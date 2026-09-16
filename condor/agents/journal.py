@@ -36,51 +36,41 @@ log = logging.getLogger(__name__)
 MAX_LEARNINGS = 20
 
 
-def _strategy_base_dir(prefix: str) -> Path:
-    """Resolve the per-strategy base dir from an agent_id prefix.
-
-    New format prefixes are ``"{agent_slug}.{strategy_slug}"`` →
-    ``{agent_slug}/strategies/{strategy_slug}/``. Legacy flat prefixes (no dot)
-    fall back to ``{slug}/`` so old ids still resolve.
-
-    Always the **local** root (FEAT-115): a journal is what this install's run
-    produced, so there is no shipped layer to resolve against.
-    """
-    root = local_agents_root()
-    if "." in prefix:
-        agent_slug, sslug = prefix.split(".", 1)
-        return root / agent_slug / "strategies" / sslug
-    return root / prefix
-
-
 def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
     """Derive (session_dir, base_dir) from an agent_id.
 
     agent_id format: ``"{agent_slug}.{strategy_slug}_{N}"`` (session) or
-    ``"..._e{N}"`` (experiment). ``base_dir`` is the strategy folder that holds
-    ``sessions/`` and ``learnings.md``.
+    ``"..._e{N}"`` (experiment), parsed by ``sessions_index.parse_agent_id``.
+    ``base_dir`` is the strategy folder (``Strategy.home``) that holds the
+    sessions and ``learnings.md``; the session dir is the one on disk under
+    either session layout, else the current ``sessions/session_N`` a new
+    journal would create. Experiments are flat files, so they get
+    ``(None, base_dir)``.
 
-    Returns (None, None) if the path doesn't exist on disk.
+    Always the **local** root (FEAT-115): a journal is what this install's run
+    produced, so there is no shipped layer to resolve against.
+
+    Returns (None, None) for a malformed id or a strategy dir not on disk.
     """
-    last_sep = agent_id.rfind("_")
-    if last_sep == -1:
-        return None, None
-    prefix = agent_id[:last_sep]
-    num_part = agent_id[last_sep + 1 :]
+    # Function-local: sessions_index imports this module.
+    from condor.agents.sessions_index import (
+        find_session_dir,
+        parse_agent_id,
+        strategy_dir_for_run_key,
+    )
 
-    base_dir = _strategy_base_dir(prefix)
-    if not base_dir.is_dir():
+    parsed = parse_agent_id(agent_id)
+    if parsed is None:
         return None, None
-
-    # Experiments (e.g. "e3") are flat files, not directories
-    if num_part.startswith("e"):
+    run_key, num, kind = parsed
+    base_dir = strategy_dir_for_run_key(run_key)
+    if base_dir is None or not base_dir.is_dir():
+        return None, None
+    if kind == "experiment":
         return None, base_dir
-
-    try:
-        session_num = int(num_part)
-    except ValueError:
-        return None, None
-    session_dir = base_dir / "sessions" / f"session_{session_num}"
+    session_dir = find_session_dir(base_dir, num) or (
+        base_dir / SESSION_DIRNAMES[0] / f"session_{num}"
+    )
     return session_dir, base_dir
 
 

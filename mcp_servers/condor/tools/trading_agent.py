@@ -463,27 +463,20 @@ def _resolve_experiment_file(agent_id: str):
     (path | None, num | None); num is set even when the file isn't on disk yet
     so callers can distinguish "experiment in progress" from "not an experiment".
     """
-    from condor.agents.journal import resolve_agent_dirs
+    from condor.agents.sessions_index import (
+        find_experiment_file,
+        parse_agent_id,
+        strategy_dir_for_run_key,
+    )
 
-    last_sep = agent_id.rfind("_")
-    if last_sep == -1:
+    parsed = parse_agent_id(agent_id)
+    if parsed is None or parsed[2] != "experiment":
         return None, None
-    num_part = agent_id[last_sep + 1 :]
-    if not num_part.startswith("e"):
-        return None, None
-    try:
-        num = int(num_part[1:])
-    except ValueError:
-        return None, None
-
-    _, base_dir = resolve_agent_dirs(agent_id)
-    if base_dir is None:
+    run_key, num, _ = parsed
+    base_dir = strategy_dir_for_run_key(run_key)
+    if base_dir is None or not base_dir.is_dir():
         return None, num
-    for dirname in ("dry_runs", "experiments"):
-        path = base_dir / dirname / f"experiment_{num}.md"
-        if path.exists():
-            return path, num
-    return None, num
+    return find_experiment_file(base_dir, num), num
 
 
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:

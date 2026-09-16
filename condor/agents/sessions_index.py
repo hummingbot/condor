@@ -21,12 +21,16 @@ from condor.agents.journal import (
     count_journal_ticks,
     iter_session_dirs,
 )
+from condor.agents.strategy import STRATEGIES_DIRNAME
+from condor.memory.paths import agent_home
 
 # New and legacy directory names, checked in order.
 EXPERIMENT_DIRNAMES = ("dry_runs", "experiments")
 _SNAPSHOT_DIRNAMES = ("snapshots", "runs")
 
 _EXPERIMENT_FILE_RE = re.compile(r"experiment_(\d+)\.md")
+# The agent_id format enumerate_agent_ids writes: "{run_key}_{N}" / "{run_key}_e{N}".
+_AGENT_ID_RE = re.compile(r"(.+)_(e?)(\d+)")
 _SNAPSHOT_FILE_RE = re.compile(r"(?:snapshot|run)_(\d+)\.md")
 _SNAPSHOT_TITLE_RE = re.compile(r"^# (?:Snapshot|Tick) #\d+ — (.+)$", re.MULTILINE)
 
@@ -390,6 +394,32 @@ def list_runs(strategy_dir: Path, run_key: str) -> list[dict[str, Any]]:
 
     runs.sort(key=lambda r: (r["started_at"] or 0.0, r["number"]), reverse=True)
     return runs
+
+
+def parse_agent_id(agent_id: str) -> tuple[str, int, str] | None:
+    """Split an agent_id into ``(run_key, number, kind)``; None if malformed.
+
+    The inverse of :func:`enumerate_agent_ids`: ``"{run_key}_{N}"`` is a
+    ``"session"`` and ``"{run_key}_e{N}"`` an ``"experiment"``.
+    """
+    m = _AGENT_ID_RE.fullmatch(agent_id)
+    if not m:
+        return None
+    run_key, exp, num = m.groups()
+    return run_key, int(num), "experiment" if exp else "session"
+
+
+def strategy_dir_for_run_key(run_key: str) -> Path | None:
+    """The strategy folder a ``"{agent_slug}.{strategy_slug}"`` run key names.
+
+    The same composition as ``Strategy.home``, without going through the
+    StrategyStore, which would refuse a deleted strategy whose session dirs
+    are still on disk. None for a key without the ``agent.strategy`` shape.
+    """
+    agent_slug, dot, slug = run_key.partition(".")
+    if not dot:
+        return None
+    return agent_home(agent_slug) / STRATEGIES_DIRNAME / slug
 
 
 def enumerate_agent_ids(run_key: str, strategy_dir: Path) -> list[tuple[str, int, str]]:
