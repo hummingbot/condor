@@ -67,6 +67,20 @@ has no user directory to go to, so it lands in the agent's own runtime tree at
 ``.condor/agents/<slug>/delegations/<task_id>/``, in the per-task shape the
 readers already use. Ownerless is not worthless: these are full transcripts,
 tens of kilobytes of real output apiece.
+
+**v4: the untracked agents v2 skipped.** v2's step 1 runs first and moves an
+excluded agent's ``store/`` and ``proposals/`` into ``.condor/agents/<slug>/``,
+so by step 2 that destination exists and the whole-directory move declined to
+go over it. The agent's definition stayed in ``agents/``, where the layering
+reads it as stock: its strategies could not be deleted ("ships with Condor")
+and every file the product wrote for it forked down beside a stale copy.
+
+v4 runs step 2 again, and step 2 now merges into a local home that already
+exists instead of skipping it. A file only the leftover has moves; one both
+sides hold identically is dropped; one they hold differently keeps the local
+copy — the one the product has been reading all along, since local shadows
+stock — and sets the leftover aside under
+``.condor/migration-backups/agents/<slug>/`` rather than deleting it.
 """
 
 from __future__ import annotations
@@ -94,6 +108,8 @@ log = logging.getLogger(__name__)
 MARKER_FILENAME = ".migrated-v1"
 MARKER_V2_FILENAME = ".migrated-v2"
 MARKER_V3_FILENAME = ".migrated-v3"
+MARKER_V4_FILENAME = ".migrated-v4"
+BACKUPS_DIRNAME = "migration-backups"
 
 # Runtime output that lived under a *tracked* agent directory. Everything here
 # was already gitignored, so step 1 is a move with no git in it.
@@ -131,6 +147,8 @@ class MigrationReport:
     agent_forks: int = 0
     # v3
     stranded_delegations: int = 0
+    # v4: leftover copies that lost to a differing local file, set aside
+    agent_backups: int = 0
 
     @property
     def total(self) -> int:
@@ -143,6 +161,7 @@ class MigrationReport:
             + self.agent_dirs
             + self.agent_forks
             + self.stranded_delegations
+            + self.agent_backups
         )
 
 
@@ -188,10 +207,18 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
             return report
         _write_marker(root, MARKER_V3_FILENAME, "FEAT-115")
 
+    if not (root / MARKER_V4_FILENAME).is_file():
+        try:
+            _merge_leftover_agents(report, source)
+        except Exception:  # noqa: BLE001 - same rule: never block a boot
+            log.exception("Leftover agent merge failed; leaving the tree in place")
+            return report
+        _write_marker(root, MARKER_V4_FILENAME, "FEAT-115")
+
     if report.total or report.dropped_stubs:
         log.warning(
             "Runtime migrated to %s: %d conversations, %d delegations, "
-            "%d stranded delegations, "
+            "%d stranded delegations, %d set-aside agent files, "
             "%d state namespaces, %d telemetry files, %d agent artefacts, "
             "%d agent directories, %d hoisted forks "
             "(%d empty conversation stubs dropped, %d already present)",
@@ -199,6 +226,7 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
             report.conversations,
             report.delegations,
             report.stranded_delegations,
+            report.agent_backups,
             report.state,
             report.telemetry,
             report.agent_artefacts,
@@ -519,17 +547,71 @@ def _move_untracked_agents(
     go stale rather than wrong once the directory is gone; removing them is a
     manual tidy-up, not something a boot migration should do to someone's
     ``.git/``.
+
+    Step 1 has usually created ``<local>/<slug>`` by now (the agent's store), so
+    a local home that already exists is merged into, never a reason to skip.
     """
     for agent_dir in _agent_dirs(stock_root):
         slug = agent_dir.name
         tracked = _git(repo_dir, "ls-files", "--", f"{prefix}/{slug}")
         if tracked is None or tracked.strip():
             continue  # git knows it: stock, or unreadable — either way, leave it
-        if _move(agent_dir, local_root / slug):
+        destination = local_root / slug
+        if _move(agent_dir, destination):
             report.agent_dirs += 1
             log.info("Agent split: %s was untracked and is now this install's", slug)
-        else:
+            continue
+        backups = paths.runtime_root() / BACKUPS_DIRNAME / prefix / slug
+        _merge_tree(report, agent_dir, destination, backups)
+        if agent_dir.exists():
             report.skipped += 1
+            log.warning("Agent split: %s could not be emptied; see above", agent_dir)
+        else:
+            report.agent_dirs += 1
+            log.info(
+                "Agent split: %s was untracked and is merged into %s", slug, destination
+            )
+
+
+def _merge_leftover_agents(report: MigrationReport, stock_root: Path) -> None:
+    """v4: step 2 again, for the installs whose v2 skipped an existing home."""
+    repo_dir = stock_root.parent
+    if not stock_root.is_dir() or not (repo_dir / ".git").exists():
+        return
+    _move_untracked_agents(
+        report, stock_root, paths.local_agents_root(), repo_dir, stock_root.name
+    )
+
+
+def _merge_tree(report: MigrationReport, src: Path, dst: Path, backups: Path) -> None:
+    """Empty ``src`` into ``dst``; the local side wins every disagreement.
+
+    ``dst`` is what the product has been reading (local shadows stock), so a
+    differing leftover is set aside under ``backups`` rather than overwriting
+    it — and rather than being deleted, since nobody has looked at it.
+    ``__pycache__`` is regenerated output and is simply dropped.
+    """
+    for child in sorted(src.iterdir()):
+        target = dst / child.name
+        if child.name == "__pycache__":
+            shutil.rmtree(child, ignore_errors=True)
+        elif _move(child, target):
+            pass
+        elif child.is_dir() and target.is_dir():
+            _merge_tree(report, child, target, backups / child.name)
+        elif child.is_file() and target.is_file() and _same_bytes(child, target):
+            child.unlink()
+        elif _move(child, backups / child.name):
+            report.agent_backups += 1
+            log.info("Agent split: kept %s, set %s aside", target, child)
+    _prune_if_empty(src)
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    try:
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
 
 
 def _hoist_modified_files(

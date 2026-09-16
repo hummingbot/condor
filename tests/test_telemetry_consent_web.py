@@ -1,4 +1,4 @@
-"""The dashboard half of the telemetry consent prompt (FEAT-023).
+"""The dashboard half of the telemetry notice (FEAT-023).
 
 A Telegram install is asked once, next to the boot notification. An install
 running without Telegram has no bot to be asked through, so before this the
@@ -66,6 +66,37 @@ def test_an_install_that_never_answered_reports_itself_as_unanswered(app):
     assert body["level"] == "ping"  # counted meanwhile — the floor
     assert body["can_change"] is True
     assert body["env_overridden"] is False
+    assert body["notice_shown"] is False
+
+
+def test_the_strip_rendering_for_the_admin_turns_usage_on(app):
+    """Rendering is the delivery: the strip posts its receipt, and from then on
+    an unanswered install sends usage summaries. The strip itself keeps showing
+    until someone answers."""
+    resp = as_user(app, ADMIN).post("/settings/telemetry/notice")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"level": "usage", "consent": "unknown", "notice_shown": True}
+    after = as_user(app, ADMIN).get("/settings/telemetry").json()
+    assert after["notice_shown"] is True
+    assert after["level"] == "usage"
+
+
+def test_a_non_admin_seeing_the_dashboard_is_not_the_admin_being_told(app):
+    resp = as_user(app, TRADER).post("/settings/telemetry/notice")
+
+    assert resp.status_code == 403
+    assert consent.level() == consent.PING
+    assert not consent.notice_shown()
+
+
+def test_a_receipt_after_a_refusal_changes_nothing(app):
+    as_user(app, ADMIN).put("/settings/telemetry", params={"level": "off"})
+
+    resp = as_user(app, ADMIN).post("/settings/telemetry/notice")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"level": "off", "consent": "denied", "notice_shown": False}
 
 
 def test_every_seat_may_read_what_the_install_shares(app):

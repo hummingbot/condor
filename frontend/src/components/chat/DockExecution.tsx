@@ -9,6 +9,7 @@ import {
   fleetRows,
   rowHref,
   dueInSec,
+  tickCountdownLabel,
   type FleetRow,
 } from "@/components/agent/workspace/fleet";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
@@ -19,9 +20,9 @@ import {
   visibleRows,
   type ExecutionRow,
 } from "@/components/chat/executionTree";
+import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useSeconds } from "@/hooks/useSeconds";
-import { countdown } from "@/lib/agent-attribution";
 import { api } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import {
@@ -109,8 +110,8 @@ function clipBotName(name: string): string {
  *
  * The deployed fleet, in the shape the perf browser folds it, read **owner
  * first**: one row per agent, each expanding into the bots, controllers and
- * executors that agent deployed, and then the controllers nobody owns under
- * *Outside Condor* / *Before the ledger*. Every row deep-links into `/bots` by
+ * executors that agent deployed, and then the records nobody owns under
+ * *No record found* / *Before the ledger*. Every row deep-links into `/bots` by
  * the `?scope=` id the browser reads (FEAT-084, FEAT-086) — and builds that id
  * by calling `controllerNodeId` on the same `PerfLeaf` the browser folds, so
  * the two can only drift if the browser's own tree does.
@@ -182,8 +183,24 @@ export function DockExecution({
   // this panel that moves on its own, and an interval running under a fleet
   // that is idle is an interval running for nothing.
   const anyRunning = agents.some((agent) => agent.status === "running");
-  const now = useSeconds(anyRunning);
-  const nowSec = now / 1000;
+  const nowSec = useSeconds(anyRunning) / 1000;
+
+  /**
+   * The clock the *fold* measures runtimes against — a minute, not a second.
+   *
+   * Two clocks rather than one, because the panel asks two different questions
+   * of the time. The countdown above is "how long until the next tick", which
+   * is a number that has to move every second to be worth printing. This one is
+   * "how long has this been running", which reaches the screen only through
+   * `formatRuntimeHours` — 0.1h above an hour, whole minutes below it — so a
+   * per-second value prints the same characters for sixty consecutive renders.
+   *
+   * They used to be the same clock, and `now` is a dependency of the `rows`
+   * memo: the panel rebuilt the whole tree and re-folded every agent, bot and
+   * controller once a second to arrive at a byte-identical fold (PERF-342).
+   * The tree build now runs on data changes and once a minute.
+   */
+  const now = useCoarseClock();
 
   /**
    * Everything trading, in the browser's one vocabulary and its one attribution.
@@ -214,8 +231,8 @@ export function DockExecution({
   const currencySymbol = fleet.currencySymbol ?? "$";
 
   const rows = useMemo(
-    () => executionRows({ leaves, deeds: fleet.deeds, agents, convert, now }),
-    [leaves, fleet.deeds, agents, convert, now],
+    () => executionRows({ leaves, deeds: fleet.deeds, agents, owners: fleet.owners, convert, now }),
+    [leaves, fleet.deeds, agents, fleet.owners, convert, now],
   );
 
   // Only what the reader has actually clicked; the default for everything else
@@ -354,17 +371,22 @@ export function DockExecution({
             <span className="text-[var(--color-yellow)]"> · {paused} paused</span>
           )}
         </span>
-        <span className="shrink-0 tabular-nums">
-          {liveExecutors} executor{liveExecutors === 1 ? "" : "s"}
-        </span>
+        {/* Only when there are some: a PMM fleet runs no executors at all, and
+            a standing "0 executors" beside the controller count reads as a
+            fault rather than as the shape of the strategy. */}
+        {liveExecutors > 0 && (
+          <span className="shrink-0 tabular-nums">
+            {liveExecutors} executor{liveExecutors === 1 ? "" : "s"}
+          </span>
+        )}
       </div>
 
       {/* A table, not a list of cards. Every controller answers the same eight
           questions, and eight answers per row only stay comparable when they
-          are in eight columns. The agent and bot rows above them span the whole
-          table instead: they are headings with a fold attached, not eight more
-          numbers, and giving them the controller's columns would have put an
-          agent's total under a heading that says "Controller". It fits whatever
+          are in eight columns. A bot row spans the whole table: it is a heading
+          with a fold attached. An agent row puts its name across the first four
+          columns and its totals under Vol, Real., Unreal. and Net, so every sum
+          is labelled by the heading above it. The table fits whatever
           width the panel was dragged to and only scrolls sideways below
           `TABLE_MIN_PX`, where the controller name would otherwise be squeezed
           out of legibility. */}
@@ -390,13 +412,17 @@ export function DockExecution({
                   key={col.key}
                   scope="col"
                   title={col.hint}
+                  // An `aria-label` rather than an `sr-only` child: visually
+                  // hidden text is still selected text, so copying the table
+                  // pasted "Pause or start the controller" as a heading.
+                  aria-label={col.label ? undefined : col.hint}
                   className={`px-1.5 pb-1 font-medium ${
                     col.num ? "text-right" : "text-left"
                   } ${col.key === "controller" ? "pl-3" : ""} ${
                     col.key === "act" ? "pr-3" : ""
                   }`}
                 >
-                  {col.label || <span className="sr-only">{col.hint}</span>}
+                  {col.label}
                 </th>
               ))}
             </tr>
@@ -414,27 +440,25 @@ export function DockExecution({
                     symbol={currencySymbol}
                     onOpen={(scope) => navigate(`/bots?scope=${scope}`)}
                   />
+                ) : row.kind === "agent" ? (
+                  <AgentRow
+                    row={row}
+                    live={row.agent ? live.get(row.agent.slug) ?? null : null}
+                    nowSec={nowSec}
+                    symbol={currencySymbol}
+                    open={open.has(row.id)}
+                    onToggle={() => toggle(row.id)}
+                    onOpenAgent={onOpenAgent}
+                  />
                 ) : (
                   <tr>
                     <td colSpan={COLUMNS.length} className="p-0">
-                      {row.kind === "agent" ? (
-                        <AgentRow
-                          row={row}
-                          live={row.agent ? live.get(row.agent.slug) ?? null : null}
-                          nowSec={nowSec}
-                          symbol={currencySymbol}
-                          open={open.has(row.id)}
-                          onToggle={() => toggle(row.id)}
-                          onOpenAgent={onOpenAgent}
-                        />
-                      ) : (
-                        <BotRow
-                          row={row}
-                          open={open.has(row.id)}
-                          onToggle={() => toggle(row.id)}
-                          onOpen={() => navigate(`/bots?scope=bot:${row.label}`)}
-                        />
-                      )}
+                      <BotRow
+                        row={row}
+                        open={open.has(row.id)}
+                        onToggle={() => toggle(row.id)}
+                        onOpen={() => navigate(`/bots?scope=bot:${row.label}`)}
+                      />
                     </td>
                   </tr>
                 )}
@@ -552,79 +576,99 @@ function AgentRow({
     else navigate(`/agents/${encodeURIComponent(slug)}`);
   };
 
-  return (
-    <div data-agent-row={row.id} className="px-3 pt-1.5">
-      <div className="flex items-baseline gap-1.5">
-        <Twisty open={open} onToggle={row.hasChildren ? onToggle : null} label={row.label} />
-        <button
-          type="button"
-          data-agent-open={slug ?? ""}
-          onClick={openIt}
-          title={
-            slug
-              ? `Open ${row.label} — everything it is running on this server`
-              : `${row.label} — records this fleet map does not credit to an agent`
-          }
-          className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left transition-colors hover:text-[var(--color-text)]"
-        >
-          {/* Live, paused, or not looping at all — and never absent: an agent
-              that has stopped is still an agent whose records are on screen. */}
-          <span
-            data-agent-live={running ? "" : undefined}
-            className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
-              running
-                ? "bg-emerald-400"
-                : live?.live
-                  ? "bg-amber-400"
-                  : "bg-[var(--color-text-muted)]/40"
-            }`}
-          />
-          <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-            {row.label}
-          </span>
-        </button>
-        <span
-          className="shrink-0 font-mono tabular-nums"
-          style={{ color: pnlColor(row.totals.net) }}
-        >
-          {formatCurrencyPnl(row.totals.net, symbol)}
-        </span>
-        <span className="shrink-0 font-mono tabular-nums text-[var(--color-text-muted)]">
-          {formatCompactVolume(row.totals.volume, symbol)}
-        </span>
-      </div>
+  /**
+   * The agent's totals, each under the heading that names it.
+   *
+   * They used to float at the end of the name line as two bare figures — a
+   * signed one and a compact one — and nothing on screen said the first was
+   * net PnL and the second volume. In the controllers' own columns the heading
+   * says it, and the sum sits directly above the rows it adds up.
+   */
+  const total = (value: number, what: string, pnl: boolean) => (
+    <td
+      title={`${row.label} — ${what}, summed over its controllers on this server`}
+      className={`whitespace-nowrap px-1.5 pt-1.5 text-right align-top font-mono font-semibold tabular-nums ${
+        pnl ? "" : "text-[var(--color-text-muted)]"
+      }`}
+      style={pnl ? { color: pnlColor(value) } : undefined}
+    >
+      {pnl ? formatCurrencyPnl(value, symbol) : formatCompactVolume(value, symbol)}
+    </td>
+  );
 
-      {live && (
-        <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
-          {due !== null && (
+  return (
+    <tr data-agent-row={row.id}>
+      {/* Controller, pair, exec and up: the name and its liveness line take
+          the columns an owner has no single value for. */}
+      <td colSpan={4} className="overflow-hidden pl-3 pr-1.5 pt-1.5 align-top">
+        <div className="flex items-baseline gap-1.5">
+          <Twisty open={open} onToggle={row.hasChildren ? onToggle : null} label={row.label} />
+          <button
+            type="button"
+            data-agent-open={slug ?? ""}
+            onClick={openIt}
+            title={
+              slug
+                ? `Open ${row.label} — everything it is running on this server`
+                : `${row.label} — records this fleet map does not credit to an agent`
+            }
+            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left transition-colors hover:text-[var(--color-text)]"
+          >
+            {/* Live, paused, or not looping at all — and never absent: an agent
+                that has stopped is still an agent whose records are on screen. */}
             <span
-              data-agent-due
-              className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
-            >
-              {due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`}
-            </span>
-          )}
-          {live.lastDid ? (
-            <Link
-              to={decisionHref(live)}
-              data-agent-decision
-              title="Read the whole tick this came from"
-              className={`min-w-0 truncate transition-colors hover:underline ${
-                live.lastDid.ok ? "" : "text-[var(--color-red)]"
+              data-agent-live={running ? "" : undefined}
+              className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
+                running
+                  ? "bg-emerald-400"
+                  : live?.live
+                    ? "bg-amber-400"
+                    : "bg-[var(--color-text-muted)]/40"
               }`}
-            >
-              {live.lastDid.summary}
-            </Link>
-          ) : (
-            live.lastSaid && (
-              <span data-agent-decision className="min-w-0 truncate">
-                {live.lastSaid}
-              </span>
-            )
-          )}
+            />
+            <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              {row.label}
+            </span>
+          </button>
         </div>
-      )}
-    </div>
+
+        {live && (
+          <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
+            {due !== null && (
+              <span
+                data-agent-due
+                className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+              >
+                {tickCountdownLabel(due)}
+              </span>
+            )}
+            {live.lastDid ? (
+              <Link
+                to={decisionHref(live)}
+                data-agent-decision
+                title="Read the whole tick this came from"
+                className={`min-w-0 truncate transition-colors hover:underline ${
+                  live.lastDid.ok ? "" : "text-[var(--color-red)]"
+                }`}
+              >
+                {live.lastDid.summary}
+              </Link>
+            ) : (
+              live.lastSaid && (
+                <span data-agent-decision className="min-w-0 truncate">
+                  {live.lastSaid}
+                </span>
+              )
+            )}
+          </div>
+        )}
+      </td>
+      {total(row.totals.volume, "volume traded", false)}
+      {total(row.totals.realized, "realized PnL", true)}
+      {total(row.totals.unrealized, "unrealized PnL", true)}
+      {total(row.totals.net, "net PnL", true)}
+      <td />
+    </tr>
   );
 }
 
@@ -696,13 +740,22 @@ function ControllerRow({
   const scope = controllerNodeId(leaf) ?? row.id;
   const stopped = leaf.status === "stopped";
 
+  /** The row said in full — its cell's tooltip, and its accessible name. */
+  const described = `${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`;
+
   return (
     <tr
       data-controller-row
       data-paused={stopped ? "" : undefined}
       role="button"
       tabIndex={0}
-      title={`${leaf.label} on ${leaf.bot}${stopped ? " — paused" : ""}`}
+      // Named rather than titled. A `title` here was a tooltip the browser
+      // anchored to the *row* — and a focusable `<tr>` inside a scrolled table
+      // is the one box Chrome gets wrong: clicking a row put a wrapped bubble
+      // up at the table's top corner, hundreds of pixels from what it
+      // described. The name is what a `role="button"` actually needs; the
+      // tooltip belongs to the cell that truncates, one line down.
+      aria-label={described}
       onClick={() => onOpen(scope)}
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
@@ -718,10 +771,11 @@ function ControllerRow({
     >
       {/* The column that absorbs the slack, and the only one allowed to
           truncate: two rows under the same bot are told apart by nothing else,
-          so it gets every pixel the numbers do not need — and the row's `title`
+          so it gets every pixel the numbers do not need — and its own `title`
           says it in full when even that is not enough. It is indented by its
           depth, which is what makes the nesting readable without a rule. */}
       <td
+        title={described}
         className="truncate py-0.5 pr-1.5"
         style={{ paddingLeft: 12 + row.depth * 10 }}
       >

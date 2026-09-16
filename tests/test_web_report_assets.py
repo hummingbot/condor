@@ -69,8 +69,7 @@ def reports_dir(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(reports, "CHARTS_DIR", directory)
-    monkeypatch.setattr(reports, "INDEX_FILE", index)
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(directory))
     monkeypatch.setattr(reports_routes, "get_config_manager", lambda: _NoAdmins())
     return directory
 

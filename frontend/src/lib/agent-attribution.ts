@@ -215,7 +215,9 @@ export interface DeedIndex {
    *
    * The one timestamp that splits the old `Unattributed` bucket in two: a
    * record older than this predates the ledger and cannot be judged; a record
-   * newer than it, with no deed, was made by something that is not Condor.
+   * newer than it, with no deed the join can reach, is one Condor's log has no
+   * answer for. Not the same as one Condor did not make — see `agentBucket`
+   * for the doors that record a deed and leave nothing to join on.
    */
   since: number;
 }
@@ -244,6 +246,68 @@ const UNOWNED: Attribution = { runKey: "", how: "none" };
 export const DEED_TITLE = "attributed by a recorded deed, not by name";
 
 /**
+ * The rule of {@link attributionOf}, with the owner list already prepared.
+ *
+ * Ask a fold for this once and call it per record; ask {@link attributionOf}
+ * for a single answer.
+ */
+export type Attributor = (botName: string, controllerId?: string) => Attribution;
+
+/**
+ * {@link attributionOf} with its loop-invariant half hoisted out (PERF-331).
+ *
+ * `owners` does not change while a population is being folded, but the rule
+ * asks the same two questions of it per record: an ordering by namespace
+ * length, and whether any owner's `agentIds` contains a tag. Both were paid per
+ * record — an array copy, a sort, and an `Array.includes` scan across every
+ * owner — inside loops that run over every executor the fleet has ever had, and
+ * re-run whenever the executors socket frame lands. So the preparation happens
+ * here, once, and the closure below does the matching and nothing else.
+ *
+ * **The answers are identical, not merely equivalent.** The comparator, the
+ * array it sorts and the sort's stability are the same, so `byLength` is the
+ * same order the per-record sort produced; and the id map is filled in owner
+ * order keeping the first writer, which is the owner the linear scan in
+ * {@link agentOfControllerId} returned. The rule order — namespace, declared,
+ * controller-id tag, deed chain — is unchanged.
+ */
+export function attributionIndex(
+  owners: FleetOwner[],
+  deeds: DeedIndex | null | undefined,
+): Attributor {
+  const byLength = [...owners].sort((a, b) => b.namespace.length - a.namespace.length);
+  // First writer wins, mirroring the first-match linear scan it replaces.
+  const runByAgentId = new Map<string, string>();
+  for (const owner of owners) {
+    for (const id of owner.agentIds) {
+      if (!runByAgentId.has(id)) runByAgentId.set(id, owner.runKey);
+    }
+  }
+  const bots = deeds?.bots;
+  return (botName: string, controllerId: string = ""): Attribution => {
+    const name = stripDeploySuffix((botName || "").trim());
+    if (name) {
+      for (const owner of byLength) {
+        if (inNamespace(name, owner.namespace)) return { runKey: owner.runKey, how: "namespace" };
+      }
+      for (const owner of byLength) {
+        if (owner.declaredBots.some((declared) => inNamespace(name, declared))) {
+          return { runKey: owner.runKey, how: "declared" };
+        }
+      }
+    }
+    const id = (controllerId || "").trim();
+    const tagged = id ? (runByAgentId.get(id) ?? "") : "";
+    if (tagged) return { runKey: tagged, how: "namespace" };
+    for (const candidate of deployNameChain(botName)) {
+      const deed = bots?.[candidate];
+      if (deed) return { runKey: deed.runKey, how: "deed" };
+    }
+    return UNOWNED;
+  };
+}
+
+/**
  * The run that owns this record, and how we know — namespace, declared, deed.
  *
  * **The order is the whole rule.** Both enforced rules are tried before the
@@ -255,6 +319,9 @@ export const DEED_TITLE = "attributed by a recorded deed, not by name";
  * The deed lookup is last and cheapest: one object lookup per name in the
  * bot's deploy chain (see {@link deployNameChain}), and a chain is two names long
  * on every bot that was deployed once.
+ *
+ * One record, one index: a caller with a loop wants {@link attributionIndex}
+ * instead, which is where the rule now lives.
  */
 export function attributionOf(
   owners: FleetOwner[],
@@ -262,25 +329,7 @@ export function attributionOf(
   botName: string,
   controllerId: string = "",
 ): Attribution {
-  const name = stripDeploySuffix((botName || "").trim());
-  if (name) {
-    const byLength = [...owners].sort((a, b) => b.namespace.length - a.namespace.length);
-    for (const owner of byLength) {
-      if (inNamespace(name, owner.namespace)) return { runKey: owner.runKey, how: "namespace" };
-    }
-    for (const owner of byLength) {
-      if (owner.declaredBots.some((declared) => inNamespace(name, declared))) {
-        return { runKey: owner.runKey, how: "declared" };
-      }
-    }
-  }
-  const tagged = agentOfControllerId(owners, controllerId);
-  if (tagged) return { runKey: tagged, how: "namespace" };
-  for (const candidate of deployNameChain(botName)) {
-    const deed = deeds?.bots?.[candidate];
-    if (deed) return { runKey: deed.runKey, how: "deed" };
-  }
-  return UNOWNED;
+  return attributionIndex(owners, deeds)(botName, controllerId);
 }
 
 /**
@@ -298,8 +347,44 @@ export function provenanceOf(leaves: readonly { how?: Provenance }[]): Provenanc
 }
 
 /** The owner a run key names, or `undefined` when the map does not know it. */
-export function ownerOf(owners: FleetOwner[], runKey: string): FleetOwner | undefined {
+export function ownerOf(
+  owners: readonly FleetOwner[],
+  runKey: string,
+): FleetOwner | undefined {
   return owners.find((owner) => owner.runKey === runKey);
+}
+
+/**
+ * The three pseudo-strategies, in the order they became possible.
+ *
+ * `condor/agents/deeds.py`'s `RESERVED_STRATEGY_SLUGS`, mirrored — a chat, a
+ * delegation and the dashboard are runs without a strategy, but a run key needs
+ * two halves, so each gets a reserved slug of its own. They are named apart
+ * rather than lumped into one "not-a-loop" bucket for the reason Python names
+ * them apart: *"the chat deployed it"* and *"somebody pressed Deploy"* are
+ * different answers to the same question.
+ *
+ * A user-created strategy may not take these slugs, so a run key ending in one
+ * is a pseudo-run with certainty rather than by convention. That certainty is
+ * why this can stay a list of **slugs**: the *words* for a pseudo-run are not
+ * here and must not be, because they already ship on the wire — see
+ * {@link ownerRowLabel}.
+ */
+export const PSEUDO_STRATEGIES = ["chat", "delegation", "ui"] as const;
+
+const PSEUDO_SLUGS: ReadonlySet<string> = new Set<string>(PSEUDO_STRATEGIES);
+
+/** `"brigado.brl_mm"` → `{ agent: "brigado", strategy: "brl_mm" }`. */
+export function splitRunKey(runKey: string): { agent: string; strategy: string } {
+  const dot = runKey.indexOf(".");
+  return dot < 0
+    ? { agent: runKey, strategy: "" }
+    : { agent: runKey.slice(0, dot), strategy: runKey.slice(dot + 1) };
+}
+
+/** Whether a run key names a chat, a delegation or the dashboard. */
+export function isPseudoRunKey(runKey: string): boolean {
+  return PSEUDO_SLUGS.has(splitRunKey(runKey).strategy);
 }
 
 /**
@@ -326,10 +411,42 @@ export function runKeyLabel(runKey: string): string {
  * Falls back to the label itself for an owner the map no longer holds, so a
  * stale deep link still names something rather than nothing.
  */
-export function ownerTitle(owners: FleetOwner[], runKey: string): string {
+export function ownerTitle(owners: readonly FleetOwner[], runKey: string): string {
   const owner = ownerOf(owners, runKey);
   if (!owner) return runKeyLabel(runKey);
   return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
+}
+
+/**
+ * **The one place a run key's owner row is named**: slugs for a strategy, the
+ * fleet map's words for a pseudo-run.
+ *
+ * {@link runKeyLabel}'s reason for preferring slugs is precise, and for a real
+ * strategy it is right — the rows beneath the agent are bot names built out of
+ * exactly those two slugs, so the slug form is the one a reader matches by eye.
+ * **That rationale cannot reach a pseudo-run.** A pseudo-owner is built with an
+ * empty namespace and the emptiness is load-bearing
+ * (`condor/agents/fleet_map.py:_pseudo_owners`): `inNamespace` refuses an empty
+ * namespace in both languages, so a `condor-ui-…` bot name can never exist to
+ * be matched against. `ui` is then a slug naming nothing the reader has ever
+ * seen, and *the dashboard* and *the chat* read as two unrelated systems rather
+ * than two doors of the same one.
+ *
+ * The words are **not** minted here, and there is deliberately no TS copy of
+ * `PSEUDO_STRATEGY_NAMES`: `condor/agents/deed_index.py` maps `ui → "Dashboard"`,
+ * `chat → "Chat"` and `delegation → "Delegation"`, and the map already ships
+ * them as every pseudo-owner's `strategyName`. A second copy in the browser
+ * would be exactly the Python/TS drift this chain suffers from elsewhere.
+ *
+ * An owner the map no longer holds falls back to slugs through
+ * {@link ownerTitle}, so a stale deep link names something rather than nothing.
+ *
+ * A caller that also has the two unowned buckets in hand wants
+ * `agentBucketLabel` (`components/perf/agentFilter`), which is this plus those
+ * two fixed labels — and nothing else names an owner row.
+ */
+export function ownerRowLabel(owners: readonly FleetOwner[], runKey: string): string {
+  return isPseudoRunKey(runKey) ? ownerTitle(owners, runKey) : runKeyLabel(runKey);
 }
 
 

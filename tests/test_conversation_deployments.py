@@ -266,8 +266,20 @@ def test_deployed_nothing_and_predates_the_ledger_are_different_answers(cm):
     }
 
 
-def test_nothing_predates_a_ledger_that_has_never_been_written(cm):
-    """No deed anywhere means no cut, and no cut judges nothing (FEAT-106)."""
+def test_nothing_predates_a_cut_that_could_not_be_written_down(cm, monkeypatch):
+    """No cut judges nothing (FEAT-106), and an unwritable stamp is no cut.
+
+    The cut is this build's coverage stamp rather than the oldest deed on disk
+    (CORR-622), so "no deed anywhere" no longer means "no cut" — a build that
+    records at every door covers everything since it booted whether or not
+    anyone has used it. What is still no cut is a stamp that cannot be
+    persisted, and an install in that state judges nothing.
+    """
+
+    def _unwritable(*args, **kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(deeds, "atomic_write_json", _unwritable)
     old = _conversation(updated_at=LONG_AGO)
 
     body = _client().get(f"/conversations/{old.id}/deployments").json()

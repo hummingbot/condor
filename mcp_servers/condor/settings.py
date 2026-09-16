@@ -5,6 +5,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from mcp_servers._profiles import parse_profile_flags
+
 # Imported for its ``load_dotenv()`` side effect as much as for the helper:
 # ``_parse_settings()`` runs at import, before anything else in the process
 # pulls this module in, so without it ``.env`` is not yet in ``os.environ`` and
@@ -42,8 +44,8 @@ class Settings:
     # with nobody watching any of them. Enforced in ``tools/delegate.py``.
     ask_target: bool = False
     # Which slice of the tool surface this process registers (FEAT-066). An ACP
-    # bridge runs unrestricted, so for those seats the mounted surface IS the
-    # permission model: see ``server.TOOL_PROFILES``. It is a separate flag from
+    # bridge filters no tool itself, so the mounted surface IS the permission
+    # model: see ``server.TOOL_PROFILES``. It is a separate flag from
     # the two above rather than derived from them, because the seat it narrows is
     # the *tick*, and neither ``agent_slug`` nor ``delegate_worker`` tells an
     # unattended loop apart from an attended chat with the same specialist.
@@ -113,11 +115,6 @@ def _resolve_user_id(argv_user_id: int | None) -> int:
     return 0
 
 
-def _split_names(raw: str) -> tuple[str, ...]:
-    """``"a, b,,c"`` → ``("a", "b", "c")``. Blanks are not names."""
-    return tuple(name.strip() for name in (raw or "").split(",") if name.strip())
-
-
 def _parse_settings() -> Settings:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--chat-id", type=int, default=None)
@@ -127,9 +124,11 @@ def _parse_settings() -> Settings:
     parser.add_argument("--session-key", default=None)
     parser.add_argument("--delegate-worker", action="store_true", default=False)
     parser.add_argument("--ask-target", action="store_true", default=False)
-    parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
-    parser.add_argument("--mute-tools", default="")
     args, _ = parser.parse_known_args()
+    # ``--profile``/``--mute-tools`` are declared once, in the shared leaf, so
+    # this seat and the hummingbot-api seat cannot drift on the wire format
+    # ``condor.runtime.toolsets`` writes (ARCH-570).
+    tool_profile, muted_tools = parse_profile_flags(DEFAULT_TOOL_PROFILE)
 
     return Settings(
         chat_id=(
@@ -152,8 +151,8 @@ def _parse_settings() -> Settings:
         delegate_worker=(
             args.delegate_worker or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
         ),
-        tool_profile=args.profile,
-        muted_tools=_split_names(args.mute_tools),
+        tool_profile=tool_profile,
+        muted_tools=muted_tools,
     )
 
 

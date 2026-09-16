@@ -18,7 +18,6 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import yaml from "js-yaml";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { CodeEditor } from "@/components/editor/CodeEditor";
@@ -33,7 +32,7 @@ import { useDismissOnOutsideClick } from "@/hooks/useDismissOnOutsideClick";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useServer } from "@/hooks/useServer";
 import { api, type ControllerConfigSummary } from "@/lib/api";
-import { configToYaml } from "@/lib/configYaml";
+import { configToYaml, validateYamlMapping } from "@/lib/configYaml";
 
 // ── Types ──
 
@@ -306,16 +305,7 @@ function EditorPane({
     (val: string) => {
       onContentChange(tab.file.id, val);
       if (tab.language === "yaml") {
-        try {
-          const parsed = yaml.load(val);
-          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-            setYamlError("YAML must be a mapping (key: value)");
-          } else {
-            setYamlError(null);
-          }
-        } catch (e) {
-          setYamlError(e instanceof Error ? e.message : "Invalid YAML");
-        }
+        setYamlError(validateYamlMapping(val));
       }
     },
     [tab.file.id, tab.language, onContentChange],

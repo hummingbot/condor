@@ -468,6 +468,109 @@ def test_release_request_slot_noop_for_cloud_providers():
     asyncio.run(_run())
 
 
+# ── cancelling a turn mid-confirmation (CORR-330) ──
+
+
+async def _count_permits(sem):
+    """How many concurrent requests the backend could receive right now."""
+    taken = 0
+    while True:
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=0.05)
+        except asyncio.TimeoutError:
+            break
+        taken += 1
+    for _ in range(taken):
+        sem.release()
+    return taken
+
+
+def _confirming_turn(client, started):
+    """A turn holding the slot, parked on a human confirmation."""
+
+    async def _turn():
+        async with client._hold_request_slot():
+            async with client._release_request_slot():
+                started.set()
+                await asyncio.sleep(3600)  # the human is deciding
+
+    return _turn
+
+
+def test_cancel_during_confirmation_does_not_park_teardown():
+    # CORR-330 (a): Web Stop cancels the prompt task, which lands inside the
+    # confirmation window by construction. Teardown must not queue for a slot
+    # another session is holding — that parks the session lock the teardown
+    # carries, and the user's next message waits behind foreign inference.
+    async def _run():
+        sem = asyncio.Semaphore(1)
+        client = PydanticAIClient(model="ollama:x")
+        client._request_semaphore = sem
+        started = asyncio.Event()
+
+        task = asyncio.create_task(_confirming_turn(client, started)())
+        await started.wait()
+        # A concurrent session takes the slot freed for the confirmation.
+        await asyncio.wait_for(sem.acquire(), timeout=0.5)
+
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=0.5)
+        assert done, "teardown parked waiting for a slot another session holds"
+        assert task.cancelled()
+
+        sem.release()  # the concurrent session finishes
+        assert await _count_permits(sem) == 1
+
+    asyncio.run(_run())
+
+
+def test_cancel_during_confirmation_preserves_semaphore_permits():
+    # CORR-330 (b): a second cancellation landing while the slot is being taken
+    # back must not leave the turn's guard releasing a permit it does not hold.
+    # _SERVER_SEMAPHORES is a process-global cache that is never rebuilt, so a
+    # single leaked permit permanently widens concurrency against the backend.
+    async def _run():
+        sem = asyncio.Semaphore(1)
+        client = PydanticAIClient(model="ollama:x")
+        client._request_semaphore = sem
+        started = asyncio.Event()
+
+        for _ in range(3):
+            started.clear()
+            task = asyncio.create_task(_confirming_turn(client, started)())
+            await started.wait()
+            await asyncio.wait_for(sem.acquire(), timeout=0.5)  # foreign session
+
+            task.cancel()  # lands in the confirmation wait
+            for _ in range(5):
+                if task.done():
+                    break
+                await asyncio.sleep(0)
+                task.cancel()  # and again, in the re-acquire
+            done, _ = await asyncio.wait([task], timeout=0.5)
+            assert done, "teardown parked waiting for a slot another session holds"
+            assert task.cancelled()
+
+            sem.release()  # the foreign session finishes
+            assert not client._slot_held
+            assert await _count_permits(sem) == 1
+
+    asyncio.run(_run())
+
+
+def test_hold_request_slot_noop_for_cloud_providers():
+    # CORR-330: the outer guard is explicit acquire/release now; cloud providers
+    # (semaphore None) must still pass straight through it.
+    async def _run():
+        client = PydanticAIClient(model="anthropic:claude-sonnet-4-6")
+        client._request_semaphore = None
+        async with client._hold_request_slot():
+            pass
+        assert not client._slot_held
+
+    asyncio.run(_run())
+
+
 def test_resolve_base_url_distinguishes_cloud_from_local_backends():
     # PERF-038: only backends with a resolved base URL get serialized. Cloud
     # providers pydantic-ai resolves natively return None (no semaphore).

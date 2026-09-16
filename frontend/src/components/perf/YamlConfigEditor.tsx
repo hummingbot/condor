@@ -5,7 +5,7 @@ import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { api } from "@/lib/api";
-import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
+import { configToYaml, CONTROLLER_HIDDEN_KEYS, validateYamlMapping } from "@/lib/configYaml";
 
 /**
  * The right drawer's config column: a controller's config as editable YAML.
@@ -57,12 +57,7 @@ export function YamlConfigEditor({
 
   const handleChange = useCallback((value: string) => {
     setYamlContent(value);
-    try {
-      yamlLib.load(value);
-      setParseError(null);
-    } catch (e) {
-      setParseError((e as Error).message?.split("\n")[0] || "Invalid YAML");
-    }
+    setParseError(validateYamlMapping(value));
   }, []);
 
   const saveMutation = useMutation({

@@ -31,6 +31,10 @@ get_prices(connector_name="binance_perpetual", trading_pairs=["BTC-USDT"])
 df = await client.market_data.get_candles_last_days("binance_perpetual", "BTC-USDT", days=30, interval="4h")
 ```
 
+In a **dry run** `run_code` is refused. Read the same series with the tool instead —
+`get_market_data(action="candles", connector_name="binance_perpetual",
+trading_pair="BTC-USDT", interval="4h", max_records=180)`.
+
 The candles matter more here than for most tools: they tell you how far this pair
 actually falls in a normal pullback, which is exactly the spacing question.
 

@@ -144,6 +144,37 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 Must export: `Config` (Pydantic BaseModel) and `async def run(config, context) -> str`.
 The `Config` docstring is the UI description. `CATEGORY` groups it in the catalog.
 
+### Never put a credential in a `Config` default
+
+A routine's **definition is public to the whole install**: its name, its
+docstring, every field default and description, and its full source are readable
+by every approved user of this Condor — the Routines page, the MCP schema and
+`GET /routines/{name}/source` all serve them unscoped. An API key typed as a
+`Field(default=...)` is therefore published the moment the file lands, with no
+review step in between.
+
+```python
+# WRONG — this key is now readable by every user of the install
+class Config(BaseModel):
+    rpc_url: str = Field(default="https://mainnet.helius-rpc.com/?api-key=3f8c…")
+    api_key: str = Field(default="sk-proj-…")
+
+# RIGHT — the field selects, run() reads the credential at run time
+class Config(BaseModel):
+    network: str = Field(default="mainnet-beta", description="Solana network")
+
+async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    rpc_url = os.environ["HELIUS_RPC_URL"]      # env, or config.yml, or get_client()
+```
+
+Read secrets **inside `run()`** — from the environment, from `config.yml`, or
+from the API client you already get with `get_client()` — and never return or
+print them either. Discovery refuses to load a routine whose `Config` obviously
+ships one (an `sk-` key, a URL carrying `api-key=`, a `password`/`private_key`
+field with a live-looking value), so `create_routine` will reject the file and
+tell you why. That check is a tripwire for the obvious mistake, not a scanner:
+a credential it does not recognise still ships. The rule is yours to keep.
+
 ## The loop: create → test → fix
 
 1. **Understand** — what to analyze, monitor or compute; agent-local or global?
@@ -190,6 +221,7 @@ manage_routines(action="run", name="x", agent="agent_slug", config={})
 - **Look it up, don't guess** — `describe("<ref>")` before writing any call
   whose exact signature you are not certain of, and `catalog()` before writing a
   fetch you suspect already exists.
+- **No credential in a `Config` default, description or docstring** — the definition is install-public; read secrets inside `run()`.
 - One routine per task. Lead with code, be direct.
 - Test after writing (`manage_routines(action="run", ...)`) and fix until the output is clean.
 

@@ -30,7 +30,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from condor.agents.attribution import (
+    DeploymentRow,
     apply_bot_mode_pnl,
+    build_deployments,
     current_owner_bases,
     session_ownership,
 )
@@ -48,7 +50,11 @@ from condor.agents.sessions_index import (
 )
 from condor.fsutil import atomic_write_text
 from condor.layering import fork_if_stock
-from condor.web.auth import check_server_access, get_current_user
+from condor.web.auth import (
+    check_server_access,
+    get_current_user,
+    report_owner_filter,
+)
 from condor.web.models import ReportSummary, WebUser
 
 # ── Simple in-memory TTL cache for performance data ──
@@ -243,38 +249,6 @@ class AgentPerformanceModel(BaseModel):
     fees_known: bool = True
 
 
-class DeploymentRow(BaseModel):
-    """One thing a run put into the world (FEAT-100).
-
-    A bot it deployed, a controller one of those bots ran, or a standalone
-    executor it created — the three kinds together are the answer to *what did
-    this run actually do out there*, which until now could only be assembled by
-    leaving the agent for the fleet browser and reading a strategy's whole
-    lifetime instead of the one run.
-    """
-
-    #: ``bot`` | ``controller`` | ``executor``.
-    kind: str
-    #: The base name, the controller id, or ``"grid SOL-USDC"``.
-    label: str
-    #: Origin for a bot, connector·pair for a controller, connector otherwise.
-    detail: str = ""
-    #: The tick whose creating call most likely produced this — ``None`` when the
-    #: join found nothing, which is every run predating the actions log. Never
-    #: guessed; see :func:`condor.agents.actions.tick_for`.
-    created_tick: int | None = None
-    started_at: float = 0.0
-    #: When this run stopped owning it, or ``None`` while it still does.
-    ended_at: float | None = None
-    #: Whether this run still holds it. Read off ownership, never off ``status``
-    #: — an archived instance's performance snapshot still says "running".
-    live: bool = False
-    pnl: float = 0.0
-    volume: float = 0.0
-    #: The fleet address this row links to (``bot:``/``ctrl:``/``exec:``).
-    scope: str = ""
-
-
 class StrategyPerformanceResponse(BaseModel):
     slug: str
     sessions: list[AgentPerformanceModel] = []
@@ -377,17 +351,15 @@ class StrategyCard(BaseModel):
 
 
 class ToolCard(BaseModel):
-    """One tool this Agent's seat actually mounts (FEAT-091).
+    """One tool of this Agent's seat's ring (FEAT-091), and what takes it away.
 
-    Not the AGENT.md allowlist: that list is only enforced for pydantic-ai model
-    keys, and an ACP bridge (claude-code, gemini, copilot) runs unrestricted, so
-    for most seats here the list is decoration. What the model is really handed
-    is what the two MCP subprocesses register — which is what this row is, and
-    what its switch turns off.
-
-    ``allowlisted`` keeps the other statement visible instead of conflating the
-    two: it says the AGENT.md list names this tool, which is a pydantic-ai fact
-    about *filtering*, while ``muted`` is an operator fact about *mounting*.
+    Every row of the ring is listed, so a tool switched off can be switched back
+    on. Two things keep a row from being mounted, on every backend alike, since
+    the spawner turns both into ``--mute-tools`` (``toolsets.seat_mutes``):
+    ``muted`` is the operator's switch, and — when the Agent names an allowlist
+    (``AgentBrain.tools_unrestricted`` false) — ``allowlisted`` false means the
+    AGENT.md list leaves it out. What the model is handed is the rows that
+    neither removes.
     """
 
     name: str
@@ -931,26 +903,16 @@ def _strategy_principal(strategy, user: WebUser) -> int:
 def _may_use_strategy_server(server_name: str, principal: int) -> bool:
     """Whether ``principal`` may turn ``server_name`` into credentials.
 
-    Existence *and* reach, in that order of importance: a stored name is not a
-    capability. It was written by whoever created the strategy, it is read now
-    by somebody else, and a share can be withdrawn long after either happened
-    (SEC-334). The level is the TRADER floor ``check_server_access`` applies to
-    every server-scoped web call.
-
-    The existence check is not redundant with the access one:
-    ``has_server_access`` answers True for an admin on an arbitrary string, so
-    without it a name that resolves to nothing today would be honoured the
-    moment a server is created under it — the same reasoning spelled out for
-    SEC-164 in ``_start``.
+    The stored-name predicate (SEC-334), which lives on the ConfigManager
+    beside ``has_server_access`` because four other callers — the tick engine,
+    session and toolset resolvers, and ``conversations.py`` — need the same
+    rule and cannot import the web layer (ARCH-587). The level it applies is
+    the TRADER floor ``check_server_access`` applies to every server-scoped web
+    call.
     """
-    from config_manager import ServerPermission, get_config_manager
+    from config_manager import get_config_manager, may_use_stored_server
 
-    if not server_name:
-        return False
-    cm = get_config_manager()
-    return bool(cm.get_server(server_name)) and cm.has_server_access(
-        principal, server_name, ServerPermission.TRADER
-    )
+    return may_use_stored_server(get_config_manager(), principal, server_name)
 
 
 async def _get_client_for_strategy(
@@ -2063,6 +2025,16 @@ async def create_agent(
     """Create a new Agent (identity + brain; strategies are added separately)."""
     from condor.preferences import get_active_agent_key
 
+    # The pin is the same field ``update_agent_config`` gates below, so it is
+    # gated identically here: creating an Agent already pinned to a server the
+    # caller cannot reach is the edit they are not allowed to make afterwards.
+    # Credentials never actually leak — every resolution site re-checks reach —
+    # but ``SessionBinding.server_name`` reports the stored pin verbatim, so an
+    # ungated create leaves an Agent naming a foreign account in the chat header
+    # and in ``AgentSummary`` (SEC-594). An empty pin needs no access at all.
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
+
     # Same rule as the Telegram/MCP path: an unspecified model inherits the
     # creator's active one rather than defaulting to a guess.
     agent = _agent_store().create(
@@ -2649,7 +2621,19 @@ async def delete_strategy(
             status_code=400,
             detail="Cannot delete a running strategy. Stop all instances first.",
         )
-    _strategy_store().delete(slug, sslug)
+    try:
+        removed = _strategy_store().delete(slug, sslug)
+    except ValueError as exc:
+        # A strategy whose ``strategy.md`` is still the shipped one is refused
+        # by the store (layering.stock_delete_error). Unhandled here that
+        # refusal reached the browser as a 500, which the delete dialog reports
+        # as "it may be running" — the one thing it certainly was not.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not remove the strategy folder — see the server log.",
+        )
     return {"deleted": True}
 
 
@@ -2676,139 +2660,6 @@ async def get_strategy_performance(
     for s in sessions:
         s.status = "running" if s.agent_id in running_ids else "closed"
     return StrategyPerformanceResponse(slug=sslug, sessions=sessions, totals=totals)
-
-
-def _instance_for_base(base: str, live: list[str], instances: list[str]) -> str:
-    """The deploy a bot row should link to: the live one, else the newest."""
-    from condor.agents.ownership import strip_deploy_suffix
-
-    for name in live:
-        if strip_deploy_suffix(name) == base:
-            return name
-    mine = [n for n in instances if strip_deploy_suffix(n) == base]
-    return mine[-1] if mine else base
-
-
-def build_deployments(
-    owned: list[Any],
-    bot_bases: list[str],
-    perf: Any,
-    actions: list[Any],
-    agent_id: str,
-) -> list[DeploymentRow]:
-    """Everything one run put into the world, from values it already has (FEAT-100).
-
-    Pure — every input is already on ``get_session_executors``'s stack, which is
-    the whole reason the ledger is a field on that response rather than a second
-    endpoint that would have to redo ``session_ownership`` *and* re-fetch the
-    session's performance to fill the same PnL column.
-
-    Three joins, none of them clever:
-
-    - a **bot** is an :class:`~condor.agents.ownership.OwnedBot`, and it is live
-      iff this session is still the base's current owner (``bot_bases``) — not
-      iff its snapshot says "running", which an archived instance also does;
-    - a **controller** belongs to the bot whose deploy it ran under, so it
-      inherits that bot's window and its tick;
-    - an **executor** is this run's own iff it is tagged with the session's
-      ``agent_id``, the same join the fleet browser performs.
-
-    The tick column is the one heuristic, and it is allowed to say nothing: the
-    actions log records arguments and never results, so there is no id to join
-    on and a record is credited to the nearest preceding create of its kind. Runs
-    written before that log exists get ``None`` everywhere, and the ledger still
-    renders — the bots and the executors are all there.
-    """
-    from condor.agents.actions import tick_for
-    from condor.agents.ownership import strip_deploy_suffix
-
-    live_instances = list(getattr(perf, "bot_names", None) or [])
-    all_instances = list(getattr(perf, "bot_instances", None) or [])
-    controllers = list(getattr(perf, "controllers", None) or [])
-    executors = list(getattr(perf, "executors", None) or [])
-    owned_by_base = {b.base: b for b in owned}
-
-    rows: list[DeploymentRow] = []
-    for bot in sorted(owned, key=lambda b: (b.since, b.base)):
-        mine = [
-            c
-            for c in controllers
-            if strip_deploy_suffix(str(c.get("bot_name") or "")) == bot.base
-        ]
-        rows.append(
-            DeploymentRow(
-                kind="bot",
-                label=bot.base,
-                detail=bot.origin,
-                created_tick=tick_for(actions, "bot", bot.since),
-                started_at=bot.since,
-                ended_at=bot.until or None,
-                live=bot.base in bot_bases,
-                pnl=sum(_controller_pnl(c) for c in mine),
-                volume=sum(float(c.get("volume_traded") or 0.0) for c in mine),
-                scope=f"bot:{_instance_for_base(bot.base, live_instances, all_instances)}",
-            )
-        )
-
-    live_set = set(live_instances)
-    for c in controllers:
-        instance = str(c.get("bot_name") or "")
-        base = strip_deploy_suffix(instance)
-        parent = owned_by_base.get(base)
-        cid = str(c.get("controller_id") or "")
-        detail = " · ".join(
-            p
-            for p in (str(c.get("connector") or ""), str(c.get("trading_pair") or ""))
-            if p
-        )
-        rows.append(
-            DeploymentRow(
-                kind="controller",
-                label=cid or str(c.get("controller_name") or "controller"),
-                detail=detail,
-                # A controller has no creating call of its own: it came into the
-                # world with the deploy that carried it.
-                created_tick=(
-                    tick_for(actions, "bot", parent.since) if parent else None
-                ),
-                started_at=parent.since if parent else 0.0,
-                ended_at=(parent.until or None) if parent else None,
-                live=instance in live_set,
-                pnl=_controller_pnl(c),
-                volume=float(c.get("volume_traded") or 0.0),
-                scope=f"ctrl:{instance}:{cid}" if instance and cid else "",
-            )
-        )
-
-    for ex in executors:
-        if str(ex.get("controller_id") or "") != agent_id:
-            continue
-        started = float(ex.get("timestamp") or 0.0)
-        closed = float(ex.get("close_timestamp") or 0.0)
-        kind_name = str(ex.get("type") or "").replace("_executor", "")
-        pair = str(ex.get("pair") or "")
-        rows.append(
-            DeploymentRow(
-                kind="executor",
-                label=" ".join(p for p in (kind_name, pair) if p) or str(ex.get("id")),
-                detail=str(ex.get("connector") or ""),
-                created_tick=tick_for(actions, "executor", started),
-                started_at=started,
-                ended_at=closed or None,
-                live=closed <= 0,
-                pnl=float(ex.get("pnl") or 0.0),
-                volume=float(ex.get("volume") or 0.0),
-                scope=f"exec:{ex.get('id')}" if ex.get("id") else "",
-            )
-        )
-    return rows
-
-
-def _controller_pnl(c: dict[str, Any]) -> float:
-    """What a controller has made, on the same basis as the KPI strip's total."""
-    return float(c.get("realized_pnl_quote") or 0.0) + float(
-        c.get("unrealized_pnl_quote") or 0.0
-    )
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/executors")
@@ -2992,6 +2843,23 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         # route never reveals which names exist.
         if not cm.get_server(server_name):
             raise HTTPException(status_code=404, detail="Server not found")
+
+    # The model is held to the same up-front check as the server. The loop runs
+    # in the background, so a key that could not run used to answer "started"
+    # and then fail its first tick where nobody saw it.
+    from condor.agents.engine import resolve_agent_key
+    from condor.runtime.llm_client import agent_key_error
+
+    agent_key = resolve_agent_key(config_dict, strategy, agent)
+    problem = await agent_key_error(
+        agent_key,
+        user_id=user_id,
+        base_url_override=config_dict.get("model_base_url") or None,
+    )
+    if problem:
+        raise HTTPException(
+            status_code=422, detail=f"Model '{agent_key}' cannot run: {problem}"
+        )
 
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context
@@ -3590,7 +3458,12 @@ async def get_session_report(
 
     run_key = _runkey(slug, sslug)
     source = f"{run_key}/session_{session_num}"
-    reports, _total = list_reports(source_type="routine", search=run_key, limit=100)
+    reports, _total = list_reports(
+        source_type="routine",
+        search=run_key,
+        limit=100,
+        owner_id=report_owner_filter(user),
+    )
     matched = [r for r in reports if r.get("source_name", "") == source]
     return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
 
@@ -3706,7 +3579,7 @@ async def get_strategy_routines(
     from condor.routine_store import get_routine_store
 
     store = get_routine_store()
-    all_routines = store.list_routines()
+    all_routines = store.list_routines(owner_id=report_owner_filter(user))
     prefix = f"{slug}/"
     return [r for r in all_routines if r.get("name", "").startswith(prefix)]
 
@@ -3724,7 +3597,12 @@ async def get_strategy_reports(
 
     run_key = _runkey(slug, sslug)
     prefix = f"{run_key}/"
-    reports, _total = list_reports(source_type="routine", search=run_key, limit=limit)
+    reports, _total = list_reports(
+        source_type="routine",
+        search=run_key,
+        limit=limit,
+        owner_id=report_owner_filter(user),
+    )
     matched = [r for r in reports if r.get("source_name", "").startswith(prefix)]
     return {
         "reports": [ReportSummary(**r).model_dump() for r in matched],

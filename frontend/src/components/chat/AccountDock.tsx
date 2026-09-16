@@ -1,8 +1,13 @@
+import { Fragment } from "react";
+
 import { DockExecution } from "@/components/chat/DockExecution";
 import { DockPortfolio } from "@/components/chat/DockPortfolio";
 import { DockSection } from "@/components/chat/DockSection";
+import { DockSplitHandle } from "@/components/chat/DockSplitHandle";
 import { PANELS, type PanelId } from "@/components/chat/accountPanels";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
+import { useDockSplit } from "@/hooks/useDockSplit";
+import { DESK_SPLIT_KEY } from "@/lib/sessionState";
 
 /**
  * The desk you trade, beside the conversation you are having about it.
@@ -39,6 +44,11 @@ import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
  * Routines share the dock. Opening the agent puts both away, because the pane
  * has one occupant and the union in `AgentChatTab` says so.
  *
+ * How the two split the panel is the reader's, dragged on the seam between them
+ * and remembered (see `DockSplit`): a portfolio of five assets and a fleet of
+ * forty controllers do not want the same half, and collapsing one away was the
+ * only answer the even split had for that.
+ *
  * **Closed still costs nothing.** With no section open there is no panel at
  * all, so neither section's queries nor its socket channels are ever mounted:
  * the Agents page is exactly as expensive as it was for anyone who never opens
@@ -64,7 +74,13 @@ export function AccountDock({
    */
   onOpenAgent?: (slug: string) => void;
 }) {
+  const { frac, setFrac, defaultFrac } = useDockSplit(DESK_SPLIT_KEY);
   if (shown.length === 0 || !server) return null;
+
+  // The seam is only a control while there are two panes to divide: with one
+  // section open it already has the panel, and a handle under it would drag
+  // against a header.
+  const split = shown.length > 1;
 
   return (
     <WorkspaceSheet
@@ -89,21 +105,33 @@ export function AccountDock({
         data-testid="account-dock"
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        {PANELS.map(({ id, label, Icon, hint }) => (
-          <DockSection
-            key={id}
-            icon={<Icon className="h-3 w-3 shrink-0" />}
-            label={label}
-            hint={hint}
-            open={shown.includes(id)}
-            onToggle={() => onToggle(id)}
-          >
-            {id === "portfolio" ? (
-              <DockPortfolio server={server} />
-            ) : (
-              <DockExecution server={server} onOpenAgent={onOpenAgent} />
+        {PANELS.map(({ id, label, Icon, hint }, i) => (
+          <Fragment key={id}>
+            {split && i > 0 && (
+              <DockSplitHandle
+                frac={frac}
+                setFrac={setFrac}
+                defaultFrac={defaultFrac}
+                label="Resize portfolio and execution"
+              />
             )}
-          </DockSection>
+            <DockSection
+              icon={<Icon className="h-3 w-3 shrink-0" />}
+              label={label}
+              hint={hint}
+              open={shown.includes(id)}
+              // The top section keeps `frac` of the panel and the bottom the
+              // rest, which is the same ratio however tall the panel is.
+              share={split ? (i === 0 ? frac : 1 - frac) : undefined}
+              onToggle={() => onToggle(id)}
+            >
+              {id === "portfolio" ? (
+                <DockPortfolio server={server} />
+              ) : (
+                <DockExecution server={server} onOpenAgent={onOpenAgent} />
+              )}
+            </DockSection>
+          </Fragment>
         ))}
       </div>
     </WorkspaceSheet>

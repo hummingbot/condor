@@ -7,6 +7,7 @@ which used to find our subprocess trees by grepping ``ps`` for the bot token —
 still finds them through the non-secret marker that replaced it.
 """
 
+import subprocess
 import sys
 
 import pytest
@@ -110,29 +111,40 @@ def test_marker_is_per_bot_and_absent_without_a_token(monkeypatch):
 # ── the reaper still finds our trees without the token on argv ──
 
 
-def _reap_with_ps(monkeypatch, rows, token=BOT_TOKEN):
-    """Run the reaper against a fake ``ps`` snapshot; return the pids signalled."""
+def _run_reaper(monkeypatch, rows, token=BOT_TOKEN):
+    """Run the reaper against a fake process table.
+
+    ``ps`` itself is faked (rather than ``_ps_rows``/``_descendant_pids``) so the
+    real snapshot-and-walk code runs, and every fork the reaper makes is counted.
+    Returns ``(pids signalled, argv of each ``ps`` invocation)``.
+    """
     from condor.acp import client as acp_client
 
     signalled: list[int] = []
-    monkeypatch.setattr(acp_client, "_ps_rows", lambda: rows)
+    ps_calls: list[list[str]] = []
 
-    def _descendants(root: int) -> set[int]:
-        """Same walk the real helper does, over the fake snapshot."""
-        out, frontier = set(), {root}
-        while frontier:
-            frontier = {p for p, ppid, _ in rows if ppid in frontier and p not in out}
-            out |= frontier
-        return out
+    def _fake_run(cmd, **_kwargs):
+        ps_calls.append(list(cmd))
+        fmt = cmd[-1]
+        if fmt.endswith("args="):
+            text = "".join(f"{p} {ppid} {args}\n" for p, ppid, args in rows)
+        else:
+            text = "".join(f"{p} {ppid}\n" for p, ppid, _ in rows)
+        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
 
-    monkeypatch.setattr(acp_client, "_descendant_pids", _descendants)
+    monkeypatch.setattr(acp_client.subprocess, "run", _fake_run)
     monkeypatch.setattr(
         acp_client, "_signal_all", lambda pids, _pg, _sig: signalled.extend(pids)
     )
     monkeypatch.setattr(acp_client, "_alive", lambda _p: False)
 
     acp_client.reap_stale_acp_trees(token, wait_s=0)
-    return set(signalled)
+    return set(signalled), ps_calls
+
+
+def _reap_with_ps(monkeypatch, rows, token=BOT_TOKEN):
+    """Run the reaper against a fake ``ps`` snapshot; return the pids signalled."""
+    return _run_reaper(monkeypatch, rows, token)[0]
 
 
 def test_reaper_kills_the_tree_seeded_by_the_marker(monkeypatch):
@@ -168,6 +180,35 @@ def test_reaper_ignores_another_bots_tree(monkeypatch):
         (300, 100, f"uv run python -m mcp_servers.condor --bot-id {other}"),
     ]
     assert _reap_with_ps(monkeypatch, rows) == set()
+
+
+def test_reaper_takes_one_ps_snapshot_however_many_roots(monkeypatch):
+    """One ``ps`` per reap, not one per root (PERF-333).
+
+    Three independent leaked trees used to mean the boot-path snapshot plus one
+    full ``ps -eo pid=,ppid=`` fork per root — and a pid seen only by one of
+    those later snapshots had no argv in the first one, so it slipped past the
+    ``_protected`` guard unread. Both go away by walking the snapshot in hand.
+    """
+    from condor.acp.client import bot_process_marker
+
+    marker = f"--bot-id {bot_process_marker(BOT_TOKEN)}"
+    rows = [(999, 1, "some unrelated process")]
+    expected: set[int] = set()
+    for root in (100, 200, 300):  # three separate acp trees, each nested deep
+        rows += [
+            (root, 1, "node claude-agent-acp"),
+            (root + 1, root, "claude"),
+            (root + 2, root + 1, f"uv run python -m mcp_servers.condor {marker}"),
+            (root + 3, root + 2, "uv run python -m mcp_servers.hummingbot_api"),
+        ]
+        expected |= {root, root + 1, root + 2, root + 3}
+
+    signalled, ps_calls = _run_reaper(monkeypatch, rows)
+
+    assert signalled == expected
+    assert len(ps_calls) == 1, f"{len(ps_calls)} ps forks for 3 roots: {ps_calls}"
+    assert ps_calls[0] == ["ps", "-eo", "pid=,ppid=,args="]
 
 
 # ── the MCP servers still read what the spawner now sends ──

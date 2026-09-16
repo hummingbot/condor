@@ -46,7 +46,10 @@ the gate can classify on its own:
   unreadable-argument ambiguity to fail closed on.
 - A tool that only sometimes moves funds is gated on one literal field, and the gate
   fails closed when that field cannot be read — `manage_clmm` and `manage_amm` on
-  `action`, `manage_gateway_config` on `resource_type`.
+  `action`.
+- A write no agent should make, even behind a confirmation, is not a parameter at all:
+  `manage_gateway_config` has no `update` action, so the RPC, connector settings and
+  wallets are changed by the server owner in Condor.
 - **A read tool must be safe by name.** If a name can be both, it is two tools.
 - Every gated name must resolve to a really-registered tool, and every gated literal to
   a real member of that tool's `Literal` — `tests/test_dangerous_gate_names_resolve.py`

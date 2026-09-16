@@ -73,6 +73,10 @@ Anchor it on realised movement rather than a guess:
 df = await client.market_data.get_candles_last_days("binance", "SOL-USDT", days=7, interval="1h")
 ```
 
+In a **dry run** `run_code` is refused. Read the same series with the tool instead —
+`get_market_data(action="candles", connector_name="binance", trading_pair="SOL-USDT",
+interval="1h", max_records=168)`.
+
 Take the recent high/low. Then:
 
 - **Actively managed (hours to a day):** roughly ±0.5–1× the pair's daily range around

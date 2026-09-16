@@ -7,8 +7,10 @@ only (re)load files that are new or changed, while still picking up edits
 and deletions on the next call — no restart needed.
 """
 
+import asyncio
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import routines.base as base
 from routines.base import discover_routines, discover_routines_from_path
@@ -172,6 +174,75 @@ class TestDiscoverRoutines:
         discover_routines(force_reload=True)
 
         assert len(calls) == len(own)
+
+
+class TestRoutinesMenuRender:
+    """PERF-620: rendering the /routines menu no longer forces a full re-import.
+
+    ``_show_menu`` used to pass ``force_reload=True``, so every ``/routines`` and
+    every "back to menu" callback re-executed every routine module. Discovery is
+    mtime-keyed, so a plain call already picks up new, edited and deleted files —
+    the forced reload only blanked the caches. It is still passed by the explicit
+    Reload button, which exists to retry a *cached load failure*.
+    """
+
+    @staticmethod
+    def _spy_discovery(monkeypatch, hr):
+        """Record the kwargs of each ``discover_routines`` call, still calling it."""
+        seen: list[dict] = []
+        real = hr.discover_routines
+
+        def spy(*args, **kwargs):
+            seen.append(dict(kwargs))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(hr, "discover_routines", spy)
+        return seen
+
+    @staticmethod
+    def _callback_update(data: str):
+        async def noop(*args, **kwargs):
+            return None
+
+        message = SimpleNamespace(edit_text=noop, reply_text=noop)
+        return SimpleNamespace(
+            effective_chat=SimpleNamespace(id=1),
+            message=None,
+            callback_query=SimpleNamespace(data=data, answer=noop, message=message),
+        )
+
+    def test_repeated_renders_do_not_reimport(self, monkeypatch):
+        import handlers.routines as hr
+
+        discover_routines()  # warm the mtime cache
+
+        seen = self._spy_discovery(monkeypatch, hr)
+        reloaded: list[str] = []
+        monkeypatch.setattr(
+            base.importlib, "reload", lambda m: reloaded.append(m.__name__)
+        )
+
+        update = self._callback_update("routines:menu")
+        context = SimpleNamespace(user_data={})
+        asyncio.run(hr._show_menu(update, context))
+        asyncio.run(hr._show_menu(update, context))
+
+        assert seen == [{}, {}]  # no force_reload from the menu
+        assert reloaded == []
+
+    def test_reload_button_still_forces(self, monkeypatch):
+        import handlers.routines as hr
+
+        discover_routines()  # warm the mtime cache
+
+        seen = self._spy_discovery(monkeypatch, hr)
+
+        update = self._callback_update("routines:reload")
+        context = SimpleNamespace(user_data={})
+        # __wrapped__ skips the @restricted auth check; the branch is what matters.
+        asyncio.run(hr.routines_callback_handler.__wrapped__(update, context))
+
+        assert seen[0] == {"force_reload": True}
 
 
 class TestRoutineStoreResolve:

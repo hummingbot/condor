@@ -17,6 +17,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import type { PickSlot } from "@/components/executor/types";
+// The library itself is substituted at the resolver, for every test file at
+// once (CORR-368); this file only declares the price scale its clicks are read
+// off and reads back the crosshair handler the component subscribed.
+import { chartDouble } from "@/test/lightweight-charts-double";
 import { TradeChart } from "./TradeChart";
 
 /** Pixel row → price, steep enough that two clicks 60px apart cannot collide. */
@@ -24,52 +28,6 @@ const PRICE_AT_Y_200 = 105234.87313432834;
 function priceAtY(y: number): number {
   return PRICE_AT_Y_200 - (y - 200) * 10;
 }
-
-const chartState = vi.hoisted(() => ({
-  series: null as unknown,
-  crosshairCb: null as ((param: unknown) => void) | null,
-}));
-
-vi.mock("lightweight-charts", () => {
-  /**
-   * The chart pieces the component reaches for are many and mostly irrelevant
-   * here, so unknown members answer with a no-op spy; only the price mapping and
-   * the crosshair subscription carry real behaviour.
-   */
-  const stub = (own: Record<string, unknown>) =>
-    new Proxy(own, {
-      get(target, prop) {
-        if (typeof prop !== "string" || prop === "then") return undefined;
-        if (!(prop in target)) target[prop] = vi.fn();
-        return target[prop];
-      },
-    });
-
-  const series = stub({
-    coordinateToPrice: vi.fn((y: number) => priceAtY(y)),
-    priceToCoordinate: vi.fn(() => 0),
-    createPriceLine: vi.fn(() => ({})),
-  });
-  chartState.series = series;
-
-  const timeScale = stub({});
-  const chart = stub({
-    addSeries: vi.fn(() => series),
-    timeScale: vi.fn(() => timeScale),
-    subscribeCrosshairMove: vi.fn((cb: (param: unknown) => void) => {
-      chartState.crosshairCb = cb;
-    }),
-  });
-
-  return {
-    createChart: vi.fn(() => chart),
-    CandlestickSeries: {},
-    LineSeries: {},
-    ColorType: { Solid: "solid" },
-    CrosshairMode: { Normal: 0 },
-    LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
-  };
-});
 
 vi.mock("@/hooks/useCandleStore", () => ({
   useCandleStore: () => ({
@@ -136,9 +94,9 @@ async function render(
 /** Move the crosshair to a pixel row, optionally over a candle. */
 async function moveTo(y: number, overBar = true) {
   const seriesData = new Map<unknown, unknown>();
-  if (overBar) seriesData.set(chartState.series, HOVERED_BAR);
+  if (overBar) seriesData.set(chartDouble.series, HOVERED_BAR);
   await act(async () => {
-    chartState.crosshairCb?.({
+    chartDouble.crosshairCb?.({
       point: { x: 300, y },
       seriesData,
       time: overBar ? 1_700_000_000 : undefined,
@@ -194,7 +152,7 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver;
-  chartState.crosshairCb = null;
+  chartDouble.reset({ toPrice: priceAtY });
   onPriceSet = vi.fn<(field: PickSlot, price: number) => void>();
   container = document.createElement("div");
   document.body.appendChild(container);

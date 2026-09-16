@@ -16,6 +16,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from handlers._deeds import record_telegram_deed
 from handlers.bots._shared import fetch_current_price, get_available_cex_connectors
 from handlers.cex._shared import (
     get_cex_balances,
@@ -907,6 +908,11 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         client, _ = await get_executors_client(chat_id, context.user_data)
         result = await create_executor(client, executor_config)
+        record_telegram_deed(
+            update,
+            verb="create_position_executor",
+            summary=f"Create position executor on {config.get('trading_pair') or '?'}",
+        )
 
         # Invalidate cache
         invalidate_cache(context.user_data, "all")

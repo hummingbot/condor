@@ -228,9 +228,13 @@ reads the same shared playbook and knows its own domain better than you do.
 
 **Capability rule:** there isn't one. Every agent is delegable and loopable on any
 model; `when_to_consult` and owning a strategy are quality, not permission. The model
-only changes *how* a run executes: a pydantic-ai key (`ollama:…`/`openai:…`/`groq:…`/
-`lmstudio:…`) enforces the `tools` allowlist; an ACP key (`claude-code`/`gemini`/
-`copilot`) runs unrestricted. Every run reached through `delegate` — `start` or `ask` —
+only changes *how* a run executes, never what it may reach: the `tools` allowlist
+binds on every key, ACP bridges included — a tool it leaves out is never mounted. So
+an allowlist must name every tool the agent's own playbooks call *plus* the family the
+inherited framework skills call (`delegate`, `send_notification`, `run_code`,
+`manage_memory`, `manage_skill`, `manage_routines`, `trading_agent_journal_read`,
+`trading_agent_journal_write`, `manage_agents`, `manage_strategies`, `control_agent`,
+`get_available_models`); leave it empty for unrestricted. Every run reached through `delegate` — `start` or `ask` —
 is unattended: nobody is asked to approve its tool calls, so only hand work to agents
 and tasks you trust.
 
@@ -250,7 +254,7 @@ operator actually has — call `get_available_models` and pick for the agent's j
 default to a hardcoded model.** The tool reports:
 - `acp_clis` — subscription/CLI bridges (`claude-code`, `gemini`, `copilot`, `codex`) and
   whether each CLI is installed. No API key or per-token cost (rides the operator's
-  Claude/ChatGPT subscription); runs unrestricted (does NOT enforce the `tools` allowlist).
+  Claude/ChatGPT subscription); still held to the agent's `tools` allowlist.
   **`available` means installed, not signed in** — each bridge needs its own interactive
   login that Condor cannot probe. Never recommend one as if it were ready; name it as an
   option and ask the user to confirm they use it.

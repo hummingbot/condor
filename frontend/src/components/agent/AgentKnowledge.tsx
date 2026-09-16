@@ -1049,13 +1049,13 @@ const TOOL_SERVERS: { id: string; label: string }[] = [
 ];
 
 /**
- * Every tool this agent's seat actually mounts, each with a switch (FEAT-091).
+ * Every tool this agent's seat could mount, each with a switch (FEAT-091).
  *
- * Not the AGENT.md allowlist. That list only binds pydantic-ai model keys — an
- * ACP bridge runs unrestricted — so a tab that only echoed it was telling most
- * agents something untrue about what they can reach. The switch is the honest
- * control: a muted tool is never registered on the subprocess, so the model is
- * never told it exists, on every backend alike.
+ * The rows are the whole ring, so a switched-off tool can be switched back on.
+ * Two things keep a row from being mounted, on every backend alike: the
+ * operator's switch, and — when AGENT.md names an allowlist — being left out of
+ * it. Either way the tool is never registered on the subprocess, so the model
+ * is never told it exists.
  */
 function ToolsTab({
   brain,
@@ -1072,6 +1072,10 @@ function ToolsTab({
     ...server,
     tools: brain.tools.filter((t) => t.server === server.id),
   })).filter((group) => group.tools.length > 0);
+  // Under an allowlist, a tool it leaves out is never mounted (the spawner turns
+  // the omission into a mute), so its row has no switch worth throwing.
+  const offList = (t: AgentBrain["tools"][number]) =>
+    !brain.tools_unrestricted && !t.allowlisted;
 
   return (
     <div className="space-y-1.5">
@@ -1082,8 +1086,8 @@ function ToolsTab({
       </p>
       <p className="text-[11px] text-[var(--color-text-muted)]">
         {brain.tools_unrestricted
-          ? "AGENT.md names no allowlist, so nothing narrows this further. Naming tools there also narrows what the agent may call — edit it in the Brain tab, where it is written."
-          : "AGENT.md also names an allowlist, marked below. Edit it in the Brain tab, where it is written."}
+          ? "AGENT.md names no allowlist, so nothing narrows this further. Naming tools there limits the agent to exactly those — edit it in the Brain tab, where it is written."
+          : "AGENT.md names an allowlist: only the tools marked allowlisted are mounted, and the rest are never offered to the agent. Edit it in the Brain tab, where it is written."}
       </p>
       {brain.tools.length === 0 ? (
         <Empty>No tools mounted on this agent's seat.</Empty>
@@ -1109,20 +1113,27 @@ function ToolsTab({
                         allowlisted
                       </Chip>
                     )}
+                    {offList(t) && (
+                      <Chip title="Left out of the AGENT.md allowlist — this agent is never told it exists">
+                        not in allowlist
+                      </Chip>
+                    )}
                   </>
                 }
                 subtitle={t.description}
-                dimmed={t.muted}
+                dimmed={t.muted || offList(t)}
                 onAsk={onAskAgent && (() => onAskAgent(OPENER.tool(t.name)))}
                 askTitle="Ask the agent how it uses this tool"
                 toggle={
-                  onMute && {
-                    on: !t.muted,
-                    onChange: () => onMute(t.name, !t.muted),
-                    title: t.muted
-                      ? "Off for this agent — switch it back on"
-                      : "On — switch it off for this agent",
-                  }
+                  onMute && !offList(t)
+                    ? {
+                        on: !t.muted,
+                        onChange: () => onMute(t.name, !t.muted),
+                        title: t.muted
+                          ? "Off for this agent — switch it back on"
+                          : "On — switch it off for this agent",
+                      }
+                    : undefined
                 }
               />
             ))}

@@ -16,6 +16,7 @@ from collections import OrderedDict
 import pytest
 
 from condor.archived_chart_series import _MAX_PNL_POINTS
+from condor.asyncutil import SingleFlight
 from condor.fetchers import archived_run
 from condor.quote_conversion import QuoteRates
 from condor.reports import subjects
@@ -86,7 +87,7 @@ def _brl_rate_and_cold_cache(monkeypatch):
 
     monkeypatch.setattr("condor.quote_conversion.resolve_usd_rates", _rates)
     monkeypatch.setattr(archived_run, "_performance_cache", OrderedDict())
-    monkeypatch.setattr(archived_run, "_performance_inflight", {})
+    monkeypatch.setattr(archived_run, "_performance_inflight", SingleFlight())
 
 
 def _detail(controller_id="", client=None):

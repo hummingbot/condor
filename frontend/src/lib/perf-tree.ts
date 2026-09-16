@@ -529,7 +529,7 @@ export function axisOfNodeId(id: string): GroupAxis | null {
  *
  * **Ownership is the one axis with a join behind it.** A leaf carries a run key
  * or nothing, and `agentBucket` (FEAT-106) is what turns *nothing* into one of
- * two answers a reader can act on — *Outside Condor* and *Before the ledger* —
+ * two answers a reader can act on — *No record found* and *Before the ledger* —
  * rather than an absence. So the agent axis never returns `""`: every record
  * has an owner row, which is the whole point of reading the fleet by owner.
  */
@@ -719,11 +719,13 @@ export function botNodeId(leaf: PerfLeaf): string | null {
  * The node id of the bucket a leaf that belongs to no controller hangs under,
  * or `null` for every leaf that does belong to one.
  *
- * These are the hand-opened positions, and on the terminated side of a real
- * server there are dozens of them, each under a different dead controller id.
- * They are not anonymous, though — each is filed under the controller id it
- * carries as its bot (`main`, for one opened from `/trade`), which is the key
- * this returns. `buildTree` nests every such bucket under one "Unattached" row
+ * These are the executors filed under no controller, and on the terminated side
+ * of a real server there are dozens of them under a handful of ids. They are
+ * not anonymous, though — each is filed under the `controller_id` its own
+ * record carries (`main`, the trading API's default for an executor created
+ * without one; an MCP-created position carries the calling agent's session id),
+ * which is the key this returns. That id is not a claim that a controller by
+ * that name ever ran, let alone died (CORR-362). `buildTree` nests every such bucket under one "Unattached" row
  * rather than drawing each at depth 0, so the count of them stays legible
  * instead of burying the bot rows the reader came for.
  *
@@ -809,10 +811,10 @@ function makeNode(id: string, kind: NodeKind, label: string): PerfNode {
  * {@link keyFor} is `""` skips it, a level with one key in it is the caller's
  * to leave out, and no level ever changes what anything folds to.
  *
- * An executor whose controller is gone *and* whose agent is unknown belongs to
+ * An executor filed under no controller *and* whose agent is unknown belongs to
  * no deployment and to nobody, but it is not nameless: it hangs under a
- * **group** row named for the controller id it carries (see
- * {@link groupNodeId}). Most dead controller ids are distinct from one another
+ * **group** row named for the `controller_id` it carries (see
+ * {@link groupNodeId}). Most of those ids are distinct from one another
  * — one executor each — so bucketing by id alone still leaves dozens of bare
  * rows at the same indentation as a bot. They are gathered a second time,
  * under one **orphans** row (`"Unattached"`), so the terminated side of a real
@@ -874,8 +876,8 @@ export function buildTree(
 
   // The one row every executor nobody claims hangs under, created the first
   // time one is seen and pushed onto its level exactly once — so a terminated
-  // side with 42 dead controller ids draws one collapsible "Unattached" row
-  // ahead of the bots, not 42.
+  // side with 42 such ids draws one collapsible "Unattached" row ahead of the
+  // bots, not 42.
   //
   // Absent from a tree with no levels at all, for the same reason a bot level
   // is: a chevron that tells the reader nothing, and the flat tree keeps the
@@ -891,7 +893,7 @@ export function buildTree(
     return node;
   };
 
-  // The bucket for one dead controller id's executors: memoised, created the
+  // The bucket for one `controller_id`'s executors: memoised, created the
   // first time one is seen, and pushed onto `orphansNode()` rather than onto
   // the level directly — the per-id split is still worth keeping once the
   // reader opens "Unattached", it just should not cost a row of its own before
@@ -977,8 +979,8 @@ export function buildTree(
  * records arrive in has nothing to say about which of them is an answer.
  *
  * Between themselves they take the order the bubbles give them, and for the
- * same reason: *Outside Condor* is a standing fact, *Before the ledger* is the
- * one that drains to zero as the log fills.
+ * same reason: *No record found* stays true, *Before the ledger* is the one
+ * that drains to zero as the log fills.
  */
 const UNOWNED_ORDER = [OUTSIDE, BEFORE_LEDGER];
 

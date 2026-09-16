@@ -5,9 +5,12 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.server_data_service import ServerDataType, get_server_data_service
+
 logger = logging.getLogger(__name__)
 
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers.executors import EXECUTORS_POLL_MAX, MAX_EXECUTORS_FETCH
 from condor.fetchers.executors import extract_executors_list as _extract_executors_list
 from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
@@ -42,6 +45,15 @@ _PERIOD_TTLS: dict[str, int] = {"1D": 60, "1W": 300, "1M": 900}
 # (server, period) -> (computed_at, summary). Bounded by servers x periods.
 _summary_cache: dict[tuple[str, str], tuple[float, ExecutorPeriodSummary]] = {}
 
+# One executor walk per server at a time, shared by every concurrent caller
+# (PERF-580). The TTL cache above only helps a request that arrives *after* an
+# answer has landed; the KPI strip refetches on a 60s interval against a 60s TTL
+# for 1D, so two open tabs used to fire two concurrent walks of up to
+# MAX_EXECUTORS_FETCH / EXECUTORS_PAGE_SIZE sequential cursor pages each.
+# Keyed by server, not by (server, period): the walk is identical for all three
+# windows, which are filtered out of the same rows client-side.
+_summary_walks = SingleFlight()
+
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
 async def list_executors(
@@ -59,8 +71,6 @@ async def list_executors(
     user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # For filtered queries or when a custom limit is requested, go direct to API.
     # For unfiltered default requests, use the SDS cache.
@@ -154,8 +164,6 @@ async def list_executors_page(
             offset = int(cursor[len(_SDS_OFFSET_PREFIX) :] or 0)
 
     if offset is not None:
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         cached = get_server_data_service().get(name, ServerDataType.EXECUTORS)
         cached_rows = _extract_executors_list(cached) if cached is not None else []
         # The poll caps its walk at EXECUTORS_POLL_MAX, so a cache of exactly
@@ -226,34 +234,65 @@ async def _usd_summary(
     ticker pool. A quote with no path to USD is added at face value and flips
     ``converted`` — the same fallback the strip's client-side ``convert()`` made,
     but reported instead of silent.
-    """
-    from condor.market_rates import get_rates
 
-    rates: dict[str, float | None] = {}
-    if by_quote:
-        try:
-            rates = await get_rates(server, [f"{q}-USDT" for q in by_quote])
-        except Exception as e:
-            logger.warning(
-                "Rates unavailable while summarizing executors for %s: %s", server, e
-            )
+    The resolution itself belongs to :func:`condor.quote_conversion.resolve_usd_rates`,
+    which the archived-run path already uses (CORR-602). The copy that used to live
+    here asked the pool for ``DAI-USDT`` and called the total "approximate" on a
+    server with no such market, while the same history read as converted elsewhere —
+    the shared helper short-circuits every stablecoin quote to 1.0 instead, so the
+    two surfaces agree on both the dollars and the confidence flag.
+    """
+    from condor.quote_conversion import resolve_usd_rates
+
+    quote_rates = await resolve_usd_rates(server, set(by_quote))
 
     pnl = 0.0
     volume = 0.0
     count = 0
-    converted = True
     for quote, totals in by_quote.items():
-        rate = rates.get(f"{quote}-USDT")
-        if not rate or rate <= 0:
-            converted = False
-            rate = 1.0
+        rate = quote_rates.rates.get(quote, 1.0)
         pnl += totals["pnl"] * rate
         volume += totals["volume"] * rate
         count += int(totals["count"])
 
     return ExecutorPeriodSummary(
-        period=period, pnl=pnl, volume=volume, count=count, converted=converted
+        period=period,
+        pnl=pnl,
+        volume=volume,
+        count=count,
+        converted=quote_rates.converted,
     )
+
+
+async def _walk_and_summarize(server: str, client) -> dict[str, ExecutorPeriodSummary]:
+    """Walk a server's executor history once and total *every* window from it.
+
+    The walk is the expensive part — up to ``MAX_EXECUTORS_FETCH /
+    EXECUTORS_PAGE_SIZE`` sequential cursor pages the SDS rate limiter never
+    sees — and it does not depend on the period: ``summarize_executors_by_quote``
+    filters on the executor's start timestamp client-side, so the 1M window's
+    rows are a strict superset of 1W's and 1D's. Computing the three totals in
+    one pass is therefore exactly the arithmetic the three separate requests
+    performed, over the same rows in the same order, and costs one walk instead
+    of three (PERF-580).
+
+    Each total is stamped into ``_summary_cache`` here, so the per-period TTLs
+    stay the read gate: a 1D request re-walks after 60s, but the 1W total it
+    also refreshed is still served from cache for its own 300s.
+    """
+    now = time.time()
+    executors = await fetch_all_executors(client)
+
+    summaries: dict[str, ExecutorPeriodSummary] = {}
+    for window_period, window in _PERIOD_SECONDS.items():
+        summary = await _usd_summary(
+            server,
+            window_period,
+            summarize_executors_by_quote(executors, now - window),
+        )
+        summaries[window_period] = summary
+        _summary_cache[(server, window_period)] = (now, summary)
+    return summaries
 
 
 @router.get("/servers/{name}/executors/summary", response_model=ExecutorPeriodSummary)
@@ -273,6 +312,11 @@ async def executors_summary(
     A period total belongs here, over the full history: this walks it with
     ``fetch_all_executors``, on demand and cached per period, leaving the 2s poll
     at its one request per tick.
+
+    The walk itself is shared (PERF-580). It is single-flighted per server, so
+    two tabs missing a cold cache at the same instant wait on one walk rather
+    than racing two, and one walk totals all three windows — switching the
+    strip's period no longer re-reads a history the previous period already had.
     """
     cm = get_config_manager()
 
@@ -292,16 +336,14 @@ async def executors_summary(
 
     client = await cm.get_client(name)
     try:
-        executors = await fetch_all_executors(client)
+        summaries = await _summary_walks.run(
+            name, lambda: _walk_and_summarize(name, client)
+        )
     except Exception as e:
         logger.exception("Failed to summarize executors for server %s", name)
         raise upstream_error("Failed to fetch executors", e)
 
-    summary = await _usd_summary(
-        name, period, summarize_executors_by_quote(executors, now - window)
-    )
-    _summary_cache[(name, period)] = (now, summary)
-    return summary
+    return summaries[period]
 
 
 async def _ensure_dex_tokens_listed(client, config: dict) -> None:
@@ -356,6 +398,8 @@ async def create_executor_endpoint(
     from condor.fetchers.executors import create_executor
 
     try:
+        # No controller_id: the fetcher takes none, so the trading API applies its
+        # own ``main`` default. See ``CreateExecutorRequest`` before adding one.
         result = await create_executor(client, config, account_name=body.account_name)
     except Exception as e:
         raise upstream_error("Failed to create executor", e)

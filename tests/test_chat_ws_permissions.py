@@ -102,6 +102,35 @@ def test_delivered_request_names_the_slot_that_raised_it(registry):
     # The rest of the shape is a live contract with the shipped dashboard.
     assert frame["request_id"] == pending.id
     assert frame["summary"] == "buy"
+    # What the prompt previews: the call the gate judged, and the time left.
+    assert frame["tool"] == "place_order"
+    assert frame["input"] == {}
+    assert 0 < frame["expires_in"] <= 30
+
+
+def test_delivered_request_previews_the_normalized_call(registry):
+    """The dashboard shows the bare tool name and the parsed arguments."""
+    call = {"tool": "mcp__mcp-hummingbot__place_order", "input": '{"amount": 1}'}
+    pending = registry.register("web:1:conv-abc", USER_A, "buy", call, OPTIONS, 30)
+    ws = _FakeWS()
+
+    asyncio.run(WebSocketChannel(ws).deliver(pending))
+
+    (frame,) = ws.sent
+    assert frame["tool"] == "place_order"
+    assert frame["input"] == {"amount": 1}
+
+
+def test_unreadable_arguments_are_sent_as_none(registry):
+    """No invented preview: arguments the gate could not read stay unread."""
+    call = {"tool": "place_order", "input": "not json"}
+    pending = registry.register("web:1:conv-abc", USER_A, "buy", call, OPTIONS, 30)
+    ws = _FakeWS()
+
+    asyncio.run(WebSocketChannel(ws).deliver(pending))
+
+    (frame,) = ws.sent
+    assert frame["input"] is None
 
 
 def test_unparseable_session_key_still_delivers(registry):

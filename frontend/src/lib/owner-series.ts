@@ -104,6 +104,23 @@ export function ownerDataKey(key: string): string {
   return `owner:${key}`;
 }
 
+/**
+ * The `dataKey` an owner's **share of the bucket's trading** is carried under.
+ *
+ * Not a line: nothing draws twelve volume series at once, and that is the point
+ * — the activity pane draws the fleet's bar and this is what the *one* series
+ * the cursor is on contributed to it (FEAT-119). Same fold, same bucket, so the
+ * share is exact rather than apportioned.
+ */
+export function ownerVolumeKey(key: string): string {
+  return `vol:${key}`;
+}
+
+/** The `dataKey` an owner's own book is carried under — the same idea as {@link ownerVolumeKey}. */
+export function ownerPositionKey(key: string): string {
+  return `pos:${key}`;
+}
+
 /** One merged row: every fleet field, plus one value per owner. */
 export interface FloorChartRow extends PnlChartPoint {
   [key: string]: number;
@@ -121,6 +138,13 @@ export interface FloorChartRow extends PnlChartPoint {
  * `volume`, `position`. `volumeDelta` is a per-bucket **flow**: forward-filling
  * it would charge the same trading to every later bucket, so it is summed at
  * the instants that actually carry it and is zero everywhere else.
+ *
+ * Each owner contributes three fields rather than one: its PnL under
+ * {@link ownerDataKey}, its book under {@link ownerPositionKey} and its share
+ * of the bucket's trading under {@link ownerVolumeKey}, each folded by the rule
+ * its fleet-level twin above is folded by. The last two are never drawn as
+ * twelve more series — they are what the hover reads when the cursor picks one
+ * line, which is the only moment they are wanted (FEAT-119).
  *
  * `total` takes an array of series rather than one because a caller may hold
  * several folds that belong on one timeline — one per server, each folded with
@@ -186,17 +210,29 @@ export function mergeOwnerRows(
     }
     for (const key of keys) {
       let value = 0;
+      let book = 0;
+      let flow = 0;
       let seen = false;
       for (const series of byKey.get(key)!) {
         const point = at(series, t);
         if (!point) continue;
         seen = true;
         value += point.total;
+        book += point.position;
+        // The flow, under the fleet's own rule one loop up: charged to the
+        // bucket that recorded it and to no later one. An owner with no reading
+        // at `t` traded nothing in that bucket — it is a zero, not a gap, and
+        // that is exactly what makes the shares of one bar add up to it.
+        if (point.time === t) flow += point.volumeDelta;
       }
       // An owner that has not started yet contributes no point at all rather
       // than a zero: recharts draws a gap, which is the truth, where a zero
       // would draw a flat line along the axis for trading that had not begun.
-      if (seen) row[ownerDataKey(key)] = value;
+      if (seen) {
+        row[ownerDataKey(key)] = value;
+        row[ownerPositionKey(key)] = book;
+        row[ownerVolumeKey(key)] = flow;
+      }
     }
     rows.push(row);
   }
@@ -302,6 +338,110 @@ export function rebaseRows(
   };
 }
 
+// ── Two axes, one zero (FEAT-119) ──
+
+/** A recharts y domain, as an explicit pair. */
+export type Domain = [number, number];
+
+/**
+ * A domain for the owner lines and a domain for the Total that put **zero on
+ * the same pixel**.
+ *
+ * The Total of twelve controllers is about twelve times any one of them, so a
+ * single axis is scaled to the Total and the lines the reader came for are a
+ * flat braid across the middle of it (the picture FEAT-119 was opened over).
+ * The fix is the ordinary one — the Total on its own axis — and the ordinary
+ * cost of it is that the two axes then disagree about where zero is, on a chart
+ * whose whole subject is whether a number is above or below zero. A line
+ * crossing the dashed zero would mean one thing and the Total crossing it
+ * another, with nothing on screen saying so.
+ *
+ * So the two domains are not chosen independently. Both are split at the same
+ * fraction — the more demanding of the two sides' own split — and each is then
+ * scaled to whichever half needs the room. One dashed line at zero is therefore
+ * true of both axes, and the two curves' *shapes* stay comparable: only the
+ * unit differs, which is what the second axis' ticks say.
+ *
+ * `null` when either side has nothing finite to measure or is flat at zero:
+ * that is not an error, it is a pane with no scale to derive, and the caller
+ * leaves both domains to recharts.
+ */
+export function alignedZeroDomains(
+  owner: readonly number[],
+  total: readonly number[],
+  pad = 0.04,
+): { owner: Domain; total: Domain } | null {
+  const o = zeroExtent(owner);
+  const t = zeroExtent(total);
+  if (!o || !t) return null;
+
+  // How much of the pane sits above zero. The larger of the two, so neither
+  // side is cut off; the other simply gets more headroom than it needs.
+  const up = Math.max(upShare(o), upShare(t));
+  const down = 1 - up;
+  const height = (e: Domain) =>
+    Math.max(up > 0 ? e[1] / up : 0, down > 0 ? -e[0] / down : 0) * (1 + pad);
+
+  const ho = height(o);
+  const ht = height(t);
+  if (!(ho > 0) || !(ht > 0)) return null;
+  return { owner: [-down * ho, up * ho], total: [-down * ht, up * ht] };
+}
+
+/** The values' extent, always straddling zero; `null` when none of them is a number. */
+function zeroExtent(values: readonly number[]): Domain | null {
+  let min = 0;
+  let max = 0;
+  let any = false;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    any = true;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return any ? [min, max] : null;
+}
+
+/** The fraction of an extent that lies above zero. */
+function upShare([min, max]: Domain): number {
+  const span = max - min;
+  return span > 0 ? max / span : 0;
+}
+
+/**
+ * Round tick values inside a domain, always including zero.
+ *
+ * An explicit domain costs the ticks recharts would have chosen: it divides
+ * whatever it is given into equal steps, so an aligned pair of domains — which
+ * are aligned precisely because they are *not* round — would print five
+ * arbitrary numbers per axis and no `$0` on either, on the two axes a dashed
+ * zero line runs between. Ticks of our own put the round numbers back and pin
+ * that line to a label on both sides of the pane.
+ */
+export function niceTicks([min, max]: Domain, count = 4): number[] {
+  const span = max - min;
+  if (!(span > 0) || !Number.isFinite(span)) return [];
+  const rough = span / Math.max(1, count);
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  // The largest round step that still fits, rather than the smallest that
+  // covers: an aligned domain is by nature an odd number, and rounding its
+  // step *up* leaves a 65%-tall pane with three labels on it. Then back off
+  // while that is too many, which bounds the count from the other side.
+  const ladder = [1, 2, 2.5, 5, 10].map((m) => m * magnitude);
+  let step = ladder.filter((s) => s <= rough).pop() ?? magnitude;
+  while (span / step > 2 * count) step = ladder.find((s) => s > step) ?? step * 2;
+
+  // Counted in whole steps rather than accumulated, so the zero step is exactly
+  // 0 and not the 1e-11 that repeated addition of a step like 2.5e-3 lands on —
+  // which is a tick the axis would print, and a zero line it would miss.
+  const ticks: number[] = [];
+  const last = Math.floor(max / step + 1e-9);
+  for (let i = Math.ceil(min / step - 1e-9); i <= last; i++) {
+    ticks.push(Number((i * step).toPrecision(12)));
+  }
+  return ticks;
+}
+
 /** The eight categorical tokens, cycled — see the note beside them in index.css. */
 export function seriesColor(index: number): string {
   return `var(--chart-series-${(Math.max(0, index) % 8) + 1})`;
@@ -320,6 +460,9 @@ export function seriesColor(index: number): string {
  * the cursor is still.
  */
 export const FOCUS_RADIUS_PX = 12;
+
+/** What a y axis answers with: where a value is drawn, in pixels. */
+export type SeriesScale = ((value: number) => number | undefined) | null | undefined;
 
 /**
  * The series the cursor is on, or `null` for a cursor on none.
@@ -340,15 +483,22 @@ export const FOCUS_RADIUS_PX = 12;
 export function nearestSeries(
   values: ReadonlyMap<string, number>,
   cursorY: number | null | undefined,
-  scale: ((value: number) => number | undefined) | null | undefined,
+  scale: SeriesScale | ReadonlyMap<string, SeriesScale>,
   radius: number = FOCUS_RADIUS_PX,
 ): string | null {
   if (typeof cursorY !== "number" || !Number.isFinite(cursorY) || !scale) return null;
+  // One scale for a pane whose series share an axis; a scale *per series* for
+  // one whose Total is on its own (FEAT-119) — the same pixel comparison either
+  // way, which is the only way it can stay right across two axes.
+  const scaleOf = (key: string): SeriesScale =>
+    scale instanceof Map ? scale.get(key) : (scale as SeriesScale);
   let best: string | null = null;
   let bestDistance = radius;
   for (const [key, value] of values) {
     if (!Number.isFinite(value)) continue;
-    const y = scale(value);
+    const on = scaleOf(key);
+    if (!on) continue;
+    const y = on(value);
     if (typeof y !== "number" || !Number.isFinite(y)) continue;
     const distance = Math.abs(y - cursorY);
     if (distance < bestDistance) {

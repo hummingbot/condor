@@ -151,7 +151,7 @@ def _chat_mcp_tools() -> tuple[str, ...]:
     )
 
 
-def chat_tool_preload(agent_key: str | None) -> str:
+def chat_tool_preload(agent_key: str | None, agent_slug: str | None = None) -> str:
     """The ToolSearch preload line for a chat seat, or ``""`` when it needs none.
 
     ACP seats (Claude Code and friends) get MCP tools deferred: they must
@@ -164,15 +164,25 @@ def chat_tool_preload(agent_key: str | None) -> str:
     Public because both chat branches need it: the coordinator's
     :func:`build_initial_context` and the specialist's ``bound_agent_context``,
     which skips that builder entirely (CORR-272).
+
+    It names exactly what the seat mounts: the ring, minus what
+    :func:`~condor.runtime.toolsets.seat_mutes` subtracts for ``agent_slug`` —
+    the operator's mutes and whatever the Agent's allowlist leaves out. Naming
+    the whole ring cost a Claude specialist ~39k tokens of schemas on its first
+    turn, most of them for tools its allowlist never meant it to have. ``None``
+    is the coordinator, whose mutes live under the chat's slug.
     """
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+    from condor.runtime.toolsets import seat_mutes
 
     if not agent_key or is_pydantic_ai_model(agent_key):
         return ""
+    muted = set(seat_mutes(agent_slug))
+    tools = [t for t in _chat_mcp_tools() if t.rsplit("__", 1)[-1] not in muted]
     return (
         "IMPORTANT: At the very start of the session (before your first response), "
         "load ALL MCP tools in a single ToolSearch call:\n"
-        f'ToolSearch(query="select:{",".join(_chat_mcp_tools())}")\n'
+        f'ToolSearch(query="select:{",".join(tools)}")\n'
         "This avoids repeated ToolSearch calls that waste context tokens. "
         "Do this silently without telling the user."
     )

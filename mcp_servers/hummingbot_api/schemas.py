@@ -15,45 +15,6 @@ from pydantic import BaseModel, Field
 # ==============================================================================
 
 
-class GatewayContainerRequest(BaseModel):
-    """Request model for Gateway container management with progressive disclosure.
-
-    This model supports container lifecycle management:
-    - get_status: Check if Gateway is running and get container details
-    - start: Start Gateway container with configuration
-    - stop: Stop Gateway container
-    - restart: Restart Gateway (optionally with new configuration)
-    - get_logs: Retrieve Gateway container logs
-    """
-
-    action: Literal["get_status", "start", "stop", "restart", "get_logs"] = Field(
-        description="Action to perform on Gateway container"
-    )
-
-    config: dict[str, Any] | None = Field(
-        default=None,
-        description="Gateway configuration (used for 'start', optional for 'restart'). "
-        "The Hummingbot API runs Gateway secured (TLS + mTLS) and manages the "
-        "certificates/passphrase itself using its own CONFIG_PASSWORD (hummingbot-api "
-        "SEC-048), so no passphrase is needed here. "
-        "Fields: image (Docker image, default: hummingbot/gateway:development), "
-        "port (exposed port, default: 15888).",
-        examples=[
-            {
-                "image": "hummingbot/gateway:development",
-                "port": 15888,
-            }
-        ],
-    )
-
-    tail: int | None = Field(
-        default=100,
-        ge=1,
-        le=200,
-        description="Number of log lines to retrieve (only for 'get_logs' action, default: 100, max: 200)",
-    )
-
-
 class GatewayConfigRequest(BaseModel):
     """Request model for Gateway configuration management.
 
@@ -61,17 +22,20 @@ class GatewayConfigRequest(BaseModel):
 
     Resource Types:
     - chains: Blockchain chains (get all chains)
-    - networks: Network configurations (list, get, update) - format: 'chain-network'
+    - networks: Network configurations (list, get) - format: 'chain-network'
     - tokens: Token configurations (list, add, delete, save) per network
-    - connectors: DEX connector configurations (list, get, update)
+    - connectors: DEX connector configurations (list, get)
     - pools: Liquidity pools (list, add, delete, save) per connector/network
     - wallets: Configured wallets per chain (list only — a wallet is added or
       removed in the Condor dashboard, never through an agent)
 
+    Networks and connectors are read-only here. Their config holds the RPC every
+    transaction is broadcast through and the slippage every swap inherits, so it
+    is changed by the server owner in Condor, never through an agent.
+
     Actions:
     - list: List available resources
     - get: Get specific resource configuration
-    - update: Update resource configuration
     - add: Add new resource (tokens, pools) - requires full details
     - delete: Delete resource (tokens, pools)
     - save: Save resource by address only (tokens, pools) - auto-fetches details
@@ -81,7 +45,7 @@ class GatewayConfigRequest(BaseModel):
         "chains", "networks", "tokens", "connectors", "pools", "wallets"
     ] = Field(description="Type of resource to manage")
 
-    action: Literal["list", "get", "update", "add", "delete", "save"] = Field(
+    action: Literal["list", "get", "add", "delete", "save"] = Field(
         description="Action to perform on the resource"
     )
 
@@ -98,18 +62,6 @@ class GatewayConfigRequest(BaseModel):
         description="DEX connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap'). "
         "Required for connector operations and pool list operations",
         examples=["meteora", "raydium", "orca", "uniswap", "pancakeswap"],
-    )
-
-    # Configuration data
-    config_updates: dict[str, Any] | None = Field(
-        default=None,
-        description="Configuration updates as key-value pairs. "
-        "Keys can be in snake_case or camelCase. "
-        "Required for 'update' action",
-        examples=[
-            {"slippage_pct": 0.5, "timeout": 30000},
-            {"node_url": "https://api.mainnet-beta.solana.com"},
-        ],
     )
 
     # Token-specific fields

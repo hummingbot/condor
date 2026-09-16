@@ -1,10 +1,14 @@
+import logging
 import os
-from typing import Optional
+from typing import Mapping, Optional
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
-load_dotenv()
+logger = logging.getLogger(__name__)
+
+_DOTENV_PATH = find_dotenv()
+load_dotenv(_DOTENV_PATH)
 
 
 class ConfigError(RuntimeError):
@@ -199,6 +203,54 @@ def check_startup_config(env=None) -> None:
             "Run `make setup` to configure a Telegram bot, or choose Local mode "
             "there (CONDOR_MODE=local) to run the dashboard without Telegram."
         )
+
+
+def shadowed_env_keys(
+    file_values: Mapping[str, Optional[str]], env: Mapping[str, str]
+) -> list[str]:
+    """The keys ``.env`` sets whose value in *env* is a different one.
+
+    ``load_dotenv`` never overrides a variable that is already set, which is the
+    right precedence for a deploy that injects its own environment. The trouble
+    is a variable nobody meant to set: a tmux server started by another project
+    hands every pane that project's ``TELEGRAM_TOKEN``, and Condor then polls as
+    that project's bot, sees no message sent to its own, and logs nothing.
+    """
+    return sorted(
+        key
+        for key, value in file_values.items()
+        if value is not None and key in env and env[key] != value
+    )
+
+
+def warn_shadowed_env(env=None, file_values=None) -> list[str]:
+    """Log each ``.env`` key the inherited environment overrides. Never a value.
+
+    ``TELEGRAM_TOKEN`` also names the bot on both sides: the id before the
+    ``:`` is public (``getMe`` returns it), and it is the difference between
+    "some variable differs" and "you are running as another bot".
+    """
+    env = os.environ if env is None else env
+    if file_values is None:
+        file_values = dotenv_values(_DOTENV_PATH) if _DOTENV_PATH else {}
+    shadowed = shadowed_env_keys(file_values, env)
+    for key in shadowed:
+        detail = ""
+        if key == "TELEGRAM_TOKEN":
+            detail = (
+                f" — running as bot {env[key].split(':', 1)[0]}, "
+                f".env names bot {file_values[key].split(':', 1)[0]}"
+            )
+        logger.warning(
+            "%s is set in the environment Condor was started from and overrides "
+            ".env%s. If .env is meant to win, start Condor where it is unset "
+            "(`unset %s`, or `tmux set-environment -gu %s` for new tmux windows).",
+            key,
+            detail,
+            key,
+            key,
+        )
+    return shadowed
 
 
 def check_local_user(env=None, get_role=None) -> None:

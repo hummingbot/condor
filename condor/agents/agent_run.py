@@ -166,10 +166,10 @@ async def run_agent_to_completion(
     )
 
     # Build the client for the (possibly fallback) model through the shared
-    # factory (ARCH-192). A pydantic-ai model gets the agent's tool allowlist
-    # enforced; an ACP model (claude-code) cannot enforce an allowlist, so it
-    # runs unrestricted — acceptable for a delegation, which is unattended by
-    # design and only started for a trusted agent. The factory re-resolves the
+    # factory (ARCH-192). A pydantic-ai model also filters by the agent's tool
+    # allowlist client-side; an ACP model (claude-code) cannot, and need not:
+    # the MCP servers built above never mount what the allowlist leaves out
+    # (toolsets.seat_mutes), whatever model runs. The factory re-resolves the
     # custom endpoint (same lenient inputs as the healthcheck above), so a
     # fallback model never inherits the original's credentials.
     from condor.runtime.llm_client import build_llm_client

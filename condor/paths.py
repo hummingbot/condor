@@ -6,15 +6,17 @@ out three times, in three modules, as a literal expression. That put this
 deployment's data inside the code, and it meant a test run wrote into the
 developer's live install because there was no single knob to turn.
 
-There are **three** roots, not one, and this module is where all three are
-named. They are separate on purpose (``.gitignore`` has always listed the first
-two apart) and the line between them is *who writes and when*:
+There are **four** roots, not one, and this module is where all four are
+named. They are separate on purpose (``.gitignore`` has always listed them
+apart) and the line between them is *who writes and when*:
 
     <repo>/.condor/                    # or $CONDOR_RUNTIME_ROOT
     ├── users/{user_id}/               # the runtime store: one conversation's
     │   ├── conversations/{conv_id}/   # worth of thinking, written turn by turn
     │   ├── delegations/{task_id}/     # by a live session
-    │   └── ui/                        # ...and what they did to the world by hand
+    │   ├── ui/                        # ...and what they did to the world by
+    │   └── telegram/                  # hand, from the dashboard and from chat
+    ├── deed_coverage.json
     ├── state/{namespace}/
     └── telemetry/
 
@@ -24,6 +26,11 @@ two apart) and the line between them is *who writes and when*:
     ├── routine_hooks.json             # editable by an operator
     ├── backtests/
     └── code_runs/
+
+    <repo>/reports/                    # or $CONDOR_REPORTS_DIR
+    ├── reports_index.json             # what a run had to show for itself:
+    ├── <report_id>.html               # one rendered report per file, indexed
+    └── assets/                        # and served to Telegram and the web
 
     <repo>/agents/                     # or $CONDOR_STOCK_AGENTS_ROOT
     ├── <slug>/AGENT.md                # the shipped library: the curated
@@ -38,13 +45,25 @@ two apart) and the line between them is *who writes and when*:
     ├── <slug>/strategies/<sslug>/     # journals, stores, mutes. Git has
     └── _shared/{skills,routines}/     # never heard of it.
 
-``data/`` is the older of the three and is named literally in agent-facing text
+``data/`` is the oldest of them and is named literally in agent-facing text
 (``data/code_runs/`` in the ``run_code`` tool description), so folding it into
 ``.condor/`` would open a new split rather than close one. What it did lack was
 a resolver: three of its stores built their path at import from the bare name
 ``data``, making it relative to the *working directory*, while ``main.py``'s
 pickle and ``code_runs`` were already anchored at the repo. Both now come from
 :func:`data_dir`.
+
+``reports/`` is what a run had to show for itself, and it arrived here last
+(ARCH-605) having made *both* of the mistakes the paragraph above describes, at
+once. ``condor/reports/store.py`` built it at import from
+``Path(__file__).parents[2]`` -- anchored at the repo, but a module constant no
+env var could move, which cost a re-import shim so monkeypatching still worked
+and made eighteen test modules patch a pair of names by hand. A second
+producer, ``handlers/bots/archived_report.py``, built the bare name ``reports``
+instead, so a process launched from anywhere but the checkout split the store
+in two. It keeps its own root rather than folding into ``data/``: ``/reports/``
+has always had its own ``.gitignore`` line and every install's history is
+already there.
 
 ``agents/`` used to be **one** root that was *half version-controlled*: an
 agent's definition and its skill library were committed, the ``store/user_{id}/``
@@ -72,8 +91,8 @@ that a route could forget to make -- it is a path the caller cannot name.
 
 Two rules this module keeps:
 
-* :func:`runtime_root`, :func:`data_dir`, :func:`stock_agents_root` and
-  :func:`local_agents_root` are a
+* :func:`runtime_root`, :func:`data_dir`, :func:`reports_dir`,
+  :func:`stock_agents_root` and :func:`local_agents_root` are a
   *function call at every use*, never a module constant. The env override has
   to be observable after import, or the test fixture that isolates the suite
   cannot work and the MCP/ACP subprocesses cannot inherit it.
@@ -110,10 +129,12 @@ RUNTIME_ROOT_ENV = "CONDOR_RUNTIME_ROOT"
 DATA_DIR_ENV = "CONDOR_DATA_DIR"
 AGENTS_ROOT_ENV = "CONDOR_AGENTS_ROOT"
 STOCK_AGENTS_ROOT_ENV = "CONDOR_STOCK_AGENTS_ROOT"
+REPORTS_DIR_ENV = "CONDOR_REPORTS_DIR"
 
 RUNTIME_DIRNAME = ".condor"
 DATA_DIRNAME = "data"
 AGENTS_DIRNAME = "agents"
+REPORTS_DIRNAME = "reports"
 
 # <repo>: condor/paths.py -> condor/ -> <repo>
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -125,6 +146,7 @@ USERS_DIRNAME = "users"
 CONVERSATIONS_DIRNAME = "conversations"
 DELEGATIONS_DIRNAME = "delegations"
 UI_DIRNAME = "ui"
+TELEGRAM_DIRNAME = "telegram"
 
 # Every id here becomes a directory name, so none of them may escape one.
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -290,6 +312,31 @@ def code_runs_dir() -> Path:
     return data_dir() / "code_runs"
 
 
+def reports_dir() -> Path:
+    """Every rendered report, plus ``reports_index.json`` and the shared assets.
+
+    A root of its own and not ``data_dir() / "reports"``: ``/reports/`` has its
+    own ``.gitignore`` entry and every install already has its history there, so
+    folding it in would move files rather than close a split. What it lacked was
+    a resolver -- ``condor/reports/store.py`` built it at import from
+    ``Path(__file__).parents[2]``, which no env var could move, and
+    ``handlers/bots/archived_report.py`` built the bare name ``reports``, which
+    the working directory could. Both come from here now (ARCH-605).
+
+    ``$CONDOR_REPORTS_DIR`` overrides it, read on every call for the same reason
+    :func:`runtime_root` reads its own.
+    """
+    override = os.environ.get(REPORTS_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+    return _PROJECT_ROOT / REPORTS_DIRNAME
+
+
+def reports_index_path() -> Path:
+    """The report index: one row per saved report (``condor.reports.store``)."""
+    return reports_dir() / "reports_index.json"
+
+
 def users_root() -> Path:
     return runtime_root() / USERS_DIRNAME
 
@@ -331,6 +378,29 @@ def ui_dir(user_id: int | str) -> Path:
     rather than a field in a row, which is a claim a route cannot forget to make.
     """
     return user_dir(user_id) / UI_DIRNAME
+
+
+def telegram_dir(user_id: int | str) -> Path:
+    """What this person did to the world straight from Telegram (CORR-622).
+
+    The fifth door, and on this product the busiest one: ``CLAUDE.md`` opens
+    with "Condor is a Telegram bot". It is shaped like :func:`ui_dir` and for
+    the same reason -- a Deploy pressed in ``/executors`` belongs to no
+    conversation and no task, so its deeds accumulate per *person* -- and it is
+    kept apart from ``ui/`` because "somebody pressed Deploy in the dashboard"
+    and "somebody pressed Deploy in the chat" are different answers to the same
+    question.
+    """
+    return user_dir(user_id) / TELEGRAM_DIRNAME
+
+
+def deed_coverage_path() -> Path:
+    """When this install began recording at *every* door (CORR-622).
+
+    Not under ``users/``: it is a fact about the build, not about a person.
+    :func:`condor.agents.deeds.coverage_since` owns what goes in it.
+    """
+    return runtime_root() / "deed_coverage.json"
 
 
 def state_dir(namespace: str) -> Path:

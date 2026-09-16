@@ -108,11 +108,15 @@ export default function App() {
             <Route path="/dex/:network/:address" element={<DexPool />} />
                 {/* Executors are a scope of the browser now, not a page
                     (FEAT-086). The listing this replaces was the whole
-                    history, live and archived together, which is what the
-                    Terminated population grouped by type is. */}
+                    history, live and archived together — which is two
+                    populations now, and a redirect can only choose one.
+                    This one lands on the live fleet grouped by type
+                    (omitting `?population` is the running default, per
+                    `parsePopulation`); the terminated half is one click
+                    away in the sidebar. */}
                 <Route
                   path="/executors"
-                  element={<Navigate to="/bots?population=terminated&group=type" replace />}
+                  element={<Navigate to="/bots?group=type" replace />}
                 />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />

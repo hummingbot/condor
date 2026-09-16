@@ -12,17 +12,21 @@ Read-only and side-effect-free. NEVER returns a key value — only whether each
 key's env var is set. An unreachable local server is a normal state (the user
 simply isn't running it), reported as ``reachable: false``, never raised.
 
-The detection itself lives in :mod:`handlers.agents.readiness`, shared with the
+The detection itself lives in :mod:`condor.llm.readiness`, shared with the
 setup wizard (``condor/setup_llm.py``) so the two can never disagree about what
-this machine can run.
+this machine can run. It is imported from ``condor.llm`` directly rather than
+through the ``handlers.agents`` alias shims (ARCH-190): both are the same module
+object, but the shim route drags the whole ``handlers`` package __init__
+(telegram, condor.acp, utils.auth) into every Condor MCP subprocess spawn for
+nothing.
 """
 
 from __future__ import annotations
 
 import os
 
-from handlers.agents.openrouter_models import fetch_models
-from handlers.agents.readiness import CLOUD_KEY_ENVS, acp_bridges, local_servers
+from condor.llm.openrouter_models import fetch_models
+from condor.llm.readiness import CLOUD_KEY_ENVS, acp_bridges, local_servers
 
 
 async def _openrouter(query: str, limit: int) -> dict:

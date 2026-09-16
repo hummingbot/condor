@@ -9,11 +9,9 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
+from condor import paths
 from condor.fsutil import atomic_write_json, atomic_write_text
 
-# reports/ is a repository-root output directory, not this source package.
-CHARTS_DIR = Path(__file__).resolve().parents[2] / "reports"
-INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
 
 _index_lock = asyncio.Lock()
@@ -32,17 +30,13 @@ _report_owner: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 
 
 def _charts_dir() -> Path:
-    # Resolve through the public package so existing runtime overrides of
-    # condor.reports.CHARTS_DIR keep working after the module-to-package split.
-    from . import CHARTS_DIR as configured_dir
-
-    return configured_dir
+    # reports/ is a repository-root output directory, not this source package;
+    # condor.paths owns it, so $CONDOR_REPORTS_DIR moves it after import.
+    return paths.reports_dir()
 
 
 def _index_file() -> Path:
-    from . import INDEX_FILE as configured_file
-
-    return configured_file
+    return paths.reports_index_path()
 
 
 def reset_last_report_id() -> None:

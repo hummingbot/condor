@@ -1,7 +1,10 @@
 import { ChevronRight, Repeat } from "lucide-react";
 
+import {
+  dueInSec,
+  tickCountdownLabel,
+} from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
-import { countdown } from "@/lib/agent-attribution";
 import type { StrategySummary } from "@/lib/api";
 
 /**
@@ -65,10 +68,9 @@ export function LoopBanner({
           strategy.instances[0] ??
           null;
         const paused = (instance?.status ?? strategy.status) === "paused";
-        const dueIn =
-          instance && instance.last_tick_at > 0 && !paused
-            ? instance.last_tick_at + instance.frequency_sec - nowSec
-            : null;
+        // The one rule for "when does it tick next", shared with the dock and
+        // the loop bar; a paused loop is not counting down towards anything.
+        const dueIn = paused ? null : dueInSec(instance, nowSec);
 
         return (
           <button
@@ -101,9 +103,7 @@ export function LoopBanner({
                   ? instance
                     ? "first tick pending…"
                     : "running"
-                  : dueIn <= 0
-                    ? `overdue ${countdown(-dueIn)}`
-                    : `next in ${countdown(dueIn)}`}
+                  : tickCountdownLabel(dueIn)}
             </span>
             <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
           </button>

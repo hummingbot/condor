@@ -11,6 +11,7 @@ from condor.fetchers.bot_performance import extract_snapshots as _extract_snapsh
 from condor.fetchers.bot_performance import (
     fetch_all_bot_performance,
     fetch_archived_paths,
+    fetch_latest_snapshots,
 )
 from condor.fetchers.performance_history import (
     PerformanceHistoryUnsupported,
@@ -277,15 +278,26 @@ async def get_latest_controller_performance(
     bot_name: Optional[str] = Query(None),
     user: WebUser = Depends(require_server_access),
 ):
-    """Get the most recent performance snapshot for each bot/controller."""
+    """Get the most recent performance snapshot for each bot/controller.
+
+    Unfiltered, this is the whole-server call every other controller-performance
+    caller also makes, so it is served from the shared 5s cache. A ``bot_name``
+    filter is a different, narrower request and keeps its own round-trip — the
+    whole-server cache is never sliced to answer it.
+    """
     cm = get_config_manager()
 
     client = await cm.get_client(name)
 
     try:
-        result = await client.bot_orchestration.get_latest_controller_performance(
-            bot_name=bot_name,
-        )
+        if bot_name is None:
+            snapshots = await fetch_latest_snapshots(client)
+        else:
+            snapshots = _extract_snapshots(
+                await client.bot_orchestration.get_latest_controller_performance(
+                    bot_name=bot_name,
+                )
+            )
     except Exception as e:
         logger.warning(
             "Failed to fetch latest controller performance from '%s': %s", name, e
@@ -294,8 +306,6 @@ async def get_latest_controller_performance(
             server_online=False,
             error_hint=f"Connection error: {e}",
         )
-
-    snapshots = _extract_snapshots(result)
 
     return ControllerPerformanceLatestResponse(
         snapshots=[ControllerPerformanceSnapshot.from_raw(s) for s in snapshots],
@@ -585,7 +595,7 @@ async def get_terminated_controllers(
     client = await cm.get_client(name)
 
     async def _fetch_latest():
-        return await client.bot_orchestration.get_latest_controller_performance()
+        return await fetch_latest_snapshots(client)
 
     async def _fetch_runs():
         return await client.bot_orchestration.get_bot_runs(limit=limit)
@@ -600,7 +610,7 @@ async def get_terminated_controllers(
         )
 
     runs = [_parse_bot_run(r) for r in _extract_runs_list(runs_raw)]
-    controllers, runs_seen = terminated_controllers(_extract_snapshots(latest), runs)
+    controllers, runs_seen = terminated_controllers(latest, runs)
 
     # A run older than the snapshot table's retention floor has rows for none of
     # its controllers. Its deployment still named them, and a run with no leaf
@@ -671,6 +681,18 @@ async def get_run_history(
     of this run" is a true statement about a run that really happened — which is
     a better thing to draw than a fabricated single step.
     """
+    # The same guard the archived routes apply to the same value, for the same
+    # reason: it is interpolated raw into an upstream URL path, and a query
+    # parameter (unlike a path one) still carries "/", "..", "?" and "#". A bad
+    # value is refused here, before a client exists (SEC-591).
+    from condor.fetchers._identifiers import IdentifierError, validate_db_path
+
+    if db_path is not None:
+        try:
+            validate_db_path(db_path)
+        except IdentifierError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     cm = get_config_manager()
     client = await cm.get_client(name)
 

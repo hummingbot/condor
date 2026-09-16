@@ -586,12 +586,11 @@ class _FakeSds:
 
 
 def _call_route(monkeypatch, sds):
-    from condor import server_data_service
     from condor.web.models import WebUser
     from condor.web.routes.market import get_venues
 
     monkeypatch.setattr(
-        server_data_service, "get_server_data_service", lambda: sds, raising=True
+        "condor.web.routes.market.get_server_data_service", lambda: sds, raising=True
     )
 
     class _Cm:

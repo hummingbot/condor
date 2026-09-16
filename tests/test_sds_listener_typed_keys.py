@@ -18,6 +18,8 @@ import asyncio
 import inspect
 import json
 
+import pytest
+
 from condor.server_data_service import (
     CacheKey,
     ServerDataService,
@@ -25,6 +27,10 @@ from condor.server_data_service import (
     get_server_data_service,
 )
 from condor.web.ws_manager import WebSocketManager, _Connection, channel_for_key
+
+# These connections are stand-ins with no config entry; `broadcast` re-reads
+# server access per frame since SEC-592 and would revoke them mid-test.
+pytestmark = pytest.mark.usefixtures("ws_access_granted")
 
 
 class _FakeWS:

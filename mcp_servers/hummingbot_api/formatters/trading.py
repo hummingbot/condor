@@ -8,7 +8,6 @@ orders and positions.
 from typing import Any
 
 from .base import format_number, get_field, get_timestamp_field
-from .table_builder import ColumnDef, TableBuilder
 
 
 def format_orders_as_table(orders: list[dict[str, Any]]) -> str:
@@ -56,19 +55,6 @@ def format_orders_as_table(orders: list[dict[str, Any]]) -> str:
 
     def format_status(item: dict) -> str:
         return str(get_field(item, "status", default="N/A"))[:8]
-
-    columns = [
-        ColumnDef(name="time", key="__time", width=11, formatter=lambda _: ""),
-        ColumnDef(name="pair", key="__pair", width=13, formatter=lambda _: ""),
-        ColumnDef(name="side", key="__side", width=4, formatter=lambda _: ""),
-        ColumnDef(name="type", key="__type", width=6, formatter=lambda _: ""),
-        ColumnDef(name="amount", key="__amount", width=8, formatter=lambda _: ""),
-        ColumnDef(name="price", key="__price", width=8, formatter=lambda _: ""),
-        ColumnDef(name="filled", key="__filled", width=8, formatter=lambda _: ""),
-        ColumnDef(name="status", key="__status", width=8, formatter=lambda _: ""),
-    ]
-
-    builder = TableBuilder(columns, empty_message="No orders found.")
 
     # Build header
     header = "time        | pair          | side | type   | amount   | price    | filled   | status"

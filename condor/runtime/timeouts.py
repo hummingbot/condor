@@ -50,6 +50,18 @@ class TimeoutPolicy:
     sse_stream: int = 1800
     # Budget for one MCP tool call.
     mcp_call: float = 15.0
+    # How long to probe a local inference server for the model it serves, when
+    # a bare "ollama:" / "lmstudio:" key leaves the model id to us. Short: it
+    # is a localhost request on the session-start path, and a backend that is
+    # down should fall through to the explicit-key error quickly.
+    local_model_probe: float = 2.0
+    # How long an agent client may take to become usable: the ACP
+    # ``initialize`` + ``session/new`` handshake, and the pydantic-ai wait for
+    # its MCP servers to come up. Generous because a cold start can include an
+    # ``npx`` fetch of the bridge, but bounded: a child that spawns and never
+    # answers used to park the caller forever, holding a per-user session slot
+    # and the session-creation lock behind it (CORR-333).
+    agent_handshake: int = 120
     # Wall-clock budget for one agent session: a strategy tick's LLM turn, and
     # the shutdown cleanup pass that runs under the same ceiling. 10 minutes.
     tick_default: int = 600
@@ -60,6 +72,20 @@ class TimeoutPolicy:
     # The conversation is durable (FEAT-015), so this is a detach, not a loss.
     # 0 disables the sweep. 1 hour.
     session_idle: int = 3600
+
+    @property
+    def prompt_hard_stop(self) -> int:
+        """The ACP stream's own ceiling: one minute above the turn budget.
+
+        ``prompt_overall`` is the deadline the *session* enforces; this is the
+        backstop under it inside ``ACPClient.prompt_stream``, so a subprocess
+        that stops answering ends even when nobody is watching the session.
+        Derived rather than stored so that raising
+        ``CONDOR_TIMEOUT_PROMPT_OVERALL`` moves both together — a stored copy
+        is exactly how a ``1860`` literal in the ACP client drifted out of
+        reach of this policy in the first place.
+        """
+        return self.prompt_overall + 60
 
     @classmethod
     def load(cls) -> "TimeoutPolicy":

@@ -8,8 +8,8 @@ snapshot's ``status``, and that an unjoinable tick is blank rather than guessed.
 """
 
 from condor.agents.actions import AgentAction
+from condor.agents.attribution import build_deployments
 from condor.agents.ownership import OwnedBot
-from condor.web.routes.agents import build_deployments
 
 AGENT_ID = "brigado.brl_mm_3"
 

@@ -151,6 +151,49 @@ def test_the_preload_names_the_tools_the_shared_playbooks_call(tool):
     assert tool in chat_tool_preload(ACP_KEY)
 
 
+def _preloaded(line: str) -> set[str]:
+    import re
+
+    return set(re.search(r'select:([^"]+)"', line).group(1).split(","))
+
+
+def test_an_allowlisted_specialist_is_preloaded_only_its_list():
+    """The ~39k-token first turn: a Claude LP specialist was preloaded all 42
+    tools of the ring while its AGENT.md named 21 of them."""
+    from condor.agents.agent import AgentStore
+
+    slug = (
+        AgentStore().create(name="Lister", tools=["get_prices", "control_agent"]).slug
+    )
+
+    assert _preloaded(chat_tool_preload(ACP_KEY, slug)) == {
+        "mcp__mcp-hummingbot__get_prices",
+        "mcp__condor__control_agent",
+    }
+
+
+def test_the_bound_branch_preloads_its_own_seat():
+    from condor.agents.agent import AgentStore
+
+    bound = _specialist()
+    bound.agent_slug = AgentStore().create(name="Lister", tools=["get_prices"]).slug
+
+    context = bound_agent_context(bound, 1, "web")
+    assert "mcp__mcp-hummingbot__get_prices" in context
+    assert "mcp__mcp-hummingbot__manage_clmm" not in context
+
+
+def test_an_operator_mute_is_not_preloaded():
+    """The coordinator's mutes live under the chat slug, which ``None`` names."""
+    from condor.memory.mutes import set_muted
+
+    set_muted(None, "tool", "manage_clmm", True)
+
+    line = chat_tool_preload(ACP_KEY)
+    assert "mcp__mcp-hummingbot__manage_clmm" not in line
+    assert "mcp__mcp-hummingbot__manage_amm" in line
+
+
 def test_no_literal_tool_list_survives_in_context():
     """Derivation is the fix; a literal creeping back is the regression.
 

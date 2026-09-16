@@ -153,8 +153,19 @@ const toggleOn = (label: string) =>
  * single one: a fleet running one bot must not spend a chevron saying so.
  */
 const botHeaders = () => [...container.querySelectorAll("[data-bot-group]")];
-const rowFor = (title: string) =>
-  container.querySelector<HTMLElement>(`[title="${title}"]`)!;
+/**
+ * The row — or the group header — that says `label`.
+ *
+ * A controller row carries it as its accessible name (the tooltip itself is on
+ * the cell that truncates, which is where the browser can place it beside what
+ * it describes); a bot group header is a button and says it as a `title`.
+ */
+const rowFor = (label: string) => {
+  const el = container.querySelector<HTMLElement>(
+    `[aria-label="${label}"], [title="${label}"]`,
+  )!;
+  return el.closest<HTMLElement>("[data-controller-row]") ?? el;
+};
 const counts = () =>
   container.querySelector('[data-testid="execution-counts"]')!.textContent ?? "";
 const text = () => container.textContent ?? "";

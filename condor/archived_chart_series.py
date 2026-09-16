@@ -38,12 +38,16 @@ class Interval(NamedTuple):
     seconds: int
 
 
-def pick_interval(duration_sec: float) -> Interval:
+def pick_candle_interval(duration_sec: float) -> Interval:
     """Candle interval proportionate to how long the run actually lasted.
 
     Mirrors the thresholds the chart component used client-side. It lives
     server-side now because the choice depends on the *true* activity range,
     which only the full executor set knows.
+
+    Not to be confused with :func:`condor.fetchers.run_history.
+    pick_sampling_interval`, which takes **milliseconds** and returns a bare
+    interval string off a coarser ladder that starts at ``5m``.
     """
     if duration_sec < 2 * 3600:
         return Interval("1m", 60)
@@ -253,7 +257,7 @@ def build_chart_series(
         start, end = activity_range(group)
         if start <= 0:
             continue
-        interval = pick_interval(max(end - start, 0))
+        interval = pick_candle_interval(max(end - start, 0))
         rate = rates.for_pair(getattr(group[0], "trading_pair", "")) if rates else 1.0
         series[key] = {
             "interval": interval.name,

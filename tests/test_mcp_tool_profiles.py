@@ -1,10 +1,10 @@
 """What each seat mounts (FEAT-066).
 
-Tool allowlists are only enforced for pydantic-ai model keys; an ACP bridge
-(claude-code, gemini, copilot) runs unrestricted. For those seats the surface a
-session MOUNTS is the whole permission model, so every profile's tool set is
-pinned here as a golden list: a tool added to the wrong ring fails a test rather
-than quietly widening the seat that trades with real capital.
+An ACP bridge (claude-code, gemini, copilot) filters no tool itself, so the
+surface a session MOUNTS is the whole permission model — the profile, minus the
+operator's mutes and the Agent's allowlist complement — and every profile's tool
+set is pinned here as a golden list: a tool added to the wrong ring fails a test
+rather than quietly widening the seat that trades with real capital.
 """
 
 import asyncio
@@ -29,6 +29,7 @@ HB_TRADING = {
     "set_account_position_mode_and_leverage",
     "search_history",
     "get_prices",
+    "get_market_data",
     "manage_controllers",
     "manage_bots",
     "create_position_executor",
@@ -53,7 +54,7 @@ HB_TRADING = {
     "explore_geckoterminal",
 }
 HB_LIQUIDITY = {"manage_amm", "manage_clmm"}
-HB_ADMIN = {"configure_server", "manage_gateway_config", "manage_gateway_container"}
+HB_ADMIN = {"configure_server", "manage_gateway_config"}
 
 HB_PROFILES = {
     "tick": HB_TRADING,
@@ -132,7 +133,6 @@ def test_every_tool_the_module_defines_lands_in_some_profile(module):
     [
         "configure_server",
         "manage_gateway_config",
-        "manage_gateway_container",
         "manage_amm",
         "manage_clmm",
     ],
@@ -214,12 +214,12 @@ def test_the_tick_preload_always_carries_a_way_to_read_a_market(
 ):
     """The other direction, which the test above cannot see (ARCH-308).
 
-    Since no ring mounts a candle, order book or funding reader any more, the
-    only way a tick reads a market it can compute on is ``run_code`` over
-    ``client.market_data.*``. Drop that one name from the preload and every
-    assertion above still passes while the tick goes blind past a single price
-    — so the name is pinned here rather than left to whoever edits the list
-    next.
+    Since no ring mounts a table-rendering candle, order book or funding reader
+    any more, the only way a tick reads a market it can *compute* on is
+    ``run_code`` over ``client.market_data.*``. Drop that one name from the
+    preload and every assertion above still passes while the tick goes blind
+    past a single price — so the name is pinned here rather than left to whoever
+    edits the list next.
     """
     from condor.agents.prompts import _build_tool_preload
 
@@ -229,6 +229,56 @@ def test_the_tick_preload_always_carries_a_way_to_read_a_market(
         is_controller_mode=is_controller_mode,
     )
     assert "mcp__condor__run_code" in line
+
+
+@pytest.mark.parametrize("is_experiment", [True, False])
+@pytest.mark.parametrize("is_controller_mode", [True, False])
+def test_the_tick_preload_carries_a_market_read_a_dry_run_can_actually_make(
+    is_experiment, is_controller_mode
+):
+    """Preloaded is not the same as callable (CORR-625).
+
+    The test above pins ``run_code``, and in a dry run ``run_code`` is refused
+    for holding the unrestricted API client — as is ``manage_routines``, the
+    other door onto the same Python. Both stay in the preload for their
+    read-only halves, so a preload that named only those would satisfy every
+    assertion here while a rehearsal could not read a single candle.
+
+    So this asserts the stronger thing: the preload names a market read, and the
+    dry-run policy in ``danger.py`` lets that exact call through.
+    """
+    from condor.agents.prompts import _build_tool_preload
+    from condor.runtime.danger import dry_run_refusal
+
+    line = _build_tool_preload(
+        is_dry_run=True,
+        is_experiment=is_experiment,
+        is_controller_mode=is_controller_mode,
+    )
+    name = "mcp__mcp-hummingbot__get_market_data"
+
+    assert name in line
+    assert name.rsplit("__", 1)[-1] in _registered(hb_server, "tick")
+    for action in ("candles", "historical_candles", "connectors"):
+        call = {"tool": name, "input": {"action": action, "trading_pair": "SOL-USDC"}}
+        assert dry_run_refusal(call) is None, action
+
+
+def test_the_tick_preload_drops_what_the_seat_never_mounts():
+    """An allowlisted agent's tick must not be told of tools its seat never
+    registers — naming one spends the tick discovering it cannot call it."""
+    from condor.agents.prompts import _build_tool_preload
+
+    line = _build_tool_preload(
+        is_dry_run=False,
+        is_experiment=False,
+        muted={"create_grid_executor", "send_notification"},
+    )
+    names = set(re.search(r'select:([^"]+)"', line).group(1).split(","))
+
+    assert "mcp__mcp-hummingbot__create_grid_executor" not in names
+    assert "mcp__condor__send_notification" not in names
+    assert "mcp__mcp-hummingbot__create_lp_executor" in names
 
 
 def test_the_manage_trading_agent_funnel_is_in_no_profile():

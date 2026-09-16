@@ -63,6 +63,8 @@ declare global {
 
 let container: HTMLDivElement;
 let root: Root;
+/** What a count in the band asks the screen to open. */
+const onOpenRun = vi.fn();
 
 const STRATEGY = {
   slug: "pmm_king",
@@ -110,6 +112,7 @@ function render(strategy: StrategyDetail = STRATEGY) {
             sslug="pmm_king"
             strategy={strategy}
             onDeleted={() => {}}
+            onOpenRun={onOpenRun}
           />
         </MemoryRouter>
       </QueryClientProvider>,
@@ -182,5 +185,30 @@ describe("PlaybookView", () => {
     const sw = container.querySelector('[role="switch"]');
     expect(sw?.getAttribute("aria-checked")).toBe("true");
     expect(sw?.textContent).toContain("resumes on restart");
+  });
+});
+
+describe("the run counts", () => {
+  beforeEach(() => onOpenRun.mockClear());
+
+  const count = (pattern: RegExp) =>
+    [...container.querySelectorAll("button")].find((b) =>
+      pattern.test(b.textContent?.trim() ?? ""),
+    );
+
+  it("open the newest session and the newest dry run", () => {
+    // Only the dry-run count used to go anywhere; the session count beside it
+    // was a label in the same pill.
+    render();
+    act(() => count(/^2 sessions$/)!.click());
+    expect(onOpenRun).toHaveBeenLastCalledWith("s:2");
+    act(() => count(/^1 dry run$/)!.click());
+    expect(onOpenRun).toHaveBeenLastCalledWith("e:1");
+  });
+
+  it("leave zero sessions a label — there is no session to open", () => {
+    render({ ...STRATEGY, sessions: [] });
+    expect(count(/^\d+ sessions?$/)).toBeUndefined();
+    expect(container.textContent).toContain("0 sessions");
   });
 });

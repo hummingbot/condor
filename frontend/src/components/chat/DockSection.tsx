@@ -4,11 +4,14 @@ import { ChevronDown, ChevronRight } from "lucide-react";
  * One pane of a dock.
  *
  * Open, it takes a fixed share of the column — `flex-1 basis-0`, so two open
- * panes are half and half no matter what is in them. Sizing from content
- * instead (`flex-auto`) looks tidier on a quiet conversation and is unusable on
- * a busy one: every task that starts or routine that finishes moves the divider,
- * so the row you were reading slides out from under the cursor. A boundary that
- * never moves is worth more than one that is always optimally placed.
+ * panes are half and half no matter what is in them, and `share` is the
+ * reader's own answer to the same question when the dock gives them a seam to
+ * drag (see `DockSplit`). Sizing from content instead (`flex-auto`) looks
+ * tidier on a quiet conversation and is unusable on a busy one: every task that
+ * starts or routine that finishes moves the divider, so the row you were
+ * reading slides out from under the cursor. A boundary that never moves — or
+ * that moves only when it is dragged — is worth more than one that is always
+ * optimally placed.
  *
  * The body owns the scrollbar, so the header never leaves the viewport whatever
  * the list does.
@@ -27,6 +30,7 @@ export function DockSection({
   hint,
   count,
   open,
+  share,
   onToggle,
   children,
 }: {
@@ -36,11 +40,18 @@ export function DockSection({
   hint: string;
   count?: number;
   open: boolean;
+  /**
+   * How much of the column this pane gets, against its sibling's share — the
+   * dragged split, when the dock has one. Omitted, open panes share evenly.
+   */
+  share?: number;
   onToggle: () => void;
   children: React.ReactNode;
 }) {
   return (
     <div
+      // Inline, so it beats the `flex-1` shorthand's own grow below.
+      style={open && share !== undefined ? { flexGrow: share } : undefined}
       className={`flex flex-col border-b border-[var(--color-border)] ${
         open ? "min-h-[72px] flex-1 basis-0 overflow-hidden" : "shrink-0"
       }`}

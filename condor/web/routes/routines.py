@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from condor import routine_hooks
 from condor.reports import list_reports
-from condor.routine_store import get_routine_store
+from condor.routine_store import get_routine_store, routine_source_roots
 from condor.runtime import client, wake
 from condor.runtime.wake import (
     ON_COMPLETE_CHOICES,
@@ -22,7 +22,7 @@ from condor.runtime.wake import (
 from condor.web.auth import (
     check_server_access,
     get_current_user,
-    require_server_access_by_server_name,
+    report_owner_filter,
     require_server_access_query,
 )
 from condor.web.models import WebUser
@@ -33,15 +33,6 @@ router = APIRouter(prefix="/routines", tags=["routines"])
 
 
 # ── Request / Response Models ──
-
-
-class RunRequest(BaseModel):
-    config: dict = {}
-
-
-class ScheduleRequest(BaseModel):
-    config: dict = {}
-    interval_sec: int = 300
 
 
 class RunRequestV2(BaseModel):
@@ -142,9 +133,18 @@ def _authorized_instance(instance_id: str, user: WebUser) -> dict:
 
 @router.get("")
 async def list_routines(user: WebUser = Depends(get_current_user)):
-    """List all discovered routines with their fields."""
+    """List all discovered routines with their fields.
+
+    Deliberately every routine the install has, agent-prefixed ones included,
+    for any approved user (SEC-617). Routine *definitions* are install-wide
+    because the whole agent layer is: ``GET /agents`` lists them unscoped and
+    ``_strategy_principal`` in ``routes/agents.py`` records that agents and
+    strategies are one global store. The owner filter below reaches only the
+    ``report_count`` on each row — the per-user part of this response — exactly
+    as ``GET /reports`` scopes the same tally (SEC-593).
+    """
     store = get_routine_store()
-    return store.list_routines()
+    return store.list_routines(owner_id=report_owner_filter(user))
 
 
 @router.get("/instances")
@@ -173,49 +173,6 @@ async def get_instance_image(
     if not result or not result.chart_image:
         raise HTTPException(404, "No chart image available")
     return Response(content=result.chart_image, media_type="image/png")
-
-
-@router.post("/servers/{server_name}/{routine_name}/run")
-async def run_routine(
-    server_name: str,
-    routine_name: str,
-    body: RunRequest,
-    user: WebUser = Depends(require_server_access_by_server_name),
-):
-    """Execute a one-shot routine. Returns instance_id for polling."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.execute(
-            routine_name=routine_name,
-            config=body.config,
-            server_name=server_name,
-            user_id=user.id,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
-
-
-@router.post("/servers/{server_name}/{routine_name}/schedule")
-async def schedule_routine(
-    server_name: str,
-    routine_name: str,
-    body: ScheduleRequest,
-    user: WebUser = Depends(require_server_access_by_server_name),
-):
-    """Schedule a routine at an interval. Returns instance_id."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.schedule(
-            routine_name=routine_name,
-            config=body.config,
-            server_name=server_name,
-            interval_sec=body.interval_sec,
-            user_id=user.id,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
 
 
 @router.post("/run")
@@ -402,7 +359,17 @@ async def get_routine_source(
     routine_name: str,
     user: WebUser = Depends(get_current_user),
 ):
-    """Return the source code of a routine."""
+    """Return the source code of a routine.
+
+    Readable by any approved user, for every agent's routines as well as the
+    general and ``_shared`` libraries (SEC-617). That follows from routine
+    definitions being install-wide — see ``list_routines`` above and the
+    ``routine_store`` module docstring — and not from the confinement below,
+    which answers a different question: ``routine_source_roots()`` is a *path*
+    allowlist stopping ``..`` and symlink escapes out of the dirs discovery
+    reads, never an authorization check. Agent homes stay out of those roots,
+    so a journal or memory store next door is not in scope either way.
+    """
     store = get_routine_store()
     all_routines = store._discover_all()
     routine = all_routines.get(routine_name)
@@ -411,8 +378,10 @@ async def get_routine_source(
     try:
         source_file = inspect.getfile(routine.run_fn)
         source_path = Path(source_file).resolve()
-        routines_dir = Path("routines").resolve()
-        if not str(source_path).startswith(str(routines_dir)):
+        # CORR-585: confine to the roots discovery actually reads — the general
+        # library, the shared one and each agent's own routines/ — not just a
+        # cwd-relative "routines", which 403'd every agent routine above.
+        if not any(source_path.is_relative_to(r) for r in routine_source_roots()):
             raise HTTPException(403, "Source not available")
         source = source_path.read_text()
         return {"filename": source_path.name, "source": source}
@@ -430,7 +399,12 @@ async def get_routine_reports(
     # Agent routines are prefixed (e.g. "agent_slug/routine_name") but reports
     # may be saved with just the base name. Match both.
     base_name = routine_name.split("/")[-1] if "/" in routine_name else routine_name
-    reports, total = list_reports(search=base_name, limit=limit)
+    # SEC-593: scope to the caller before matching. The routine name is a free
+    # string anyone may spell, so this listing is only as private as its owner
+    # filter — the same one ``GET /reports`` applies.
+    reports, total = list_reports(
+        search=base_name, limit=limit, owner_id=report_owner_filter(user)
+    )
     # Filter to exact source_name match (full prefixed or base name)
     exact = [r for r in reports if r.get("source_name") in (routine_name, base_name)]
     return {"reports": exact, "total": len(exact)}

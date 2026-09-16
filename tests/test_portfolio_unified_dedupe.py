@@ -138,7 +138,7 @@ class _FakeSDS:
 def web_portfolio(monkeypatch):
     async def _call(state):
         monkeypatch.setattr(
-            "condor.server_data_service.get_server_data_service",
+            "condor.web.routes.portfolio.get_server_data_service",
             lambda: _FakeSDS(state),
         )
         return await get_portfolio(SERVER, refresh=False, user=_USER)

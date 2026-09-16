@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import aiohttp
 
+from condor.server_data_service import ServerDataType, get_server_data_service
+
 logger = logging.getLogger(__name__)
 
 # What a stream should do about the error that broke it.
@@ -65,11 +67,32 @@ class HummingbotStreamsMixin:
         return result
 
     @staticmethod
-    def _transform_bots(raw_data: Any) -> dict:
-        """Transform raw BOTS_STATUS data to BotsPageResponse-compatible dict for WS broadcast."""
-        from condor.fetchers.bots import build_bots_page
+    async def _transform_bots(server_name: str, raw_data: Any) -> dict:
+        """Transform raw BOTS_STATUS data to a BotsPageResponse-compatible dict.
 
-        return build_bots_page(raw_data)
+        Shares the REST route's builder *and* its enrichment: a frame that
+        omitted the controller configs, deploy timestamps and DB performance
+        left the client patching every row back out of the last REST payload.
+        """
+        from condor.web.routes.bots import enriched_bots_page
+
+        return await enriched_bots_page(server_name, raw_data)
+
+    async def _broadcast_bots_update(
+        self, channel: str, server_name: str, raw_data: Any
+    ) -> None:
+        """Enrich a raw BOTS_STATUS payload and broadcast it, if it changed.
+
+        Enrichment is an await, so every bots frame is built inside a task —
+        including the ones triggered by the synchronous SDS cache listener.
+        """
+        try:
+            data = await self._transform_bots(server_name, raw_data)
+            self._overlay_stopping_state(server_name, data)
+        except Exception as e:
+            logger.debug("Failed to transform bots data for WS: %s", e)
+            return
+        await self._broadcast_update(channel, data)
 
     @staticmethod
     def _transform_controller_perf(raw_data: Any) -> list[dict]:
@@ -351,8 +374,6 @@ class HummingbotStreamsMixin:
         cm = get_config_manager()
 
         # Try SDS cache first (pre-warmed by auto_subscribe_servers or REST prefetch)
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
         if channel not in self._last_data:
             sds = get_server_data_service()
             cached = sds.get(server_name, ServerDataType.EXECUTORS)
@@ -472,16 +493,11 @@ class HummingbotStreamsMixin:
 
         # Send SDS-cached bots data as initial snapshot
         if channel not in self._last_data:
-            from condor.server_data_service import (
-                ServerDataType,
-                get_server_data_service,
-            )
-
             sds = get_server_data_service()
             cached = sds.get(server_name, ServerDataType.BOTS_STATUS)
             if cached is not None:
                 try:
-                    data = self._transform_bots(cached)
+                    data = await self._transform_bots(server_name, cached)
                     await self.broadcast(channel, data)
                 except Exception as e:
                     logger.debug("Failed to send initial bots snapshot: %s", e)
@@ -494,20 +510,10 @@ class HummingbotStreamsMixin:
                 return
             raw_data = msg.get("data", {})
             # Update SDS cache so REST and Telegram benefit
-            from condor.server_data_service import (
-                ServerDataType,
-                get_server_data_service,
-            )
-
             get_server_data_service().put(
                 server_name, ServerDataType.BOTS_STATUS, raw_data
             )
-            try:
-                data = self._transform_bots(raw_data)
-                self._overlay_stopping_state(server_name, data)
-                await self._broadcast_update(channel, data)
-            except Exception as e:
-                logger.debug("Failed to transform bots WS data: %s", e)
+            await self._broadcast_bots_update(channel, server_name, raw_data)
 
         await self._run_ws_stream(
             channel,
@@ -535,11 +541,6 @@ class HummingbotStreamsMixin:
                 return
             raw_data = msg.get("data", [])
             # Update SDS cache
-            from condor.server_data_service import (
-                ServerDataType,
-                get_server_data_service,
-            )
-
             get_server_data_service().put(
                 server_name, ServerDataType.POSITIONS, raw_data
             )
@@ -589,6 +590,7 @@ class HummingbotStreamsMixin:
             return
         server_name = parts[1]
 
+        from condor.fetchers.bot_performance import fetch_latest_snapshots
         from config_manager import get_config_manager
 
         cm = get_config_manager()
@@ -605,9 +607,11 @@ class HummingbotStreamsMixin:
                     return
 
                 client = await cm.get_client(server_name)
-                result = (
-                    await client.bot_orchestration.get_latest_controller_performance()
-                )
+                # Shared whole-server cache: this 30s poll asks for the very
+                # payload the bots-page enrichment and the controller-performance
+                # routes ask for, so a poll that coincides with one of them costs
+                # no round-trip at all.
+                result = await fetch_latest_snapshots(client)
 
                 snapshots = self._transform_controller_perf(result)
 

@@ -24,10 +24,10 @@ export function TelemetrySettings() {
 
   const { disclosure, level, consent, env_overridden, can_change } = data;
   const locked = env_overridden || !can_change;
-  // At `unknown` no option is the answer yet, so none is shown as chosen —
-  // the install is at the ping floor, but nobody has said so. `denied` is an
-  // answer, and the one it selects is the off row below.
-  const chosen = consent === "granted" ? level : consent === "denied" ? "off" : null;
+  // Unanswered installs still have a real level — `ping` until the admin has
+  // been shown the notice, `usage` after — so the row that is in effect is the
+  // one shown as chosen. `denied` selects the off row below.
+  const chosen = consent === "denied" ? "off" : level;
   const offChosen = chosen === "off";
 
   return (
@@ -38,8 +38,7 @@ export function TelemetrySettings() {
           {disclosure.headline}
         </h3>
         <div className="space-y-2 text-xs leading-relaxed text-[var(--color-text-muted)]">
-          <p>{disclosure.always_on}</p>
-          <p>{disclosure.optional}</p>
+          <p>{disclosure.summary}</p>
         </div>
       </section>
 
@@ -94,10 +93,9 @@ export function TelemetrySettings() {
             );
           })}
 
-          {/* Not one of `disclosure.options`: the consent form has no "off"
-              button, because ignoring a prompt must not read as a refusal.
-              Saying no out loud is a different act, and it needs somewhere to
-              be said other than the operator's `.env`. */}
+          {/* Not one of `disclosure.options`: "off" is not a level but a
+              recorded refusal (`consent.deny`), the same answer the notice's
+              "Turn off" gives, and it survives upgrades. */}
           <button
             disabled={locked || mutation.isPending}
             onClick={() => mutation.mutate("off")}

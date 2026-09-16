@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
+from pathlib import Path
 from typing import Any
 
 from condor.frontmatter import parse_frontmatter
@@ -210,7 +212,11 @@ JOURNAL:
 
 
 def _build_tool_preload(
-    *, is_dry_run: bool, is_experiment: bool, is_controller_mode: bool = False
+    *,
+    is_dry_run: bool,
+    is_experiment: bool,
+    is_controller_mode: bool = False,
+    muted: Collection[str] = (),
 ) -> str:
     """ToolSearch preload line for ACP sessions.
 
@@ -220,14 +226,25 @@ def _build_tool_preload(
     modes (dry_run / run_once) omit trading_agent_journal_write since they have no
     journal. Controller mode preloads the bot/controller tools it actually trades with
     — otherwise the agent burns a tick discovering them.
+
+    ``muted`` is what the seat never mounts (``toolsets.seat_mutes``: operator
+    mutes plus whatever the Agent's allowlist leaves out), dropped from the line so
+    it names only tools the tick can actually call.
     """
     tools = [
         "mcp__mcp-hummingbot__get_prices",
-        # The candle, order book and funding readers are not mounted any more
-        # (ARCH-308): market data a tick computes on is read as structured rows
-        # with ``client.market_data.*`` inside run_code, so run_code is what a
-        # tick has to arrive holding.
+        # The table-rendering candle, order book and funding readers are not
+        # mounted any more (ARCH-308): market data a tick computes on is read as
+        # structured rows with ``client.market_data.*`` inside run_code, so
+        # run_code is what a tick has to arrive holding.
         "mcp__condor__run_code",
+        # …except in a dry run, where a snippet is refused for holding the
+        # unrestricted client (SEC-616) and so is a routine (SEC-626), which
+        # between them left a rehearsal with no candle read at all. Preloaded in
+        # every mode rather than only that one: it is the cheaper read wherever
+        # the candles are the answer, and a tick should not have to know which
+        # mode it is in to reach for it (CORR-625).
+        "mcp__mcp-hummingbot__get_market_data",
     ]
     if is_controller_mode:
         # Read-only bot/controller queries stay available in dry-run; the
@@ -262,6 +279,7 @@ def _build_tool_preload(
         "mcp__condor__manage_skill",
         "mcp__condor__manage_routines",
     ]
+    tools = [t for t in tools if t.rsplit("__", 1)[-1] not in muted]
     return (
         "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
         f'ToolSearch(query="select:{",".join(tools)}")\n'
@@ -368,6 +386,37 @@ CORE_RULES_FILENAME = "core_rules.md"
 # the same block whether it is ticking or answering a chat.
 CORE_RULES_HEADER = "[CORE RULES — apply to every session]"
 
+# Pairs already warned about, so a shadow costs one line and not one per tick.
+_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_once_if_shadowed(local: Path, stock: Path) -> None:
+    """Say it out loud when a local rulebook silently overrides a shipped one.
+
+    The rulebook is a *single file*, so a local copy forks the whole
+    behavioural contract — the failure mode :func:`resolve_agent_file` avoids
+    one level down by resolving per item. An operator who then edits the
+    tracked file gets no error, no warning and no effect (ARCH-612). One
+    warning per pair turns that silent no-op into a line in the log.
+    """
+    key = (str(local), str(stock))
+    if key in _SHADOWED_RULEBOOKS_WARNED:
+        return
+    try:
+        if not stock.is_file():
+            return  # nothing shipped to shadow: a purely local rulebook is fine
+        if stock.read_text(encoding="utf-8") == local.read_text(encoding="utf-8"):
+            return  # a copy, not a fork
+    except OSError:
+        return
+    _SHADOWED_RULEBOOKS_WARNED.add(key)
+    log.warning(
+        "%s shadows %s and the two differ: edits to the shipped file have no "
+        "effect. Delete the local copy to fall back to it.",
+        local,
+        stock,
+    )
+
 
 def load_core_rules(agent_slug: str | None = None) -> str:
     """The shared behavioural rules for this agent: its own, else the default.
@@ -380,22 +429,31 @@ def load_core_rules(agent_slug: str | None = None) -> str:
 
     Read on every call, never cached: editing the file is meant to be visible on
     the next tick. Returns ``""`` when nothing is on disk or the file is
-    unreadable — a missing rulebook must never be what breaks a tick.
+    unreadable — a missing rulebook must never be what breaks a tick. When a
+    local layer wins over a shipped file that differs,
+    :func:`_warn_once_if_shadowed` says so rather than letting the fork be
+    silent.
     """
     from condor.memory.paths import agent_home_layers, defaults_layers
 
-    candidates = [home / CORE_RULES_FILENAME for home in agent_home_layers(agent_slug)]
-    candidates += [d / CORE_RULES_FILENAME for d in defaults_layers()]
-    for path in candidates:
-        try:
-            if not path.is_file():
-                continue
-            _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-            body = body.strip()
-            if body:
-                return body
-        except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
-            log.warning("Could not read %s", path, exc_info=True)
+    layers = (agent_home_layers(agent_slug), defaults_layers())
+    for local_home, stock_home in layers:
+        local, stock = (
+            local_home / CORE_RULES_FILENAME,
+            stock_home / CORE_RULES_FILENAME,
+        )
+        for path in (local, stock):
+            try:
+                if not path.is_file():
+                    continue
+                _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+                body = body.strip()
+                if body:
+                    if path == local:
+                        _warn_once_if_shadowed(local, stock)
+                    return body
+            except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
+                log.warning("Could not read %s", path, exc_info=True)
     return ""
 
 
@@ -477,11 +535,14 @@ def build_tick_prompt(
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
+        from condor.runtime.toolsets import seat_mutes
+
         sections.append(
             _build_tool_preload(
                 is_dry_run=is_dry_run,
                 is_experiment=is_experiment,
                 is_controller_mode=is_controller_mode,
+                muted=seat_mutes(getattr(agent, "slug", "") or None),
             )
         )
     else:

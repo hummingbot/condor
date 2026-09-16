@@ -24,6 +24,7 @@ import {
   rowHref,
   scopeStrategy,
   strategylessAgents,
+  tickCountdownLabel,
 } from "./fleet";
 
 function instance(over: Partial<RunningInstance> = {}): RunningInstance {
@@ -186,6 +187,21 @@ describe("the next tick", () => {
   it("is unknowable for a loop that has not ticked yet", () => {
     expect(dueInSec(instance({ last_tick_at: 0 }), 1_000)).toBeNull();
     expect(dueInSec(null, 1_000)).toBeNull();
+  });
+
+  it("is unknowable for a loop with no cadence, rather than forever overdue", () => {
+    // Nothing constrains `frequency_sec` to be positive, and `last_tick_at -
+    // now` on a 0-cadence loop is a large negative that reads as "overdue 4h"
+    // on every surface that skips this guard.
+    expect(dueInSec(instance({ frequency_sec: 0 }), 1_000)).toBeNull();
+    expect(dueInSec(instance({ frequency_sec: -30 }), 1_000)).toBeNull();
+  });
+
+  it("is worded the same wherever it is printed", () => {
+    expect(tickCountdownLabel(40)).toBe("next in 40s");
+    expect(tickCountdownLabel(-40)).toBe("overdue 40s");
+    // Due exactly now has already slipped, so it is overdue, not "next in 0s".
+    expect(tickCountdownLabel(0)).toBe("overdue 0s");
   });
 });
 
