@@ -22,12 +22,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from condor.agents.config import redact_confidential, redact_verbatim
 from condor.fsutil import atomic_write_text
 from condor.paths import local_agents_root
 
@@ -289,8 +290,18 @@ def save_experiment_snapshot(
     risk_state: dict,
     duration: float,
     agent_key: str = "",
+    confidential: Iterable[str] = (),
+    secrets: Iterable[str] = (),
 ) -> Path:
-    """Save a single experiment snapshot as a flat .md file."""
+    """Save a single experiment snapshot as a flat .md file.
+
+    ``confidential`` names the run-config keys whose rendered ``key: value``
+    line is replaced before the prompt is embedded, so the overlay of a vault
+    run never lands in the file (plan §6 hook 2). ``secrets`` are texts (the
+    run's system prompt) scrubbed verbatim from the whole file, response and
+    tool calls included, in case the model quoted them back.
+    """
+    system_prompt = redact_confidential(system_prompt, confidential)
     experiments_dir = agent_dir / "dry_runs"
     experiments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -344,7 +355,7 @@ def save_experiment_snapshot(
     )
 
     path = experiments_dir / f"experiment_{experiment_num}.md"
-    path.write_text(content)
+    path.write_text(redact_verbatim(content, secrets))
     return path
 
 
@@ -661,8 +672,16 @@ class JournalManager:
         executors_data: str,
         risk_state: dict[str, Any],
         duration: float,
+        confidential: Iterable[str] = (),
+        secrets: Iterable[str] = (),
     ) -> Path:
-        """Write a full snapshot capturing everything."""
+        """Write a full snapshot capturing everything.
+
+        ``confidential`` names the run-config keys redacted out of the embedded
+        prompt, ``secrets`` the texts scrubbed verbatim from the whole file —
+        see ``save_experiment_snapshot``.
+        """
+        system_prompt = redact_confidential(system_prompt, confidential)
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Format risk state
@@ -711,7 +730,7 @@ class JournalManager:
         )
 
         path = self._snapshots_dir / f"snapshot_{tick}.md"
-        path.write_text(content)
+        path.write_text(redact_verbatim(content, secrets))
         self._cleanup_old_snapshots()
         return path
 

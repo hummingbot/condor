@@ -555,6 +555,10 @@ def build_tick_prompt(
         "server_name",
         "frequency_sec",
         "execution_mode",  # noise / internal
+        # A vault run's private context. It reaches the model as a true ACP
+        # system prompt (engine._create_client), never through this prompt —
+        # which is what keeps it out of every snapshot file.
+        "system_prompt",
     }
     config_lines = [
         "[CURRENT CONFIG]",

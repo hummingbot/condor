@@ -25,7 +25,7 @@ from condor.acp.client import (
     ToolCallUpdate,
     fold_tool_call_event,
 )
-from condor.acp.pydantic_ai_client import PydanticAIClient
+from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from condor.runtime import toolsets
 from condor.runtime.registry_file import LoopState
 from condor.runtime.timeouts import resolve_tick_timeout
@@ -33,6 +33,7 @@ from condor.telemetry import taps as telemetry_taps
 
 from . import actions as actions_mod
 from .agent import Agent
+from .config import confidential_keys, persistable_config
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
@@ -141,6 +142,10 @@ class TickEngine:
     _active_client: "ACPClient | PydanticAIClient | None" = field(
         default=None, init=False, repr=False
     )
+    # The run-config keys this session withholds from disk (Condor Vaults,
+    # plan §6 hook 2): the `confidential` list plus `system_prompt`. Resolved
+    # once, at start, so a malformed list fails the start and not a snapshot.
+    _confidential: tuple[str, ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -148,6 +153,26 @@ class TickEngine:
         # while the Agent's brain (memory/skills) stays shared at the parent.
         strategy_dir = self.strategy.home
         mode = self.config.get("execution_mode", "loop")
+
+        # Condor Vault hooks, checked before anything is written so a bad start
+        # request is refused with the reason and leaves no session behind.
+        # A `confidential` that is not a list of names would otherwise persist
+        # the overlay in clear; a non-ACP model cannot take a system prompt
+        # (the pydantic-ai client has no channel for one, and folding it into
+        # the tick prompt is exactly what the hook exists to avoid); a `vault`
+        # block outside its shape would reach argv malformed.
+        self._confidential = confidential_keys(self.config)
+        if self.config.get("system_prompt") and is_pydantic_ai_model(self._agent_key()):
+            raise ValueError(
+                f"agent_key {self._agent_key()!r} is a pydantic-ai model, which "
+                "cannot take a system_prompt: a confidential system prompt only "
+                "reaches an ACP model (claude-acp, gemini, codex). Pick an ACP "
+                "agent_key for this run or drop system_prompt."
+            )
+        if self.config.get("vault") is not None:
+            from mcp_servers.hummingbot_api.vault_block import validate_vault_block
+
+            validate_vault_block(self.config["vault"])
         self.is_experiment = mode in ("dry_run", "run_once")
 
         # agent_id == controller_id tag: "{agent_slug}.{strategy_slug}_{N}" (and
@@ -181,10 +206,11 @@ class TickEngine:
             self.session_dir = strategy_dir / "sessions" / f"session_{self.session_num}"
             self.session_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save config per session
+            # Save config per session — minus the confidential keys and the
+            # system prompt, which live only in this process for the run.
             from .config import save_full_config
 
-            save_full_config(self.session_dir, self.config)
+            save_full_config(self.session_dir, persistable_config(self.config))
 
             self.journal = JournalManager(
                 self.agent_id,
@@ -687,6 +713,8 @@ class TickEngine:
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
                 agent_key=self._agent_key(),
+                confidential=self._confidential,
+                secrets=self._secret_texts(),
             )
             log.info(
                 "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
@@ -767,6 +795,8 @@ class TickEngine:
                 executors_data=executors_summary,
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
+                confidential=self._confidential,
+                secrets=self._secret_texts(),
             )
             actions_mod.append_actions(self.session_dir, tick_actions)
 
@@ -1027,6 +1057,7 @@ class TickEngine:
             server_name=self.config.get("server_name"),
             agent_slug=self.agent.slug,
             tick=True,
+            vault=self._vault_block(),
         )
         permission_cb = auto_approve_with_risk_check(
             self.risk,
@@ -1045,6 +1076,10 @@ class TickEngine:
         # allowlist the agent gets when delegated to; empty => unrestricted.
         from condor.runtime.llm_client import build_llm_client
 
+        # A vault run's private context rides as a true ACP system prompt
+        # (`_meta.systemPrompt.append`), never inside the tick prompt, so no
+        # snapshot ever carries it (plan §6 hook 1). __post_init__ already
+        # refused a non-ACP model when one is set.
         return build_llm_client(
             self._agent_key(),
             mcp_servers=mcp_servers,
@@ -1053,7 +1088,28 @@ class TickEngine:
             user_id=self.user_id,
             base_url_override=self.config.get("model_base_url") or None,
             tool_filter_mode=self.config.get("tool_filter_mode"),
+            system_prompt=self.config.get("system_prompt", ""),
         )
+
+    def _secret_texts(self) -> tuple[str, ...]:
+        """Texts scrubbed verbatim from every snapshot: the system prompt."""
+        prompt = self.config.get("system_prompt", "")
+        return (prompt,) if prompt else ()
+
+    def _vault_block(self) -> dict[str, Any] | None:
+        """The public vault block for the MCP subprocess, or None.
+
+        The run config's ``vault`` plus this session's directory, where
+        ``sweep_fees`` keeps its append-only ledger. An experiment has no
+        session directory and gets the block without one.
+        """
+        vault = self.config.get("vault")
+        if not vault:
+            return None
+        block = dict(vault)
+        if self.session_dir is not None:
+            block["session_dir"] = str(self.session_dir)
+        return block
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1216,6 +1272,10 @@ class TickEngine:
                 strategy=self.config.get("tick_timeout_sec"),
             ),
             "server_name": self.config.get("server_name", ""),
+            # Which Condor Vault this run serves, so the dashboard can label it.
+            # The two public identifiers only; the block itself is on argv.
+            "vault_slug": (self.config.get("vault") or {}).get("slug", ""),
+            "vault_run_id": (self.config.get("vault") or {}).get("run_id", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": (

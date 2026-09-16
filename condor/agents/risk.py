@@ -118,7 +118,15 @@ class RiskState:
 #: Gateway tools where reaching the tool at all is the signature -- there is no
 #: ``action`` to look up, because the split gave the signing call its own name
 #: (FEAT-064). The confirmation gate lists these in ``DANGEROUS_TOOLS``.
-ALWAYS_SIGNING_DEX_TOOLS = frozenset({"execute_swap"})
+ALWAYS_SIGNING_DEX_TOOLS = frozenset({"execute_swap", "sweep_fees"})
+
+#: Signing tools whose size is fixed by the ledger, not by the call. The vault
+#: buyback spends a share of fees an executor has already realised, read off
+#: the executor by the tool itself; there is no ``amount`` in its arguments to
+#: price, and the capital it moves was earned by the position it follows. It
+#: is admitted without a notional the way a risk-reducing action is, and never
+#: accumulates into the exposure total — it opens no position.
+FEE_FUNDED_DEX_TOOLS = frozenset({"sweep_fees"})
 
 #: The signing actions of each action-gated Gateway tool, by tool name. These are
 #: the DANGEROUS_* sets the confirmation gate already uses: loop mode stands in for
@@ -486,7 +494,7 @@ class RiskEngine:
         if not _is_signing_dex_call(tool_name, input_data):
             return True, ""
 
-        if action in RISK_REDUCING_DEX_ACTIONS:
+        if action in RISK_REDUCING_DEX_ACTIONS or tool_name in FEE_FUNDED_DEX_TOOLS:
             return True, ""
 
         # Everything that returns capital has passed above; what is left signs
@@ -833,6 +841,7 @@ def auto_approve_with_risk_check(
                 if (
                     _is_signing_dex_call(tool_name, input_data)
                     and action not in RISK_REDUCING_DEX_ACTIONS  # unpriced
+                    and tool_name not in FEE_FUNDED_DEX_TOOLS  # sized by the ledger
                 ):
                     try:
                         notional_quote = await _dex_notional_quote(

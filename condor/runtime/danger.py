@@ -58,6 +58,12 @@ DANGEROUS_TOOLS = {
     # executor_defaults) is safe by name and never reaches a human.
     *CREATE_EXECUTOR_TOOLS,
     "stop_executor",
+    # The Condor Vault buyback: every call signs two swaps from the vault's Swig
+    # wallet. Gated by name like `execute_swap`; sized by the executor's realised
+    # fees rather than by an argument, so loop mode admits it without a notional
+    # (condor.agents.risk.FEE_FUNDED_DEX_TOOLS) and dry-run refuses it like any
+    # other signature.
+    "sweep_fees",
     # Account-wide leverage. It opens no position of its own, which is exactly
     # why it was missed: it re-prices the ones already open. A create is gated
     # on the capital it commits, and leverage is what decides how far the market
@@ -447,6 +453,7 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     return tool_name in CREATE_EXECUTOR_TOOLS or tool_name in {
         "place_order",
         "execute_swap",
+        "sweep_fees",
         "stop_executor",
         LEVERAGE_TOOL,
     }
@@ -521,6 +528,19 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return "Stop executor (id could not be read)"
         suffix = ", keeping the position" if keep else ""
         return f"Stop executor {exec_id[:12]}...{suffix}"
+
+    if tool_name == "sweep_fees":
+        # The size is the executor's realised fees times the vault's share, and
+        # neither is an argument: the line names the executor and says the
+        # amount is read off it, rather than printing a number the call does
+        # not carry.
+        exec_id = str(input_data.get("executor_id", "") or "")
+        if not exec_id:
+            return "Sweep vault fees (executor id could not be read)"
+        return (
+            f"Sweep executor {exec_id[:12]}...'s realised fees into the vault token"
+            " (buyback share of the vault block, from the Swig wallet)"
+        )
 
     if tool_name == LEVERAGE_TOOL:
         # Both halves of the call are named because either can be the one that

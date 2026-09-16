@@ -44,6 +44,7 @@ from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
+from mcp_servers.hummingbot_api.tools import vault as vault_tools
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
 )
@@ -2005,6 +2006,71 @@ async def search_swaps(
     client = await hummingbot_client.get_client()
     result = await manage_gateway_swaps_impl(client, request)
     return format_gateway_swap_result("search", result)
+
+
+# Condor Vault Tools
+#
+# Both read the vault block this process was spawned with (``--vault-json``,
+# ``settings.vault``). Neither takes a wallet or an amount: the wallet is the
+# vault's Swig agent wallet and the amount is the executor's realised fees, so
+# there is nothing here a model could redirect.
+
+
+@handle_errors("sweep vault fees", GATEWAY_LOG_HINT)
+async def sweep_fees(executor_id: str) -> str:
+    """Buy the vault token with the runner's share of one closed LP executor's realised fees. Signs — call it only when the run's system prompt says to.
+
+    Use this tool when: this session runs a Condor Vault and an LP executor it
+    opened has just been stopped and closed with realised fees. Call it once,
+    with that executor's id, before anything else. Do NOT call it otherwise:
+    not for a running executor, not for an executor another session opened,
+    and never twice for the same id.
+
+    WHAT IT SWEEPS. The executor's `custom_info.fees_earned_quote` — the LP fee
+    income the position collected (`base_fee × price + quote_fee`), in the
+    pool's quote asset. NOT `cum_fees_quote`, which on an LP executor is the
+    gas the executor paid. The swept amount is `fees_earned_quote ×
+    buyback_bps / 10000`, with `buyback_bps` from the vault block.
+
+    WHAT IT DOES. Two swaps from the vault's Swig wallet, both through Gateway:
+    the swept amount to SOL through `jupiter/router` (skipped when the fee
+    asset is SOL), then that SOL into the vault token on `meteora-dbc/router`
+    (pair `<MINT>-SOL`, side BUY, amount in SOL). The tokens land in the Swig
+    wallet in the same transaction.
+
+    REFUSALS (a message, not a trade): the run has no vault block; the vault's
+    `buyback_bps` is 0; the executor is not TERMINATED; it is not an LP
+    executor; it realised no fees; or this run already holds a sweep record
+    for it — a sweep is one signature per executor, and a record from a failed
+    attempt is a reason to read the chain, not to retry.
+
+    Args:
+        executor_id: The closed LP executor whose realised fees to sweep.
+
+    Returns:
+        The realised fees, the swept amount, the SOL it became, the tokens the
+        DBC quote expects and the buy's transaction signature.
+    """
+    client = await hummingbot_client.get_client()
+    result = await vault_tools.sweep_fees(client, executor_id, settings.vault)
+    return result["formatted_output"]
+
+
+@handle_errors("read vault status", GATEWAY_LOG_HINT)
+async def vault_status() -> str:
+    """Read the Condor Vault this run serves: its block, its DBC pool and what the wallet holds. Read-only.
+
+    Use this tool when: you want to know which vault this session runs
+    (slug, mint, pool, run id, Swig wallet, buyback share), how far the token's
+    bonding curve has progressed and at what price, how much of the vault
+    token the Swig wallet holds, and which executors this run has already
+    swept. It signs nothing.
+
+    Refuses with a message when the run has no vault block.
+    """
+    client = await hummingbot_client.get_client()
+    result = await vault_tools.vault_status(client, settings.vault)
+    return result["formatted_output"]
 
 
 # GeckoTerminal Tools

@@ -17,6 +17,7 @@ from typing import Any
 
 from condor.acp.client import bot_process_marker
 from condor.paths import local_agents_root, stock_agents_root
+from mcp_servers.hummingbot_api.vault_block import encode_vault_block
 
 log = logging.getLogger(__name__)
 
@@ -227,11 +228,24 @@ def _condor_mcp_args(
     return args
 
 
+def _vault_args(vault: dict[str, Any] | None) -> list[str]:
+    """``--vault-json <json>`` for a Condor Vault run, or nothing at all.
+
+    The block is public by construction (``vault_block.py`` refuses any key
+    outside its shape), which is what lets it travel on argv beside
+    ``--agent-slug``: the vault's slug, mint, pool, run id, Swig wallet and
+    buyback share are all on-chain already. The confidential overlay never
+    comes near this line.
+    """
+    return ["--vault-json", encode_vault_block(vault)] if vault else []
+
+
 def _hummingbot_mcp_args(
     server: dict[str, Any],
     server_name: str,
     profile: str = "full",
     muted_tools: Sequence[str] = (),
+    vault: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build CLI args for the hummingbot MCP subprocess.
 
@@ -240,6 +254,9 @@ def _hummingbot_mcp_args(
     (SEC-095). Every element is a string: YAML loads unquoted numerics as int
     (e.g. ``port: 8000``), and pydantic-ai's StdioServerParameters rejects
     non-string args when starting LM Studio / other local-model sessions.
+
+    ``vault`` is a Condor Vault run's public block (see :func:`_vault_args`);
+    ``None`` on every other seat keeps the argv byte-identical.
     """
     api_url = f"http://{server['host']}:{server['port']}"
     return (
@@ -256,6 +273,7 @@ def _hummingbot_mcp_args(
             profile,
         ]
         + _muted_tool_args(muted_tools)
+        + _vault_args(vault)
         + _bot_id_args()
     )
 
@@ -270,6 +288,7 @@ def build_mcp_servers_for_session(
     ask_target: bool = False,
     tick: bool = False,
     session_key: str = "",
+    vault: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -305,6 +324,11 @@ def build_mcp_servers_for_session(
     why ``delegate(action="ask")`` exists at all: with no session there is no
     turn for ``on_complete="resume"`` to wake. See
     :func:`_condor_mcp_args` for why it travels on argv.
+
+    ``vault`` is a Condor Vault run's public block, handed to the hummingbot
+    subprocess as ``--vault-json`` so ``sweep_fees`` and ``vault_status`` know
+    which vault, which wallet and which share (plan §6 hook 3). Only the tick
+    engine passes one.
     """
     from condor.memory.mutes import load_mutes
     from config_manager import (
@@ -419,7 +443,9 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": _hummingbot_mcp_args(server, server_name, profile, muted_tools),
+        "args": _hummingbot_mcp_args(
+            server, server_name, profile, muted_tools, vault=vault
+        ),
         "env": _env_entries(
             HUMMINGBOT_API_USERNAME=server["username"],
             HUMMINGBOT_API_PASSWORD=server["password"],

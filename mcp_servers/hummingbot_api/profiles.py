@@ -46,6 +46,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_swap_status": "Resolve a submitted swap by transaction hash",
     "search_swaps": "Query swap history with filters",
     "explore_geckoterminal": "Explore GeckoTerminal DEX market data",
+    "sweep_fees": "Buy the vault token with a closed executor's realised fees — spends funds",
+    "vault_status": "The vault block, its DBC curve and the wallet's token balance",
     "manage_amm": "Direct AMM pool operations and pool creation",
     "manage_clmm": "Direct CLMM position operations",
     "configure_server": "Repoint this seat at another Hummingbot API server",
@@ -93,6 +95,11 @@ TRADING_TOOLS: tuple[str, ...] = (
     "get_swap_status",
     "search_swaps",
     "explore_geckoterminal",
+    # Condor Vault (plan §6): the buyback and its read. In the trading ring
+    # because the tick seat is the one that closes positions and must sweep
+    # them; both refuse outright on a seat spawned without a vault block.
+    "sweep_fees",
+    "vault_status",
 )
 
 #: Direct, un-executored liquidity operations. An attended specialist owns these

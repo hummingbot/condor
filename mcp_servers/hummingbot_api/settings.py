@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from mcp_servers.hummingbot_api.exceptions import ConfigurationError
+from mcp_servers.hummingbot_api.vault_block import decode_vault_block
 
 CONFIG_DIR = Path.home() / ".hummingbot_mcp"
 SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
@@ -35,6 +36,26 @@ def _parse_tool_profile() -> str:
     parser.add_argument("--profile", default=DEFAULT_TOOL_PROFILE)
     args, _ = parser.parse_known_args()
     return args.profile
+
+
+def _parse_vault_block() -> dict | None:
+    """``--vault-json <json>`` off argv, read at import.
+
+    Same ``parse_known_args`` discipline as the profile: absent on every seat
+    that is not a Condor Vault run, and under pytest. Present, it is validated
+    by ``vault_block.decode_vault_block`` — the same validator the spawner ran
+    before putting it on argv — so a malformed block fails the spawn rather
+    than a sweep.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--vault-json", default="")
+    args, _ = parser.parse_known_args()
+    if not args.vault_json:
+        return None
+    try:
+        return decode_vault_block(args.vault_json)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
 
 
 def _parse_muted_tools() -> tuple[str, ...]:
@@ -118,6 +139,11 @@ class Settings(BaseModel):
     # free of the agent registry.
     muted_tools: tuple[str, ...] = Field(default=())
 
+    # The Condor Vault this seat runs for, or None on every other seat. Public
+    # coordinates only (see ``parse_vault_block``); ``sweep_fees`` and
+    # ``vault_status`` read it, nothing else does.
+    vault: dict | None = Field(default=None)
+
     # Connection settings
     connection_timeout: float = Field(default=30.0)
     max_retries: int = Field(default=3)
@@ -168,6 +194,7 @@ def get_settings() -> Settings:
             log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
             tool_profile=_parse_tool_profile(),
             muted_tools=_parse_muted_tools(),
+            vault=_parse_vault_block(),
         )
     except Exception as e:
         raise ConfigurationError(f"Failed to load configuration: {e}")

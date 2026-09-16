@@ -51,6 +51,8 @@ HB_TRADING = {
     "get_swap_status",
     "search_swaps",
     "explore_geckoterminal",
+    "sweep_fees",
+    "vault_status",
 }
 HB_LIQUIDITY = {"manage_amm", "manage_clmm"}
 HB_ADMIN = {"configure_server", "manage_gateway_config", "manage_gateway_container"}
