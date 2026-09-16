@@ -1,11 +1,13 @@
 """TickEngine -- main orchestrator for autonomous trading agents.
 
-One TickEngine instance per running agent.  Each tick:
-1. Pre-compute core data providers (active executors)
-2. Read journal (learnings + summary + recent decisions)
-3. Build prompt with strategy + data + risk state + loop state
-4. Spawn a fresh ACP session, stream events, capture tool calls
-5. Save full snapshot and update journal
+One TickEngine instance per running agent.  _tick runs three phases:
+1. Gather (_gather_tick_context): adopt running bots, run core data
+   providers, compute risk state (may end the tick: shutdown or block), read
+   the journal and build the prompt
+2. Run model (_run_model): spawn a fresh ACP session, stream events under
+   the tick timeout, capture tool calls, always reap the client
+3. Persist (_persist_tick): experiment snapshot, or journal + full
+   snapshot + action log + session report for a session
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from condor.acp.client import (
@@ -67,6 +70,19 @@ class _NullTracker:
 
     def get_drawdown_pct(self) -> float:
         return 0.0
+
+
+@dataclass(frozen=True)
+class _TickContext:
+    """What the gather phase hands the model and persist phases of one tick."""
+
+    risk_state: RiskState
+    core_data_summaries: dict[str, str]
+    prompt: str
+
+    @property
+    def executors_summary(self) -> str:
+        return self.core_data_summaries.get("executors", "No executor data.")
 
 
 def _supervisor():
@@ -498,22 +514,51 @@ class TickEngine:
                 break
 
     async def _tick(self) -> None:
-        self._last_tick_at = time.time()
-        mode = self.config.get("execution_mode", "loop")
+        """One tick, in three phases: gather, run the model, persist.
 
-        # 1. Get API client
+        Each phase is its own method so it can be read and tested on its own.
+        The tick ends early only when there is no API client or the gather
+        phase returns ``None`` (a hard shutdown or a risk block); past that,
+        the model always runs and its outcome is always persisted.
+        """
+        self._last_tick_at = time.time()
+
         client = await self._get_client()
         if not client:
             if self.journal:
                 self.journal.append_error("No API client available")
             return
 
-        # 1b. Adopt any bot of ours already running (first tick only). A crash
+        ctx = await self._gather_tick_context(client)
+        if ctx is None:
+            return
+
+        response_text, tool_calls = await self._run_model(
+            ctx.prompt, ctx.risk_state, client
+        )
+        await self._persist_tick(
+            ctx, response_text, tool_calls, time.time() - self._last_tick_at
+        )
+
+    # ------------------------------------------------------------------
+    # Tick phase 1: gather
+    # ------------------------------------------------------------------
+
+    async def _gather_tick_context(self, client) -> _TickContext | None:
+        """Collect everything the model sees this tick and build its prompt.
+
+        Adopts running bots, runs the core data providers, reads the journal,
+        computes the risk state, and builds the prompt. Returns ``None`` when
+        the tick must end here: the hard kill-switch escalated to a shutdown,
+        or the risk gate blocked the tick (journalled, and announced once per
+        reason).
+        """
+        # Adopt any bot of ours already running (first tick only). A crash
         # restart always mints a NEW session (see condor/runtime/loops.py), so the
         # live bot must be taken over rather than orphaned and redeployed.
         await self._adopt_running_bots(client)
 
-        # 2. Run core data providers (executors only -- agent uses MCP for market data)
+        # Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
             client,
             self.config,
@@ -548,14 +593,7 @@ class TickEngine:
             name: result.summary for name, result in skill_results.items()
         }
 
-        # 3. Read journal context (sessions only)
-        learnings = self.journal.read_learnings() if self.journal else ""
-        recent_decisions = (
-            self.journal.get_recent_decisions(count=3) if self.journal else ""
-        )
-        summary = self.journal.read_summary() if self.journal else ""
-
-        # 4. Get risk state (experiments pass None — returns clean state)
+        # Risk state (experiments pass None — returns clean state)
         risk_state = self.risk.get_state(self.journal or _NullTracker())
         live_executors = self._last_skill_data.get("executors", [])
         live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
@@ -569,7 +607,7 @@ class TickEngine:
         # pause below. Experiments never trade for real, so they never shut down.
         if risk_state.should_shutdown and not self.is_experiment:
             await self._run_shutdown(reason=risk_state.shutdown_reason)
-            return
+            return None
 
         if risk_state.is_blocked and not self.is_experiment:
             with self.journal.batch():
@@ -584,10 +622,36 @@ class TickEngine:
                     f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
                 )
             self._last_block_reason = risk_state.block_reason
-            return
+            return None
         self._last_block_reason = ""
 
-        # 5. Build prompt (server credentials are injected via env into MCP process)
+        prompt = self._build_prompt(core_data_summaries, risk_state, live_open_count)
+        return _TickContext(
+            risk_state=risk_state,
+            core_data_summaries=core_data_summaries,
+            prompt=prompt,
+        )
+
+    def _build_prompt(
+        self,
+        core_data_summaries: dict[str, str],
+        risk_state: RiskState,
+        live_open_count: int,
+    ) -> str:
+        """Read the journal and the per-tick context, and render the tick prompt.
+
+        Server credentials are injected via env into the MCP process, never the
+        prompt. Every read here is fresh each tick; a failing optional read
+        (routines, memory, canvas, loop state) degrades to empty, never fails
+        the tick.
+        """
+        # Journal context (sessions only)
+        learnings = self.journal.read_learnings() if self.journal else ""
+        recent_decisions = (
+            self.journal.get_recent_decisions(count=3) if self.journal else ""
+        )
+        summary = self.journal.read_summary() if self.journal else ""
+
         # Routine discovery is read fresh each tick, like the skills index right
         # below it. It used to be cached on the first tick on the grounds that
         # "routines rarely change mid-session" — FEAT-090 made that false: an
@@ -651,7 +715,7 @@ class TickEngine:
             log.exception("TickEngine %s: loop state read failed", self.agent_id)
             loop_state = {}
 
-        prompt = build_tick_prompt(
+        return build_tick_prompt(
             agent=self.agent,
             strategy=self.strategy,
             config=self.config,
@@ -672,7 +736,20 @@ class TickEngine:
             refusals=self._last_refusals,
         )
 
-        # 6. Create a fresh agent client per tick (clean context window)
+    # ------------------------------------------------------------------
+    # Tick phase 2: run the model
+    # ------------------------------------------------------------------
+
+    async def _run_model(
+        self, prompt: str, risk_state: RiskState, client
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Run one agent session over ``prompt``; return (response text, tool calls).
+
+        A fresh client per tick (clean context window), streamed under the
+        tick's wall-clock budget. A timeout is not an error: the partial
+        response gets "(timed out)" appended. The client is always stopped and
+        ``_active_client`` cleared, whatever happens.
+        """
         acp_client = await self._create_client(risk_state, client)
         self._active_client = acp_client
 
@@ -686,7 +763,8 @@ class TickEngine:
         # config sets ``tick_timeout_sec`` -- a slower model or a tick that does
         # real research needs more room than a quoting loop does.
         tick_timeout = resolve_tick_timeout(
-            execution_mode=mode, strategy=self.config.get("tick_timeout_sec")
+            execution_mode=self.config.get("execution_mode", "loop"),
+            strategy=self.config.get("tick_timeout_sec"),
         )
         try:
             async with asyncio.timeout(tick_timeout):
@@ -708,145 +786,178 @@ class TickEngine:
             await acp_client.stop()
             self._active_client = None
 
-        response_text = "".join(response_chunks)
-        tick_duration = time.time() - self._last_tick_at
+        return "".join(response_chunks), tool_calls
 
+    # ------------------------------------------------------------------
+    # Tick phase 3: persist
+    # ------------------------------------------------------------------
+
+    async def _persist_tick(
+        self,
+        ctx: _TickContext,
+        response_text: str,
+        tool_calls: list[dict[str, Any]],
+        tick_duration: float,
+    ) -> None:
+        """Record what the tick did: a snapshot file for an experiment, the
+        journal, snapshot, action log and session report for a session.
+        """
         # What the gate refused this tick, taken before either branch below so a
         # dry run and a live tick both carry it. It reaches the agent through the
         # next tick's prompt; the journal entry below is for the human reading
         # the session afterwards.
         self._last_refusals = self._refusals.drain()
 
-        from datetime import datetime, timezone
-
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        executors_summary = core_data_summaries.get("executors", "No executor data.")
-
         if self.is_experiment:
-            # Experiments: save a single snapshot file, no journal
-            from .journal import save_experiment_snapshot
-
-            save_experiment_snapshot(
-                agent_dir=self.strategy.home,
-                experiment_num=self.session_num,
-                execution_mode=mode,
-                timestamp=timestamp,
-                system_prompt=prompt,
-                response_text=response_text,
-                tool_calls=tool_calls,
-                executors_data=executors_summary,
-                risk_state=risk_state.to_dict(),
-                duration=tick_duration,
-                agent_key=self._agent_key(),
-            )
-            log.info(
-                "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
-                self.agent_id,
-                self.session_num,
-                len(tool_calls),
-                len(response_text),
+            self._persist_experiment(
+                ctx, response_text, tool_calls, tick_duration, timestamp
             )
         else:
-            # What the tick actually *did*, as opposed to what it said (FEAT-097).
-            # Derived here rather than at stream time because the outcome of a
-            # call is only known once its terminal update has folded in, and a
-            # log whose whole purpose is "what it did" must not record intent.
-            # The tick number is the one ``record_tick`` is about to assign
-            # (it increments and returns the counter), needed here because the
-            # same call wants the action *count* for journal.md's Ticks line —
-            # which has read ``actions=0`` on every tick ever written.
-            tick_actions = actions_mod.actions_from_tool_calls(
-                tool_calls, tick=self.journal.tick_count + 1, at=time.time()
+            await self._persist_session(
+                ctx, response_text, tool_calls, tick_duration, timestamp
             )
 
-            # And what it took ownership of (FEAT-102). Derived from the same
-            # folded list, so a deploy that is logged is a deploy that is owned.
-            # The risk gate already claims a deploy on its way *in*
-            # (``condor.agents.risk``), but only when the permission callback
-            # fires and only if it could read the arguments; this claims it on
-            # the way out, from the call that actually completed. ``note_deploy``
-            # is idempotent and never downgrades an adopted bot, so the two
-            # claims cost nothing — and the gate's earlier ``since`` is the
-            # correct attribution window, which is why it stays.
-            if self.ledger is not None:
-                for bot_name in actions_mod.deployed_bot_names(tool_calls):
-                    self.ledger.note_deploy(bot_name)
+    def _persist_experiment(
+        self,
+        ctx: _TickContext,
+        response_text: str,
+        tool_calls: list[dict[str, Any]],
+        tick_duration: float,
+        timestamp: str,
+    ) -> None:
+        """Experiments: save a single snapshot file, no journal."""
+        from .journal import save_experiment_snapshot
 
-            # Sessions: full journal tracking. Every journal.md update of this
-            # tick goes into one batch, so the file is rewritten once instead of
-            # three-to-five times (PERF-136).
-            with self.journal.batch():
-                tick_num = self.journal.record_tick(
-                    response_summary=response_text[:500],
-                    actions=len(tick_actions),
-                )
+        save_experiment_snapshot(
+            agent_dir=self.strategy.home,
+            experiment_num=self.session_num,
+            execution_mode=self.config.get("execution_mode", "loop"),
+            timestamp=timestamp,
+            system_prompt=ctx.prompt,
+            response_text=response_text,
+            tool_calls=tool_calls,
+            executors_data=ctx.executors_summary,
+            risk_state=ctx.risk_state.to_dict(),
+            duration=tick_duration,
+            agent_key=self._agent_key(),
+        )
+        log.info(
+            "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
+            self.agent_id,
+            self.session_num,
+            len(tool_calls),
+            len(response_text),
+        )
 
-                self._journal_ownership_violations(tick_num)
-                self._journal_refusals(tick_num)
-                self._journal_mode_mismatch(tick_num)
+    async def _persist_session(
+        self,
+        ctx: _TickContext,
+        response_text: str,
+        tool_calls: list[dict[str, Any]],
+        tick_duration: float,
+        timestamp: str,
+    ) -> None:
+        """Sessions: full journal tracking, snapshot, action log, live report."""
+        # What the tick actually *did*, as opposed to what it said (FEAT-097).
+        # Derived here rather than at stream time because the outcome of a
+        # call is only known once its terminal update has folded in, and a
+        # log whose whole purpose is "what it did" must not record intent.
+        # The tick number is the one ``record_tick`` is about to assign
+        # (it increments and returns the counter), needed here because the
+        # same call wants the action *count* for journal.md's Ticks line —
+        # which has read ``actions=0`` on every tick ever written.
+        tick_actions = actions_mod.actions_from_tool_calls(
+            tool_calls, tick=self.journal.tick_count + 1, at=time.time()
+        )
 
-                skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-                skill_volume = self._last_skill_data.get("total_volume", 0.0)
-                skill_executors = len(self._last_skill_data.get("executors", []))
-                skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
-                self.journal.record_snapshot(
-                    total_pnl=skill_pnl,
-                    total_volume=skill_volume,
-                    open_count=skill_executors,
-                    position_size=skill_exposure,
-                )
+        # And what it took ownership of (FEAT-102). Derived from the same
+        # folded list, so a deploy that is logged is a deploy that is owned.
+        # The risk gate already claims a deploy on its way *in*
+        # (``condor.agents.risk``), but only when the permission callback
+        # fires and only if it could read the arguments; this claims it on
+        # the way out, from the call that actually completed. ``note_deploy``
+        # is idempotent and never downgrades an adopted bot, so the two
+        # claims cost nothing — and the gate's earlier ``since`` is the
+        # correct attribution window, which is why it stays.
+        if self.ledger is not None:
+            for bot_name in actions_mod.deployed_bot_names(tool_calls):
+                self.ledger.note_deploy(bot_name)
 
-                action_brief = (
-                    response_text[:100].replace("\n", " ")
-                    if response_text
-                    else "No response"
-                )
-                self.journal.write_summary(
-                    tick=tick_num,
-                    status="Running",
-                    pnl=skill_pnl,
-                    open_count=skill_executors,
-                    last_action=action_brief,
-                )
+        # Every journal.md update of this tick goes into one batch, so the file
+        # is rewritten once instead of three-to-five times (PERF-136).
+        with self.journal.batch():
+            tick_num = self.journal.record_tick(
+                response_summary=response_text[:500],
+                actions=len(tick_actions),
+            )
 
-            self.journal.save_full_snapshot(
+            self._journal_ownership_violations(tick_num)
+            self._journal_refusals(tick_num)
+            self._journal_mode_mismatch(tick_num)
+
+            skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
+            skill_volume = self._last_skill_data.get("total_volume", 0.0)
+            skill_executors = len(self._last_skill_data.get("executors", []))
+            skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
+            self.journal.record_snapshot(
+                total_pnl=skill_pnl,
+                total_volume=skill_volume,
+                open_count=skill_executors,
+                position_size=skill_exposure,
+            )
+
+            action_brief = (
+                response_text[:100].replace("\n", " ")
+                if response_text
+                else "No response"
+            )
+            self.journal.write_summary(
                 tick=tick_num,
-                timestamp=timestamp,
-                system_prompt=prompt,
-                response_text=response_text,
-                tool_calls=tool_calls,
-                executors_data=executors_summary,
-                risk_state=risk_state.to_dict(),
-                duration=tick_duration,
+                status="Running",
+                pnl=skill_pnl,
+                open_count=skill_executors,
+                last_action=action_brief,
             )
-            actions_mod.append_actions(self.session_dir, tick_actions)
 
-            # Live session report (FEAT-036). Deterministic render over data we
-            # already hold — no tokens. The guard is load-bearing: a charting or
-            # report-index failure must never take down a trading tick.
-            if self._session_report is not None:
-                try:
-                    await self._session_report.update(
-                        info=self.get_info(),
-                        journal=self.journal,
-                        session_dir=self.session_dir,
-                        executors=self._last_skill_data.get("all_executors")
-                        or self._last_skill_data.get("executors")
-                        or [],
-                        pnl_series=await self._pnl_series(),
-                    )
-                except Exception:
-                    log.exception(
-                        "TickEngine %s: session report update failed", self.agent_id
-                    )
+        self.journal.save_full_snapshot(
+            tick=tick_num,
+            timestamp=timestamp,
+            system_prompt=ctx.prompt,
+            response_text=response_text,
+            tool_calls=tool_calls,
+            executors_data=ctx.executors_summary,
+            risk_state=ctx.risk_state.to_dict(),
+            duration=tick_duration,
+        )
+        actions_mod.append_actions(self.session_dir, tick_actions)
 
-            log.info(
-                "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
-                self.agent_id,
-                tick_num,
-                len(tool_calls),
-                len(response_text),
-            )
+        # Live session report (FEAT-036). Deterministic render over data we
+        # already hold — no tokens. The guard is load-bearing: a charting or
+        # report-index failure must never take down a trading tick.
+        if self._session_report is not None:
+            try:
+                await self._session_report.update(
+                    info=self.get_info(),
+                    journal=self.journal,
+                    session_dir=self.session_dir,
+                    executors=self._last_skill_data.get("all_executors")
+                    or self._last_skill_data.get("executors")
+                    or [],
+                    pnl_series=await self._pnl_series(),
+                )
+            except Exception:
+                log.exception(
+                    "TickEngine %s: session report update failed", self.agent_id
+                )
+
+        log.info(
+            "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
+            self.agent_id,
+            tick_num,
+            len(tool_calls),
+            len(response_text),
+        )
 
     def _apply_drift_verdict(self, risk_state, drift_result) -> None:
         """Carry the venue check's verdict into the risk state ([[FEAT-113]]).
@@ -1238,8 +1349,6 @@ class TickEngine:
         error goes where a failed model call already puts it — the Agent
         Response — which is what marks the run as failed in the Runs rail.
         """
-        from datetime import datetime, timezone
-
         from .journal import save_experiment_snapshot
 
         try:

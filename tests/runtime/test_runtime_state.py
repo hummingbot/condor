@@ -289,7 +289,8 @@ def test_the_tick_feeds_the_prompt_from_its_own_bound_state():
 
     from condor.agents import engine
 
-    tick_src = inspect.getsource(engine.TickEngine._tick)
+    # READ-649: the prompt is built in the gather phase, not in _tick itself.
+    tick_src = inspect.getsource(engine.TickEngine._build_prompt)
     assert "self.state.list()" in tick_src
     assert "loop_state=loop_state" in tick_src
 
@@ -389,7 +390,8 @@ def test_engine_tick_has_no_hardcoded_budget():
 
     from condor.agents import engine, shutdown
 
-    tick_src = inspect.getsource(engine.TickEngine._tick)
+    # READ-649: the model-run phase owns the tick budget.
+    tick_src = inspect.getsource(engine.TickEngine._run_model)
     assert "resolve_tick_timeout" in tick_src
     assert "asyncio.timeout(300)" not in tick_src
     assert "asyncio.timeout(300)" not in inspect.getsource(shutdown)
