@@ -34,6 +34,7 @@ from utils.config import (
     ConfigError,
     check_local_user,
     check_startup_config,
+    warn_shadowed_env,
 )
 
 # Enable logging
@@ -998,6 +999,7 @@ def main() -> None:
     except ConfigError as exc:
         logger.error("%s", exc)
         raise SystemExit(1)
+    warn_shadowed_env()
 
     # Reap any ACP/MCP subprocess trees orphaned by a prior hard kill (kill -9,
     # OOM, power loss) before we spawn our own — those bypass teardown().
