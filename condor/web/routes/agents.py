@@ -868,10 +868,10 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
     ``"local"``, so an empty string is a strategy that explicitly declared no
     server — and the caller is expected to say so rather than substitute one.
     """
-    from condor.agents.config import load_agent_config
+    from condor.agents.config import load_full_config
 
     try:
-        return load_agent_config(strategy_dir, default_config).server_name or ""
+        return load_full_config(strategy_dir, default_config).get("server_name") or ""
     except Exception:
         return ""
 
@@ -2476,9 +2476,12 @@ async def create_strategy(
     )
 
     if req.config:
-        from condor.agents.config import AgentConfig, save_agent_config
+        from condor.agents.config import load_full_config, save_full_config
 
-        save_agent_config(strategy.home, AgentConfig.from_dict(req.config))
+        # The full pair keeps strategy-specific keys (trading_pair, venues, ...)
+        # that AgentConfig does not model, while still validating and
+        # defaulting the core fields (ARCH-670).
+        save_full_config(strategy.home, load_full_config(strategy.home, req.config))
 
     learnings_path = strategy.home / "learnings.md"
     if not learnings_path.exists():

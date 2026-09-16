@@ -21,7 +21,7 @@ from starlette.testclient import TestClient
 from condor.agents import agent as agent_module
 from condor.agents import strategy as strategy_module
 from condor.agents.agent import AgentStore
-from condor.agents.config import AgentConfig, save_agent_config
+from condor.agents.config import save_full_config
 from condor.agents.strategy import StrategyStore
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -84,7 +84,7 @@ def test_an_unpinned_agent_reports_an_empty_server_not_a_guess(env):
 
 def test_each_strategy_carries_the_server_its_records_were_read_from(env):
     strategy = StrategyStore().create(agent_slug="brigado", name="BRL MM")
-    save_agent_config(strategy.home, AgentConfig(server_name="brigado_2"))
+    save_full_config(strategy.home, {"server_name": "brigado_2"})
 
     summary = _brigado()
     listed = next(s for s in summary["strategies"] if s["slug"] == "brl_mm")
@@ -93,7 +93,7 @@ def test_each_strategy_carries_the_server_its_records_were_read_from(env):
 
 def test_a_strategy_that_declares_no_server_reports_none(env):
     strategy = StrategyStore().create(agent_slug="brigado", name="BRL MM")
-    save_agent_config(strategy.home, AgentConfig(server_name=""))
+    save_full_config(strategy.home, {"server_name": ""})
 
     listed = next(s for s in _brigado()["strategies"] if s["slug"] == "brl_mm")
     assert listed["server_name"] == ""

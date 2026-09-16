@@ -127,32 +127,6 @@ class AgentConfig(BaseModel):
         return cls(**cleaned)
 
 
-def load_agent_config(
-    agent_dir: Path, defaults: dict[str, Any] | None = None
-) -> AgentConfig:
-    """Load config from config.yml in the agent directory, falling back to defaults."""
-    config_path = agent_dir / "config.yml"
-    if config_path.exists():
-        try:
-            data = yaml.safe_load(config_path.read_text()) or {}
-            return AgentConfig(**data)
-        except Exception:
-            pass
-    if defaults:
-        return AgentConfig.from_dict(defaults)
-    return AgentConfig()
-
-
-def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
-    """Save config to config.yml in the agent directory."""
-    config_path = agent_dir / "config.yml"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        config_path,
-        yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False),
-    )
-
-
 def load_full_config(
     agent_dir: Path, defaults: dict[str, Any] | None = None
 ) -> dict[str, Any]:
