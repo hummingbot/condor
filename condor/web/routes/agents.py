@@ -2943,6 +2943,33 @@ def _authorized_engines_for(slug: str, sslug: str, user: WebUser) -> list:
     ]
 
 
+def _target_engines(
+    slug: str,
+    sslug: str,
+    agent_id: str | None,
+    user: WebUser,
+    *,
+    running_only: bool = False,
+) -> list:
+    """The engines a lifecycle verb acts on, or the one not-found 404.
+
+    Named ``agent_id``: that engine alone (403 if it is someone else's, see
+    ``_authorized_engine``). No ``agent_id``: every engine of this strategy the
+    caller may act on, since the dashboard never names an instance and a
+    strategy can run several at once. ``running_only`` drops engines whose tick
+    task has finished; a paused engine still counts as running.
+    """
+    if agent_id:
+        engines = [_authorized_engine(agent_id, user)]
+    else:
+        engines = _authorized_engines_for(slug, sslug, user)
+    if running_only:
+        engines = [e for e in engines if e.is_running]
+    if not engines:
+        raise HTTPException(status_code=404, detail="No running strategy found")
+    return engines
+
+
 @router.post("/{slug}/strategies/{sslug}/stop")
 async def stop_strategy(
     slug: str,
@@ -2951,14 +2978,8 @@ async def stop_strategy(
     user: WebUser = Depends(get_current_user),
 ):
     """Stop a running strategy. If agent_id given, stop that instance; else all."""
-    if agent_id:
-        await _authorized_engine(agent_id, user).stop()
-    else:
-        engines = _authorized_engines_for(slug, sslug, user)
-        if not engines:
-            raise HTTPException(status_code=404, detail="No running strategy found")
-        for engine in engines:
-            await engine.stop()
+    for engine in _target_engines(slug, sslug, agent_id, user):
+        await engine.stop()
     return {"stopped": True}
 
 
@@ -2975,15 +2996,8 @@ async def shutdown_strategy(
     given, only that instance is wound down; otherwise every running instance of
     this strategy is.
     """
-    reason = "manual emergency stop"
-    if agent_id:
-        await _authorized_engine(agent_id, user)._run_shutdown(reason=reason)
-    else:
-        engines = _authorized_engines_for(slug, sslug, user)
-        if not engines:
-            raise HTTPException(status_code=404, detail="No running strategy found")
-        for engine in engines:
-            await engine._run_shutdown(reason=reason)
+    for engine in _target_engines(slug, sslug, agent_id, user):
+        await engine._run_shutdown(reason="manual emergency stop")
     return {"shutdown": True}
 
 
@@ -2994,21 +3008,9 @@ async def pause_strategy(
     agent_id: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Pause a running strategy."""
-    if agent_id:
-        engine = _authorized_engine(agent_id, user)
-        if not engine.is_running:
-            raise HTTPException(
-                status_code=404, detail=f"Agent '{agent_id}' not found or not running"
-            )
+    """Pause a running strategy. If agent_id given, pause that instance; else all."""
+    for engine in _target_engines(slug, sslug, agent_id, user, running_only=True):
         engine.pause()
-    else:
-        engines = [
-            e for e in _authorized_engines_for(slug, sslug, user) if e.is_running
-        ]
-        if not engines:
-            raise HTTPException(status_code=404, detail="No running strategy found")
-        engines[0].pause()
     return {"paused": True}
 
 
@@ -3019,14 +3021,9 @@ async def resume_strategy(
     agent_id: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Resume a paused strategy."""
-    if agent_id:
-        _authorized_engine(agent_id, user).resume()
-    else:
-        engines = _authorized_engines_for(slug, sslug, user)
-        if not engines:
-            raise HTTPException(status_code=404, detail="No strategy found")
-        engines[0].resume()
+    """Resume a paused strategy. If agent_id given, resume that instance; else all."""
+    for engine in _target_engines(slug, sslug, agent_id, user):
+        engine.resume()
     return {"resumed": True}
 
 

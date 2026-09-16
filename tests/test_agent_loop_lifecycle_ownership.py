@@ -124,3 +124,60 @@ def test_an_unowned_restored_loop_is_admin_only(engine, verb):
 
     assert _post(ADMIN, verb, engine.agent_id).status_code == 200
     assert engine.calls == [verb]
+
+
+# ── ARCH-689: one targeting helper for all four verbs ──
+
+
+@pytest.fixture
+def no_engines(monkeypatch):
+    monkeypatch.setattr(
+        "config_manager.get_config_manager", lambda: FakeConfigManager()
+    )
+    monkeypatch.setattr(engine_module, "get_engine", lambda aid: None)
+    monkeypatch.setattr(routes, "_get_engines_for", lambda slug, sslug: [])
+
+
+def test_every_verb_gives_the_same_not_found_detail(no_engines):
+    details = set()
+    for verb in VERBS:
+        res = _post(OWNER, verb)
+        assert res.status_code == 404
+        details.add(res.json()["detail"])
+
+    assert details == {"No running strategy found"}
+
+
+def test_pausing_a_finished_engine_by_id_uses_the_broadcast_wording(engine):
+    engine.is_running = False
+
+    by_id = _post(OWNER, "pause", engine.agent_id)
+    broadcast = _post(OWNER, "pause")
+
+    assert by_id.status_code == broadcast.status_code == 404
+    assert by_id.json()["detail"] == broadcast.json()["detail"]
+    assert engine.calls == []
+
+
+def test_pausing_a_paused_but_running_engine_by_id_still_succeeds(engine):
+    """``TickEngine.is_running`` ignores ``_paused``: a second pause is a no-op 200."""
+    assert _post(OWNER, "pause", engine.agent_id).status_code == 200
+    assert _post(OWNER, "pause", engine.agent_id).status_code == 200
+
+    assert engine.calls == ["pause", "pause"]
+
+
+@pytest.mark.parametrize("verb", VERBS)
+def test_the_broadcast_reaches_every_instance_of_the_strategy(monkeypatch, verb):
+    """The dashboard never names an instance, so every verb must hit them all."""
+    first = FakeEngine("agent-1", OWNER.id)
+    second = FakeEngine("agent-2", OWNER.id)
+    monkeypatch.setattr(
+        "config_manager.get_config_manager", lambda: FakeConfigManager()
+    )
+    monkeypatch.setattr(routes, "_get_engines_for", lambda slug, sslug: [first, second])
+
+    assert _post(OWNER, verb).status_code == 200
+
+    assert first.calls == [verb]
+    assert second.calls == [verb]
