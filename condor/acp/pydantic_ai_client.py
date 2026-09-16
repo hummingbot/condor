@@ -63,6 +63,11 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 # session (user chat, trading tick, etc.) holds it.
 _SERVER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 
+# How often the MCP lifecycle task checks its stdio transports for a dead
+# server between shutdown checks (CORR-332). A killed subprocess never raises
+# out of ``run_mcp_servers()``; it only closes the session's streams.
+MCP_TRANSPORT_POLL_SECONDS = 2.0
+
 
 def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
     if base_url not in _SERVER_SEMAPHORES:
@@ -352,6 +357,23 @@ def gated_toolset_cls() -> Any:
 
     _GATED_TOOLSET_CLS = PermissionGatedToolset
     return _GATED_TOOLSET_CLS
+
+
+def _dead_transport(servers: list[Any]) -> str | None:
+    """Label of the first MCP server whose session streams are closed, if any.
+
+    When an MCP subprocess dies, the stdio reader hits EOF and the MCP
+    session's receive loop closes both of its streams. Nothing raises until
+    the next request (``anyio.ClosedResourceError``), so a closed stream is
+    the only signal there is (CORR-332). ``_closed`` is anyio's memory-stream
+    flag; a server that has not opened its streams reads as healthy.
+    """
+    for server in servers:
+        for attr in ("_read_stream", "_write_stream"):
+            stream = getattr(server, attr, None)
+            if stream is not None and getattr(stream, "_closed", False):
+                return getattr(server, "command", None) or repr(server)
+    return None
 
 
 class PydanticAIClient:
@@ -811,10 +833,19 @@ class PydanticAIClient:
         fresh client, instead of quietly handing prompts to a toolless one
         (CORR-332). ``CancelledError`` is never converted into a normal return.
         """
+        servers = list(self._mcp_servers)
         try:
             async with self._agent.run_mcp_servers():
                 self._ready_event.set()
-                await self._shutdown_event.wait()
+                while not self._shutdown_event.is_set():
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(
+                            self._shutdown_event.wait(),
+                            timeout=MCP_TRANSPORT_POLL_SECONDS,
+                        )
+                    dead = _dead_transport(servers)
+                    if dead is not None and not self._shutdown_event.is_set():
+                        raise ConnectionError(f"MCP server transport closed: {dead}")
         except asyncio.CancelledError as exc:
             # Unblock start() if we were cancelled before ready, then stay
             # visibly cancelled rather than completing "successfully".
@@ -830,13 +861,34 @@ class PydanticAIClient:
                 self._startup_error = exc
                 self._ready_event.set()
                 return
-            log.exception(
-                "MCP server lifecycle failed after startup (model=%s); "
-                "marking client dead so a new one is built",
-                self.model_name,
-            )
-            self._lifecycle_error = exc
+            if self._lifecycle_error is None:
+                # Not already reported by a prompt that hit the dead transport.
+                log.exception(
+                    "MCP server lifecycle failed after startup (model=%s); "
+                    "marking client dead so a new one is built",
+                    self.model_name,
+                )
+                self._lifecycle_error = exc
             self._teardown_after_lifecycle_failure()
+
+    def _mark_dead_if_transport_closed(self, exc: BaseException) -> None:
+        """A turn failed: if an MCP transport is gone, the client is dead.
+
+        The prompt usually meets a killed subprocess before the lifecycle
+        task's next poll does, so don't leave ``alive`` True in between. The
+        lifecycle task still exits on its next poll and closes the servers.
+        """
+        dead = _dead_transport(self._mcp_servers)
+        if dead is None or self._lifecycle_error is not None:
+            return
+        log.error(
+            "MCP server transport closed mid-session (model=%s, server=%s); "
+            "marking client dead so a new one is built",
+            self.model_name,
+            dead,
+        )
+        self._lifecycle_error = exc
+        self._teardown_after_lifecycle_failure()
 
     def _teardown_after_lifecycle_failure(self) -> None:
         """Drop the agent so ``alive`` cannot report a toolless client healthy."""
@@ -1039,6 +1091,7 @@ class PydanticAIClient:
                 yield PromptDone(stop_reason="timeout")
             except Exception as e:
                 log.exception("PydanticAI prompt error: %s", e)
+                self._mark_dead_if_transport_closed(e)
                 yield TextChunk(text=self._format_error(e))
                 yield PromptDone(stop_reason="error")
 
