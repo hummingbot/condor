@@ -954,3 +954,96 @@ def test_bot_universe_degrades_a_failed_snapshot_to_an_empty_live_set():
     finally:
         clear_snapshot_cache()
         clear_archived_cache()
+
+
+# ── ARCH-690: one AgentPerformance -> AgentPerformanceModel projection ──
+
+
+def _every_field_perf():
+    from condor.agents.performance import AgentPerformance
+
+    return AgentPerformance(
+        agent_id="demo.s_3",
+        realized_pnl=1.5,
+        unrealized_pnl=-0.25,
+        total_pnl=1.25,
+        volume=900.0,
+        fees=0.75,
+        trade_count=4,
+        win_rate=0.5,
+        open_count=1,
+        closed_count=3,
+        executors=[{"id": "ex1", "custom_info": {"k": 1}}],
+        bot_names=["bot-a"],
+        bot_instances=["bot-a-1", "bot-a-2"],
+        controllers=[{"id": "ctrl-1"}],
+        close_type_counts={"CloseType.TAKE_PROFIT": 2},
+        fees_known=False,
+        unresolved_bases=["gone-bot"],
+    )
+
+
+def test_from_perf_carries_every_dataclass_field():
+    from dataclasses import fields
+
+    from condor.agents.performance import AgentPerformance
+
+    p = _every_field_perf()
+    # Guard the fixture itself: every field must differ from its default, or a
+    # dropped field would still compare equal.
+    default = AgentPerformance(agent_id="other")
+    for f in fields(p):
+        assert getattr(p, f.name) != getattr(default, f.name), f.name
+
+    dumped = AgentPerformanceModel.from_perf(p, agent_id=p.agent_id).model_dump()
+    shared = [f.name for f in fields(p) if f.name in AgentPerformanceModel.model_fields]
+    assert len(shared) == len(fields(p))  # the model covers the whole dataclass
+    for name in shared:
+        assert dumped[name] == getattr(p, name), name
+    assert "bot_name" not in dumped
+
+    assert AgentPerformanceModel.from_perf(p, session_num=7).session_num == 7
+    model = AgentPerformanceModel.from_perf(
+        p, agent_id="override", kind="experiment", error=True
+    )
+    assert (model.agent_id, model.kind, model.error) == ("override", "experiment", True)
+
+
+def test_instance_from_engine_takes_money_fields_off_the_perf_row(monkeypatch):
+    import condor.agents.fleet_map as fleet_map
+    from condor.web.routes.agents import _instance_from_engine
+
+    monkeypatch.setattr(fleet_map, "read_last_action", lambda journal: "")
+    monkeypatch.setattr(fleet_map, "read_last_did", lambda engine: None)
+
+    class _Engine:
+        journal = None
+
+        def get_info(self):
+            return {
+                "agent_id": "demo.s_3",
+                "session_num": 3,
+                "status": "running",
+                "tick_count": 9,
+                "daily_pnl": 42.0,
+            }
+
+    row = AgentPerformanceModel.from_perf(_every_field_perf(), session_num=3)
+    inst = _instance_from_engine(_Engine(), {"demo.s_3": row})
+    assert inst.daily_pnl == row.total_pnl
+    for name in (
+        "realized_pnl",
+        "unrealized_pnl",
+        "total_pnl",
+        "volume",
+        "fees",
+        "open_count",
+        "closed_count",
+        "win_rate",
+    ):
+        assert getattr(inst, name) == getattr(row, name), name
+
+    bare = _instance_from_engine(_Engine(), {})
+    assert bare.daily_pnl == 42.0
+    assert (bare.realized_pnl, bare.total_pnl, bare.open_count) == (0.0, 0.0, 0)
+    assert bare.win_rate is None

@@ -23,8 +23,9 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import asdict
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -56,6 +57,9 @@ from condor.web.auth import (
     report_owner_filter,
 )
 from condor.web.models import ReportSummary, WebUser
+
+if TYPE_CHECKING:
+    from condor.agents.performance import AgentPerformance
 
 # ── Simple in-memory TTL cache for performance data ──
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
@@ -247,6 +251,24 @@ class AgentPerformanceModel(BaseModel):
     controllers: list[dict[str, Any]] = []
     close_type_counts: dict[str, int] = {}
     fees_known: bool = True
+
+    @classmethod
+    def from_perf(cls, perf: AgentPerformance, **overrides) -> AgentPerformanceModel:
+        """Project an ``AgentPerformance`` onto the wire model by field name.
+
+        The one place dataclass fields map onto this model, so a field added to
+        both reaches every route without being threaded through by hand. The copy
+        is shallow on purpose: ``perf.to_dict()`` goes through ``asdict``, which
+        deep-copies every executor row, and adds ``bot_name``, which is not a
+        field here. ``overrides`` carry what the dataclass does not know (the
+        session number, kind, experiment metadata).
+        """
+        values = {
+            f.name: getattr(perf, f.name)
+            for f in dataclass_fields(perf)
+            if f.name in cls.model_fields
+        }
+        return cls(**{**values, **overrides})
 
 
 class StrategyPerformanceResponse(BaseModel):
@@ -1059,7 +1081,8 @@ async def _compute_strategy_performance(
             ):
                 _closed_perf_put(agent_id, perf)
             sessions.append(
-                AgentPerformanceModel(
+                AgentPerformanceModel.from_perf(
+                    perf,
                     agent_id=agent_id,
                     session_num=num,
                     kind=kind,
@@ -1073,16 +1096,6 @@ async def _compute_strategy_performance(
                         if kind == "experiment"
                         else False
                     ),
-                    realized_pnl=perf.realized_pnl,
-                    unrealized_pnl=perf.unrealized_pnl,
-                    total_pnl=perf.total_pnl,
-                    volume=perf.volume,
-                    fees=perf.fees,
-                    trade_count=perf.trade_count,
-                    win_rate=perf.win_rate,
-                    open_count=perf.open_count,
-                    closed_count=perf.closed_count,
-                    executors=perf.executors,
                 )
             )
 
@@ -1130,6 +1143,20 @@ async def _compute_strategy_performance(
     return result
 
 
+#: The money fields a running instance carries off its session's performance
+#: row; absent a row, ``RunningInstance``'s own defaults apply.
+_INSTANCE_PERF_FIELDS = {
+    "realized_pnl",
+    "unrealized_pnl",
+    "total_pnl",
+    "volume",
+    "fees",
+    "open_count",
+    "closed_count",
+    "win_rate",
+}
+
+
 def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
     # The same two reads the fleet band makes per live engine — a cached
     # summary read and a tail of actions.jsonl — reused rather than re-derived,
@@ -1145,14 +1172,7 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         status=info["status"],
         tick_count=info["tick_count"],
         daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
-        realized_pnl=p.realized_pnl if p else 0.0,
-        unrealized_pnl=p.unrealized_pnl if p else 0.0,
-        total_pnl=p.total_pnl if p else 0.0,
-        volume=p.volume if p else 0.0,
-        fees=p.fees if p else 0.0,
-        open_count=p.open_count if p else 0,
-        closed_count=p.closed_count if p else 0,
-        win_rate=p.win_rate if p else None,
+        **(p.model_dump(include=_INSTANCE_PERF_FIELDS) if p else {}),
         server_name=info.get("server_name", ""),
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
@@ -2721,30 +2741,13 @@ async def get_session_executors(
     perf = await fetch_agent_performance(
         client, agent_id, bot_names=bot_names, since=since
     )
-    model = AgentPerformanceModel(
-        agent_id=agent_id,
-        session_num=session_num,
-        realized_pnl=perf.realized_pnl,
-        unrealized_pnl=perf.unrealized_pnl,
-        total_pnl=perf.total_pnl,
-        volume=perf.volume,
-        fees=perf.fees,
-        trade_count=perf.trade_count,
-        win_rate=perf.win_rate,
-        open_count=perf.open_count,
-        closed_count=perf.closed_count,
-        executors=perf.executors,
-        bot_names=perf.bot_names,
-        bot_instances=perf.bot_instances,
-        unresolved_bases=perf.unresolved_bases,
-        controllers=perf.controllers,
-        # Base-lifetime, not window-sliced: the payload counts closes per
-        # controller with no timestamp to slice on. Equal to the session's own
-        # closes whenever the session deployed the bases it owns (the normal
-        # case); a superset when it adopted a base another session had traded.
-        # The UI labels it as the bots' breakdown for exactly that reason.
-        close_type_counts=perf.close_type_counts,
-        fees_known=perf.fees_known,
+    # close_type_counts is base-lifetime, not window-sliced: the payload counts
+    # closes per controller with no timestamp to slice on. Equal to the session's
+    # own closes whenever the session deployed the bases it owns (the normal
+    # case); a superset when it adopted a base another session had traded.
+    # The UI labels it as the bots' breakdown for exactly that reason.
+    model = AgentPerformanceModel.from_perf(
+        perf, agent_id=agent_id, session_num=session_num
     )
     # The equity curve, sliced from the same ownership window as the figures
     # above. The journal's per-tick snapshots are only what the aggregator

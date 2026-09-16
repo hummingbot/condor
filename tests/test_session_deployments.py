@@ -10,26 +10,24 @@ snapshot's ``status``, and that an unjoinable tick is blank rather than guessed.
 from condor.agents.actions import AgentAction
 from condor.agents.attribution import build_deployments
 from condor.agents.ownership import OwnedBot
+from condor.agents.performance import AgentPerformance
 
 AGENT_ID = "brigado.brl_mm_3"
 
 
-class _Perf:
-    """The fields of ``AgentPerformance`` the ledger reads, and nothing else."""
+def _Perf(*, bot_names=(), bot_instances=(), controllers=(), executors=()):
+    """An ``AgentPerformance`` carrying only what the ledger reads.
 
-    def __init__(self, *, bot_names=(), bot_instances=(), controllers=(), executors=()):
-        self.bot_names = list(bot_names)
-        self.bot_instances = list(bot_instances)
-        self.controllers = list(controllers)
-        self.executors = list(executors)
-        # The rest of the aggregate, so the same double serves the route test.
-        self.realized_pnl = self.unrealized_pnl = self.total_pnl = 0.0
-        self.volume = self.fees = 0.0
-        self.trade_count = self.open_count = self.closed_count = 0
-        self.win_rate = None
-        self.unresolved_bases = []
-        self.close_type_counts = {}
-        self.fees_known = True
+    The real dataclass, not a look-alike: the session route projects it onto
+    the wire model by dataclass field (``AgentPerformanceModel.from_perf``).
+    """
+    return AgentPerformance(
+        agent_id=AGENT_ID,
+        bot_names=list(bot_names),
+        bot_instances=list(bot_instances),
+        controllers=list(controllers),
+        executors=list(executors),
+    )
 
 
 def _controller(bot_name, cid, pnl=0.0, volume=0.0, status="running"):
