@@ -3463,16 +3463,13 @@ async def get_session_report(
     _get_strategy(slug, sslug)
     from condor.reports import list_reports
 
-    run_key = _runkey(slug, sslug)
-    source = f"{run_key}/session_{session_num}"
     reports, _total = list_reports(
         source_type="routine",
-        search=run_key,
-        limit=100,
+        source_name=f"{_runkey(slug, sslug)}/session_{session_num}",
+        limit=1,
         owner_id=report_owner_filter(user),
     )
-    matched = [r for r in reports if r.get("source_name", "") == source]
-    return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
+    return {"report": ReportSummary(**reports[0]).model_dump() if reports else None}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/actions")
@@ -3602,16 +3599,13 @@ async def get_strategy_reports(
     _get_strategy(slug, sslug)  # validate exists
     from condor.reports import list_reports
 
-    run_key = _runkey(slug, sslug)
-    prefix = f"{run_key}/"
-    reports, _total = list_reports(
+    reports, total = list_reports(
         source_type="routine",
-        search=run_key,
+        source_prefix=f"{_runkey(slug, sslug)}/",
         limit=limit,
         owner_id=report_owner_filter(user),
     )
-    matched = [r for r in reports if r.get("source_name", "").startswith(prefix)]
     return {
-        "reports": [ReportSummary(**r).model_dump() for r in matched],
-        "total": len(matched),
+        "reports": [ReportSummary(**r).model_dump() for r in reports],
+        "total": total,
     }

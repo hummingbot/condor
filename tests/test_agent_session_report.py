@@ -354,8 +354,7 @@ def test_a_live_session_publishes_one_report_the_strategy_page_finds(
     _silent_tick(engine, monkeypatch)
 
     # Exactly what condor/web/routes/agents.py:get_strategy_reports does.
-    reports, _ = rep.list_reports(source_type="routine", search="brigado.grid")
-    matched = [r for r in reports if r["source_name"].startswith("brigado.grid/")]
+    matched, _ = rep.list_reports(source_type="routine", source_prefix="brigado.grid/")
 
     assert len(matched) == 1
     assert matched[0]["source_name"] == f"brigado.grid/session_{engine.session_num}"
