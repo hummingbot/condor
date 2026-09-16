@@ -37,6 +37,9 @@ dependencies = [
     # Brings py-vapid and http-ece; cryptography was already here via
     # python-jose[cryptography].
     "pywebpush>=2.5.0",
+    # Avoid the asyncio CancelScope delivery spin fixed in AnyIO 4.14.2.
+    # A completed task retained by a scope could otherwise pin one CPU core.
+    "anyio>=4.14.2,<5",
 ]
 
 [dependency-groups]
