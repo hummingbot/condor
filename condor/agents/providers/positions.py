@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from condor.fetchers.tracked_positions import fetch_tracked_positions
+
 from . import register_provider
 from .base import BaseProvider, ProviderResult
 
@@ -23,8 +25,8 @@ class PositionsProvider(BaseProvider):
         # bot_names is part of the provider contract but irrelevant here: positions
         # are queried by controller_id, not by bot.
         try:
-            result = await client.executors.get_positions_summary(
-                controller_id=agent_id or None,
+            positions = await fetch_tracked_positions(
+                client, controller_id=agent_id or None, strict=True
             )
         except Exception as e:
             return ProviderResult(
@@ -32,12 +34,6 @@ class PositionsProvider(BaseProvider):
                 data={"error": str(e)},
                 summary=f"Positions Summary: failed to fetch ({e})",
             )
-
-        positions = (
-            result.get("positions", result) if isinstance(result, dict) else result
-        )
-        if not isinstance(positions, list):
-            positions = [positions] if positions else []
 
         if not positions:
             label = f" [agent: {agent_id}]" if agent_id else ""

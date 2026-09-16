@@ -20,6 +20,7 @@ import asyncio
 import logging
 from typing import Any
 
+from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.frontmatter import parse_frontmatter
 from condor.runtime.timeouts import resolve_tick_timeout
 
@@ -186,18 +187,15 @@ async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
 
 
 async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
-    """Positions summary scoped to this session (``controller_id``)."""
-    try:
-        result = await client.executors.get_positions_summary(
-            controller_id=agent_id or None
-        )
-    except Exception:
-        log.exception("shutdown: failed to fetch positions summary")
-        return []
-    positions = result.get("positions", result) if isinstance(result, dict) else result
-    if not isinstance(positions, list):
-        positions = [positions] if positions else []
-    return [p for p in positions if isinstance(p, dict)]
+    """Positions summary scoped to this session (``controller_id``).
+
+    Non-strict on purpose: ``run_shutdown`` never raises for an individual API
+    failure and ``_verify_and_retry`` calls this unguarded, so a failed request
+    is logged by the fetcher and reads as no positions.
+    """
+    return await fetch_tracked_positions(
+        client, controller_id=agent_id or None, strict=False
+    )
 
 
 async def _deterministic_baseline(

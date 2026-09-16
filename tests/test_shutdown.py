@@ -520,3 +520,23 @@ def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
     assert dict(client.executors.stop_calls) == {"e1": False}
     assert any("complete" in n for n in notes)
     assert not any("🚨" in n for n in notes)
+
+
+def test_winddown_survives_a_positions_fetch_failure_during_verify(
+    tmp_path, monkeypatch
+):
+    """_verify_and_retry calls the positions fetch unguarded, so it must go
+    through the non-strict fetcher: a failed request reads as no positions and
+    the winddown still completes instead of propagating ([[ARCH-682]])."""
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+
+    async def boom(controller_id=None):
+        raise RuntimeError("positions endpoint down")
+
+    monkeypatch.setattr(client.executors, "get_positions_summary", boom)
+    asyncio.run(run_shutdown(engine, "test breach"))
+
+    assert ("shutdown_done", "stopped=1, failures=0, verify=flat") in [
+        (a, r) for a, r in engine.journal.actions
+    ]
