@@ -235,7 +235,7 @@ def _loop_runs() -> Iterator[tuple[Path, str, str]]:
     and never declared. Experiments are deliberately absent: a dry run's ledger
     is in-memory only (``BotLedger`` with no path), so there is nothing to read.
     """
-    from condor.agents.sessions_index import SESSION_DIRNAMES
+    from condor.agents.sessions_index import iter_session_dirs
     from condor.agents.strategy import StrategyStore
 
     try:
@@ -244,19 +244,8 @@ def _loop_runs() -> Iterator[tuple[Path, str, str]]:
         log.debug("deed_index: could not list strategies", exc_info=True)
         return
     for strategy in strategies:
-        for dirname in SESSION_DIRNAMES:
-            try:
-                children = sorted((strategy.home / dirname).iterdir())
-            except OSError:
-                continue
-            for child in children:
-                if not child.is_dir() or not child.name.startswith("session_"):
-                    continue
-                try:
-                    num = int(child.name.split("_", 1)[1])
-                except (ValueError, IndexError):
-                    continue
-                yield child, strategy.key, f"s{num}"
+        for num, session_dir in iter_session_dirs(strategy.home):
+            yield session_dir, strategy.key, f"s{num}"
 
 
 def _run_key_of(directory: Path, strategy: str) -> str:

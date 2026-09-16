@@ -20,6 +20,7 @@ from starlette.routing import Match
 from condor.agents import agent as agent_module
 from condor.agents import sessions_index
 from condor.agents import strategy as strategy_module
+from condor.agents.journal import iter_session_dirs, next_session_number
 from condor.agents.sessions_index import infer_latest_session_status, list_runs
 from condor.runtime.registry_file import BOOT_ID
 from condor.web.routes.agents import router
@@ -249,6 +250,68 @@ def test_a_legacy_trading_sessions_layout_is_listed_once(tmp_path):
     assert sorted(r["run_id"] for r in rows) == ["s1", "s2"]
     # The current directory name wins the collision.
     assert next(r for r in rows if r["run_id"] == "s1")["tick_count"] == 7
+
+
+def test_every_enumerator_agrees_on_a_dual_layout_strategy(tmp_path):
+    """Old sessions under ``trading_sessions/``, newer ones under ``sessions/``
+    (where the engine always writes): count, list, runs, ids and the next
+    number must all see the same two sessions (ARCH-663)."""
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, ticks=1, dirname="sessions")
+    _write_session(strategy_dir, 1, ticks=1, dirname="trading_sessions")
+    _write_session(strategy_dir, 2, ticks=1, dirname="trading_sessions")
+
+    sessions = sessions_index.list_sessions(strategy_dir)
+    runs = list_runs(strategy_dir, "brigado.brl_mm")
+    session_ids = [
+        t
+        for t in sessions_index.enumerate_agent_ids("brigado.brl_mm", strategy_dir)
+        if t[2] == "session"
+    ]
+    assert sessions_index.count_sessions(strategy_dir) == 2
+    assert len(sessions) == len(runs) == len(session_ids) == 2
+    assert sorted(s["number"] for s in sessions) == [1, 2]
+    # The next run must not reuse the legacy session_2's number (and agent_id).
+    assert next_session_number(strategy_dir) == 3
+
+
+def test_sessions_are_listed_newest_first_by_number_not_by_name(tmp_path):
+    """``session_10`` sorts before ``session_9`` as a string."""
+    strategy_dir = tmp_path / "brl_mm"
+    for n in range(1, 12):
+        _write_session(strategy_dir, n, snapshots=1 if n == 10 else 0)
+
+    rows = sessions_index.list_sessions(strategy_dir)
+    assert [r["number"] for r in rows] == list(range(11, 0, -1))
+    ten = next(r for r in rows if r["number"] == 10)
+    assert ten["snapshot_count"] == 1
+    assert float(ten["created_at"]) > 0
+
+
+def test_entries_that_are_not_session_directories_are_skipped(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, ticks=1)
+    sessions = strategy_dir / "sessions"
+    (sessions / ".DS_Store").write_text("")
+    (sessions / "notes").mkdir()
+    (sessions / "session_draft").mkdir()
+    (sessions / "session_7").write_text("a file, not a session")
+    # A dirname that exists as a file is not a session directory either.
+    (strategy_dir / "trading_sessions").write_text("")
+
+    assert iter_session_dirs(strategy_dir) == [(1, sessions / "session_1")]
+    assert [r["number"] for r in sessions_index.list_sessions(strategy_dir)] == [1]
+    assert sessions_index.count_sessions(strategy_dir) == 1
+    assert next_session_number(strategy_dir) == 2
+
+
+def test_a_session_without_a_journal_lists_an_empty_created_at(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    (strategy_dir / "sessions" / "session_1").mkdir(parents=True)
+
+    assert sessions_index.list_sessions(strategy_dir) == [
+        {"number": 1, "snapshot_count": 0, "created_at": ""}
+    ]
 
 
 def test_runs_come_back_newest_first(tmp_path):

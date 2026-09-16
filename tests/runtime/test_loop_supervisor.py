@@ -172,6 +172,20 @@ def test_reconcile_marks_interrupted(tmp_path):
     assert "brigado.mm session 1" in report.summary()
 
 
+def test_reconcile_settles_past_entries_that_are_not_sessions(tmp_path):
+    """Stray files and folders under ``sessions/`` are skipped, not fatal."""
+    session_dir = _seed_session(tmp_path, tick=3)
+    (session_dir.parent / ".DS_Store").write_text("")
+    notes = session_dir.parent / "notes"
+    notes.mkdir()
+    (notes / "status.json").write_text(json.dumps({"state": LoopState.RUNNING}))
+
+    report = asyncio.run(LoopSupervisor().reconcile_boot(agents_root=tmp_path))
+
+    assert report.total == 1
+    assert read_status(session_dir)["state"] == LoopState.INTERRUPTED
+
+
 def test_reconcile_closes_ownership_at_the_last_recorded_instant(tmp_path):
     """The orphan gap between a crash and the reboot belongs to no session.
 

@@ -174,23 +174,40 @@ Duration: {duration:.1f}s
 """
 
 
+# Session directory names, current first. A strategy that ran before the rename
+# can hold both, and the current name wins when both hold the same number.
+SESSION_DIRNAMES = ("sessions", "trading_sessions")
+
+
+def iter_session_dirs(strategy_dir: Path) -> list[tuple[int, Path]]:
+    """Every ``session_N`` directory of a strategy, as ``(N, dir)`` ascending by N.
+
+    The one walk over the session layout: each dirname of ``SESSION_DIRNAMES``
+    in order, the first one holding a number keeps it, and anything that is not
+    a directory named ``session_<int>`` is skipped. Counting, listing, settling
+    and numbering the next session all read this, so they cannot disagree about
+    which sessions exist.
+    """
+    found: dict[int, Path] = {}
+    for dirname in SESSION_DIRNAMES:
+        try:
+            children = list((strategy_dir / dirname).iterdir())
+        except OSError:  # absent, or not a directory
+            continue
+        for child in children:
+            if not child.name.startswith("session_") or not child.is_dir():
+                continue
+            try:
+                num = int(child.name.split("_", 1)[1])
+            except ValueError:
+                continue
+            found.setdefault(num, child)
+    return sorted(found.items())
+
+
 def next_session_number(agent_dir: Path) -> int:
-    """Determine the next session number by scanning existing session_* dirs."""
-    # Check new location first
-    sessions_dir = agent_dir / "sessions"
-    if not sessions_dir.exists():
-        # Check legacy location
-        legacy_dir = agent_dir / "trading_sessions"
-        if legacy_dir.exists():
-            sessions_dir = legacy_dir
-        else:
-            return 1
-    existing = [
-        int(d.name.split("_", 1)[1])
-        for d in sessions_dir.iterdir()
-        if d.is_dir() and d.name.startswith("session_")
-    ]
-    return max(existing, default=0) + 1
+    """One past the highest session number in any session directory."""
+    return max((num for num, _ in iter_session_dirs(agent_dir)), default=0) + 1
 
 
 def next_experiment_number(agent_dir: Path) -> int:

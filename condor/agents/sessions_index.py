@@ -16,10 +16,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from condor.agents.journal import count_journal_ticks
+from condor.agents.journal import (
+    SESSION_DIRNAMES,
+    count_journal_ticks,
+    iter_session_dirs,
+)
 
 # New and legacy directory names, checked in order.
-SESSION_DIRNAMES = ("sessions", "trading_sessions")
 EXPERIMENT_DIRNAMES = ("dry_runs", "experiments")
 _SNAPSHOT_DIRNAMES = ("snapshots", "runs")
 
@@ -40,24 +43,11 @@ def infer_latest_session_status(
     """
     from condor.runtime.registry_file import read_status
 
-    session_dirs: list[Path] = []
-    for dirname in SESSION_DIRNAMES:
-        sessions_dir = strategy_dir / dirname
-        if not sessions_dir.exists():
-            continue
-        session_dirs.extend(
-            d
-            for d in sessions_dir.iterdir()
-            if d.is_dir() and d.name.startswith("session_")
-        )
-    if not session_dirs:
+    sessions = iter_session_dirs(strategy_dir)
+    if not sessions:
         return None
 
-    latest = max(session_dirs, key=lambda d: d.stat().st_mtime)
-    try:
-        num = int(latest.name.split("_", 1)[1])
-    except (ValueError, IndexError):
-        return None
+    num, latest = max(sessions, key=lambda s: s[1].stat().st_mtime)
 
     status = read_status(latest) or {}
     return {
@@ -71,17 +61,7 @@ def infer_latest_session_status(
 
 
 def count_sessions(strategy_dir: Path) -> int:
-    for dirname in SESSION_DIRNAMES:
-        sessions_dir = strategy_dir / dirname
-        if sessions_dir.exists():
-            return len(
-                [
-                    d
-                    for d in sessions_dir.iterdir()
-                    if d.is_dir() and d.name.startswith("session_")
-                ]
-            )
-    return 0
+    return len(iter_session_dirs(strategy_dir))
 
 
 def count_experiments(strategy_dir: Path) -> int:
@@ -102,33 +82,22 @@ def count_experiments(strategy_dir: Path) -> int:
 
 
 def list_sessions(strategy_dir: Path) -> list[dict[str, Any]]:
-    """List sessions as dicts (number, snapshot_count, created_at), newest first."""
-    sessions: list[dict[str, Any]] = []
-    for dirname in SESSION_DIRNAMES:
-        sessions_dir = strategy_dir / dirname
-        if not sessions_dir.exists():
-            continue
-        for d in sorted(sessions_dir.iterdir(), reverse=True):
-            if not d.is_dir() or not d.name.startswith("session_"):
-                continue
-            try:
-                num = int(d.name.split("_", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            snap_count = 0
-            for snap_dir_name in _SNAPSHOT_DIRNAMES:
-                snap_dir = d / snap_dir_name
-                if snap_dir.exists():
-                    snap_count = len(list(snap_dir.glob("*.md")))
-                    break
-            created = ""
-            journal_path = d / "journal.md"
-            if journal_path.exists():
-                created = str(os.path.getctime(journal_path))
-            sessions.append(
-                {"number": num, "snapshot_count": snap_count, "created_at": created}
-            )
-    return sessions
+    """List sessions as dicts (number, snapshot_count, created_at), newest first.
+
+    Newest is the highest session number. ``created_at`` is ``journal.md``'s
+    ctime as a string, or ``""`` when the session has no journal yet.
+    """
+    rows: list[dict[str, Any]] = []
+    for num, session_dir in reversed(iter_session_dirs(strategy_dir)):
+        created = _created_at(session_dir / "journal.md")
+        rows.append(
+            {
+                "number": num,
+                "snapshot_count": _snapshot_count(session_dir),
+                "created_at": "" if created is None else str(created),
+            }
+        )
+    return rows
 
 
 # Experiment snapshots are write-once (save_experiment_snapshot allocates a new
@@ -303,8 +272,8 @@ def _journal_tick_count(journal_path: Path) -> int:
 def _created_at(path: Path) -> float | None:
     """Creation time as a float, or ``None`` when the file is not there.
 
-    ``list_sessions`` already sorts on ``journal.md``'s ctime, so runs sort on
-    the same fact rather than on a second definition of when a run began. It is
+    ``list_sessions`` reports ``journal.md``'s ctime through this, and runs sort
+    on the same fact rather than on a second definition of when a run began. It is
     the file's creation and not the first tick's timestamp — close enough to
     order a rail and to say "2h ago", never close enough to call a trade's start.
     """
@@ -408,25 +377,10 @@ def list_runs(strategy_dir: Path, run_key: str) -> list[dict[str, Any]]:
     for ``experiment_1.md``. Unique within a strategy, which is all the URL
     needs, since the strategy is a separate parameter.
     """
-    runs: list[dict[str, Any]] = []
-    seen: set[int] = set()
-    for dirname in SESSION_DIRNAMES:
-        sessions_dir = strategy_dir / dirname
-        if not sessions_dir.is_dir():
-            continue
-        for d in sorted(sessions_dir.iterdir()):
-            if not d.is_dir() or not d.name.startswith("session_"):
-                continue
-            try:
-                num = int(d.name.split("_", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            # A legacy `trading_sessions/` layout beside the current one must
-            # not list session 1 twice; the current name is checked first.
-            if num in seen:
-                continue
-            seen.add(num)
-            runs.append(_session_run(d, num, run_key))
+    runs = [
+        _session_run(session_dir, num, run_key)
+        for num, session_dir in iter_session_dirs(strategy_dir)
+    ]
 
     for info in list_experiments(strategy_dir):
         path = find_experiment_file(strategy_dir, int(info["number"]))
@@ -440,19 +394,12 @@ def list_runs(strategy_dir: Path, run_key: str) -> list[dict[str, Any]]:
 
 def enumerate_agent_ids(run_key: str, strategy_dir: Path) -> list[tuple[str, int, str]]:
     """Return (agent_id, session_num, kind) for every session and experiment on disk."""
-    ids: list[tuple[str, int, str]] = []
-    for dirname in SESSION_DIRNAMES:
-        d = strategy_dir / dirname
-        if not d.exists():
-            continue
-        for sd in d.iterdir():
-            if not sd.is_dir() or not sd.name.startswith("session_"):
-                continue
-            try:
-                n = int(sd.name.split("_", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            ids.append((f"{run_key}_{n}", n, "session"))
+    ids: list[tuple[str, int, str]] = [
+        (f"{run_key}_{n}", n, "session") for n, _ in iter_session_dirs(strategy_dir)
+    ]
+    # Experiments can sit in both a current and a legacy directory too; the
+    # first one listed keeps the number.
+    seen: set[int] = set()
     for dirname in EXPERIMENT_DIRNAMES:
         d = strategy_dir / dirname
         if not d.exists():
@@ -462,15 +409,11 @@ def enumerate_agent_ids(run_key: str, strategy_dir: Path) -> list[tuple[str, int
             if not m:
                 continue
             n = int(m.group(1))
+            if n in seen:
+                continue
+            seen.add(n)
             ids.append((f"{run_key}_e{n}", n, "experiment"))
-    seen: set[str] = set()
-    unique: list[tuple[str, int, str]] = []
-    for tup in ids:
-        if tup[0] in seen:
-            continue
-        seen.add(tup[0])
-        unique.append(tup)
-    return unique
+    return ids
 
 
 def find_session_dir(strategy_dir: Path, session_num: int) -> Path | None:
