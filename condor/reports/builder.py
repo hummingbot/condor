@@ -88,8 +88,22 @@ class ReportBuilder:
         return self
 
     def kpi(
-        self, label: str, value: str, delta: str | None = None, trend: str = "neutral"
+        self,
+        label: str,
+        value: str,
+        delta: str | None = None,
+        trend: str = "neutral",
+        width: int = 12,
     ) -> ReportBuilder:
+        """Add a KPI card.
+
+        ``width`` is the span of the report's 12-column grid taken by the whole
+        run of consecutive cards, the first card's value winning. The default
+        spans the row as before; a narrower one lets the cards sit beside a
+        figure and, below the layout's 800px breakpoint, stack under it. The
+        cards keep their own auto-fitting grid inside that span, so a narrow
+        run simply wraps to fewer per row.
+        """
         self._sections.append(
             {
                 "type": "kpi",
@@ -97,6 +111,7 @@ class ReportBuilder:
                 "value": value,
                 "delta": delta,
                 "trend": trend,
+                "width": max(1, min(12, int(width))),
             }
         )
         return self
@@ -118,8 +133,14 @@ class ReportBuilder:
         )
         return self
 
-    def plotly(self, fig: Any, optimize: bool = True) -> ReportBuilder:
+    def plotly(self, fig: Any, optimize: bool = True, width: int = 12) -> ReportBuilder:
         """Attach a Plotly figure.
+
+        ``width`` is the figure's span of the report's 12-column grid, the same
+        knob every data-bound component already takes. The default spans the
+        row, exactly as before. A narrower one lets two figures sit side by
+        side and, below the layout's 800px breakpoint, stack on their own —
+        which a single figure split internally cannot do.
 
         Large figures are re-encoded for display (see
         :mod:`condor.reports.figure_opt`): evenly spaced x arrays collapse to
@@ -139,7 +160,13 @@ class ReportBuilder:
             )
         else:
             content = fig.to_html(full_html=False, include_plotlyjs=False)
-        self._sections.append({"type": "plotly", "content": content})
+        self._sections.append(
+            {
+                "type": "plotly",
+                "content": content,
+                "width": max(1, min(12, int(width))),
+            }
+        )
         return self
 
     def table(
@@ -565,7 +592,18 @@ class ReportBuilder:
                         f'<div class="value">{html.escape(str(kpi["value"]))}</div>'
                         f"{delta_html}</div>"
                     )
-                parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
+                # A full-width run keeps the markup it has always had. A
+                # narrower one is wrapped in a grid item rather than given the
+                # span itself: `.report-grid > .kpi-bar` would beat it, and the
+                # inner bar still needs its own card grid.
+                span = kpis[0].get("width", 12)
+                bar = f'<div class="kpi-bar">{"".join(cards)}</div>'
+                parts.append(
+                    bar
+                    if span >= 12
+                    else f'<div class="report-component" '
+                    f'style="--component-span:{span}">{bar}</div>'
+                )
             elif section["type"] == "markdown":
                 parts.append(
                     '<div class="section section-md">'
@@ -573,9 +611,26 @@ class ReportBuilder:
                 )
                 index += 1
             elif section["type"] == "plotly":
-                parts.append(
-                    f'<div class="section plotly-chart report-panel">{section["content"]}</div>'
-                )
+                # A full-width figure keeps the plain section markup it has
+                # always had. A narrower one becomes a grid item instead, so it
+                # spans its columns and collapses to full width on a narrow
+                # screen; `.report-grid > .section` would otherwise force it
+                # back to the whole row.
+                span = section.get("width", 12)
+                if span < 12:
+                    # `min-height: 400px` keeps a full-width chart from being
+                    # squashed, but a narrow panel was placed deliberately
+                    # beside something else and has to be free to match it.
+                    # Inline, so it overrides the stylesheet for this panel only.
+                    parts.append(
+                        f'<div class="plotly-chart report-panel report-component" '
+                        f'style="--component-span:{span};min-height:0">'
+                        f'{section["content"]}</div>'
+                    )
+                else:
+                    parts.append(
+                        f'<div class="section plotly-chart report-panel">{section["content"]}</div>'
+                    )
                 index += 1
             elif section["type"] == "table":
                 parts.append(self._render_table(section["columns"], section["rows"]))
