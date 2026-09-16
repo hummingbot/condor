@@ -78,7 +78,8 @@ async def list_pools(
         description="source=gecko: the chain, as a Gateway network or gecko id",
     ),
     view: str = Query(
-        default="trending", description="source=gecko: trending | top | new | token"
+        default="trending",
+        description="source=gecko: trending | top | new | token | search",
     ),
     connector: str = Query(
         default="meteora", description="source=gateway: meteora | orca | raydium | ..."
@@ -86,6 +87,7 @@ async def list_pools(
     query: str | None = Query(
         default=None,
         description="source=gecko+view=token: the token address. "
+        "source=gecko+view=search: free text matched against pool and token names. "
         "source=gateway: free text matched against pool names.",
     ),
     dexes: str | None = Query(
@@ -164,6 +166,10 @@ async def list_pools(
     # A ticker would be pasted straight into a GeckoTerminal path segment.
     if view == "token" and not _ADDRESS_RE.match(token):
         raise HTTPException(status_code=400, detail="Invalid token address")
+    # view=search carries its text as a parameter, so anything is safe there —
+    # but an empty one would ask GeckoTerminal to rank the whole chain.
+    if view == "search" and not token:
+        raise HTTPException(status_code=400, detail="query is required for view=search")
 
     before = _throttle_counter()
     result = await list_gecko_pools_page(

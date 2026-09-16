@@ -1890,7 +1890,7 @@ def extract_pair_from_name(name: str) -> Tuple[str, str]:
 # web route. These are: the same upstreams, normalized, decorated and TTL-cached
 # process-wide, with no presentation attached.
 
-GECKO_POOL_VIEWS = ("trending", "top", "new", "token")
+GECKO_POOL_VIEWS = ("trending", "top", "new", "token", "search")
 
 # GeckoTerminal serves every pool list in fixed pages of 20 and answers 401 past
 # page 10, so those two numbers — not a preference of ours — bound what the pool
@@ -2115,15 +2115,24 @@ async def _gecko_page_fetch(
     key: Tuple,
 ) -> Optional[List[Dict[str, Any]]]:
     """The uncached fetch behind ``_gecko_page_rows``. One upstream request."""
+    params: Dict[str, Any] = {"page": page}
     if dex:
         path = GECKO_CONSTANTS.GET_TOP_POOLS_BY_NETWORK_DEX_PATH.format(gnet, dex)
     elif view == "token":
         path = GECKO_CONSTANTS.GET_TOP_POOLS_BY_NETWORK_TOKEN_PATH.format(gnet, token)
+    elif view == "search":
+        # Free text ("SOL USDC", a ticker, a partial name). The one view whose
+        # subject is a query rather than a chain or an address, so it is the one
+        # view that carries it in the parameters; ``POOL_SPEC`` reads dex_id out
+        # of ``relationships`` either way, so the rows need no special handling.
+        path = "search/pools"
+        params["query"] = token
+        params["network"] = gnet
     else:
         path = _GECKO_VIEW_PATHS[view].format(gnet)
 
     try:
-        payload = await gecko_request("GET", path, params={"page": page})
+        payload = await gecko_request("GET", path, params=params)
         rows = [
             row
             for row in glom(payload, GECKO_CONSTANTS.POOL_SPEC)
@@ -2240,6 +2249,8 @@ async def list_gecko_pools_page(
         view = "trending"
     token = (token or "").strip()
     if view == "token" and not ADDRESS_RE.match(token):
+        return {"pools": [], "has_more": False}
+    if view == "search" and not token:
         return {"pools": [], "has_more": False}
     limit = _clamp_pool_limit(limit)
     try:
