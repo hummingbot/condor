@@ -220,6 +220,35 @@ export function agentQuery(slug: string) {
 }
 
 /**
+ * Poll cadence for the `["agents"]` roster.
+ *
+ * One constant for the reason `EXECUTORS_REFETCH_MS` spells out: react-query
+ * drives a shared key at the *shortest* interval any observer asks for, and
+ * `GET /agents` rolls up per-strategy performance. The roster used to be
+ * declared by hand in four places at 10s, 10s, none and 30s, so the next
+ * surface to paste its own literal would have silently set everyone's cadence.
+ * 10s is what the chat surfaces need (the dock's liveness and countdowns), so
+ * Portfolio and the open chat bubble now follow it rather than 30s / a single
+ * read.
+ */
+export const AGENTS_REFETCH_MS = 10_000;
+
+/**
+ * The one declaration of `GET /agents`: key, fetch and cadence. Observe it with
+ * `useQuery(agentsQuery())` (`{ enabled }` gates a surface that only needs the
+ * roster while open) and invalidate it with `agentsQuery().queryKey`. The key
+ * value `["agents"]` is shared contract — `pageFacts` reads it from the cache.
+ */
+export function agentsQuery(opts: { enabled?: boolean } = {}) {
+  return {
+    queryKey: ["agents"] as ["agents"],
+    queryFn: () => api.getAgents(),
+    enabled: opts.enabled ?? true,
+    refetchInterval: AGENTS_REFETCH_MS,
+  };
+}
+
+/**
  * Recover the filters from an executors key, or `null` if the key is not one.
  *
  * Deliberately strict: a cache scan reaches this with arbitrary keys, and the

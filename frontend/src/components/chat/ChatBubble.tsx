@@ -22,8 +22,9 @@ import {
   isAgentPage,
   normalizeAgentSlug,
 } from "@/lib/agentSlug";
-import { api, CHAT_SLUG } from "@/lib/api";
+import { CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
+import { agentsQuery } from "@/lib/queryClient";
 import { BUBBLE_OPEN_KEY } from "@/lib/sessionState";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 
@@ -70,14 +71,9 @@ export function ChatBubble() {
   const [seen, setSeen] = useState<Record<string, number>>({});
 
   // Everything below is only needed with the panel open, so the fetch is
-  // gated — and carries no refetchInterval: the workspace's own query key, so
-  // react-query dedupes when both are mounted.
+  // gated. Key and cadence: `agentsQuery`.
   const { defaultAgent, agents: modelOptions } = useSessionOptions(open);
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents"],
-    queryFn: api.getAgents,
-    enabled: open,
-  });
+  const { data: agents = [] } = useQuery(agentsQuery({ enabled: open }));
 
   const slug = bubbleAgentSlug(pathname);
   const storedId = slotBySlug[slug];

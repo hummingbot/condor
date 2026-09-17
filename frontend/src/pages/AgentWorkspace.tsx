@@ -25,7 +25,7 @@ import {
 } from "@/components/agent/workspace/workspaceUrl";
 import { writePane } from "@/components/chat/paneUrl";
 import { api } from "@/lib/api";
-import { agentQuery, hasRunningLoop } from "@/lib/queryClient";
+import { agentQuery, agentsQuery, hasRunningLoop } from "@/lib/queryClient";
 
 /**
  * One agent, one screen, one route (FEAT-103).
@@ -66,7 +66,7 @@ export function AgentWorkspace() {
   const deleteAgentMutation = useMutation({
     mutationFn: () => api.deleteAgent(slug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: agentsQuery().queryKey });
       navigate("/");
     },
   });

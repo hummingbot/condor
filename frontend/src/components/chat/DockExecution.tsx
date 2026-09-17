@@ -23,7 +23,6 @@ import {
 import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useSeconds } from "@/hooks/useSeconds";
-import { api } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import {
   formatCompactVolume,
@@ -34,6 +33,7 @@ import {
 } from "@/lib/formatters";
 import { quoteConverter, runningLeaves } from "@/lib/perf-population";
 import { UNATTACHED_BOT, controllerNodeId, type PerfLeaf } from "@/lib/perf-tree";
+import { agentsQuery } from "@/lib/queryClient";
 
 /**
  * The columns, left to right — the header row and every body row read from it.
@@ -171,13 +171,9 @@ export function DockExecution({
   // does not chart, and the walk costs a paged request per controller.
   const fleet = useFleetData(server, { population: "running", history: false });
 
-  // Same key and interval `AgentChatTab` and the rail already poll, so the
-  // agent rows' liveness arrives with a request nobody made for them.
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents"],
-    queryFn: api.getAgents,
-    refetchInterval: 10000,
-  });
+  // The shared roster (key and cadence: `agentsQuery`), so the agent rows'
+  // liveness arrives with a request nobody made for them.
+  const { data: agents = [] } = useQuery(agentsQuery());
 
   // A clock only while something is looping: the countdown is the one thing in
   // this panel that moves on its own, and an interval running under a fleet

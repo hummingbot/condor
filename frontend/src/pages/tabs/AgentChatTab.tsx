@@ -55,6 +55,7 @@ import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
 import { normalizeAgentSlug } from "@/lib/agentSlug";
+import { agentsQuery } from "@/lib/queryClient";
 import {
   api,
   CHAT_SLUG,
@@ -177,13 +178,8 @@ export function AgentChatTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Same keys and intervals the fleet tab uses, so react-query dedupes rather
-  // than polling `/agents` twice.
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents"],
-    queryFn: api.getAgents,
-    refetchInterval: 10000,
-  });
+  // The shared roster: key and cadence live in `agentsQuery`.
+  const { data: agents = [] } = useQuery(agentsQuery());
   const { data: delegationData } = useQuery({
     queryKey: ["delegations"],
     queryFn: api.getDelegations,
