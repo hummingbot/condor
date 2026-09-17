@@ -1144,3 +1144,137 @@ def test_planned_amount_quote_refuses_an_unpriceable_fetched_price(monkeypatch):
         asyncio.run(
             _planned_amount_quote("create_position_executor", {"amount": "1"}, object())
         )
+
+
+# ---------------------------------------------------------------------------
+# SEC-631: execution_mode="shutdown" lets only the brakes through
+# ---------------------------------------------------------------------------
+
+
+def _shutdown_gate(tmp_path, refusals=None, owners=None, price_client=None):
+    from condor.agents.ownership import BotLedger
+
+    ledger = BotLedger("acme-scalper", tmp_path, enforced=True)
+    return auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=1e9, max_open_executors=99)),
+        RiskState(),
+        execution_mode="shutdown",
+        ledger=ledger,
+        agent_id="acme.scalper_1",
+        price_client=price_client,
+        refusals=refusals,
+        executor_owners=owners or {"e_own": "acme.scalper_1"},
+    )
+
+
+def _outcome(result: dict) -> str:
+    return result["outcome"]["outcome"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        {
+            "tool": "create_position_executor",
+            "input": {
+                "controller_id": "acme.scalper_1",
+                "connector_name": "binance_perpetual",
+                "trading_pair": "SOL-USDT",
+                "amount": 1,
+                "total_amount_quote": 10,
+            },
+        },
+        {"tool": "create_grid_executor", "input": {"controller_id": "acme.scalper_1"}},
+        {"tool": "create_lp_executor", "input": {"controller_id": "acme.scalper_1"}},
+        {
+            "tool": "set_account_position_mode_and_leverage",
+            "input": {"leverage": 1, "trading_pair": "SOL-USDT"},
+        },
+        {"tool": "place_order", "input": {"trading_pair": "SOL-USDT"}},
+        {
+            "tool": "manage_bots",
+            "input": {"action": "deploy", "bot_name": "acme-scalper-2"},
+        },
+        {
+            "tool": "manage_bots",
+            "input": {"action": "start_controllers", "bot_name": "acme-scalper-2"},
+        },
+        {
+            "tool": "manage_bots",
+            "input": {"action": "update_config", "bot_name": "acme-scalper-2"},
+        },
+        {"tool": "execute_swap", "input": {"trading_pair": "SOL-USDC", "amount": 1}},
+        {"tool": "manage_clmm", "input": {"action": "open"}},
+        {"tool": "manage_clmm", "input": {"action": "add_liquidity"}},
+        {"tool": "manage_amm", "input": {"action": "add_liquidity"}},
+        {"tool": "manage_clmm", "input": {"action": None}},
+        {"tool": "control_agent", "input": {"action": "start"}},
+    ],
+)
+def test_shutdown_mode_refuses_every_exposure_adding_call(tmp_path, call):
+    refusals = RefusalLog()
+    result = asyncio.run(_shutdown_gate(tmp_path, refusals)(call, _OPTIONS))
+    assert _outcome(result) == "cancelled"
+    [entry] = refusals.drain()
+    assert entry["tool"] == call["tool"]
+    assert "shutting down" in entry["reason"]
+
+
+def test_shutdown_mode_allows_an_owned_stop_and_refuses_a_foreign_one(
+    tmp_path, monkeypatch
+):
+    import condor.fetchers.executors as executors_fetcher
+
+    async def detail(client, executor_id):
+        return {"id": executor_id, "controller_id": "x.y_2"}
+
+    monkeypatch.setattr(executors_fetcher, "get_executor_detail", detail)
+    gate = _shutdown_gate(tmp_path, price_client=object())
+    own = {"tool": "stop_executor", "input": {"executor_id": "e_own"}}
+    other = {"tool": "stop_executor", "input": {"executor_id": "e_other"}}
+    assert _outcome(asyncio.run(gate(own, _OPTIONS))) == "selected"
+    result = asyncio.run(gate(other, _OPTIONS))
+    assert _outcome(result) == "cancelled"
+    assert "another session" in result["reason"]
+
+
+def test_shutdown_mode_bot_stops_still_meet_the_namespace(tmp_path):
+    gate = _shutdown_gate(tmp_path)
+    for action in ("stop_bot", "stop_controllers"):
+        own = {
+            "tool": "manage_bots",
+            "input": {"action": action, "bot_name": "acme-scalper-1"},
+        }
+        assert _outcome(asyncio.run(gate(own, _OPTIONS))) == "selected"
+    foreign = {
+        "tool": "manage_bots",
+        "input": {"action": "stop_bot", "bot_name": "zed-1"},
+    }
+    result = asyncio.run(gate(foreign, _OPTIONS))
+    assert _outcome(result) == "cancelled"
+    assert "namespace" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "tool,action",
+    [
+        ("manage_clmm", "close"),
+        ("manage_clmm", "remove_liquidity"),
+        ("manage_clmm", "collect_fees"),
+        ("manage_amm", "remove_liquidity"),
+    ],
+)
+def test_shutdown_mode_lets_liquidity_removal_through(tmp_path, tool, action):
+    gate = _shutdown_gate(tmp_path)
+    call = {"tool": tool, "input": {"action": action}}
+    assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected"
+
+
+def test_shutdown_mode_leaves_safe_calls_alone(tmp_path):
+    gate = _shutdown_gate(tmp_path)
+    for call in (
+        {"tool": "list_executors", "input": {}},
+        {"tool": "manage_bots", "input": {"action": "status"}},
+        {"tool": "control_agent", "input": {"action": "stop"}},
+    ):
+        assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected"

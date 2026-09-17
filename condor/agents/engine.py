@@ -1168,42 +1168,11 @@ class TickEngine:
         (it only feeds the auto-approve callback and cannot change between the
         two points), avoiding a redundant per-tick journal re-parse.
         """
-        mode = self.config.get("execution_mode", "loop")
-
-        # A configured server pins the toolset; None falls back to the chat's.
-        # tick=True narrows both subprocesses to the loop profile (FEAT-066).
-        # This seat runs unattended behind an auto-approving permission callback,
-        # so what it can reach at all is decided here, by what gets mounted.
-        mcp_servers = toolsets.build_mcp_servers_for_session(
-            self.user_id,
-            self.chat_id,
-            server_name=self.config.get("server_name"),
-            agent_slug=self.agent.slug,
-            tick=True,
-        )
-        permission_cb = auto_approve_with_risk_check(
-            self.risk,
+        return build_gated_client(
+            self,
             risk_state,
-            execution_mode=mode,
-            ledger=self.ledger,
-            agent_id=self.agent_id,
-            price_client=price_client,
-            refusals=self._refusals,
-            executor_owners=self._executor_owners(),
-        )
-
-        # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
-        # in the run config still wins over the owner's saved custom endpoint.
-        # Same allowlist the agent gets when delegated to; empty => unrestricted.
-        from condor.runtime.llm_client import build_llm_client
-
-        return build_llm_client(
-            self._agent_key(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_cb,
-            allowed_tools=self.agent.tools or None,
-            user_id=self.user_id,
-            base_url_override=self.config.get("model_base_url") or None,
+            price_client,
+            self.config.get("execution_mode", "loop"),
         )
 
     # ------------------------------------------------------------------
@@ -1431,3 +1400,54 @@ class TickEngine:
             "session_dir": str(self.session_dir) if self.session_dir else "",
             "is_experiment": self.is_experiment,
         }
+
+
+def build_gated_client(
+    engine: "TickEngine",
+    risk_state: RiskState,
+    price_client: Any,
+    execution_mode: str,
+) -> "ACPClient | PydanticAIClient":
+    """The unattended client for ``engine``: tick toolset behind the risk gate.
+
+    The one place a loop's model client is built, so the tick and the emergency
+    winddown's LLM cleanup (``execution_mode="shutdown"``, SEC-631) mount the
+    same narrow profile and answer every dangerous call through the same
+    ``auto_approve_with_risk_check`` — ledger, refusal log and executor
+    ownership included. Does NOT start the client.
+    """
+    # A configured server pins the toolset; None falls back to the chat's.
+    # tick=True narrows both subprocesses to the loop profile (FEAT-066).
+    # This seat runs unattended behind an auto-approving permission callback,
+    # so what it can reach at all is decided here, by what gets mounted.
+    mcp_servers = toolsets.build_mcp_servers_for_session(
+        engine.user_id,
+        engine.chat_id,
+        server_name=engine.config.get("server_name"),
+        agent_slug=engine.agent.slug,
+        tick=True,
+    )
+    permission_cb = auto_approve_with_risk_check(
+        engine.risk,
+        risk_state,
+        execution_mode=execution_mode,
+        ledger=engine.ledger,
+        agent_id=engine.agent_id,
+        price_client=price_client,
+        refusals=engine._refusals,
+        executor_owners=engine._executor_owners(),
+    )
+
+    # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
+    # in the run config still wins over the owner's saved custom endpoint.
+    # Same allowlist the agent gets when delegated to; empty => unrestricted.
+    from condor.runtime.llm_client import build_llm_client
+
+    return build_llm_client(
+        engine._agent_key(),
+        mcp_servers=mcp_servers,
+        permission_callback=permission_cb,
+        allowed_tools=engine.agent.tools or None,
+        user_id=engine.user_id,
+        base_url_override=engine.config.get("model_base_url") or None,
+    )

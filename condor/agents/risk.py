@@ -193,6 +193,35 @@ EXPOSURE_ADDING_BOT_ACTIONS = frozenset(
 )
 
 
+#: The bot actions an emergency winddown may still take: the brakes.
+SHUTDOWN_BOT_ACTIONS = frozenset({"stop_bot", "stop_controllers"})
+
+
+def _shutdown_refusal(tool_name: str, input_data: dict[str, Any]) -> str:
+    """Why a dangerous call is refused during an emergency winddown, or "".
+
+    Called only for calls :func:`is_dangerous_tool_call` already flagged. What
+    passes is what reduces exposure — ``stop_executor``, a bot stop, and the
+    Gateway actions that return capital — and each still meets the ownership
+    checks the gate runs after this. Everything else is refused.
+    """
+    action = input_data.get("action", "")
+    action = action if isinstance(action, str) else ""
+    if tool_name == "stop_executor":
+        return ""
+    if tool_name == "manage_bots" and action in SHUTDOWN_BOT_ACTIONS:
+        return ""
+    if (
+        tool_name in _SIGNING_DEX_ACTIONS or tool_name in ALWAYS_SIGNING_DEX_TOOLS
+    ) and action in RISK_REDUCING_DEX_ACTIONS:
+        return ""
+    label = f"{tool_name}({action})" if action else tool_name
+    return (
+        f"{label} is not a winddown action — this session is shutting down after "
+        "a kill switch, so only stops and liquidity removals are allowed"
+    )
+
+
 def _book_refusal(current_state: "RiskState | None") -> tuple[bool, str] | None:
     """The drift guard, or None when the book is trustworthy.
 
@@ -742,6 +771,17 @@ def auto_approve_with_risk_check(
                     "this session runs in dry-run mode, where nothing mutates",
                     level=logging.INFO,
                 )
+
+            # Shutdown mode: the LLM cleanup pass after a kill switch (SEC-631).
+            # Only the brakes get through, and they then go on to the same
+            # ownership checks a tick's brakes do below; every other dangerous
+            # call opens, grows or re-prices exposure at the one moment a limit
+            # has just been breached. An allowlist, so a dangerous call this
+            # branch has not heard of is refused rather than approved.
+            if execution_mode == "shutdown":
+                refusal = _shutdown_refusal(tool_name, input_data)
+                if refusal:
+                    return deny(tool_name, refusal)
 
             # For executor creates, run risk check. The name is the classification
             # since FEAT-062 — `stop_executor` is dangerous too, but it reduces

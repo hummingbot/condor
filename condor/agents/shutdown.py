@@ -305,7 +305,9 @@ async def _run_llm_cleanup(
     if not body or agent is None:
         return
     try:
-        from .agent_run import run_agent_to_completion
+        from condor.runtime import context as runtime_context
+
+        from .engine import _NullTracker, build_gated_client
 
         running = await _get_running_executors(engine, client)
         positions = await _fetch_positions(client, engine.agent_id)
@@ -313,15 +315,20 @@ async def _run_llm_cleanup(
         cleanup_timeout = resolve_tick_timeout(
             strategy=engine.config.get("tick_timeout_sec")
         )
+        prompt = runtime_context.build_agent_context(
+            agent, engine.user_id, body, context
+        )
+        # The tick's own client and gate, in shutdown mode (SEC-631): the same
+        # narrow toolset, and only the brakes are approved — each still bound to
+        # this session's executors and bot namespace.
+        risk_state = engine.risk.get_state(engine.journal or _NullTracker())
+        llm = build_gated_client(engine, risk_state, client, "shutdown")
         async with asyncio.timeout(cleanup_timeout):
-            await run_agent_to_completion(
-                slug=agent.slug,
-                user_id=engine.user_id,
-                chat_id=engine.chat_id,
-                server_name=engine.config.get("server_name"),
-                task=body,
-                context=context,
-            )
+            await llm.start()
+            try:
+                await llm.prompt(prompt)
+            finally:
+                await llm.stop()
     except asyncio.TimeoutError:
         log.warning(
             "TickEngine %s: shutdown LLM cleanup timed out (floor already secured)",
@@ -331,6 +338,24 @@ async def _run_llm_cleanup(
         log.exception(
             "TickEngine %s: shutdown LLM cleanup failed (floor already secured)",
             engine.agent_id,
+        )
+    _journal_cleanup_refusals(engine)
+
+
+def _journal_cleanup_refusals(engine: Any) -> None:
+    """Write what the gate refused during the cleanup pass into the journal.
+
+    The journal is still open here (``TickEngine._run_shutdown`` closes it only
+    in its ``finally``), and nothing drains the refusal log after this: the run
+    ends with the winddown. Never raises — the verify step still has to run.
+    """
+    try:
+        engine._last_refusals = engine._refusals.drain()
+        if engine.journal:
+            engine._journal_refusals(engine.journal.tick_count + 1)
+    except Exception:
+        log.exception(
+            "TickEngine %s: could not journal the cleanup's refusals", engine.agent_id
         )
 
 

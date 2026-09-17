@@ -6,7 +6,6 @@ verify/alert on residual), and the engine wrapper's idempotency guard.
 """
 
 import asyncio
-import inspect
 from contextlib import contextmanager
 from functools import partial
 from types import SimpleNamespace
@@ -459,10 +458,20 @@ def test_shutdown_threshold_disabled_by_default():
 
 
 def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
+    from condor.agents.risk import RefusalLog, RiskEngine
+
     engine, client, notes = _fake_engine(running, positions_seq, monkeypatch, tmp_path)
-    engine.agent = SimpleNamespace(slug="acme")
+    engine.agent = SimpleNamespace(slug="acme", tools=[], instructions="You are acme.")
     engine.user_id = 7
     engine.chat_id = 99
+    # What the tick's gate reads off the engine (SEC-631).
+    engine.risk = RiskEngine()
+    engine.journal.get_drawdown_pct = lambda: 0.0
+    engine._refusals = RefusalLog()
+    engine._last_refusals = []
+    engine._agent_key = lambda: "claude-code"
+    engine._executor_owners = partial(TickEngine._executor_owners, engine)
+    engine._journal_refusals = partial(TickEngine._journal_refusals, engine)
     engine.strategy.home.mkdir(parents=True, exist_ok=True)
     (engine.strategy.home / "shutdown.md").write_text(
         f"---\non_kill_switch: flatten_all\n---\n{body}\n"
@@ -470,45 +479,189 @@ def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
     return engine, client, notes
 
 
-def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
-    from condor.agents import agent_run as agent_run_module
+class _FakeLLM:
+    """A model client that runs ``script(callback)`` as its one prompt."""
 
+    def __init__(self, permission_callback, script=None):
+        self.permission_callback = permission_callback
+        self.script = script
+        self.prompts: list[str] = []
+        self.started = self.stopped = False
+
+    async def start(self):
+        self.started = True
+
+    async def prompt(self, text):
+        self.prompts.append(text)
+        if self.script is not None:
+            await self.script(self.permission_callback)
+        return "done"
+
+    async def stop(self):
+        self.stopped = True
+
+
+def _patch_llm(monkeypatch, script=None, mounts=None):
+    """Stub the mount + client factory the gated builder uses; return the log."""
+    import condor.runtime.llm_client as llm_client_module
+    import condor.runtime.toolsets as toolsets_module
+
+    built: list[tuple[dict, _FakeLLM]] = []
+
+    def fake_mounts(user_id, chat_id, **kwargs):
+        if mounts is not None:
+            mounts.append({"user_id": user_id, "chat_id": chat_id, **kwargs})
+        return [{"name": "fake"}]
+
+    def fake_build(agent_key, **kwargs):
+        llm = _FakeLLM(kwargs.get("permission_callback"), script)
+        built.append((kwargs, llm))
+        return llm
+
+    monkeypatch.setattr(toolsets_module, "build_mcp_servers_for_session", fake_mounts)
+    monkeypatch.setattr(llm_client_module, "build_llm_client", fake_build)
+    return built
+
+
+def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
         running, [[]], tmp_path, monkeypatch, body="Do cleanup."
     )
-    seen = {}
-
-    async def fake_complete(**kwargs):
-        seen.update(kwargs)
-        return "done"
-
-    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_complete)
+    built = _patch_llm(monkeypatch)
     asyncio.run(run_shutdown(engine, "breach"))
-    assert seen["task"] == "Do cleanup."
-    assert seen["slug"] == "acme"
-    # Unattended by construction: the shared engine builds no permission callback
-    # at all any more, so there is no argument here that could re-attend the run.
-    from condor.agents import agent_run
 
-    assert (
-        "permission_callback"
-        not in inspect.signature(agent_run.run_agent_to_completion).parameters
+    [(kwargs, llm)] = built
+    [prompt] = llm.prompts
+    assert "[TASK]\nDo cleanup." in prompt
+    assert "You are acme." in prompt
+    assert llm.started and llm.stopped
+
+
+def test_llm_cleanup_mounts_the_tick_profile(tmp_path, monkeypatch):
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
     )
+    mounts: list[dict] = []
+    built = _patch_llm(monkeypatch, mounts=mounts)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    [mount] = mounts
+    assert mount["tick"] is True
+    assert mount["agent_slug"] == "acme"
+    assert (mount["user_id"], mount["chat_id"]) == (7, 99)
+    [(kwargs, _)] = built
+    assert kwargs["permission_callback"] is not None
+
+
+def test_llm_cleanup_refuses_new_exposure_and_allows_owned_stops(tmp_path, monkeypatch):
+    import condor.fetchers.executors as executors_fetcher
+
+    running = [
+        {
+            "id": "e1",
+            "connector": "binance_perpetual",
+            "controller_id": "acme.scalper_1",
+        }
+    ]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+
+    async def detail(api, executor_id):
+        return {"id": executor_id, "controller_id": "other.session_3"}
+
+    monkeypatch.setattr(executors_fetcher, "get_executor_detail", detail)
+    options = [{"kind": "allow_once", "optionId": "allow"}]
+    outcomes: dict[str, str] = {}
+
+    async def script(callback):
+        calls = {
+            "create": {
+                "tool": "create_position_executor",
+                "input": {"controller_id": "acme.scalper_1", "amount": 1},
+            },
+            "leverage": {
+                "tool": "set_account_position_mode_and_leverage",
+                "input": {"leverage": 2},
+            },
+            "deploy": {
+                "tool": "manage_bots",
+                "input": {"action": "deploy", "bot_name": "acme-x"},
+            },
+            "swap": {"tool": "execute_swap", "input": {"amount": 1}},
+            "own_stop": {"tool": "stop_executor", "input": {"executor_id": "e1"}},
+            "foreign_stop": {
+                "tool": "stop_executor",
+                "input": {"executor_id": "e_theirs"},
+            },
+        }
+        for name, call in calls.items():
+            result = await callback(call, options)
+            outcomes[name] = result["outcome"]["outcome"]
+
+    _patch_llm(monkeypatch, script=script)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert outcomes == {
+        "create": "cancelled",
+        "leverage": "cancelled",
+        "deploy": "cancelled",
+        "swap": "cancelled",
+        "own_stop": "selected",
+        "foreign_stop": "cancelled",
+    }
+    blocked = [r for a, r in engine.journal.actions if a == "risk_blocked"]
+    assert len(blocked) == 5
+    for tool in (
+        "create_position_executor",
+        "set_account_position_mode_and_leverage",
+        "manage_bots",
+        "execute_swap",
+        "stop_executor",
+    ):
+        assert any(r.startswith(f"{tool} refused") for r in blocked), tool
+    assert engine._refusals.drain() == []
+
+
+def test_llm_cleanup_never_bypasses_the_risk_gate(tmp_path, monkeypatch):
+    from condor.agents import agent_run as agent_run_module
+
+    running = [
+        {"id": "e_perp", "connector": "binance_perpetual"},
+        {"id": "e_spot", "connector": "binance"},
+    ]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+
+    async def ungated(**kwargs):
+        raise AssertionError("the cleanup must not use the ungated delegation path")
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", ungated)
+    built = _patch_llm(monkeypatch)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert dict(client.executors.stop_calls) == {"e_perp": False, "e_spot": False}
+    [(_, llm)] = built
+    assert len(llm.prompts) == 1
+    assert any("complete" in n for n in notes)
 
 
 def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
-    from condor.agents import agent_run as agent_run_module
+    import condor.runtime.llm_client as llm_client_module
 
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
         running, [[]], tmp_path, monkeypatch, body="Cleanup."
     )
+    _patch_llm(monkeypatch)
 
-    async def boom(**kwargs):
+    def boom(agent_key, **kwargs):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
+    monkeypatch.setattr(llm_client_module, "build_llm_client", boom)
     asyncio.run(run_shutdown(engine, "breach"))
     # The deterministic floor still ran and the winddown completed cleanly.
     assert dict(client.executors.stop_calls) == {"e1": False}
