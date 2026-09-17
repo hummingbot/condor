@@ -890,8 +890,8 @@ export interface AgentSummary {
   /**
    * The agent's server *pin*, `""` when it follows the ambient one (ARCH-324).
    *
-   * A strategy's own `server_name` overrides it — the rule `AgentWorkspace`
-   * already applies (`strategy?.config?.server_name || agent.server_name`).
+   * A strategy's own `server_name` overrides it — the rule `declaredServerOf`
+   * (workspace/fleet.ts) owns, and both the home and the workspace call.
    */
   server_name?: string;
   instances: RunningInstance[];

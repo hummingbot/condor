@@ -10,6 +10,7 @@ import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOvervie
 import { RunRail } from "@/components/agent/lab/RunRail";
 import { isLoopRun } from "@/components/agent/lab/runs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
+import { declaredServerOf } from "@/components/agent/workspace/fleet";
 import { MoneyView } from "@/components/agent/workspace/MoneyView";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
@@ -314,8 +315,16 @@ export function AgentRunScreen({
   // fleet map deliberately does not, so a rooted fleet has to read the agent's
   // (FEAT-108) — otherwise an agent trading on another server has a Fleet
   // disclosure that cannot fetch its own bots.
-  const strategyServer =
-    (strategy?.config?.server_name as string) || agent.server_name || "";
+  //
+  // `declaredServerOf` over the strategy *summary*, the rule the home applies
+  // to the row that links here (ARCH-382): the summary is in the agent query
+  // already warm on arrival, where the `["strategy", …]` detail is a second
+  // fetch — reading its config would fold the pin's fleet on first paint and
+  // flip to the strategy's once the detail landed.
+  const strategyServer = declaredServerOf(
+    agent,
+    (agent.strategies ?? []).find((s) => s.slug === sslug) ?? null,
+  );
 
   /**
    * What the rail says about each section, out of what this screen already has.

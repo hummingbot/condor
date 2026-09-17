@@ -57,10 +57,12 @@ vi.mock("@/lib/api", () => ({
  * because the component does.
  */
 const mounted: string[] = [];
-const stub = (name: string) => () => {
-  mounted.push(name);
-  return <div data-body={name} />;
-};
+const stub =
+  (name: string) =>
+  ({ serverName }: { serverName?: string }) => {
+    mounted.push(name);
+    return <div data-body={name} data-server={serverName} />;
+  };
 
 vi.mock("@/components/agent/workspace/NowView", () => ({
   NowView: stub("answers"),
@@ -299,6 +301,44 @@ describe("the disclosures", () => {
     await render("/?open=money");
     expect(section("money").getAttribute("aria-expanded")).toBe("true");
     expect(section("fleet").getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+describe("which server Money and Fleet fold (ARCH-382)", () => {
+  const withServers = (pin: string, own?: string) =>
+    ({
+      ...AGENT,
+      server_name: pin,
+      strategies: [
+        { ...AGENT.strategies[0], server_name: own },
+        AGENT.strategies[1],
+      ],
+    }) as unknown as AgentDetail;
+  const servers = () =>
+    ["money", "fleet"].map((name) =>
+      container
+        .querySelector(`[data-body="${name}"]`)
+        ?.getAttribute("data-server"),
+    );
+
+  it("is the scoped strategy's own server, before its detail has loaded", async () => {
+    getAgent.mockResolvedValue(withServers("pin", "own"));
+    // The detail never arrives: the summary in the agent query is the answer.
+    getStrategy.mockReturnValue(new Promise(() => {}));
+    await render("/?strategy=brl_mm&open=money.fleet");
+    expect(servers()).toEqual(["own", "own"]);
+  });
+
+  it("falls back to the agent's pin when the strategy declares none", async () => {
+    getAgent.mockResolvedValue(withServers("pin", ""));
+    await render("/?strategy=brl_mm&open=money.fleet");
+    expect(servers()).toEqual(["pin", "pin"]);
+
+    getAgent.mockResolvedValue(withServers("pin"));
+    act(() => root.unmount());
+    root = createRoot(container);
+    await render("/?strategy=brl_mm&open=money.fleet");
+    expect(servers()).toEqual(["pin", "pin"]);
   });
 });
 
