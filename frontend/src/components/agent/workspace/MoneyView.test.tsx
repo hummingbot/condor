@@ -294,3 +294,92 @@ describe("the dash rule", () => {
     expect(container.querySelector("[data-money-volume]")?.textContent).toBe("—");
   });
 });
+
+describe("the rollup poll (PERF-375)", () => {
+  let client: QueryClient;
+
+  function strategy(slug: string, status: string) {
+    return { slug, name: slug, status } as StrategySummary;
+  }
+
+  /** Mount (or re-render over the same cache) with these strategies in scope. */
+  function mount(strategies: readonly StrategySummary[]) {
+    act(() => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <MemoryRouter>
+            <MoneyView
+              slug="brigado"
+              sslug="brl_mm"
+              strategy={null}
+              strategies={strategies}
+              serverName="brigado"
+            />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    });
+  }
+
+  /** Let `ms` of polling elapse, flushing the fetches it schedules. */
+  async function elapse(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function callsFor(sslug: string) {
+    return getStrategyPerformance.mock.calls.filter(([, s]) => s === sslug).length;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    fleetData.mockReturnValue(fleet([]));
+    getStrategyPerformance.mockResolvedValue({ totals: { total_pnl: 0 }, sessions: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reads each stopped strategy once and never polls it", async () => {
+    mount([strategy("a", "stopped"), strategy("b", "stopped")]);
+    await elapse(30_000);
+    expect(getStrategyPerformance).toHaveBeenCalledTimes(2);
+    expect(callsFor("a")).toBe(1);
+    expect(callsFor("b")).toBe(1);
+  });
+
+  it.each(["running", "paused"])(
+    "keeps polling a %s strategy beside a stopped one read once",
+    async (status) => {
+      mount([strategy("live", status), strategy("idle", "stopped")]);
+      await elapse(25_000);
+      expect(callsFor("live")).toBeGreaterThanOrEqual(3);
+      expect(callsFor("idle")).toBe(1);
+    },
+  );
+
+  it("stops polling a strategy once it is re-rendered as stopped", async () => {
+    mount([strategy("live", "running")]);
+    await elapse(25_000);
+    expect(callsFor("live")).toBeGreaterThanOrEqual(3);
+
+    mount([strategy("live", "stopped")]);
+    await elapse(0);
+    const after = callsFor("live");
+    await elapse(30_000);
+    expect(callsFor("live")).toBe(after);
+  });
+
+  it("resumes the cadence when a stopped strategy is re-rendered as running", async () => {
+    mount([strategy("live", "stopped")]);
+    await elapse(30_000);
+    expect(callsFor("live")).toBe(1);
+
+    mount([strategy("live", "running")]);
+    await elapse(25_000);
+    expect(callsFor("live")).toBeGreaterThanOrEqual(3);
+  });
+});

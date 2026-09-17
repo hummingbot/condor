@@ -20,6 +20,10 @@ import { agentQuery } from "@/lib/queryClient";
  * the delete guard — and what re-arms the gated `["agent", slug]` poll
  * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
  * over a loop that had just started, with nothing left to reopen it.
+ *
+ * The third key is the strategy's run rollup. MoneyView polls it only while
+ * the strategy is running or paused (PERF-375), so after a stop nothing else
+ * would re-read it and the band would keep the number polled before the stop.
  */
 export function invalidateLifecycle(
   queryClient: QueryClient,
@@ -28,6 +32,7 @@ export function invalidateLifecycle(
 ) {
   queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
   queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
+  queryClient.invalidateQueries({ queryKey: ["strategy-performance", slug, sslug] });
 }
 
 /**

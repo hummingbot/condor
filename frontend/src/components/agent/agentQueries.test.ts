@@ -16,12 +16,14 @@ function fakeClient() {
 }
 
 describe("agent invalidation sets", () => {
-  it("invalidateLifecycle re-reads the strategy and the agent detail", () => {
+  it("invalidateLifecycle re-reads the strategy, the agent detail and the rollup", () => {
     const { client, keys } = fakeClient();
     invalidateLifecycle(client, "brigado", "brl_mm");
     expect(keys()).toEqual([
       { queryKey: ["strategy", "brigado", "brl_mm"] },
       { queryKey: ["agent", "brigado"] },
+      // MoneyView stops polling a stopped strategy's rollup (PERF-375).
+      { queryKey: ["strategy-performance", "brigado", "brl_mm"] },
     ]);
   });
 

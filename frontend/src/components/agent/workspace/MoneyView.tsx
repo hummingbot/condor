@@ -110,6 +110,15 @@ export function MoneyView({
    * One query per strategy, under the key the strategy workbench's own
    * performance panel reads — so a reader who opens both is served from one
    * cache, and no new endpoint is added for a number that is already computed.
+   *
+   * **Polled only while the strategy has a live engine** (PERF-375). Only a
+   * running or paused engine keeps its ownership window open, so only its
+   * rollup moves; a paused one still accrues unrealized PnL, which is why the
+   * gate is not "running" alone. A stopped strategy is read once. The
+   * `strategies` prop comes off the gated `["agent", slug]` poll, so a start it
+   * observes re-evaluates this option and resumes the cadence, and
+   * `invalidateLifecycle` re-reads the key once after a stop so the final
+   * number is not the one polled up to 10 s before it.
    */
   const scoped = useMemo(
     () => (strategy ? strategies.filter((s) => s.slug === strategy) : strategies),
@@ -119,7 +128,8 @@ export function MoneyView({
     queries: scoped.map((s) => ({
       queryKey: ["strategy-performance", slug, s.slug],
       queryFn: () => api.getStrategyPerformance(slug, s.slug),
-      refetchInterval: 10000,
+      refetchInterval:
+        s.status === "running" || s.status === "paused" ? 10000 : (false as const),
     })),
   });
 
