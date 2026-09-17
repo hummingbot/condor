@@ -44,14 +44,17 @@ def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
     ``"..._e{N}"`` (experiment), parsed by ``sessions_index.parse_agent_id``.
     ``base_dir`` is the strategy folder (``Strategy.home``) that holds the
     sessions and ``learnings.md``; the session dir is the one on disk under
-    either session layout, else the current ``sessions/session_N`` a new
-    journal would create. Experiments are flat files, so they get
+    either session layout. Experiments are flat files, so they get
     ``(None, base_dir)``.
 
     Always the **local** root (FEAT-115): a journal is what this install's run
     produced, so there is no shipped layer to resolve against.
 
-    Returns (None, None) for a malformed id or a strategy dir not on disk.
+    Returns (None, None) for a malformed id, a strategy dir not on disk, or a
+    session not on disk (CORR-654): the MCP journal tools resolve a
+    model-supplied id here, and a mistyped or stale session number must not
+    materialise a phantom ``sessions/session_N`` through ``JournalManager``'s
+    mkdir. A live run's engine creates its session dir before any tick.
     """
     # Function-local: sessions_index imports this module.
     from condor.agents.sessions_index import (
@@ -69,9 +72,9 @@ def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
         return None, None
     if kind == "experiment":
         return None, base_dir
-    session_dir = find_session_dir(base_dir, num) or (
-        base_dir / SESSION_DIRNAMES[0] / f"session_{num}"
-    )
+    session_dir = find_session_dir(base_dir, num)
+    if session_dir is None or not session_dir.is_dir():
+        return None, None
     return session_dir, base_dir
 
 

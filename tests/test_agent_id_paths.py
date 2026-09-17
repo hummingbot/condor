@@ -62,14 +62,17 @@ def test_a_legacy_trading_sessions_dir_is_resolved_not_shadowed(agents_root):
     assert not (strategy_dir / "sessions" / "session_1").exists()
 
 
-def test_a_session_not_yet_on_disk_resolves_to_the_current_layout(agents_root):
+def test_a_session_not_on_disk_resolves_to_nothing(agents_root):
+    # CORR-654: no phantom session dir for an unknown session number.
     strategy_dir = agents_root / "a" / "strategies" / "s"
     strategy_dir.mkdir(parents=True)
+    assert resolve_agent_dirs("a.s_4") == (None, None)
+    assert resolve_agent_dirs("a.s_e4") == (None, strategy_dir)
+    (strategy_dir / "sessions" / "session_4").mkdir(parents=True)
     assert resolve_agent_dirs("a.s_4") == (
         strategy_dir / "sessions" / "session_4",
         strategy_dir,
     )
-    assert resolve_agent_dirs("a.s_e4") == (None, strategy_dir)
 
 
 def test_unknown_or_malformed_ids_resolve_to_nothing(agents_root):

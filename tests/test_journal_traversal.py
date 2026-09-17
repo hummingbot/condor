@@ -72,11 +72,16 @@ def test_the_journal_manager_fallback_refuses_a_traversal_id(agents, victim):
 
 
 def test_well_formed_and_unicode_ids_still_resolve(agents):
+    (agents / "brigado" / "strategies" / "grid" / "sessions" / "session_1").mkdir(
+        parents=True
+    )
     session, base = resolve_agent_dirs("brigado.grid_1")
     assert base == agents / "brigado" / "strategies" / "grid"
     assert session == base / "sessions" / "session_1"
 
-    (agents / "señor_trader" / "strategies" / "grid").mkdir(parents=True)
+    (agents / "señor_trader" / "strategies" / "grid" / "sessions" / "session_1").mkdir(
+        parents=True
+    )
     session, base = resolve_agent_dirs("señor_trader.grid_1")
     assert base == agents / "señor_trader" / "strategies" / "grid"
     assert session == base / "sessions" / "session_1"
