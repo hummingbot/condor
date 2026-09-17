@@ -115,4 +115,17 @@ describe("SessionTabs identity", () => {
     expect(tabs()[1].textContent).toContain("#2");
     expect(tabs()[1].getAttribute("title")).toBe("Arbitrage #2 — brigado_2");
   });
+
+  it("numbers two unbound chats on different models (CORR-410)", async () => {
+    // Both tabs read "Condor": the model is not shown, so it cannot tell them
+    // apart either.
+    await render([
+      slot({ slot_id: "a", agent_slug: "", agent_key: "claude_acp" }),
+      slot({ slot_id: "b", agent_slug: "", agent_key: "openai" }),
+    ]);
+
+    expect(tabs()[0].textContent).not.toContain("#");
+    expect(tabs()[1].textContent).toContain("#2");
+    expect(tabs()[1].getAttribute("title")).toBe("Condor #2");
+  });
 });

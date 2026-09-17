@@ -133,9 +133,13 @@ export function SessionTabs({
   );
 }
 
-/** What makes two tabs "the same agent" for numbering. */
+/**
+ * What makes two tabs "the same agent" for numbering: what the tab displays.
+ * The model is not part of a tab's identity (READ-275) — every unbound chat
+ * reads "Condor" whatever its `agent_key`, so they number as one group.
+ */
 function groupKey(slot: ChatSlot): string {
-  return slot.info.agent_slug || slot.info.agent_key;
+  return slot.info.agent_slug || "";
 }
 
 /**
