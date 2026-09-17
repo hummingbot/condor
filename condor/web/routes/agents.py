@@ -900,6 +900,28 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
         return ""
 
 
+def _gate_pin_change(user: WebUser, new: Any, stored: str) -> None:
+    """Refuse a server pin the caller cannot reach, unless it is already stored.
+
+    One rule for every writer of a server pin that is not a dedicated field —
+    raw AGENT.md, strategy.md front matter, a strategy's config dict — so they
+    answer like ``POST /agents`` and ``PATCH /config`` (SEC-594) instead of
+    storing whatever the body names (SEC-693). An empty pin needs no access, and
+    re-sending the value already on disk is the normal editor round-trip of a
+    file someone else legitimately pinned, so only a *change* is checked.
+    """
+    if new and new != stored:
+        check_server_access(user.id, str(new))
+
+
+def _frontmatter_meta(content: str) -> dict:
+    """The front matter of a markdown body as a dict (``{}`` when it is not one)."""
+    from condor.frontmatter import parse_frontmatter
+
+    meta, _ = parse_frontmatter(content)
+    return meta if isinstance(meta, dict) else {}
+
+
 def _strategy_principal(strategy, user: WebUser) -> int:
     """Whose reach a strategy's stored server name is held to.
 
@@ -2103,6 +2125,11 @@ async def update_agent_md(
 ):
     """Update AGENT.md content."""
     agent = _get_agent(slug)
+    # The front matter carries the server pin, so this raw write is held to the
+    # rule the dedicated create/config routes apply to the same field (SEC-693).
+    _gate_pin_change(
+        user, _frontmatter_meta(req.content).get("server_name"), agent.server_name
+    )
     # Straight past ``AgentStore``, so the stock guard is stated here rather
     # than inherited: a shipped AGENT.md is forked into the local root first and
     # this writes the fork (FEAT-115).
@@ -2527,6 +2554,8 @@ async def create_strategy(
 ):
     """Create a new strategy (playbook) under an Agent."""
     _get_agent(slug)
+    # A new strategy has no stored pin, so any non-empty one is checked (SEC-693).
+    _gate_pin_change(user, (req.config or {}).get("server_name"), "")
     strategy = _strategy_store().create(
         agent_slug=slug,
         name=req.name,
@@ -2641,6 +2670,14 @@ async def update_strategy_md(
 ):
     """Update strategy.md content."""
     strategy = _get_strategy(slug, sslug)
+    # ``default_config`` in the front matter carries the strategy's server pin;
+    # compared against the same field of the file being replaced (SEC-693).
+    new_defaults = _frontmatter_meta(req.content).get("default_config")
+    _gate_pin_change(
+        user,
+        new_defaults.get("server_name") if isinstance(new_defaults, dict) else None,
+        (strategy.default_config or {}).get("server_name") or "",
+    )
     # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here.
     target = fork_if_stock(slug, "strategies", strategy.slug, "strategy.md")
     atomic_write_text(target, req.content)
@@ -2659,6 +2696,11 @@ async def update_strategy_config(
     from condor.agents.config import load_full_config, save_full_config
 
     config_dict = load_full_config(strategy.home, strategy.default_config)
+    _gate_pin_change(
+        user,
+        req.config.get("server_name"),
+        _strategy_server(strategy.home, strategy.default_config),
+    )
     config_dict.update(req.config)
     save_full_config(strategy.home, config_dict)
     return {"updated": True, "config": config_dict}
