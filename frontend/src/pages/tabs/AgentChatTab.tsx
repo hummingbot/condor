@@ -69,6 +69,7 @@ import {
   CHAT_SLUG,
   type AgentSummary,
   type ConversationMeta,
+  type Delegation,
 } from "@/lib/api";
 
 /** Openers offered when nothing is bound, and when something is. */
@@ -104,6 +105,14 @@ const AGENT_STARTERS: Starter[] = [
 
 /** Go to my conversation with them, or start another one regardless. */
 type TalkIntent = "focus" | "fresh";
+
+/**
+ * The delegation list before the first poll lands, one identity: a `?? []`
+ * fallback is a fresh array per render, which would break `ContextDock`'s memo
+ * on every stream flush (PERF-394). Once loaded, react-query's structural
+ * sharing keeps the array stable between polls.
+ */
+const NO_DELEGATIONS: Delegation[] = [];
 
 /**
  * The chat workspace — what `/` opens on.
@@ -462,7 +471,8 @@ export function AgentChatTab() {
     [talkTo, openSlug],
   );
 
-  const runningTasks = (delegationData?.delegations ?? []).filter(
+  const delegations = delegationData?.delegations ?? NO_DELEGATIONS;
+  const runningTasks = delegations.filter(
     (d) => d.status === "running",
   ).length;
 
@@ -493,11 +503,34 @@ export function AgentChatTab() {
   });
   const conversationId = activeSlot?.info.conversation_id || "";
   const context = useContextPanels({
-    delegations: delegationData?.delegations ?? [],
+    delegations,
     conversationId,
     agentSlug: activeSlot?.info.agent_slug || "",
     libraryOpen: pane?.kind === "routines",
   });
+  // The dock is memoised (PERF-394), so what it is handed must hold across a
+  // stream flush. `activeSlot` is a new object on every flush, so the run
+  // context is keyed on the scalars it reads, never on the slot itself.
+  const runSlotId = activeSlot?.info.slot_id;
+  const runSlotServer = activeSlot?.info.server_name;
+  const runAgentSlug = activeSlot?.info.agent_slug;
+  const runUserId = user?.id;
+  const runContext = useMemo(
+    () =>
+      runSlotId !== undefined && runUserId !== undefined
+        ? {
+            serverName: runSlotServer || server || "",
+            sessionKey: webSessionKey(runUserId, runSlotId),
+            agentSlug: runAgentSlug || undefined,
+          }
+        : undefined,
+    [runSlotId, runSlotServer, runAgentSlug, runUserId, server],
+  );
+  const onLibraryChange = useCallback(
+    (focus: LibraryFocus | null) =>
+      openPane(focus ? { kind: "routines", focus } : null),
+    [openPane],
+  );
   return (
     <WorkspacePaneProvider>
       <div className="flex h-full min-h-0">
@@ -745,26 +778,16 @@ export function AgentChatTab() {
 
           <ContextDock
             panels={context}
-            delegations={delegationData?.delegations ?? []}
+            delegations={delegations}
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
             agentName={boundAgent?.name}
             // A routine launched from the dock's library is this
             // conversation's: it runs on the server the chat is talking to,
             // reports back into it, and is filed under whoever is answering.
-            runContext={
-              activeSlot && user
-                ? {
-                    serverName: activeSlot.info.server_name || server || "",
-                    sessionKey: webSessionKey(user.id, activeSlot.info.slot_id),
-                    agentSlug: activeSlot.info.agent_slug || undefined,
-                  }
-                : undefined
-            }
+            runContext={runContext}
             library={pane?.kind === "routines" ? pane.focus : null}
-            onLibraryChange={(focus) =>
-              openPane(focus ? { kind: "routines", focus } : null)
-            }
+            onLibraryChange={onLibraryChange}
           />
         </div>
 
