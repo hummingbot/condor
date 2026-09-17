@@ -18,7 +18,7 @@ import remarkGfm from "remark-gfm";
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { formatRunId } from "@/components/agent/lab/runs";
+import { effectiveTradingContext, formatRunId } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { countdown } from "@/lib/agent-attribution";
@@ -532,10 +532,7 @@ function ConfigCard({
     ];
   }, [config, risk]);
 
-  const context = text(
-    config.trading_context || strategy.default_trading_context,
-    "",
-  );
+  const context = text(effectiveTradingContext(strategy), "");
 
   return (
     <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">

@@ -12,6 +12,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
+import { effectiveTradingContext } from "@/components/agent/lab/runs";
 import { BrainPicker } from "@/components/chat/BrainPicker";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useSessionOptions } from "@/hooks/useChat";
@@ -250,11 +251,7 @@ export function WorkspaceHeader({
             slug={agent.slug}
             sslug={strategy.slug}
             status={strategy.status}
-            defaultContext={
-              strategy.default_trading_context ||
-              (strategy.config.trading_context as string) ||
-              ""
-            }
+            defaultContext={effectiveTradingContext(strategy)}
             agentConfig={strategy.config}
           />
         )}

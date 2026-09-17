@@ -14,7 +14,14 @@ import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DeployedFleet } from "@/components/agent/DeployedFleet";
 import { LoopPulse } from "@/components/agent/LoopPulse";
-import { formatRunId, isLiveRun, liveControllerIds, runFacts, runLabel } from "@/components/agent/lab/runs";
+import {
+  effectiveTradingContext,
+  formatRunId,
+  isLiveRun,
+  liveControllerIds,
+  runFacts,
+  runLabel,
+} from "@/components/agent/lab/runs";
 import {
   workspaceHref,
   type WorkspaceUrlPatch,
@@ -333,7 +340,7 @@ export function StrategyWorkbench({
             slug={slug}
             sslug={sslug}
             status={strategy.status}
-            defaultContext={strategy.default_trading_context || (strategy.config.trading_context as string) || ""}
+            defaultContext={effectiveTradingContext(strategy)}
             agentConfig={strategy.config}
           />
         </div>

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   actionsByTick,
   beatState,
+  effectiveTradingContext,
   formatRunId,
   hasPricedMoney,
   isLiveRun,
@@ -284,5 +285,32 @@ describe("liveControllerIds", () => {
     expect(seed).toEqual(["s"]);
     expect(out).toEqual(["s", "c1"]);
     expect(out).not.toBe(seed);
+  });
+});
+
+describe("the trading context a strategy starts under (READ-401)", () => {
+  const strat = (config: Record<string, unknown>, default_trading_context = "") => ({
+    config,
+    default_trading_context,
+  });
+
+  it("takes config.yml's context over the default, like the start route", () => {
+    expect(effectiveTradingContext(strat({ trading_context: "from config" }, "the default"))).toBe("from config");
+  });
+
+  it("falls back to the default when the config context is empty, absent or not a string", () => {
+    expect(effectiveTradingContext(strat({ trading_context: "" }, "the default"))).toBe("the default");
+    expect(effectiveTradingContext(strat({}, "the default"))).toBe("the default");
+    expect(effectiveTradingContext(strat({ trading_context: 42 }, "the default"))).toBe("the default");
+    expect(effectiveTradingContext(strat({ trading_context: null }, "the default"))).toBe("the default");
+  });
+
+  it("does not trim: a whitespace-only config context still wins, as it does on the server", () => {
+    expect(effectiveTradingContext(strat({ trading_context: "  " }, "the default"))).toBe("  ");
+  });
+
+  it("is the empty string when neither is set", () => {
+    expect(effectiveTradingContext(strat({}))).toBe("");
+    expect(effectiveTradingContext(strat({ trading_context: "" }, ""))).toBe("");
   });
 });

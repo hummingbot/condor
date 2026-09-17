@@ -13,7 +13,7 @@
 // be a state and not a footnote.
 
 import type { AgentActionRow } from "@/lib/agent-attribution";
-import type { AgentPerformance, AgentRunRow } from "@/lib/api";
+import type { AgentPerformance, AgentRunRow, StrategyDetail } from "@/lib/api";
 import { formatDuration } from "@/lib/formatters";
 
 /**
@@ -268,4 +268,25 @@ export function liveControllerIds(
     if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
   }
   return Array.from(ids);
+}
+
+// ── Trading context ──
+
+/**
+ * The trading context a strategy starts under when the caller names none.
+ *
+ * Mirrors the backend start route (`start_strategy` in condor/web/routes/agents.py:
+ * `if req.trading_context ... elif not config_dict.get("trading_context") and
+ * strategy.default_trading_context`): the context written in the strategy's
+ * config.yml wins, and the strategy's default only fills an empty one. Plain
+ * truthiness, no trimming — a whitespace-only config value wins on the server
+ * too, and trimming here would be a new mismatch. A non-string config value is
+ * treated as absent.
+ */
+export function effectiveTradingContext(
+  strategy: Pick<StrategyDetail, "config" | "default_trading_context">,
+): string {
+  const fromConfig = strategy.config.trading_context;
+  if (typeof fromConfig === "string" && fromConfig) return fromConfig;
+  return strategy.default_trading_context || "";
 }
