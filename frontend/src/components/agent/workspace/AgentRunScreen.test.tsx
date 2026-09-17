@@ -879,3 +879,91 @@ describe("a loop that is on time (PERF-372)", () => {
     expect(count("playbook")).toBe(playbook);
   });
 });
+
+describe("the strategy detail poll (PERF-374)", () => {
+  const idle = { slug: "brl_mm", instances: [], config: {} } as unknown as StrategyDetail;
+  const live = {
+    slug: "brl_mm",
+    instances: [
+      { agent_id: "a1", status: "running", last_tick_at: 0, frequency_sec: 60 },
+    ],
+    config: {},
+  } as unknown as StrategyDetail;
+
+  let client: QueryClient;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Let `ms` of polling elapse, flushing the fetches it schedules. */
+  async function elapse(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  async function mount() {
+    client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/?strategy=brl_mm"]}>
+          <QueryClientProvider client={client}>
+            <Host />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await elapse(0);
+    await elapse(0);
+  }
+
+  it("reads an idle strategy once and then stops asking", async () => {
+    getStrategy.mockResolvedValue(idle);
+    await mount();
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+
+    await elapse(30_000);
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the 5s cadence while an engine is up", async () => {
+    getStrategy.mockResolvedValue(live);
+    await mount();
+    await elapse(30_000);
+    expect(getStrategy.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("re-arms the poll when a lifecycle invalidation finds a running instance", async () => {
+    getStrategy.mockResolvedValue(idle);
+    await mount();
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+
+    getStrategy.mockResolvedValue(live);
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["strategy", "brigado", "brl_mm"] });
+    });
+    await elapse(0);
+    expect(getStrategy).toHaveBeenCalledTimes(2);
+
+    await elapse(10_000);
+    expect(getStrategy.mock.calls.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("goes quiet once the last instance is gone", async () => {
+    getStrategy.mockResolvedValue(live);
+    await mount();
+    getStrategy.mockResolvedValue(idle);
+    await elapse(5_000);
+    const afterStop = getStrategy.mock.calls.length;
+    expect(afterStop).toBeGreaterThanOrEqual(2);
+
+    await elapse(20_000);
+    expect(getStrategy).toHaveBeenCalledTimes(afterStop);
+  });
+});

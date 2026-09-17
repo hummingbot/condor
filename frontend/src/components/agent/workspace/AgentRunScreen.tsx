@@ -110,8 +110,9 @@ export function AgentRunScreen({
   // One `["agent", slug]` and one `["agent-runs", slug]` for the whole screen:
   // the header, the loop bar and the bands all want them, and react-query
   // dedupes the keys. Nothing live here comes off the agent key — the countdown
-  // and cadence are `["strategy", slug, sslug]`, the rail `["agent-runs", ...]`
-  // — so it takes the shared gate (`agentQuery`, PERF-305/PERF-343).
+  // and cadence are `["strategy", slug, sslug]` (polled only while an engine is
+  // up, read once for an idle strategy), the rail `["agent-runs", ...]` — so it
+  // takes the shared gate (`agentQuery`, PERF-305/PERF-343).
   const { data: agent, isLoading } = useQuery(agentQuery(slug));
 
   // The rail's window, not a filter (FEAT-111). An install that has been
@@ -165,11 +166,21 @@ export function AgentRunScreen({
     [runs, sslug],
   );
 
+  // The strategy detail ships `strategy.md` and `learnings.md` and walks the
+  // session index and performance cache on the server, so it polls only while
+  // it has something live to report: an instance exists exactly while an
+  // engine (a session or a dry_run/run_once experiment) is running or paused,
+  // the only time `last_tick_at`/`tick_count` move. An idle strategy is read
+  // once (PERF-374); start/stop/pause/resume invalidate the key
+  // (`invalidateLifecycle`), and the predicate is re-evaluated on that refetch,
+  // so the poll re-arms without a reload. A loop started elsewhere (Telegram,
+  // MCP, restart_on_boot) shows on the next focus/reconnect/remount.
   const { data: strategy = null } = useQuery({
     queryKey: ["strategy", slug, sslug],
     queryFn: () => api.getStrategy(slug, sslug!),
     enabled: !!slug && !!sslug,
-    refetchInterval: 5000,
+    refetchInterval: (q) =>
+      (q.state.data?.instances?.length ?? 0) > 0 ? 5000 : false,
   });
 
   // The live engine behind the selected run, for the cadence and the countdown
