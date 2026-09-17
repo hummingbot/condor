@@ -40,6 +40,7 @@ from condor.agents.attribution import (
     session_windows,
     window_span,
 )
+from condor.agents.journal import LEARNINGS_TEMPLATE
 from condor.agents.run_records import KIND_CODE
 from condor.agents.sessions_index import (
     count_experiments,
@@ -2646,10 +2647,9 @@ async def create_strategy(
 
     learnings_path = strategy.home / "learnings.md"
     if not learnings_path.exists():
-        atomic_write_text(
-            learnings_path,
-            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n",
-        )
+        # The journal owns this template: append_learning keys on its section
+        # headers, so seeding any other layout leaves dead sections (READ-680).
+        atomic_write_text(learnings_path, LEARNINGS_TEMPLATE)
 
     return StrategySummary(
         slug=strategy.slug,

@@ -295,6 +295,40 @@ def test_the_raw_learnings_route_writes_into_the_local_root(stock):
     assert learnings.read_text() == "learned"
 
 
+def test_the_create_strategy_route_seeds_the_journals_learnings_template(stock):
+    from condor.agents.journal import LEARNINGS_TEMPLATE
+
+    resp = _client().post("/agents/scout/strategies", json={"name": "Grid"})
+
+    assert resp.status_code == 200, resp.text
+    strategy = StrategyStore().get("scout", "grid")
+    assert (strategy.home / "learnings.md").read_text() == LEARNINGS_TEMPLATE
+
+
+def test_a_learning_appended_to_a_route_created_strategy_adds_no_section(
+    stock, tmp_path
+):
+    import re
+
+    from condor.agents.journal import JournalManager
+
+    resp = _client().post("/agents/scout/strategies", json={"name": "Grid"})
+    assert resp.status_code == 200, resp.text
+    home = StrategyStore().get("scout", "grid").home
+
+    JournalManager(
+        "scout_grid.1", session_dir=tmp_path / "session_1", agent_dir=home
+    ).append_learning("Spreads widen at the open", "market")
+
+    text = (home / "learnings.md").read_text()
+    assert re.findall(r"^## (.+)$", text, re.MULTILINE) == [
+        "Market Observations",
+        "Execution Notes",
+        "Retired Insights",
+    ]
+    assert "Spreads widen at the open" in text
+
+
 # ── 7. The defaults and the back-walk sites ──
 
 
