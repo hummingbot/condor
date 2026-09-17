@@ -105,7 +105,20 @@ vi.mock("@/components/agent/workspace/PlaybookView", () => ({
     );
   },
 }));
-vi.mock("@/components/agent/lab/RunRail", () => ({ RunRail: stub("rail") }));
+/** What the rail stub was last handed (CORR-378). */
+let railProps: {
+  runs: AgentRunRow[];
+  selectedKey: string | null;
+  hasMore?: boolean;
+  onShowMore?: () => void;
+} | null = null;
+vi.mock("@/components/agent/lab/RunRail", () => ({
+  RunRail: (props: NonNullable<typeof railProps>) => {
+    mounted.push("rail");
+    railProps = props;
+    return <div data-body="rail" />;
+  },
+}));
 vi.mock("@/components/agent/lab/RunOverview", () => ({
   RunOverview: stub("detail"),
   ExperimentDetail: stub("experiment"),
@@ -247,6 +260,7 @@ beforeEach(() => {
   at = "";
   mounted.length = 0;
   delegationTask = null;
+  railProps = null;
   localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -732,5 +746,56 @@ describe("a strategy whose runs are behind newer chats (CORR-376)", () => {
       container.querySelector('[data-testid="tick-spine"], [data-spine-empty]'),
     ).not.toBeNull();
     expect(container.querySelector("[data-now-older-runs]")).toBeNull();
+  });
+});
+
+describe("widening the Runs window (CORR-378)", () => {
+  const chats = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      ...CHAT,
+      id: `chat-${i}`,
+      run_id: `c:chat-${i}`,
+      started_at: 1_000 + i,
+    })) as AgentRunRow[];
+
+  it("keeps the run and the answer stack on screen while the wider page loads", async () => {
+    getAgentRuns.mockResolvedValue([RUN, ...chats(100)]);
+    await render("/?open=runs.detail&run=s:3");
+
+    expect(railProps!.hasMore).toBe(true);
+    const before = railProps!.selectedKey;
+    expect(before).toBe("brl_mm:s:3");
+    expect(bodies()).toContain("detail");
+
+    let resolveWide!: (rows: AgentRunRow[]) => void;
+    getAgentRuns.mockImplementation(
+      (_slug: string, limit: number) =>
+        limit === 200
+          ? new Promise<AgentRunRow[]>((r) => {
+              resolveWide = r;
+            })
+          : Promise.resolve([RUN, ...chats(100)]),
+    );
+    await act(async () => {
+      railProps!.onShowMore!();
+    });
+    await settle();
+
+    expect(getAgentRuns).toHaveBeenLastCalledWith("brigado", 200);
+    expect(bodies()).toContain("detail");
+    expect(container.textContent).not.toContain("Pick a loop run above");
+    expect(container.textContent).not.toContain("This agent has no runs yet.");
+    expect(railProps!.selectedKey).toBe(before);
+    expect(railProps!.runs).toHaveLength(101);
+
+    const wide = [RUN, ...chats(200)];
+    await act(async () => {
+      resolveWide(wide);
+    });
+    await settle();
+
+    expect(railProps!.runs).toHaveLength(201);
+    expect(railProps!.selectedKey).toBe(before);
+    expect(railProps!.hasMore).toBe(true);
   });
 });

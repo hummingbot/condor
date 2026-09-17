@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ChevronRight, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -114,12 +114,20 @@ export function AgentRunScreen({
   // chatted with for a year has hundreds of conversations, and pulling the
   // archive on a five-second poll is how a cheap rail stops being cheap. The
   // window widens on request and stays widened for the visit.
+  //
+  // Widening re-keys the query, and a key with no cache entry reads `[]` until
+  // it lands: no selected run, so every band would say there is nothing to show
+  // for as long as the wider page takes — triggered by the control whose job is
+  // to show more (CORR-378). So the previous window stays on screen meanwhile.
+  // While it does, `hasMoreRuns` is false (100 rows against a limit of 200), so
+  // the rail's "Show older" and the `+` drop until the wider page lands.
   const [runLimit, setRunLimit] = useState(RUN_PAGE);
   const { data: runs = [] } = useQuery({
     queryKey: ["agent-runs", slug, runLimit],
     queryFn: () => api.getAgentRuns(slug, runLimit),
     enabled: !!slug,
     refetchInterval: 5000,
+    placeholderData: keepPreviousData,
   });
 
   // Hoisted rather than reached through in the dependency lists: the compiler
