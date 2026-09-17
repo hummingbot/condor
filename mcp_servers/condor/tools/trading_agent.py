@@ -527,6 +527,24 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
         return {"content": jm.read_recent(max_entries=max_entries)}
 
 
+def _may_feed_run(engine) -> bool:
+    """Whether this seat may write what ``engine`` reads back each tick (SEC-638).
+
+    The tick's own MCP subprocess runs as the engine's owner, so the loop's
+    writes pass; a foreign chat session's agent is refused unless its user is
+    an admin. An unowned restored loop (``user_id == 0``) is left as it was.
+    """
+    owner = getattr(engine, "user_id", 0) or 0
+    if not owner or owner == settings.user_id:
+        return True
+    try:
+        from config_manager import get_config_manager
+
+        return bool(get_config_manager().is_admin(settings.user_id))
+    except Exception:  # noqa: BLE001 - no config is not a licence to write
+        return False
+
+
 def journal_write(
     agent_id: str,
     entry_type: str,
@@ -566,6 +584,10 @@ def journal_write(
             return {
                 "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
             }
+        # Every entry type is read back by the loop: learnings, state and the
+        # canvas directly, actions as the prompt's recent decisions.
+        if not _may_feed_run(engine):
+            return {"error": "Not your agent"}
         session_dir = engine.session_dir
         agent_dir = engine.strategy.home
     else:

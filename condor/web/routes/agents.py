@@ -1971,6 +1971,7 @@ async def create_agent_skill(
     a panel button should do silently.
     """
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     return _store_result(
         _skill_store_for(agent.slug).create(
             name=req.name,
@@ -1992,6 +1993,7 @@ async def update_agent_skill(
 ):
     """Patch one of the Agent's playbooks, leaving unsent fields alone."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     fields: dict[str, Any] = {}
     for key in ("description", "when_to_use", "body"):
         if getattr(req, key):
@@ -2008,6 +2010,7 @@ async def delete_agent_skill(
 ):
     """Delete one of the Agent's playbooks. Refuses an inherited shared one."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     # `delete` answers `True`, `False` for an unknown slug, or a refusal dict.
     result = _skill_store_for(agent.slug).delete(name)
     if isinstance(result, dict):
@@ -2031,6 +2034,7 @@ async def accept_agent_skill_proposal(
     what lands is an ordinary skill from here on.
     """
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     return _store_result(_proposals().accept(agent.slug))
 
 
@@ -2125,6 +2129,7 @@ async def update_agent_md(
 ):
     """Update AGENT.md content."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     # The front matter carries the server pin, so this raw write is held to the
     # rule the dedicated create/config routes apply to the same field (SEC-693).
     _gate_pin_change(
@@ -2220,6 +2225,7 @@ async def set_agent_mute(
     from condor.runtime.toolsets import seat_tools
 
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     if (req.kind or "").strip().lower().rstrip("s") == "tool":
         if req.name not in {row["name"] for row in seat_tools(agent.slug)}:
             raise HTTPException(
@@ -2670,6 +2676,7 @@ async def update_strategy_md(
 ):
     """Update strategy.md content."""
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
     # ``default_config`` in the front matter carries the strategy's server pin;
     # compared against the same field of the file being replaced (SEC-693).
     new_defaults = _frontmatter_meta(req.content).get("default_config")
@@ -2693,6 +2700,7 @@ async def update_strategy_config(
 ):
     """Update a strategy's runtime config."""
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
     from condor.agents.config import load_full_config, save_full_config
 
     config_dict = load_full_config(strategy.home, strategy.default_config)
@@ -3019,6 +3027,34 @@ def _authorized_engines_for(slug: str, sslug: str, user: WebUser) -> list:
     ]
 
 
+def _require_no_foreign_live_run(slug: str, sslug: str, user: WebUser) -> None:
+    """Refuse a write into a strategy someone else's loop is running (SEC-638).
+
+    Definitions are shared (SEC-617), but a live loop re-reads its learnings,
+    scratch state, skills and mutes every tick and trades on its owner's
+    credentials, so an edit there is an instruction to *that owner's* run — the
+    outcome SEC-251 gates the lifecycle verbs against. Every registered engine
+    counts, paused included: a paused loop resumes with the same inputs. The
+    403 admits nothing new, since the strategy page already shows the run. No
+    supervisor (tests, a bare import) means no loop, so the write goes through.
+    """
+    try:
+        engines = _get_engines_for(slug, sslug)
+    except Exception:  # noqa: BLE001 - no supervisor is no live run
+        return
+    if any(not _owns_engine(e, user) for e in engines) and not _is_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Another user's loop is running this strategy — stop it first",
+        )
+
+
+def _require_no_foreign_live_run_for_agent(slug: str, user: WebUser) -> None:
+    """The same refusal for an agent-level input every strategy's loop reads."""
+    for strategy in _strategy_store().list(slug):
+        _require_no_foreign_live_run(slug, strategy.slug, user)
+
+
 def _target_engines(
     slug: str,
     sslug: str,
@@ -3135,6 +3171,7 @@ async def set_restart_on_boot(
     from condor.runtime.loops import get_supervisor
 
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
 
     config = load_full_config(strategy.home, strategy.default_config)
     config["restart_on_boot"] = req.enabled
@@ -3362,6 +3399,7 @@ async def update_learnings(
 ):
     """Update a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
     # The third raw write, and the one with no fork question to ask: learnings
     # are this install's output, so ``home`` is local by construction and there
     # is no shipped counterpart to shadow.
@@ -3398,6 +3436,7 @@ async def set_strategy_state(
     from condor.runtime.state import clear_state, namespace_for_session, set_state
 
     _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
     namespace = namespace_for_session(f"{slug}.{sslug}")
 
     if req.clear:
