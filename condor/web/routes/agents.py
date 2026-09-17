@@ -289,6 +289,7 @@ class StrategyPerformanceResponse(BaseModel):
 
 class SessionInfo(BaseModel):
     number: int
+    #: Not read by the dashboard (only api.ts types it); a candidate to drop.
     snapshot_count: int = 0
     created_at: str = ""
 
@@ -536,6 +537,7 @@ class RunRow(BaseModel):
     status: str = ""
     execution_mode: str = ""
     tick_count: int = 0
+    #: Not read by the dashboard (only api.ts types it); a candidate to drop.
     snapshot_count: int = 0
     #: ``journal.md``'s ctime. The file's creation, not the first tick.
     started_at: float | None = None

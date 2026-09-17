@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -312,11 +313,40 @@ def session_started_at(session_dir: Path) -> float | None:
         return _created_at(session_dir / "journal.md")
 
 
+# The snapshot count both 5s polls report (``list_sessions`` and ``list_runs``)
+# is memoised per snapshots directory on the directory's own mtime. That is
+# exact, not a heuristic: snapshots are write-once (``save_full_snapshot``) and
+# retention only unlinks, and a directory's mtime moves on every entry created,
+# unlinked or renamed in it, which is the only way the count can change.
+_snapshot_count_cache: dict[Path, tuple[int, int]] = {}
+
+
 def _snapshot_count(session_dir: Path) -> int:
+    """How many ``.md`` files the session's snapshot directory holds.
+
+    The first existing directory of ``_SNAPSHOT_DIRNAMES`` wins, as in
+    :func:`list_session_snapshots`. The dashboard does not render this number;
+    it rides on ``SessionInfo``/``RunRow`` only.
+    """
     for dirname in _SNAPSHOT_DIRNAMES:
         snap_dir = session_dir / dirname
-        if snap_dir.is_dir():
-            return len(list(snap_dir.glob("*.md")))
+        try:
+            st = snap_dir.stat()
+        except OSError:
+            _snapshot_count_cache.pop(snap_dir, None)
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        cached = _snapshot_count_cache.get(snap_dir)
+        if cached is not None and cached[0] == st.st_mtime_ns:
+            return cached[1]
+        try:
+            with os.scandir(snap_dir) as entries:
+                count = sum(1 for e in entries if e.name.endswith(".md"))
+        except OSError:  # removed between the stat and the listing
+            return 0
+        _snapshot_count_cache[snap_dir] = (st.st_mtime_ns, count)
+        return count
     return 0
 
 
