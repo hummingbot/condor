@@ -219,23 +219,29 @@ export function metricsToDataPoints(metrics: MetricEntry[]): PnlDataPoint[] {
     .sort((a, b) => a.time - b.time);
 }
 
-// Helper to convert session-level performance to PnlDataPoints (aggregate)
+// Helper to convert session-level performance to a cumulative equity curve.
+// Each point sits at the session's real start (`started_at`, unix seconds from
+// the backend). A session without one is left off rather than placed on an
+// invented time: the chart prints these times on its axis and tooltip.
+// Sessions starting in the same second share one point (the series needs
+// strictly ascending times), carrying the cumulative PnL after all of them.
 export function sessionsToDataPoints(
-  sessions: { session_num: number; total_pnl: number; status: string }[],
+  sessions: { session_num: number; total_pnl: number; started_at?: number }[],
 ): PnlDataPoint[] {
-  if (sessions.length === 0) return [];
-  // Use session_num as a proxy for time ordering — each session gets a synthetic timestamp
-  // spaced 1 hour apart from a base time
-  const base = Math.floor(Date.now() / 1000) - sessions.length * 3600;
   let cumPnl = 0;
-  return sessions
-    .slice()
-    .sort((a, b) => a.session_num - b.session_num)
-    .map((s, i) => {
+  const points: PnlDataPoint[] = [];
+  sessions
+    .filter((s) => (s.started_at ?? 0) > 0)
+    .sort(
+      (a, b) =>
+        (a.started_at ?? 0) - (b.started_at ?? 0) || a.session_num - b.session_num,
+    )
+    .forEach((s) => {
       cumPnl += s.total_pnl;
-      return {
-        time: base + i * 3600,
-        value: cumPnl,
-      };
+      const time = Math.floor(s.started_at ?? 0);
+      const last = points[points.length - 1];
+      if (last && last.time === time) last.value = cumPnl;
+      else points.push({ time, value: cumPnl });
     });
+  return points;
 }

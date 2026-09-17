@@ -36,6 +36,7 @@ from condor.agents.attribution import (
     build_deployments,
     current_owner_bases,
     session_ownership,
+    session_start_epoch,
     session_windows,
     window_span,
 )
@@ -222,6 +223,10 @@ class AgentPerformanceModel(BaseModel):
     #: An experiment whose snapshot recorded an error (parsed off disk).
     error: bool = False
     status: str = ""
+    #: When a session started, in unix seconds (``session_start_epoch``: its
+    #: config.yml mtime). 0.0 = unknown, and always 0.0 for an experiment. The
+    #: equity curve plots sessions on this, never on a made-up spacing.
+    started_at: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     total_pnl: float = 0.0
@@ -1129,6 +1134,11 @@ async def _compute_strategy_performance(
                         bool(exp_meta.get(num, {}).get("error"))
                         if kind == "experiment"
                         else False
+                    ),
+                    started_at=(
+                        session_start_epoch(strategy_dir, num)
+                        if kind == "session"
+                        else 0.0
                     ),
                 )
             )

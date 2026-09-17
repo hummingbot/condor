@@ -927,6 +927,9 @@ export interface AgentPerformance {
   /** An experiment whose snapshot recorded an error. */
   error?: boolean;
   status: string;
+  /** When the session started, unix seconds (its config.yml mtime). 0 or
+   *  absent = unknown; always 0 for an experiment. */
+  started_at?: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
