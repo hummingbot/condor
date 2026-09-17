@@ -431,9 +431,10 @@ describe("the panel", () => {
       onOpenRoutine: true,
       onOpenStrategy: true,
       onAskAgent: true,
+      onDirtyChange: true,
       onClose: true,
     };
-    expect(Object.keys(exactKeys)).toHaveLength(9);
+    expect(Object.keys(exactKeys)).toHaveLength(10);
 
     await renderPanel({ wiring: <span data-testid="host-wiring">wired</span> });
 
@@ -451,5 +452,36 @@ describe("the panel", () => {
     await renderPanel();
     await click(document.querySelector<HTMLElement>('button[title^="Close"]')!);
     expect(closed).toBe(1);
+  });
+
+  it("reports an unsaved editor to its host and leaves the question to it", async () => {
+    // CORR-395: the sheet's close is one of many doors out of the pane, so the
+    // guard is the host's (`usePaneGuard`); the panel only says it is dirty.
+    const reported: boolean[] = [];
+    await renderPanel({ onDirtyChange: (d) => reported.push(d) });
+
+    const edit = [...container.querySelectorAll<HTMLElement>("button")].find(
+      (b) => b.textContent?.trim() === "Edit",
+    )!;
+    await click(edit);
+    const textarea = container.querySelector("textarea")!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(textarea, "a draft");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+    expect(reported.at(-1)).toBe(true);
+
+    await click(document.querySelector<HTMLElement>('button[title^="Close"]')!);
+    expect(closed).toBe(1);
+    expect(document.body.textContent).not.toContain("Discard changes?");
+
+    // Unmounting takes the flag with it.
+    await act(async () => root.render(<></>));
+    expect(reported.at(-1)).toBe(false);
   });
 });

@@ -41,6 +41,7 @@ import {
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StrategySheet } from "@/components/chat/StrategySheet";
+import { usePaneGuard } from "@/components/chat/usePaneGuard";
 import { ShareChatButton } from "@/components/chat/ShareChatButton";
 import { WorkspaceRail } from "@/components/chat/WorkspaceRail";
 import {
@@ -153,7 +154,12 @@ export function AgentChatTab() {
   const [libraryFocus, setLibraryFocus] = useState<LibraryFocus>({});
   const pane: PaneView = readPane(searchParams, libraryFocus);
 
-  const openPane = (next: PaneView) => {
+  /**
+   * Put `next` in the pane, unguarded — every caller goes through `openPane`
+   * below, which asks first when this would drop an agent panel's unsaved
+   * editor (CORR-395).
+   */
+  const applyPane = (next: PaneView) => {
     if (next?.kind === "routines") setLibraryFocus(next.focus);
     // The agent panel comes back on the section it was left on: which one that
     // is survives the close in this browser, because closing the pane takes the
@@ -402,6 +408,14 @@ export function AgentChatTab() {
    * "the agent I am talking to".
    */
   const openSlug = (pane?.kind === "agent" && pane.slug) || panelSlug;
+  /**
+   * Every door out of the agent panel — its own close, the rail's tile, a desk
+   * tile, the routine library, a strategy card, an Execution row naming another
+   * agent — is a call to this, so this is where an unsaved editor is asked
+   * about (CORR-395).
+   */
+  const paneGuard = usePaneGuard({ pane, panelSlug, apply: applyPane });
+  const openPane = paneGuard.openPane;
   const openAgent = agents.find((a) => a.slug === openSlug);
 
   const runningTasks = (delegationData?.delegations ?? []).filter(
@@ -591,6 +605,10 @@ export function AgentChatTab() {
 
           {pane?.kind === "agent" && (
             <AgentPanel
+              // Keyed on whose panel it is: an Execution row re-slugging the
+              // pane must remount the sections, or the previous agent's open
+              // editor carries over, seeded with the next agent's text.
+              key={openSlug}
               slug={openSlug}
               name={openAgent?.name || "Condor"}
               // What the conversation runs on, in the panel's own bar — the
@@ -647,9 +665,11 @@ export function AgentChatTab() {
               // agent was last asked. The workspace itself stays put — the
               // detail page has to navigate for this, the chat does not.
               onAskAgent={(text) => talkTo(openSlug, { intent: "fresh", text })}
+              onDirtyChange={paneGuard.onPanelDirtyChange}
               onClose={() => openPane(null)}
             />
           )}
+          {paneGuard.dialog}
 
           {/* One of the agent's loops, on its own — opened by a strategy card
               in the panel, or from a pasted `?panel=strategy&loop=`. It

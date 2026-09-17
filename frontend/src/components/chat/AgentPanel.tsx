@@ -1,10 +1,9 @@
 import { ExternalLink } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
-import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 
 /**
@@ -70,6 +69,7 @@ export function AgentPanel({
   onOpenRoutine,
   onOpenStrategy,
   onAskAgent,
+  onDirtyChange,
   onClose,
 }: {
   /** Whose panel this is: the session's agent, the rail's pick, else Condor. */
@@ -102,81 +102,75 @@ export function AgentPanel({
    * and the detail page does not: the workspace stays where it is.
    */
   onAskAgent: (text: string) => void;
+  /**
+   * Whether an editor in the panel holds unsaved text (CORR-395).
+   *
+   * Reported up rather than guarded here: the sheet's own close is one of many
+   * doors out of the pane — the rail's tile, a desk tile, the routine library,
+   * an Execution row naming another agent — and only the host sees them all
+   * (`usePaneGuard`). Reports `false` when the panel unmounts, so a flag never
+   * outlives the editor it was about.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
   onClose: () => void;
 }) {
-  const [dirty, setDirty] = useState(false);
-  const [confirmClose, setConfirmClose] = useState(false);
+  const reportDirty = useRef(onDirtyChange);
+  useEffect(() => {
+    reportDirty.current = onDirtyChange;
+  }, [onDirtyChange]);
+  useEffect(() => () => reportDirty.current?.(false), []);
 
   return (
-    <>
-      <WorkspaceSheet
-        title={name}
-        // The wiring rides in the bar rather than in the body: it is about the
-        // conversation, not about the agent, and it has to stay reachable
-        // whichever of the panel's sections is scrolled to.
-        actions={
-          <div className="flex shrink-0 items-center gap-1">
-            {/* The door, to the left of the wiring: the wiring is about this
-                conversation and belongs nearest the close glyph it shares an
-                edge with, while this is about the agent, like the title it
-                sits beside. Labelled rather than a glyph — the destination is
-                a different screen, not a wider one, and a reader is owed the
-                name of the place a click takes them out to. */}
-            <Link
-              to={`/agents/${encodeURIComponent(slug)}`}
-              title={`Open ${name}'s workspace — its runs, what it deployed and what it made`}
-              className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-            >
-              <ExternalLink className="h-3.5 w-3.5" /> Workspace
-            </Link>
-            {wiring}
-          </div>
-        }
-        onClose={() => (dirty ? setConfirmClose(true) : onClose())}
-        // No full screen. The panel is a place you change one thing and look
-        // back at what the agent just said — the whole reason it opens beside
-        // the conversation instead of over it — so the one gesture the button
-        // offered was losing the chat it is meant to be read against. The door
-        // beside it goes somewhere else on purpose, and says so.
-        fullscreen={false}
-        // An even split, not a report's two thirds: both sides of this seam are
-        // in use at once — you change something here and read what the agent
-        // says about it there — so neither gets to be the margin of the other.
-        paneProfile="tune"
-        bleed
-      >
-        <AgentKnowledge
-          slug={slug}
-          // A column, not a page: the strategy cards read the viewport's
-          // breakpoints, and on a wide window three of them would land side by
-          // side in a 400px pane. Stated rather than inferred from the rail,
-          // because they were always two different facts (FEAT-117).
-          dense
-          tab={tab}
-          onTabChange={onTabChange}
-          onOpenRoutine={onOpenRoutine}
-          onOpenStrategy={onOpenStrategy}
-          onAskAgent={onAskAgent}
-          onDirtyChange={setDirty}
-        />
-      </WorkspaceSheet>
-
-      {/* A pane closes in one click, where a page has to be navigated away
-          from — so the text an editor is holding gets a question first. */}
-      <ConfirmDialog
-        open={confirmClose}
-        title="Discard changes?"
-        confirmLabel="Discard"
-        pendingLabel="Discarding..."
-        onConfirm={() => {
-          setConfirmClose(false);
-          onClose();
-        }}
-        onClose={() => setConfirmClose(false)}
-      >
-        This panel has an editor with unsaved text. Closing it drops what you
-        wrote.
-      </ConfirmDialog>
-    </>
+    <WorkspaceSheet
+      title={name}
+      // The wiring rides in the bar rather than in the body: it is about the
+      // conversation, not about the agent, and it has to stay reachable
+      // whichever of the panel's sections is scrolled to.
+      actions={
+        <div className="flex shrink-0 items-center gap-1">
+          {/* The door, to the left of the wiring: the wiring is about this
+              conversation and belongs nearest the close glyph it shares an
+              edge with, while this is about the agent, like the title it
+              sits beside. Labelled rather than a glyph — the destination is
+              a different screen, not a wider one, and a reader is owed the
+              name of the place a click takes them out to. */}
+          <Link
+            to={`/agents/${encodeURIComponent(slug)}`}
+            title={`Open ${name}'s workspace — its runs, what it deployed and what it made`}
+            className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+          >
+            <ExternalLink className="h-3.5 w-3.5" /> Workspace
+          </Link>
+          {wiring}
+        </div>
+      }
+      onClose={onClose}
+      // No full screen. The panel is a place you change one thing and look
+      // back at what the agent just said — the whole reason it opens beside
+      // the conversation instead of over it — so the one gesture the button
+      // offered was losing the chat it is meant to be read against. The door
+      // beside it goes somewhere else on purpose, and says so.
+      fullscreen={false}
+      // An even split, not a report's two thirds: both sides of this seam are
+      // in use at once — you change something here and read what the agent
+      // says about it there — so neither gets to be the margin of the other.
+      paneProfile="tune"
+      bleed
+    >
+      <AgentKnowledge
+        slug={slug}
+        // A column, not a page: the strategy cards read the viewport's
+        // breakpoints, and on a wide window three of them would land side by
+        // side in a 400px pane. Stated rather than inferred from the rail,
+        // because they were always two different facts (FEAT-117).
+        dense
+        tab={tab}
+        onTabChange={onTabChange}
+        onOpenRoutine={onOpenRoutine}
+        onOpenStrategy={onOpenStrategy}
+        onAskAgent={onAskAgent}
+        onDirtyChange={onDirtyChange}
+      />
+    </WorkspaceSheet>
   );
 }

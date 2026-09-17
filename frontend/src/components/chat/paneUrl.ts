@@ -187,3 +187,24 @@ export function writePane(
   }
   return next;
 }
+
+/**
+ * Whether putting `next` in the pane unmounts the agent panel that is there
+ * now (CORR-395) — and with it any editor holding unsaved text.
+ *
+ * True when an agent panel is open and `next` is anything else: no pane, the
+ * desk, the routine library, a strategy sheet, or an agent panel that resolves
+ * to a *different* agent. Both slugs resolve by the rule `AgentChatTab` reads
+ * the pane with, `slug || panelSlug`, so a bare `{kind: "agent"}` while an
+ * Execution row's agent is open counts as a hand-off, and a section change on
+ * the same agent (the panel's own tab strip) does not.
+ */
+export function paneHandoffDropsPanel(
+  pane: PaneView,
+  next: PaneView,
+  panelSlug: string,
+): boolean {
+  if (pane?.kind !== "agent") return false;
+  if (next?.kind !== "agent") return true;
+  return (next.slug || panelSlug) !== (pane.slug || panelSlug);
+}

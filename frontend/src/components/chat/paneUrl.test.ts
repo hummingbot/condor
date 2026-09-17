@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_PARAM,
   TAB_PARAM,
+  paneHandoffDropsPanel,
   readPane,
   writePane,
   type PaneView,
@@ -194,5 +195,43 @@ describe("writing the pane into the URL", () => {
       expect(next.get("run")).toBe("s:3");
       expect(next.get("tick")).toBe("40");
     });
+  });
+});
+
+describe("whether a hand-off drops the agent panel (CORR-395)", () => {
+  const drops = (pane: PaneView, next: PaneView) =>
+    paneHandoffDropsPanel(pane, next, "orca");
+
+  it("does not for a section change on the same agent", () => {
+    expect(drops({ kind: "agent" }, { kind: "agent", tab: "tools" })).toBe(false);
+    expect(
+      drops({ kind: "agent", slug: "kraken" }, { kind: "agent", slug: "kraken", tab: "memories" }),
+    ).toBe(false);
+    // A bare agent pane and one naming the conversation's own slug are one panel.
+    expect(drops({ kind: "agent" }, { kind: "agent", slug: "orca" })).toBe(false);
+  });
+
+  it("does not when no agent panel is open", () => {
+    expect(drops(null, { kind: "desk" })).toBe(false);
+    expect(drops({ kind: "desk" }, null)).toBe(false);
+    expect(drops({ kind: "routines", focus: {} }, { kind: "agent" })).toBe(false);
+    expect(
+      drops({ kind: "strategy", agentSlug: "orca", strategySlug: "lp" }, { kind: "agent" }),
+    ).toBe(false);
+  });
+
+  it("does for a close, the desk, the library and a strategy sheet", () => {
+    expect(drops({ kind: "agent" }, null)).toBe(true);
+    expect(drops({ kind: "agent" }, { kind: "desk" })).toBe(true);
+    expect(drops({ kind: "agent" }, { kind: "routines", focus: {} })).toBe(true);
+    expect(
+      drops({ kind: "agent" }, { kind: "strategy", agentSlug: "orca", strategySlug: "lp" }),
+    ).toBe(true);
+  });
+
+  it("does for an agent panel that resolves to someone else", () => {
+    expect(drops({ kind: "agent" }, { kind: "agent", slug: "kraken" })).toBe(true);
+    // An Execution row's agent is open; a bare agent pane means the conversation's.
+    expect(drops({ kind: "agent", slug: "kraken" }, { kind: "agent" })).toBe(true);
   });
 });
