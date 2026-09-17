@@ -202,6 +202,22 @@ async def create_session(
     elif spec.user_id != user.id and not cm.is_admin(user.id):
         raise HTTPException(status_code=403, detail="Cannot create for another user")
 
+    # The key is not a licence either (SEC-637). The runtime looks it up in the
+    # process-wide registry with no owner check and tears down a live session
+    # whose model differs, respawning it under ``spec.user_id`` — and Telegram
+    # keeps prompting that key, so naming ``tg:<victim>`` would hand the victim's
+    # chat to the caller's tools and conversation. A live session may only be
+    # replaced by its recorded owner (or an admin), exactly as every other route
+    # on the key; a fresh key must carry the caller's own id as its owner. The
+    # runtime is handed the canonical form so the key checked is the key used.
+    key = _parse_key(spec.key)
+    spec = spec.model_copy(update={"key": str(key)})
+    existing = await runtime.get_info(key)
+    if existing is not None:
+        _require_ownership(existing, user)
+    elif key.owner != str(user.id) and not cm.is_admin(user.id):
+        raise HTTPException(status_code=403, detail="Not your session")
+
     # The session's toolset is built with this server's API credentials, so gate
     # the pinned name exactly like ``_respawn`` does. The subject is the
     # *caller*, never ``spec.user_id`` (SEC-167): an admin creating a session
