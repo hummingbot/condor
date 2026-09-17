@@ -910,8 +910,12 @@ class PydanticAIClient:
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
                 from pydantic_ai.messages import (
+                    PartDeltaEvent,
+                    PartStartEvent,
                     TextPart,
+                    TextPartDelta,
                     ThinkingPart,
+                    ThinkingPartDelta,
                     ToolCallPart,
                     ToolReturnPart,
                 )
@@ -971,26 +975,48 @@ class PydanticAIClient:
                                             status="completed",
                                             output=output_str,
                                         )
+                            # The answer as it is produced, rather than in one
+                            # lump when the response is complete. Walking nodes
+                            # alone only sees a finished ModelResponse, so a
+                            # pydantic-ai chat sat silent for the whole turn and
+                            # then printed the reasoning and the answer at once
+                            # — while an ACP chat streamed both. Same events
+                            # either way now, so the reader cannot tell which
+                            # client is behind the session.
+                            #
+                            # Streaming the node here also RUNS the request, so
+                            # the parts it produced must not be yielded again at
+                            # the CallToolsNode below; that branch emits tool
+                            # calls only.
+                            async with node.stream(run.ctx) as request_stream:
+                                async for stream_event in request_stream:
+                                    # A part's first slice arrives on its start
+                                    # event, not as a delta — dropping it loses
+                                    # the opening words of every answer.
+                                    if isinstance(stream_event, PartStartEvent):
+                                        part = stream_event.part
+                                        if isinstance(part, ThinkingPart) and part.content:
+                                            yield ThoughtChunk(text=part.content)
+                                        elif isinstance(part, TextPart) and part.content:
+                                            yield TextChunk(text=part.content)
+                                    elif isinstance(stream_event, PartDeltaEvent):
+                                        delta = stream_event.delta
+                                        if isinstance(delta, ThinkingPartDelta):
+                                            if delta.content_delta:
+                                                yield ThoughtChunk(text=delta.content_delta)
+                                        elif isinstance(delta, TextPartDelta):
+                                            if delta.content_delta:
+                                                yield TextChunk(text=delta.content_delta)
 
                         elif isinstance(node, CallToolsNode):
                             # Emit text and tool-call events from model response
                             for part in node.model_response.parts:
-                                if isinstance(part, TextPart) and part.content:
-                                    yield TextChunk(text=part.content)
-
-                                # A reasoning model's thinking. Dropping it left
-                                # every pydantic-ai chat with no thought display
-                                # at all, while ACP chats had one — the whole
-                                # path below this (EventType.THOUGHT, the WS
-                                # `thought_chunk` frame, the dashboard's
-                                # RunStrip) was already there and simply never
-                                # fed. Emitted as the same ThoughtChunk the ACP
-                                # client emits, so neither side has to know
-                                # which client produced it.
-                                elif isinstance(part, ThinkingPart) and part.content:
-                                    yield ThoughtChunk(text=part.content)
-
-                                elif isinstance(part, ToolCallPart):
+                                # Text and thinking were already streamed above,
+                                # as the model produced them. Only the tool
+                                # calls are read here, where the permission gate
+                                # can record a decision before pydantic-graph
+                                # executes them on its next step.
+                                if isinstance(part, ToolCallPart):
                                     tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
                                     tool_name = part.tool_name
 
