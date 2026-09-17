@@ -240,6 +240,13 @@ def _build_tool_preload(
         "mcp__mcp-hummingbot__list_executors",
         "mcp__mcp-hummingbot__get_executor",
         "mcp__mcp-hummingbot__get_performance_report",
+        # The wallet a tick signs from. A strategy that names an authorised
+        # wallet has to settle it against the account's own before its first
+        # open, and that read is this tool.
+        "mcp__mcp-hummingbot__get_portfolio_overview",
+        # Vault reads. `vault_status` is read-only and refuses outright on a
+        # seat with no vault block, so it costs a non-vault tick nothing.
+        "mcp__mcp-hummingbot__vault_status",
     ]
     if not is_dry_run:
         tools += [
@@ -249,6 +256,11 @@ def _build_tool_preload(
             "mcp__mcp-hummingbot__create_order_executor",
             "mcp__mcp-hummingbot__create_lp_executor",
             "mcp__mcp-hummingbot__stop_executor",
+            # With stop_executor: a vault run's system prompt requires a sweep
+            # after every close that realised fees, so the tick that can close
+            # has to arrive holding the tool that settles it. It signs, which is
+            # why it sits inside the not-dry-run block.
+            "mcp__mcp-hummingbot__sweep_fees",
         ]
     tools += [
         "mcp__mcp-hummingbot__search_history",
