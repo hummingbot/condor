@@ -27,7 +27,6 @@ async def send_notification(text: str, parse_mode: str = "Markdown") -> dict:
                 "text": text,
                 "parse_mode": parse_mode,
                 "chat_id": settings.chat_id,
-                "user_id": settings.user_id,
                 # Provenance: the route resolves this to the conversation the
                 # announcement came from, so the chat keeps a trace of it.
                 "session_key": settings.session_key,

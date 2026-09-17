@@ -121,7 +121,6 @@ async def delegate(
                 "task": task,
                 "context": context,
                 "chat_id": settings.chat_id,
-                "user_id": settings.user_id,
                 "server_name": settings.active_server or None,
                 # Who is asking, stamped onto the ask's record (FEAT-058) so an
                 # agent's Activity tab can say "asked by condor" rather than only
@@ -179,7 +178,6 @@ async def delegate(
         body = {
             "task": task,
             "chat_id": settings.chat_id,
-            "user_id": settings.user_id,
             "server_name": settings.active_server or None,
             # Provenance: the route resolves this to the conversation that
             # asked for the work, so the chat can watch what it started.

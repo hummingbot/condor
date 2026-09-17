@@ -408,7 +408,6 @@ async def _agent_lifecycle(
                     "config": config_dict,
                     "trading_context": trading_context,
                     "chat_id": settings.chat_id,
-                    "user_id": settings.user_id,
                 },
             )
 

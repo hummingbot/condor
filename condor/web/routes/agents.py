@@ -790,7 +790,6 @@ class AskRequest(BaseModel):
     task: str
     context: str = ""
     chat_id: int = 0
-    user_id: int | None = None
     server_name: str | None = None
     # Which agent is asking, for the ask's record (FEAT-058). "" is a person
     # asking directly. A label on a record the caller already owns, so there is
@@ -802,7 +801,6 @@ class StartStrategyRequest(BaseModel):
     config: dict[str, Any] = {}
     trading_context: str = ""
     chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
 # ── The delegation budget (ARCH-310) ──
@@ -829,7 +827,6 @@ MIN_DELEGATE_TIMEOUT_S = 900
 class DelegateRequest(BaseModel):
     task: str
     chat_id: int = 0  # Telegram chat for the completion notification
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
     timeout_s: int = DEFAULT_DELEGATE_TIMEOUT_S
     # Canonical key of the session asking for the work (posted by the condor MCP
@@ -844,7 +841,6 @@ class NotifyRequest(BaseModel):
     text: str
     parse_mode: str = "Markdown"
     chat_id: int = 0  # Telegram chat to push to (0 = nothing to push to)
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
     # Canonical key of the session announcing something (posted by the condor
     # MCP server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
     session_key: str = ""
@@ -2399,9 +2395,8 @@ async def ask_agent(
     # rule as the push target on /notify (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    # Web callers always act as themselves; the ``user_id`` override is reserved
-    # for trusted internal/MCP callers and must not let a session impersonate
-    # another user's memory/skill scope.
+    # Web callers always act as themselves: a body-supplied user_id must not let
+    # a session impersonate another user's memory/skill scope.
     answer = await run_ask(
         slug=slug,
         user_id=user.id,
@@ -2516,9 +2511,9 @@ async def delegate_agent(
         )
         on_complete = "notify"
 
-    # Web callers always act as themselves: honoring ``req.user_id`` here would
-    # let any authenticated session run a delegation under another user's memory
-    # scope and server grants.
+    # Web callers always act as themselves: honoring a body-supplied user_id
+    # here would let any authenticated session run a delegation under another
+    # user's memory scope and server grants.
     dt = await start_delegation(
         agent_slug=slug,
         user_id=user.id,
@@ -2551,12 +2546,12 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
     if not req.text:
         raise HTTPException(status_code=400, detail="text is required")
 
-    # The push target must belong to the caller — mirror the ``req.user_id``
-    # rule below for the outbound address, and refuse before any side effect
-    # (SEC-198).
+    # The push target must belong to the caller — mirror the JWT-not-body
+    # user_id rule below for the outbound address, and refuse before any side
+    # effect (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    # The caller is the JWT, never ``req.user_id``: mirror delegate so an
+    # The caller is the JWT, never a body-supplied user_id: mirror delegate so an
     # authenticated session cannot write into another user's transcript.
     conversation_id = await _owned_conversation_for_session(req.session_key, user)
     recorded = False
@@ -3015,8 +3010,8 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
-    # Web callers always act as themselves (mirror delegate): honoring
-    # ``req.user_id`` would let any authenticated session start the engine
+    # Web callers always act as themselves (mirror delegate): honoring a
+    # body-supplied user_id would let any authenticated session start the engine
     # under another user's memory scope and accessible-servers fallback.
     new_engine = TickEngine(
         agent=agent,
