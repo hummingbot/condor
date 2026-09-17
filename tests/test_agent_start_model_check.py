@@ -129,6 +129,96 @@ def test_an_explicit_base_url_stands_in_for_the_saved_endpoint(client):
     assert resp.status_code == 200, resp.text
 
 
+# ── A caller-chosen base URL never carries the install's keys (SEC-630) ──
+
+EVIL = "https://evil.example/v1"
+
+
+class _Built(Exception):
+    """Raised by the fake AsyncOpenAI so no provider is ever built or called."""
+
+
+def _capture_openai(monkeypatch) -> list[dict]:
+    built: list[dict] = []
+
+    def fake_async_openai(**kwargs):
+        built.append(kwargs)
+        raise _Built
+
+    monkeypatch.setattr("openai.AsyncOpenAI", fake_async_openai)
+    return built
+
+
+def _build(key, **kwargs) -> dict:
+    from condor.runtime.llm_client import build_llm_client
+
+    client = build_llm_client(key, **kwargs)
+    with pytest.raises(_Built):
+        asyncio.run(client._build_model())
+
+
+def test_a_base_url_override_never_carries_an_env_api_key(monkeypatch):
+    built = _capture_openai(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env")
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "ck-env")
+    monkeypatch.delenv("CUSTOM_LLM_BASE_URL", raising=False)
+    monkeypatch.setattr("condor.preferences.load_user_data_for", lambda uid: {})
+
+    _build("openrouter:x/y", user_id=555, base_url_override=EVIL)
+    _build("custom:m", user_id=555, base_url_override=EVIL)
+    assert [(b["base_url"], b["api_key"]) for b in built] == [
+        (EVIL, "not-needed"),
+        (EVIL, "not-needed"),
+    ]
+
+    # Without an override the install's own endpoints still get their keys.
+    built.clear()
+    monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "https://install.example/v1")
+    _build("openrouter:x/y", user_id=555)
+    _build("custom:m", user_id=555)
+    assert [b["api_key"] for b in built] == ["sk-env", "ck-env"]
+    assert EVIL not in [b["base_url"] for b in built]
+
+
+def test_a_saved_endpoints_own_key_still_travels_with_an_override(monkeypatch):
+    from condor.preferences import save_custom_provider
+
+    built = _capture_openai(monkeypatch)
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "ck-env")
+    user_data: dict = {}
+    save_custom_provider(
+        user_data, "venice", "https://api.venice.ai/api/v1", api_key="user-key"
+    )
+    monkeypatch.setattr("condor.preferences.load_user_data_for", lambda uid: user_data)
+
+    _build("custom@venice:m", user_id=555, base_url_override="http://127.0.0.1:9/v1")
+
+    assert built == [
+        {
+            "base_url": "http://127.0.0.1:9/v1",
+            "api_key": "user-key",
+            "timeout": built[0]["timeout"],
+        }
+    ]
+
+
+def test_starting_an_openrouter_loop_with_a_base_url_is_refused(
+    client, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env")
+    built = _capture_openai(monkeypatch)
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+    resp = _start(client, {"agent_key": "openrouter:x/y", "model_base_url": EVIL})
+
+    assert resp.status_code == 422
+    assert "base URL cannot be set for openrouter" in resp.json()["detail"]
+    assert FakeEngine.spawned == []
+    assert built == []
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+    assert not list(tmp_path.rglob("sessions"))
+
+
 # ── The engine ──
 
 
