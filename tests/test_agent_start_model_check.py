@@ -387,3 +387,164 @@ def test_notify_reaches_the_owner_of_a_dashboard_launch(tmp_path, monkeypatch):
     asyncio.run(engine_module.TickEngine._notify(engine, "hello"))
 
     assert sent == [{"chat_id": 42, "text": "hello"}]
+
+
+# ── CORR-629: a model turn that ends in a failed PromptDone is a failed tick ──
+
+
+def _stream_of(engine, events, *, last_tick=True):
+    """A ``_collect_stream`` stand-in yielding ``events``; stops the loop after."""
+
+    async def stream(*args, **kwargs):
+        if last_tick:
+            engine._running = False
+        for event in events:
+            yield event
+
+    return stream
+
+
+def _stop_executor_call():
+    from condor.acp.client import ToolCallEvent, ToolCallUpdate
+
+    return [
+        ToolCallEvent(
+            tool_call_id="t1",
+            title="mcp__mcp-hummingbot__stop_executor",
+            status="pending",
+            input={"executor_id": "ex-1"},
+        ),
+        ToolCallUpdate(tool_call_id="t1", status="completed", output="stopped"),
+    ]
+
+
+def test_a_loop_tick_whose_turn_errors_is_journaled_as_an_error(
+    tmp_path, monkeypatch, supervisor
+):
+    from condor.acp.client import PromptDone
+
+    engine, notices = _engine(tmp_path, monkeypatch, mode="loop")
+    monkeypatch.setattr(
+        engine, "_collect_stream", _stream_of(engine, [PromptDone(stop_reason="error")])
+    )
+
+    _run(engine)
+
+    assert "agent session ended: error" in engine._last_error
+    journal = engine.journal._path.read_text()
+    decisions = journal.split("## Decisions", 1)[1]
+    assert "**error**" in decisions and "agent session ended: error" in decisions
+    summary = engine.journal.read_summary()
+    assert "No response" not in summary
+    assert "ERROR: agent session ended: error" in summary
+    assert notices == [
+        f"Agent {engine.agent_id} tick error: agent session ended: error"
+    ]
+
+
+def test_a_dry_run_whose_turn_disconnects_is_a_failed_run(
+    tmp_path, monkeypatch, supervisor
+):
+    from condor.acp.client import PromptDone
+
+    engine, notices = _engine(tmp_path, monkeypatch, mode="dry_run")
+    monkeypatch.setattr(
+        engine,
+        "_collect_stream",
+        _stream_of(engine, [PromptDone(stop_reason="disconnected")], last_tick=False),
+    )
+
+    _run(engine)
+
+    [run] = list_experiments(engine.strategy.home)
+    assert run["error"] is True
+    assert notices == [
+        f"Agent {engine.agent_id}: Dry run failed: agent session ended: disconnected"
+    ]
+    assert supervisor.finals == [LoopState.ERROR]
+    # The tick's own file survives: _record_failed_experiment did not replace it
+    # with an empty one.
+    [f] = list(engine.strategy.home.rglob("*.md"))
+    content = f.read_text()
+    assert "System Prompt (0 chars)" not in content
+    assert "The tick failed before collecting any." not in content
+    assert "(error: agent session ended: disconnected)" in content
+
+
+def test_a_failed_loop_turn_still_records_its_tool_calls(
+    tmp_path, monkeypatch, supervisor
+):
+    from condor.acp.client import PromptDone
+    from condor.agents.actions import read_actions
+
+    engine, notices = _engine(tmp_path, monkeypatch, mode="loop")
+    events = _stop_executor_call() + [PromptDone(stop_reason="error")]
+    monkeypatch.setattr(engine, "_collect_stream", _stream_of(engine, events))
+
+    _run(engine)
+
+    [action] = read_actions(engine.session_dir)
+    assert action.tool == "stop_executor" and action.ok
+    assert "agent session ended: error" in engine._last_error
+
+
+def test_a_failed_dry_run_turn_still_records_its_tool_calls(
+    tmp_path, monkeypatch, supervisor
+):
+    from condor.acp.client import PromptDone
+
+    engine, notices = _engine(tmp_path, monkeypatch, mode="dry_run")
+    events = _stop_executor_call() + [PromptDone(stop_reason="timeout")]
+    monkeypatch.setattr(
+        engine, "_collect_stream", _stream_of(engine, events, last_tick=False)
+    )
+
+    _run(engine)
+
+    [run] = list_experiments(engine.strategy.home)
+    assert run["error"] is True
+    [f] = list(engine.strategy.home.rglob("*.md"))
+    assert "## Tool Calls (1)" in f.read_text()
+    assert "stop_executor" in f.read_text()
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "cancelled"])
+def test_a_turn_that_did_not_fail_is_a_normal_tick(
+    tmp_path, monkeypatch, supervisor, stop_reason
+):
+    from condor.acp.client import PromptDone, TextChunk
+
+    engine, notices = _engine(tmp_path, monkeypatch, mode="loop")
+    events = [TextChunk("ok"), PromptDone(stop_reason=stop_reason)]
+    monkeypatch.setattr(engine, "_collect_stream", _stream_of(engine, events))
+
+    _run(engine)
+
+    assert engine._last_error == ""
+    assert notices == []
+    assert engine.journal.tick_count == 1
+    assert "Last action: ok" in engine.journal.read_summary()
+
+
+def test_a_pydantic_provider_error_marks_the_dry_run_failed(
+    tmp_path, monkeypatch, supervisor
+):
+    from condor.acp.client import PromptDone, TextChunk
+
+    engine, notices = _engine(tmp_path, monkeypatch, mode="dry_run")
+    events = [
+        TextChunk("OpenRouter rejected the request: insufficient credits.\nTop up."),
+        PromptDone(stop_reason="error"),
+    ]
+    monkeypatch.setattr(
+        engine, "_collect_stream", _stream_of(engine, events, last_tick=False)
+    )
+
+    _run(engine)
+
+    [run] = list_experiments(engine.strategy.home)
+    assert run["error"] is True
+    assert notices == [
+        f"Agent {engine.agent_id}: Dry run failed: agent session ended: error"
+        " — OpenRouter rejected the request: insufficient credits."
+    ]

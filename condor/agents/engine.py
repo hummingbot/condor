@@ -36,6 +36,7 @@ from condor.telemetry import taps as telemetry_taps
 
 from . import actions as actions_mod
 from .agent import Agent
+from .agent_run import FAILED_STOP_REASONS
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
@@ -64,6 +65,24 @@ class _NullTracker:
 
     def get_drawdown_pct(self) -> float:
         return 0.0
+
+
+def _turn_failure(stop_reason: str, response_text: str) -> str:
+    """The error a failed model turn raises, or "" when the turn answered.
+
+    Only ``FAILED_STOP_REASONS`` count: a ``cancelled`` turn is the engine's own
+    stop, not a failure. On ``error`` the first streamed line is kept, since
+    that is where the pydantic client puts the provider's message.
+    """
+    if stop_reason not in FAILED_STOP_REASONS:
+        return ""
+    failure = f"agent session ended: {stop_reason}"
+    first_line = next(
+        (line.strip() for line in response_text.splitlines() if line.strip()), ""
+    )
+    if stop_reason == "error" and first_line:
+        failure += f" — {first_line}"
+    return failure
 
 
 @dataclass(frozen=True)
@@ -138,6 +157,8 @@ class TickEngine:
     )
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
+    # Set once an experiment tick has written its own dry-run file.
+    _experiment_written: bool = field(default=False, init=False)
     # The block the owner was last told about, so a block lasting many ticks is
     # announced once instead of on every one of them.
     _last_block_reason: str = field(default="", init=False, repr=False)
@@ -551,12 +572,22 @@ class TickEngine:
         if ctx is None:
             return
 
-        response_text, tool_calls = await self._run_model(
+        response_text, tool_calls, stop_reason = await self._run_model(
             ctx.prompt, ctx.risk_state, client
         )
+        failure = _turn_failure(stop_reason, response_text)
+        # A failed turn may already have run tool calls (a deploy), so it is
+        # persisted like any other tick first; raising afterwards lets ``_loop``
+        # journal the error, tell the owner and end a dry run as failed.
         await self._persist_tick(
-            ctx, response_text, tool_calls, time.time() - self._last_tick_at
+            ctx,
+            response_text,
+            tool_calls,
+            time.time() - self._last_tick_at,
+            failure=failure,
         )
+        if failure:
+            raise RuntimeError(failure)
 
     # ------------------------------------------------------------------
     # Tick phase 1: gather
@@ -756,13 +787,16 @@ class TickEngine:
 
     async def _run_model(
         self, prompt: str, risk_state: RiskState, client
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Run one agent session over ``prompt``; return (response text, tool calls).
+    ) -> tuple[str, list[dict[str, Any]], str]:
+        """Run one agent session over ``prompt``; return (response text, tool
+        calls, the terminal ``PromptDone`` stop reason).
 
         A fresh client per tick (clean context window), streamed under the
         tick's wall-clock budget. A timeout is not an error: the partial
         response gets "(timed out)" appended. The client is always stopped and
-        ``_active_client`` cleared, whatever happens.
+        ``_active_client`` cleared, whatever happens. Neither client raises when
+        the turn fails; it ends on a ``PromptDone`` whose reason says so, which
+        ``_tick`` checks against ``FAILED_STOP_REASONS``.
         """
         acp_client = await self._create_client(risk_state, client)
         self._active_client = acp_client
@@ -770,6 +804,7 @@ class TickEngine:
         response_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         tool_call_map: dict[str, dict[str, Any]] = {}
+        stop_reason = "end_turn"
 
         await acp_client.start()
         # Wall-clock budget for this tick's agent session. Comes from the shared
@@ -789,6 +824,8 @@ class TickEngine:
                         new_tc = fold_tool_call_event(tool_call_map, event)
                         if new_tc is not None:
                             tool_calls.append(new_tc)
+                    elif isinstance(event, PromptDone):
+                        stop_reason = event.stop_reason
         except asyncio.TimeoutError:
             log.warning(
                 "TickEngine %s: ACP prompt timed out after %ds",
@@ -800,7 +837,7 @@ class TickEngine:
             await acp_client.stop()
             self._active_client = None
 
-        return "".join(response_chunks), tool_calls
+        return "".join(response_chunks), tool_calls, stop_reason
 
     # ------------------------------------------------------------------
     # Tick phase 3: persist
@@ -812,9 +849,13 @@ class TickEngine:
         response_text: str,
         tool_calls: list[dict[str, Any]],
         tick_duration: float,
+        failure: str = "",
     ) -> None:
         """Record what the tick did: a snapshot file for an experiment, the
         journal, snapshot, action log and session report for a session.
+
+        ``failure`` is set when the model turn itself failed; the tick is still
+        recorded in full, marked as failed.
         """
         # What the gate refused this tick, taken before either branch below so a
         # dry run and a live tick both carry it. It reaches the agent through the
@@ -825,11 +866,11 @@ class TickEngine:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         if self.is_experiment:
             self._persist_experiment(
-                ctx, response_text, tool_calls, tick_duration, timestamp
+                ctx, response_text, tool_calls, tick_duration, timestamp, failure
             )
         else:
             await self._persist_session(
-                ctx, response_text, tool_calls, tick_duration, timestamp
+                ctx, response_text, tool_calls, tick_duration, timestamp, failure
             )
 
     def _persist_experiment(
@@ -839,10 +880,17 @@ class TickEngine:
         tool_calls: list[dict[str, Any]],
         tick_duration: float,
         timestamp: str,
+        failure: str = "",
     ) -> None:
-        """Experiments: save a single snapshot file, no journal."""
+        """Experiments: save a single snapshot file, no journal.
+
+        A failed turn leads its Agent Response with ``(error: ...)``, which is
+        what marks the run failed in the Runs rail.
+        """
         from .journal import save_experiment_snapshot
 
+        if failure:
+            response_text = f"(error: {failure})\n\n{response_text}"
         save_experiment_snapshot(
             agent_dir=self.strategy.home,
             experiment_num=self.session_num,
@@ -856,6 +904,9 @@ class TickEngine:
             duration=tick_duration,
             agent_key=self._agent_key(),
         )
+        # The tick's own file is the record; ``_record_failed_experiment`` must
+        # not replace it with an empty one when the failure is raised after.
+        self._experiment_written = True
         log.info(
             "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
             self.agent_id,
@@ -871,6 +922,7 @@ class TickEngine:
         tool_calls: list[dict[str, Any]],
         tick_duration: float,
         timestamp: str,
+        failure: str = "",
     ) -> None:
         """Sessions: full journal tracking, snapshot, action log, live report."""
         # What the tick actually *did*, as opposed to what it said (FEAT-097).
@@ -921,11 +973,12 @@ class TickEngine:
                 position_size=skill_exposure,
             )
 
-            action_brief = (
-                response_text[:100].replace("\n", " ")
-                if response_text
-                else "No response"
-            )
+            if failure:
+                action_brief = f"ERROR: {failure}"[:100].replace("\n", " ")
+            elif response_text:
+                action_brief = response_text[:100].replace("\n", " ")
+            else:
+                action_brief = "No response"
             self.journal.write_summary(
                 tick=tick_num,
                 status="Running",
@@ -1348,6 +1401,8 @@ class TickEngine:
         """
         from .journal import save_experiment_snapshot
 
+        if self._experiment_written:
+            return
         try:
             save_experiment_snapshot(
                 agent_dir=self.strategy.home,

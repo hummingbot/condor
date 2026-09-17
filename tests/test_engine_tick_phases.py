@@ -58,12 +58,13 @@ def test_run_model_reaps_client_on_timeout(tmp_path, monkeypatch):
     fake = _HangingClient()
     monkeypatch.setattr(engine, "_create_client", _async(fake))
 
-    text, tool_calls = asyncio.run(
+    text, tool_calls, stop_reason = asyncio.run(
         engine._run_model("prompt", RiskState(), client=object())
     )
 
     assert text.endswith("(timed out)")
     assert tool_calls == []
+    assert stop_reason == "end_turn"
     assert fake.stops == 1
     assert engine._active_client is None
 
