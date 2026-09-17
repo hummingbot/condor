@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -65,22 +66,26 @@ class ProviderRegistry:
         if not _REGISTRY:
             _auto_register()
 
-        results: dict[str, ProviderResult] = {}
-        for provider in list_core_providers():
+        async def _run_one(provider: BaseProvider) -> ProviderResult:
             try:
-                result = await provider.execute(
+                return await provider.execute(
                     client,
                     config,
                     agent_id=agent_id,
                     bot_names=bot_names,
                     owned=owned,
                 )
-                results[result.name] = result
             except Exception:
                 log.exception("Core provider %s failed", provider.name)
-                results[provider.name] = ProviderResult(
+                return ProviderResult(
                     name=provider.name,
                     data={},
                     summary=f"(provider {provider.name} failed)",
                 )
-        return results
+
+        # The providers are independent (none reads another's result), so their
+        # API round trips run concurrently; gather keeps registration order.
+        outcomes = await asyncio.gather(
+            *(_run_one(provider) for provider in list_core_providers())
+        )
+        return {result.name: result for result in outcomes}
