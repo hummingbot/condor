@@ -164,13 +164,22 @@ def _should_remain_open(position: dict, policy: ShutdownPolicy) -> bool:
 async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
     """This session's running executors -- fresh if possible, else last snapshot.
 
-    Re-runs the core providers so the winddown acts on current truth; on any
+    Re-runs only the executors core provider so the winddown acts on current
+    truth without paying for the positions and account-wide drift reads it
+    would discard. Scoped like the tick: the ledger's bases, so a session that
+    deployed more than its configured bot winds all of them down. On any
     failure it falls back to ``engine._last_skill_data`` (already scoped to this
     session's ``agent_id`` by the last tick).
     """
+    ledger = getattr(engine, "ledger", None)
     try:
         results = await engine.provider_registry.run_core_providers(
-            client, engine.config, agent_id=engine.agent_id
+            client,
+            engine.config,
+            agent_id=engine.agent_id,
+            bot_names=ledger.bases() if ledger else None,
+            owned=ledger.owned() if ledger else None,
+            names=("executors",),
         )
         ex_result = results.get("executors")
         if ex_result is not None and "executors" in getattr(ex_result, "data", {}):
@@ -309,8 +318,11 @@ async def _run_llm_cleanup(
 
         from .engine import _NullTracker, build_gated_client
 
-        running = await _get_running_executors(engine, client)
-        positions = await _fetch_positions(client, engine.agent_id)
+        # Independent reads, and each swallows its own failure.
+        running, positions = await asyncio.gather(
+            _get_running_executors(engine, client),
+            _fetch_positions(client, engine.agent_id),
+        )
         context = _build_llm_context(policy, running, positions, failures)
         cleanup_timeout = resolve_tick_timeout(
             strategy=engine.config.get("tick_timeout_sec")

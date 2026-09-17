@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 from .base import BaseProvider, ProviderResult
@@ -55,13 +56,16 @@ class ProviderRegistry:
         agent_id: str = "",
         bot_names: list[str] | None = None,
         owned: list[OwnedBot] | None = None,
+        names: Collection[str] | None = None,
     ) -> dict[str, ProviderResult]:
-        """Run all core providers and return {name: ProviderResult} dict.
+        """Run the core providers and return {name: ProviderResult} dict.
 
         ``bot_names`` are the bases the session owns per its ownership ledger, so
         a session operating several bots sees all of them in its core data.
         ``owned`` is that ledger's records, which scope each base's PnL to the
         window this session held it over.
+        ``names`` narrows the run to those core providers (the shutdown winddown
+        only needs ``executors``); ``None`` runs every one, as the tick does.
         """
         if not _REGISTRY:
             _auto_register()
@@ -83,9 +87,10 @@ class ProviderRegistry:
                     summary=f"(provider {provider.name} failed)",
                 )
 
+        providers = [
+            p for p in list_core_providers() if names is None or p.name in names
+        ]
         # The providers are independent (none reads another's result), so their
         # API round trips run concurrently; gather keeps registration order.
-        outcomes = await asyncio.gather(
-            *(_run_one(provider) for provider in list_core_providers())
-        )
+        outcomes = await asyncio.gather(*(_run_one(p) for p in providers))
         return {result.name: result for result in outcomes}

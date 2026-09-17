@@ -207,7 +207,20 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
     strat = Strategy(agent_slug="acme", name="Scalper")
 
     class _Registry:
-        async def run_core_providers(self, client, config, agent_id=""):
+        """Records each provider run; a full core sweep fails loudly (PERF-641)."""
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def run_core_providers(
+            self, client, config, agent_id="", bot_names=None, owned=None, names=None
+        ):
+            assert names is not None, "shutdown must not run every core provider"
+            self.calls.append(
+                {"names": list(names), "bot_names": bot_names, "owned": owned}
+            )
+            if "executors" not in names:
+                return {}
             return {"executors": SimpleNamespace(data={"executors": running_executors})}
 
     client = _FakeClient(positions_sequence)
@@ -815,3 +828,106 @@ def test_winddown_survives_a_positions_fetch_failure_during_verify(
     assert ("shutdown_done", "stopped=1, failures=0, verify=flat") in [
         (a, r) for a, r in engine.journal.actions
     ]
+
+
+# ── winddown reads only the executor list (PERF-641) ──
+
+
+class _Ledger:
+    def bases(self):
+        return ["bot_a", "bot_b"]
+
+    def owned(self):
+        return ["owned-records"]
+
+
+def _count_positions_calls(client):
+    counter = {"n": 0}
+    original = client.executors.get_positions_summary
+
+    async def counted(controller_id=None):
+        counter["n"] += 1
+        return await original(controller_id=controller_id)
+
+    client.executors.get_positions_summary = counted
+    return counter
+
+
+def test_winddown_only_runs_the_executors_provider(tmp_path, monkeypatch):
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    _patch_llm(monkeypatch)
+    positions_calls = _count_positions_calls(client)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    # Baseline + LLM pass; nothing stranded, so no verify retry.
+    calls = engine.provider_registry.calls
+    assert [c["names"] for c in calls] == [["executors"], ["executors"]]
+    assert all(c["bot_names"] is None and c["owned"] is None for c in calls)
+    # One positions read from the LLM pass, one from the verify step.
+    assert positions_calls["n"] == 2
+    assert any("complete" in n for n in notes)
+
+
+def test_a_stranded_retry_reads_the_executors_provider_again(tmp_path, monkeypatch):
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    stuck = [{"connector_name": "binance_perpetual", "trading_pair": "ETH-USDT"}]
+    engine, client, notes = _engine_with_llm(
+        running, [stuck, stuck, []], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    _patch_llm(monkeypatch)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    names = [c["names"] for c in engine.provider_registry.calls]
+    assert names == [["executors"]] * 3
+    assert not any("🚨" in n for n in notes)
+
+
+def test_winddown_scopes_the_executor_read_to_the_ledger(tmp_path, monkeypatch):
+    running = [{"id": "e1", "connector": "binance"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    engine.ledger = _Ledger()
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    [call] = engine.provider_registry.calls
+    assert call["bot_names"] == ["bot_a", "bot_b"]
+    assert call["owned"] == ["owned-records"]
+
+
+def test_llm_pass_reads_executors_and_positions_concurrently(tmp_path, monkeypatch):
+    """Each read waits for the other to start, so a serial pass times out."""
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    started: list[str] = []
+    gate = asyncio.Event()
+
+    async def _mark(name):
+        started.append(name)
+        if len(started) == 2:
+            gate.set()
+        await asyncio.wait_for(gate.wait(), timeout=2)
+
+    async def executors(engine_, client_):
+        await _mark("executors")
+        return running
+
+    async def positions(client_, agent_id):
+        await _mark("positions")
+        return []
+
+    monkeypatch.setattr(shutdown_module, "_get_running_executors", executors)
+    monkeypatch.setattr(shutdown_module, "_fetch_positions", positions)
+    built = _patch_llm(monkeypatch)
+    asyncio.run(
+        shutdown_module._run_llm_cleanup(
+            engine, client, ShutdownPolicy(), "Do cleanup.", []
+        )
+    )
+
+    assert sorted(started) == ["executors", "positions"]
+    [(_, llm)] = built
+    assert len(llm.prompts) == 1

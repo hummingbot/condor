@@ -317,3 +317,49 @@ def test_an_agent_with_no_rows_of_its_own_gets_no_gate_signal():
     assert result.data["mine"] == []
     assert result.data["worst_quote"] is None
     assert result.data["drifting"] == 1
+
+
+def test_run_core_providers_narrows_to_the_named_providers(monkeypatch):
+    """PERF-641: the winddown asks for ``executors`` alone, with the full scope."""
+    import condor.agents.providers as providers
+    from condor.agents.providers.base import ProviderResult
+
+    seen: list[tuple[str, dict]] = []
+
+    class _Recording:
+        is_core = True
+
+        def __init__(self, name):
+            self.name = name
+
+        async def execute(self, client, config, **kwargs):
+            seen.append((self.name, kwargs))
+            return ProviderResult(name=self.name, data={}, summary=self.name)
+
+    fakes = [_Recording(n) for n in ("executors", "positions", "drift")]
+    monkeypatch.setattr(providers, "list_core_providers", lambda: fakes)
+
+    results = asyncio.run(
+        ProviderRegistry().run_core_providers(
+            object(),
+            {},
+            agent_id="acme.s_1",
+            bot_names=["bot_a"],
+            owned=["rec"],
+            names=("executors",),
+        )
+    )
+    assert list(results) == ["executors"]
+    assert seen == [
+        (
+            "executors",
+            {"agent_id": "acme.s_1", "bot_names": ["bot_a"], "owned": ["rec"]},
+        )
+    ]
+
+    seen.clear()
+    assert list(asyncio.run(ProviderRegistry().run_core_providers(object(), {}))) == [
+        "executors",
+        "positions",
+        "drift",
+    ]
