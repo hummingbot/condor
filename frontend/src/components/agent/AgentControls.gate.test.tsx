@@ -71,7 +71,7 @@ function GatedReader() {
 let container: HTMLDivElement;
 let root: Root;
 
-function mount() {
+function mount(status = "paused") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -82,7 +82,7 @@ function mount() {
         <AgentControls
           slug="brigado"
           sslug="brl_mm"
-          status="paused"
+          status={status}
           defaultContext=""
           agentConfig={{}}
         />
@@ -141,5 +141,44 @@ describe("resuming a loop", () => {
     // And the gate is open again on what it read back.
     await elapse(5_000);
     expect(getAgent).toHaveBeenCalledTimes(3);
+  });
+});
+
+/** Button labels the controls render, in DOM order. */
+function labels(): string[] {
+  return [...container.querySelectorAll("button")].map((b) =>
+    (b.textContent ?? "").trim(),
+  );
+}
+
+describe("which controls a status gets (CORR-370)", () => {
+  // A strategy with no live engine reports its last session's raw state, so
+  // terminal words like completed/interrupted reach here and must stay startable.
+  it.each(["completed", "interrupted", "error", "suspended", "idle", "stopped", ""])(
+    "offers Start and nothing live for %j",
+    (status) => {
+      mount(status);
+      const shown = labels();
+      expect(shown.some((l) => l.includes("Start"))).toBe(true);
+      for (const live of ["Pause", "Resume", "Stop"]) {
+        expect(shown.some((l) => l.includes(live))).toBe(false);
+      }
+    },
+  );
+
+  it("offers Pause and Stop, not Start, while running", () => {
+    mount("running");
+    const shown = labels();
+    expect(shown.some((l) => l.includes("Pause"))).toBe(true);
+    expect(shown.some((l) => l.includes("Stop"))).toBe(true);
+    expect(shown.some((l) => l.includes("Start"))).toBe(false);
+  });
+
+  it("offers Resume and Stop, not Start, while paused", () => {
+    mount("paused");
+    const shown = labels();
+    expect(shown.some((l) => l.includes("Resume"))).toBe(true);
+    expect(shown.some((l) => l.includes("Stop"))).toBe(true);
+    expect(shown.some((l) => l.includes("Start"))).toBe(false);
   });
 });

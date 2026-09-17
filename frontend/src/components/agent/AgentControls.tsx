@@ -375,14 +375,9 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
   return (
     <>
       <div className="flex items-center gap-2">
-        {status === "idle" || status === "stopped" ? (
-          <button
-            onClick={() => setShowStartDialog(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
-          >
-            <Play className="h-3.5 w-3.5" /> Start
-          </button>
-        ) : status === "running" ? (
+        {/* Only running and paused are live; every other state (idle, stopped,
+            completed, interrupted, error, suspended, "") is startable (CORR-370). */}
+        {status === "running" ? (
           <>
             <button
               onClick={() => pauseMut.mutate()}
@@ -404,7 +399,14 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
             </button>
             {stopControls}
           </>
-        ) : null}
+        ) : (
+          <button
+            onClick={() => setShowStartDialog(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
+          >
+            <Play className="h-3.5 w-3.5" /> Start
+          </button>
+        )}
         {controlError && (
           <p className="text-xs text-red-400">{controlError.message}</p>
         )}
