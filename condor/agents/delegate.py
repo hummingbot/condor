@@ -83,7 +83,11 @@ from condor.runtime.wake import (  # noqa: F401 - re-exported, see ON_COMPLETE b
 
 log = logging.getLogger(__name__)
 
-# Module-level registry of live delegations (mirrors engine._engines).
+# In-memory registry of delegations: in-flight ones plus the most recent
+# MAX_FINISHED_DELEGATIONS terminal ones (see retire_delegation). Unlike the loop
+# supervisor's engine registry (condor.runtime.loops.LoopSupervisor._engines),
+# nothing here survives the process; the on-disk record is written by
+# _record_delegation_status.
 _delegations: dict[str, "DelegateTask"] = {}
 
 # Default per-task wall-clock budget; a hung ACP subprocess is cancelled after this.
