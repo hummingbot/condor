@@ -1036,3 +1036,123 @@ def test_mcp_create_with_a_taken_name_returns_an_error_dict(tmp_path, monkeypatc
         action="create", agent_slug="brigado", name="brl mm", instructions="y"
     )
     assert "already exists" in dup["error"]
+
+
+# ── MCP tool: the server pin is gated like the web routes' (SEC-698) ──
+
+
+class _FakeConfigManager:
+    """A config manager that knows which servers exist and who may reach them.
+
+    Existence and reach are separate sets on purpose: ``may_use_stored_server``
+    is the conjunction of the two, and a fake that folded them together could
+    not tell the shared predicate apart from a bare ``has_server_access``.
+    """
+
+    def __init__(self, servers, access):
+        self.servers = set(servers)
+        self.access = set(access)
+
+    def get_server(self, name):
+        return {"name": name} if name in self.servers else None
+
+    def has_server_access(self, user_id, name, permission=None):
+        return name in self.access
+
+
+def _patch_cm(monkeypatch, servers, access):
+    import config_manager
+
+    monkeypatch.setattr(
+        config_manager,
+        "get_config_manager",
+        lambda: _FakeConfigManager(servers, access),
+    )
+
+
+def test_mcp_update_refuses_a_server_pin_the_caller_cannot_reach(tmp_path, monkeypatch):
+    """The negative case: pinning an Agent to a foreign server is refused."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+    _patch_cm(monkeypatch, servers=["mine", "foreign"], access=["mine"])
+
+    assert ta.manage_agents(action="create", name="Sentry", agent_key="x")["created"]
+
+    refused = ta.manage_agents(
+        action="update", agent_slug="sentry", server_name="foreign"
+    )
+    assert refused == {"error": "No access to server 'foreign'"}
+    # Nothing was written: the refusal is not a half-applied update.
+    assert ta.manage_agents(action="get", agent_slug="sentry")["server_name"] == ""
+
+
+def test_mcp_create_refuses_a_server_pin_the_caller_cannot_reach(tmp_path, monkeypatch):
+    """The same gate on create, where the stored pin is the empty one."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+    _patch_cm(monkeypatch, servers=["mine", "foreign"], access=["mine"])
+
+    refused = ta.manage_agents(
+        action="create", name="Sentry", agent_key="x", server_name="foreign"
+    )
+    assert refused == {"error": "No access to server 'foreign'"}
+    # And no Agent was created by the attempt.
+    assert "error" in ta.manage_agents(action="get", agent_slug="sentry")
+
+
+def test_mcp_pin_gate_uses_the_stored_name_predicate(tmp_path, monkeypatch):
+    """A name that resolves to no server is refused even for a reaching caller.
+
+    ``may_use_stored_server`` is existence *and* reach; an admin's
+    ``has_server_access`` answers True on any string at all (SEC-164), so a
+    gate built on reach alone would store a pin that can never resolve.
+    """
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+    _patch_cm(monkeypatch, servers=[], access=["ghost"])
+
+    refused = ta.manage_agents(
+        action="create", name="Sentry", agent_key="x", server_name="ghost"
+    )
+    assert refused == {"error": "No access to server 'ghost'"}
+
+
+def test_mcp_reachable_empty_and_unchanged_pins_are_stored(tmp_path, monkeypatch):
+    """The legitimate paths the gate must not break."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+    _patch_cm(monkeypatch, servers=["mine", "foreign"], access=["mine"])
+
+    # A reachable name on create.
+    assert ta.manage_agents(
+        action="create", name="Sentry", agent_key="x", server_name="mine"
+    )["created"]
+    assert ta.manage_agents(action="get", agent_slug="sentry")["server_name"] == "mine"
+
+    # A reachable name on update, and clearing the pin, which needs no access.
+    assert ta.manage_agents(action="update", agent_slug="sentry", server_name="")[
+        "updated"
+    ]
+    assert ta.manage_agents(action="get", agent_slug="sentry")["server_name"] == ""
+
+    # Re-sending the stored name is not a change, so it is not re-checked: the
+    # editor round-trip of a pin someone else legitimately set stays writable
+    # even after the share is withdrawn.
+    ta.manage_agents(action="update", agent_slug="sentry", server_name="mine")
+    _patch_cm(monkeypatch, servers=["mine"], access=[])
+    assert ta.manage_agents(
+        action="update", agent_slug="sentry", server_name="mine", description="d"
+    )["updated"]
+    assert ta.manage_agents(action="get", agent_slug="sentry")["server_name"] == "mine"

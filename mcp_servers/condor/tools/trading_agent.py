@@ -220,6 +220,49 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
+def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
+    """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
+
+    An Agent's server pin decides which account its tools trade on, so every
+    writer of that field answers the same way: ``POST /agents`` and ``PATCH
+    /config`` gate it (SEC-594), a raw ``AGENT.md`` write gates it (SEC-693),
+    and this tool — the third door onto the same field, and the one the web
+    routes' own docstring names as performing "the same write" — did not.
+
+    Credentials never actually leaked, because every site that turns a stored
+    name into a client re-checks reach (``config_manager.may_use_stored_server``
+    at each of its five call sites). What leaked was the *label*: an Agent
+    pinned over MCP to a server the caller cannot reach reports that name
+    verbatim in ``AgentSummary`` and in the chat header's
+    ``SessionBinding.server_name``, so the UI names a foreign account as the one
+    at risk — exactly the mislabel SEC-594 and SEC-693 were shipped to prevent.
+
+    The predicate is ``may_use_stored_server`` rather than the web layer's
+    ``check_server_access``: the two apply the same TRADER floor to the same
+    ``has_server_access``, but the web one lives in ``condor/web/auth.py`` and
+    signals by raising ``HTTPException``, which this layer cannot import (it
+    sits below the web app) and could not answer with anyway — an MCP tool
+    reports refusal as ``{"error": ...}``, the shape ``manage_servers`` already
+    uses for this exact sentence. ``may_use_stored_server`` is the boolean
+    sibling that ARCH-587 gave the callers below the web layer, and it also
+    checks existence, so an admin — for whom ``has_server_access`` answers True
+    on any string at all (SEC-164) — cannot pin an Agent to a name that
+    resolves to no server.
+
+    An empty pin needs no access, and re-sending the value already stored is
+    the ordinary round-trip of a pin someone else legitimately set, so only a
+    *change* is checked — the same two exemptions ``_gate_pin_change`` makes.
+    """
+    if not new or new == stored:
+        return None
+
+    from config_manager import get_config_manager, may_use_stored_server
+
+    if not may_use_stored_server(get_config_manager(), settings.user_id, new):
+        return {"error": f"No access to server '{new}'"}
+    return None
+
+
 def _manage_agent(
     action: str,
     agent_slug: str | None,
@@ -240,6 +283,11 @@ def _manage_agent(
     if action == "create_agent":
         if not name:
             return {"error": "name is required to create an agent"}
+        # Creating an Agent already pinned to an unreachable server is the edit
+        # that is refused below, so it is refused here too.
+        refusal = _refuse_unreachable_pin(server_name, "")
+        if refusal:
+            return refusal
         # Default to the model the creator is actually running. Guessing here
         # produces agents pinned to a backend the user never configured — the
         # coordinator has no way to know which models are reachable, so an
@@ -293,6 +341,11 @@ def _manage_agent(
         a = store.get(agent_slug)
         if not a:
             return {"error": f"Agent '{agent_slug}' not found"}
+        # Ahead of every assignment, so a refused pin leaves the record whole
+        # rather than persisting the fields that happened to be listed first.
+        refusal = _refuse_unreachable_pin(server_name, a.server_name)
+        if refusal:
+            return refusal
         if name:
             a.name = name
         if description is not None:
