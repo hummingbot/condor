@@ -6,6 +6,12 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.fetchers.api_server import (
+    ApiServerSettingsUnsupported,
+    fetch_client_config,
+    fetch_system_info,
+    update_client_config,
+)
 from condor.server_data_service import (
     CREDENTIAL_DERIVED,
     ServerDataType,
@@ -19,6 +25,7 @@ from condor.web.auth import (
 from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
+    ApiClientConfigUpdateRequest,
     CredentialInfo,
     GatewayNetworkUpdateRequest,
     GatewayPullRequest,
@@ -550,6 +557,110 @@ async def gateway_wallet_remove(
             server,
         )
         raise upstream_error("Failed to remove wallet", e)
+
+
+# ── Hummingbot API server (FEAT-121) ──
+#
+# Scoped to the server the navbar points at, exactly like the Gateway routes above: the
+# ``?server=`` query param is the only picker, so the panel and the rest of the app can
+# never disagree about which server is "the" server.
+#
+# These three reach past ``hummingbot-api-client``, which is pinned to a released PyPI
+# version with no method for either route — see ``condor.fetchers.raw_api``. The one
+# consequence visible here is ``ApiServerSettingsUnsupported``: a server whose API
+# predates the routes answers 404, and that is a capability answer, not an outage, so it
+# becomes a 501 the panel can turn into "upgrade this server's API" rather than a 502
+# that reads as "the server is down".
+
+
+def _api_too_old(server: str, exc: Exception) -> HTTPException:
+    """A 501 that names the upgrade, for a server whose API predates these routes."""
+    logger.info("Server '%s' does not serve the API settings routes: %s", server, exc)
+    return HTTPException(
+        status_code=501,
+        detail=(
+            "This server's hummingbot-api is older than this panel. "
+            "Upgrade it to read its version and bot defaults."
+        ),
+    )
+
+
+@router.get("/api/info")
+async def api_server_info(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Versions, image provenance and market-data tunables of the selected server.
+
+    TRADER: it reports what the server runs, which is server state, and carries no
+    credential — ``MarketDataSettings`` is intervals and timeouts by construction.
+    """
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        return await fetch_system_info(client)
+    except ApiServerSettingsUnsupported as e:
+        raise _api_too_old(server, e)
+    except Exception as e:
+        logger.exception("Failed to fetch API server info from '%s'", server)
+        raise upstream_error("Failed to fetch API server info", e)
+
+
+@router.get("/api/client-config")
+async def api_client_config(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """The client defaults bots deployed from this server will inherit.
+
+    TRADER: a rate oracle source and a display token are not secrets, and a trader who
+    can deploy a bot should be able to see what that bot will be built with. Writing
+    them is OWNER, below.
+    """
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        return await fetch_client_config(client)
+    except ApiServerSettingsUnsupported as e:
+        raise _api_too_old(server, e)
+    except Exception as e:
+        logger.exception("Failed to fetch bot client defaults from '%s'", server)
+        raise upstream_error("Failed to fetch bot client defaults", e)
+
+
+@router.put("/api/client-config")
+async def api_client_config_update(
+    req: ApiClientConfigUpdateRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Change the client defaults new bot deploys inherit. OWNER only.
+
+    This rewrites a file on the owner's host that decides how every bot deployed there
+    next is configured — infrastructure, not trading, which is the same line the gateway
+    pull and wallet routes draw.
+
+    Running bots are untouched: a deploy copies ``conf_client.yml`` into the instance, so
+    a bot keeps the copy it was built with until it is redeployed.
+    """
+    cm = get_config_manager()
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    try:
+        return await update_client_config(
+            client,
+            rate_oracle_source=req.rate_oracle_source,
+            global_token_name=req.global_token_name,
+            global_token_symbol=req.global_token_symbol,
+            rate_limits_share_pct=req.rate_limits_share_pct,
+        )
+    except ApiServerSettingsUnsupported as e:
+        raise _api_too_old(server, e)
+    except Exception as e:
+        # Includes the upstream 400/422 naming an invalid oracle source or share, which
+        # upstream_error forwards as a 400 with the API's own message.
+        logger.exception("Failed to update bot client defaults on '%s'", server)
+        raise upstream_error("Failed to update bot client defaults", e)
 
 
 # ── Voice Preferences ──

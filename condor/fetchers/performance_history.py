@@ -10,10 +10,10 @@ controller's, and the browser gets one data contract instead of two.
 ``performance`` router; every router's ``_get`` is protected, and the design
 doc's alternative — add the router upstream-of-the-pin and move the pin — is
 not available for a version pin at a package index. So the request goes to the
-same authenticated session every other call already uses, by the same idiom
-:func:`condor.backtesting.get_task` established: reach for the router's
-``session`` and ``base_url``, and degrade rather than crash for a client shape
-that exposes neither (the test doubles, a future client).
+same authenticated session every other call already uses. That idiom lives in
+:mod:`condor.fetchers.raw_api`, which this module calls: it is shared with the
+other routes past the pin, so the rule that an upstream body never reaches a
+browser (``raw_api.detail``) has one copy rather than one per caller.
 
 **Why a 404 is not an error.** The route is new and unreleased — it exists on a
 server built from the branch behind hummingbot/hummingbot-api#226 and nowhere
@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-import aiohttp
+from condor.fetchers import raw_api
 
 logger = logging.getLogger(__name__)
 
@@ -68,77 +68,32 @@ EXECUTOR_ONLY_FILTERS = (
 MAX_PAGE_LIMIT = 1000
 
 
-class PerformanceHistoryUnsupported(Exception):
+class PerformanceHistoryUnsupported(raw_api.ApiRouteUnsupported):
     """This server has no ``/performance/history``.
 
     Not an error condition — the route is unreleased, so most servers answer
     404 and Condor's derived series is the right thing to draw. Distinct from
     every other failure precisely so a 404 can never be reported as a server
     that is down.
+
+    A subclass of the shared :class:`~condor.fetchers.raw_api.ApiRouteUnsupported`
+    so a caller that handles "this server is too old" in general catches it too,
+    while every existing ``except PerformanceHistoryUnsupported`` is unchanged.
     """
-
-
-def _endpoint(client) -> Optional[tuple[Any, str]]:
-    """``(session, base_url)`` for a client that exposes them, else ``None``.
-
-    Read off ``bot_orchestration`` because that is the router whose surface this
-    one replaces; any router would do, they all hold the same session. A client
-    that exposes neither is not broken — it is a double, or a client shape that
-    changed — and the caller treats it as "cannot ask", which lands on the same
-    fallback a 404 does.
-    """
-    router = getattr(client, "bot_orchestration", None)
-    session = getattr(router, "session", None)
-    base_url = getattr(router, "base_url", None)
-    if session is None or not base_url:
-        return None
-    return session, str(base_url).rstrip("/")
 
 
 async def _get(client, path: str, params: dict[str, Any], *, timeout=None) -> Any:
     """One raw authenticated GET, with upstream's status preserved on failure."""
-    endpoint = _endpoint(client)
-    if endpoint is None:
-        raise PerformanceHistoryUnsupported(
-            "this client cannot reach the performance routes"
-        )
-    session, base_url = endpoint
-
-    kwargs: dict[str, Any] = {"params": params}
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    async with session.get(f"{base_url}{path}", **kwargs) as response:
-        if response.status == 404:
-            raise PerformanceHistoryUnsupported(
-                f"{path} is not served by this API version"
-            )
-        if not response.ok:
-            raise aiohttp.ClientResponseError(
-                response.request_info,
-                response.history,
-                status=response.status,
-                message=await _detail(response),
-                headers=response.headers,
-            )
-        return await response.json()
-
-
-async def _detail(response) -> str:
-    """The API's own ``detail``, or a line that says only the status.
-
-    Never the raw body: an upstream error page can be anything, and this string
-    is handed to a browser. Trimmed for the same reason.
-    """
-    try:
-        body = await response.json()
-    except Exception:
-        return f"the trading API returned HTTP {response.status}"
-    if isinstance(body, dict):
-        for field in ("detail", "message", "error"):
-            value = body.get(field)
-            if isinstance(value, str) and value.strip():
-                return value.strip()[:300]
-    return f"the trading API returned HTTP {response.status}"
+    return await raw_api.request(
+        client,
+        "get",
+        path,
+        params=params,
+        timeout=timeout,
+        # This module's own capability exception, so callers already catching it keep
+        # working and a 404 here still reads as "no /performance/history on this server".
+        unsupported=PerformanceHistoryUnsupported,
+    )
 
 
 def reject_foreign_filters(subject: str, **supplied) -> Optional[str]:

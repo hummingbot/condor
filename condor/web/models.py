@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from condor.fetchers.executors import build_executor_row, get_executor_type
 from condor.fetchers.models import (
@@ -735,6 +735,40 @@ class CredentialInfo(BaseModel):
 
 class GatewayPullRequest(BaseModel):
     image: str = "hummingbot/gateway:development"
+
+
+class ApiClientConfigUpdateRequest(BaseModel):
+    """A partial change to the client defaults new bot deploys inherit (FEAT-121).
+
+    Every field is optional and only the ones supplied are written, so a save that moves
+    the oracle source leaves the global token exactly as it was.
+
+    Values are *not* validated here beyond the shapes below. The authority is the
+    server's own bundled hummingbot — it checks the source against the rate-oracle
+    sources that build knows and the share against ``ClientConfigMap``'s own bound — and
+    a second copy of a rule that must agree with a remote library version is the copy
+    that goes stale. The share's range is the one exception, pinned because it is a plain
+    number with no server-side spelling to get wrong and rejecting it here saves a round
+    trip to be told 422.
+    """
+
+    rate_oracle_source: Optional[str] = None
+    global_token_name: Optional[str] = None
+    global_token_symbol: Optional[str] = None
+    rate_limits_share_pct: Optional[float] = Field(default=None, gt=0, le=100)
+
+    @field_validator("rate_oracle_source", "global_token_name", "global_token_symbol")
+    @classmethod
+    def _strip_and_reject_blank(cls, v: Optional[str]) -> Optional[str]:
+        # A pasted " binance" is the same choice as "binance"; a field cleared to "" is
+        # not a change to empty, it is a field the form should have omitted. Upstream
+        # refuses a blank token name outright, so let it never get there.
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        return v
 
 
 class GatewayNetworkUpdateRequest(BaseModel):
