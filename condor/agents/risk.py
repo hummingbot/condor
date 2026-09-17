@@ -453,10 +453,18 @@ class RiskEngine:
                     f"position limit ${self.limits.max_position_size_quote:.2f}"
                 )
         elif action == "update_config":
+            # A stringified config_data is a common model slip; its amount can't
+            # be read, so it is refused rather than raised out of the permission
+            # callback (which would skip RefusalLog) or passed as "no amount".
+            config_data = input_data.get("config_data") or {}
+            if not isinstance(config_data, dict):
+                return False, (
+                    f"manage_bots {action}: config_data must be an object, "
+                    f"got {type(config_data).__name__}"
+                )
             try:
                 amount = _quote_amount(
-                    (input_data.get("config_data") or {}).get("total_amount_quote"),
-                    "total_amount_quote",
+                    config_data.get("total_amount_quote"), "total_amount_quote"
                 )
             except ValueError as exc:
                 return False, f"manage_bots {action}: {exc}"

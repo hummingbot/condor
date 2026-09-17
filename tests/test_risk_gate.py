@@ -398,7 +398,8 @@ def test_loop_mode_approves_update_config_within_limit():
 
 
 @pytest.mark.parametrize(
-    "cap", ["nan", float("nan"), "-inf", -1, "-5", 0, "0", "0.0", " 0 ", "twenty", True]
+    "cap",
+    ["nan", float("nan"), "-inf", -1, "-5", 0, "0", "$0", "0.0", " 0 ", "fifty", True],
 )
 def test_bot_deploy_refuses_unreadable_or_non_positive_loss_cap(cap):
     """SEC-632: a NaN cap never fires on the backend and a zero cap is never
@@ -477,6 +478,53 @@ def test_update_config_refuses_unreadable_amount(amount):
     assert result["outcome"]["outcome"] == "cancelled"
     assert "total_amount_quote" in result["reason"]
     assert len(refusals.drain()) == 1
+
+
+def test_bot_deploy_dollar_cap_above_the_position_limit_names_the_limit():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    call = _bot_call(
+        "deploy",
+        bot_name="x",
+        controllers_config=["cfg"],
+        max_global_drawdown_quote="$5000",
+    )
+
+    allowed, reason = engine.check_bot_action(call, RiskState())
+
+    assert allowed is False
+    assert "position limit" in reason
+
+
+@pytest.mark.parametrize(
+    "config_data", ['{"total_amount_quote": 9000}', ["total_amount_quote", 9000], 7]
+)
+def test_update_config_with_a_non_dict_config_data_is_refused_not_raised(config_data):
+    """CORR-653: a stringified config_data used to raise AttributeError out of
+    the permission callback, so the refusal never reached RefusalLog."""
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    call = _bot_call("update_config", bot_name="x", config_data=config_data)
+
+    allowed, reason = engine.check_bot_action(call, RiskState())
+    assert allowed is False
+    assert "config_data" in reason
+
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        engine, RiskState(), execution_mode="loop", refusals=refusals
+    )
+    result = asyncio.run(callback(call, _OPTIONS))
+    assert result["outcome"]["outcome"] == "cancelled"
+    logged = refusals.drain()
+    assert len(logged) == 1
+    assert "manage_bots" in logged[0]["tool"]
+
+
+@pytest.mark.parametrize("config_data", [None, {}])
+def test_update_config_without_config_data_is_still_allowed(config_data):
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    call = _bot_call("update_config", bot_name="x", config_data=config_data)
+
+    assert engine.check_bot_action(call, RiskState()) == (True, "")
 
 
 def test_loop_mode_still_approves_bot_stop():
