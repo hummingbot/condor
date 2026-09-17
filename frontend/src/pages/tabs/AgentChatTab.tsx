@@ -56,6 +56,11 @@ import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
 import { normalizeAgentSlug, slotFor } from "@/lib/agentSlug";
+import {
+  pickFor,
+  sessionAgentKey,
+  type PendingPick,
+} from "@/lib/sessionAgentKey";
 import { agentsQuery } from "@/lib/queryClient";
 import {
   api,
@@ -130,8 +135,12 @@ export function AgentChatTab() {
    * the only model control on this screen, so what it says has to be what the
    * next `start_session` carries — otherwise the pick is silently dropped.
    * `null` means "never touched it", which is what falls back to `defaultAgent`.
+   *
+   * Scoped to the agent the hero or panel was showing when it was picked, and
+   * only ever sent to a spawn with that agent (`sessionAgentKey`) — a bare key
+   * rode every later spawn and rewrote each specialist's AGENT.md model.
    */
-  const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
+  const [pendingPick, setPendingPick] = useState<PendingPick>(null);
   /**
    * What is in the pane — read from `?panel=`, so Escape and browser Back both
    * close it and a panel can be sent to someone (FEAT-103).
@@ -258,7 +267,7 @@ export function AgentChatTab() {
         // needs a model named. Volunteering `defaultAgent` here is what used to
         // claim an override the user never made, so a bound Agent ran on
         // Condor's model instead of its own.
-        pendingAgentKey ?? (slug ? "" : defaultAgent),
+        sessionAgentKey(pendingPick, slug, defaultAgent),
         server || undefined,
         slug || undefined,
       );
@@ -274,7 +283,7 @@ export function AgentChatTab() {
       chat.setActiveSlotId,
       chat.startSession,
       defaultAgent,
-      pendingAgentKey,
+      pendingPick,
       server,
     ],
   );
@@ -553,7 +562,10 @@ export function AgentChatTab() {
                   modelOptions={modelOptions}
                   customProviders={customProviders}
                   agentBindings={agentBindings}
-                  selectedKey={pendingAgentKey ?? defaultAgent}
+                  selectedKey={
+                    pickFor(pendingPick, normalizeAgentSlug(heroAgent?.slug)) ??
+                    defaultAgent
+                  }
                   onAsk={(text, files) =>
                     talkTo(heroAgent?.slug || "", { text, files })
                   }
@@ -562,7 +574,10 @@ export function AgentChatTab() {
                   // the user highlighted.
                   onPickBrain={(sel) => {
                     if (sel.agentKey !== undefined)
-                      setPendingAgentKey(sel.agentKey);
+                      setPendingPick({
+                        slug: normalizeAgentSlug(heroAgent?.slug),
+                        key: sel.agentKey,
+                      });
                   }}
                 />
               }
@@ -583,7 +598,10 @@ export function AgentChatTab() {
               wiring={
                 <AgentWiring
                   slot={activeSlot}
-                  pendingAgentKey={pendingAgentKey ?? defaultAgent}
+                  pendingAgentKey={
+                    pickFor(pendingPick, normalizeAgentSlug(openSlug)) ??
+                    defaultAgent
+                  }
                   ambientServer={server || ""}
                   agents={modelOptions}
                   customProviders={customProviders}
@@ -595,7 +613,10 @@ export function AgentChatTab() {
                   onSelectBrain={(sel) => {
                     if (activeSlot) switchBrain(sel);
                     else if (sel.agentKey !== undefined)
-                      setPendingAgentKey(sel.agentKey);
+                      setPendingPick({
+                        slug: normalizeAgentSlug(openSlug),
+                        key: sel.agentKey,
+                      });
                   }}
                   onSelectServer={(name) => {
                     if (activeSlot) switchServer(activeSlot.info.slot_id, name);
