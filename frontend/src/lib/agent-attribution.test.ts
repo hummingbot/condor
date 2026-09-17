@@ -140,6 +140,15 @@ describe("labels", () => {
     expect(runKeyLabel("nonsense")).toBe("nonsense");
   });
 
+  it("split a run key the way splitRunKey does, so a trailing dot has no strategy half", () => {
+    // runKeyLabel and runOwner both delegate the first-dot split to splitRunKey;
+    // a hand-rolled copy used to print "x / " for a key splitRunKey reads as strategy "",
+    // which is not a two-part key and so stays the raw key.
+    expect(splitRunKey("x.")).toEqual({ agent: "x", strategy: "" });
+    expect(runKeyLabel("x.")).toBe("x.");
+    expect(runKeyLabel("a.b.c")).toBe("a / b.c");
+  });
+
   it("spell the same subject out in display names for the tooltip", () => {
     expect(ownerTitle(owners, "brigado.brl_mm")).toBe("Brigado / BRL MM");
   });

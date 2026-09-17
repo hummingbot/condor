@@ -362,8 +362,8 @@ export function isPseudoRunKey(runKey: string): boolean {
  * without the fleet map in hand: the node id already carries the answer.
  */
 export function runKeyLabel(runKey: string): string {
-  const dot = runKey.indexOf(".");
-  return dot < 0 ? runKey : `${runKey.slice(0, dot)} / ${runKey.slice(dot + 1)}`;
+  const { agent, strategy } = splitRunKey(runKey);
+  return strategy ? `${agent} / ${strategy}` : runKey;
 }
 
 /**
