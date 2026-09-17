@@ -7,7 +7,7 @@ import {
   journalNamesDeploy,
   type WorkspaceAlert,
 } from "@/components/agent/workspace/views";
-import { useSeconds } from "@/hooks/useSeconds";
+import { useOverdueSeconds } from "@/hooks/useOverdueSeconds";
 import {
   api,
   type AgentPerformance,
@@ -98,10 +98,11 @@ export function useWorkspaceAlerts({
   );
   const decisions = journal?.decisions ?? EMPTY_DECISIONS;
 
-  // A clock only while something is looping — an overdue tick is the only alert
-  // that changes on its own, and a `Date.now()` in render is what the compiler
-  // forbids anyway.
-  const now = useSeconds(instance?.status === "running");
+  // The overdue tick is the only alert that changes on its own. Its clock is
+  // the lateness itself, not the time (PERF-372): a loop that is on time reads
+  // -1 every second and re-renders nothing here, where a raw clock re-rendered
+  // the whole screen once a second to print the same alerts.
+  const overdueSec = useOverdueSeconds(instance);
 
   const actions = actionsData?.actions;
   const deployments = perfData?.deployments;
@@ -112,9 +113,9 @@ export function useWorkspaceAlerts({
         deployments: (deployments ?? []).length,
         journalNamesDeploy: journalNamesDeploy(decisions),
         loop: instance,
-        nowSec: now / 1000,
+        nowSec: nowSecFor(instance, overdueSec),
       }),
-    [actions, deployments, decisions, instance, now],
+    [actions, deployments, decisions, instance, overdueSec],
   );
 
   return {
@@ -133,3 +134,20 @@ const LIVE_RUN_REFETCH_MS = 10_000;
 
 /** One frozen empty list, so "no journal yet" is a stable identity. */
 const EMPTY_DECISIONS: Decision[] = [];
+
+/**
+ * A `nowSec` that reads back as `overdueSec` in {@link alertsFor}'s rule.
+ *
+ * Half a second past the whole count, because the rule guards on `late > 0`:
+ * the first second of lateness is count 0, and `due + 0` would drop the alert.
+ * Not late (-1) maps to the due time itself, which the same guard reads as on
+ * time.
+ */
+function nowSecFor(
+  loop: { last_tick_at: number; frequency_sec: number } | null,
+  overdueSec: number,
+): number {
+  if (!loop) return 0;
+  const due = loop.last_tick_at + loop.frequency_sec;
+  return overdueSec < 0 ? due : due + overdueSec + 0.5;
+}

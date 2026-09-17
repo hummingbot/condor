@@ -841,3 +841,41 @@ describe("what the narrowing bands are handed (CORR-397)", () => {
     expect(railProps?.strategyFilter).toBe("sol_lp");
   });
 });
+
+describe("a loop that is on time (PERF-372)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("re-renders no band while the seconds pass", async () => {
+    getStrategy.mockResolvedValue({
+      slug: "brl_mm",
+      instances: [
+        {
+          agent_id: "a1",
+          status: "running",
+          last_tick_at: Math.floor(Date.now() / 1000),
+          frequency_sec: 60,
+        },
+      ],
+      config: {},
+    } as unknown as StrategyDetail);
+    // Only the interval and the clock are faked, and before the render so the
+    // screen's clocks are the fake ones: `settle` runs on real `setTimeout(0)`.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    await render("/?strategy=brl_mm&run=s:3&open=playbook");
+    expect(bodies()).toContain("playbook");
+    const count = (name: string) => mounted.filter((n) => n === name).length;
+    const answers = count("answers");
+    const playbook = count("playbook");
+
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+    }
+
+    expect(count("answers")).toBe(answers);
+    expect(count("playbook")).toBe(playbook);
+  });
+});

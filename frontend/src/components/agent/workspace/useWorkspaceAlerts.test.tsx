@@ -14,7 +14,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentRunRow } from "@/lib/api";
+import type { WorkspaceAlert } from "@/components/agent/workspace/views";
+import type { AgentRunRow, RunningInstance } from "@/lib/api";
 
 const getSessionJournal = vi.fn();
 const getSessionActions = vi.fn();
@@ -44,27 +45,37 @@ const run = (status: string) =>
     status,
   }) as unknown as AgentRunRow;
 
-function Probe({ status }: { status: string }) {
-  useWorkspaceAlerts({
+/** Every `alerts` the hook returned, one per render of the probe. */
+let seen: WorkspaceAlert[][] = [];
+
+function Probe({
+  status,
+  instance = null,
+}: {
+  status: string;
+  instance?: RunningInstance | null;
+}) {
+  const { alerts } = useWorkspaceAlerts({
     slug: "brigado",
     sslug: "brl_mm",
     run: run(status),
-    instance: null,
+    instance,
   });
+  seen.push(alerts);
   return null;
 }
 
 let container: HTMLDivElement;
 let root: Root;
 
-async function mount(status: string) {
+async function mount(status: string, instance: RunningInstance | null = null) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <Probe status={status} />
+        <Probe status={status} instance={instance} />
       </QueryClientProvider>,
     );
   });
@@ -82,6 +93,7 @@ async function advance(ms: number) {
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
+  seen = [];
   getSessionJournal.mockReset().mockResolvedValue({ content: "" });
   getSessionActions.mockReset().mockResolvedValue({ actions: [] });
   container = document.createElement("div");
@@ -118,5 +130,88 @@ describe("useWorkspaceAlerts polling", () => {
     await advance(30_000);
     expect(getSessionJournal).toHaveBeenCalledTimes(1);
     expect(getSessionActions).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the overdue clock (PERF-372)", () => {
+  /** A loop whose next tick fell due `lateSec` seconds ago (negative: still ahead). */
+  const loop = (lateSec: number, status = "running") =>
+    ({
+      agent_id: "a1",
+      status,
+      frequency_sec: 60,
+      last_tick_at: Date.now() / 1000 - 60 - lateSec,
+    }) as unknown as RunningInstance;
+  const overdue = () =>
+    seen.at(-1)!.filter((a) => a.kind === "overdue").map((a) => a.text);
+
+  // The 1 s intervals still running. Not `vi.getTimerCount()`: react-query's
+  // own 10 s poll is a timer too, and it is not the clock under test.
+  let clocks: Set<unknown>;
+  beforeEach(() => {
+    clocks = new Set();
+    const set = globalThis.setInterval;
+    const clear = globalThis.clearInterval;
+    vi.spyOn(globalThis, "setInterval").mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      const id = set(fn, ms);
+      if (ms === 1000) clocks.add(id);
+      return id;
+    }) as typeof setInterval);
+    vi.spyOn(globalThis, "clearInterval").mockImplementation(((
+      id?: Parameters<typeof clearInterval>[0],
+    ) => {
+      clocks.delete(id);
+      clear(id);
+    }) as typeof clearInterval);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("counts a late tick up once a second", async () => {
+    await mount("running", loop(2));
+    expect(overdue()).toEqual(["The next tick is 2s overdue."]);
+
+    await advance(1_000);
+    expect(overdue()).toEqual(["The next tick is 3s overdue."]);
+  });
+
+  it("keeps the first second of lateness", async () => {
+    await mount("running", loop(0.5));
+    expect(overdue()).toEqual(["The next tick is 0s overdue."]);
+  });
+
+  it("does not re-render a loop that is on time", async () => {
+    await mount("running", loop(-30));
+    const renders = seen.length;
+    const alerts = seen.at(-1);
+
+    for (let i = 0; i < 5; i++) await advance(1_000);
+    expect(seen.length).toBe(renders);
+    expect(seen.at(-1)).toBe(alerts);
+    expect(overdue()).toEqual([]);
+  });
+
+  it.each([
+    ["no loop", null],
+    ["a loop that is not running", loop(120, "stopped")],
+  ])("holds the same alerts with %s, and runs no clock", async (_, instance) => {
+    await mount("stopped", instance);
+    const alerts = seen.at(-1);
+    await advance(5_000);
+    expect(seen.at(-1)).toBe(alerts);
+    expect(overdue()).toEqual([]);
+    expect(clocks.size).toBe(0);
+  });
+
+  it("leaves no interval behind once unmounted", async () => {
+    await mount("stopped", loop(2));
+    expect(clocks.size).toBe(1);
+    act(() => root.unmount());
+    expect(clocks.size).toBe(0);
+    root = createRoot(container);
   });
 });
