@@ -3,7 +3,7 @@ import { ChevronRight, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
+import { SnapshotDetail } from "@/components/agent/session/Snapshot";
 import { RunOverview } from "@/components/agent/lab/RunOverview";
 import { isLoopRun } from "@/components/agent/lab/runs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";

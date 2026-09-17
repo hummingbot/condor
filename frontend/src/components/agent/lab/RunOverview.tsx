@@ -2,15 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, AlertTriangle, Zap } from "lucide-react";
 import { useMemo } from "react";
 
-import {
-  SessionActivity,
-  SessionBots,
-  SessionCanvasPanel,
-  SessionExecutors,
-  SnapshotBody,
-} from "@/components/agent/AgentSessionContent";
 import { SessionActions } from "@/components/agent/SessionActions";
 import { liveControllerIds } from "@/components/agent/lab/runs";
+import { SessionActivity } from "@/components/agent/session/SessionActivity";
+import { SessionBots } from "@/components/agent/session/SessionBots";
+import { SessionCanvasPanel } from "@/components/agent/session/SessionCanvasPanel";
+import { SessionExecutors } from "@/components/agent/session/SessionExecutors";
+import { SnapshotBody } from "@/components/agent/session/Snapshot";
 import { api } from "@/lib/api";
 import {
   type ParsedJournal,
@@ -22,7 +20,7 @@ import {
 /**
  * The evidence behind a run: what it ran, what it did, and what it said.
  *
- * Every band here is an existing export of `AgentSessionContent` — that is what
+ * Every band here is an existing export of `components/agent/session/` — that is what
  * made the Lab tractable at all: `SessionReviewer` was a shell (a sidebar, a
  * sub-tab bar and a top bar) around bodies that were already written, so the
  * Lab replaced the shell and reused the bodies unchanged.

@@ -17,7 +17,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ParsedSnapshot } from "@/lib/parse-agent";
-import { SnapshotBody } from "./AgentSessionContent";
+import { SnapshotBody } from "./Snapshot";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;

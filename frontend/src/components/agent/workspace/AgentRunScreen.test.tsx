@@ -90,7 +90,7 @@ vi.mock("@/components/agent/lab/RunOverview", () => ({
   RunOverview: stub("detail"),
   ExperimentDetail: stub("experiment"),
 }));
-vi.mock("@/components/agent/AgentSessionContent", () => ({
+vi.mock("@/components/agent/session/Snapshot", () => ({
   SnapshotDetail: stub("tick"),
 }));
 /** The task the delegation stub was last handed (ARCH-398). */

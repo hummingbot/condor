@@ -61,7 +61,7 @@ vi.mock("@/components/agent/lab/RunOverview", () => ({
   RunOverview: stub(),
   ExperimentDetail: stub(),
 }));
-vi.mock("@/components/agent/AgentSessionContent", () => ({
+vi.mock("@/components/agent/session/Snapshot", () => ({
   SnapshotDetail: stub(),
 }));
 vi.mock("@/components/agent/DelegationSheet", () => ({

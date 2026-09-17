@@ -38,15 +38,9 @@ vi.mock("@/components/routines/ReportViewer", () => ({
 
 // The chart is `lightweight-charts` under a canvas jsdom does not have. What
 // this file asserts about it is whether it was asked for, which the stub says.
-vi.mock("@/components/agent/AgentSessionContent", async () => {
-  const real = await vi.importActual<
-    typeof import("@/components/agent/AgentSessionContent")
-  >("@/components/agent/AgentSessionContent");
-  return {
-    ...real,
-    SessionOverview: () => <div data-pnl-chart />,
-  };
-});
+vi.mock("@/components/agent/session/SessionOverview", () => ({
+  SessionOverview: () => <div data-pnl-chart />,
+}));
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;

@@ -4,12 +4,10 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import {
-  SessionKpis,
-  SessionOverview,
-} from "@/components/agent/AgentSessionContent";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { hasPricedMoney } from "@/components/agent/lab/runs";
+import { SessionKpis } from "@/components/agent/session/SessionKpis";
+import { SessionOverview } from "@/components/agent/session/SessionOverview";
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { api, type AgentPerformance } from "@/lib/api";
