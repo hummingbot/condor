@@ -2326,17 +2326,40 @@ async def ask_agent(
 # ── Delegate (fire-and-forget background tasks) ──
 
 
-async def _conversation_for_session(session_key: str) -> str:
-    """Resolve a session key to the conversation currently on that session.
+async def _owned_conversation_for_session(session_key: str, user: WebUser) -> str:
+    """Resolve the caller's own session key to the conversation behind it.
 
-    The resolution itself lives in ``condor.runtime.client`` — routine runs need
-    the same answer (ARCH-089) and a second copy could drift from this one. Kept
-    as a thin local name because the runtime import stays lazy here, as it does
-    for the rest of this module's runtime touchpoints.
+    ``session_key`` is a plain body field, and what it resolves to is where a
+    delegation's completion is resumed or noted -- the session's owner's chat,
+    not the caller's. So the key must be the caller's (SEC-636): a live session
+    recorded under another user is refused with 403, under the same rule
+    ``sessions._require_ownership`` applies (admins pass; everyone else must be
+    the session's recorded ``user_id``). The MCP crossback passes untouched --
+    its JWT is minted for the very user the session is recorded under.
+
+    A missing, malformed or dead key is not an error and resolves to "": that
+    is the truth for a tick- or routine-started agent. The lookup itself is
+    ``condor.runtime.client``'s, as for routine runs (ARCH-089); the import
+    stays lazy like this module's other runtime touchpoints.
     """
+    if not session_key:
+        return ""
     from condor.runtime import client
+    from condor.runtime.keys import SessionKey
 
-    return await client.conversation_for_session(session_key)
+    try:
+        info = await client.get_info(SessionKey.parse(session_key))
+    except Exception:
+        log.debug("Could not resolve session key %r", session_key, exc_info=True)
+        return ""
+    if info is None:
+        return ""
+    if info.user_id is None or info.user_id != user.id:
+        from config_manager import get_config_manager
+
+        if not get_config_manager().is_admin(user.id):
+            raise HTTPException(status_code=403, detail="Not your session")
+    return info.conversation_id
 
 
 @router.post("/{slug}/delegate")
@@ -2387,7 +2410,7 @@ async def delegate_agent(
     # caller's task text) land in someone else's chat (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    conversation_id = await _conversation_for_session(req.session_key)
+    conversation_id = await _owned_conversation_for_session(req.session_key, user)
 
     # Depth 1, structurally. A delegate worker cannot delegate at all
     # (FEAT-032), and a delegation started from *inside* a wake turn is forced
@@ -2444,7 +2467,7 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
 
     # The caller is the JWT, never ``req.user_id``: mirror delegate so an
     # authenticated session cannot write into another user's transcript.
-    conversation_id = await _conversation_for_session(req.session_key)
+    conversation_id = await _owned_conversation_for_session(req.session_key, user)
     recorded = False
     if conversation_id:
         try:

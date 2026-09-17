@@ -765,11 +765,13 @@ def test_delegate_forces_caller_user_id(monkeypatch):
         seen.update(kw)
         return SimpleNamespace(task_id="em-delegate-1", status="running")
 
-    async def _no_conversation(session_key):
+    async def _no_conversation(session_key, user):
         return ""
 
     monkeypatch.setattr(agents_module, "_get_agent", lambda slug: SimpleNamespace())
-    monkeypatch.setattr(agents_module, "_conversation_for_session", _no_conversation)
+    monkeypatch.setattr(
+        agents_module, "_owned_conversation_for_session", _no_conversation
+    )
     monkeypatch.setattr(delegate_module, "start_delegation", _capture_start)
     monkeypatch.setattr(
         "condor.web.auth.get_config_manager",

@@ -396,12 +396,14 @@ def test_session_key_resolution_never_raises():
 
     The delegate route must not fail because provenance could not be resolved.
     """
-    from condor.web.routes.agents import _conversation_for_session
+    from condor.web.models import WebUser
+    from condor.web.routes.agents import _owned_conversation_for_session
 
-    assert asyncio.run(_conversation_for_session("")) == ""
-    assert asyncio.run(_conversation_for_session("not-a-key")) == ""
+    user = WebUser(id=1, role="user")
+    assert asyncio.run(_owned_conversation_for_session("", user)) == ""
+    assert asyncio.run(_owned_conversation_for_session("not-a-key", user)) == ""
     # Well-formed but no such session.
-    assert asyncio.run(_conversation_for_session("web:999999:ghost")) == ""
+    assert asyncio.run(_owned_conversation_for_session("web:999999:ghost", user)) == ""
 
 
 def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
