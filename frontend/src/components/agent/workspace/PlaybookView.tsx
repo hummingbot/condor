@@ -375,11 +375,20 @@ function seconds(v: unknown, none = "none"): string {
   return countdown(n);
 }
 
-/** A limit where a negative is "no limit", which is how the engine reads it. */
-function limit(v: unknown, fmt: (n: number) => string): Row["value"] | null {
+/**
+ * A limit, parsed once: a negative is "no limit", which is how the engine reads
+ * it, and the row is `off` exactly when it says so. `unset` overrides which
+ * numbers mean switched off (max ticks: `0` is the default and unlimited too).
+ */
+function limitRow(
+  label: string,
+  v: unknown,
+  fmt: (n: number) => string,
+  opts?: { none?: string; unset?: (n: number) => boolean },
+): Row {
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) return null;
-  return fmt(n);
+  const off = !Number.isFinite(n) || (opts?.unset ?? ((x) => x < 0))(n);
+  return { label, value: off ? (opts?.none ?? "no limit") : fmt(n), off };
 }
 
 function text(v: unknown, fallback: string): string {
@@ -448,11 +457,10 @@ function ConfigCard({
         value: seconds(config.tick_timeout_sec, "none"),
         off: !Number(config.tick_timeout_sec),
       },
-      {
-        label: "max ticks",
-        value: limit(config.max_ticks, (n) => (n > 0 ? String(n) : "unlimited")) ?? "unlimited",
-        off: !Number(config.max_ticks),
-      },
+      limitRow("max ticks", config.max_ticks, String, {
+        none: "unlimited",
+        unset: (n) => n <= 0,
+      }),
     ];
 
     const where: Row[] = [
@@ -475,36 +483,12 @@ function ConfigCard({
         value: formatCurrency(Number(config.total_amount_quote) || 0),
         hint: "What one session may put to work",
       },
-      {
-        label: "max position",
-        value: limit(risk.max_position_size_quote, (n) => formatCurrency(n)) ?? "no limit",
-        off: limit(risk.max_position_size_quote, () => "") === null,
-      },
-      {
-        label: "max executors",
-        value: limit(risk.max_open_executors, (n) => String(n)) ?? "no limit",
-        off: limit(risk.max_open_executors, () => "") === null,
-      },
-      {
-        label: "max drawdown",
-        value: limit(risk.max_drawdown_pct, (n) => `${n}%`) ?? "no limit",
-        off: limit(risk.max_drawdown_pct, () => "") === null,
-      },
-      {
-        label: "shutdown drawdown",
-        value: limit(risk.shutdown_drawdown_pct, (n) => `${n}%`) ?? "no limit",
-        off: limit(risk.shutdown_drawdown_pct, () => "") === null,
-      },
-      {
-        label: "max drift",
-        value: limit(risk.max_drift_quote, (n) => formatCurrency(n)) ?? "no limit",
-        off: limit(risk.max_drift_quote, () => "") === null,
-      },
-      {
-        label: "max leverage",
-        value: limit(risk.max_leverage, (n) => `${n}×`) ?? "no limit",
-        off: limit(risk.max_leverage, () => "") === null,
-      },
+      limitRow("max position", risk.max_position_size_quote, (n) => formatCurrency(n)),
+      limitRow("max executors", risk.max_open_executors, (n) => String(n)),
+      limitRow("max drawdown", risk.max_drawdown_pct, (n) => `${n}%`),
+      limitRow("shutdown drawdown", risk.shutdown_drawdown_pct, (n) => `${n}%`),
+      limitRow("max drift", risk.max_drift_quote, (n) => formatCurrency(n)),
+      limitRow("max leverage", risk.max_leverage, (n) => `${n}×`),
     ];
 
     // Whatever a newer build writes that this dashboard has no name for. Shown
