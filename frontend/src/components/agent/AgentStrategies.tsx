@@ -108,7 +108,8 @@ export function AgentStrategies({
   }
 
   const deleteMut = useMutation({
-    mutationFn: () => api.deleteStrategy(slug, deleteStrategy!.slug),
+    mutationFn: (strategy: StrategySummary) =>
+      api.deleteStrategy(slug, strategy.slug),
     onSuccess: () => {
       refresh();
       setDeleteStrategy(null);
@@ -203,7 +204,7 @@ export function AgentStrategies({
             ? deleteMut.error.message
             : "Failed to delete strategy. It may be running."
         }
-        onConfirm={() => deleteMut.mutate()}
+        onConfirm={() => deleteStrategy && deleteMut.mutate(deleteStrategy)}
         onClose={() => setDeleteStrategy(null)}
       >
         Delete{" "}

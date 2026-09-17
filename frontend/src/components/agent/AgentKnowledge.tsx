@@ -207,10 +207,10 @@ export const AgentKnowledge = memo(function AgentKnowledge({
   }, [queryClient, slug]);
 
   const deleteMut = useMutation({
-    mutationFn: () =>
-      deleting!.kind === "skill"
-        ? api.deleteAgentSkill(slug, deleting!.card.slug)
-        : api.deleteAgentMemory(slug, deleting!.card.name),
+    mutationFn: (target: Reading) =>
+      target.kind === "skill"
+        ? api.deleteAgentSkill(slug, target.card.slug)
+        : api.deleteAgentMemory(slug, target.card.name),
     onSuccess: () => {
       refresh();
       setDeleting(null);
@@ -584,7 +584,7 @@ export const AgentKnowledge = memo(function AgentKnowledge({
             ? deleteMut.error.message
             : "Could not delete this."
         }
-        onConfirm={() => deleteMut.mutate()}
+        onConfirm={() => deleting && deleteMut.mutate(deleting)}
         onClose={() => setDeleting(null)}
       >
         {deleting?.kind === "memory" ? (

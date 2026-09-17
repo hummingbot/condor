@@ -25,6 +25,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentDetail, StrategySummary } from "@/lib/api";
+import { api } from "@/lib/api";
 import { AgentStrategies } from "./AgentStrategies";
 
 vi.mock("@/lib/api", () => ({
@@ -33,6 +34,7 @@ vi.mock("@/lib/api", () => ({
       CALLS += 1;
       return DETAIL;
     }),
+    deleteStrategy: vi.fn(async () => ({})),
   },
 }));
 
@@ -156,5 +158,31 @@ describe("AgentStrategies polling", () => {
 
     await elapse(20_000);
     expect(CALLS).toBe(afterStop);
+  });
+});
+
+describe("AgentStrategies delete (READ-408)", () => {
+  it("deletes the card whose delete was clicked, passed as the mutation variable", async () => {
+    DETAIL = detail([strategy("stopped"), strategy("idle")]);
+    mount();
+    await elapse(0);
+
+    const deletes = container.querySelectorAll<HTMLElement>(
+      '[aria-label="Delete strategy"]',
+    );
+    expect(deletes).toHaveLength(2);
+    act(() => deletes[1].click());
+
+    const confirm = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Delete",
+    );
+    expect(confirm).toBeDefined();
+    await act(async () => {
+      confirm!.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(api.deleteStrategy).toHaveBeenCalledTimes(1);
+    expect(api.deleteStrategy).toHaveBeenCalledWith("scout", "s-idle");
   });
 });
