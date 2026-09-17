@@ -925,3 +925,67 @@ def test_events_route_returns_status_alongside_the_transcript():
     assert payload["task_id"] == dt.task_id
     assert payload["status"] == "running"
     assert payload["events"] == [{"type": "thought", "text": "thinking"}]
+
+
+# ── CORR-643: a session that dies is a failed delegation, not a "done" one ──
+
+
+def _stream_client(events):
+    """A fake ACPClient whose one turn streams exactly ``events``."""
+
+    class _StreamClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def prompt_stream(self, text):
+            for event in events:
+                yield event
+
+    return _StreamClient
+
+
+def test_delegation_whose_session_disconnects_is_an_error(tmp_path, monkeypatch):
+    """Drives the REAL engine: only the client, toolset and prompt are faked."""
+    from condor.acp import client as acp_client_module
+    from condor.acp.client import PromptDone
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    _write_agent(tmp_path, "scout")
+    monkeypatch.setattr(
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "condor.runtime.context.build_agent_context", lambda *a, **k: "prompt"
+    )
+    monkeypatch.setattr(
+        acp_client_module,
+        "ACPClient",
+        _stream_client([PromptDone(stop_reason="disconnected")]),
+    )
+    bot = _FakeBot()
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan SOL pools",
+            bot=bot,
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    assert dt.status == "error"
+    assert "disconnected" in dt.error
+    assert bot.messages, "the failure must still be announced"
+    assert bot.messages[-1].startswith("❌")
+    assert "failed" in bot.messages[-1]
