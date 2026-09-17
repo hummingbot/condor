@@ -44,6 +44,17 @@ export const DELEGATION_STATUS: Record<
 };
 
 /**
+ * Whether a raw status string is one `DELEGATION_STATUS` can colour.
+ *
+ * Derived from the exhaustive map rather than a second list, so a status added
+ * to the union is recognised the moment it is mapped (ARCH-398). `Object.hasOwn`,
+ * not `in`: `"toString" in DELEGATION_STATUS` is true through the prototype.
+ */
+export function isDelegationStatus(s: string): s is DelegationStatus {
+  return Object.hasOwn(DELEGATION_STATUS, s);
+}
+
+/**
  * How long this task has been going, compactly.
  *
  * Only a running task gets a live elapsed time; everything else reports when it

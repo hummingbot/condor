@@ -3,7 +3,11 @@ import { ChevronRight, ExternalLink, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { DelegationSheet } from "@/components/agent/DelegationSheet";
+import {
+  DelegationSheet,
+  type DelegationListing,
+} from "@/components/agent/DelegationSheet";
+import { isDelegationStatus } from "@/components/agent/delegationStatus";
 import { SnapshotDetail } from "@/components/agent/AgentSessionContent";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { ExperimentDetail, RunOverview } from "@/components/agent/lab/RunOverview";
@@ -28,8 +32,6 @@ import type { WorkspaceUrlAdapter } from "@/components/agent/workspace/workspace
 import {
   api,
   type AgentRunRow,
-  type DelegationStatus,
-  type DelegationSummary,
   type StrategyDetail,
 } from "@/lib/api";
 import { agentQuery } from "@/lib/queryClient";
@@ -43,17 +45,6 @@ import { agentQuery } from "@/lib/queryClient";
  */
 const RUN_PAGE = 100;
 
-/** Statuses `DELEGATION_STATUS` can colour; anything else is `unknown`. */
-const DELEGATION_STATUSES: readonly DelegationStatus[] = [
-  "running",
-  "done",
-  "error",
-  "stopped",
-  "interrupted",
-  "timeout",
-  "unknown",
-];
-
 /**
  * A rail row, as the delegation sheet reads a history row.
  *
@@ -64,20 +55,14 @@ const DELEGATION_STATUSES: readonly DelegationStatus[] = [
  * cast: a record written by a newer build could name a state this dashboard
  * cannot colour, and `unknown` is the honest cell for it.
  */
-function delegationTask(run: AgentRunRow, agent: string): DelegationSummary {
-  const status = DELEGATION_STATUSES.find((s) => s === run.status) ?? "unknown";
+function delegationTask(run: AgentRunRow, agent: string): DelegationListing {
   return {
     task_id: run.id,
     agent,
-    user_id: 0,
-    chat_id: 0,
-    server_name: null,
     task: run.title,
-    status,
+    status: isDelegationStatus(run.status) ? run.status : "unknown",
     kind: run.execution_mode === "consult" ? "consult" : "delegate",
-    conversation_id: "",
     started_at: run.started_at ?? 0,
-    ended_at: run.ended_at ?? 0,
   };
 }
 

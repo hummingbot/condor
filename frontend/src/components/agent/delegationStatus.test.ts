@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { formatDelegationTime } from "./delegationStatus";
+import {
+  DELEGATION_STATUS,
+  formatDelegationTime,
+  isDelegationStatus,
+} from "./delegationStatus";
 
 // ARCH-404: the elapsed time goes through the shared `formatDuration`, so a
 // task four hours in reads `4h12m` like the lab run rail, not a floored `4h`.
@@ -18,5 +22,19 @@ describe("formatDelegationTime", () => {
 
   it("says nothing for a task with no start", () => {
     expect(formatDelegationTime({ started_at: 0, status: "running" }, NOW_MS)).toBe("");
+  });
+});
+
+// ARCH-398: the run rail narrows a raw status through the exhaustive map, not a
+// hand-copied list, and a prototype key is not a status.
+describe("isDelegationStatus", () => {
+  it("accepts a mapped status and refuses anything else", () => {
+    expect(isDelegationStatus("timeout")).toBe(true);
+    expect(isDelegationStatus("bogus")).toBe(false);
+    expect(isDelegationStatus("toString")).toBe(false);
+  });
+
+  it("accepts every status the map colours", () => {
+    for (const s of Object.keys(DELEGATION_STATUS)) expect(isDelegationStatus(s)).toBe(true);
   });
 });

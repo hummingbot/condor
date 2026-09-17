@@ -93,8 +93,14 @@ vi.mock("@/components/agent/lab/RunOverview", () => ({
 vi.mock("@/components/agent/AgentSessionContent", () => ({
   SnapshotDetail: stub("tick"),
 }));
+/** The task the delegation stub was last handed (ARCH-398). */
+let delegationTask: Record<string, unknown> | null = null;
 vi.mock("@/components/agent/DelegationSheet", () => ({
-  DelegationSheet: stub("delegation"),
+  DelegationSheet: ({ task }: { task: Record<string, unknown> }) => {
+    mounted.push("delegation");
+    delegationTask = task;
+    return <div data-body="delegation" />;
+  },
 }));
 
 const { AgentRunScreen } = await import("./AgentRunScreen");
@@ -220,6 +226,7 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   at = "";
   mounted.length = 0;
+  delegationTask = null;
   localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -401,6 +408,46 @@ describe("a conversation in the Runs disclosure", () => {
     expect(container.textContent).toContain("before Condor recorded");
     // Not the ledger's own empty case, which would say it deployed nothing.
     expect(container.querySelector("table")).toBeNull();
+  });
+});
+
+describe("a delegation in the Runs disclosure (ARCH-398)", () => {
+  const delegation = (status: string) =>
+    ({
+      id: "abc123",
+      run_id: "d:abc123",
+      kind: "delegation",
+      number: 0,
+      strategy_slug: "",
+      title: "Check the BRL book",
+      status,
+      execution_mode: "consult",
+      started_at: 300,
+      ended_at: null,
+      agent_id: "",
+    }) as unknown as AgentRunRow;
+
+  it("opens the sheet on a status it cannot colour as `unknown`", async () => {
+    getAgentRuns.mockResolvedValue([RUN, delegation("exploded")]);
+    await render("/?open=runs&run=d:abc123");
+    expect(mounted).toContain("delegation");
+    expect(delegationTask).toEqual({
+      task_id: "abc123",
+      agent: "brigado",
+      task: "Check the BRL book",
+      status: "unknown",
+      kind: "consult",
+      started_at: 300,
+    });
+  });
+
+  it("passes a known status through, and invents no user, chat or end", async () => {
+    getAgentRuns.mockResolvedValue([RUN, delegation("interrupted")]);
+    await render("/?open=runs&run=d:abc123");
+    expect(delegationTask?.status).toBe("interrupted");
+    for (const key of ["user_id", "chat_id", "server_name", "conversation_id", "ended_at"]) {
+      expect(delegationTask).not.toHaveProperty(key);
+    }
   });
 });
 
