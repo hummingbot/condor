@@ -483,6 +483,7 @@ def build_deployments(
     all_instances = list(getattr(perf, "bot_instances", None) or [])
     controllers = list(getattr(perf, "controllers", None) or [])
     executors = list(getattr(perf, "executors", None) or [])
+    base_windows = getattr(perf, "base_windows", None) or {}
     owned_by_base = {b.base: b for b in owned}
 
     rows: list[DeploymentRow] = []
@@ -492,6 +493,20 @@ def build_deployments(
             for c in controllers
             if strip_deploy_suffix(str(c.get("bot_name") or "")) == bot.base
         ]
+        live = bot.base in bot_bases
+        window = base_windows.get(bot.base)
+        if window is not None:
+            # The session's slice of the bot's history — the same figure the KPI
+            # strip folded — plus the open book only while this session still
+            # holds the base (the current-owner rule). The controllers' own
+            # realized PnL is lifetime and would credit what was inherited.
+            realized, volume, _trades, _fees = window
+            unrealized = sum(float(c.get("unrealized_pnl_quote") or 0.0) for c in mine)
+            pnl = realized + (unrealized if live else 0.0)
+        else:
+            # No window could be cut: the lifetime aggregate is all there is.
+            pnl = sum(_controller_pnl(c) for c in mine)
+            volume = sum(float(c.get("volume_traded") or 0.0) for c in mine)
         rows.append(
             DeploymentRow(
                 kind="bot",
@@ -500,9 +515,9 @@ def build_deployments(
                 created_tick=tick_for(actions, "bot", bot.since),
                 started_at=bot.since,
                 ended_at=bot.until or None,
-                live=bot.base in bot_bases,
-                pnl=sum(_controller_pnl(c) for c in mine),
-                volume=sum(float(c.get("volume_traded") or 0.0) for c in mine),
+                live=live,
+                pnl=pnl,
+                volume=volume,
                 scope=f"bot:{_instance_for_base(bot.base, live_instances, all_instances)}",
             )
         )
@@ -531,6 +546,9 @@ def build_deployments(
                 started_at=parent.since if parent else 0.0,
                 ended_at=(parent.until or None) if parent else None,
                 live=instance in live_set,
+                # Lifetime, not sliced: the controller history is per instance,
+                # never per controller, so only the bot row above can carry the
+                # session's window. The two levels are on different bases.
                 pnl=_controller_pnl(c),
                 volume=float(c.get("volume_traded") or 0.0),
                 scope=f"ctrl:{instance}:{cid}" if instance and cid else "",

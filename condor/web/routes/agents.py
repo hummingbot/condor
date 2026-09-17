@@ -253,6 +253,9 @@ class AgentPerformanceModel(BaseModel):
     controllers: list[dict[str, Any]] = []
     close_type_counts: dict[str, int] = {}
     fees_known: bool = True
+    # Each owned base's (realized, volume, trades, fees) over this session's own
+    # ownership window — what the deployment ledger's bot rows read (CORR-661).
+    base_windows: dict[str, tuple[float, float, float, float]] = {}
 
     @classmethod
     def from_perf(cls, perf: AgentPerformance, **overrides) -> AgentPerformanceModel:

@@ -69,6 +69,16 @@ class AgentPerformance:
     # render alike: a session whose bot has vanished reporting "$0.00" reads as
     # "traded flat" when it means "cannot see the bot".
     unresolved_bases: list[str] = field(default_factory=list)
+    # Each owned base's ``(realized, volume, trades, fees)`` sliced to this
+    # session's ownership window — the per-bot figures the totals above were
+    # folded from. ``controllers`` is the live snapshot's lifetime breakdown, so a
+    # per-bot figure read off it credits an adopted bot's inherited PnL and reads
+    # $0 for a bot the session already stopped. A base with no window (no known
+    # takeover, or a failed history fetch) is absent: its lifetime aggregate is
+    # the only figure there is.
+    base_windows: dict[str, tuple[float, float, float, float]] = field(
+        default_factory=dict
+    )
 
     @property
     def bot_name(self) -> str:
@@ -421,6 +431,7 @@ async def fetch_agent_performance_batch(
             sliced = await _slice_owned_windows(
                 client, aid, all_bot_perf, archived, owned, now
             )
+            out[aid].base_windows.update(sliced)
             for base in bases:
                 bot = live.get(base)
                 window = owned.get(base)

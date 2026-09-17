@@ -754,6 +754,9 @@ def test_rollup_and_agent_view_agree_on_an_adopted_bot():
         assert s1.trade_count == detail.trade_count == 3
         assert s1.unrealized_pnl == detail.unrealized_pnl == 7.0
         assert s1.fees_known and detail.fees_known
+        # The per-bot slice the totals were folded from stays on the result, so
+        # the deployment ledger's bot row reads the same figure (CORR-661).
+        assert detail.base_windows == {"ns-bot": (60.0, 5000.0, 3, 5.0)}
 
 
 def _both_surfaces(tmp_path: Path, history: dict, snapshots: list[dict]):
@@ -980,6 +983,7 @@ def _every_field_perf():
         close_type_counts={"CloseType.TAKE_PROFIT": 2},
         fees_known=False,
         unresolved_bases=["gone-bot"],
+        base_windows={"bot-a": (1.5, 900.0, 3.0, 0.75)},
     )
 
 
