@@ -57,7 +57,7 @@ def test_positions_provider_reads_through_the_tracked_fetcher(monkeypatch):
     # A failed request is the provider's error result, never "no open positions".
     failing = _Client(raises=RuntimeError("api down"))
     result = asyncio.run(provider.execute(failing, {}, agent_id="acme.scalper_1"))
-    assert result.data == {"error": "api down"}
+    assert result.data == {"error": "RuntimeError"}
     assert "failed to fetch" in result.summary
 
 

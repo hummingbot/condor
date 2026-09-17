@@ -6,13 +6,18 @@ live ticks and the web API always agree.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
+
+from condor.fetchers.executors import describe_executor_error
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
 
 if TYPE_CHECKING:
     from condor.agents.ownership import OwnedBot
+
+log = logging.getLogger(__name__)
 
 
 class ExecutorsProvider(BaseProvider):
@@ -53,10 +58,14 @@ class ExecutorsProvider(BaseProvider):
                 windows=ownership_windows(owned or []),
             )
         except Exception as e:
+            # The summary is embedded in the tick prompt and snapshot, and the
+            # raw exception carries the backend URL: keep it in the server log.
+            log.warning("executors provider fetch failed", exc_info=True)
+            _, message = describe_executor_error(e)
             return ProviderResult(
                 name=self.name,
-                data={"error": str(e)},
-                summary=f"Active Executors: failed to fetch ({e})",
+                data={"error": message},
+                summary=f"Active Executors: failed to fetch ({message})",
             )
 
         running = [e for e in perf.executors if e["status"] == "RUNNING"]

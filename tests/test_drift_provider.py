@@ -7,8 +7,12 @@ sibling's drift is its own.
 """
 
 import asyncio
+import logging
 
+import aiohttp
 import pytest
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 from condor.agents.providers import ProviderRegistry, get_provider, list_core_providers
 from condor.agents.providers.drift import DriftProvider, owned_controller_ids
@@ -113,18 +117,41 @@ def test_a_mismatch_reaches_the_summary_and_the_worst_quote():
 # ── A venue that does not answer ──
 
 
-def test_a_venue_exception_yields_unanswered_and_not_a_crash():
-    client = _Client(tracked=[_held()], venue_raises=RuntimeError("connection reset"))
-    result = _run(client)
+def _http_error(status=500, message="Internal Server Error"):
+    """What the hummingbot client raises: ``str()`` carries the backend URL."""
+    url = URL("http://10.0.0.5:8000/x")
+    info = aiohttp.RequestInfo(url, "GET", CIMultiDictProxy(CIMultiDict()), url)
+    return aiohttp.ClientResponseError(info, (), status=status, message=message)
+
+
+def test_a_venue_exception_yields_unanswered_and_not_a_crash(caplog):
+    client = _Client(tracked=[_held()], venue_raises=_http_error())
+    with caplog.at_level(logging.WARNING, logger="condor.agents.providers.drift"):
+        result = _run(client)
     assert result.data["trusted"] is False
-    assert "connection reset" in result.data["reason"]
+    assert result.data["reason"] == "Internal Server Error"
     assert [r["verdict"] for r in result.data["report"]["rows"]] == ["unanswered"]
     assert "DID NOT ANSWER" in result.summary
+    assert "10.0.0.5" not in result.summary
+    # The URL is kept out of the prompt, not lost: it reaches the server log.
+    records = [r for r in caplog.records if r.name == "condor.agents.providers.drift"]
+    assert len(records) == 1
+    assert "10.0.0.5" in logging.Formatter().formatException(records[0].exc_info)
+
+
+def test_an_unreachable_venue_reason_is_the_generic_line():
+    client = _Client(
+        tracked=[_held()],
+        venue_raises=aiohttp.ClientConnectionError("connection reset"),
+    )
+    result = _run(client)
+    assert result.data["reason"] == "the trading API is unreachable"
 
 
 def test_the_unanswered_reason_is_clipped():
-    client = _Client(tracked=[], venue_raises=RuntimeError("x" * 400))
+    client = _Client(tracked=[], venue_raises=_http_error(422, "x" * 400))
     result = _run(client)
+    assert result.data["reason"].startswith("x")
     assert len(result.data["reason"]) <= 120
 
 
