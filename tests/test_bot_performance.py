@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from condor.agents.attribution import OwnershipWindow
 from condor.agents.config import AgentConfig, load_full_config
 from condor.agents.performance import (
     AgentPerformance,
@@ -774,10 +775,10 @@ def _capture_provider_fetch(monkeypatch) -> dict:
 
     captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_names=None, since=0.0):
+    async def _fake_fetch(client, agent_id, bot_names=None, windows=None):
         captured["agent_id"] = agent_id
         captured["bot_names"] = bot_names
-        captured["since"] = since
+        captured["windows"] = windows
         return _AP(agent_id=agent_id, bot_names=list(bot_names or []))
 
     monkeypatch.setattr(
@@ -802,7 +803,7 @@ def test_executors_provider_falls_back_to_config_bot_name(monkeypatch):
     assert captured == {
         "agent_id": "river.scalp_1",
         "bot_names": ["river"],
-        "since": 0.0,  # no ledger → no takeover instant → unsliced, as before
+        "windows": {},  # no ledger → no takeover instant → unsliced, as before
     }
 
 
@@ -962,7 +963,7 @@ def test_adopted_bot_pnl_is_sliced_to_the_sessions_window():
 
     perf = asyncio.run(
         fetch_agent_performance(
-            client, "ns.strat_2", bot_names=["ns-bot"], since=took_over
+            client, "ns.strat_2", windows={"ns-bot": OwnershipWindow(took_over)}
         )
     )
 
@@ -1356,8 +1357,8 @@ def test_a_stopped_bots_realized_pnl_reaches_the_agent():
         fetch_agent_performance(
             client,
             "directional_trader.ema_trend_loop_1",
-            bot_names=["ema_trend_loop"],
-            since=1786052340.0,  # 2026-08-06 21:39 UTC, the session's first tick
+            # 2026-08-06 21:39 UTC, the session's first tick
+            windows={"ema_trend_loop": OwnershipWindow(1786052340.0)},
         )
     )
 
@@ -1396,7 +1397,9 @@ def test_a_base_with_no_instance_anywhere_is_flagged_not_zeroed():
 
     perf = asyncio.run(
         fetch_agent_performance(
-            client, "agent.strat_1", bot_names=["vanished_bot"], since=1786052340.0
+            client,
+            "agent.strat_1",
+            windows={"vanished_bot": OwnershipWindow(1786052340.0)},
         )
     )
 

@@ -36,6 +36,8 @@ from condor.agents.attribution import (
     build_deployments,
     current_owner_bases,
     session_ownership,
+    session_windows,
+    window_span,
 )
 from condor.agents.run_records import KIND_CODE
 from condor.agents.sessions_index import (
@@ -2720,27 +2722,26 @@ async def get_session_executors(
             "deployments": [],
         }
     # Bot-mode: the session operates named bots whose executors live in the bot
-    # container, not the agent_id-keyed table. Merge the live positions of every
-    # base this session CURRENTLY owns — the same last-owner-by-`since` rule
-    # apply_bot_mode_pnl uses, so the two views never disagree. A session that
-    # handed its bot over shows only its own direct executors; the live open book
-    # belongs to whoever operates the bot now.
+    # container, not the agent_id-keyed table. Every base it ever owned is sliced
+    # to the window it held that base over — cut at its release and at the next
+    # owner's takeover by the same tiling apply_bot_mode_pnl uses — so the detail
+    # reports exactly the session's row in the strategy list, a finished session
+    # included. Only a base whose window is still open (this session CURRENTLY
+    # owns it) brings the live open book; a session that handed its bot over
+    # keeps its realized slice and nothing that belongs to the next operator.
     session_nums = [
         n
         for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.home)
         if k == "session"
     ]
+    windows = session_windows(
+        strategy.home, strategy.default_config, session_nums, session_num
+    )
     bot_names = current_owner_bases(
         strategy.home, strategy.default_config, session_nums, session_num
     )
-    # Slice the bot to this session's window for the same reason the rollup does:
-    # merging the lifetime aggregate here made the session detail disagree with
-    # the session's own row in the strategy list.
     owned = session_ownership(strategy.home, strategy.default_config, session_num)
-    since = min((b.since for b in owned if b.since > 0), default=0.0)
-    perf = await fetch_agent_performance(
-        client, agent_id, bot_names=bot_names, since=since
-    )
+    perf = await fetch_agent_performance(client, agent_id, windows=windows)
     # close_type_counts is base-lifetime, not window-sliced: the payload counts
     # closes per controller with no timestamp to slice on. Equal to the session's
     # own closes whenever the session deployed the bases it owns (the normal
@@ -2749,15 +2750,15 @@ async def get_session_executors(
     model = AgentPerformanceModel.from_perf(
         perf, agent_id=agent_id, session_num=session_num
     )
-    # The equity curve, sliced from the same ownership window as the figures
+    # The equity curve, sliced from the same ownership windows as the figures
     # above. The journal's per-tick snapshots are only what the aggregator
     # believed at the time, so a session that ran while it was blind to its bots
     # has a permanently flat record; this is derived and therefore self-correcting.
-    # A bot released mid-window stops the curve where the session stopped owning.
-    released = max((b.until for b in owned if b.until > 0), default=0.0)
+    # A session that let go of every base stops the curve where it last held one.
+    since, until = window_span(windows)
     try:
         pnl_series = await fetch_agent_pnl_series(
-            client, bot_names or [b.base for b in owned], since, until=released
+            client, list(windows), since, until=until
         )
     except Exception as e:
         log.warning("pnl series for %s failed: %s", agent_id, e)

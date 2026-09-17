@@ -6,10 +6,13 @@ live ticks and the web API always agree.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
 
 
 class ExecutorsProvider(BaseProvider):
@@ -22,8 +25,9 @@ class ExecutorsProvider(BaseProvider):
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
     ) -> ProviderResult:
+        from condor.agents.attribution import ownership_windows
         from condor.agents.performance import fetch_agent_performance
 
         if not agent_id:
@@ -39,11 +43,14 @@ class ExecutorsProvider(BaseProvider):
         bases = list(bot_names or []) or [config.get("bot_name", "")]
 
         try:
-            # ``since`` slices an adopted bot's history to this session's window,
+            # Each owned base is sliced to the window this session held it over,
             # so what the agent is told it earned is what the dashboard attributes
             # to it — inherited PnL is not reported as its own.
             perf = await fetch_agent_performance(
-                client, agent_id, bot_names=bases, since=since
+                client,
+                agent_id,
+                bot_names=bases,
+                windows=ownership_windows(owned or []),
             )
         except Exception as e:
             return ProviderResult(

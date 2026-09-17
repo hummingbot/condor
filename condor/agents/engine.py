@@ -567,14 +567,10 @@ class TickEngine:
             # the bots this session operates right now — including any extra one
             # it deployed beyond the configured name.
             bot_names=self.ledger.bases() if self.ledger else None,
-            # Earliest takeover across those bases. Bot PnL earned before it was
-            # inherited, not produced by this session, so it is sliced off rather
-            # than reported back to the agent as its own.
-            since=(
-                min((b.since for b in self.ledger.owned() if b.since > 0), default=0.0)
-                if self.ledger
-                else 0.0
-            ),
+            # The ledger's records, unflattened: each base is sliced to its own
+            # takeover, so bot PnL earned before it was inherited is not reported
+            # back to the agent as its own.
+            owned=self.ledger.owned() if self.ledger else None,
         )
 
         # Extract structured data from providers for tracking
@@ -1072,13 +1068,14 @@ class TickEngine:
         if not self.ledger or not self.ledger.bases():
             return []
         try:
+            from .attribution import ownership_windows, window_span
             from .performance import fetch_agent_pnl_series
 
             client = await self._get_client()
-            since = min(
-                (b.since for b in self.ledger.owned() if b.since > 0), default=0.0
+            since, until = window_span(ownership_windows(self.ledger.owned()))
+            return await fetch_agent_pnl_series(
+                client, self.ledger.bases(), since, until=until
             )
-            return await fetch_agent_pnl_series(client, self.ledger.bases(), since)
         except Exception:
             log.warning(
                 "TickEngine %s: pnl series failed", self.agent_id, exc_info=True

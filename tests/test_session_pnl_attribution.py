@@ -13,9 +13,12 @@ from pathlib import Path
 import yaml
 
 from condor.agents.attribution import (
+    OwnershipWindow,
     apply_bot_mode_pnl,
     current_owner_bases,
+    ownership_windows,
     session_ownership,
+    session_windows,
 )
 from condor.web.routes.agents import AgentPerformanceModel
 
@@ -364,7 +367,9 @@ def test_session_detail_and_rollup_report_the_same_trade_count(monkeypatch, tmp_
 
     client.executors = SimpleNamespace(search_executors=_no_executors)
     detail = asyncio.run(
-        fetch_agent_performance(client, "a_1", bot_names=["ns-bot"], since=_epoch(T0))
+        fetch_agent_performance(
+            client, "a_1", windows={"ns-bot": OwnershipWindow(_epoch(T0))}
+        )
     )
 
     rollup = next(s for s in _rollup(monkeypatch, tmp_path, client)[0])
@@ -736,10 +741,9 @@ def test_rollup_and_agent_view_agree_on_an_adopted_bot():
         agent_client = _FakeClient(snapshots=snapshots, history=history)
         agent_client.executors = SimpleNamespace(search_executors=_no_executors)
         owned = session_ownership(tmp_path, None, 1)
-        since = min(b.since for b in owned)
         detail = asyncio.run(
             fetch_agent_performance(
-                agent_client, "a_1", bot_names=[b.base for b in owned], since=since
+                agent_client, "a_1", windows=ownership_windows(owned)
             )
         )
 
@@ -776,11 +780,8 @@ def _both_surfaces(tmp_path: Path, history: dict, snapshots: list[dict]):
     agent_client = _FakeClient(snapshots=snapshots, history=history)
     agent_client.executors = SimpleNamespace(search_executors=_no_executors)
     owned = session_ownership(tmp_path, None, 1)
-    since = min(b.since for b in owned)
     detail = asyncio.run(
-        fetch_agent_performance(
-            agent_client, "a_1", bot_names=[b.base for b in owned], since=since
-        )
+        fetch_agent_performance(agent_client, "a_1", windows=ownership_windows(owned))
     )
     return s1, detail
 
@@ -917,10 +918,9 @@ def test_rollup_still_attributes_archived_pnl_when_the_live_snapshot_fails():
             agent_client = _SnapshotDownClient(history, archived=[inst])
             agent_client.executors = SimpleNamespace(search_executors=_no_executors)
             owned = session_ownership(tmp_path, None, 1)
-            since = min(b.since for b in owned)
             detail = asyncio.run(
                 fetch_agent_performance(
-                    agent_client, "a_1", bot_names=[b.base for b in owned], since=since
+                    agent_client, "a_1", windows=ownership_windows(owned)
                 )
             )
 
@@ -1047,3 +1047,226 @@ def test_instance_from_engine_takes_money_fields_off_the_perf_row(monkeypatch):
     assert bare.daily_pnl == 42.0
     assert (bare.realized_pnl, bare.total_pnl, bare.open_count) == (0.0, 0.0, 0)
     assert bare.win_rate is None
+
+
+# ── ARCH-662: the ownership window is the unit both surfaces slice over ──
+
+
+def _executorless(client: "_FakeClient") -> "_FakeClient":
+    """The agent-side fetch also walks agent_id-tagged executors; these have none."""
+    from types import SimpleNamespace
+
+    async def _no_executors(**_kw):
+        return []
+
+    client.executors = SimpleNamespace(search_executors=_no_executors)
+    return client
+
+
+def _released_fixture(tmp_path: Path) -> tuple[list[dict], dict]:
+    """test_released_session_stops_accruing_a_surviving_bot's session and bot."""
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)}, until={"ns-bot": _epoch(T2)})
+    inst = "ns-bot-20260701-000000"
+    position = {
+        "trading_pair": "BTC-USD",
+        "connector_name": "hyperliquid",
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 100.0,
+        "unrealized_pnl_quote": 7.0,
+    }
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0, positions=[position])]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)]}
+    return snapshots, history
+
+
+def test_session_detail_stops_accruing_after_release(tmp_path):
+    """A finished session's detail reports its rollup row, not $0 and not $100."""
+    from condor.agents.performance import fetch_agent_performance
+
+    snapshots, history = _released_fixture(tmp_path)
+
+    windows = session_windows(tmp_path, None, [1], 1)
+    assert windows == {"ns-bot": OwnershipWindow(_epoch(T0), _epoch(T2))}
+    detail = asyncio.run(
+        fetch_agent_performance(
+            _executorless(_FakeClient(snapshots, history)), "a_1", windows=windows
+        )
+    )
+
+    s1 = _session(1)
+    asyncio.run(
+        apply_bot_mode_pnl([s1], tmp_path, None, _FakeClient(snapshots, history))
+    )
+
+    assert detail.realized_pnl == s1.realized_pnl == 40.0
+    assert detail.unrealized_pnl == s1.unrealized_pnl == 0.0
+    assert detail.open_count == s1.open_count == 0
+    assert detail.executors == []  # the open rows belong to nobody now
+
+
+def test_session_detail_route_prices_a_released_session(monkeypatch, tmp_path):
+    """The route itself: KPI and curve both stop at the release instant."""
+    from condor.web.routes import agents as mod
+
+    snapshots, history = _released_fixture(tmp_path)
+    client = _executorless(_FakeClient(snapshots, history))
+
+    async def _fake_client(*_a, **_kw):
+        return client, "srv"
+
+    monkeypatch.setattr(
+        mod,
+        "_get_strategy",
+        lambda slug, sslug: type("S", (), {"home": tmp_path, "default_config": {}})(),
+    )
+    monkeypatch.setattr(mod, "_get_client_for_strategy", _fake_client)
+    monkeypatch.setattr(mod, "_strategy_principal", lambda *_a: None)
+    monkeypatch.setattr(
+        mod,
+        "enumerate_agent_ids",
+        lambda run_key, home: [(f"{run_key}_1", 1, "session")],
+    )
+
+    out = asyncio.run(mod.get_session_executors("ns", "st", 1, user=object()))
+
+    perf = out["performance"]
+    assert perf["realized_pnl"] == 40.0
+    assert perf["unrealized_pnl"] == 0.0 and perf["open_count"] == 0
+    assert out["pnl_series"][-1]["pnl"] == 40.0
+    # The deployment row is still not live: the gate for display is unchanged.
+    assert [r["live"] for r in out["deployments"] if r["kind"] == "bot"] == [False]
+
+
+def test_two_bases_adopted_at_different_instants_are_sliced_per_base(tmp_path):
+    """One scalar ``since`` credited ns-b with PnL from before its own takeover."""
+    from condor.agents.performance import fetch_agent_performance
+
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-a": _epoch(T0), "ns-b": _epoch(T2)})
+    a_inst, b_inst = "ns-a-20260701-000000", "ns-b-20260701-000000"
+    snapshots = [_snap(a_inst, T3, realized=10.0), _snap(b_inst, T3, realized=100.0)]
+    history = {
+        a_inst: [_hist_row(T0, 0.0), _hist_row(T3, 10.0)],
+        b_inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)],
+    }
+
+    s1 = _session(1)
+    asyncio.run(
+        apply_bot_mode_pnl([s1], tmp_path, None, _FakeClient(snapshots, history))
+    )
+    detail = asyncio.run(
+        fetch_agent_performance(
+            _executorless(_FakeClient(snapshots, history)),
+            "a_1",
+            windows=ownership_windows(session_ownership(tmp_path, None, 1)),
+        )
+    )
+
+    # ns-a over [T0, now) = 10, ns-b over [T2, now) = 60.
+    assert detail.realized_pnl == s1.realized_pnl == 70.0
+
+
+def test_session_detail_stops_at_the_next_owners_takeover(tmp_path):
+    """Session 1's ledger never saw session 2 adopt; the tiling cuts it anyway."""
+    from condor.agents.performance import fetch_agent_performance
+
+    _write_ledger(_write_session(tmp_path, 1), {"ns-bot": _epoch(T0)})
+    _write_ledger(_write_session(tmp_path, 2), {"ns-bot": _epoch(T2)})
+    inst = "ns-bot-20260701-000000"
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0)]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)]}
+
+    w1 = session_windows(tmp_path, None, [1, 2], 1)
+    w2 = session_windows(tmp_path, None, [1, 2], 2)
+    assert w1 == {"ns-bot": OwnershipWindow(_epoch(T0), _epoch(T2))}
+    assert w2 == {"ns-bot": OwnershipWindow(_epoch(T2))}
+    # The open window and the current-owner gate are one rule.
+    assert current_owner_bases(tmp_path, None, [1, 2], 1) == []
+    assert current_owner_bases(tmp_path, None, [1, 2], 2) == ["ns-bot"]
+
+    s1, s2 = _session(1), _session(2)
+    asyncio.run(
+        apply_bot_mode_pnl([s1, s2], tmp_path, None, _FakeClient(snapshots, history))
+    )
+    d1, d2 = (
+        asyncio.run(
+            fetch_agent_performance(
+                _executorless(_FakeClient(snapshots, history)), f"a_{n}", windows=w
+            )
+        )
+        for n, w in ((1, w1), (2, w2))
+    )
+
+    assert d1.realized_pnl == s1.realized_pnl == 40.0
+    assert d1.unrealized_pnl == s1.unrealized_pnl == 0.0
+    assert d2.realized_pnl == s2.realized_pnl == 60.0
+    assert d2.unrealized_pnl == s2.unrealized_pnl == 7.0
+
+
+def test_ownership_windows_close_at_release_or_handover_whichever_first():
+    from condor.agents.ownership import OwnedBot
+
+    owned = [
+        OwnedBot(base="held", origin="deployed", since=10.0, last_seen=10.0),
+        OwnedBot(
+            base="released", origin="adopted", since=10.0, last_seen=10.0, until=50.0
+        ),
+        OwnedBot(
+            base="taken", origin="deployed", since=20.0, last_seen=20.0, until=90.0
+        ),
+    ]
+    windows = ownership_windows(owned, handovers={"taken": 40.0, "held": 0.0})
+
+    assert windows == {
+        "held": OwnershipWindow(10.0, 0.0),
+        "released": OwnershipWindow(10.0, 50.0),
+        "taken": OwnershipWindow(20.0, 40.0),
+    }
+    assert windows["held"].is_open and not windows["taken"].is_open
+    assert windows["held"].bounds(99.0) == (10.0, 99.0)
+
+
+def test_window_span_runs_to_now_while_any_window_is_open():
+    from condor.agents.attribution import window_span
+
+    closed = {"a": OwnershipWindow(30.0, 40.0), "b": OwnershipWindow(10.0, 60.0)}
+    assert window_span(closed) == (10.0, 60.0)
+    assert window_span({**closed, "c": OwnershipWindow(50.0)}) == (10.0, 0.0)
+    assert window_span({}) == (0.0, 0.0)
+
+
+def test_executors_provider_slices_each_owned_base_to_its_own_window(monkeypatch):
+    """The tick carries the ledger unflattened, never ``min(since)``."""
+    from condor.agents.ownership import OwnedBot
+    from condor.agents.performance import AgentPerformance
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    captured: dict = {}
+
+    async def _fake(client, agent_id, bot_names=None, windows=None):
+        captured.update(bot_names=bot_names, windows=windows)
+        return AgentPerformance(agent_id=agent_id)
+
+    monkeypatch.setattr("condor.agents.performance.fetch_agent_performance", _fake)
+    owned = [
+        OwnedBot(base="ns-a", origin="deployed", since=100.0, last_seen=1.0),
+        OwnedBot(base="ns-b", origin="adopted", since=300.0, last_seen=1.0),
+    ]
+    asyncio.run(
+        ExecutorsProvider().execute(
+            object(), {}, agent_id="a_1", bot_names=["ns-a", "ns-b"], owned=owned
+        )
+    )
+
+    assert captured["windows"] == {
+        "ns-a": OwnershipWindow(100.0),
+        "ns-b": OwnershipWindow(300.0),
+    }
+
+
+def test_merge_stopped_bot_perf_alias_is_gone():
+    import condor.agents.performance as perf_mod
+
+    assert not hasattr(perf_mod, "_merge_stopped_bot_perf")

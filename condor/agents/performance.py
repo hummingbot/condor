@@ -12,10 +12,13 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from condor.fetchers._pagination import walk_pages
 from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, extract_executors_list
+
+if TYPE_CHECKING:
+    from condor.agents.attribution import OwnershipWindow
 
 log = logging.getLogger(__name__)
 
@@ -104,26 +107,31 @@ async def fetch_agent_performance(
     client: Any,
     agent_id: str,
     bot_names: list[str] | None = None,
-    since: float = 0.0,
+    windows: Mapping[str, OwnershipWindow] | None = None,
 ) -> AgentPerformance:
     """Fetch authoritative performance for a single ``agent_id``.
 
-    When ``bot_names`` is given, the agent is in controller mode: each named bot's
-    PnL is merged into the returned totals (see
+    When ``bot_names`` or ``windows`` name bases, the agent is in controller mode:
+    each base's PnL is merged into the returned totals (see
     :func:`fetch_agent_performance_batch`).
 
-    ``since`` is the instant this session took the bots over. With it, the bot's
-    realized/volume/trades/fees are sliced to ``[since, now)`` exactly as the web
-    rollup slices them, so a session that adopted a long-running bot is not
-    credited with the PnL it inherited. Without it the whole lifetime aggregate is
-    merged, which is only right for a session that deployed the bot itself.
+    ``windows`` maps a base to the :class:`~condor.agents.attribution.OwnershipWindow`
+    this session held it over — build it with
+    :func:`~condor.agents.attribution.ownership_windows` or
+    :func:`~condor.agents.attribution.session_windows`, never by flattening the
+    ledger to one instant. Each base's realized/volume/trades/fees are then sliced
+    to its own window exactly as the web rollup slices them, so a session that
+    adopted a long-running bot is not credited with the PnL it inherited, nor with
+    what the bot earned after it let go. A base named only in ``bot_names`` has no
+    known takeover and gets the lifetime aggregate, which is only right for a
+    session that deployed the bot itself.
     """
-    names = [b for b in (bot_names or []) if b]
+    names = list(dict.fromkeys(b for b in [*(bot_names or []), *(windows or {})] if b))
     batch = await fetch_agent_performance_batch(
         client,
         [agent_id],
         {agent_id: names} if names else None,
-        since={agent_id: since} if names and since > 0 else None,
+        windows={agent_id: dict(windows)} if names and windows else None,
     )
     return batch.get(
         agent_id, AgentPerformance(agent_id=agent_id, bot_names=list(names))
@@ -273,24 +281,6 @@ async def fetch_agent_pnl_series(
     return series
 
 
-def _merge_stopped_bot_perf(
-    perf: AgentPerformance,
-    window: tuple[float, float, float, float],
-) -> None:
-    """Fold a stopped bot's sliced window into ``perf``.
-
-    The live-snapshot counterpart of :func:`_merge_bot_perf` has nothing to work
-    with once a bot is archived — there is no aggregate, no open book and no
-    controller breakdown, only the history it left behind. That history is the
-    whole point: a session is judged on what it realized, and stopping the bot is
-    the normal way a session ends. Everything an open position would contribute
-    (unrealized PnL, executor rows) is correctly absent.
-    """
-    from condor.agents.attribution import fold_sliced_window
-
-    fold_sliced_window(perf, window)
-
-
 def _build_perf_from_rows(
     agent_id: str,
     rows: list[dict[str, Any]],
@@ -333,7 +323,7 @@ async def fetch_agent_performance_batch(
     agent_ids: list[str],
     bot_names: dict[str, list[str]] | None = None,
     failed_ids: set[str] | None = None,
-    since: dict[str, float] | None = None,
+    windows: Mapping[str, Mapping[str, OwnershipWindow]] | None = None,
 ) -> dict[str, AgentPerformance]:
     """Batched multi-agent fetch via a single cursor-paginated executor search.
 
@@ -341,11 +331,15 @@ async def fetch_agent_performance_batch(
     controller mode; each such agent's bot figures (one shared snapshot fetch for
     the whole batch) are merged into its executor-derived totals.
 
-    ``since`` maps ``agent_id -> the instant it took its bots over``. Where it is
-    known, that agent's bot realized/volume/trades/fees are sliced from the
-    controller history to ``[since, now)`` instead of taking the bot's whole
-    lifetime, so the figure matches what the web rollup attributes to the same
-    session.
+    ``windows`` maps ``agent_id -> {base: OwnershipWindow}``, the span that agent
+    held each base. A base with a known takeover has its realized/volume/trades/
+    fees sliced from the controller history over its OWN window instead of the
+    bot's whole lifetime, so the figure matches what the web rollup attributes to
+    the same session. The live open book (unrealized PnL, open rows, controller
+    breakdown) is merged only for a base whose window is still open — the
+    current-owner rule the rollup applies; a closed window keeps its realized
+    slice and nothing else. A base in ``bot_names`` with no window (or no known
+    ``since``) keeps the lifetime aggregate.
 
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised — their entries may be partial/empty. This lets callers avoid
@@ -402,12 +396,11 @@ async def fetch_agent_performance_batch(
     if wanted:
         import time
 
+        from condor.agents.attribution import fold_sliced_window
         from condor.fetchers.bot_performance import (
-            fetch_base_histories,
             fetch_bot_universe,
             partition_instances,
             resolve_bots,
-            slice_history,
         )
 
         # Stopped instances still hold the realized PnL they earned, and a session
@@ -420,24 +413,17 @@ async def fetch_agent_performance_batch(
             # into the same agent twice.
             live = resolve_bots(all_bot_perf, bases)
             instances = partition_instances(all_bot_perf, bases, archived)
-            start = float((since or {}).get(aid, 0.0) or 0.0)
-            windows: dict[str, tuple[float, float, float, float]] = {}
-            if start > 0 and (all_bot_perf or archived):
-                try:
-                    histories = await fetch_base_histories(
-                        client, all_bot_perf, bases, start, now, extra_names=archived
-                    )
-                    windows = {
-                        base: slice_history(hs, start, now)
-                        for base, hs in histories.items()
-                    }
-                except Exception as e:
-                    # Falling back to the lifetime aggregate over-credits an
-                    # adopted bot, but reporting zero would be worse: the agent
-                    # would read a live position as costless.
-                    log.warning("history slice for %s failed: %s", aid, e)
+            owned = {
+                base: w
+                for base, w in ((windows or {}).get(aid) or {}).items()
+                if base in bases
+            }
+            sliced = await _slice_owned_windows(
+                client, aid, all_bot_perf, archived, owned, now
+            )
             for base in bases:
                 bot = live.get(base)
+                window = owned.get(base)
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
@@ -445,12 +431,14 @@ async def fetch_agent_performance_batch(
                 # included — the session operated them all, and the two this one
                 # wound down are exactly where its realized PnL came from.
                 out[aid].bot_instances.extend(instances.get(base) or [])
-                if bot:
-                    _merge_bot_perf(out[aid], bot, windows.get(base))
-                elif base in windows:
-                    # Stopped: no live snapshot to merge, but the window over its
-                    # archived history is exactly what this session realized on it.
-                    _merge_stopped_bot_perf(out[aid], windows[base])
+                if bot and (window is None or window.is_open):
+                    # Held now: the open book is this agent's, over its window's
+                    # slice (or the lifetime aggregate when none could be cut).
+                    _merge_bot_perf(out[aid], bot, sliced.get(base))
+                elif base in sliced:
+                    # Stopped, released or handed over: no open book to merge, but
+                    # the slice of its history is exactly what this agent realized.
+                    fold_sliced_window(out[aid], sliced[base])
                 if not instances.get(base):
                     out[aid].unresolved_bases.append(base)
             if out[aid].unresolved_bases:
@@ -460,4 +448,44 @@ async def fetch_agent_performance_batch(
                     aid,
                     ", ".join(out[aid].unresolved_bases),
                 )
+    return out
+
+
+async def _slice_owned_windows(
+    client: Any,
+    aid: str,
+    all_bot_perf: dict[str, dict],
+    archived: list[str],
+    owned: Mapping[str, OwnershipWindow],
+    now: float,
+) -> dict[str, tuple[float, float, float, float]]:
+    """``{base: sliced (realized, volume, trades, fees)}`` over each base's window.
+
+    One history fetch reaching back to the earliest known takeover, then one
+    slice per base over its own :meth:`OwnershipWindow.bounds` — the rule
+    :func:`condor.agents.attribution.apply_bot_mode_pnl` tiles with. A base with
+    no known ``since`` is left out (lifetime aggregate), and so is an empty window
+    (closed at or before it opened), which the rollup skips too.
+    """
+    from condor.fetchers.bot_performance import fetch_base_histories, slice_history
+
+    cut = {b: w for b, w in owned.items() if w.since > 0}
+    if not cut or not (all_bot_perf or archived):
+        return {}
+    earliest = min(w.since for w in cut.values())
+    try:
+        histories = await fetch_base_histories(
+            client, all_bot_perf, sorted(cut), earliest, now, extra_names=archived
+        )
+    except Exception as e:
+        # Falling back to the lifetime aggregate over-credits an adopted bot, but
+        # reporting zero would be worse: the agent would read a live position as
+        # costless.
+        log.warning("history slice for %s failed: %s", aid, e)
+        return {}
+    out: dict[str, tuple[float, float, float, float]] = {}
+    for base, window in cut.items():
+        start, stop = window.bounds(now)
+        if stop > start:
+            out[base] = slice_history(histories.get(base, []), start, stop)
     return out

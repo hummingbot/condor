@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseProvider, ProviderResult
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
 
 log = logging.getLogger(__name__)
 
@@ -50,14 +53,14 @@ class ProviderRegistry:
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
     ) -> dict[str, ProviderResult]:
         """Run all core providers and return {name: ProviderResult} dict.
 
         ``bot_names`` are the bases the session owns per its ownership ledger, so
         a session operating several bots sees all of them in its core data.
-        ``since`` is the earliest instant it took one over, which scopes bot PnL
-        to this session's window.
+        ``owned`` is that ledger's records, which scope each base's PnL to the
+        window this session held it over.
         """
         if not _REGISTRY:
             _auto_register()
@@ -70,7 +73,7 @@ class ProviderRegistry:
                     config,
                     agent_id=agent_id,
                     bot_names=bot_names,
-                    since=since,
+                    owned=owned,
                 )
                 results[result.name] = result
             except Exception:

@@ -20,9 +20,14 @@ Both consumers go through this module: the web strategy rollup
 (``condor.web.routes.agents``) via :func:`apply_bot_mode_pnl` /
 :func:`current_owner_bases` / :func:`session_ownership`, and the agent's own
 view (``condor.agents.performance``) via :func:`fold_sliced_window` /
-:func:`apply_fee_fallback`. That is what makes the invariant structural
-instead of hand-maintained: the dashboard and the tick loop cannot disagree,
-because they no longer have separate copies of the rules to drift apart.
+:func:`apply_fee_fallback`. Both slice over the same unit, an
+:class:`OwnershipWindow` per base ([[ARCH-662]]): the rollup tiles them with
+:func:`tile_owner_windows`, and every single-session caller builds them with
+:func:`ownership_windows` / :func:`session_windows` and hands them to
+``fetch_agent_performance`` unflattened. That is what makes the invariant
+structural instead of hand-maintained: the dashboard and the tick loop cannot
+disagree, because they no longer have separate copies of the rules to drift
+apart.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, NamedTuple
 
 from pydantic import BaseModel
 
@@ -161,28 +166,120 @@ def session_ownership(
 # ── Owner-window tiling ──
 
 
-def owner_windows(
-    real_sessions: list, strategy_dir: Path, default_config: dict | None
-) -> dict[str, list[tuple[float, Any, float]]]:
-    """``{base: [(since, session, until), …]}`` — owners, oldest takeover first.
+class OwnershipWindow(NamedTuple):
+    """The span one session held one base: ``[since, end)``.
 
-    The windows a base's owners occupy tile ``[since_i, since_{i+1})`` and the last
-    one runs to now, so slicing over them reproduces the bot's whole cumulative with
-    no gap and no double count. Keyed per base rather than globally per session
-    number: two bases handed over at different moments never share a timeline.
-
-    ``until`` is the instant the session released the bot, or ``0.0`` while it
-    still holds it. A released last window stops there rather than running to now,
-    which is the one case where the tiling deliberately leaves a gap: PnL a bot
-    earned with no session operating it belongs to no session.
+    ``end`` is ``0.0`` while the session still holds the base — the window runs to
+    now, and the bot's live open book (unrealized PnL, open rows) belongs to it.
+    A closed window (``end > 0``) ended at a release or at the next owner's
+    takeover: it keeps the realized slice and never the live book. ``since`` of
+    ``0.0`` means the takeover instant is unknown, which the agent-side fetch
+    reads as "no slice" and falls back to the lifetime aggregate.
     """
-    owners: dict[str, list[tuple[float, Any, float]]] = {}
-    for s in real_sessions:
-        for ob in session_ownership(strategy_dir, default_config, s.session_num):
-            owners.setdefault(ob.base, []).append((ob.since, s, ob.until))
+
+    since: float
+    end: float = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        """Still held — the window runs to now and carries the live open book."""
+        return self.end <= 0
+
+    def bounds(self, now: float) -> tuple[float, float]:
+        """``(start, stop)`` to slice the history over, an open end read as ``now``."""
+        return self.since, (self.end if self.end > 0 else now)
+
+
+def ownership_windows(
+    owned: list[OwnedBot], handovers: Mapping[str, float] | None = None
+) -> dict[str, OwnershipWindow]:
+    """``{base: OwnershipWindow}`` for one session's ledger, one window per base.
+
+    A released base (``until``) closes there. ``handovers`` maps a base to the
+    instant a LATER owner took it over, which one session's own ledger cannot
+    see: the window is clipped there too, so it stops where the next owner's
+    starts instead of running on to now. The session-detail route gets those
+    instants from :func:`session_windows`; a live session is its bots' current
+    owner and passes none.
+    """
+    out: dict[str, OwnershipWindow] = {}
+    for ob in owned:
+        ends = [t for t in (ob.until, (handovers or {}).get(ob.base, 0.0)) if t > 0]
+        out[ob.base] = OwnershipWindow(ob.since, min(ends) if ends else 0.0)
+    return out
+
+
+def window_span(windows: Mapping[str, OwnershipWindow]) -> tuple[float, float]:
+    """``(since, until)`` covering every window, for a scalar-span consumer.
+
+    ``since`` is the earliest known takeover; ``until`` is the latest close, or
+    ``0.0`` (to now) while any window is still open. ``(0.0, 0.0)`` when no
+    window has a known start.
+    """
+    since = min((w.since for w in windows.values() if w.since > 0), default=0.0)
+    if not windows or any(w.is_open for w in windows.values()):
+        return since, 0.0
+    return since, max(w.end for w in windows.values())
+
+
+def owner_windows(
+    session_nums: list[int], strategy_dir: Path, default_config: dict | None
+) -> dict[str, list[tuple[float, int, float]]]:
+    """``{base: [(since, session_num, until), …]}`` — owners, oldest takeover first.
+
+    Keyed per base rather than globally per session number: two bases handed over
+    at different moments never share a timeline. Ties on ``since`` go to the
+    higher session number. :func:`tile_owner_windows` turns one base's list into
+    its windows.
+    """
+    owners: dict[str, list[tuple[float, int, float]]] = {}
+    for n in session_nums:
+        for ob in session_ownership(strategy_dir, default_config, n):
+            owners.setdefault(ob.base, []).append((ob.since, n, ob.until))
     for lst in owners.values():
-        lst.sort(key=lambda t: (t[0], t[1].session_num))
+        lst.sort(key=lambda t: (t[0], t[1]))
     return owners
+
+
+def tile_owner_windows(
+    owners: list[tuple[float, int, float]],
+) -> list[tuple[int, OwnershipWindow]]:
+    """One base's owners as ``[(session_num, window), …]``, tiling its timeline.
+
+    The windows tile ``[since_i, since_{i+1})`` and the last one runs to now, so
+    slicing over them reproduces the bot's whole cumulative with no gap and no
+    double count. A released window stops at its ``until`` rather than at the
+    next takeover, which is the one case where the tiling deliberately leaves a
+    gap: PnL a bot earned with no session operating it belongs to no session.
+    Only the last owner's window can be open, and only if it never released.
+    """
+    out: list[tuple[int, OwnershipWindow]] = []
+    for i, (since, num, until) in enumerate(owners):
+        nxt = owners[i + 1][0] if i + 1 < len(owners) else 0.0
+        ends = [t for t in (nxt, until) if t > 0]
+        out.append((num, OwnershipWindow(since, min(ends) if ends else 0.0)))
+    return out
+
+
+def session_windows(
+    strategy_dir: Path,
+    default_config: dict | None,
+    session_nums: list[int],
+    num: int,
+) -> dict[str, OwnershipWindow]:
+    """Session ``num``'s windows, cut by the same tiling the rollup slices with.
+
+    What :func:`ownership_windows` gives for one ledger, plus the next owner's
+    takeover — so a session detail reports exactly its row in the strategy
+    rollup, including for a base a later session adopted.
+    """
+    nums = sorted(set(session_nums) | {num})
+    return {
+        base: window
+        for base, owners in owner_windows(nums, strategy_dir, default_config).items()
+        for owner, window in tile_owner_windows(owners)
+        if owner == num
+    }
 
 
 def current_owner_bases(
@@ -191,23 +288,17 @@ def current_owner_bases(
     session_nums: list[int],
     num: int,
 ) -> list[str]:
-    """Bases ``num`` is the CURRENT owner of — the last takeover by ``since``.
+    """Bases ``num`` is the CURRENT owner of — its window on them is still open.
 
     A bot's live open positions belong to whoever operates it now, so this is the
-    gate for merging them into one session's view. Same rule
-    :func:`apply_bot_mode_pnl` applies to live unrealized PnL, kept here as one
-    lookup over the same windows so the rollup and the per-session detail can
-    never disagree about who holds the open book. A session that released the bot
-    is not its current owner, so an ended session shows no live open book.
+    gate for merging them into one session's view. It reads the same windows
+    :func:`apply_bot_mode_pnl` slices with — only the last takeover's window can
+    be open — so the rollup and the per-session detail can never disagree about
+    who holds the open book. A session that released the bot is not its current
+    owner, so an ended session shows no live open book.
     """
-    last: dict[str, tuple[float, int, float]] = {}
-    for n in session_nums:
-        for ob in session_ownership(strategy_dir, default_config, n):
-            if last.get(ob.base, (float("-inf"), -1, 0.0))[:2] <= (ob.since, n):
-                last[ob.base] = (ob.since, n, ob.until)
-    return sorted(
-        base for base, (_, owner, until) in last.items() if owner == num and until <= 0
-    )
+    windows = session_windows(strategy_dir, default_config, session_nums, num)
+    return sorted(base for base, w in windows.items() if w.is_open)
 
 
 # ── The attribution engine ──
@@ -219,7 +310,8 @@ async def apply_bot_mode_pnl(
     """Distribute each owned bot's PnL across the sessions that operated it.
 
     One rule covers deploy and handover: every owned bot is attributed by slicing
-    its history over ``[since, next_owner.since or now)``, where ``since`` is the
+    its history over its :func:`tile_owner_windows` window
+    ``[since, min(next_owner.since, until) or now)``, where ``since`` is the
     takeover instant the ownership ledger recorded. A bot the session *deployed*
     has no history before its ``since``, so the general rule already hands it the
     whole instance — the exact case falls out instead of needing its own branch.
@@ -243,7 +335,8 @@ async def apply_bot_mode_pnl(
 
     if not client or not real_sessions:
         return
-    owners = owner_windows(real_sessions, strategy_dir, default_config)
+    by_num = {s.session_num: s for s in real_sessions}
+    owners = owner_windows(list(by_num), strategy_dir, default_config)
     bases = sorted(owners)
     if not bases:
         return  # direct-executor strategy — nothing to attribute
@@ -269,7 +362,7 @@ async def apply_bot_mode_pnl(
 
     live = resolve_bots(all_perf, bases)
     for base in bases:
-        window_owners = owners[base]
+        tiled = tile_owner_windows(owners[base])
         insts = histories_by_base.get(base, [])
 
         # Realized / volume / trades / fees: one window per owner, tiling the
@@ -278,24 +371,23 @@ async def apply_bot_mode_pnl(
         # was operating the bot is attributed to nobody instead of accruing to
         # whoever happened to hold last.
         sliced_fees = 0.0
-        for i, (since, s, until) in enumerate(window_owners):
-            end = window_owners[i + 1][0] if i + 1 < len(window_owners) else now
-            if until > 0:
-                end = min(end, until)
-            if end <= since:
+        for num, owned_window in tiled:
+            start, stop = owned_window.bounds(now)
+            if stop <= start:
                 continue
-            window = slice_history(insts, since, end)
-            fold_sliced_window(s, window)
+            window = slice_history(insts, start, stop)
+            fold_sliced_window(by_num[num], window)
             sliced_fees += window[3]
 
-        # Live unrealized + open positions → the base's current owner, unless it
-        # has released the bot: an ended session holds no open book.
+        # Live unrealized + open positions → the base's current owner, i.e. the
+        # one whose window is still open: an ended session holds no open book.
         bot = live.get(base)
         if not bot:
             continue
-        last_since, operator, last_until = window_owners[-1]
-        if last_until > 0:
+        num, last_window = tiled[-1]
+        if not last_window.is_open:
             continue
+        operator = by_num[num]
         b_rows = bot_executor_rows(bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
         # Top the operator up to the fallback figure: when the whole sliced fee

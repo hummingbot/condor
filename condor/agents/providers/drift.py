@@ -14,7 +14,7 @@ out must cost the agent its drift block, not its positions block.
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from condor import venue_drift
 from condor.fetchers.positions import fetch_positions
@@ -22,6 +22,9 @@ from condor.fetchers.tracked_positions import fetch_tracked_positions
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
 
 #: Separators a controller tag may put between a session's ``agent_id`` and a
 #: suffix. Matching on the bare prefix would let ``brigado.mm_1`` claim
@@ -64,7 +67,7 @@ class DriftProvider(BaseProvider):
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
     ) -> ProviderResult:
         # Unscoped on purpose: the venue answers for the whole account, so the
         # tracked side must too or every sibling controller's position would
