@@ -72,6 +72,8 @@ from condor.memory.paths import (
 )
 from condor.paths import UnsafeIdError
 
+from .strategy import AlreadyExistsError
+
 log = logging.getLogger(__name__)
 
 AGENT_MD = "AGENT.md"
@@ -308,6 +310,11 @@ class AgentStore:
             raise ValueError(
                 f"'{CHAT_SLUG}' is reserved for the default agent — pick another name"
             )
+        # ``_save`` overwrites unconditionally; ``get`` resolves through the
+        # layers, so a shipped agent is refused too instead of forked and
+        # clobbered (CORR-635).
+        if self.get(slug) is not None:
+            raise AlreadyExistsError(f"Agent '{slug}' already exists")
         agent = Agent(
             slug=slug,
             name=name,

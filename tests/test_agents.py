@@ -869,3 +869,170 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
     env = {e["name"]: e["value"] for e in hb["env"]}
     assert env["HUMMINGBOT_API_USERNAME"] == "999"
     assert env["HUMMINGBOT_API_PASSWORD"] == "123"
+
+
+# ── Creating over an existing name is refused, never an overwrite (CORR-635) ──
+
+
+def _create_client(monkeypatch):
+    """The create routes behind a FastAPI app, as a plain approved user."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+    from condor.web.models import WebUser
+    from condor.web.routes import agents as routes
+
+    monkeypatch.setattr("condor.preferences.get_active_agent_key", lambda uid: "")
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: WebUser(
+        id=555, username="u", first_name="U", role="user"
+    )
+    return TestClient(app)
+
+
+def test_post_agents_with_a_taken_name_is_409_and_leaves_agent_md(
+    tmp_path, monkeypatch
+):
+    _patch_roots(monkeypatch, tmp_path)
+    client = _create_client(monkeypatch)
+
+    first = client.post("/agents", json={"name": "Brigado", "instructions": "Keep."})
+    assert first.status_code == 200
+    md = tmp_path / "brigado" / "AGENT.md"
+    before = md.read_bytes()
+
+    again = client.post("/agents", json={"name": "brigado", "instructions": "Lost."})
+
+    assert again.status_code == 409
+    assert "brigado" in again.json()["detail"]
+    assert md.read_bytes() == before
+
+
+def test_post_agents_naming_a_stock_agent_is_409_without_a_local_fork(
+    tmp_path, monkeypatch
+):
+    from condor.memory.paths import agent_home, stock_agent_home
+
+    _patch_roots(monkeypatch, tmp_path)
+    shipped = stock_agent_home("scout") / "AGENT.md"
+    shipped.parent.mkdir(parents=True)
+    shipped.write_text("---\nname: Scout\ndescription: shipped\n---\n\nShip.\n")
+    before = shipped.read_bytes()
+
+    res = _create_client(monkeypatch).post("/agents", json={"name": "Scout"})
+
+    assert res.status_code == 409
+    assert "scout" in res.json()["detail"]
+    assert not (agent_home("scout") / "AGENT.md").exists()
+    assert shipped.read_bytes() == before
+
+
+def test_post_strategies_with_a_taken_name_is_409_and_leaves_playbook_and_config(
+    tmp_path, monkeypatch
+):
+    _patch_roots(monkeypatch, tmp_path)
+    client = _create_client(monkeypatch)
+    assert client.post("/agents", json={"name": "Brigado"}).status_code == 200
+
+    first = client.post(
+        "/agents/brigado/strategies",
+        json={
+            "name": "BRL MM",
+            "instructions": "Tuned tactic.",
+            "config": {"frequency_sec": 17, "total_amount_quote": 1234},
+        },
+    )
+    assert first.status_code == 200
+    home = tmp_path / "brigado" / "strategies" / "brl_mm"
+    md, cfg = home / "strategy.md", home / "config.yml"
+    before = (md.read_bytes(), cfg.read_bytes())
+
+    again = client.post(
+        "/agents/brigado/strategies",
+        json={"name": "brl mm", "instructions": "Other.", "config": {"x": 1}},
+    )
+
+    assert again.status_code == 409
+    assert "brl_mm" in again.json()["detail"]
+    assert (md.read_bytes(), cfg.read_bytes()) == before
+
+
+def test_reserved_names_are_400_not_500(tmp_path, monkeypatch):
+    _patch_roots(monkeypatch, tmp_path)
+    client = _create_client(monkeypatch)
+
+    res = client.post("/agents", json={"name": "condor"})
+    assert res.status_code == 400
+    assert "reserved" in res.json()["detail"]
+
+    assert client.post("/agents", json={"name": "Brigado"}).status_code == 200
+    res = client.post(
+        "/agents/brigado/strategies", json={"name": "chat", "instructions": "x"}
+    )
+    assert res.status_code == 400
+    assert "reserved" in res.json()["detail"]
+    assert not (tmp_path / "brigado" / "strategies" / "chat").exists()
+
+
+def test_store_create_refuses_an_existing_agent_and_strategy(tmp_path, monkeypatch):
+    import pytest
+
+    _patch_roots(monkeypatch, tmp_path)
+    agents = AgentStore()
+    agents.create(name="Brigado", instructions="Keep.")
+    md = tmp_path / "brigado" / "AGENT.md"
+    before = md.read_bytes()
+
+    with pytest.raises(ValueError, match="already exists"):
+        agents.create(name="brigado", instructions="Lost.")
+    assert md.read_bytes() == before
+
+    strategies = StrategyStore()
+    strategies.create(agent_slug="brigado", name="BRL MM", instructions="Keep.")
+    smd = tmp_path / "brigado" / "strategies" / "brl_mm" / "strategy.md"
+    sbefore = smd.read_bytes()
+    with pytest.raises(ValueError, match="already exists"):
+        strategies.create(agent_slug="brigado", name="brl mm", instructions="Lost.")
+    assert smd.read_bytes() == sbefore
+
+    # The same name under another agent is a different strategy.
+    agents.create(name="Other")
+    strategies.create(agent_slug="other", name="BRL MM", instructions="Fine.")
+
+
+def test_ensure_default_twice_returns_the_same_strategy(tmp_path, monkeypatch):
+    _patch_roots(monkeypatch, tmp_path)
+    AgentStore().create(name="Brigado")
+    store = StrategyStore()
+
+    first = store.ensure_default("brigado")
+    second = store.ensure_default("brigado")
+
+    assert first is not None and second is not None
+    assert first.key == second.key
+    assert first.created_at == second.created_at
+
+
+def test_mcp_create_with_a_taken_name_returns_an_error_dict(tmp_path, monkeypatch):
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+
+    assert ta.manage_agents(action="create", name="Brigado", agent_key="x")["created"]
+    dup = ta.manage_agents(action="create", name="brigado", agent_key="x")
+    assert "already exists" in dup["error"]
+    reserved = ta.manage_agents(action="create", name="condor", agent_key="x")
+    assert "reserved" in reserved["error"]
+
+    made = ta.manage_strategies(
+        action="create", agent_slug="brigado", name="BRL MM", instructions="x"
+    )
+    assert made["created"] is True
+    dup = ta.manage_strategies(
+        action="create", agent_slug="brigado", name="brl mm", instructions="y"
+    )
+    assert "already exists" in dup["error"]

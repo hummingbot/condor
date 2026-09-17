@@ -162,6 +162,15 @@ def _load_strategy_from_file(path: Path, agent_slug: str) -> Strategy | None:
         return None
 
 
+class AlreadyExistsError(ValueError):
+    """A create named an Agent or strategy that already exists.
+
+    A ``ValueError`` so every caller that already maps store refusals keeps
+    working; the subclass lets the web routes answer 409 for this one and 400
+    for the rest without matching message text.
+    """
+
+
 class StrategyStore:
     """CRUD for strategies stored as ``strategy.md`` under ``{agent}/strategies/``.
 
@@ -198,6 +207,14 @@ class StrategyStore:
             raise ValueError(
                 f"'{name}' is reserved: {', '.join(sorted(RESERVED_STRATEGY_SLUGS))} "
                 "name Condor's own non-loop runs. Pick another name."
+            )
+        # ``_save`` overwrites unconditionally, so without this a second create
+        # whose name slugifies the same replaces the playbook — and the route
+        # then resets its tuned config.yml (CORR-635). ``get`` reads through the
+        # layers, so a shipped strategy is refused too rather than forked over.
+        if self.get(agent_slug, slugify(name)) is not None:
+            raise AlreadyExistsError(
+                f"Strategy '{slugify(name)}' already exists under '{agent_slug}'"
             )
         strategy = Strategy(
             agent_slug=agent_slug,

@@ -2084,6 +2084,18 @@ async def delete_agent_memory(
     return {"deleted": True}
 
 
+def _create_refusal(exc: ValueError) -> HTTPException:
+    """A store's create refusal as HTTP: 409 for a taken name, 400 otherwise.
+
+    Uncaught, the reserved-name ``ValueError`` reached the browser as a 500,
+    while the delete routes already answer 400 for the same store refusals.
+    """
+    from condor.agents.strategy import AlreadyExistsError
+
+    status = 409 if isinstance(exc, AlreadyExistsError) else 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
 @router.post("", response_model=AgentSummary)
 async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
@@ -2103,17 +2115,20 @@ async def create_agent(
 
     # Same rule as the Telegram/MCP path: an unspecified model inherits the
     # creator's active one rather than defaulting to a guess.
-    agent = _agent_store().create(
-        name=req.name,
-        description=req.description,
-        instructions=req.instructions,
-        agent_key=req.agent_key or get_active_agent_key(user.id) or "",
-        tools=req.tools,
-        when_to_consult=req.when_to_consult,
-        server_required=req.server_required,
-        server_name=req.server_name,
-        created_by=user.id,
-    )
+    try:
+        agent = _agent_store().create(
+            name=req.name,
+            description=req.description,
+            instructions=req.instructions,
+            agent_key=req.agent_key or get_active_agent_key(user.id) or "",
+            tools=req.tools,
+            when_to_consult=req.when_to_consult,
+            server_required=req.server_required,
+            server_name=req.server_name,
+            created_by=user.id,
+        )
+    except ValueError as exc:
+        raise _create_refusal(exc) from exc
     return AgentSummary(
         slug=agent.slug,
         name=agent.name,
@@ -2562,16 +2577,21 @@ async def create_strategy(
     _get_agent(slug)
     # A new strategy has no stored pin, so any non-empty one is checked (SEC-693).
     _gate_pin_change(user, (req.config or {}).get("server_name"), "")
-    strategy = _strategy_store().create(
-        agent_slug=slug,
-        name=req.name,
-        description=req.description,
-        instructions=req.instructions,
-        agent_key=req.agent_key,
-        default_config=req.config,
-        default_trading_context=req.default_trading_context,
-        created_by=user.id,
-    )
+    try:
+        strategy = _strategy_store().create(
+            agent_slug=slug,
+            name=req.name,
+            description=req.description,
+            instructions=req.instructions,
+            agent_key=req.agent_key,
+            default_config=req.config,
+            default_trading_context=req.default_trading_context,
+            created_by=user.id,
+        )
+    except ValueError as exc:
+        # Refused before anything is written, so the existing playbook's
+        # strategy.md and config.yml below are never touched (CORR-635).
+        raise _create_refusal(exc) from exc
 
     if req.config:
         from condor.agents.config import load_full_config, save_full_config

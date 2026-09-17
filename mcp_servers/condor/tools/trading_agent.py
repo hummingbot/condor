@@ -77,16 +77,19 @@ def _manage_strategy(
 
         if AgentStore().get(agent_slug) is None:
             return {"error": f"Agent '{agent_slug}' not found"}
-        strategy = store.create(
-            agent_slug=agent_slug,
-            name=name,
-            description=description or "",
-            agent_key=agent_key,
-            instructions=instructions,
-            skills=skills,
-            default_config=config,
-            created_by=settings.user_id,
-        )
+        try:
+            strategy = store.create(
+                agent_slug=agent_slug,
+                name=name,
+                description=description or "",
+                agent_key=agent_key,
+                instructions=instructions,
+                skills=skills,
+                default_config=config,
+                created_by=settings.user_id,
+            )
+        except ValueError as exc:  # taken or reserved name (CORR-635)
+            return {"error": str(exc)}
         return {"created": True, "strategy_id": strategy.key, "name": strategy.name}
 
     elif action == "update_strategy":
@@ -242,17 +245,20 @@ def _manage_agent(
         # coordinator has no way to know which models are reachable, so an
         # invented agent_key is a coin flip that only surfaces on the first run.
         resolved_key = agent_key or _creator_agent_key()
-        agent = store.create(
-            name=name,
-            description=description or "",
-            instructions=instructions or "",
-            agent_key=resolved_key,
-            tools=tools,
-            when_to_consult=when_to_consult or "",
-            server_required=True if server_required is None else server_required,
-            server_name=server_name or "",
-            created_by=settings.user_id,
-        )
+        try:
+            agent = store.create(
+                name=name,
+                description=description or "",
+                instructions=instructions or "",
+                agent_key=resolved_key,
+                tools=tools,
+                when_to_consult=when_to_consult or "",
+                server_required=True if server_required is None else server_required,
+                server_name=server_name or "",
+                created_by=settings.user_id,
+            )
+        except ValueError as exc:  # taken or reserved name (CORR-635)
+            return {"error": str(exc)}
         return {
             "created": True,
             "agent_slug": agent.slug,
