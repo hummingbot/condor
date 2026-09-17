@@ -1096,6 +1096,7 @@ def _every_field_perf():
         fees_known=False,
         unresolved_bases=["gone-bot"],
         base_windows={"bot-a": (1.5, 900.0, 3.0, 0.75)},
+        pnl_series=[{"timestamp": "2026-07-01T00:00:00+00:00", "pnl": 1.5}],
     )
 
 
@@ -1361,7 +1362,7 @@ def test_executors_provider_slices_each_owned_base_to_its_own_window(monkeypatch
 
     captured: dict = {}
 
-    async def _fake(client, agent_id, bot_names=None, windows=None):
+    async def _fake(client, agent_id, bot_names=None, windows=None, **_kw):
         captured.update(bot_names=bot_names, windows=windows)
         return AgentPerformance(agent_id=agent_id)
 

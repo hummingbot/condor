@@ -79,6 +79,12 @@ class AgentPerformance:
     base_windows: dict[str, tuple[float, float, float, float]] = field(
         default_factory=dict
     )
+    # The session's realized-PnL curve (:func:`fetch_agent_pnl_series`'s shape),
+    # derived from the histories the window slices above were cut from. ``None``
+    # means "not computed": only a caller that asks for it (the tick's executors
+    # provider, so the session report does not walk every instance's history a
+    # second time) gets one, and only when its inputs match the standalone fetch.
+    pnl_series: list[dict[str, Any]] | None = None
 
     @property
     def bot_name(self) -> str:
@@ -118,6 +124,7 @@ async def fetch_agent_performance(
     agent_id: str,
     bot_names: list[str] | None = None,
     windows: Mapping[str, OwnershipWindow] | None = None,
+    pnl_series: bool = False,
 ) -> AgentPerformance:
     """Fetch authoritative performance for a single ``agent_id``.
 
@@ -135,6 +142,9 @@ async def fetch_agent_performance(
     what the bot earned after it let go. A base named only in ``bot_names`` has no
     known takeover and gets the lifetime aggregate, which is only right for a
     session that deployed the bot itself.
+
+    ``pnl_series`` also fills :attr:`AgentPerformance.pnl_series` from the
+    histories the slices were cut from (see :func:`fetch_agent_performance_batch`).
     """
     names = list(dict.fromkeys(b for b in [*(bot_names or []), *(windows or {})] if b))
     batch = await fetch_agent_performance_batch(
@@ -142,6 +152,7 @@ async def fetch_agent_performance(
         [agent_id],
         {agent_id: names} if names else None,
         windows={agent_id: dict(windows)} if names and windows else None,
+        pnl_series=pnl_series,
     )
     return batch.get(
         agent_id, AgentPerformance(agent_id=agent_id, bot_names=list(names))
@@ -252,6 +263,41 @@ def _merge_stopped_instance(perf: AgentPerformance, bot: dict, lifetime: bool) -
     ]
 
 
+def pnl_series_from_histories(
+    histories: Mapping[str, list[list[tuple[float, float, float, float, float]]]],
+    since: float,
+    end: float,
+) -> list[dict[str, Any]]:
+    """Merge ``{base: [instance history, …]}`` into one realized curve over ``[since, end]``.
+
+    Pure: the half of :func:`fetch_agent_pnl_series` that needs no network, so a
+    caller already holding the histories (the tick's performance fetch) derives
+    the identical curve without walking them again.
+    """
+    from condor.fetchers.bot_performance import slice_history_series
+
+    instances = [h for hs in histories.values() for h in hs if h]
+    if not instances:
+        return []
+
+    # One point per instant any instance was sampled. Each is the whole session's
+    # cumulative at that moment, so the curve is continuous across a redeploy
+    # rather than restarting at zero with each new bot.
+    # Single merge pass over all instances instead of a slice_history rescan
+    # per stamp — same values, O(stamps + rows) instead of O(stamps × rows).
+    stamps = sorted({t for h in instances for t, *_ in h if since <= t <= end})
+    return [
+        {
+            "timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+            "pnl": realized,
+            "volume": volume,
+        }
+        for t, realized, volume, _trades, _fees in slice_history_series(
+            instances, since, stamps
+        )
+    ]
+
+
 async def fetch_agent_pnl_series(
     client: Any,
     bot_names: list[str],
@@ -278,11 +324,7 @@ async def fetch_agent_pnl_series(
     """
     import time as _time
 
-    from condor.fetchers.bot_performance import (
-        fetch_base_histories,
-        fetch_bot_universe,
-        slice_history_series,
-    )
+    from condor.fetchers.bot_performance import fetch_base_histories, fetch_bot_universe
 
     bases = [b for b in (bot_names or []) if b]
     if not client or not bases or since <= 0:
@@ -298,28 +340,7 @@ async def fetch_agent_pnl_series(
         log.warning("pnl series: history fetch failed: %s", e)
         return []
 
-    instances = [h for hs in histories.values() for h in hs if h]
-    if not instances:
-        return []
-
-    # One point per instant any instance was sampled. Each is the whole session's
-    # cumulative at that moment, so the curve is continuous across a redeploy
-    # rather than restarting at zero with each new bot.
-    # Single merge pass over all instances instead of a slice_history rescan
-    # per stamp — same values, O(stamps + rows) instead of O(stamps × rows).
-    stamps = sorted({t for h in instances for t, *_ in h if since <= t <= end})
-    series: list[dict[str, Any]] = []
-    for t, realized, volume, _trades, _fees in slice_history_series(
-        instances, since, stamps
-    ):
-        series.append(
-            {
-                "timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
-                "pnl": realized,
-                "volume": volume,
-            }
-        )
-    return series
+    return pnl_series_from_histories(histories, since, end)
 
 
 def _build_perf_from_rows(
@@ -365,6 +386,7 @@ async def fetch_agent_performance_batch(
     bot_names: dict[str, list[str]] | None = None,
     failed_ids: set[str] | None = None,
     windows: Mapping[str, Mapping[str, OwnershipWindow]] | None = None,
+    pnl_series: bool = False,
 ) -> dict[str, AgentPerformance]:
     """Batched multi-agent fetch via a single cursor-paginated executor search.
 
@@ -386,6 +408,14 @@ async def fetch_agent_performance_batch(
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised — their entries may be partial/empty. This lets callers avoid
     caching a failed fetch as a genuinely empty result.
+
+    ``pnl_series`` asks for each controller-mode agent's realized curve too, built
+    from the histories its windows were sliced from, so a caller wanting both the
+    figures and the curve pays one history walk. It is set only when those
+    histories are exactly what :func:`fetch_agent_pnl_series` would fetch — every
+    owned base has a known takeover (same bases, same earliest instant) and a
+    window is still open (same span, hence the same sampling interval) — and left
+    ``None`` otherwise, for the caller to fall back to the standalone fetch.
     """
     out: dict[str, AgentPerformance] = {
         aid: AgentPerformance(agent_id=aid) for aid in agent_ids
@@ -464,10 +494,18 @@ async def fetch_agent_performance_batch(
                 for base, w in ((windows or {}).get(aid) or {}).items()
                 if base in bases
             }
-            sliced = await _slice_owned_windows(
+            sliced, histories = await _slice_owned_windows(
                 client, aid, all_bot_perf, archived, owned, now
             )
             out[aid].base_windows.update(sliced)
+            if (
+                pnl_series
+                and histories is not None
+                and all(b in owned and owned[b].since > 0 for b in bases)
+                and any(w.is_open for w in owned.values())
+            ):
+                since = min(w.since for w in owned.values())
+                out[aid].pnl_series = pnl_series_from_histories(histories, since, now)
             for base in bases:
                 bot = live.get(base)
                 window = owned.get(base)
@@ -520,20 +558,27 @@ async def _slice_owned_windows(
     archived: list[str],
     owned: Mapping[str, OwnershipWindow],
     now: float,
-) -> dict[str, tuple[float, float, float, float]]:
-    """``{base: sliced (realized, volume, trades, fees)}`` over each base's window.
+) -> tuple[
+    dict[str, tuple[float, float, float, float]],
+    dict[str, list[list[tuple[float, float, float, float, float]]]] | None,
+]:
+    """``({base: sliced (realized, volume, trades, fees)}, histories)`` per window.
 
     One history fetch reaching back to the earliest known takeover, then one
     slice per base over its own :meth:`OwnershipWindow.bounds` — the rule
     :func:`condor.agents.attribution.apply_bot_mode_pnl` tiles with. A base with
     no known ``since`` is left out (lifetime aggregate), and so is an empty window
     (closed at or before it opened), which the rollup skips too.
+
+    ``histories`` is the ``{base: [instance history, …]}`` the slices were cut
+    from, or ``None`` when nothing was fetched (no known ``since``, no instance
+    universe, or the fetch raised).
     """
     from condor.fetchers.bot_performance import fetch_base_histories, slice_history
 
     cut = {b: w for b, w in owned.items() if w.since > 0}
     if not cut or not (all_bot_perf or archived):
-        return {}
+        return {}, None
     earliest = min(w.since for w in cut.values())
     try:
         histories = await fetch_base_histories(
@@ -544,10 +589,10 @@ async def _slice_owned_windows(
         # reporting zero would be worse: the agent would read a live position as
         # costless.
         log.warning("history slice for %s failed: %s", aid, e)
-        return {}
+        return {}, None
     out: dict[str, tuple[float, float, float, float]] = {}
     for base, window in cut.items():
         start, stop = window.bounds(now)
         if stop > start:
             out[base] = slice_history(histories.get(base, []), start, stop)
-    return out
+    return out, histories

@@ -775,7 +775,7 @@ def _capture_provider_fetch(monkeypatch) -> dict:
 
     captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_names=None, windows=None):
+    async def _fake_fetch(client, agent_id, bot_names=None, windows=None, **_kw):
         captured["agent_id"] = agent_id
         captured["bot_names"] = bot_names
         captured["windows"] = windows
@@ -1483,6 +1483,63 @@ def test_pnl_series_is_continuous_across_a_redeploy():
     assert pnls == [0.0, -0.3053, -0.3053, -0.7688]
     # And it ends where the KPI does.
     assert pnls[-1] == pytest.approx(-0.3053 + -0.4635, abs=1e-4)
+
+
+def test_pnl_series_from_histories_matches_the_network_fetch():
+    """PERF-639: the pure merge over fetched histories IS the standalone curve."""
+    from condor.agents.performance import (
+        fetch_agent_pnl_series,
+        pnl_series_from_histories,
+    )
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        fetch_archived_instances,
+        fetch_base_histories,
+    )
+
+    clear_archived_cache()
+    since, end = 1786052340.0, 1786200000.0
+    history = {
+        "loop-20260806-213931": [
+            _hist_row("2026-08-06T22:00:00+00:00", "btc", 0.0, 193.0),
+            _hist_row("2026-08-06T22:45:00+00:00", "btc", -0.3053, 386.19),
+        ],
+        "loop-20260807-022130": [
+            _hist_row("2026-08-07T02:22:00+00:00", "btc", 0.0, 193.05),
+            _hist_row("2026-08-07T03:27:00+00:00", "btc", -0.4635, 385.84),
+        ],
+    }
+
+    class _Archived:
+        async def list_databases(self):
+            return [f"{n}.sqlite" for n in history]
+
+    class _Orch:
+        async def get_latest_controller_performance(self, bot_name=None):
+            return {"data": []}
+
+        async def get_controller_performance_history(self, bot_name, **kw):
+            return {"data": history.get(bot_name, [])}
+
+    client = SimpleNamespace(
+        base_url="", bot_orchestration=_Orch(), archived_bots=_Archived()
+    )
+
+    async def _both():
+        archived = await fetch_archived_instances(client)
+        histories = await fetch_base_histories(
+            client, {}, ["loop"], since, end, extra_names=archived
+        )
+        return (
+            pnl_series_from_histories(histories, since, end),
+            await fetch_agent_pnl_series(client, ["loop"], since, until=end),
+        )
+
+    derived, fetched = asyncio.run(_both())
+
+    assert [round(p["pnl"], 4) for p in derived] == [0.0, -0.3053, -0.3053, -0.7688]
+    assert derived == fetched
+    assert pnl_series_from_histories({}, since, end) == []
 
 
 def test_pnl_series_is_empty_without_an_owned_bot():

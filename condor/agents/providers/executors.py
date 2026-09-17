@@ -56,6 +56,9 @@ class ExecutorsProvider(BaseProvider):
                 agent_id,
                 bot_names=bases,
                 windows=ownership_windows(owned or []),
+                # The session report's curve, cut from the histories these
+                # figures were sliced from, so the tick walks them once.
+                pnl_series=True,
             )
         except Exception as e:
             # The summary is embedded in the tick prompt and snapshot, and the
@@ -163,6 +166,9 @@ class ExecutorsProvider(BaseProvider):
                 "controllers": perf.controllers,
                 "close_type_counts": perf.close_type_counts,
                 "fees_known": perf.fees_known,
+                # None when it could not be derived here; the engine then fetches
+                # it itself (TickEngine._pnl_series).
+                "pnl_series": perf.pnl_series,
             },
             summary="\n".join(lines),
         )

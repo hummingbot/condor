@@ -261,6 +261,9 @@ class AgentPerformanceModel(BaseModel):
     # Each owned base's (realized, volume, trades, fees) over this session's own
     # ownership window — what the deployment ledger's bot rows read (CORR-661).
     base_windows: dict[str, tuple[float, float, float, float]] = {}
+    # Only the tick's executors provider asks for the curve (PERF-639); the routes
+    # serve it from fetch_agent_pnl_series, so this stays null on the wire.
+    pnl_series: list[dict] | None = None
 
     @classmethod
     def from_perf(cls, perf: AgentPerformance, **overrides) -> AgentPerformanceModel:

@@ -1135,9 +1135,17 @@ class TickEngine:
         Only meaningful once the session owns a bot: an executor-only session has
         no bot history to derive from and the report falls back to the journal's
         snapshots. Best-effort — a charting input must never cost a tick.
+
+        The executors provider already derives the curve from the histories it
+        sliced at tick start, beside the KPIs the report shows; only a tick whose
+        provider data carries none (a failed fetch, or inputs it could not match)
+        walks the histories again here.
         """
         if not self.ledger or not self.ledger.bases():
             return []
+        carried = self._last_skill_data.get("pnl_series")
+        if carried is not None:
+            return carried
         try:
             from .attribution import ownership_windows, window_span
             from .performance import fetch_agent_pnl_series
