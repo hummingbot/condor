@@ -12,11 +12,13 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
+import condor.code_runs as code_runs_module
 import config_manager
 from condor.agents import delegate as delegate_module
 from condor.agents import delegation_history as history_module
 from condor.agents.delegate import DelegateTask
 from condor.web.models import WebUser
+from condor.web.routes import code as code_routes
 from condor.web.routes.agents import (
     get_delegation_events,
     get_delegation_status,
@@ -34,11 +36,43 @@ class _FakeConfigManager:
     def is_admin(self, user_id: int) -> bool:
         return user_id == ADMIN.id
 
+    def get_user_preference(self, user_id: int, key: str, default=None):
+        # Nobody here holds the `code_run` grant, so `_may_run_code` answers
+        # True for the admin alone — the only caller that reaches the code-run
+        # source these tests stub out below.
+        return default
+
+
+class _EmptyCodeRunStore:
+    """No snippet was ever run: the third source of the history list is empty."""
+
+    def list(self, **kwargs):
+        return []
+
 
 @pytest.fixture(autouse=True)
 def _registry_and_admin(monkeypatch):
-    """Two delegations owned by different users, plus a known admin id."""
+    """Two delegations owned by different users, plus a known admin id.
+
+    ``list_delegation_history`` reaches outside this module for two singletons,
+    and both are pinned here rather than left to whatever the process happens to
+    hold (CORR-701). ``condor.web.routes.code`` binds ``get_config_manager`` by
+    name at import time, so patching ``config_manager`` alone decided nothing:
+    which object that module ended up with depended on whether some earlier test
+    file had already imported it — run alone it captured this fake and blew up on
+    the missing ``get_user_preference``, run after ``test_code_run_*`` it kept the
+    real one and these tests read the real ``config.yml``. Importing the module at
+    the top of this file and setting the name on it makes the answer the same
+    either way. ``get_code_run_store`` is patched on ``condor.code_runs``, not on
+    the route module, because the lazy import inside ``list_delegation_history``
+    reads it off there at call time — and an unpatched one builds the real
+    on-disk store and caches it in a module global for the rest of the session.
+    """
     monkeypatch.setattr(config_manager, "get_config_manager", _FakeConfigManager)
+    monkeypatch.setattr(code_routes, "get_config_manager", _FakeConfigManager)
+    monkeypatch.setattr(
+        code_runs_module, "get_code_run_store", lambda: _EmptyCodeRunStore()
+    )
     delegate_module._delegations.clear()
     delegate_module._delegations["t-owner"] = DelegateTask(
         task_id="t-owner",
@@ -319,3 +353,25 @@ def test_stopping_a_finished_task_answers_honestly(monkeypatch):
     assert asyncio.run(stop_delegation_route("h-owner", user=OWNER)) == {
         "stopped": False
     }
+
+
+# ── The isolation the history tests depend on (CORR-701) ──
+
+
+def test_the_history_list_reads_no_real_singleton(monkeypatch):
+    """Every door `list_delegation_history` opens outward is pinned to a fake.
+
+    This file's four history tests pass or fail on which object those two names
+    hold, and nothing in their own assertions says so — run alone they crashed
+    on the fake's missing `get_user_preference`, run after a test file that had
+    already imported `condor.web.routes.code` they quietly questioned the real
+    `config.yml` and built the real on-disk code-run store. Asserting it here
+    means removing either patch fails on the sentence that describes it rather
+    than somewhere else, in one import order only.
+    """
+    assert code_routes.get_config_manager is _FakeConfigManager
+    assert isinstance(code_runs_module.get_code_run_store(), _EmptyCodeRunStore)
+    # The admin is the one caller that gets past `_may_run_code` and therefore
+    # the one that would reach a real store; nobody else holds the grant.
+    assert code_routes._may_run_code(ADMIN.id) is True
+    assert code_routes._may_run_code(OWNER.id) is False
