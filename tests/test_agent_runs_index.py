@@ -11,6 +11,7 @@ doing nothing, or the spine will colour twenty ticks as "did nothing".
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -490,3 +491,75 @@ def test_the_runs_route_is_not_shadowed_by_the_slug_catch_all():
             assert route.endpoint.__name__ == "list_agent_runs"
             return
     raise AssertionError("no route matched /agents/brigado/runs")
+
+
+# ── CORR-659: a session's start is its config.yml, not its journal's ctime ──
+
+
+def _write_configured_session(strategy_dir: Path, num: int, started: float) -> Path:
+    """A session as the engine creates one: config.yml written once, at start."""
+    d = _write_session(strategy_dir, num, ticks=1)
+    cfg = d / "config.yml"
+    cfg.write_text("bot_name: brl_mm\n")
+    os.utime(cfg, (started, started))
+    return d
+
+
+def _tick(session_dir: Path) -> None:
+    """Rewrite the journal the way record_tick does (temp file + os.replace)."""
+    from condor.fsutil import atomic_write_text
+
+    time.sleep(0.02)
+    atomic_write_text(session_dir / "journal.md", _journal(2))
+
+
+def test_started_at_survives_a_journal_rewrite(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _tick(d)
+
+    assert list_runs(strategy_dir, "brigado.brl_mm")[0]["started_at"] == 1_700_000_000.0
+
+
+def test_runs_keep_their_order_after_a_tick(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    older = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _write_configured_session(strategy_dir, 2, started=1_700_000_100.0)
+    _tick(older)
+
+    rows = list_runs(strategy_dir, "brigado.brl_mm")
+    assert [r["number"] for r in rows] == [2, 1]
+    assert [r["started_at"] for r in rows] == [1_700_000_100.0, 1_700_000_000.0]
+
+
+def test_list_sessions_created_at_is_the_config_start(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _tick(d)
+
+    assert sessions_index.list_sessions(strategy_dir)[0]["created_at"] == str(
+        1_700_000_000.0
+    )
+
+
+def test_a_session_without_config_falls_back_to_its_journal(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_session(strategy_dir, 1, ticks=1)
+
+    started = list_runs(strategy_dir, "brigado.brl_mm")[0]["started_at"]
+    assert started == os.path.getctime(d / "journal.md") > 0
+
+
+def test_attribution_session_start_uses_the_same_definition(tmp_path):
+    from condor.agents.attribution import session_start_epoch
+
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _tick(d)
+
+    assert (
+        session_start_epoch(strategy_dir, 1)
+        == sessions_index.session_started_at(d)
+        == 1_700_000_000.0
+    )
+    assert session_start_epoch(strategy_dir, 99) == 0.0

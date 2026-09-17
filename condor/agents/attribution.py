@@ -33,7 +33,6 @@ apart.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
@@ -41,7 +40,7 @@ from typing import Any, Mapping, NamedTuple
 from pydantic import BaseModel
 
 from condor.agents.ownership import OwnedBot, read_owned
-from condor.agents.sessions_index import find_session_dir
+from condor.agents.sessions_index import find_session_dir, session_started_at
 
 log = logging.getLogger(__name__)
 
@@ -124,16 +123,12 @@ def session_bot_base(strategy_dir: Path, default_config: dict | None, num: int) 
 
 
 def session_start_epoch(strategy_dir: Path, num: int) -> float:
-    """Session start time: config.yml is written once at start, so its mtime is stable."""
+    """Session start time per :func:`~condor.agents.sessions_index.session_started_at`, or 0.0."""
     sd = find_session_dir(strategy_dir, num)
     if not sd:
         return 0.0
-    cfg = sd / "config.yml"
-    target = cfg if cfg.exists() else sd
-    try:
-        return os.path.getmtime(target)
-    except OSError:
-        return 0.0
+    start = session_started_at(sd)
+    return 0.0 if start is None else start
 
 
 def session_ownership(

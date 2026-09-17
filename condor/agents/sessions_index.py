@@ -89,12 +89,13 @@ def count_experiments(strategy_dir: Path) -> int:
 def list_sessions(strategy_dir: Path) -> list[dict[str, Any]]:
     """List sessions as dicts (number, snapshot_count, created_at), newest first.
 
-    Newest is the highest session number. ``created_at`` is ``journal.md``'s
-    ctime as a string, or ``""`` when the session has no journal yet.
+    Newest is the highest session number. ``created_at`` is
+    :func:`session_started_at` as a string, or ``""`` when neither the session's
+    ``config.yml`` nor its journal exists yet.
     """
     rows: list[dict[str, Any]] = []
     for num, session_dir in reversed(iter_session_dirs(strategy_dir)):
-        created = _created_at(session_dir / "journal.md")
+        created = session_started_at(session_dir)
         rows.append(
             {
                 "number": num,
@@ -275,17 +276,35 @@ def _journal_tick_count(journal_path: Path) -> int:
 
 
 def _created_at(path: Path) -> float | None:
-    """Creation time as a float, or ``None`` when the file is not there.
+    """The file's ctime as a float, or ``None`` when the file is not there.
 
-    ``list_sessions`` reports ``journal.md``'s ctime through this, and runs sort
-    on the same fact rather than on a second definition of when a run began. It is
-    the file's creation and not the first tick's timestamp — close enough to
-    order a rail and to say "2h ago", never close enough to call a trade's start.
+    ctime is the inode *change* time, not the creation time: any rewrite through
+    ``atomic_write_text`` (temp file + ``os.replace``) moves it. It only stands
+    for "when this was written" on a file written once, such as an experiment
+    snapshot. Sessions rewrite their journal every tick, so their start comes
+    from :func:`session_started_at` instead.
     """
     try:
         return os.path.getctime(path)
     except OSError:
         return None
+
+
+def session_started_at(session_dir: Path) -> float | None:
+    """When a session started, or ``None`` when nothing on disk says.
+
+    The session's ``config.yml`` is written exactly once, by the engine as it
+    creates the session dir, so its mtime is the start and stays put. The journal
+    is no anchor: ``record_tick`` rewrites it through ``os.replace`` on every
+    tick, so its ctime is the last tick. A session with no ``config.yml`` (written
+    before the engine saved one per session) falls back to that journal ctime,
+    the best there is for it. Runs, ``list_sessions`` and the PnL attribution's
+    session start all read this one definition.
+    """
+    try:
+        return os.path.getmtime(session_dir / "config.yml")
+    except OSError:
+        return _created_at(session_dir / "journal.md")
 
 
 def _snapshot_count(session_dir: Path) -> int:
@@ -330,7 +349,7 @@ def _session_run(session_dir: Path, num: int, run_key: str) -> dict[str, Any]:
         "execution_mode": "",
         "tick_count": _journal_tick_count(session_dir / "journal.md"),
         "snapshot_count": _snapshot_count(session_dir),
-        "started_at": _created_at(session_dir / "journal.md"),
+        "started_at": session_started_at(session_dir),
         # A run still going has no end. Otherwise the last heartbeat is the
         # closest recorded thing to one.
         "ended_at": (
