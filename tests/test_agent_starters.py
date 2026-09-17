@@ -168,6 +168,34 @@ def test_the_file_is_capped_and_keeps_the_best():
     assert ranked[0].label == "Keeper"
 
 
+def test_a_stale_habit_ranks_below_a_fresh_one():
+    """A row that stopped recurring is ranked on its decayed score, not its old count."""
+    stale = NOW - timedelta(days=180)
+    for _ in range(3):
+        starters.merge(USER, AGENT, [_intent("Audit my old grid")], stale)
+    starters.merge(USER, AGENT, [_intent("Rebalance my range")], NOW)
+
+    assert _labels(starters.read(USER, AGENT, now=NOW)) == [
+        "Rebalance my range",
+        "Audit my old grid",
+    ]
+    assert _labels(starters.top(USER, AGENT, limit=1, now=NOW)) == [
+        "Rebalance my range"
+    ]
+
+
+def test_the_cap_evicts_the_stale_row_not_the_fresh_one():
+    year_ago = NOW - timedelta(days=365)
+    for i in range(starters.MAX_ENTRIES + 1):
+        starters.merge(USER, AGENT, [_intent(f"Old {i}")], year_ago)
+        starters.merge(USER, AGENT, [_intent(f"Old {i}")], year_ago)
+    starters.merge(USER, AGENT, [_intent("Fresh one")], NOW)
+
+    ranked = starters.read(USER, AGENT, now=NOW)
+    assert len(ranked) == starters.MAX_ENTRIES
+    assert ranked[0].label == "Fresh one"
+
+
 # ── Damage ──
 
 
@@ -260,6 +288,22 @@ def test_the_endpoint_serves_the_learned_rows_best_first(tmp_path, monkeypatch):
     assert rows[0]["prompt"] == "Rebalance my range"
     assert rows[0]["hint"] == "Re-centre it"
     assert rows[1]["icon"] == "chart"
+
+
+def test_the_endpoint_serves_the_decayed_order(tmp_path, monkeypatch):
+    slug = _agent(tmp_path, monkeypatch)
+    real_now = datetime.now(timezone.utc)
+    stale = real_now - timedelta(days=180)
+    for _ in range(3):
+        starters.merge(USER, slug, [_intent("Audit my old grid")], stale)
+    starters.merge(USER, slug, [_intent("Rebalance my range")], real_now)
+
+    rows = _client().get(f"/agents/{slug}/starters").json()["starters"]
+
+    assert [row["title"] for row in rows] == [
+        "Rebalance my range",
+        "Audit my old grid",
+    ]
 
 
 def test_the_endpoint_serves_at_most_three(tmp_path, monkeypatch):
