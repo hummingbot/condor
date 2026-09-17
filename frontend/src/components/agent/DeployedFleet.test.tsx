@@ -27,6 +27,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "@/lib/api";
+import { formatCurrencyPnl } from "@/lib/formatters";
 import type { FleetOwner } from "@/lib/agent-attribution";
 import type { ControllerInfo } from "@/lib/api";
 import { DeployedFleet } from "./DeployedFleet";
@@ -79,7 +80,9 @@ vi.mock("@/hooks/useFleetData", () => ({
     // off it and render NaN, which `tsc --noEmit` over the test never sees.
     convert: (value: number) => ({ value, converted: true }),
     currencySymbol: "$",
-    rateFormatPnl: money,
+    // The real one: `formatCurrencyPnl` carries its own sign ("+$12.34",
+    // "-$12.34"), and a stub without it hid a row that added a second "+".
+    rateFormatPnl: (value: number) => formatCurrencyPnl(value),
     rateFormatValue: money,
     rateFormatDetailed: money,
     error: null,
@@ -219,6 +222,36 @@ describe("the rows it shows", () => {
     expect(host.textContent).toContain("+$64.50");
     expect(host.textContent).toContain("$1,500.00");
     expect(host.textContent).not.toContain("9,999");
+  });
+
+  it("signs a winning controller once, in its row and in the header", async () => {
+    FLEET = {
+      controllers: [controller({ controller_id: "up", global_pnl_quote: 12.34 })],
+      owners: [owner()],
+      isLoading: false,
+    };
+    await render(panel());
+
+    const row = host.querySelector('[title="Running"]')?.parentElement;
+    expect(row?.textContent).toContain("+$12.34");
+    expect(host.textContent).not.toContain("++");
+  });
+
+  it("puts a loss's minus before the symbol, in its row and in the header", async () => {
+    FLEET = {
+      controllers: [controller({ controller_id: "down", global_pnl_quote: -12.34 })],
+      owners: [owner()],
+      isLoading: false,
+    };
+    await render(panel());
+
+    const row = host.querySelector('[title="Running"]')?.parentElement;
+    expect(row?.textContent).toContain("-$12.34");
+    const stat = [...host.querySelectorAll("span")].find(
+      (el) => el.firstElementChild?.textContent === "PnL",
+    );
+    expect(stat?.lastElementChild?.textContent).toBe("-$12.34");
+    expect(host.textContent).not.toContain("$-");
   });
 
   it("reads the kill switch rather than the status field", async () => {

@@ -13,6 +13,7 @@ import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useFleetData } from "@/hooks/useFleetData";
 import { attributionOf } from "@/lib/agent-attribution";
 import { api, type ControllerInfo } from "@/lib/api";
+import { formatCurrency, formatCurrencyPnl } from "@/lib/formatters";
 
 /**
  * What this strategy put into the world, on the strategy's own page.
@@ -206,12 +207,12 @@ export function DeployedFleet({
         <div className="mb-3 flex flex-wrap items-baseline gap-x-5 gap-y-1 border-b border-[var(--color-border)]/50 pb-3">
           <Stat
             label="PnL"
-            value={`${totals.pnl >= 0 ? "+" : ""}${fleet.currencySymbol}${fmt(totals.pnl)}`}
+            value={formatCurrencyPnl(totals.pnl, fleet.currencySymbol)}
             tone={totals.pnl >= 0 ? "text-emerald-500" : "text-[var(--color-red)]"}
           />
           <Stat
             label="Volume"
-            value={`${fleet.currencySymbol}${fmt(totals.volume)}`}
+            value={formatCurrency(totals.volume, fleet.currencySymbol)}
           />
           <Stat
             label="Controllers"
@@ -320,14 +321,6 @@ function quoteOf(ctrl: ControllerInfo): string {
   return ctrl.trading_pair?.split("-")[1] || "USDT";
 }
 
-/** Two significant decimals, grouped — the same shape every money read here has. */
-function fmt(value: number): string {
-  return value.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
 function Stat({
   label,
   value,
@@ -397,7 +390,6 @@ function ControllerRow({
           raw >= 0 ? "text-emerald-500" : "text-[var(--color-red)]"
         }`}
       >
-        {raw >= 0 ? "+" : ""}
         {formatPnl(raw, quote)}
       </span>
       <span className="w-24 shrink-0 truncate text-right font-mono text-[10px] tabular-nums text-[var(--color-text-muted)]">
