@@ -776,12 +776,22 @@ class JournalManager:
         return "\n".join(lines[-count:])
 
     def _cleanup_old_snapshots(self) -> None:
-        """Remove oldest snapshots if over MAX_SNAPSHOTS."""
+        """Remove the lowest-tick snapshots if over MAX_SNAPSHOTS.
+
+        Ordered by the parsed tick, not the filename: ``snapshot_{tick}.md`` is
+        unpadded, so a lexicographic sort puts ``snapshot_100`` before
+        ``snapshot_2`` and would unlink the newest ticks. Names that are not
+        ``snapshot_<int>.md`` are neither counted nor removed.
+        """
         if not self._snapshots_dir.exists():
             return
-        files = sorted(self._snapshots_dir.glob("snapshot_*.md"))
-        if len(files) > MAX_SNAPSHOTS:
-            for f in files[: len(files) - MAX_SNAPSHOTS]:
+        ticked = sorted(
+            (int(m.group(1)), f)
+            for f in self._snapshots_dir.glob("snapshot_*.md")
+            if (m := re.match(r"snapshot_(\d+)\.md", f.name))
+        )
+        if len(ticked) > MAX_SNAPSHOTS:
+            for _, f in ticked[: len(ticked) - MAX_SNAPSHOTS]:
                 f.unlink()
 
     # ------------------------------------------------------------------
