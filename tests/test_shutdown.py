@@ -411,6 +411,134 @@ def test_run_shutdown_idempotent(monkeypatch):
     assert stub._shutting_down is True
 
 
+# ── stop() racing an emergency winddown (CORR-644) ──
+
+
+class _RecordingSupervisor:
+    def __init__(self):
+        self.finals = []
+
+    def unregister(self, agent_id, final_state):
+        self.finals.append(final_state)
+
+
+def _winddown_stub(monkeypatch):
+    """A stub engine whose run_shutdown blocks on a gate, plus its supervisor."""
+    import condor.agents.engine as engine_module
+    from condor.runtime.registry_file import LoopState
+
+    gate = asyncio.Event()
+    events = []
+
+    async def fake_run_shutdown(engine, reason):
+        events.append(("start", reason))
+        await gate.wait()
+        events.append(("done", reason))
+
+    monkeypatch.setattr(shutdown_module, "run_shutdown", fake_run_shutdown)
+    supervisor = _RecordingSupervisor()
+    monkeypatch.setattr(engine_module, "_supervisor", lambda: supervisor)
+
+    async def _notify(msg):
+        events.append(("notify", msg))
+
+    stub = SimpleNamespace(
+        _shutting_down=False,
+        _shutdown_finished=None,
+        _running=True,
+        _paused=False,
+        _task=None,
+        _active_client=None,
+        journal=None,
+        ledger=None,
+        config={},
+        _last_stop_reason="",
+        agent_id="acme.scalper_1",
+        _notify=_notify,
+    )
+    stub._reap_client = partial(TickEngine._reap_client, stub)
+    stub._finish = partial(TickEngine._finish, stub)
+    return stub, gate, events, supervisor, LoopState
+
+
+def test_stop_during_a_winddown_lets_it_finish(monkeypatch):
+    """A risk-engine winddown runs inside the tick task; stop() must not cancel it."""
+    stub, gate, events, supervisor, LoopState = _winddown_stub(monkeypatch)
+
+    async def _drive():
+        stub._task = asyncio.create_task(TickEngine._run_shutdown(stub, "risk"))
+        await asyncio.sleep(0)
+        assert events == [("start", "risk")]
+
+        stop_task = asyncio.create_task(TickEngine.stop(stub))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not stop_task.done()  # waiting on the winddown, not tearing down
+
+        gate.set()
+        result = await stop_task
+        # stop() returned only after the winddown completed.
+        assert ("done", "risk") in events
+        await stub._task
+        return result
+
+    result = asyncio.run(_drive())
+    assert result is False
+    assert [e for e in events if e[0] != "notify"] == [
+        ("start", "risk"),
+        ("done", "risk"),
+    ]
+    assert not any(e[0] == "notify" for e in events)
+    assert stub._task.cancelled() is False
+    assert supervisor.finals == [LoopState.STOPPED]
+    assert stub._last_stop_reason == "shutdown"
+
+
+def test_stop_after_a_manual_winddown_waits_for_it(monkeypatch):
+    """Manual /shutdown cancels _task first; a concurrent stop() still waits."""
+    stub, gate, events, supervisor, LoopState = _winddown_stub(monkeypatch)
+
+    async def _drive():
+        stub._task = asyncio.create_task(asyncio.sleep(3600))
+        await asyncio.sleep(0)
+        manual = asyncio.create_task(TickEngine._run_shutdown(stub, "manual"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert stub._task.cancelled() is True
+        assert events == [("start", "manual")]
+
+        stop_task = asyncio.create_task(TickEngine.stop(stub))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not stop_task.done()
+        assert supervisor.finals == []
+
+        gate.set()
+        result = await stop_task  # must not raise CancelledError
+        assert ("done", "manual") in events
+        await manual
+        return result
+
+    assert asyncio.run(_drive()) is False
+    assert supervisor.finals == [LoopState.STOPPED]
+
+
+def test_plain_stop_still_cancels_the_tick_task(monkeypatch):
+    """Regression guard: no winddown in flight, stop() cancels and stops once."""
+    stub, _gate, events, supervisor, LoopState = _winddown_stub(monkeypatch)
+
+    async def _drive():
+        stub._task = asyncio.create_task(asyncio.sleep(3600))
+        await asyncio.sleep(0)
+        return await TickEngine.stop(stub)
+
+    assert asyncio.run(_drive()) is True
+    assert stub._task.cancelled() is True
+    assert supervisor.finals == [LoopState.STOPPED]
+    assert stub._last_stop_reason == "user"
+    assert events == []
+
+
 # ── soft-vs-hard drawdown triggers ──
 
 

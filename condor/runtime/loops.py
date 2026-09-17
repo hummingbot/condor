@@ -173,14 +173,21 @@ class LoopSupervisor:
         resume and ``restart_on_boot`` fired only after a crash, which is the
         opposite of what the flag reads like. Overwrite that with SUSPENDED:
         the process ended this run, and the next one settles it.
+
+        An engine already in an emergency winddown (risk kill-switch or manual
+        /shutdown) is not cancelled: its ``stop()`` waits for the winddown to
+        finish, bounded by the LLM cleanup timeout (``resolve_tick_timeout``,
+        default 10 min), and returns False. That run was ended by the winddown,
+        which recorded STOPPED itself, so it is not overwritten with SUSPENDED.
         """
         for engine in list(self._engines.values()):
             try:
-                await engine.stop()
+                stopped = await engine.stop()
             except Exception:
                 log.exception("Error stopping engine %s", engine.agent_id)
             else:
-                self.record(engine, LoopState.SUSPENDED)
+                if stopped:
+                    self.record(engine, LoopState.SUSPENDED)
 
     # ── Boot reconciliation ──
 

@@ -506,6 +506,7 @@ def test_stop_all_stops_every_engine(tmp_path):
         async def _stop(agent_id=engine.agent_id):
             stopped.append(agent_id)
             supervisor.unregister(agent_id, LoopState.STOPPED)
+            return True
 
         engine.stop = _stop
         supervisor.register(engine)
@@ -518,6 +519,42 @@ def test_stop_all_stops_every_engine(tmp_path):
         # SUSPENDED, not STOPPED: the process ended these, not their owner, and
         # only that distinction lets the next boot honour ``restart_on_boot``.
         assert read_status(d)["state"] == LoopState.SUSPENDED
+
+
+def test_stop_all_keeps_the_stopped_a_winddown_wrote(tmp_path):
+    """CORR-644: an engine mid-winddown is not overwritten with SUSPENDED.
+
+    Its stop() defers to the winddown (returns False) and the winddown's own
+    teardown already recorded STOPPED; only the engine stop() actually stopped
+    is SUSPENDED.
+    """
+    supervisor = LoopSupervisor()
+    plain_dir, winding_dir = tmp_path / "plain", tmp_path / "winding"
+    plain_dir.mkdir()
+    winding_dir.mkdir()
+    plain = _fake_engine(plain_dir, num=1)
+    winding = _fake_engine(winding_dir, num=2)
+    winding._shutting_down = True
+
+    async def _plain_stop():
+        supervisor.unregister(plain.agent_id, LoopState.STOPPED)
+        return True
+
+    async def _winding_stop():
+        # The winddown's finally ends the run while stop() waits for it.
+        supervisor.unregister(winding.agent_id, LoopState.STOPPED)
+        return False
+
+    plain.stop = _plain_stop
+    winding.stop = _winding_stop
+    supervisor.register(plain)
+    supervisor.register(winding)
+
+    asyncio.run(supervisor.stop_all())
+
+    assert supervisor.all() == {}
+    assert read_status(plain_dir)["state"] == LoopState.SUSPENDED
+    assert read_status(winding_dir)["state"] == LoopState.STOPPED
 
 
 def test_for_strategy_filters_by_pair(tmp_path):

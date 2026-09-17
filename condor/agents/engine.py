@@ -131,6 +131,11 @@ class TickEngine:
     _running: bool = field(default=False, init=False)
     _paused: bool = field(default=False, init=False)
     _shutting_down: bool = field(default=False, init=False)
+    # Set when an emergency winddown's own teardown has run, so a stop() that
+    # arrives mid-winddown waits for it instead of cancelling it.
+    _shutdown_finished: asyncio.Event | None = field(
+        default=None, init=False, repr=False
+    )
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     # The block the owner was last told about, so a block lasting many ticks is
@@ -277,8 +282,21 @@ class TickEngine:
             self.config.get("frequency_sec", 60),
         )
 
-    async def stop(self) -> None:
-        """Stop gracefully (positions are kept)."""
+    async def stop(self) -> bool:
+        """Stop gracefully (positions are kept).
+
+        Returns True when this call performed the stop. When an emergency
+        winddown is already in flight (risk kill-switch inside the tick task, or
+        a manual /shutdown from a request task) it is neither cancelled nor torn
+        down here: stop() waits until the winddown's own teardown has recorded
+        STOPPED and returns False. Cancelling the tick task at that point would
+        abort run_shutdown mid-flight and leave positions stranded.
+        """
+        if self._shutting_down:
+            finished = getattr(self, "_shutdown_finished", None)
+            if finished is not None:
+                await finished.wait()
+            return False
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -287,6 +305,7 @@ class TickEngine:
             except asyncio.CancelledError:
                 pass
         await self._finish(LoopState.STOPPED, "user")
+        return True
 
     async def _reap_client(self, *, during: str = "") -> None:
         """Stop the live per-tick ACP client, if any.
@@ -363,6 +382,7 @@ class TickEngine:
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._shutdown_finished = asyncio.Event()
         # Halt the loop so no next/concurrent tick fights the winddown.
         self._running = False
         self._paused = True
@@ -395,7 +415,11 @@ class TickEngine:
             # run_shutdown() may have wound the bot down or failed; either way
             # the run ends here.
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
-            await self._finish(LoopState.STOPPED, "shutdown")
+            try:
+                await self._finish(LoopState.STOPPED, "shutdown")
+            finally:
+                # Release any stop() that arrived mid-winddown and is waiting.
+                self._shutdown_finished.set()
 
     def pause(self) -> None:
         self._paused = True
