@@ -1,8 +1,30 @@
 """Risk engine -- pre-tick validation and guardrails.
 
-Enforces position limits, daily loss caps, drawdown limits, executor counts,
-and LLM cost caps.  Also provides a permission callback that auto-approves
-safe tool calls and blocks dangerous ones that violate risk limits.
+``RiskLimits`` carries six limits (the last four are disabled at -1):
+
+- ``max_position_size_quote`` -- the quote a create, bot deploy/update or
+  signing DEX call may put at stake;
+- ``max_open_executors`` -- how many executors may be open before a create;
+- ``max_drawdown_pct`` -- soft drawdown: breaching it pauses the tick;
+- ``shutdown_drawdown_pct`` -- hard drawdown: breaching it winds the session
+  down (see :mod:`condor.agents.shutdown`);
+- ``max_drift_quote`` -- book drift against the venue beyond which the book is
+  untrusted and new exposure is refused;
+- ``max_leverage`` -- the most leverage a create may ask for or an account may
+  be set to.
+
+``RiskEngine.get_state`` applies the two drawdown limits before a tick (the
+engine pauses or shuts down on its verdict), and the engine's venue check marks
+the book untrusted on drift; ``check_executor_action``, ``check_bot_action``,
+``check_dex_action`` and ``check_leverage_action`` apply the rest, and the book
+verdict, to individual tool calls.
+
+``auto_approve_with_risk_check`` builds the permission callback that runs those
+checks, auto-approves safe calls, and adds refusals of its own: an executor
+create must carry this session's ``controller_id``, ``stop_executor`` may only
+stop this session's executors, ``manage_bots`` mutations stay inside the bot
+ledger's namespace, dry-run mode refuses every mutation, shutdown mode lets
+only the brakes through, and ``place_order`` is always refused.
 """
 
 from __future__ import annotations
@@ -238,7 +260,11 @@ def _book_refusal(current_state: "RiskState | None") -> tuple[bool, str] | None:
 
 
 class RiskEngine:
-    """Evaluates risk state and can block snapshots or individual tool calls."""
+    """Evaluates risk state and individual tool calls against ``RiskLimits``.
+
+    Its state can pause a tick (soft drawdown) or escalate to a winddown (hard
+    drawdown); its ``check_*`` methods refuse individual tool calls.
+    """
 
     def __init__(self, limits: RiskLimits | None = None):
         self.limits = limits or RiskLimits()
