@@ -37,6 +37,7 @@ from condor.telemetry import taps as telemetry_taps
 from . import actions as actions_mod
 from .agent import Agent
 from .agent_run import FAILED_STOP_REASONS
+from .config import is_experiment_mode
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
@@ -198,7 +199,7 @@ class TickEngine:
         # while the Agent's brain (memory/skills) stays shared at the parent.
         strategy_dir = self.strategy.home
         mode = self.config.get("execution_mode", "loop")
-        self.is_experiment = mode in ("dry_run", "run_once")
+        self.is_experiment = is_experiment_mode(mode)
 
         # agent_id == controller_id tag: "{agent_slug}.{strategy_slug}_{N}" (and
         # "..._e{N}" for experiments). The dot separates the two slugs cleanly —
@@ -487,7 +488,7 @@ class TickEngine:
                     log.exception("TickEngine %s tick error", self.agent_id)
                     if self.journal:
                         self.journal.append_error(tick_error)
-                    if mode in ("dry_run", "run_once"):
+                    if self.is_experiment:
                         self._record_failed_experiment(tick_error)
                     elif not repeated:
                         await self._notify(
@@ -510,7 +511,7 @@ class TickEngine:
                 _supervisor().record_tick(self)
 
                 # Single-tick modes: stop after first tick
-                if mode in ("dry_run", "run_once"):
+                if self.is_experiment:
                     label = "Dry run" if mode == "dry_run" else "Run-once"
                     if tick_error:
                         # A tick that raised is a failed run, not a completed one.

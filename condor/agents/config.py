@@ -14,6 +14,16 @@ from pydantic import BaseModel, Field
 
 from condor.fsutil import atomic_write_text
 
+# The execution modes that run a single tick as an experiment: no journal, the
+# tick captured as a dry-run snapshot instead. The one definition of that set —
+# AgentConfig.execution_mode below is the Literal naming every mode.
+EXPERIMENT_MODES: frozenset[str] = frozenset({"dry_run", "run_once"})
+
+
+def is_experiment_mode(mode: str) -> bool:
+    """True for an execution mode that runs as an experiment (dry_run/run_once)."""
+    return mode in EXPERIMENT_MODES
+
 
 class RiskLimitsConfig(BaseModel):
     max_position_size_quote: float = Field(

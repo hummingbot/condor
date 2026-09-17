@@ -16,6 +16,7 @@ from condor.memory import paths as _paths
 from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
+from .config import is_experiment_mode
 from .journal import render_risk_lines
 from .strategy import Strategy
 
@@ -449,9 +450,7 @@ def build_tick_prompt(
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
-    # Experiments (dry_run + run_once) keep no journal — the tick is captured as a
-    # dry-run snapshot instead. Mirrors TickEngine.is_experiment in engine.py.
-    is_experiment = execution_mode in ("dry_run", "run_once")
+    is_experiment = is_experiment_mode(execution_mode)
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
