@@ -242,6 +242,66 @@ def test_a_live_task_shadows_its_own_disk_copy(monkeypatch):
     assert rows[0]["task"] == "owner's task"  # the live record, not the disk one
 
 
+def _strangers_live_tasks_newer_than(monkeypatch, *disk_records):
+    """Three live STRANGER tasks that sort above every on-disk record (CORR-688)."""
+    _on_disk(monkeypatch, *disk_records)
+    delegate_module._delegations.clear()
+    for n in range(3):
+        delegate_module._delegations[f"t-live-{n}"] = DelegateTask(
+            task_id=f"t-live-{n}",
+            agent_slug="scout",
+            user_id=STRANGER.id,
+            chat_id=STRANGER.id,
+            server_name=None,
+            task="stranger's live task",
+            started_at=100.0 + n,
+        )
+
+
+def test_history_page_is_not_eaten_by_foreign_live_tasks(monkeypatch):
+    """The visibility filter runs before `limit`, so a page is full (CORR-688).
+
+    Before: the three newer foreign live rows took both slots of ``limit=2`` and
+    were then filtered out, answering zero rows while two of OWNER's were on disk.
+    """
+    _strangers_live_tasks_newer_than(
+        monkeypatch, _record("h-owner-1", OWNER.id), _record("h-owner-2", OWNER.id)
+    )
+
+    rows = asyncio.run(list_delegation_history(kind="delegate", limit=2, user=OWNER))[
+        "delegations"
+    ]
+    assert {r["task_id"] for r in rows} == {"h-owner-1", "h-owner-2"}
+
+
+def test_history_page_for_admin_still_takes_the_newest_rows(monkeypatch):
+    _strangers_live_tasks_newer_than(
+        monkeypatch, _record("h-owner-1", OWNER.id), _record("h-owner-2", OWNER.id)
+    )
+
+    rows = asyncio.run(list_delegation_history(kind="delegate", limit=2, user=ADMIN))[
+        "delegations"
+    ]
+    assert [r["task_id"] for r in rows] == ["t-live-2", "t-live-1"]
+
+
+def test_history_page_skips_unowned_records_before_the_limit(monkeypatch):
+    """The final guard also filters before the cut, not only the registry scope."""
+    orphan = {**_record("h-orphan", 0), "started_at": 50.0}
+    _on_disk(monkeypatch, orphan, _record("h-owner", OWNER.id))
+    delegate_module._delegations.clear()
+    # A scoped stub would never hand OWNER the orphan; force it through so the
+    # guard is what stands between it and the page.
+    monkeypatch.setattr(
+        history_module, "list_history", lambda **kw: [orphan, _record("h-owner", 1)]
+    )
+
+    rows = asyncio.run(list_delegation_history(kind="delegate", limit=1, user=OWNER))[
+        "delegations"
+    ]
+    assert [r["task_id"] for r in rows] == ["h-owner"]
+
+
 def test_detail_and_events_fall_back_to_disk(monkeypatch):
     _on_disk(monkeypatch, _record("h-owner", OWNER.id))
     delegate_module._delegations.clear()

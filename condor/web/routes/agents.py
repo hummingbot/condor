@@ -1576,11 +1576,18 @@ async def list_delegation_history(
 
     # Everything in the registry is a delegation by construction, so any other
     # kind filter simply excludes it rather than needing a field to test.
+    #
+    # The registry is one dict for the whole process, so it is scoped to the
+    # caller here with `list_delegations`' predicate (CORR-688): a stranger's
+    # live task must never reach `records`, where it would take a slot of the
+    # `limit` page and only then be dropped, leaving a short page while more
+    # of the caller's own history sits on disk.
+    see_all = _is_admin(user)
     live = (
         {
             dt.task_id: dt.to_dict()
             for dt in get_all_delegations().values()
-            if agent in (None, dt.agent_slug)
+            if agent in (None, dt.agent_slug) and (see_all or dt.user_id == user.id)
         }
         if kind in ("", KIND_DELEGATE)
         else {}
@@ -1621,12 +1628,14 @@ async def list_delegation_history(
         )
 
     records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
+    # The final guard filters *before* the page is cut, never after (CORR-688):
+    # a row the caller may not see must not count toward `limit`.
+    visible_records = [r for r in records if _can_see_delegation(r, user)]
 
     return {
         "delegations": [
             {k: v for k, v in r.items() if k not in ("result", "error")}
-            for r in records[:limit]
-            if _can_see_delegation(r, user)
+            for r in visible_records[:limit]
         ]
     }
 
