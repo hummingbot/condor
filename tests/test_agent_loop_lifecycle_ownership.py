@@ -9,6 +9,7 @@ approved user (or a prompt-injected chat agent using the MCP ``control_agent``
 tool with its own JWT) could force-liquidate someone else's running loop.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +183,93 @@ def test_the_broadcast_reaches_every_instance_of_the_strategy(monkeypatch, verb)
     assert _post(OWNER, verb).status_code == 200
 
     assert first.calls == [verb]
+    assert second.calls == [verb]
+
+
+# ── PERF-687: /stop and /shutdown wind every instance down at once ──
+
+
+class _GatedEngine(FakeEngine):
+    """Signals entry to stop/_run_shutdown, then holds until ``release`` is set."""
+
+    def __init__(self, agent_id: str, release: asyncio.Event, fail: bool = False):
+        super().__init__(agent_id, OWNER.id)
+        self.entered = asyncio.Event()
+        self.release = release
+        self.fail = fail
+
+    async def _hold(self, verb: str):
+        self.entered.set()
+        await self.release.wait()
+        if self.fail:
+            raise RuntimeError(f"{verb} blew up")
+        self.calls.append(verb)
+
+    async def stop(self):
+        await self._hold("stop")
+        return True
+
+    async def _run_shutdown(self, reason: str):
+        await self._hold("shutdown")
+
+
+def _route_call(verb: str):
+    if verb == "stop":
+        return routes.stop_strategy("brigado", "scalp", agent_id=None, user=OWNER)
+    return routes.shutdown_strategy("brigado", "scalp", agent_id=None, user=OWNER)
+
+
+@pytest.fixture
+def two_gated(monkeypatch):
+    def _make(fail_first: bool = False):
+        release = asyncio.Event()
+        first = _GatedEngine("agent-1", release, fail=fail_first)
+        second = _GatedEngine("agent-2", release)
+        monkeypatch.setattr(
+            "config_manager.get_config_manager", lambda: FakeConfigManager()
+        )
+        monkeypatch.setattr(
+            routes, "_get_engines_for", lambda slug, sslug: [first, second]
+        )
+        return release, first, second
+
+    return _make
+
+
+@pytest.mark.parametrize(
+    "verb,body", [("shutdown", {"shutdown": True}), ("stop", {"stopped": True})]
+)
+@pytest.mark.asyncio
+async def test_every_instance_winds_down_at_once(two_gated, verb, body):
+    release, first, second = two_gated()
+
+    task = asyncio.create_task(_route_call(verb))
+    try:
+        # Serial code never enters the second engine while the first is held.
+        await asyncio.wait_for(
+            asyncio.gather(first.entered.wait(), second.entered.wait()), 1
+        )
+    finally:
+        release.set()
+    result = await asyncio.wait_for(task, 1)
+
+    assert result == body
+    assert first.calls == [verb]
+    assert second.calls == [verb]
+
+
+@pytest.mark.parametrize("verb", ["shutdown", "stop"])
+@pytest.mark.asyncio
+async def test_one_failing_instance_does_not_skip_the_others(two_gated, verb):
+    release, first, second = two_gated(fail_first=True)
+    release.set()
+
+    with pytest.raises(routes.HTTPException) as exc:
+        await asyncio.wait_for(_route_call(verb), 1)
+
+    assert exc.value.status_code == 500
+    assert "1 of 2 instances" in exc.value.detail
+    assert first.calls == []
     assert second.calls == [verb]
 
 

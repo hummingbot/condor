@@ -3134,6 +3134,34 @@ def _target_engines(
     return engines
 
 
+async def _wind_down_all(engines: list, verb: str, action) -> None:
+    """Run ``action(engine)`` on every engine at once, then 500 if any raised.
+
+    Instances are independent, so one engine's wind-down (a tick cancel, an ACP
+    reap, a whole emergency winddown) must neither wait behind another's nor be
+    skipped because an earlier one raised. Every failure is logged with its
+    agent_id before the route reports it.
+    """
+    results = await asyncio.gather(
+        *(action(engine) for engine in engines), return_exceptions=True
+    )
+    failed = 0
+    for engine, result in zip(engines, results):
+        if isinstance(result, BaseException):
+            failed += 1
+            log.error(
+                "Failed to %s agent %s",
+                verb,
+                getattr(engine, "agent_id", "?"),
+                exc_info=result,
+            )
+    if failed:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{failed} of {len(engines)} instances failed to {verb}",
+        )
+
+
 @router.post("/{slug}/strategies/{sslug}/stop")
 async def stop_strategy(
     slug: str,
@@ -3142,8 +3170,8 @@ async def stop_strategy(
     user: WebUser = Depends(get_current_user),
 ):
     """Stop a running strategy. If agent_id given, stop that instance; else all."""
-    for engine in _target_engines(slug, sslug, agent_id, user):
-        await engine.stop()
+    engines = _target_engines(slug, sslug, agent_id, user)
+    await _wind_down_all(engines, "stop", lambda e: e.stop())
     return {"stopped": True}
 
 
@@ -3160,8 +3188,12 @@ async def shutdown_strategy(
     given, only that instance is wound down; otherwise every running instance of
     this strategy is.
     """
-    for engine in _target_engines(slug, sslug, agent_id, user):
-        await engine._run_shutdown(reason="manual emergency stop")
+    engines = _target_engines(slug, sslug, agent_id, user)
+    await _wind_down_all(
+        engines,
+        "shut down",
+        lambda e: e._run_shutdown(reason="manual emergency stop"),
+    )
     return {"shutdown": True}
 
 
