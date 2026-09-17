@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import aiohttp
@@ -29,6 +30,13 @@ class OpenRouterModel:
     context_length: int  # tokens
     prompt_price: float  # USD per 1M input tokens, 0 if free
     completion_price: float
+    # Carried so that nothing downstream has to ask OpenRouter itself. A
+    # dashboard that shows a model's age or what caching costs would otherwise
+    # need its own call to the provider, which is the one thing this module
+    # exists to be the only place of.
+    release_date: str | None = None  # ISO date, from the API's `created`
+    cached_read_price: float = 0.0  # USD per 1M, 0 when not offered
+    cached_write_price: float = 0.0
 
 
 _cache: tuple[float, list[OpenRouterModel]] | None = None
@@ -40,6 +48,14 @@ def _parse_price(value: object) -> float:
         return float(value) * 1_000_000  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_date(value: object) -> str | None:
+    """OpenRouter's `created` is a unix timestamp. Return an ISO date, or None."""
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).date().isoformat()  # type: ignore[arg-type]
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
 
 
 def _model_supports_tools(entry: dict) -> bool:
@@ -82,6 +98,7 @@ async def fetch_models(force_refresh: bool = False) -> list[OpenRouterModel]:
         if not _model_supports_tools(entry):
             continue
         pricing = entry.get("pricing") or {}
+        created = entry.get("created")
         models.append(
             OpenRouterModel(
                 slug=slug,
@@ -89,6 +106,9 @@ async def fetch_models(force_refresh: bool = False) -> list[OpenRouterModel]:
                 context_length=int(entry.get("context_length") or 0),
                 prompt_price=_parse_price(pricing.get("prompt")),
                 completion_price=_parse_price(pricing.get("completion")),
+                release_date=_parse_date(created),
+                cached_read_price=_parse_price(pricing.get("input_cache_read")),
+                cached_write_price=_parse_price(pricing.get("input_cache_write")),
             )
         )
 

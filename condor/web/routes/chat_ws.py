@@ -1128,6 +1128,11 @@ async def get_openrouter_models(user: WebUser = Depends(get_current_user)):
                 "context_length": m.context_length,
                 "prompt_price": m.prompt_price,
                 "completion_price": m.completion_price,
+                # For callers that show a catalog rather than a picker, so that
+                # none of them needs its own call to OpenRouter.
+                "release_date": m.release_date,
+                "cached_read_price": m.cached_read_price,
+                "cached_write_price": m.cached_write_price,
             }
             for m in models
         ],
