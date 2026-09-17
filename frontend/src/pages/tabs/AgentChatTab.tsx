@@ -54,7 +54,7 @@ import { webSessionKey } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
-import { normalizeAgentSlug } from "@/lib/agentSlug";
+import { normalizeAgentSlug, slotFor } from "@/lib/agentSlug";
 import { agentsQuery } from "@/lib/queryClient";
 import {
   api,
@@ -243,13 +243,8 @@ export function AgentChatTab() {
         // not an answer — taking the *first* match sent "Open chat" back to the
         // oldest thread with that agent while the bubble on the page it came
         // from was showing another, and the two surfaces told the user
-        // different stories about which conversation they were in. Same rule as
-        // `adoptableSlot` in `ChatBubble`, deliberately.
-        const mine = slotsRef.current.filter(
-          (s) => (s.info.agent_slug || "") === slug,
-        );
-        const live =
-          mine.find((s) => s.info.slot_id === activeRef.current) ?? mine.at(-1);
+        // different stories about which conversation they were in.
+        const live = slotFor(slotsRef.current, slug, activeRef.current);
         if (live) {
           chat.setActiveSlotId(live.info.slot_id);
           if (opts?.text || opts?.files?.length)
@@ -625,9 +620,7 @@ export function AgentChatTab() {
               // request does not land under whatever unrelated thing this
               // agent was last asked. The workspace itself stays put — the
               // detail page has to navigate for this, the chat does not.
-              onAskAgent={(text) =>
-                talkTo(openSlug, { intent: "fresh", text })
-              }
+              onAskAgent={(text) => talkTo(openSlug, { intent: "fresh", text })}
               onClose={() => openPane(null)}
             />
           )}
@@ -646,7 +639,9 @@ export function AgentChatTab() {
                   kind: "agent",
                   // Back to the agent this sheet was opened from, which is not
                   // necessarily the conversation's since FEAT-114.
-                  ...(pane.agentSlug === panelSlug ? {} : { slug: pane.agentSlug }),
+                  ...(pane.agentSlug === panelSlug
+                    ? {}
+                    : { slug: pane.agentSlug }),
                 })
               }
             />

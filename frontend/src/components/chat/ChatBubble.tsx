@@ -17,11 +17,7 @@ import { useChat, useSessionOptions } from "@/hooks/useChat";
 import type { ChatSlot } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
 import { useStarters } from "@/hooks/useStarters";
-import {
-  bubbleAgentSlug,
-  isAgentPage,
-  normalizeAgentSlug,
-} from "@/lib/agentSlug";
+import { bubbleAgentSlug, isAgentPage, slotFor } from "@/lib/agentSlug";
 import { CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
 import { agentsQuery } from "@/lib/queryClient";
@@ -273,10 +269,6 @@ export function ChatBubble() {
  * is append-ordered by `startSession` / `resumeConversation`, so the newest
  * conversation with this agent is the one the user was most recently in.
  *
- * The slot's own binding is normalized because a conversation resumed from a
- * record written before the slugs were reconciled can still carry the
- * registry's spelling.
- *
  * Read-only with respect to the workspace: the caller must not focus what it
  * adopts. `startSession(..., { focus: false })` and `permissionFor` being a
  * selector exist precisely so a second surface can drive a slot it did not
@@ -294,12 +286,7 @@ function adoptableSlot(
   activeSlotId: string | null,
 ): ChatSlot | null {
   if (!isAgentPage(pathname)) return null;
-  const mine = slots.filter(
-    (s) => normalizeAgentSlug(s.info.agent_slug) === slug,
-  );
-  return (
-    mine.find((s) => s.info.slot_id === activeSlotId) ?? mine.at(-1) ?? null
-  );
+  return slotFor(slots, slug, activeSlotId);
 }
 
 /**

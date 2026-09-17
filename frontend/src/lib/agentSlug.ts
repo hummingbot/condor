@@ -27,6 +27,34 @@ export function normalizeAgentSlug(slug: string | null | undefined): string {
   return s === CHAT_SLUG ? "" : s;
 }
 
+/**
+ * Which of my conversations with `slug` is "mine with this agent", when there
+ * are several: the one already focused, else the newest.
+ *
+ * Position alone is not an answer — taking the *first* match sent "Open chat"
+ * back to the oldest thread while the bubble on the page it came from showed
+ * another, so the rail and the bubble told the user different stories about
+ * which conversation they were in. Both ask here so they cannot drift again.
+ * `slots` is append-ordered by `startSession` / `resumeConversation`, so the
+ * last match is the one the user was most recently in.
+ *
+ * `slug` must already be normalized. The slot's own binding is normalized here
+ * because a conversation resumed from a record written before the slugs were
+ * reconciled can still carry the registry's spelling (`"condor"`).
+ *
+ * Structurally typed so lib/ takes no runtime dependency on the chat socket.
+ */
+export function slotFor<
+  S extends { info: { slot_id: string; agent_slug?: string | null } },
+>(slots: readonly S[], slug: string, activeSlotId: string | null): S | null {
+  const mine = slots.filter(
+    (s) => normalizeAgentSlug(s.info.agent_slug) === slug,
+  );
+  return (
+    mine.find((s) => s.info.slot_id === activeSlotId) ?? mine.at(-1) ?? null
+  );
+}
+
 /** `/agents/:slug` and anything under it. The index `/agents` is not a match. */
 const AGENT_PAGE = /^\/agents\/([^/]+)/;
 
