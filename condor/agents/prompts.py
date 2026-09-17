@@ -559,6 +559,23 @@ def build_tick_prompt(
             f"{trading_context}"
         )
 
+    # A Condor Vault's operating rule, when this session runs one. It used to be
+    # withheld from this prompt and delivered as a true ACP system prompt, which
+    # kept it out of every snapshot file — a sealed overlay's secret had to stay
+    # out of them. Nothing about it is secret now: it is one instruction about
+    # sweeping realised fees, and the vault's whole folder is public at the
+    # commit the chain pins. Delivering it here instead means it reaches EVERY
+    # model rather than only the three that speak ACP, which is what let a vault
+    # be configured with a model that could never receive its own rules.
+    vault_rule = config.get("system_prompt", "")
+    if vault_rule:
+        sections.append(
+            "[VAULT RULE]\n"
+            "This session runs a Condor Vault. The following is binding, and "
+            "takes precedence over the strategy instructions wherever they "
+            f"differ:\n\n{vault_rule}"
+        )
+
     # Current config (exclude keys shown elsewhere or not useful to the LLM)
     _CONFIG_EXCLUDE = {
         "trading_context",
@@ -567,10 +584,7 @@ def build_tick_prompt(
         "server_name",
         "frequency_sec",
         "execution_mode",  # noise / internal
-        # A vault run's private context. It reaches the model as a true ACP
-        # system prompt (engine._create_client), never through this prompt —
-        # which is what keeps it out of every snapshot file.
-        "system_prompt",
+        "system_prompt",  # its own [VAULT RULE] section above
     }
     config_lines = [
         "[CURRENT CONFIG]",

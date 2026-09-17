@@ -25,7 +25,7 @@ from condor.acp.client import (
     ToolCallUpdate,
     fold_tool_call_event,
 )
-from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
+from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.runtime import toolsets
 from condor.runtime.registry_file import LoopState
 from condor.runtime.timeouts import resolve_tick_timeout
@@ -152,17 +152,9 @@ class TickEngine:
 
         # Condor Vault hooks, checked before anything is written so a bad start
         # request is refused with the reason and leaves no session behind.
-        # A non-ACP model cannot take a system prompt (the pydantic-ai client
-        # has no channel for one), so a vault run on one would silently lose
-        # the rules that prompt carries; a `vault` block outside its shape
-        # would reach argv malformed.
-        if self.config.get("system_prompt") and is_pydantic_ai_model(self._agent_key()):
-            raise ValueError(
-                f"agent_key {self._agent_key()!r} is a pydantic-ai model, which "
-                "cannot take a system_prompt: it only reaches an ACP model "
-                "(claude-acp, gemini, codex). Pick an ACP agent_key for this "
-                "run or drop system_prompt."
-            )
+        # A `vault` block outside its shape would reach argv malformed, so it is
+        # checked here — before anything is written, so a bad start request is
+        # refused with the reason and leaves no session behind.
         if self.config.get("vault") is not None:
             from mcp_servers.hummingbot_api.vault_block import validate_vault_block
 
@@ -1074,7 +1066,10 @@ class TickEngine:
             user_id=self.user_id,
             base_url_override=self.config.get("model_base_url") or None,
             tool_filter_mode=self.config.get("tool_filter_mode"),
-            system_prompt=self.config.get("system_prompt", ""),
+            # NOT the vault rule: that is a [VAULT RULE] section of the tick
+            # prompt (agents/prompts.py), so it reaches every model rather than
+            # only the ones that speak ACP.
+            system_prompt="",
         )
 
     def _vault_block(self) -> dict[str, Any] | None:
