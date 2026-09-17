@@ -1235,7 +1235,14 @@ class TickEngine:
             )
 
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
-        """Wrapper to make prompt_stream compatible with wait_for."""
+        """Test seam over ``acp_client.prompt_stream``: tests monkeypatch this to
+        inject a canned stream.
+
+        The tick's wall-clock budget is the ``asyncio.timeout`` block in
+        ``_run_model``, not anything here. Both clients already end their stream
+        on ``PromptDone`` (``agent_run`` iterates ``prompt_stream`` directly); the
+        ``break`` is a guard for a client that does not.
+        """
         async for event in acp_client.prompt_stream(prompt):
             yield event
             if isinstance(event, PromptDone):
