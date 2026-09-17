@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatAxisCurrency,
   formatAxisTime,
+  formatCompactUsd,
   formatCompactVolume,
+  formatCurrency,
+  formatCurrencyPnl,
   formatCurrencyVolume,
   formatDateTime,
   formatDuration,
@@ -29,7 +32,7 @@ describe("formatAxisCurrency", () => {
     it("gives a pnl axis 2 decimals under $10, where the axis often spans cents", () => {
       expect(formatAxisCurrency(0, "$", "pnl")).toBe("$0.00");
       expect(formatAxisCurrency(2.5, "$", "pnl")).toBe("$2.50");
-      expect(formatAxisCurrency(-2.5, "$", "pnl")).toBe("$-2.50");
+      expect(formatAxisCurrency(-2.5, "$", "pnl")).toBe("-$2.50");
       expect(formatAxisCurrency(9.99, "$", "pnl")).toBe("$9.99");
     });
 
@@ -89,11 +92,11 @@ describe("formatAxisCurrency", () => {
   });
 
   describe("negatives and zero", () => {
-    it("carries the minus inside the number, as the other helpers do", () => {
-      expect(formatAxisCurrency(-2_400_000, "$", "volume")).toBe("$-2.4M");
-      expect(formatAxisCurrency(-2_450, "$", "volume")).toBe("$-2.5K");
-      expect(formatAxisCurrency(-250, "$", "volume")).toBe("$-250");
-      expect(formatAxisCurrency(-1_000_000_000, "$", "volume")).toBe("$-1.00B");
+    it("puts the minus before the symbol, as the other helpers do (CORR-419)", () => {
+      expect(formatAxisCurrency(-2_400_000, "$", "volume")).toBe("-$2.4M");
+      expect(formatAxisCurrency(-2_450, "$", "volume")).toBe("-$2.5K");
+      expect(formatAxisCurrency(-250, "$", "volume")).toBe("-$250");
+      expect(formatAxisCurrency(-1_000_000_000, "$", "volume")).toBe("-$1.00B");
     });
 
     it("renders zero without a sign in either kind", () => {
@@ -128,6 +131,46 @@ describe("formatAxisCurrency", () => {
   });
 });
 
+// CORR-419: every currency formatter used to build `symbol + <signed number>`
+// by hand, so only `formatCurrency`'s `$`-under-$10K branch — the one that
+// delegates to `Intl` — put the minus where a reader expects it. The same
+// figure therefore rendered `-$12.34` at one magnitude and `$-12.3K` at the
+// next, and a non-dollar display currency never got it right at any magnitude.
+describe("the minus sign sits before the currency symbol", () => {
+  it("holds for formatCurrency at every tier and symbol", () => {
+    expect(formatCurrency(-12.34, "R$")).toBe("-R$12.34");
+    expect(formatCurrency(-12_345)).toBe("-$12.3K");
+    expect(formatCurrency(-2_500_000, "€")).toBe("-€2.50M");
+    expect(formatCurrency(-0.001234, "₿")).toBe("-₿0.001234");
+    expect(formatCurrency(-12.34)).toBe("-$12.34");
+  });
+
+  it("holds for the helpers built on the same ladder", () => {
+    expect(formatCurrencyPnl(-12.34, "R$")).toBe("-R$12.34");
+    expect(formatAxisCurrency(-2.5, "$", "pnl")).toBe("-$2.50");
+    expect(formatCompactUsd(-12_345)).toBe("-$12.3K");
+    expect(formatCurrencyVolume(-2_500_000, "€")).toBe("-€2.5M");
+    expect(formatCompactVolume(-2_500_000_000, "€")).toBe("-€2.50B");
+  });
+
+  it("leaves positive values, and the `+` PnL prefix, exactly as they were", () => {
+    expect(formatCurrency(12.34, "R$")).toBe("R$12.34");
+    expect(formatCurrency(12_345)).toBe("$12.3K");
+    expect(formatCurrency(2_500_000, "€")).toBe("€2.50M");
+    expect(formatCurrency(0.001234, "₿")).toBe("₿0.001234");
+    expect(formatCurrencyPnl(12.34, "R$")).toBe("+R$12.34");
+    expect(formatCurrencyVolume(2_500_000, "€")).toBe("€2.5M");
+  });
+
+  // `val < 0` is false for `-0`, which is what keeps `Intl` from printing the
+  // `-$0.00` that the `toFixed` branches never produced for the same input.
+  it("never signs a zero, however it was arrived at", () => {
+    expect(formatCurrency(0)).toBe("$0.00");
+    expect(formatCurrency(-0)).toBe("$0.00");
+    expect(formatCurrency(-0, "R$")).toBe("R$0.00");
+    expect(formatCurrencyPnl(-0)).toBe("+$0.00");
+  });
+});
 
 // ── READ-250: the X axis was hardcoded to HH:MM ──
 //

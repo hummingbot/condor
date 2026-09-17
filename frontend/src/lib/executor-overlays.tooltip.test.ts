@@ -23,9 +23,12 @@ import { describe, expect, it } from "vitest";
 
 import { renderOverlayTooltipHtml, type ExecutorOverlay } from "./executor-overlays";
 
+// Stand-ins for the display-currency formatters `useRates` injects. They put a
+// minus *before* the symbol because the real ones do (CORR-419) — a double that
+// signed the other way would assert a rendering no user can ever see.
 const fmt = {
-  formatValue: (v: number) => `€${v.toFixed(2)}`,
-  formatPnl: (v: number) => `${v >= 0 ? "+" : ""}€${v.toFixed(2)}`,
+  formatValue: (v: number) => `${v < 0 ? "-" : ""}€${Math.abs(v).toFixed(2)}`,
+  formatPnl: (v: number) => (v >= 0 ? `+€${v.toFixed(2)}` : `-€${Math.abs(v).toFixed(2)}`),
 };
 
 function overlay(patch: Partial<ExecutorOverlay> = {}): ExecutorOverlay {
@@ -86,7 +89,7 @@ describe("renderOverlayTooltipHtml", () => {
     expect(text).toContain("sell");
     expect(text).toContain("completed");
     expect(text).toContain("TP");
-    expect(text).toContain("€-8.00");
+    expect(text).toContain("-€8.00");
     expect(text).toContain("-2.00%");
     // Not running, so the far price is the close.
     expect(text).toContain("Close");

@@ -227,8 +227,8 @@ function asOf(
  *
  * Reads the same `["rates", server, currency, …]` cache `useRates` fills and
  * runs it through the same `lib/rates` rule — same conversion, same symbol,
- * same `⚠` marker — so the block says `$-412.30` where the screen says
- * `$-412.30`, in the display currency the user picked rather than in raw quote
+ * same `⚠` marker — so the block says `-$412.30` where the screen says
+ * `-$412.30`, in the display currency the user picked rather than in raw quote
  * units. Sharing the rule is the point: the copy that used to live here had
  * drifted on the symbol for an unconvertible quote (ARCH-228).
  */

@@ -124,36 +124,61 @@ export function escapeHtml(val: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * Render a magnitude under a currency symbol and put the minus sign, if any,
+ * *before* the symbol: `-$1.2K`, not `$-1.2K`.
+ *
+ * Every currency formatter below goes through this, because they used to each
+ * build `symbol + <signed number>` by hand and only `formatCurrency`'s `$`
+ * branch — the one that delegates to `Intl` — got it right, so the same loss
+ * rendered `-$12.34` under $10K and `$-12.3K` above it (CORR-419). `render`
+ * therefore only ever sees a non-negative number, which is also why the
+ * `Math.abs` guards the callers used for tier selection collapse into plain
+ * comparisons here.
+ *
+ * `val < 0` is false for `-0`, so a negative zero prints `$0.00` rather than
+ * `Intl`'s `-$0.00` — the placement the `toFixed` branches already gave it.
+ */
+function withSign(val: number, render: (abs: number) => string): string {
+  return (val < 0 ? "-" : "") + render(Math.abs(val));
+}
+
 export function formatCurrency(val: number, symbol = "$") {
-  if (Math.abs(val) >= 1_000_000) return symbol + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return symbol + (val / 1_000).toFixed(1) + "K";
-  if (symbol === "$") {
-    return val.toLocaleString("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: 2,
-    });
-  }
-  // Adaptive precision for small values (e.g. BTC)
-  if (Math.abs(val) < 0.01 && val !== 0) return symbol + val.toPrecision(4);
-  return symbol + val.toFixed(2);
+  return withSign(val, (abs) => {
+    if (abs >= 1_000_000) return symbol + (abs / 1_000_000).toFixed(2) + "M";
+    if (abs >= 10_000) return symbol + (abs / 1_000).toFixed(1) + "K";
+    if (symbol === "$") {
+      return abs.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+        minimumFractionDigits: 2,
+      });
+    }
+    // Adaptive precision for small values (e.g. BTC)
+    if (abs < 0.01 && abs !== 0) return symbol + abs.toPrecision(4);
+    return symbol + abs.toFixed(2);
+  });
 }
 
 /**
  * Compact USD for chart tooltips / stat strips: `>=1M → "$N.NNM"`, `>=10K → "$N.NK"`,
  * else plain `"$" + toFixed(2)` (no locale grouping). Kept distinct from `formatCurrency`,
- * which uses `Intl` grouping/sign placement below 10K — switching would change rendered values.
+ * which uses `Intl` grouping below 10K — switching would change rendered values.
  */
 export function formatCompactUsd(val: number): string {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return "$" + val.toFixed(2);
+  return withSign(val, (abs) => {
+    if (abs >= 1_000_000) return "$" + (abs / 1_000_000).toFixed(2) + "M";
+    if (abs >= 10_000) return "$" + (abs / 1_000).toFixed(1) + "K";
+    return "$" + abs.toFixed(2);
+  });
 }
 
 export function formatCurrencyVolume(val: number, symbol = "$") {
-  if (Math.abs(val) >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(val) >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
-  return symbol + val.toFixed(Math.abs(val) < 100 ? 2 : 0);
+  return withSign(val, (abs) => {
+    if (abs >= 1_000_000) return symbol + (abs / 1_000_000).toFixed(1) + "M";
+    if (abs >= 1_000) return symbol + (abs / 1_000).toFixed(1) + "K";
+    return symbol + abs.toFixed(abs < 100 ? 2 : 0);
+  });
 }
 
 export function formatCurrencyPnl(val: number, symbol = "$") {
@@ -191,11 +216,12 @@ export function formatVolume(val: number) {
  * where `formatCurrencyVolume` would render an unreadable "2400.0M".
  */
 export function formatCompactVolume(val: number, symbol = "$"): string {
-  const abs = Math.abs(val);
-  if (abs >= 1_000_000_000) return symbol + (val / 1_000_000_000).toFixed(2) + "B";
-  if (abs >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
-  if (abs >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
-  return symbol + val.toFixed(0);
+  return withSign(val, (abs) => {
+    if (abs >= 1_000_000_000) return symbol + (abs / 1_000_000_000).toFixed(2) + "B";
+    if (abs >= 1_000_000) return symbol + (abs / 1_000_000).toFixed(1) + "M";
+    if (abs >= 1_000) return symbol + (abs / 1_000).toFixed(1) + "K";
+    return symbol + abs.toFixed(0);
+  });
 }
 
 /**
@@ -213,11 +239,12 @@ export function formatCompactVolume(val: number, symbol = "$"): string {
  * dollars, and a decimal there only costs width).
  */
 export function formatAxisCurrency(val: number, symbol = "$", kind: "pnl" | "volume" = "volume"): string {
-  const abs = Math.abs(val);
-  if (abs >= 1_000_000_000) return symbol + (val / 1_000_000_000).toFixed(2) + "B";
-  if (abs >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
-  if (abs >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
-  return symbol + val.toFixed(kind === "pnl" && abs < 10 ? 2 : 0);
+  return withSign(val, (abs) => {
+    if (abs >= 1_000_000_000) return symbol + (abs / 1_000_000_000).toFixed(2) + "B";
+    if (abs >= 1_000_000) return symbol + (abs / 1_000_000).toFixed(1) + "M";
+    if (abs >= 1_000) return symbol + (abs / 1_000).toFixed(1) + "K";
+    return symbol + abs.toFixed(kind === "pnl" && abs < 10 ? 2 : 0);
+  });
 }
 
 export function formatPnl(val: number) {
