@@ -3008,13 +3008,21 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     # Web callers always act as themselves (mirror delegate): honoring
     # ``req.user_id`` would let any authenticated session start the engine
     # under another user's memory scope and accessible-servers fallback.
-    new_engine = TickEngine(
-        agent=agent,
-        strategy=strategy,
-        config=config_dict,
-        chat_id=req.chat_id,
-        user_id=user_id,
-    )
+    # TickEngine refuses a structurally impossible start in __post_init__ — a
+    # system_prompt on a pydantic-ai agent_key, a malformed vault block —
+    # deliberately before anything is written. Those reasons are written for
+    # whoever asked, so they go back as a 400 rather than surfacing to the
+    # caller as a bare 500 with the text only in this process's log.
+    try:
+        new_engine = TickEngine(
+            agent=agent,
+            strategy=strategy,
+            config=config_dict,
+            chat_id=req.chat_id,
+            user_id=user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     await new_engine.start()
     return {
         "started": True,
