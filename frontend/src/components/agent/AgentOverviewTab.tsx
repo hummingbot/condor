@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save, Zap } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { ModeBadge } from "@/components/agent/ModeBadge";
-import { api } from "@/lib/api";
+import { api, type AgentPerformance } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, pnlTextClass } from "@/lib/formatters";
 
 // ── Markdown Editor ──
@@ -168,7 +168,15 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 // ── Performance Panel ──
 
-export function PerformancePanel({
+const EMPTY_SESSIONS: AgentPerformance[] = [];
+
+/**
+ * Memoized because its only host, `StrategyWorkbench`, re-renders on every
+ * `executors:<server>` WS frame (~2 s) while a loop runs, and its props are
+ * primitives; its own query still re-renders it when the rollup changes
+ * (PERF-385).
+ */
+export const PerformancePanel = memo(function PerformancePanel({
   slug,
   sslug,
   dense = false,
@@ -192,7 +200,11 @@ export function PerformancePanel({
   // so it is never folded into the totals below, which are about money that
   // moved. The runs themselves are listed in the Lab (FEAT-099); what stays
   // here is the strategy-level view: the KPI strip and the equity curve.
-  const sessions = (data?.sessions || []).filter((s) => s.kind === "session");
+  // Memoized on the query's payload (structurally shared across refetches), so
+  // `pnlData` below keeps its identity between renders and the chart's
+  // `setData` runs only when the sessions actually change (PERF-385).
+  const allSessions = data?.sessions ?? EMPTY_SESSIONS;
+  const sessions = useMemo(() => allSessions.filter((s) => s.kind === "session"), [allSessions]);
   const totalPnl = Number(totals.total_pnl ?? 0);
   const realized = Number(totals.realized_pnl ?? 0);
   const unrealized = Number(totals.unrealized_pnl ?? 0);
@@ -283,5 +295,5 @@ export function PerformancePanel({
 
     </div>
   );
-}
+});
 
