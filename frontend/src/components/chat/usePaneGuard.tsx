@@ -1,4 +1,10 @@
-import { useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import {
@@ -41,13 +47,24 @@ export function usePaneGuard({
   // Boxed, so a pending `null` (close the pane) is told apart from no request.
   const [pending, setPending] = useState<{ next: PaneView } | null>(null);
 
-  const openPane = (next: PaneView) => {
+  const guarded = (next: PaneView) => {
     if (panelDirty && paneHandoffDropsPanel(pane, next, panelSlug)) {
       setPending({ next });
       return;
     }
     apply(next);
   };
+  // Handed out under one identity for the life of the host (PERF-393). `pane`
+  // is a fresh object on every host render and `apply` a fresh closure, so an
+  // `openPane` built over them changed on every 50 ms stream flush, and so did
+  // every panel handler derived from it — which defeated the `memo` that keeps
+  // AgentKnowledge from re-parsing AGENT.md while an answer streams. Doors call
+  // it from event handlers, after the commit that refreshed the ref.
+  const latest = useRef(guarded);
+  useEffect(() => {
+    latest.current = guarded;
+  });
+  const openPane = useCallback((next: PaneView) => latest.current(next), []);
 
   const dialog = (
     // A pane is handed off in one click, where a page has to be navigated away

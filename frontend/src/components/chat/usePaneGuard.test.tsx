@@ -11,7 +11,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -62,6 +62,9 @@ function brain(slug: string, name: string): AgentBrain {
 /** The conversation's agent, the one a bare `?panel=agent` means. */
 const PANEL_SLUG = "orca";
 
+/** Every `openPane` the host was handed, one per commit (PERF-393). */
+const seenOpenPane: unknown[] = [];
+
 function Host() {
   const [searchParams, setSearchParams] = useSearchParams();
   const pane = readPane(searchParams, {});
@@ -72,6 +75,9 @@ function Host() {
     apply: (next) => setSearchParams(writePane(searchParams, next)),
   });
   const openPane = guard.openPane;
+  useEffect(() => {
+    seenOpenPane.push(guard.openPane);
+  });
   return (
     <>
       <button
@@ -176,6 +182,7 @@ async function dirtyTheEditor() {
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  seenOpenPane.length = 0;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -270,5 +277,24 @@ describe("a door out of a dirty agent panel", () => {
     await click(door("desk"));
     expect(dialogOpen()).toBe(false);
     expect(paneKind()).toBe("desk");
+  });
+});
+
+describe("the guard's openPane identity (PERF-393)", () => {
+  it("is one function across renders, and still asks with the latest state", async () => {
+    await render();
+    // Editing flips the dirty flag and re-renders the host several times; a
+    // hand-off that lands re-renders it with a new `?panel=`.
+    await dirtyTheEditor();
+    await click(door("desk"));
+    expect(dialogOpen()).toBe(true);
+    await click(buttonNamed("Discard")!);
+    await click(door("rail"));
+
+    expect(seenOpenPane.length).toBeGreaterThan(3);
+    expect(new Set(seenOpenPane).size).toBe(1);
+    // The one identity handed out on the first commit, before anything was
+    // dirty, is the one that asked — so it reads the current flag and pane.
+    expect(paneKind()).toBe("agent");
   });
 });

@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import { AccountDock } from "@/components/chat/AccountDock";
 import {
   DESK_PARAM,
@@ -418,6 +419,49 @@ export function AgentChatTab() {
   const openPane = paneGuard.openPane;
   const openAgent = agents.find((a) => a.slug === openSlug);
 
+  /**
+   * The agent panel's handlers, each under one identity while its inputs hold
+   * (PERF-393).
+   *
+   * `AgentKnowledge` is `memo`'d, and inline arrows here were new on every
+   * 50 ms stream flush, so the panel re-parsed the whole AGENT.md through
+   * ReactMarkdown twenty times a second while an answer streamed beside it.
+   * `openPane` and `talkTo` are stable and the rest are strings. Not keyed on
+   * `pane`: `readPane` builds a fresh object every render, so the section
+   * change rebuilds the agent pane from its scalar slug instead.
+   */
+  const paneSlug = pane?.kind === "agent" ? pane.slug : undefined;
+  const onPanelTabChange = useCallback(
+    (t: KnowledgeTabId) =>
+      openPane({
+        kind: "agent",
+        ...(paneSlug ? { slug: paneSlug } : {}),
+        tab: t,
+      }),
+    [openPane, paneSlug],
+  );
+  // The pane's routine house is the one FEAT-077 built; the panel hands it
+  // over rather than growing a second one.
+  const onPanelOpenRoutine = useCallback(
+    (name: string) => openPane({ kind: "routines", focus: { source: name } }),
+    [openPane],
+  );
+  // And a strategy card to the workbench sheet, which never went anywhere —
+  // FEAT-117 only stopped the panel from opening it.
+  const onPanelOpenStrategy = useCallback(
+    (sslug: string) =>
+      openPane({ kind: "strategy", agentSlug: openSlug, strategySlug: sslug }),
+    [openPane, openSlug],
+  );
+  // A revision is its own thread: `fresh`, not `focus`, so the request does not
+  // land under whatever unrelated thing this agent was last asked. The
+  // workspace itself stays put — the detail page has to navigate for this, the
+  // chat does not.
+  const onPanelAskAgent = useCallback(
+    (text: string) => talkTo(openSlug, { intent: "fresh", text }),
+    [talkTo, openSlug],
+  );
+
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
   ).length;
@@ -645,26 +689,10 @@ export function AgentChatTab() {
               // (FEAT-118), so Back steps through the seven and a pane open on
               // Tools can be sent to somebody.
               tab={pane.tab}
-              onTabChange={(t) => openPane({ ...pane, tab: t })}
-              // The pane's routine house is the one FEAT-077 built; the panel
-              // hands it over rather than growing a second one.
-              onOpenRoutine={(name) =>
-                openPane({ kind: "routines", focus: { source: name } })
-              }
-              // And a strategy card to the workbench sheet, which never went
-              // anywhere — FEAT-117 only stopped the panel from opening it.
-              onOpenStrategy={(sslug) =>
-                openPane({
-                  kind: "strategy",
-                  agentSlug: openSlug,
-                  strategySlug: sslug,
-                })
-              }
-              // A revision is its own thread: `fresh`, not `focus`, so the
-              // request does not land under whatever unrelated thing this
-              // agent was last asked. The workspace itself stays put — the
-              // detail page has to navigate for this, the chat does not.
-              onAskAgent={(text) => talkTo(openSlug, { intent: "fresh", text })}
+              onTabChange={onPanelTabChange}
+              onOpenRoutine={onPanelOpenRoutine}
+              onOpenStrategy={onPanelOpenStrategy}
+              onAskAgent={onPanelAskAgent}
               onDirtyChange={paneGuard.onPanelDirtyChange}
               onClose={() => openPane(null)}
             />

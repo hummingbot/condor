@@ -14,7 +14,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { memo, useCallback, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -48,6 +48,13 @@ import { agentQuery } from "@/lib/queryClient";
 import { formatRoutineName } from "@/lib/routineUtils";
 
 /**
+ * One plugin list for every render (PERF-393): a fresh `[remarkGfm]` is a new
+ * prop to ReactMarkdown each time, and this component is `memo`'d so the chat
+ * pane's 50 ms stream flushes stop re-parsing AGENT.md.
+ */
+const GFM = [remarkGfm];
+
+/**
  * Everything an agent is, in one editable surface.
  *
  * What the model is handed at the top of every turn — its AGENT.md, the
@@ -68,7 +75,7 @@ import { formatRoutineName } from "@/lib/routineUtils";
  * opening the panel on an agent with forty playbooks costs a few kilobytes, and
  * the one you clicked costs its own request.
  */
-export function AgentKnowledge({
+export const AgentKnowledge = memo(function AgentKnowledge({
   slug,
   dense = false,
   tab,
@@ -633,7 +640,7 @@ export function AgentKnowledge({
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">{body}</div>
     </div>
   );
-}
+});
 
 // ── Tabs ──
 
@@ -755,7 +762,7 @@ function BrainTab({
       </div>
       {prose ? (
         <div className="chat-markdown text-xs text-[var(--color-text)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{prose}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={GFM}>{prose}</ReactMarkdown>
         </div>
       ) : (
         <Empty>This agent has no AGENT.md yet.</Empty>
@@ -821,7 +828,7 @@ function ProposedSkill({
       </button>
       {open && (
         <div className="chat-markdown mt-2 text-xs text-[var(--color-text)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown remarkPlugins={GFM}>
             {proposal.body}
           </ReactMarkdown>
         </div>
