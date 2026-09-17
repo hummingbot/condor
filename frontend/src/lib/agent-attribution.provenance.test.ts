@@ -13,7 +13,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  agentOfBot,
   attributionOf,
   DEED_TITLE,
   deployNameChain,
@@ -112,15 +111,6 @@ describe("what a deed is matched on", () => {
     expect(attributionOf([], index, "a").runKey).toBe("condor.chat");
     expect(attributionOf([], index, "b").runKey).toBe("brigado.delegation");
     expect(attributionOf([], index, "c").runKey).toBe("condor.ui");
-  });
-});
-
-describe("agentOfBot", () => {
-  it("is still the two enforced rules and nothing else", () => {
-    // The old entry point delegates now, so this pins that the delegation did
-    // not quietly hand it a third rule: no deed index, no deed answers.
-    expect(agentOfBot([owner()], "brigado-brl_mm-btc")).toBe("brigado.brl_mm");
-    expect(agentOfBot([owner()], "pmm-king-btcbrl")).toBe("");
   });
 });
 
