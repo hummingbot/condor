@@ -84,12 +84,3 @@ class ProviderRegistry:
                     summary=f"(provider {provider.name} failed)",
                 )
         return results
-
-    async def run_provider(
-        self, name: str, client: Any, config: dict
-    ) -> ProviderResult | None:
-        """Run a single provider by name."""
-        provider = get_provider(name)
-        if not provider:
-            return None
-        return await provider.execute(client, config)

@@ -139,6 +139,12 @@ def test_a_failing_tracked_fetch_degrades_through_the_registry():
     assert results["drift"].data == {}
 
 
+def test_run_core_providers_is_the_registrys_only_runner():
+    """READ-684: no by-name runner that would call ``execute`` without the agent scope."""
+    runners = [n for n in vars(ProviderRegistry) if n.startswith("run_")]
+    assert runners == ["run_core_providers"]
+
+
 # ── "Yours": the annotation, never a filter ──
 
 
