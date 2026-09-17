@@ -367,6 +367,16 @@ export function runKeyLabel(runKey: string): string {
 }
 
 /**
+ * An owner's display names: `"Brigado / BRL MM"`, each half falling back to
+ * its slug when the map carries no name. The one spelling of that format —
+ * `ownerTitle` looks the owner up and returns this, and a caller already
+ * holding the `FleetOwner` calls it directly.
+ */
+export function ownerDisplayName(owner: FleetOwner): string {
+  return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
+}
+
+/**
  * The same subject spelled out: `"Brigado / BRL MM"`.
  *
  * What the map's display names are for — the tooltip on a label that is an id.
@@ -376,7 +386,7 @@ export function runKeyLabel(runKey: string): string {
 export function ownerTitle(owners: readonly FleetOwner[], runKey: string): string {
   const owner = ownerOf(owners, runKey);
   if (!owner) return runKeyLabel(runKey);
-  return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
+  return ownerDisplayName(owner);
 }
 
 /**

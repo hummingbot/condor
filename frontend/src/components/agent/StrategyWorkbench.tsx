@@ -19,6 +19,7 @@ import {
   type WorkspaceUrlPatch,
 } from "@/components/agent/workspace/workspaceUrl";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
+import { runParam } from "@/components/perf/agentFilter";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
@@ -216,7 +217,7 @@ export function StrategyWorkbench({
   /** A beat on the pulse strip is an address: land on that tick's snapshot. */
   const handleOpenTick = useCallback(
     (sessionNum: number, tick: number) => {
-      navigate(labUrl({ run: `s${sessionNum}`, tick }));
+      navigate(labUrl({ run: runParam(sessionNum), tick }));
     },
     [navigate, labUrl],
   );

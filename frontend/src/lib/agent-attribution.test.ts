@@ -16,6 +16,7 @@ import {
   loopFacts,
   loopStatus,
   isPseudoRunKey,
+  ownerDisplayName,
   ownerOf,
   ownerRowLabel,
   ownerTitle,
@@ -141,6 +142,13 @@ describe("labels", () => {
 
   it("spell the same subject out in display names for the tooltip", () => {
     expect(ownerTitle(owners, "brigado.brl_mm")).toBe("Brigado / BRL MM");
+  });
+
+  it("spell a held owner through the same display-name rule as the lookup (ARCH-413)", () => {
+    expect(ownerTitle(owners, "brigado.brl_mm")).toBe(
+      ownerDisplayName(ownerOf(owners, "brigado.brl_mm")!),
+    );
+    expect(ownerDisplayName(owner({ agentName: "", strategyName: "BRL MM" }))).toBe("brigado / BRL MM");
   });
 
   it("fall back to the label for an owner the map no longer holds", () => {

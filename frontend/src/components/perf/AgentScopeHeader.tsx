@@ -3,9 +3,9 @@ import { type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
-import { agentBucketLabel, isAgentBucket } from "@/components/perf/agentFilter";
+import { agentBucketLabel, isAgentBucket, runParam } from "@/components/perf/agentFilter";
 import { agentColor } from "@/lib/agentColor";
-import { loopFacts, loopStatus, type FleetOwner } from "@/lib/agent-attribution";
+import { loopFacts, loopStatus, ownerDisplayName, type FleetOwner } from "@/lib/agent-attribution";
 import { shortBotName } from "@/lib/formatters";
 import { useSeconds } from "@/hooks/useSeconds";
 
@@ -119,7 +119,7 @@ export function AgentScopeHeader({
       workspaceHref(owner.agentSlug, {
         open: "runs",
         strategy: owner.strategySlug,
-        run: live?.sessionNum ? `s${live.sessionNum}` : null,
+        run: live?.sessionNum ? runParam(live.sessionNum) : null,
         tick: snapshotTick || null,
       }),
     );
@@ -136,11 +136,7 @@ export function AgentScopeHeader({
         />
         <span
           className="truncate"
-          title={
-            owner
-              ? `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`
-              : label
-          }
+          title={owner ? ownerDisplayName(owner) : label}
         >
           {label}
         </span>
