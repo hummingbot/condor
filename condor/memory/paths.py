@@ -54,7 +54,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
-from condor.paths import local_agents_root, stock_agents_root
+from condor.paths import UnsafeIdError, local_agents_root, stock_agents_root
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,31 @@ def _is_agent_dir(path: Path) -> bool:
     return path.is_dir() and not path.name.startswith("_") and path.name != "strategies"
 
 
+def safe_slug(value: str) -> str:
+    """``value`` as exactly one path segment under an agents root, or refuse.
+
+    Agent and strategy slugs reach the resolvers below straight from MCP tool
+    arguments, so a ``../../agents/<slug>`` would otherwise resolve the shipped
+    tree *through the local layer* and every copy-on-write guard (which compares
+    the local path to the stock one) would take it for a local file.
+
+    Not :func:`condor.paths.safe_id`: :func:`condor.frontmatter.slugify` keeps
+    unicode ``\\w`` ("Ñandú Bot" -> ``ñandú_bot``), which that ASCII regex
+    refuses. The rule here is only what makes a value one segment: non-empty, no
+    ``/``, ``\\`` or NUL, not ``.``, and no ``..`` anywhere (the same stance
+    ``safe_id`` takes). Raises :class:`condor.paths.UnsafeIdError`.
+    """
+    text = str(value)
+    if (
+        not text
+        or text == "."
+        or ".." in text
+        or any(ch in text for ch in ("/", "\\", "\0"))
+    ):
+        raise UnsafeIdError(f"Invalid agent path segment {text!r}")
+    return text
+
+
 def agent_home(agent_slug: str | None = None) -> Path:
     """The **writable** home of an agent: ``<local>/<slug>``.
 
@@ -80,13 +105,15 @@ def agent_home(agent_slug: str | None = None) -> Path:
     down from stock. A falsy slug resolves the default agent (Condor).
 
     Use :func:`agent_home_layers` to *read* something that may still be stock.
+    Raises :class:`condor.paths.UnsafeIdError` for a slug that is not one
+    path segment (:func:`safe_slug`).
     """
-    return local_agents_root() / (agent_slug or CHAT_SLUG)
+    return local_agents_root() / safe_slug(agent_slug or CHAT_SLUG)
 
 
 def stock_agent_home(agent_slug: str | None = None) -> Path:
     """The shipped home of an agent: ``<stock>/<slug>``. Never written at runtime."""
-    return stock_agents_root() / (agent_slug or CHAT_SLUG)
+    return stock_agents_root() / safe_slug(agent_slug or CHAT_SLUG)
 
 
 def agent_home_layers(agent_slug: str | None = None) -> tuple[Path, Path]:
@@ -101,7 +128,12 @@ def resolve_agent_file(agent_slug: str | None, *rel: str) -> Path | None:
     live". Per *item*, deliberately: an install that forked ``AGENT.md`` must
     still receive upstream's new ``skills/<slug>/``, so the fork can never be
     the whole directory.
+
+    Every ``rel`` part must be one segment too (:func:`safe_slug`), so a
+    strategy slug or skill name cannot climb out of the home either.
     """
+    for part in rel:
+        safe_slug(part)
     for home in agent_home_layers(agent_slug):
         candidate = home.joinpath(*rel)
         if candidate.exists():

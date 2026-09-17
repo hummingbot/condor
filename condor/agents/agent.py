@@ -70,6 +70,7 @@ from condor.memory.paths import (
     iter_agent_slugs,
     resolve_agent_file,
 )
+from condor.paths import UnsafeIdError
 
 log = logging.getLogger(__name__)
 
@@ -228,7 +229,11 @@ class AgentStore:
     def get(self, slug: str) -> Agent | None:
         if not slug:
             return None
-        path = resolve_agent_file(slug, AGENT_MD)
+        try:
+            path = resolve_agent_file(slug, AGENT_MD)
+        except UnsafeIdError:
+            # Not one path segment (SEC-648): no agent can live there.
+            return None
         if path is None:
             return None
         return _load_agent_from_file(path, slug)
@@ -329,12 +334,17 @@ class AgentStore:
             raise ValueError(
                 f"'{CHAT_SLUG}' is the default agent and cannot be deleted"
             )
-        if resolves_to_stock(slug, AGENT_MD):
+        try:
+            stock_only_def = resolves_to_stock(slug, AGENT_MD)
+            agent_dir = agent_home(slug)
+        except UnsafeIdError:
+            # A traversal slug names no deletable agent (SEC-648).
+            return False
+        if stock_only_def:
             # A shipped agent has no local file to remove and an update would
             # bring it straight back, so deletion would be a lie. FEAT-090's
             # mute is the reversible answer that already exists.
             raise ValueError(stock_delete_error(slug))
-        agent_dir = agent_home(slug)
         path = agent_dir / AGENT_MD
         if not path.exists():
             return False

@@ -695,3 +695,117 @@ def test_a_promoted_proposal_lands_in_the_local_library(stock):
         in (agent_home("scout") / "skills" / "recon" / "SKILL.md").read_text()
     )
     assert (stock / "skills" / "recon" / "SKILL.md").read_text().endswith("Look.\n")
+
+
+# ── SEC-648: a slug is one path segment, never a way into the shipped tree ──
+
+TRAVERSAL = "../../agents/brigado"
+
+
+@pytest.fixture
+def repo_layout(tmp_path, monkeypatch):
+    """The documented layout: stock ``<repo>/agents``, local ``<repo>/.condor/agents``.
+
+    With it ``<local>/../../agents/brigado`` *is* the shipped brigado, which is
+    what made a traversal slug read as a local file to every layering guard.
+    """
+    stock_root = tmp_path / "agents"
+    local_root = tmp_path / ".condor" / "agents"
+    monkeypatch.setenv("CONDOR_STOCK_AGENTS_ROOT", str(stock_root))
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(local_root))
+    # A real install has its local root; without it the OS cannot walk the
+    # ``..`` through a missing directory and the traversal never lands.
+    local_root.mkdir(parents=True)
+    agent_md = _write(
+        stock_root / "brigado" / "AGENT.md",
+        AGENT_MD.format(name="Brigado", desc="shipped", body="Ship."),
+    )
+    _write(
+        stock_root / "brigado" / "strategies" / "default" / "strategy.md",
+        "---\nname: Default\n---\n\nLoop.\n",
+    )
+    return stock_root, local_root, agent_md
+
+
+def _local_files(local_root):
+    return sorted(p for p in local_root.rglob("*")) if local_root.exists() else []
+
+
+def test_a_traversal_slug_never_resolves_into_the_shipped_tree(repo_layout):
+    from condor.layering import resolves_to_stock
+    from condor.paths import UnsafeIdError
+
+    assert AgentStore().get(TRAVERSAL) is None
+    assert StrategyStore().list(TRAVERSAL) == []
+    # The layering guard itself refuses the slug rather than answering "local";
+    # the stores above are what turn that refusal into "no such agent".
+    with pytest.raises(UnsafeIdError):
+        resolves_to_stock(TRAVERSAL, "AGENT.md")
+
+
+def test_the_strategy_slug_cannot_traverse_either(repo_layout):
+    _, local_root, _ = repo_layout
+    (local_root / "condor" / "strategies").mkdir(parents=True, exist_ok=True)
+    sslug = "../../../../agents/brigado/strategies/default"
+
+    assert StrategyStore().get("condor", sslug) is None
+    assert StrategyStore().get_by_key(f"condor.{sslug}") is None
+
+
+def test_deleting_or_updating_through_a_traversal_slug_leaves_the_shipped_copy(
+    repo_layout,
+):
+    from condor.agents.agent import Agent
+    from condor.paths import UnsafeIdError
+
+    _, local_root, agent_md = repo_layout
+    original = agent_md.read_bytes()
+
+    assert AgentStore().delete(TRAVERSAL) is False
+    assert agent_md.read_bytes() == original
+
+    with pytest.raises(UnsafeIdError) as exc:
+        AgentStore().update(Agent(slug=TRAVERSAL, name="x"))
+    assert isinstance(exc.value, ValueError)
+    assert agent_md.read_bytes() == original
+    assert _local_files(local_root) == []
+
+
+def test_manage_skill_cannot_target_a_traversal_slug(repo_layout):
+    import asyncio
+
+    from mcp_servers.condor.tools.skills import manage_skill
+
+    stock_root, _, _ = repo_layout
+    result = asyncio.run(
+        manage_skill(
+            action="create",
+            agent=TRAVERSAL,
+            name="evil",
+            description="d",
+            when_to_use="w",
+            body="b",
+        )
+    )
+    assert result == {"error": f"No agent or strategy found for '{TRAVERSAL}'"}
+    assert not (stock_root / "brigado" / "skills").exists()
+
+
+def test_safe_slug_accepts_every_slug_slugify_produces():
+    from condor.frontmatter import slugify
+    from condor.memory.paths import CHAT_SLUG, safe_slug
+    from condor.paths import UnsafeIdError, local_agents_root
+
+    names = ["RIVER Scalper v2", "BRL MM", "Risk Sentry", "Ñandú Bot", "Émile"]
+    names.append("--- ---")
+    assert slugify("--- ---") == "unnamed"
+    for name in names:
+        assert agent_home(slugify(name)) == local_agents_root() / slugify(name)
+    assert agent_home(None) == local_agents_root() / CHAT_SLUG
+    assert agent_home("") == local_agents_root() / CHAT_SLUG
+
+    for bad in ("..", ".", "a/b", "a\\b", "a\0b", "x..y", "../x"):
+        with pytest.raises(UnsafeIdError):
+            safe_slug(bad)
+    with pytest.raises(UnsafeIdError):
+        resolve_agent_file("scout", "skills", "../../other", "SKILL.md")

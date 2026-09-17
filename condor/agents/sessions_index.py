@@ -22,7 +22,8 @@ from condor.agents.journal import (
     iter_session_dirs,
 )
 from condor.agents.strategy import STRATEGIES_DIRNAME
-from condor.memory.paths import agent_home
+from condor.memory.paths import agent_home, safe_slug
+from condor.paths import UnsafeIdError
 
 # New and legacy directory names, checked in order.
 EXPERIMENT_DIRNAMES = ("dry_runs", "experiments")
@@ -414,12 +415,17 @@ def strategy_dir_for_run_key(run_key: str) -> Path | None:
 
     The same composition as ``Strategy.home``, without going through the
     StrategyStore, which would refuse a deleted strategy whose session dirs
-    are still on disk. None for a key without the ``agent.strategy`` shape.
+    are still on disk. None for a key without the ``agent.strategy`` shape,
+    or when either half is not one path segment (SEC-648/SEC-678: the key
+    reaches here from model-supplied journal tool ids).
     """
     agent_slug, dot, slug = run_key.partition(".")
     if not dot:
         return None
-    return agent_home(agent_slug) / STRATEGIES_DIRNAME / slug
+    try:
+        return agent_home(agent_slug) / STRATEGIES_DIRNAME / safe_slug(slug)
+    except UnsafeIdError:
+        return None
 
 
 def enumerate_agent_ids(run_key: str, strategy_dir: Path) -> list[tuple[str, int, str]]:

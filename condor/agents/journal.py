@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from condor.fsutil import atomic_write_text
+from condor.memory.paths import safe_slug
 from condor.paths import local_agents_root
 
 log = logging.getLogger(__name__)
@@ -397,8 +398,12 @@ class JournalManager:
         else:
             # Try to resolve from agent_id before falling back
             resolved_session, resolved_agent = resolve_agent_dirs(agent_id)
+            # The fallback joins the raw id, so it must be one segment
+            # (SEC-678): raises UnsafeIdError, a ValueError, before any mkdir.
             self._session_dir = (
-                resolved_session if resolved_session else local_agents_root() / agent_id
+                resolved_session
+                if resolved_session
+                else local_agents_root() / safe_slug(agent_id)
             )
             if not agent_dir and resolved_agent:
                 agent_dir = resolved_agent
