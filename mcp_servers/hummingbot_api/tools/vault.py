@@ -2,7 +2,8 @@
 
 A Condor Vault is a strategy token on a Meteora Dynamic Bonding Curve (DBC).
 The agent folder that drives it is public; the run config that tunes it is
-confidential; and the runner's Swig agent wallet is paid **by the token**: after
+private to its manager; and the runner's Swig agent wallet is paid **by the
+token**: after
 every close that realised LP fees, ``sweep_fees`` takes the runner's chosen share
 of those fees (``buyback_bps`` of the vault block), converts it to SOL and buys
 the vault token on its DBC pool, delivering the tokens to that same wallet.

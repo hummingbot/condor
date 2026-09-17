@@ -234,7 +234,7 @@ def _vault_args(vault: dict[str, Any] | None) -> list[str]:
     The block is public by construction (``vault_block.py`` refuses any key
     outside its shape), which is what lets it travel on argv beside
     ``--agent-slug``: the vault's slug, mint, pool, run id, Swig wallet and
-    buyback share are all on-chain already. The confidential overlay never
+    buyback share are all on-chain already. The vault's private config never
     comes near this line.
     """
     return ["--vault-json", encode_vault_block(vault)] if vault else []

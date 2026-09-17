@@ -136,7 +136,7 @@ class RunningInstance(BaseModel):
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
     # The Condor Vault this run serves, when it serves one: enough to label the
-    # run and link it, nothing from the confidential overlay.
+    # run and link it, nothing from the vault's private config.
     vault_slug: str = ""
     vault_run_id: str = ""
     # ── The loop's pulse ──
@@ -3658,35 +3658,16 @@ async def get_snapshot(
     tick: int,
     user: WebUser = Depends(get_current_user),
 ):
-    """Read a specific snapshot.
-
-    Redacted by key name against the session's saved config: the snapshot
-    writer already replaced every confidential ``key: value`` line before the
-    file was written, and this applies the same redaction on the way out so a
-    file written by an older writer, or edited by hand, still cannot hand the
-    overlay to the dashboard (plan §6 hook 2). The saved config carries the
-    ``confidential`` list and none of the values, so the read never sees them.
-    """
-    from condor.agents.config import confidential_keys, redact_confidential
-
+    """Read a specific snapshot."""
     strategy = _get_strategy(slug, sslug)
     session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
-    config_path = session_dir / "config.yml"
-    session_config = (
-        yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
-    )
-    keys = confidential_keys(session_config or {})
-
     for snap_dir_name, prefix in [("snapshots", "snapshot"), ("runs", "run")]:
         path = session_dir / snap_dir_name / f"{prefix}_{tick}.md"
         if path.exists():
-            return {
-                "content": redact_confidential(path.read_text(), keys),
-                "tick": tick,
-            }
+            return {"content": path.read_text(), "tick": tick}
     raise HTTPException(status_code=404, detail=f"Snapshot {tick} not found")
 
 

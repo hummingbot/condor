@@ -33,7 +33,7 @@ from condor.telemetry import taps as telemetry_taps
 
 from . import actions as actions_mod
 from .agent import Agent
-from .config import confidential_keys, persistable_config
+from .config import save_full_config
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
@@ -142,10 +142,6 @@ class TickEngine:
     _active_client: "ACPClient | PydanticAIClient | None" = field(
         default=None, init=False, repr=False
     )
-    # The run-config keys this session withholds from disk (Condor Vaults,
-    # plan §6 hook 2): the `confidential` list plus `system_prompt`. Resolved
-    # once, at start, so a malformed list fails the start and not a snapshot.
-    _confidential: tuple[str, ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -156,18 +152,16 @@ class TickEngine:
 
         # Condor Vault hooks, checked before anything is written so a bad start
         # request is refused with the reason and leaves no session behind.
-        # A `confidential` that is not a list of names would otherwise persist
-        # the overlay in clear; a non-ACP model cannot take a system prompt
-        # (the pydantic-ai client has no channel for one, and folding it into
-        # the tick prompt is exactly what the hook exists to avoid); a `vault`
-        # block outside its shape would reach argv malformed.
-        self._confidential = confidential_keys(self.config)
+        # A non-ACP model cannot take a system prompt (the pydantic-ai client
+        # has no channel for one), so a vault run on one would silently lose
+        # the rules that prompt carries; a `vault` block outside its shape
+        # would reach argv malformed.
         if self.config.get("system_prompt") and is_pydantic_ai_model(self._agent_key()):
             raise ValueError(
                 f"agent_key {self._agent_key()!r} is a pydantic-ai model, which "
-                "cannot take a system_prompt: a confidential system prompt only "
-                "reaches an ACP model (claude-acp, gemini, codex). Pick an ACP "
-                "agent_key for this run or drop system_prompt."
+                "cannot take a system_prompt: it only reaches an ACP model "
+                "(claude-acp, gemini, codex). Pick an ACP agent_key for this "
+                "run or drop system_prompt."
             )
         if self.config.get("vault") is not None:
             from mcp_servers.hummingbot_api.vault_block import validate_vault_block
@@ -206,11 +200,7 @@ class TickEngine:
             self.session_dir = strategy_dir / "sessions" / f"session_{self.session_num}"
             self.session_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save config per session — minus the confidential keys and the
-            # system prompt, which live only in this process for the run.
-            from .config import save_full_config
-
-            save_full_config(self.session_dir, persistable_config(self.config))
+            save_full_config(self.session_dir, self.config)
 
             self.journal = JournalManager(
                 self.agent_id,
@@ -713,8 +703,6 @@ class TickEngine:
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
                 agent_key=self._agent_key(),
-                confidential=self._confidential,
-                secrets=self._secret_texts(),
             )
             log.info(
                 "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
@@ -795,8 +783,6 @@ class TickEngine:
                 executors_data=executors_summary,
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
-                confidential=self._confidential,
-                secrets=self._secret_texts(),
             )
             actions_mod.append_actions(self.session_dir, tick_actions)
 
@@ -1090,11 +1076,6 @@ class TickEngine:
             tool_filter_mode=self.config.get("tool_filter_mode"),
             system_prompt=self.config.get("system_prompt", ""),
         )
-
-    def _secret_texts(self) -> tuple[str, ...]:
-        """Texts scrubbed verbatim from every snapshot: the system prompt."""
-        prompt = self.config.get("system_prompt", "")
-        return (prompt,) if prompt else ()
 
     def _vault_block(self) -> dict[str, Any] | None:
         """The public vault block for the MCP subprocess, or None.
