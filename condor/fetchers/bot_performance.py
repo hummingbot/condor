@@ -376,7 +376,11 @@ def _merge_instance_aggregates(bots: list[dict]) -> dict:
     return merged
 
 
-def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, dict]:
+def resolve_bots(
+    all_bot_perf: dict[str, dict],
+    bases: list[str],
+    live_names: set[str] | None = None,
+) -> dict[str, dict]:
     """Live aggregate per base, partition-aware and summed across its instances.
 
     A bot deploys under an instance name with a timestamp suffix appended
@@ -387,15 +391,23 @@ def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, d
     exact deploy where there is one, else its freshest instance — that rule now
     only picks a label, not which instance's PnL survives.
 
-    Deliberately live-only: this is the source for unrealized PnL and the open
-    position book, which belong to whoever is running right now. Realized PnL from
-    stopped instances comes through :func:`fetch_base_histories`, whose universe
-    includes archived names. Bases with no live instance are absent from the
-    result.
+    This is the source for unrealized PnL and the open position book, which belong
+    to whoever is running right now — but the snapshot is NOT live-only: it keeps
+    every bot the API ever orchestrated, a stopped one's frozen final unrealized
+    and positions included. ``live_names`` (:func:`fetch_live_instance_names`) is
+    the filter that makes the result live: only instances in it contribute. With
+    ``None`` liveness is unknown and every snapshot instance counts, unfiltered.
+    Realized PnL from stopped instances comes through :func:`fetch_base_histories`,
+    whose universe includes archived names. Bases with no live instance are absent
+    from the result.
     """
     out: dict[str, dict] = {}
     for base, insts in partition_instances(all_bot_perf, bases).items():
-        live = [i for i in insts if i in all_bot_perf]
+        live = [
+            i
+            for i in insts
+            if i in all_bot_perf and (live_names is None or i in live_names)
+        ]
         if not live:
             continue
         # Name-bearer first: _merge_instance_aggregates keeps bots[0]'s bot_name.
@@ -472,6 +484,62 @@ async def fetch_archived_instances(client: Any) -> list[str]:
 def clear_archived_cache() -> None:
     """Drop the cached archived-instance listing (tests, server reconfiguration)."""
     _archived_cache.clear()
+
+
+# Which instances are actually running. The controller-performance snapshot
+# cannot say — its rows outlive the bot — so liveness comes from the
+# orchestrator's active-bots listing. Short TTL (the snapshot's): a bot stopped
+# seconds ago must not linger as the live book.
+_live_names_cache: dict[str, tuple[float, set[str]]] = {}
+
+
+def clear_live_names_cache() -> None:
+    """Drop the cached active-instance listing (tests, server reconfiguration)."""
+    _live_names_cache.clear()
+
+
+def _is_bots_listing(result: Any) -> bool:
+    """Whether an active-bots response is a real listing, even an empty one.
+
+    ``extract_bots_list`` flattens an error payload, an HTML page and ``None`` to
+    ``[]`` just like a server with no bots running, and only the latter may mean
+    "nothing is live".
+    """
+    if isinstance(result, list):
+        return True
+    return (
+        isinstance(result, dict)
+        and result.get("status") != "error"
+        and isinstance(result.get("data"), (dict, list))
+    )
+
+
+async def fetch_live_instance_names(client: Any) -> set[str] | None:
+    """Names of the bot instances running on this server now, or ``None`` if unknown.
+
+    The filter :func:`resolve_bots` needs to keep a stopped instance's final
+    snapshot out of the live open book. Best-effort: a call that raises, a client
+    without the listing, or a response that is not a listing yields ``None`` —
+    never an empty set — so the caller keeps its unfiltered behaviour instead of
+    silently zeroing every bot's open book. A failure is not cached.
+    """
+    from condor.fetchers.bots import extract_bots_list
+
+    key = _server_key(client)
+    entry = _live_names_cache.get(key) if key else None
+    if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
+        return entry[1]
+    try:
+        result = await client.bot_orchestration.get_active_bots_status()
+    except Exception as e:
+        logger.debug("fetch_live_instance_names failed: %s", e)
+        return None
+    if not _is_bots_listing(result):
+        return None
+    names = {str(b["bot_name"]) for b in extract_bots_list(result) if b.get("bot_name")}
+    if key:
+        _live_names_cache[key] = (time.monotonic(), names)
+    return names
 
 
 async def fetch_bot_universe(client: Any) -> tuple[dict[str, dict], list[str]]:

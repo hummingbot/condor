@@ -324,6 +324,7 @@ async def apply_bot_mode_pnl(
         bot_executor_rows,
         fetch_base_histories,
         fetch_bot_universe,
+        fetch_live_instance_names,
         resolve_bots,
         slice_history,
     )
@@ -355,7 +356,9 @@ async def apply_bot_mode_pnl(
         client, all_perf, bases, earliest, now, extra_names=archived
     )
 
-    live = resolve_bots(all_perf, bases)
+    # The snapshot keeps a stopped instance's final unrealized and positions, so
+    # only the instances actually running may carry the open book.
+    live = resolve_bots(all_perf, bases, await fetch_live_instance_names(client))
     for base in bases:
         tiled = tile_owner_windows(owners[base])
         insts = histories_by_base.get(base, [])

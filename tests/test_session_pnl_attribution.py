@@ -10,6 +10,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from condor.agents.attribution import (
@@ -71,14 +72,26 @@ def _session(num: int) -> AgentPerformanceModel:
 class _FakeClient:
     """Serves controller snapshots + per-instance cumulative history."""
 
-    def __init__(self, snapshots: list[dict], history: dict[str, list[dict]]):
+    def __init__(
+        self,
+        snapshots: list[dict],
+        history: dict[str, list[dict]],
+        active: list[str] | None = None,
+    ):
         self._snapshots = snapshots
         self._history = history
+        # What the orchestrator runs now; by default every snapshot bot is live.
+        self._active = (
+            [s["bot_name"] for s in snapshots] if active is None else list(active)
+        )
         self.history_calls: list[str] = []
         self.bot_orchestration = self
 
     async def get_latest_controller_performance(self):
         return self._snapshots
+
+    async def get_active_bots_status(self):
+        return {"data": {name: {} for name in self._active}}
 
     async def get_controller_performance_history(self, bot_name, interval, limit):
         self.history_calls.append(bot_name)
@@ -1274,3 +1287,121 @@ def test_merge_stopped_bot_perf_alias_is_gone():
     import condor.agents.performance as perf_mod
 
     assert not hasattr(perf_mod, "_merge_stopped_bot_perf")
+
+
+# ── CORR-633: a stopped bot's final snapshot is not the live book ──
+
+
+def _stopped_bot_fixture(tmp_path: Path):
+    """A session still owning ``ns-bot`` (never released) whose instance stopped."""
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)})
+    inst = "ns-bot-20260701-000000"
+    position = {
+        "trading_pair": "BTC-USD",
+        "connector_name": "hyperliquid",
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 100.0,
+        "unrealized_pnl_quote": 7.0,
+    }
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0, positions=[position])]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0)]}
+    return inst, snapshots, history
+
+
+def _run_both(tmp_path: Path, make_client):
+    from condor.agents.performance import fetch_agent_performance
+
+    s1 = _session(1)
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, make_client()))
+    detail = asyncio.run(
+        fetch_agent_performance(
+            _executorless(make_client()),
+            "a_1",
+            windows=session_windows(tmp_path, None, [1], 1),
+        )
+    )
+    return s1, detail
+
+
+def test_a_stopped_bots_final_snapshot_is_not_the_live_book(tmp_path):
+    inst, snapshots, history = _stopped_bot_fixture(tmp_path)
+
+    s1, detail = _run_both(tmp_path, lambda: _FakeClient(snapshots, history, active=[]))
+
+    for surface in (s1, detail):
+        assert surface.realized_pnl == 100.0  # still realized, from the history
+        assert surface.unrealized_pnl == 0.0  # the frozen mark is nobody's
+        assert surface.open_count == 0
+        assert surface.executors == []
+    assert inst in detail.bot_instances
+    assert inst not in detail.bot_names
+    # The deploy stays listed for the report, marked with no open book.
+    assert [c["bot_name"] for c in detail.controllers] == [inst]
+    assert detail.controllers[0]["unrealized_pnl_quote"] == 0.0
+    assert detail.controllers[0]["positions_summary"] == []
+
+
+class _NoListingClient(_FakeClient):
+    """A backend (or double) whose active-bots listing raises."""
+
+    async def get_active_bots_status(self):
+        raise RuntimeError("listing down")
+
+
+class _ErrorListingClient(_FakeClient):
+    async def get_active_bots_status(self):
+        return {"status": "error", "message": "boom"}
+
+
+@pytest.mark.parametrize("client_cls", [_NoListingClient, _ErrorListingClient])
+def test_an_unknown_liveness_keeps_todays_attribution(tmp_path, client_cls):
+    """No listing means 'unknown', never 'nothing is live'."""
+    _inst, snapshots, history = _stopped_bot_fixture(tmp_path)
+
+    s1, detail = _run_both(tmp_path, lambda: client_cls(snapshots, history))
+
+    assert s1.unrealized_pnl == detail.unrealized_pnl == 7.0
+    assert s1.open_count == detail.open_count == 1
+
+
+def test_a_client_without_the_listing_is_unknown_liveness():
+    from condor.fetchers.bot_performance import fetch_live_instance_names
+
+    class _Bare:
+        bot_orchestration = object()
+
+    assert asyncio.run(fetch_live_instance_names(_Bare())) is None
+
+
+def test_live_names_are_cached_per_server_but_a_failure_is_not():
+    from condor.fetchers.bot_performance import (
+        clear_live_names_cache,
+        fetch_live_instance_names,
+    )
+
+    class _Counting:
+        base_url = "http://corr633"
+
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+            self.bot_orchestration = self
+
+        async def get_active_bots_status(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("down")
+            return {"status": "success", "data": {"b-1": {"status": "running"}}}
+
+    clear_live_names_cache()
+    try:
+        client = _Counting()
+        assert asyncio.run(fetch_live_instance_names(client)) is None
+        client.fail = False
+        assert asyncio.run(fetch_live_instance_names(client)) == {"b-1"}
+        assert asyncio.run(fetch_live_instance_names(client)) == {"b-1"}
+        assert client.calls == 2  # the failure was retried, the success cached
+    finally:
+        clear_live_names_cache()

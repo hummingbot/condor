@@ -221,6 +221,37 @@ def _merge_bot_perf(
     perf.open_count += len(open_rows)
 
 
+def _merge_stopped_instance(perf: AgentPerformance, bot: dict, lifetime: bool) -> None:
+    """Merge a stopped instance's final snapshot into ``perf`` without its book.
+
+    The snapshot outlives the bot, so its last unrealized PnL and positions are a
+    frozen mark, not exposure anyone holds ([[CORR-633]]). What it *did* still
+    counts: its controllers (unrealized and positions cleared) and close types
+    always, and its lifetime realized/volume/trades only when ``lifetime`` — a
+    base with a sliced window already has them from the history.
+    """
+    from condor.agents.attribution import fold_sliced_window
+
+    if lifetime:
+        fold_sliced_window(
+            perf,
+            (
+                float(bot.get("realized_pnl_quote", 0) or 0),
+                float(bot.get("volume_traded", 0) or 0),
+                float(bot.get("closed_trades", 0) or 0),
+                0.0,
+            ),
+        )
+    for ct, n in (bot.get("close_type_counts") or {}).items():
+        perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(
+            n or 0
+        )
+    perf.controllers = perf.controllers + [
+        {**c, "unrealized_pnl_quote": 0.0, "positions_summary": []}
+        for c in bot.get("controllers", [])
+    ]
+
+
 async def fetch_agent_pnl_series(
     client: Any,
     bot_names: list[str],
@@ -347,8 +378,9 @@ async def fetch_agent_performance_batch(
     bot's whole lifetime, so the figure matches what the web rollup attributes to
     the same session. The live open book (unrealized PnL, open rows, controller
     breakdown) is merged only for a base whose window is still open — the
-    current-owner rule the rollup applies; a closed window keeps its realized
-    slice and nothing else. A base in ``bot_names`` with no window (or no known
+    current-owner rule the rollup applies — and only from instances the
+    orchestrator lists as running; a closed window, or a base whose instances
+    are all stopped, keeps its realized slice and nothing else. A base in ``bot_names`` with no window (or no known
     ``since``) keeps the lifetime aggregate.
 
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
@@ -409,6 +441,7 @@ async def fetch_agent_performance_batch(
         from condor.agents.attribution import fold_sliced_window
         from condor.fetchers.bot_performance import (
             fetch_bot_universe,
+            fetch_live_instance_names,
             partition_instances,
             resolve_bots,
         )
@@ -416,12 +449,15 @@ async def fetch_agent_performance_batch(
         # Stopped instances still hold the realized PnL they earned, and a session
         # that stopped its bot before the rollup ran would otherwise report $0.
         all_bot_perf, archived = await fetch_bot_universe(client)
+        # Server-wide like ``archived``: which snapshot instances are running now.
+        # A stopped one's final snapshot is not a live book ([[CORR-633]]).
+        live_names = await fetch_live_instance_names(client)
         now = time.time()
         for aid, bases in wanted.items():
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
-            live = resolve_bots(all_bot_perf, bases)
+            live = resolve_bots(all_bot_perf, bases, live_names)
             instances = partition_instances(all_bot_perf, bases, archived)
             owned = {
                 base: w
@@ -442,10 +478,25 @@ async def fetch_agent_performance_batch(
                 # included — the session operated them all, and the two this one
                 # wound down are exactly where its realized PnL came from.
                 out[aid].bot_instances.extend(instances.get(base) or [])
-                if bot and (window is None or window.is_open):
-                    # Held now: the open book is this agent's, over its window's
-                    # slice (or the lifetime aggregate when none could be cut).
-                    _merge_bot_perf(out[aid], bot, sliced.get(base))
+                if window is None or window.is_open:
+                    if bot:
+                        # Held now: the open book is this agent's, over its
+                        # window's slice (or the lifetime aggregate when none
+                        # could be cut).
+                        _merge_bot_perf(out[aid], bot, sliced.get(base))
+                    elif base in sliced:
+                        fold_sliced_window(out[aid], sliced[base])
+                    # Instances the snapshot still lists but the orchestrator no
+                    # longer runs: what they did, never an open book.
+                    for name in instances.get(base) or []:
+                        if (
+                            live_names is not None
+                            and name in all_bot_perf
+                            and name not in live_names
+                        ):
+                            _merge_stopped_instance(
+                                out[aid], all_bot_perf[name], base not in sliced
+                            )
                 elif base in sliced:
                     # Stopped, released or handed over: no open book to merge, but
                     # the slice of its history is exactly what this agent realized.

@@ -402,3 +402,32 @@ def test_attribution_flags_a_bot_the_aggregator_cannot_see():
 def test_attribution_is_silent_for_a_pure_executor_session():
     """No bots, nothing missing — the agent_id tag is the whole story."""
     assert _blocks({})._sections == []
+
+
+def test_a_deploy_missing_from_bot_names_reads_stopped():
+    """CORR-633: State follows the live instance names, not the snapshot row."""
+
+    class _B:
+        rows: list = []
+
+        def section(self, *a, **k):
+            pass
+
+        def table(self, rows):
+            self.rows = rows
+
+    b = _B()
+    SessionReport._controllers(
+        b,
+        {
+            "bot_names": ["b-20260807-045821"],
+            "controllers": [
+                {"bot_name": "b-20260806-213931", "controller_id": "btc"},
+                {"bot_name": "b-20260807-045821", "controller_id": "sol"},
+            ],
+        },
+    )
+    assert [(r["Deploy"], r["State"]) for r in b.rows] == [
+        ("b-20260806-213931", "stopped"),
+        ("b-20260807-045821", "running"),
+    ]
