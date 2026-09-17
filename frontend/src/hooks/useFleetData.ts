@@ -108,9 +108,9 @@ export function useFleetData(
      * Whether to walk the fleet's performance history (ARCH-324).
      *
      * On by default, because both pages that fold a whole fleet also chart it.
-     * A host that only wants the *fold* — the home overview's money column,
-     * which folds one population per server and draws nothing — would
-     * otherwise pay a paged request per controller per server for a series it
+     * A host that only wants the *fold* — the execution dock
+     * (`components/chat/DockExecution.tsx`), which folds the running
+     * population and draws nothing — would otherwise pay a paged request per controller per server for a series it
      * never reads. Every other query is left exactly as it was, under the same
      * keys, so a host that turns the walk off still shares its fleet with the
      * pages that do chart it.

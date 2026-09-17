@@ -6,20 +6,20 @@
  * arithmetic it needed did not go with it, because it was never about the page.
  * What is pinned here is that a breakdown is a *slice of the same spine* and so
  * sums to the same fold; that {@link sumTotals} is a rule and not a spread,
- * because three of its fields are not additive; and that an agent's fold is the
- * *agent entire* rather than one scoped strategy of it, which is what
- * `floorTargets` exists to say.
+ * because three of its fields are not additive; and that the spine readers
+ * `floor.ts` and `scopeOwners` share read the spine `reconcile` folded.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { groupSpine, sumTotals } from "@/components/agent/floor/floor";
 import {
-  floorTargets,
-  foldRows,
-  foldTargets,
+  spineExposure,
+  spineKeys,
+  spineLastClose,
 } from "@/components/agent/workspace/fleet";
-import type { AgentSummary, ControllerInfo } from "@/lib/api";
+import { reconcile } from "@/components/agent/workspace/reconcile";
+import type { ControllerInfo } from "@/lib/api";
 import type { ConvertQuote, PerfLeaf } from "@/lib/perf-tree";
 import { foldLeaves } from "@/lib/perf-tree";
 
@@ -145,66 +145,7 @@ describe("sumTotals is a rule, not a spread", () => {
   });
 });
 
-describe("an agent's fold is the agent entire", () => {
-  function strategy(slug: string, server = "") {
-    return {
-      slug,
-      name: slug.toUpperCase(),
-      session_count: 1,
-      instances: [],
-      server_name: server,
-    } as unknown as AgentSummary["strategies"][number];
-  }
-
-  function agent(over: Partial<AgentSummary> = {}): AgentSummary {
-    return {
-      slug: "alpha",
-      name: "Alpha",
-      status: "idle",
-      session_count: 1,
-      total_pnl: 0,
-      total_volume: 0,
-      open_positions: 0,
-      server_name: "s1",
-      strategies: [strategy("mm")],
-      instances: [],
-      ...over,
-    } as AgentSummary;
-  }
-
-  it("prints the same number as the home's row when one strategy is in scope", () => {
-    const leaves = [leaf({ agent: "alpha.mm", how: "namespace", net: 64.12, volume: 2_549 })];
-    const input = { leaves, deeds: DEEDS, owners: [], convert: cv, now: NOW, symbol: "$" };
-    const home = foldRows(foldTargets([agent()], null)[0].targets, input);
-    const floor = foldRows(floorTargets([agent()], null)[0].targets, input);
-
-    expect(home.get("alpha")!.net).toBe(64.12);
-    expect(floor.get("alpha")!.net).toBe(home.get("alpha")!.net);
-  });
-
-  it("keeps the other strategies' records that the home's row narrows away", () => {
-    const two = agent({ strategies: [strategy("mm"), strategy("grid")] });
-    const leaves = [
-      leaf({ agent: "alpha.mm", how: "namespace", net: 100, volume: 10 }),
-      leaf({ agent: "alpha.grid", how: "namespace", net: 25, volume: 5 }),
-    ];
-    const input = { leaves, deeds: DEEDS, owners: [], convert: cv, now: NOW, symbol: "$" };
-
-    expect(foldRows(foldTargets([two], null)[0].targets, input).get("alpha")!.net).toBe(100);
-    // The whole reason `floorTargets` exists: `alpha.grid` is attributed, so it
-    // is in neither unowned bucket, and a row that narrowed it away would drop
-    // it out of a total whose only job is to be complete.
-    expect(floorTargets([two], null)[0].targets[0].strategy).toBeNull();
-    expect(foldRows(floorTargets([two], null)[0].targets, input).get("alpha")!.net).toBe(125);
-  });
-
-  it("lists an agent on every server any of its strategies declares", () => {
-    const spread = agent({
-      strategies: [strategy("mm", "s1"), strategy("grid", "s2")],
-    });
-    expect(floorTargets([spread], null).map((g) => g.server)).toEqual(["s1", "s2"]);
-  });
-
+describe("the spine readers over a reconciled spine", () => {
   it("carries the spine's derived readings out of the one fold", () => {
     const leaves = [
       leaf({
@@ -222,19 +163,21 @@ describe("an agent's fold is the agent entire", () => {
         endedAt: NOW - 60_000,
       }),
     ];
-    const fold = foldRows([{ slug: "alpha", strategy: null }], {
+    const r = reconcile({
       leaves,
       deeds: DEEDS,
       owners: [],
       convert: cv,
       now: NOW,
-      symbol: "$",
-    }).get("alpha")!;
+      slug: "alpha",
+      strategy: null,
+      attributed: null,
+    });
 
-    expect(fold.keys).toContain("bot-x:c9");
-    expect(fold.exposure).toBeCloseTo(-100, 9);
-    expect(fold.lastClose).toBe(NOW - 60_000);
-    expect(fold.running).toBe(1);
-    expect(fold.totals.net).toBe(3);
+    expect(spineKeys(r.spine)).toContain("bot-x:c9");
+    expect(spineExposure(r.spine, cv)).toBeCloseTo(-100, 9);
+    expect(spineLastClose(r.spine)).toBe(NOW - 60_000);
+    expect(r.spine.filter((l) => l.running)).toHaveLength(1);
+    expect(r.totals.net).toBe(3);
   });
 });
