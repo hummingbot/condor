@@ -1152,9 +1152,9 @@ async def _compute_strategy_performance(
     # fetch can still come back empty — so without this a dry run vanishes from
     # the sessions table on exactly the setup where it is most useful: no server
     # configured, nothing traded, just a simulated tick to read.
-    priced = {s.session_num for s in sessions if s.kind == "experiment"}
+    experiments_with_rows = {s.session_num for s in sessions if s.kind == "experiment"}
     for num, meta in sorted(exp_meta.items(), reverse=True):
-        if num in priced:
+        if num in experiments_with_rows:
             continue
         sessions.append(
             AgentPerformanceModel(

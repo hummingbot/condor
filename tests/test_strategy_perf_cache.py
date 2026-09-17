@@ -6,7 +6,10 @@ sessions/experiments are immutable and get served from ``_CLOSED_PERF_CACHE``
 after one final successful fetch.
 """
 
+import ast
 import asyncio
+import inspect
+import textwrap
 from collections import Counter, OrderedDict
 from types import SimpleNamespace
 
@@ -333,3 +336,25 @@ def test_no_client_rollup_is_still_cached(perf_env):
     assert sessions == []
     assert totals["total_pnl"] == 0
     assert len(agents_routes._PERF_CACHE) == 1
+
+
+def test_priced_is_bound_once_as_the_access_predicate():
+    """READ-696: ``priced`` names only the SEC-334 access bool that picks the
+    cache bucket; the experiment de-dup set has its own name, so a later
+    ``if priced:`` can never silently test set emptiness."""
+    src = textwrap.dedent(
+        inspect.getsource(agents_routes._compute_strategy_performance)
+    )
+    tree = ast.parse(src)
+    bindings = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id == "priced"
+    ]
+    assert len(bindings) == 1
+    call = bindings[0]
+    assert isinstance(call, ast.Call) and call.func.id == "_may_use_strategy_server"
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "experiments_with_rows" in names
