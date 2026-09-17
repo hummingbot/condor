@@ -142,7 +142,8 @@ const ExecutorRow = memo(function ExecutorRow({
   isStopping: boolean;
   onRowClick: (ex: ExecutorInfo) => void;
   onToggleSelect: (id: string) => void;
-  onStop: (id: string) => void;
+  /** Omitted by read-only hosts: no Stop control is drawn without it. */
+  onStop?: (id: string) => void;
   fmtPnl: RowFormatter;
   fmtVol: RowFormatter;
   fmtDet: RowFormatter;
@@ -216,7 +217,7 @@ const ExecutorRow = memo(function ExecutorRow({
         </div>
       </td>
       <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-        {isExecutorActive(ex.status) && (
+        {onStop && isExecutorActive(ex.status) && (
           <button
             onClick={() => onStop(ex.id)}
             disabled={isStopping}
@@ -265,8 +266,9 @@ export function ExecutorTable({
   allSelected: boolean;
   onRowClick: (ex: ExecutorInfo) => void;
   selectedExecutorId: string | null;
-  onStop: (id: string) => void;
-  stoppingIds: Set<string>;
+  /** Omit for a read-only table: rows then draw no Stop control. */
+  onStop?: (id: string) => void;
+  stoppingIds?: Set<string>;
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -330,7 +332,7 @@ export function ExecutorTable({
                 ex={ex}
                 isSelected={selectedExecutorId === ex.id}
                 isChecked={selectedIds.has(ex.id)}
-                isStopping={stoppingIds.has(ex.id)}
+                isStopping={stoppingIds?.has(ex.id) ?? false}
                 onRowClick={onRowClick}
                 onToggleSelect={onToggleSelect}
                 onStop={onStop}
@@ -374,8 +376,9 @@ export function DetailPanel({
   executor: ExecutorInfo;
   server: string;
   onClose: () => void;
-  onStop: (id: string) => void;
-  stopping: boolean;
+  /** Omit for a read-only panel: no Stop button is drawn without it. */
+  onStop?: (id: string) => void;
+  stopping?: boolean;
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -454,7 +457,7 @@ export function DetailPanel({
               <TrendingUp className="h-3 w-3" />
               Trade
             </button>
-            {isExecutorActive(executor.status) && (
+            {onStop && isExecutorActive(executor.status) && (
               <button
                 onClick={() => onStop(executor.id)}
                 disabled={stopping}

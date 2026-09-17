@@ -530,7 +530,6 @@ export function SessionExecutors({
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const stoppingIds = useMemo(() => new Set<string>(), []);
   const [selectedExecutor, setSelectedExecutor] = useState<ExecutorInfo | null>(null);
 
   // Positions held (filtered by controller IDs)
@@ -688,8 +687,6 @@ export function SessionExecutors({
         allSelected={allSelected}
         onRowClick={(ex) => setSelectedExecutor(ex)}
         selectedExecutorId={selectedExecutor?.id ?? null}
-        onStop={() => {}}
-        stoppingIds={stoppingIds}
       />
 
       {/* Executor Detail Panel */}
@@ -698,8 +695,6 @@ export function SessionExecutors({
           executor={selectedExecutor}
           server={serverName}
           onClose={() => setSelectedExecutor(null)}
-          onStop={() => {}}
-          stopping={false}
           rateFormatPnl={formatPnlValue}
           rateFormatValue={formatValue}
           rateFormatDetailed={formatValueDetailed}
