@@ -1079,16 +1079,32 @@ class TickEngine:
         bot whose base an earlier session of this same strategy recorded owning is
         this strategy's bot, and the session that just replaced that one inherits
         it. Both rules are conservative — an unrecognised bot is left alone.
+
+        All three rules match a *name*, and the performance snapshot they are
+        matched against is not a list of what is running: it keeps every bot the
+        API ever orchestrated, a stopped one's frozen final row included. So the
+        names are filtered through the orchestrator's live listing first
+        (CORR-699), or a restart would adopt every bot the strategy has ever run
+        and open an ownership window, starting now, on bots that are dead.
         """
         if self._adoption_done or self.ledger is None:
             return
-        from condor.fetchers.bot_performance import fetch_all_bot_performance
+        from condor.fetchers.bot_performance import (
+            fetch_all_bot_performance,
+            fetch_live_instance_names,
+        )
 
         try:
             all_perf = await fetch_all_bot_performance(client)
         except Exception as e:
             log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
             return
+
+        # Liveness is best-effort in the same way the rest of the function is:
+        # ``None`` means the orchestrator did not answer, and an unknown liveness
+        # must not silently adopt nothing — it leaves the snapshot unfiltered,
+        # exactly as before this filter existed.
+        live = await fetch_live_instance_names(client)
 
         from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
 
@@ -1117,6 +1133,8 @@ class TickEngine:
 
         now = time.time()
         for instance_name in all_perf:
+            if live is not None and instance_name not in live:
+                continue
             base = strip_deploy_suffix(instance_name)
             if base in disowned:
                 continue
