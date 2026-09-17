@@ -1320,21 +1320,34 @@ class TickEngine:
             return None
 
     async def _notify(self, message: str) -> None:
-        """Tell the run's owner, down the same ladder a delegation's notice takes.
+        """Tell the run's owner on Telegram *and* the dashboard bell, once each.
 
-        Only a live bot handed to ``start()`` used to count, and neither caller
-        (the start route, the boot restart) has one to hand, so every notice
-        here went nowhere. A dashboard launch carries no chat (``chat_id`` 0);
-        its owner's private chat is the one their user id names.
+        The notice goes down :func:`condor.notifications.announce`, the path a
+        delegation's notice takes: it resolves the sender ladder itself and
+        owns the "don't file it twice when the bottom rung is the bell" rule
+        (ARCH-212). Sending straight to the resolved bot put tick errors, risk
+        blocks and the emergency-shutdown alerts on Telegram only, so a
+        dashboard user on a Telegram-equipped install never saw them (ARCH-647).
+        A dashboard launch carries no chat (``chat_id`` 0); its owner's private
+        chat is the one their user id names. The bell entry links to the
+        agent's page, named by the agent slug that leads ``agent_id``.
         """
         chat_id = self.chat_id or self.user_id
         if not chat_id:
             return
-        from .delegate import resolve_bot
+        from condor.notifications import announce
 
+        slug = self.agent_id.partition(".")[0]
         try:
-            bot = resolve_bot(getattr(self, "_bot", None))
-            await bot.send_message(chat_id=chat_id, text=message)
+            await announce(
+                self.user_id,
+                chat_id,
+                message,
+                kind="agent",
+                bot=getattr(self, "_bot", None),
+                title=f"Loop · {slug}",
+                link=f"/agents/{slug}",
+            )
         except Exception:
             log.exception("Failed to send notification to chat %s", chat_id)
 
