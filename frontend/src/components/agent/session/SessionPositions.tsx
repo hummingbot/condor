@@ -1,13 +1,29 @@
+import { quoteOf } from "@/components/agent/session/positionFormat";
 import { PairLabel } from "@/components/executor/PairLabel";
 import type { PositionHeld } from "@/lib/api";
-import { formatCurrencyPnl, pnlTextClass } from "@/lib/formatters";
+import { pnlTextClass } from "@/lib/formatters";
+
+/** A money formatter bound to the display currency: `(value, quoteCurrency)`. */
+type QuoteFormatter = (val: number, quote: string) => string;
 
 /**
  * The positions a run's controllers still hold on the server — the card
  * `SessionExecutors` draws above its charts. The caller filters them to the
  * run's controller ids; an empty list renders nothing.
+ *
+ * Entry, current and unrealized PnL are in each position's quote currency, so
+ * they go through the caller's rate formatters (display currency, or the
+ * quote's own symbol with `⚠` when no rate exists) — never a bare `$`.
  */
-export function SessionPositions({ positions }: { positions: PositionHeld[] }) {
+export function SessionPositions({
+  positions,
+  formatPnl,
+  formatPrice,
+}: {
+  positions: PositionHeld[];
+  formatPnl: QuoteFormatter;
+  formatPrice: QuoteFormatter;
+}) {
   if (positions.length === 0) return null;
 
   return (
@@ -35,6 +51,7 @@ export function SessionPositions({ positions }: { positions: PositionHeld[] }) {
               const amount = p.net_amount_base ?? p.amount ?? 0;
               const entry = p.buy_breakeven_price ?? p.entry_price ?? 0;
               const current = p.current_price ?? 0;
+              const quote = quoteOf(p.trading_pair);
               return (
                 <tr key={`${p.trading_pair}-${i}`} className="border-b border-[var(--color-border)]/30">
                   <td className="py-2 pr-3 font-mono text-[var(--color-text)]">
@@ -46,10 +63,10 @@ export function SessionPositions({ positions }: { positions: PositionHeld[] }) {
                     </span>
                   </td>
                   <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">{Math.abs(amount).toFixed(4)}</td>
-                  <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">${entry.toFixed(2)}</td>
-                  <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${current.toFixed(2)}</td>
+                  <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">{formatPrice(entry, quote)}</td>
+                  <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">{formatPrice(current, quote)}</td>
                   <td className={`py-2 pr-3 text-right font-mono ${pnlTextClass(upnl)}`}>
-                    {formatCurrencyPnl(upnl)}
+                    {formatPnl(upnl, quote)}
                   </td>
                   <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{p.leverage ? `${p.leverage}x` : "—"}</td>
                 </tr>

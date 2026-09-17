@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 
+import { formatPositionPrice, quoteOf } from "@/components/agent/session/positionFormat";
 import { SessionPositions } from "@/components/agent/session/SessionPositions";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { PairLabel } from "@/components/executor/PairLabel";
@@ -10,7 +11,8 @@ import { useRates } from "@/hooks/useRates";
 import { useSnapshotBubbles } from "@/hooks/useSnapshotBubbles";
 import { type AgentExecutorRow, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
-import { formatCurrencyPnl, pnlTextClass } from "@/lib/formatters";
+import { pnlTextClass } from "@/lib/formatters";
+import { formatWithRate } from "@/lib/rates";
 
 // ── Helper ──
 
@@ -98,12 +100,6 @@ export function SessionExecutors({
     return merged;
   }, [restExecutors, wsExecutors, isLiveSession]);
 
-  // Currency conversion
-  const quoteCurrencies = useMemo(
-    () => executorInfos.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
-    [executorInfos],
-  );
-  const { formatPnlValue, formatValue, formatValueDetailed } = useRates(quoteCurrencies);
 
   // Fetch snapshots for bubble markers
   const { data: snapshotsData } = useQuery({
@@ -140,6 +136,18 @@ export function SessionExecutors({
     const cidSet = new Set(controllerIds);
     return positionsData.positions.filter((p) => p.controller_id && cidSet.has(p.controller_id));
   }, [positionsData, controllerIds]);
+
+  // Currency conversion. Positions carry their own quotes: a BTC-BRL hold next
+  // to SOL-USDC executors still needs the BRL rate fetched.
+  const quoteCurrencies = useMemo(
+    () => [...executorInfos.map((ex) => quoteOf(ex.trading_pair)), ...positions.map((p) => quoteOf(p.trading_pair))],
+    [executorInfos, positions],
+  );
+  const { rates, currency, formatPnlValue, formatValue, formatValueDetailed } = useRates(quoteCurrencies);
+  const formatPriceValue = useMemo(
+    () => formatWithRate(formatPositionPrice, rates, currency),
+    [rates, currency],
+  );
 
   const handleSort = useCallback((key: SortKey) => {
     setSortDir((prev) => (sortKey === key ? (prev === "asc" ? "desc" : "asc") : "desc"));
@@ -186,7 +194,7 @@ export function SessionExecutors({
   return (
     <div className="space-y-3">
       {/* Positions Held */}
-      <SessionPositions positions={positions} />
+      <SessionPositions positions={positions} formatPnl={formatPnlValue} formatPrice={formatPriceValue} />
 
       {/* Chart-focused view — each trading pair gets a prominent chart */}
       {chartGroups.map(([key, group]) => {
@@ -203,7 +211,7 @@ export function SessionExecutors({
                 />
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
                 <span className={`ml-auto font-mono text-xs ${pnlTextClass(pairPnl)}`}>
-                  {formatCurrencyPnl(pairPnl)}
+                  {formatPnlValue(pairPnl, quoteOf(group[0].trading_pair))}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>
               </div>
@@ -233,6 +241,9 @@ export function SessionExecutors({
         allSelected={allSelected}
         onRowClick={(ex) => setSelectedExecutor(ex)}
         selectedExecutorId={selectedExecutor?.id ?? null}
+        rateFormatPnl={formatPnlValue}
+        rateFormatValue={formatValue}
+        rateFormatDetailed={formatValueDetailed}
       />
 
       {/* Executor Detail Panel */}
