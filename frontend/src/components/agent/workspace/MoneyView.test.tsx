@@ -235,6 +235,41 @@ describe("the two numbers", () => {
   });
 });
 
+describe("the display currency (CORR-377)", () => {
+  it("converts the rollup with the fold, so a matching pair reconciles under R$", async () => {
+    fleetData.mockReturnValue(
+      fleet([controller({ controller_id: "a", global_pnl_quote: 64 })], {
+        convert: (v: number) => ({ value: v / 5, converted: true }),
+        currencySymbol: "R$",
+      }),
+    );
+    getStrategyPerformance.mockResolvedValue({ totals: { total_pnl: 64 }, sessions: [] });
+
+    render();
+    await settle();
+
+    expect(container.querySelector("[data-money-rollup]")?.textContent).toContain("+R$12.80");
+    expect(container.querySelector("[data-money-net]")?.textContent).toContain("+R$12.80");
+    // The only difference was the FX rate, and that is not a finding.
+    expect(container.querySelector("[data-money-unaccounted]")).toBeNull();
+  });
+
+  it("keeps both sides in one unit when no rate path exists", async () => {
+    fleetData.mockReturnValue(
+      fleet([controller({ controller_id: "a", global_pnl_quote: 64 })], {
+        convert: (v: number) => ({ value: v, converted: false }),
+      }),
+    );
+    getStrategyPerformance.mockResolvedValue({ totals: { total_pnl: 64 }, sessions: [] });
+
+    render();
+    await settle();
+
+    expect(container.querySelector("[data-money-rollup]")).not.toBeNull();
+    expect(container.querySelector("[data-money-unaccounted]")).toBeNull();
+  });
+});
+
 describe("the dash rule", () => {
   it("prints a dash, never $0.00, for an agent whose records say nothing", async () => {
     fleetData.mockReturnValue(fleet([]));

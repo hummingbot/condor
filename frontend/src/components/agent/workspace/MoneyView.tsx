@@ -122,9 +122,24 @@ export function MoneyView({
    *
    * A partial sum would be a smaller number that looks like a finished one, and
    * the whole reconciliation would then blame the difference on the fleet.
+   *
+   * **In the display currency** (CORR-377). The backend sums the bots'
+   * `*_pnl_quote` fields unconverted, while the fold and every term are run
+   * through `fleet.convert` per leaf — so the raw sum is converted once here,
+   * through the same `ConvertFn`, before `reconcile` subtracts it. Otherwise,
+   * under BRL/EUR/BTC, the rollup line printed a USD figure beside an `R$`
+   * symbol and `unaccounted` was nothing but the FX rate. With no rate path
+   * `convert` hands back the raw value, exactly as `quoteConverter` does for
+   * the leaves, so both sides stay in one unit either way. The sum is
+   * quote-mixed (a BRL-quoted bot contributes BRL numbers) and is converted as
+   * `USDT`, the same approximation every other rollup reader makes
+   * (`SessionKpis`); fixing that belongs in the backend, not here.
    */
   const attributed = rollups.every((q) => q.data)
-    ? rollups.reduce((sum, q) => sum + Number(q.data?.totals?.total_pnl ?? 0), 0)
+    ? fleet.convert(
+        rollups.reduce((sum, q) => sum + Number(q.data?.totals?.total_pnl ?? 0), 0),
+        "USDT",
+      ).value
     : null;
 
   const r = useMemo(
