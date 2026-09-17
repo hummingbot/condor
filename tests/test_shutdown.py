@@ -419,12 +419,6 @@ class _FakeTracker:
     def __init__(self, drawdown_pct):
         self._dd = drawdown_pct
 
-    def get_total_exposure(self):
-        return 0.0
-
-    def get_open_executor_count(self):
-        return 0
-
     def get_drawdown_pct(self):
         return self._dd
 

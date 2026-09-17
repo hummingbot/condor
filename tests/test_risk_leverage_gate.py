@@ -117,8 +117,6 @@ def test_the_limit_is_carried_into_the_risk_state_dict():
     engine = RiskEngine(RiskLimits(max_leverage=5.0))
     state = engine.get_state(
         SimpleNamespace(
-            get_total_exposure=lambda: 0.0,
-            get_open_executor_count=lambda: 0,
             get_drawdown_pct=lambda: 0.0,
         )
     )

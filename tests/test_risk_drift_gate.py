@@ -53,8 +53,6 @@ def test_the_verdict_reaches_the_prompt():
     engine = RiskEngine(RiskLimits(max_drift_quote=50.0))
     state = engine.get_state(
         SimpleNamespace(
-            get_total_exposure=lambda: 0.0,
-            get_open_executor_count=lambda: 0,
             get_drawdown_pct=lambda: 0.0,
         )
     )
@@ -82,8 +80,6 @@ def test_get_state_carries_the_engine_limit_values_as_a_field():
     engine = RiskEngine(limits)
     state = engine.get_state(
         SimpleNamespace(
-            get_total_exposure=lambda: 0.0,
-            get_open_executor_count=lambda: 0,
             get_drawdown_pct=lambda: 0.0,
         )
     )

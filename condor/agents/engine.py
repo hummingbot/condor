@@ -62,12 +62,6 @@ log = logging.getLogger(__name__)
 class _NullTracker:
     """Stub tracker for experiments (no journal)."""
 
-    def get_total_exposure(self) -> float:
-        return 0.0
-
-    def get_open_executor_count(self) -> int:
-        return 0
-
     def get_drawdown_pct(self) -> float:
         return 0.0
 
@@ -1388,13 +1382,7 @@ class TickEngine:
         if self.journal:
             summary = self.journal.get_summary_dict()
         else:
-            summary = {
-                "total_ticks": 0,
-                "daily_pnl": 0,
-                "total_volume": 0,
-                "total_exposure": 0,
-                "open_executors": 0,
-            }
+            summary = {"total_ticks": 0, "total_volume": 0}
 
         return {
             "agent_id": self.agent_id,
@@ -1403,12 +1391,12 @@ class TickEngine:
             "session_num": self.session_num,
             "status": self.status,
             "tick_count": summary["total_ticks"],
-            "daily_pnl": sd.get("total_pnl", summary["daily_pnl"]),
+            "daily_pnl": sd.get("total_pnl", 0.0),
             "realized_pnl": sd.get("realized_pnl", 0.0),
             "unrealized_pnl": sd.get("unrealized_pnl", 0.0),
             "total_volume": sd.get("total_volume", summary.get("total_volume", 0)),
-            "total_exposure": sd.get("total_exposure", summary["total_exposure"]),
-            "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
+            "total_exposure": sd.get("total_exposure", 0.0),
+            "open_executors": len(sd.get("executors") or []),
             # What the PnL above is made of, and what it is missing. A session
             # operating bots earns through them, so naming them is the difference
             # between a number and an auditable one.

@@ -215,17 +215,20 @@ class RiskEngine:
         self.limits = limits or RiskLimits()
 
     def get_state(self, tracker: Any) -> RiskState:
-        """Compute current risk metrics from tracker data."""
+        """Compute current risk metrics from tracker data.
+
+        The tracker only supplies ``get_drawdown_pct``. Exposure and the open
+        executor count come from the live executors provider, which the engine
+        sets on the returned state itself.
+        """
         state = RiskState(limits=self.limits)
 
         try:
-            state.total_exposure = tracker.get_total_exposure()
-            state.executor_count = tracker.get_open_executor_count()
             state.drawdown_pct = tracker.get_drawdown_pct()
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
-            # against zeroed exposure/count. A blocked state makes the engine
+            # against a zeroed drawdown. A blocked state makes the engine
             # pause the tick and notify instead of trading blind.
             state.is_blocked = True
             state.block_reason = f"risk state unavailable: {exc}"

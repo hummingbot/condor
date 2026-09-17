@@ -116,8 +116,6 @@ No ticks yet.
 
 ## Ticks
 
-## Executors
-
 ## Snapshots
 """
 
@@ -893,42 +891,6 @@ class JournalManager:
         return self._tick_count
 
     # ------------------------------------------------------------------
-    # Executor tracking
-    # ------------------------------------------------------------------
-
-    def track_executor(self, executor_id: str, ex_type: str, config: dict) -> None:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        connector = config.get("connector_name", "")
-        pair = config.get("trading_pair", "")
-        side = config.get("side", "")
-        amount = config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
-        entry = (
-            f"- executor={executor_id} | type={ex_type} | {connector} {pair} {side} "
-            f"| amount=${float(amount):.2f} | created={now} | status=open | pnl=0 | volume=0"
-        )
-        self._append_to_section("Executors", entry)
-
-    def update_executor(
-        self, executor_id: str, pnl: float, volume: float, stopped: bool = False
-    ) -> None:
-        text = self.read_full()
-        pattern = rf"(- executor={re.escape(executor_id)} \|.*)"
-        m = re.search(pattern, text)
-        if not m:
-            return
-
-        old_line = m.group(1)
-        new_line = re.sub(r"pnl=[^ |]*", f"pnl={pnl:.2f}", old_line)
-        new_line = re.sub(r"volume=[^ |]*", f"volume={volume:.2f}", new_line)
-        if stopped:
-            new_line = re.sub(r"status=\w+", "status=closed", new_line)
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-            new_line += f" | stopped={now}"
-
-        text = text.replace(old_line, new_line)
-        self._write_journal(text)
-
-    # ------------------------------------------------------------------
     # Metric snapshots (inline in journal)
     # ------------------------------------------------------------------
 
@@ -950,25 +912,6 @@ class JournalManager:
     # Queries (used by RiskEngine)
     # ------------------------------------------------------------------
 
-    def _parse_executors(self) -> list[dict]:
-        self.read_full()  # refresh parsed cache if the file changed
-        cached = self._parsed_cache.get("executors")
-        if cached is not None:
-            return cached
-        section = self._get_section("Executors")
-        results = []
-        for line in section.splitlines():
-            if not line.startswith("- executor="):
-                continue
-            entry: dict[str, Any] = {}
-            for part in line[2:].split(" | "):
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    entry[k.strip()] = v.strip()
-            results.append(entry)
-        self._parsed_cache["executors"] = results
-        return results
-
     def _parse_snapshots(self) -> list[dict]:
         self.read_full()  # refresh parsed cache if the file changed
         cached = self._parsed_cache.get("snapshots")
@@ -982,32 +925,6 @@ class JournalManager:
             results.append(_parse_snapshot_line(line))
         self._parsed_cache["snapshots"] = results
         return results
-
-    def get_daily_pnl(self) -> float:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        total = 0.0
-        for ex in self._parse_executors():
-            created = ex.get("created", "")
-            if created.startswith(today):
-                try:
-                    total += float(ex.get("pnl", 0))
-                except (ValueError, TypeError):
-                    pass
-        return total
-
-    def get_total_exposure(self) -> float:
-        total = 0.0
-        for ex in self._parse_executors():
-            if ex.get("status") == "open":
-                amount_str = ex.get("amount", "$0").lstrip("$")
-                try:
-                    total += float(amount_str)
-                except (ValueError, TypeError):
-                    pass
-        return total
-
-    def get_open_executor_count(self) -> int:
-        return sum(1 for ex in self._parse_executors() if ex.get("status") == "open")
 
     def get_drawdown_pct(self) -> float:
         snapshots = self._parse_snapshots()
@@ -1049,10 +966,7 @@ class JournalManager:
         """Overall summary for display."""
         return {
             "total_ticks": self._tick_count,
-            "daily_pnl": self.get_daily_pnl(),
             "total_volume": self.get_total_volume(),
-            "total_exposure": self.get_total_exposure(),
-            "open_executors": self.get_open_executor_count(),
             "drawdown_pct": self.get_drawdown_pct(),
         }
 
@@ -1148,22 +1062,6 @@ class JournalManager:
             m = re.search(r"peak_pnl=\$([+-]?[\d.]+)", line)
             return float(m.group(1)) if m else None
         return None
-
-    def _append_to_section(self, section: str, entry: str) -> None:
-        """Append a line to a section."""
-        text = self.read_full()
-        marker = f"## {section}\n"
-        idx = text.find(marker)
-        if idx == -1:
-            text += f"\n{marker}{entry}\n"
-        else:
-            insert_at = idx + len(marker)
-            next_section = text.find("\n## ", insert_at)
-            if next_section == -1:
-                text += entry + "\n"
-            else:
-                text = text[:next_section] + entry + "\n" + text[next_section:]
-        self._write_journal(text)
 
     # ------------------------------------------------------------------
     # Info

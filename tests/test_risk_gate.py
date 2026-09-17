@@ -212,16 +212,10 @@ def test_callback_second_create_cancelled_same_tick():
 
 
 class _BrokenTracker:
-    """Tracker whose metrics raise (e.g. corrupted journal)."""
-
-    def get_total_exposure(self) -> float:
-        raise ValueError("could not convert string to float: 'garbage'")
-
-    def get_open_executor_count(self) -> int:
-        return 0
+    """Tracker whose metric raises (e.g. corrupted journal)."""
 
     def get_drawdown_pct(self) -> float:
-        return 0.0
+        raise ValueError("could not convert string to float: 'garbage'")
 
 
 def test_get_state_fails_closed_when_tracker_raises():
