@@ -931,3 +931,107 @@ def test_llm_pass_reads_executors_and_positions_concurrently(tmp_path, monkeypat
     assert sorted(started) == ["executors", "positions"]
     [(_, llm)] = built
     assert len(llm.prompts) == 1
+
+
+# ── stop fan-out (PERF-668) ──
+
+
+def _gate_stops_in_batches(client, batch):
+    """Make each fake stop wait until ``batch`` stops of its round have started.
+
+    A serial loop never gets the next stop out, so it deadlocks on the gate and
+    the caller's ``asyncio.wait_for`` raises instead.
+    """
+    api = client.executors
+
+    async def gated_stop(executor_id, keep_position=False):
+        api.stop_calls.append((executor_id, keep_position))
+        target = -(-len(api.stop_calls) // batch) * batch
+        while len(api.stop_calls) < target:
+            await asyncio.sleep(0)
+        return {"status": "ok"}
+
+    api.stop_executor = gated_stop
+
+
+def test_baseline_stops_executors_concurrently(tmp_path, monkeypatch):
+    running = [
+        {"id": "e1", "connector": "binance_perpetual"},
+        {"id": "e2", "connector": "binance"},
+        {"id": "e3", "connector": "hyperliquid_perpetual"},
+    ]
+    # Nothing stranded, so the verify step issues no retry stops.
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    _gate_stops_in_batches(client, 3)
+
+    async def _go():
+        await asyncio.wait_for(run_shutdown(engine, "test"), timeout=2)
+
+    asyncio.run(_go())
+
+    assert dict(client.executors.stop_calls) == {"e1": False, "e2": True, "e3": False}
+    assert ("shutdown_done", "stopped=3, failures=0, verify=flat") in (
+        engine.journal.actions
+    )
+
+
+class _StopRejected(Exception):
+    def __init__(self, status, message):
+        super().__init__(f"{status}, message={message!r}, url=http://internal:8000")
+        self.status = status
+        self.message = message
+
+
+def test_one_failed_stop_is_reported_in_running_order(tmp_path, monkeypatch):
+    running = [
+        {"id": "e1", "connector": "binance_perpetual"},
+        {"id": "e2", "connector": "binance_perpetual"},
+        {"id": "e3", "connector": "binance_perpetual"},
+    ]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    api = client.executors
+
+    async def stop(executor_id, keep_position=False):
+        api.stop_calls.append((executor_id, keep_position))
+        if executor_id == "e2":
+            raise _StopRejected(409, "executor already stopping")
+        return {"status": "ok"}
+
+    api.stop_executor = stop
+    stopped, failures = asyncio.run(
+        shutdown_module._deterministic_baseline(engine, client, ShutdownPolicy())
+    )
+
+    assert failures == ["stop e2: executor already stopping"]
+    assert stopped == len(running) - 1
+
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    client.executors.stop_executor = stop
+    asyncio.run(run_shutdown(engine, "breach"))
+    [note] = notes
+    assert "1 winddown error(s): stop e2: executor already stopping" in note
+    assert "internal" not in note
+
+
+def test_retry_pass_stops_executors_concurrently(tmp_path, monkeypatch):
+    running = [
+        {"id": "e1", "connector": "binance_perpetual"},
+        {"id": "e2", "connector": "binance_perpetual"},
+        {"id": "e3", "connector": "binance_perpetual"},
+    ]
+    stuck = [{"connector_name": "binance_perpetual", "trading_pair": "ETH-USDT"}]
+    residual = [{"connector_name": "binance_perpetual", "trading_pair": "SOL-USDT"}]
+    engine, client, notes = _fake_engine(
+        running, [stuck, residual], monkeypatch, tmp_path
+    )
+    _gate_stops_in_batches(client, 3)
+
+    async def _go():
+        await asyncio.wait_for(run_shutdown(engine, "breach"), timeout=2)
+
+    asyncio.run(_go())
+
+    calls = client.executors.stop_calls
+    assert len(calls) == 6
+    assert sorted(calls[3:]) == [("e1", False), ("e2", False), ("e3", False)]
+    assert any("🚨" in n and "SOL-USDT" in n for n in notes)

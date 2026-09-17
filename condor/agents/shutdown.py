@@ -212,23 +212,26 @@ async def _deterministic_baseline(
     from condor.fetchers.executors import describe_executor_error, stop_executor
 
     running = await _get_running_executors(engine, client)
-    stopped = 0
-    failures: list[str] = []
-    for ex in running:
+    targets = [ex for ex in running if ex.get("id") or ex.get("executor_id")]
+
+    async def _stop_one(ex: dict) -> str | None:
         ex_id = ex.get("id") or ex.get("executor_id")
-        if not ex_id:
-            continue
-        keep = _keep_position(ex, policy)
         try:
-            await stop_executor(client, ex_id, keep_position=keep)
+            await stop_executor(client, ex_id, keep_position=_keep_position(ex, policy))
         except Exception as e:
             # A raise is the only failure signal: these failures are read back
             # by the operator and by the LLM cleanup pass, so keep the raw
             # exception (which embeds the backend URL) out of them.
             _, message = describe_executor_error(e)
-            failures.append(f"stop {ex_id}: {message}")
-            continue
-        stopped += 1
+            return f"stop {ex_id}: {message}"
+        return None
+
+    # Every stop signal goes out at once (PERF-668): on a hanging API a serial
+    # loop would not even send the last executor's stop until the previous ones
+    # had each hit the client timeout. gather keeps results in ``running`` order.
+    results = await asyncio.gather(*(_stop_one(ex) for ex in targets))
+    failures = [r for r in results if r]
+    stopped = sum(1 for r in results if r is None)
     return stopped, failures
 
 
@@ -249,16 +252,20 @@ async def _verify_and_retry(
     from condor.fetchers.executors import stop_executor
 
     running = await _get_running_executors(engine, client)
-    for ex in running:
-        if _keep_position(ex, policy):
-            continue
+    targets = [
+        ex
+        for ex in running
+        if not _keep_position(ex, policy) and (ex.get("id") or ex.get("executor_id"))
+    ]
+
+    async def _retry_one(ex: dict) -> None:
         ex_id = ex.get("id") or ex.get("executor_id")
-        if not ex_id:
-            continue
         try:
             await stop_executor(client, ex_id, keep_position=False)
         except Exception:
             log.exception("shutdown: retry stop failed for %s", ex_id)
+
+    await asyncio.gather(*(_retry_one(ex) for ex in targets))
 
     positions = await _fetch_positions(client, engine.agent_id)
     return [p for p in positions if not _should_remain_open(p, policy)]
