@@ -3514,10 +3514,10 @@ async def get_strategy_state(
     slug: str, sslug: str, user: WebUser = Depends(get_current_user)
 ):
     """Every live key in this strategy's namespace."""
-    from condor.runtime.state import list_state, namespace_for_session
+    from condor.runtime.state import list_state, namespace_for_strategy
 
     _get_strategy(slug, sslug)  # 404s if it does not exist
-    return {"state": list_state(namespace_for_session(f"{slug}.{sslug}"))}
+    return {"state": list_state(namespace_for_strategy(slug, sslug))}
 
 
 @router.post("/{slug}/strategies/{sslug}/state")
@@ -3528,11 +3528,11 @@ async def set_strategy_state(
     user: WebUser = Depends(get_current_user),
 ):
     """Set or clear one key. The namespace is derived, never caller-supplied."""
-    from condor.runtime.state import clear_state, namespace_for_session, set_state
+    from condor.runtime.state import clear_state, namespace_for_strategy, set_state
 
     _get_strategy(slug, sslug)
     _require_no_foreign_live_run(slug, sslug, user)
-    namespace = namespace_for_session(f"{slug}.{sslug}")
+    namespace = namespace_for_strategy(slug, sslug)
 
     if req.clear:
         return {"cleared": clear_state(namespace, req.key)}

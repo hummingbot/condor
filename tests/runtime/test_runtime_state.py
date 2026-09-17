@@ -25,6 +25,7 @@ from condor.runtime.state import (
     list_state,
     load_namespace,
     namespace_for,
+    namespace_for_strategy,
     set_state,
 )
 from condor.runtime.timeouts import TimeoutPolicy, resolve_tick_timeout
@@ -191,6 +192,43 @@ def test_namespace_for_uses_agent_and_strategy():
         session_num=7,
     )
     assert namespace_for(engine) == "brigado.mm"
+
+
+def _engine(agent_slug, strategy_slug):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        agent=SimpleNamespace(slug=agent_slug),
+        strategy=SimpleNamespace(slug=strategy_slug),
+        session_num=7,
+    )
+
+
+def test_namespace_for_strategy_matches_the_engine_namespace():
+    """The routes' helper and the loop's derivation are one definition (READ-694)."""
+    engine = _engine("brigado", "mm")
+    assert namespace_for_strategy("brigado", "mm") == namespace_for(engine)
+    assert namespace_for(engine) == "brigado.mm"
+
+
+def test_state_routes_share_the_loop_namespace(state_root, monkeypatch):
+    """What the dashboard writes is what the loop's BoundState reads, and back."""
+    import asyncio
+
+    from condor.web.routes import agents as routes
+
+    (state_root / "a" / "strategies" / "s").mkdir(parents=True)
+    monkeypatch.setattr(routes, "_get_strategy", lambda *a, **k: None)
+    monkeypatch.setattr(routes, "_require_no_foreign_live_run", lambda *a, **k: None)
+
+    req = routes.SetStateRequest(key="cursor", value="exec-9")
+    assert asyncio.run(routes.set_strategy_state("a", "s", req, user=None)) == {
+        "ok": True
+    }
+
+    assert BoundState(namespace_for(_engine("a", "s"))).list() == {"cursor": "exec-9"}
+    got = asyncio.run(routes.get_strategy_state("a", "s", user=None))
+    assert got == {"state": {"cursor": "exec-9"}}
 
 
 # ── The tick reads the store (ARCH-276) ──

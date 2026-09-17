@@ -211,17 +211,20 @@ def _expired(entry: dict) -> bool:
 # ── Namespace helpers ──
 
 
-def namespace_for(engine) -> str:
-    """The namespace a running strategy owns.
+def namespace_for_strategy(agent_slug: str, strategy_slug: str) -> str:
+    """The namespace a strategy owns.
 
     Keyed on (agent, strategy) rather than the session number so a cursor
     survives into the next session — which is the point of persisting it.
+    The loop and the dashboard's state routes both derive it here, so they
+    cannot drift onto different stores.
     """
-    return f"{engine.agent.slug}.{engine.strategy.slug}"
+    return f"{agent_slug}.{strategy_slug}"
 
 
-def namespace_for_session(key) -> str:
-    return str(key).replace(":", ".")
+def namespace_for(engine) -> str:
+    """The namespace a running strategy owns; see namespace_for_strategy."""
+    return namespace_for_strategy(engine.agent.slug, engine.strategy.slug)
 
 
 class BoundState:

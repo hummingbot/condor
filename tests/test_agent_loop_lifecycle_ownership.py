@@ -343,11 +343,11 @@ def _send(user: WebUser, method: str, url: str, body):
 
 def _snapshot(run) -> dict:
     from condor.agents.config import load_full_config
-    from condor.runtime.state import list_state, namespace_for_session
+    from condor.runtime.state import list_state, namespace_for_strategy
 
     return {
         "learnings": (run.home / "learnings.md").read_text(),
-        "state": list_state(namespace_for_session("brigado.scalp")),
+        "state": list_state(namespace_for_strategy("brigado", "scalp")),
         "config": load_full_config(run.home),
         "files": sorted(
             (str(p.relative_to(run.root)), p.read_bytes())
