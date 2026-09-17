@@ -563,3 +563,47 @@ def test_attribution_session_start_uses_the_same_definition(tmp_path):
         == 1_700_000_000.0
     )
     assert session_start_epoch(strategy_dir, 99) == 0.0
+
+
+# ── Which session is "latest" (CORR-660) ──
+
+
+def test_latest_session_is_the_highest_number_not_the_most_recently_touched(
+    tmp_path,
+):
+    """An unclaim rewrites ``owned_bots.json`` in every session that owned the
+    bot, which bumps an old session dir's mtime; the card must still report the
+    newest run."""
+    from condor.agents.ownership import BotLedger, disown
+
+    strategy_dir = tmp_path / "brl_mm"
+    s1 = _write_session(
+        strategy_dir, 1, ticks=4, status={"state": "stopped", "agent_id": "a.mm_1"}
+    )
+    s2 = _write_session(
+        strategy_dir, 2, ticks=9, status={"state": "interrupted", "agent_id": "a.mm_2"}
+    )
+    # session_2 is the newer run but session_1 is touched last.
+    os.utime(s2, (1000, 1000))
+    BotLedger("ns", s1, enforced=None).adopt("bot_x")
+    disown(strategy_dir, "bot_x")
+    assert s1.stat().st_mtime > s2.stat().st_mtime
+
+    status = infer_latest_session_status(strategy_dir, "a.mm")
+    assert status["session_num"] == 2
+    assert status["status"] == "interrupted"
+    assert status["agent_id"] == "a.mm_2"
+    assert status["tick_count"] == 9
+
+
+def test_latest_session_skips_a_junk_session_dir(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, status={"state": "stopped"})
+    _write_session(strategy_dir, 3, status={"state": "running"})
+    junk = strategy_dir / "sessions" / "session_junk"
+    junk.mkdir()
+    os.utime(junk, (time.time() + 100, time.time() + 100))
+
+    status = infer_latest_session_status(strategy_dir, "brigado.brl_mm")
+    assert status["session_num"] == 3
+    assert status["status"] == "running"

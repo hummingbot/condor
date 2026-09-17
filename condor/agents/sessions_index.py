@@ -45,6 +45,11 @@ def infer_latest_session_status(
     ``interrupted`` rather than the ``idle`` this used to fabricate. Sessions
     written before status files existed have none, and those still fall back to
     ``idle`` — the honest answer when nothing was recorded.
+
+    "Latest" is the highest session number (numbers are allocated monotonically
+    by ``next_session_number``), never the directory mtime: every ledger write
+    (``disown`` rewrites ``owned_bots.json`` in every session that owned a bot)
+    bumps an old session dir's mtime and would hand the card its status.
     """
     from condor.runtime.registry_file import read_status
 
@@ -52,7 +57,7 @@ def infer_latest_session_status(
     if not sessions:
         return None
 
-    num, latest = max(sessions, key=lambda s: s[1].stat().st_mtime)
+    num, latest = sessions[-1]
 
     status = read_status(latest) or {}
     return {

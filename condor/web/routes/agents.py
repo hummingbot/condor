@@ -3292,6 +3292,7 @@ async def claim_bot(
     back-fill actually report the run's history.
     """
     from condor.agents.config import load_full_config
+    from condor.agents.journal import iter_session_dirs
     from condor.agents.ownership import (
         BotLedger,
         bot_namespace,
@@ -3310,11 +3311,11 @@ async def claim_bot(
     if req.session_num:
         session_dir = sessions_root / f"session_{req.session_num}"
     else:
-        candidates = sorted(
-            (d for d in sessions_root.glob("session_*") if d.is_dir()),
-            key=lambda d: d.stat().st_mtime,
-        )
-        session_dir = candidates[-1] if candidates else None
+        # The highest-numbered session, as the strategy card reports it — not
+        # the dir with the newest mtime, which any ledger write (an unclaim
+        # rewrites every session's owned_bots.json) moves onto an old session.
+        sessions = iter_session_dirs(strategy.home)
+        session_dir = sessions[-1][1] if sessions else None
     if session_dir is None or not session_dir.is_dir():
         raise HTTPException(
             status_code=404,
