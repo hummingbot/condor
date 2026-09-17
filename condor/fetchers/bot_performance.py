@@ -561,13 +561,22 @@ async def fetch_bot_universe(client: Any) -> tuple[dict[str, dict], list[str]]:
     with each caller, whose guards differ. Adoption (``TickEngine``) deliberately
     calls :func:`fetch_all_bot_performance` directly, because it must defer on a
     failed snapshot instead of seeing an empty server.
+
+    The two listings are independent, so they are awaited together: a cold entry
+    (every engine tick, the rollup past the archived TTL) pays one wall-clock
+    round trip instead of two back to back.
     """
-    try:
-        all_perf = await fetch_all_bot_performance(client)
-    except Exception as e:
-        logger.warning("bot performance snapshot failed: %s", e)
-        all_perf = {}
-    archived = await fetch_archived_instances(client)
+
+    async def _snapshot() -> dict[str, dict]:
+        try:
+            return await fetch_all_bot_performance(client)
+        except Exception as e:
+            logger.warning("bot performance snapshot failed: %s", e)
+            return {}
+
+    all_perf, archived = await asyncio.gather(
+        _snapshot(), fetch_archived_instances(client)
+    )
     return all_perf, archived
 
 

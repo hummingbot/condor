@@ -972,6 +972,105 @@ def test_bot_universe_degrades_a_failed_snapshot_to_an_empty_live_set():
         clear_archived_cache()
 
 
+# ── PERF-681: the snapshot and the archived listing are fetched together ──
+
+
+class _GatedUniverseClient(_FakeClient):
+    """The snapshot only returns once the archived listing has been requested.
+
+    No ``base_url``, so neither cache nor SingleFlight is involved: a prelude that
+    awaits the snapshot before starting the archived listing deadlocks here.
+    """
+
+    def __init__(self, history, archived, snapshot_fails=False):
+        super().__init__(snapshots=[], history=history)
+        self._listed = asyncio.Event()
+        self._snapshot_fails = snapshot_fails
+        paths = [f"bots/archived/{n}/data/{n}.sqlite" for n in archived]
+
+        async def _list_databases():
+            self._listed.set()
+            return paths
+
+        from types import SimpleNamespace
+
+        self.archived_bots = SimpleNamespace(list_databases=_list_databases)
+
+    async def get_latest_controller_performance(self):
+        await self._listed.wait()
+        if self._snapshot_fails:
+            raise RuntimeError("controller-performance/latest timed out")
+        return self._snapshots
+
+
+@pytest.mark.parametrize("snapshot_fails", [False, True])
+def test_bot_universe_fetches_snapshot_and_archive_concurrently(
+    tmp_path, snapshot_fails
+):
+    """All three attribution sites complete against the gated fake, same figures."""
+    from condor.agents.performance import (
+        fetch_agent_performance_batch,
+        fetch_agent_pnl_series,
+    )
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_history_cache,
+        clear_live_names_cache,
+        clear_snapshot_cache,
+        fetch_bot_universe,
+    )
+
+    def _clear():
+        clear_snapshot_cache()
+        clear_archived_cache()
+        clear_history_cache()
+        clear_live_names_cache()
+
+    inst = "ns-bot-20260701-000000"
+    history = {
+        inst: [
+            _hist_row(T0, 0.0),
+            _hist_row(T2, 40.0, cum_volume=4000.0),
+            _hist_row(T3, 100.0, cum_volume=9000.0),
+        ]
+    }
+
+    def _client():
+        return _GatedUniverseClient(history, [inst], snapshot_fails=snapshot_fails)
+
+    async def _bounded(coro):
+        return await asyncio.wait_for(coro, 5.0)
+
+    _clear()
+    try:
+        assert asyncio.run(_bounded(fetch_bot_universe(_client()))) == ({}, [inst])
+
+        sd1 = _write_session(tmp_path, 1)
+        _write_ledger(sd1, {"ns-bot": _epoch(T2)})
+        s1 = _session(1)
+        asyncio.run(_bounded(apply_bot_mode_pnl([s1], tmp_path, None, _client())))
+        assert s1.realized_pnl == 60.0
+
+        series = asyncio.run(
+            _bounded(fetch_agent_pnl_series(_client(), ["ns-bot"], _epoch(T2)))
+        )
+        assert series and series[-1]["pnl"] == 60.0
+
+        batch = asyncio.run(
+            _bounded(
+                fetch_agent_performance_batch(
+                    _executorless(_client()),
+                    ["a_1"],
+                    bot_names={"a_1": ["ns-bot"]},
+                    windows={"a_1": {"ns-bot": OwnershipWindow(_epoch(T2))}},
+                )
+            )
+        )
+        assert batch["a_1"].realized_pnl == 60.0
+    finally:
+        _clear()
+
+
 # ── ARCH-690: one AgentPerformance -> AgentPerformanceModel projection ──
 
 
