@@ -5,7 +5,13 @@ import { useNavigate } from "react-router-dom";
 import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { agentBucketLabel, isAgentBucket, runParam } from "@/components/perf/agentFilter";
 import { agentColor } from "@/lib/agentColor";
-import { loopFacts, loopStatus, ownerDisplayName, type FleetOwner } from "@/lib/agent-attribution";
+import {
+  isPseudoRunKey,
+  loopFacts,
+  loopStatus,
+  ownerDisplayName,
+  type FleetOwner,
+} from "@/lib/agent-attribution";
 import { shortBotName } from "@/lib/formatters";
 import { useSeconds } from "@/hooks/useSeconds";
 
@@ -95,6 +101,11 @@ export function AgentScopeHeader({
   // on and no key to mint a colour from, so it gets the name and the fold and
   // none of the affordances that only mean something for a run.
   const bucket = isAgentBucket(runKey);
+  // A door (chat, delegation, the dashboard) is a run key with a colour, but no
+  // loop stands behind it either: its owner ships `live: null`, so the status
+  // would always read "idle", and its slug is reserved, so no agent owns it and
+  // the workspace would open some unrelated loop strategy instead (CORR-396).
+  const loopless = bucket || isPseudoRunKey(runKey);
   const label = agentBucketLabel(runKey, owners);
   const live = owner?.live ?? null;
   const status = loopStatus(live);
@@ -114,7 +125,7 @@ export function AgentScopeHeader({
   // in the URL is the whole point of the Lab, so this is the shortest possible
   // demonstration of it.
   const openSession = (snapshotTick?: number) => {
-    if (!owner) return;
+    if (!owner || loopless) return;
     navigate(
       workspaceHref(owner.agentSlug, {
         open: "runs",
@@ -149,10 +160,11 @@ export function AgentScopeHeader({
             {shortBotName(botName)}
           </span>
         )}
-        {/* Only a run can be idle. A bucket has no loop to be between ticks of,
-            and saying "idle" beside it would answer a question nobody asked
-            with a fact about a thing that does not exist (CORR-363). */}
-        {!bucket && (
+        {/* Only a loop can be idle. A bucket has no loop to be between ticks of,
+            and neither is a door (chat, delegation, dashboard): saying "idle"
+            beside either would answer a question nobody asked with a fact
+            about a thing that does not exist (CORR-363, CORR-396). */}
+        {!loopless && (
           <span className="flex shrink-0 items-center gap-1.5 font-normal">
             <StatusDot status={status} />
             <span className="text-xs capitalize text-[var(--color-text-muted)]">{status}</span>
@@ -163,7 +175,7 @@ export function AgentScopeHeader({
             {facts.join(" · ")}
           </span>
         )}
-        {owner && (
+        {owner && !loopless && (
           <button
             type="button"
             onClick={() => openSession()}
