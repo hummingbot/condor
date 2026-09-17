@@ -123,7 +123,6 @@ export function SessionExecutors({
   // Table state
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectedExecutor, setSelectedExecutor] = useState<ExecutorInfo | null>(null);
 
   // Positions held (filtered by controller IDs)
@@ -156,23 +155,6 @@ export function SessionExecutors({
     setSortDir((prev) => (sortKey === key ? (prev === "asc" ? "desc" : "asc") : "desc"));
     setSortKey(key);
   }, [sortKey]);
-
-  const toggleSelect = useCallback((id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const selectAll = useCallback(() => {
-    setSelectedIds((prev) =>
-      prev.size === executorInfos.length ? new Set() : new Set(executorInfos.map((e) => e.id)),
-    );
-  }, [executorInfos]);
-
-  const allSelected = selectedIds.size === executorInfos.length && executorInfos.length > 0;
 
   if (!sessionDetail) {
     return (
@@ -238,10 +220,6 @@ export function SessionExecutors({
         sortKey={sortKey}
         sortDir={sortDir}
         onSort={handleSort}
-        selectedIds={selectedIds}
-        onToggleSelect={toggleSelect}
-        onSelectAll={selectAll}
-        allSelected={allSelected}
         onRowClick={(ex) => setSelectedExecutor(ex)}
         selectedExecutorId={selectedExecutor?.id ?? null}
         rateFormatPnl={formatPnlValue}

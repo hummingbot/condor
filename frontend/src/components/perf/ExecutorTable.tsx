@@ -138,10 +138,12 @@ const ExecutorRow = memo(function ExecutorRow({
 }: {
   ex: ExecutorInfo;
   isSelected: boolean;
-  isChecked: boolean;
+  /** Only meaningful when `onToggleSelect` is given. */
+  isChecked?: boolean;
   isStopping: boolean;
   onRowClick: (ex: ExecutorInfo) => void;
-  onToggleSelect: (id: string) => void;
+  /** Omitted by hosts with no bulk action: no checkbox cell is drawn without it. */
+  onToggleSelect?: (id: string) => void;
   /** Omitted by read-only hosts: no Stop control is drawn without it. */
   onStop?: (id: string) => void;
   fmtPnl: RowFormatter;
@@ -157,14 +159,16 @@ const ExecutorRow = memo(function ExecutorRow({
       style={{ borderLeft: `3px solid ${pnlBorder}` }}
       onClick={() => onRowClick(ex)}
     >
-      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-        <input
-          type="checkbox"
-          checked={isChecked}
-          onChange={() => onToggleSelect(ex.id)}
-          className="rounded border-[var(--color-border)]"
-        />
-      </td>
+      {onToggleSelect && (
+        <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={isChecked ?? false}
+            onChange={() => onToggleSelect(ex.id)}
+            className="rounded border-[var(--color-border)]"
+          />
+        </td>
+      )}
       <td className="px-4 py-2.5 text-xs font-mono text-[var(--color-text-muted)]" title={ex.id}>
         {ex.id.slice(0, 8)}
       </td>
@@ -260,10 +264,13 @@ export function ExecutorTable({
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (key: SortKey) => void;
-  selectedIds: Set<string>;
-  onToggleSelect: (id: string) => void;
-  onSelectAll: () => void;
-  allSelected: boolean;
+  /** The four selection props travel together: a host that wants the checkbox
+   *  column passes all of them, a read-only host passes none and the column is
+   *  not drawn at all. */
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
+  onSelectAll?: () => void;
+  allSelected?: boolean;
   onRowClick: (ex: ExecutorInfo) => void;
   selectedExecutorId: string | null;
   /** Omit for a read-only table: rows then draw no Stop control. */
@@ -303,14 +310,16 @@ export function ExecutorTable({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
-              <th className="px-3 py-3 w-8">
-                <input
-                  type="checkbox"
-                  checked={allSelected && executors.length > 0}
-                  onChange={onSelectAll}
-                  className="rounded border-[var(--color-border)]"
-                />
-              </th>
+              {onToggleSelect && (
+                <th className="px-3 py-3 w-8">
+                  <input
+                    type="checkbox"
+                    checked={(allSelected ?? false) && executors.length > 0}
+                    onChange={onSelectAll}
+                    className="rounded border-[var(--color-border)]"
+                  />
+                </th>
+              )}
               <SortHeader label="ID" sortKey="id" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Type" sortKey="type" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Connector" sortKey="connector" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
@@ -331,7 +340,7 @@ export function ExecutorTable({
                 key={ex.id}
                 ex={ex}
                 isSelected={selectedExecutorId === ex.id}
-                isChecked={selectedIds.has(ex.id)}
+                isChecked={selectedIds?.has(ex.id) ?? false}
                 isStopping={stoppingIds?.has(ex.id) ?? false}
                 onRowClick={onRowClick}
                 onToggleSelect={onToggleSelect}
