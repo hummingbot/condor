@@ -11,7 +11,7 @@ import {
 } from "@/components/perf/agentFilter";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useFleetData } from "@/hooks/useFleetData";
-import { attributionOf } from "@/lib/agent-attribution";
+import { attributionIndex } from "@/lib/agent-attribution";
 import { api, type ControllerInfo } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl } from "@/lib/formatters";
 
@@ -34,7 +34,7 @@ import { formatCurrency, formatCurrencyPnl } from "@/lib/formatters";
  *
  * `useFleetData` under the same query keys `/bots` and the workspace's Fleet
  * view use, so this host adds no fetching of its own — react-query hands all
- * three the one set of records. Ownership is decided by `attributionOf`, the
+ * three the one set of records. Ownership is decided by `attributionIndex`, the
  * same rule `AgentFleet`'s counts and `PerfBrowser`'s tree apply, so the three
  * surfaces can never disagree about which controllers are this strategy's.
  *
@@ -72,14 +72,11 @@ export function DeployedFleet({
 
   /** The controllers this run key owns, and the totals across them. */
   const { mine, total } = useMemo(() => {
+    // One index per fold, not one per controller (PERF-409).
+    const agentOf = attributionIndex(fleet.owners, fleet.deeds);
     const owned: ControllerInfo[] = [];
     for (const ctrl of fleet.controllers) {
-      const who = attributionOf(
-        fleet.owners,
-        fleet.deeds,
-        ctrl.bot_name,
-        ctrl.controller_id || ctrl.controller_name,
-      );
+      const who = agentOf(ctrl.bot_name, ctrl.controller_id || ctrl.controller_name);
       if (who.runKey === runKey) owned.push(ctrl);
     }
     return { mine: owned, total: fleet.controllers.length };
@@ -95,14 +92,11 @@ export function DeployedFleet({
    * is when the bot itself went up.
    */
   const unowned = useMemo(() => {
+    // One index per fold, not one per controller (PERF-409).
+    const agentOf = attributionIndex(fleet.owners, fleet.deeds);
     const earliest = new Map<string, number>();
     for (const ctrl of fleet.controllers) {
-      const who = attributionOf(
-        fleet.owners,
-        fleet.deeds,
-        ctrl.bot_name,
-        ctrl.controller_id || ctrl.controller_name,
-      );
+      const who = agentOf(ctrl.bot_name, ctrl.controller_id || ctrl.controller_name);
       if (who.runKey || !ctrl.bot_name) continue;
       const at = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) / 1000 : 0;
       const seen = earliest.get(ctrl.bot_name);

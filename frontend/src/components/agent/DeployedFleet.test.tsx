@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "@/lib/api";
 import { formatCurrencyPnl } from "@/lib/formatters";
-import type { FleetOwner } from "@/lib/agent-attribution";
+import { attributionIndex, attributionOf, type FleetOwner } from "@/lib/agent-attribution";
 import type { ControllerInfo } from "@/lib/api";
 import { DeployedFleet } from "./DeployedFleet";
 
@@ -62,6 +62,20 @@ vi.mock("@/lib/api", () => ({
     startControllers: vi.fn(async () => ({})),
   },
 }));
+
+// Wrapped rather than spied: `vi.spyOn` on the ESM namespace does not reach the
+// component's own import. Both entry points are wrapped because `attributionOf`
+// reaches `attributionIndex` through the module's local binding, which a
+// wrapper on the export never sees — counting the index alone would pass with
+// the per-record calls still in place (PERF-409).
+vi.mock("@/lib/agent-attribution", async (orig) => {
+  const m = await orig<typeof import("@/lib/agent-attribution")>();
+  return {
+    ...m,
+    attributionIndex: vi.fn(m.attributionIndex),
+    attributionOf: vi.fn(m.attributionOf),
+  };
+});
 
 const fleetArgs = vi.fn();
 
@@ -597,5 +611,32 @@ describe("handing a bot back", () => {
       (b) => b.textContent?.trim() === "Unassign",
     );
     expect(unassign).toBeUndefined();
+  });
+});
+
+describe("the ownership folds (PERF-409)", () => {
+  it("builds one attribution index per fold, not one per controller", async () => {
+    FLEET = {
+      controllers: [
+        controller({ controller_id: "c1", trading_pair: "BTC-BRL" }),
+        controller({ controller_id: "c2", trading_pair: "ETH-BRL" }),
+        controller({ controller_id: "c3", trading_pair: "SOL-BRL" }),
+        controller({ controller_id: "c4", bot_name: "stray-20260903-181000" }),
+        controller({ controller_id: "c5", bot_name: "other-thing-20260903-181000" }),
+      ],
+      owners: [owner(), owner({ runKey: "other.thing", namespace: "other-thing" })],
+      isLoading: false,
+    };
+    vi.mocked(attributionIndex).mockClear();
+    vi.mocked(attributionOf).mockClear();
+    await render(panel());
+
+    // The folds still decide the same rows: three of the five are this run's.
+    expect(host.textContent).toContain("3 of 5");
+    expect(host.textContent).toContain("SOL-BRL");
+    // `mine` and `unowned` each take the index once; per record it was ten.
+    expect(vi.mocked(attributionOf)).not.toHaveBeenCalled();
+    expect(vi.mocked(attributionIndex).mock.calls.length).toBeGreaterThan(0);
+    expect(vi.mocked(attributionIndex).mock.calls.length).toBeLessThanOrEqual(2);
   });
 });

@@ -282,8 +282,9 @@ export function attributionIndex(
  * bot's deploy chain (see {@link deployNameChain}), and a chain is two names long
  * on every bot that was deployed once.
  *
- * One record, one index: a caller with a loop wants {@link attributionIndex}
- * instead, which is where the rule now lives.
+ * A single-record convenience only: it builds a whole index per call, so any
+ * caller that folds over records — a `for`, `map` or `filter` body — takes
+ * {@link attributionIndex} once above the loop instead (PERF-331, PERF-409).
  */
 export function attributionOf(
   owners: FleetOwner[],
