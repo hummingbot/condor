@@ -87,8 +87,15 @@ vi.mock("@/components/agent/workspace/NowView", () => ({
     );
   },
 }));
+/** What the money stub was last handed (CORR-397). */
+let moneyProps: { sslug: string | null; strategy: string | null } | null = null;
 vi.mock("@/components/agent/workspace/MoneyView", () => ({
-  MoneyView: stub("money"),
+  MoneyView: (
+    props: NonNullable<typeof moneyProps> & { serverName?: string },
+  ) => {
+    moneyProps = props;
+    return stub("money")(props);
+  },
 }));
 vi.mock("@/components/agent/workspace/AgentFleet", () => ({
   AgentFleet: stub("fleet"),
@@ -109,6 +116,7 @@ vi.mock("@/components/agent/workspace/PlaybookView", () => ({
 let railProps: {
   runs: AgentRunRow[];
   selectedKey: string | null;
+  strategyFilter: string | null;
   hasMore?: boolean;
   onShowMore?: () => void;
 } | null = null;
@@ -261,6 +269,7 @@ beforeEach(() => {
   mounted.length = 0;
   delegationTask = null;
   railProps = null;
+  moneyProps = null;
   localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -797,5 +806,38 @@ describe("widening the Runs window (CORR-378)", () => {
     expect(railProps!.runs).toHaveLength(201);
     expect(railProps!.selectedKey).toBe(before);
     expect(railProps!.hasMore).toBe(true);
+  });
+});
+
+describe("what the narrowing bands are handed (CORR-397)", () => {
+  it("narrows the money fold to nothing for a slug the agent does not own", async () => {
+    await render("/?open=money&strategy=ghost");
+    // The loop bar resolved a real strategy; the fold must not narrow on the
+    // ghost, or it prints a $0.00 rollup for a scope that does not exist.
+    expect(moneyProps?.sslug).toBe("brl_mm");
+    expect(moneyProps?.strategy).toBeNull();
+  });
+
+  it("narrows the money fold to a strategy the agent owns", async () => {
+    await render("/?open=money&strategy=sol_lp");
+    expect(moneyProps?.strategy).toBe("sol_lp");
+    expect(moneyProps?.sslug).toBe("sol_lp");
+  });
+
+  it("keeps a bare address agent-wide", async () => {
+    await render("/?open=money");
+    expect(moneyProps?.strategy).toBeNull();
+    expect(moneyProps?.sslug).toBe("brl_mm");
+  });
+
+  it("does not filter the Runs rail on a slug the agent does not own", async () => {
+    await render("/?open=runs&strategy=ghost");
+    expect(mounted).toContain("rail");
+    expect(railProps?.strategyFilter).toBeNull();
+  });
+
+  it("filters the Runs rail on a strategy the agent owns", async () => {
+    await render("/?open=runs&strategy=sol_lp");
+    expect(railProps?.strategyFilter).toBe("sol_lp");
   });
 });

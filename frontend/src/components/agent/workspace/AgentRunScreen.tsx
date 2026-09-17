@@ -21,7 +21,11 @@ import {
   type SectionId,
 } from "@/components/agent/workspace/sections";
 import { useWorkspaceAlerts } from "@/components/agent/workspace/useWorkspaceAlerts";
-import { pickRun, pickStrategy } from "@/components/agent/workspace/views";
+import {
+  ownsStrategy,
+  pickRun,
+  pickStrategy,
+} from "@/components/agent/workspace/views";
 import type { WorkspaceUrlAdapter } from "@/components/agent/workspace/workspaceUrl";
 import {
   api,
@@ -137,6 +141,13 @@ export function AgentRunScreen({
   const sslug = useMemo(
     () => pickStrategy(strategies ?? [], runs, url.strategy),
     [strategies, runs, url.strategy],
+  );
+  // What the bands that *narrow* read: `?strategy=` only when the agent owns
+  // it. Not `sslug` — a bare URL means every strategy to the rail and the fold
+  // — and not the raw param, which a stale link can point at nothing (CORR-397).
+  const narrow = useMemo(
+    () => ownsStrategy(strategies ?? [], url.strategy),
+    [strategies, url.strategy],
   );
   const selectedRun = useMemo(
     () => pickRun(runs, sslug, url.run),
@@ -397,7 +408,7 @@ export function AgentRunScreen({
                     slug={agent.slug}
                     runs={runs}
                     selectedRun={selectedRun}
-                    strategyFilter={url.strategy}
+                    strategyFilter={narrow}
                     onStrategyFilter={(next) => setParams({ strategy: next })}
                     onSelectRun={openRun}
                     onClearRun={() => setParams({ run: null })}
@@ -436,7 +447,7 @@ export function AgentRunScreen({
                   <MoneyView
                     slug={agent.slug}
                     sslug={sslug}
-                    strategy={url.strategy}
+                    strategy={narrow}
                     strategies={agent.strategies ?? []}
                     serverName={strategyServer}
                   />

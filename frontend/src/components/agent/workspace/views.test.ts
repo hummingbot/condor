@@ -20,6 +20,7 @@ import type { AgentRunRow, StrategySummary } from "@/lib/api";
 import {
   alertsFor,
   journalNamesDeploy,
+  ownsStrategy,
   parseWorkspace,
   pickRun,
   pickStrategy,
@@ -113,6 +114,23 @@ describe("parsing the URL", () => {
       tick: null,
       open: null,
     });
+  });
+});
+
+describe("the strategy the URL narrows to (CORR-397)", () => {
+  const strategies = [strategy(), strategy({ slug: "sol_lp" })];
+
+  it("is the named slug when the agent owns it", () => {
+    expect(ownsStrategy(strategies, "brl_mm")).toBe("brl_mm");
+  });
+
+  it("is null for a slug the agent does not own", () => {
+    expect(ownsStrategy(strategies, "ghost")).toBeNull();
+  });
+
+  it("is null when the URL names none", () => {
+    expect(ownsStrategy(strategies, null)).toBeNull();
+    expect(ownsStrategy([], "brl_mm")).toBeNull();
   });
 });
 

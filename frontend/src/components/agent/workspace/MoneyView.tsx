@@ -67,7 +67,11 @@ export function MoneyView({
   slug: string;
   /** The strategy the workspace resolved — the scope of the rollup band. */
   sslug: string;
-  /** `?strategy=` when the URL names one, else `null`. Narrows the fold. */
+  /**
+   * `?strategy=` when the URL names one the agent owns, else `null` — the
+   * screen validates it (`ownsStrategy`), so an unknown slug arrives as `null`.
+   * Narrows the fold.
+   */
   strategy: string | null;
   /** Every strategy the agent owns, for the agent-wide rollup. */
   strategies: readonly StrategySummary[];

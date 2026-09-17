@@ -53,6 +53,23 @@ type StrategyScope = Pick<StrategySummary, "slug" | "status" | "instances">;
 type RunScope = Pick<AgentRunRow, "strategy_slug" | "started_at">;
 
 /**
+ * The strategy `?strategy=` names, when this agent owns it; else `null`.
+ *
+ * The one ownership rule every reader of the parameter shares: `pickStrategy`
+ * honours a named slug only through it, and the bands that *narrow* on the
+ * parameter (the Runs rail's filter, the Money fold) take its answer rather
+ * than the raw string, so a stale slug from an old link or a deleted strategy
+ * narrows nothing instead of filtering every row out and printing a `$0.00`
+ * rollup for a scope that does not exist (CORR-397).
+ */
+export function ownsStrategy(
+  strategies: readonly Pick<StrategySummary, "slug">[],
+  named: string | null,
+): string | null {
+  return named && strategies.some((s) => s.slug === named) ? named : null;
+}
+
+/**
  * Which strategy the workspace is scoped to.
  *
  * The URL wins when it names one this agent actually owns. Absent — which is
@@ -65,7 +82,8 @@ export function pickStrategy(
   runs: readonly RunScope[],
   named: string | null,
 ): string | null {
-  if (named && strategies.some((s) => s.slug === named)) return named;
+  const owned = ownsStrategy(strategies, named);
+  if (owned) return owned;
 
   const live = strategies.find(
     (s) => s.status === "running" || s.instances.length > 0,
