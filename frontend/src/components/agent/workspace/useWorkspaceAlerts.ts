@@ -85,7 +85,9 @@ export function useWorkspaceAlerts({
     queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
     queryFn: () => api.getStrategySessionExecutors(slug, sslug!, sessionNum),
     enabled,
-    refetchInterval: 10000,
+    // Gated on the run, not on `instance`: the strategy's engine may be running
+    // a different session than the one on screen (PERF-384).
+    refetchInterval: liveInterval,
   });
 
   // Hoisted rather than reached through in the dependency list: the compiler

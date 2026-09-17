@@ -19,13 +19,13 @@ import type { AgentRunRow, RunningInstance } from "@/lib/api";
 
 const getSessionJournal = vi.fn();
 const getSessionActions = vi.fn();
+const getStrategySessionExecutors = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getSessionJournal: (...a: unknown[]) => getSessionJournal(...a),
     getSessionActions: (...a: unknown[]) => getSessionActions(...a),
-    getStrategySessionExecutors: () =>
-      Promise.resolve({ deployments: [], performance: null, pnl_series: null }),
+    getStrategySessionExecutors: (...a: unknown[]) => getStrategySessionExecutors(...a),
   },
 }));
 
@@ -96,6 +96,9 @@ beforeEach(() => {
   seen = [];
   getSessionJournal.mockReset().mockResolvedValue({ content: "" });
   getSessionActions.mockReset().mockResolvedValue({ actions: [] });
+  getStrategySessionExecutors
+    .mockReset()
+    .mockResolvedValue({ deployments: [], performance: null, pnl_series: null });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -130,6 +133,26 @@ describe("useWorkspaceAlerts polling", () => {
     await advance(30_000);
     expect(getSessionJournal).toHaveBeenCalledTimes(1);
     expect(getSessionActions).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads a live run's executors every 10s and a stopped run's once (PERF-384)", async () => {
+    await mount("running");
+    await advance(10_000);
+    expect(getStrategySessionExecutors).toHaveBeenCalledTimes(2);
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    getStrategySessionExecutors.mockClear();
+    await mount("stopped");
+    await advance(60_000);
+    expect(getStrategySessionExecutors).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poll a finished run's executors while another session's engine runs", async () => {
+    const other = { agent_id: "a1", status: "running" } as unknown as RunningInstance;
+    await mount("stopped", other);
+    await advance(60_000);
+    expect(getStrategySessionExecutors).toHaveBeenCalledTimes(1);
   });
 });
 

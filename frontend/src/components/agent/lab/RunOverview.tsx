@@ -60,7 +60,8 @@ export function RunOverview({
     queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
     queryFn: () => api.getStrategySessionExecutors(slug, sslug, sessionNum),
     enabled: sessionNum > 0,
-    refetchInterval: 10000,
+    // Live runs only (PERF-384) — see SessionExecutors, which shares this key.
+    refetchInterval: isLiveSession ? 10000 : false,
   });
   const perf = perfData?.performance ?? null;
 

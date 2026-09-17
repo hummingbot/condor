@@ -69,7 +69,10 @@ export function SessionExecutors({
   const { data: sessionDetail } = useQuery({
     queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
     queryFn: () => api.getStrategySessionExecutors(slug, sslug, sessionNum),
-    refetchInterval: 10000,
+    // A finished session's record no longer moves, and the route is uncached:
+    // only the live one is re-read (PERF-384). Every observer of this key gates
+    // the same way — react-query polls at the shortest interval among them.
+    refetchInterval: isLiveSession ? 10000 : false,
   });
 
   const restExecutors = sessionDetail?.executors ?? [];
