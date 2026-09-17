@@ -972,6 +972,40 @@ def test_bot_universe_degrades_a_failed_snapshot_to_an_empty_live_set():
         clear_archived_cache()
 
 
+def test_bot_universe_checked_reports_whether_the_snapshot_failed():
+    """CORR-700: the degrade is invisible to attribution but visible to a cache.
+
+    ``fetch_bot_universe`` answers ``{}`` for both a failed snapshot and a server
+    with no bots, which is right for rendering and wrong for deciding whether the
+    render is worth storing — so the checked variant carries the one bit that
+    tells them apart.
+    """
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_snapshot_cache,
+        fetch_bot_universe_checked,
+    )
+
+    clear_snapshot_cache()
+    clear_archived_cache()
+    try:
+        down = _SnapshotDownClient({}, archived=["a-1"])
+        assert asyncio.run(fetch_bot_universe_checked(down)) == ({}, ["a-1"], True)
+
+        # An empty but healthy server is not degraded.
+        empty = _FakeClient(snapshots=[], history={})
+        assert asyncio.run(fetch_bot_universe_checked(empty)) == ({}, [], False)
+
+        healthy = _FakeClient(
+            snapshots=[_snap("live-bot", T3, realized=5.0)], history={}
+        )
+        live, archived, degraded = asyncio.run(fetch_bot_universe_checked(healthy))
+        assert set(live) == {"live-bot"} and archived == [] and degraded is False
+    finally:
+        clear_snapshot_cache()
+        clear_archived_cache()
+
+
 # ── PERF-681: the snapshot and the archived listing are fetched together ──
 
 

@@ -301,7 +301,7 @@ def current_owner_bases(
 
 async def apply_bot_mode_pnl(
     real_sessions: list, strategy_dir: Path, default_config: dict | None, client: Any
-) -> None:
+) -> bool:
     """Distribute each owned bot's PnL across the sessions that operated it.
 
     One rule covers deploy and handover: every owned bot is attributed by slicing
@@ -319,30 +319,36 @@ async def apply_bot_mode_pnl(
     Works uniformly for single- and multi-controller bots (history sums controllers
     per instance) and for a base re-launched under several instances. Strategies
     whose sessions own no bot (direct-executor agents) are left untouched.
+
+    Returns whether the live snapshot fetch failed, i.e. whether the rows it just
+    wrote are missing their unrealized PnL and open positions. Mutation and a
+    return value together, because the caller's question is not *what did this
+    compute* but *is what it computed worth caching* ([[CORR-700]]); a strategy
+    that owns no bot never asks the backend at all and so is never degraded.
     """
     from condor.fetchers.bot_performance import (
         bot_executor_rows,
         fetch_base_histories,
-        fetch_bot_universe,
+        fetch_bot_universe_checked,
         fetch_live_instance_names,
         resolve_bots,
         slice_history,
     )
 
     if not client or not real_sessions:
-        return
+        return False
     by_num = {s.session_num: s for s in real_sessions}
     owners = owner_windows(list(by_num), strategy_dir, default_config)
     bases = sorted(owners)
     if not bases:
-        return  # direct-executor strategy — nothing to attribute
+        return False  # direct-executor strategy — nothing to attribute
 
     # Archived instances carry the realized PnL of every bot a session stopped —
     # the normal end state of a finished session, and invisible in the live
     # snapshot. Same universe and failure policy the live agent's own view uses,
     # so the dashboard and the tick loop cannot disagree about what a session
     # earned — not even when the live snapshot is down.
-    all_perf, archived = await fetch_bot_universe(client)
+    all_perf, archived, degraded = await fetch_bot_universe_checked(client)
 
     now = time.time()
     # The oldest takeover across every base sets how far back the histories must
@@ -395,6 +401,8 @@ async def apply_bot_mode_pnl(
         operator.open_count += sum(1 for r in b_rows if r["status"] == "RUNNING")
         operator.executors = list(operator.executors) + b_rows
         operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl
+
+    return degraded
 
 
 # ── The run ledger ──

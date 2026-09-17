@@ -9,6 +9,7 @@ after one final successful fetch.
 import ast
 import asyncio
 import inspect
+import json
 import textwrap
 from collections import Counter, OrderedDict
 from types import SimpleNamespace
@@ -289,6 +290,152 @@ def test_failed_fetch_is_not_cached_in_rollup(perf_env):
     assert api.calls[f"{RUN_KEY}_1"] == 3
     assert totals["total_pnl"] == pytest.approx(3.0)
     # A clean result is cached again.
+    assert len(agents_routes._PERF_CACHE) == 1
+
+
+# ── CORR-700: the bot snapshot is the rollup's other fetch ──
+
+#: Takeover instant for the ledgers below; any fixed past epoch will do, since
+#: the histories these tests serve are empty and only the open window matters.
+_SINCE = 1751328000.0  # 2026-07-01T00:00:00+00:00
+
+
+def _write_bot_ledger(strategy_dir, num: int, base: str) -> None:
+    """A session that owns one bot, still open, as ``BotLedger`` serializes it.
+
+    Without a ledger a strategy is direct-executor and ``apply_bot_mode_pnl``
+    returns before asking the backend anything — which is exactly why the
+    executor-fetch tests above never touch the snapshot.
+    """
+    (strategy_dir / "sessions" / f"session_{num}" / "owned_bots.json").write_text(
+        json.dumps(
+            {
+                "namespace": "ns",
+                "declared": [],
+                "bots": {
+                    base: {
+                        "base": base,
+                        "origin": "deployed",
+                        "since": _SINCE,
+                        "last_seen": _SINCE,
+                        "until": 0.0,
+                    }
+                },
+                "violations": [],
+            }
+        )
+    )
+
+
+class _FakeBotClient:
+    """The rollup's other half: controller-performance, liveness, archives.
+
+    ``fail`` makes the snapshot endpoint raise the way an outage does — the one
+    failure ``fetch_bot_universe`` degrades to an empty live set instead of
+    propagating.
+    """
+
+    def __init__(self, executors_api, instance: str, unrealized=0.0, fail=False):
+        self.executors = executors_api
+        self._instance = instance
+        self._unrealized = unrealized
+        self.fail = fail
+        self.snapshot_calls = 0
+        self.bot_orchestration = self
+        self.archived_bots = SimpleNamespace(list_databases=self._list_databases)
+
+    async def get_latest_controller_performance(self):
+        self.snapshot_calls += 1
+        if self.fail:
+            raise RuntimeError("controller-performance/latest timed out")
+        return [
+            {
+                "bot_name": self._instance,
+                "controller_id": f"{self._instance}-c1",
+                "timestamp": "2026-07-04T00:00:00+00:00",
+                "status": "RUNNING",
+                "performance": {
+                    "realized_pnl_quote": 0.0,
+                    "unrealized_pnl_quote": self._unrealized,
+                    "volume_traded": 0.0,
+                    "positions_summary": [
+                        {
+                            "trading_pair": "BTC-USD",
+                            "connector_name": "hyperliquid",
+                            "side": "TradeType.BUY",
+                            "amount": 1.0,
+                            "breakeven_price": 100.0,
+                            "unrealized_pnl_quote": self._unrealized,
+                            "cum_fees_quote": 0.0,
+                        }
+                    ],
+                },
+            }
+        ]
+
+    async def get_active_bots_status(self):
+        return {"data": {self._instance: {}}}
+
+    async def get_controller_performance_history(self, bot_name, interval, limit):
+        return {"data": []}
+
+    async def _list_databases(self):
+        return []
+
+
+def test_failed_bot_snapshot_is_not_cached_in_rollup(perf_env):
+    """CORR-700: a snapshot outage is an outage, not a strategy with no open book.
+
+    The executor fetch is only half of what the rollup asks the backend for; the
+    other half is the bot snapshot, whose failure degrades silently to an empty
+    live set. Before this, that degraded row — no unrealized PnL, no open
+    positions — was cached for the full 30s TTL and kept being served after the
+    backend came back.
+    """
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    _write_bot_ledger(strategy_dir, 1, "ns-bot")
+    api = _FakeExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
+    client = _FakeBotClient(api, "ns-bot-20260701-000000", unrealized=7.0, fail=True)
+    use_client(client)
+
+    sessions, totals = _compute(strategy_dir)
+    assert client.snapshot_calls == 1
+    # The degraded render still serves what it has — the executor row — but
+    # without the live open book it is not the whole truth.
+    assert totals["unrealized_pnl"] == 0.0
+    assert totals["open_positions"] == 0
+    assert agents_routes._PERF_CACHE == {}
+
+    # No manual cache clear: the next poll must go back to the backend.
+    _compute(strategy_dir)
+    assert client.snapshot_calls == 2
+
+    # Recovered: the full result, and only now is it worth keeping.
+    client.fail = False
+    sessions, totals = _compute(strategy_dir)
+    assert client.snapshot_calls == 3
+    assert totals["unrealized_pnl"] == pytest.approx(7.0)
+    assert totals["open_positions"] == 1
+    assert totals["total_pnl"] == pytest.approx(8.0)
+    assert len(agents_routes._PERF_CACHE) == 1
+
+    # And the healthy result is genuinely cached, not re-fetched.
+    _compute(strategy_dir)
+    assert client.snapshot_calls == 3
+
+
+def test_healthy_bot_snapshot_alone_does_not_block_the_rollup_cache(perf_env):
+    """The new flag must mean "the snapshot failed", not "a bot was attributed"."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    _write_bot_ledger(strategy_dir, 1, "ns-bot")
+    api = _FakeExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
+    client = _FakeBotClient(api, "ns-bot-20260701-000000", unrealized=7.0)
+    use_client(client)
+
+    _compute(strategy_dir)
+    assert client.snapshot_calls == 1
     assert len(agents_routes._PERF_CACHE) == 1
 
 

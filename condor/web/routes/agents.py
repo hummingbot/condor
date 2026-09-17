@@ -1174,7 +1174,15 @@ async def _compute_strategy_performance(
     # bot is DISTRIBUTED — not duplicated — the totals below are a plain additive
     # sum of the rows and stay correct for both modes with no double counting.
     if client and real_sessions:
-        await apply_bot_mode_pnl(real_sessions, strategy_dir, default_config, client)
+        # A failed bot snapshot is degraded, not empty: these rows lose their
+        # unrealized PnL and open positions, so the 30s cache below must skip
+        # them exactly as it skips a failed executor fetch ([[CORR-700]]).
+        fetch_failed = (
+            await apply_bot_mode_pnl(
+                real_sessions, strategy_dir, default_config, client
+            )
+            or fetch_failed
+        )
 
     totals = {
         "total_pnl": sum(s.total_pnl for s in real_sessions),

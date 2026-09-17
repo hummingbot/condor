@@ -565,19 +565,49 @@ async def fetch_bot_universe(client: Any) -> tuple[dict[str, dict], list[str]]:
     The two listings are independent, so they are awaited together: a cold entry
     (every engine tick, the rollup past the archived TTL) pays one wall-clock
     round trip instead of two back to back.
+
+    Callers that must tell a degraded universe from a genuinely empty server —
+    a cache deciding whether the result is worth keeping — take
+    :func:`fetch_bot_universe_checked` instead; this one drops that flag for the
+    callers that only ever render what they got.
     """
+    all_perf, archived, _degraded = await fetch_bot_universe_checked(client)
+    return all_perf, archived
+
+
+async def fetch_bot_universe_checked(
+    client: Any,
+) -> tuple[dict[str, dict], list[str], bool]:
+    """:func:`fetch_bot_universe` plus ``degraded``: did the live snapshot fail?
+
+    The degradation to ``{}`` is deliberately invisible to the attribution
+    itself — an archived-only base still resolves, which is the whole point —
+    but it is NOT invisible to a cache: a result computed without the live
+    snapshot has no unrealized PnL and no open positions, and storing it under a
+    30s TTL keeps showing the outage for half a minute after the backend came
+    back ([[CORR-700]]). So the flag exists for exactly one decision — cache or
+    don't — and is returned rather than raised, because every caller still wants
+    the degraded result to render now.
+
+    The archived listing is not part of the flag: :func:`fetch_archived_instances`
+    never raises, and its own failure mode is already an empty list that costs
+    only history the snapshot usually still has.
+    """
+    degraded = False
 
     async def _snapshot() -> dict[str, dict]:
+        nonlocal degraded
         try:
             return await fetch_all_bot_performance(client)
         except Exception as e:
             logger.warning("bot performance snapshot failed: %s", e)
+            degraded = True
             return {}
 
     all_perf, archived = await asyncio.gather(
         _snapshot(), fetch_archived_instances(client)
     )
-    return all_perf, archived
+    return all_perf, archived, degraded
 
 
 def _iso_to_epoch(ts: Any) -> float | None:
