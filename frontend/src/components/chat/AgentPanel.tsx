@@ -1,19 +1,11 @@
 import { ExternalLink } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { AgentKnowledge } from "@/components/agent/AgentKnowledge";
 import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { AgentWiring } from "@/components/chat/AgentWiring";
-import type { BrainSelection } from "@/components/chat/BrainPicker";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
-import type { ChatSlot } from "@/hooks/useChatSocket";
-import type {
-  AgentBindingOption,
-  ChatAgentOption,
-  CustomProvider,
-} from "@/lib/api";
 
 /**
  * What the agent knows, and what it runs on, beside the conversation you are
@@ -72,17 +64,9 @@ import type {
 export function AgentPanel({
   slug,
   name,
-  slot,
-  pendingAgentKey,
-  ambientServer,
-  agents,
-  customProviders,
-  agentBindings,
-  isStreaming,
+  wiring,
   tab,
   onTabChange,
-  onSelectBrain,
-  onSelectServer,
   onOpenRoutine,
   onOpenStrategy,
   onAskAgent,
@@ -91,15 +75,13 @@ export function AgentPanel({
   /** Whose panel this is: the session's agent, the rail's pick, else Condor. */
   slug: string;
   name: string;
-  slot: ChatSlot | null;
-  /** The model the next conversation starts on, before there is one. */
-  pendingAgentKey: string;
-  /** The page's ambient server selection, before there is a session. */
-  ambientServer: string;
-  agents: ChatAgentOption[];
-  customProviders: CustomProvider[];
-  agentBindings: AgentBindingOption[];
-  isStreaming: boolean;
+  /**
+   * The conversation's model and server pickers, rendered by the host (in
+   * practice an `AgentWiring`). A slot rather than the pickers' nine props:
+   * the panel only places them in its bar and reads none of their inputs.
+   * Required, because the bar is where this panel promises they are.
+   */
+  wiring: ReactNode;
   /**
    * Which section is open, off the home's `?tab=` (FEAT-118).
    *
@@ -110,8 +92,6 @@ export function AgentPanel({
    */
   tab?: KnowledgeTabId;
   onTabChange: (tab: KnowledgeTabId) => void;
-  onSelectBrain: (selection: BrainSelection) => void;
-  onSelectServer: (serverName: string) => void;
   /** Hand the pane to the routine library, focused on this routine. */
   onOpenRoutine: (routineName: string) => void;
   /** Hand the pane to this strategy's workbench, the same one its page hosts. */
@@ -149,17 +129,7 @@ export function AgentPanel({
             >
               <ExternalLink className="h-3.5 w-3.5" /> Workspace
             </Link>
-            <AgentWiring
-              slot={slot}
-              pendingAgentKey={pendingAgentKey}
-              ambientServer={ambientServer}
-              agents={agents}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              isStreaming={isStreaming}
-              onSelectBrain={onSelectBrain}
-              onSelectServer={onSelectServer}
-            />
+            {wiring}
           </div>
         }
         onClose={() => (dirty ? setConfirmClose(true) : onClose())}

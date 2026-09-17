@@ -22,6 +22,7 @@ import {
   rememberKnowledgeTab,
 } from "@/components/agent/knowledgeTabs";
 import { AgentPanel } from "@/components/chat/AgentPanel";
+import { AgentWiring } from "@/components/chat/AgentWiring";
 import {
   BrainPicker,
   type BrainSelection,
@@ -579,29 +580,33 @@ export function AgentChatTab() {
               name={openAgent?.name || "Condor"}
               // What the conversation runs on, in the panel's own bar — the
               // first thing waiting on the other side of the click.
-              slot={activeSlot}
-              pendingAgentKey={pendingAgentKey ?? defaultAgent}
-              ambientServer={server || ""}
-              agents={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              isStreaming={isActiveStreaming}
+              wiring={
+                <AgentWiring
+                  slot={activeSlot}
+                  pendingAgentKey={pendingAgentKey ?? defaultAgent}
+                  ambientServer={server || ""}
+                  agents={modelOptions}
+                  customProviders={customProviders}
+                  agentBindings={agentBindings}
+                  isStreaming={isActiveStreaming}
+                  // With a session this moves the conversation; without one
+                  // it is the model the next `start_session` carries, which
+                  // is the same field the hero's picker sets.
+                  onSelectBrain={(sel) => {
+                    if (activeSlot) switchBrain(sel);
+                    else if (sel.agentKey !== undefined)
+                      setPendingAgentKey(sel.agentKey);
+                  }}
+                  onSelectServer={(name) => {
+                    if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+                  }}
+                />
+              }
               // Which section is open lives on the home's query string
               // (FEAT-118), so Back steps through the seven and a pane open on
               // Tools can be sent to somebody.
               tab={pane.tab}
               onTabChange={(t) => openPane({ ...pane, tab: t })}
-              // With a session this moves the conversation; without one it is
-              // the model the next `start_session` carries, which is the same
-              // field the hero's picker sets.
-              onSelectBrain={(sel) => {
-                if (activeSlot) switchBrain(sel);
-                else if (sel.agentKey !== undefined)
-                  setPendingAgentKey(sel.agentKey);
-              }}
-              onSelectServer={(name) => {
-                if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-              }}
               // The pane's routine house is the one FEAT-077 built; the panel
               // hands it over rather than growing a second one.
               onOpenRoutine={(name) =>
