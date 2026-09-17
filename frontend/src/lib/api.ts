@@ -18,9 +18,22 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    // The status rides along on the Error so a caller can tell apart failures that
+    // read the same as a message but call for different things from the operator —
+    // a 501 from the API-settings routes means "this server is older than this
+    // panel, upgrade it", not "something is broken". `message` is unchanged, so
+    // every existing caller reads exactly what it read before.
+    throw Object.assign(new Error(err.detail || `Request failed: ${res.status}`), {
+      status: res.status,
+    });
   }
   return res.json();
+}
+
+/** The HTTP status of a failed `apiFetch`, when the thrown value carries one. */
+export function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
 }
 
 /**
@@ -1564,6 +1577,55 @@ export interface GatewayWalletGroup {
   chain: string;
   walletAddresses: string[];
   default_address?: string;
+}
+
+/**
+ * What a hummingbot-api server runs and how it was deployed (FEAT-121).
+ *
+ * Every field below the versions degrades on its own: a server with no docker.sock,
+ * an unreachable daemon, or a process that cannot find its own container still
+ * reports both versions and the tunables, with `container` null and `pinned` null —
+ * null, not false, because "we could not tell" is not "it is the published image".
+ */
+export interface ApiServerContainer {
+  id: string | null;
+  name: string | null;
+  image: string | null;
+  image_id: string | null;
+  /** Registry digest, null for an image that was built on the box. */
+  digest: string | null;
+  compose_project: string | null;
+  compose_working_dir: string | null;
+  compose_config_files: string | null;
+}
+
+export interface ApiServerInfo {
+  api_version: string;
+  hummingbot_version: string | null;
+  /** The MARKET_DATA_* knobs as the API process resolved them. Read-only. */
+  market_data: Record<string, number>;
+  docker_available: boolean;
+  container: ApiServerContainer | null;
+  pinned: boolean | null;
+  pinned_reason: string | null;
+  override_file: string | null;
+}
+
+/** The client defaults a deploy copies into every new bot. */
+export interface ApiClientConfig {
+  account_name: string;
+  rate_oracle_source: { name: string };
+  global_token: { global_token_name: string; global_token_symbol: string };
+  rate_limits_share_pct: number;
+  /** Which sources this server's bundled hummingbot knows about. */
+  available_sources: string[];
+}
+
+export interface ApiClientConfigUpdate {
+  rate_oracle_source?: string;
+  global_token_name?: string;
+  global_token_symbol?: string;
+  rate_limits_share_pct?: number;
 }
 
 export interface CredentialInfo {
@@ -3636,6 +3698,23 @@ export const api = {
   getGatewayNetworks: (server: string) =>
     apiFetch<{ networks: GatewayNetworkInfo[] }>(
       `/api/v1/settings/gateway/networks?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiServerInfo: (server: string) =>
+    apiFetch<ApiServerInfo>(
+      `/api/v1/settings/api/info?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiClientConfig: (server: string) =>
+    apiFetch<ApiClientConfig>(
+      `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+    ),
+
+  /** Partial: only the fields present are written, the rest keep their values. */
+  updateApiClientConfig: (server: string, changes: ApiClientConfigUpdate) =>
+    apiFetch<{ success: boolean; message: string; config: ApiClientConfig }>(
+      `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+      { method: "PUT", body: JSON.stringify(changes) },
     ),
 
   getGatewayNetworkConfig: (server: string, networkId: string) =>
