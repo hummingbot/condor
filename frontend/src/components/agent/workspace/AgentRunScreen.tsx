@@ -31,6 +31,7 @@ import {
   type DelegationSummary,
   type StrategyDetail,
 } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 /**
  * How many runs one page of the rail holds (FEAT-111).
@@ -143,32 +144,12 @@ export function AgentRunScreen({
   );
   const { open, toggle } = useSections(url.open, setOpenParam);
 
-  // One `["agent", slug]` and one `["agent-runs", slug]` for the whole screen.
-  // The header, the loop bar and the bands all want them; react-query dedupes
-  // the keys, which is the only reason three regions polling at 5s is one poll
-  // — and the reason the page can hold its own `["agent", slug]` for the header
-  // without buying a second one.
-  //
-  // Gated the same way `AgentStrategies` and `AgentKnowledge` gate this key
-  // (PERF-305/PERF-343): `GET /agents/{slug}` prices every strategy's sessions
-  // through the Hummingbot API, and react-query takes the *shortest* interval
-  // among a key's observers — so a flat 5s here silently overrode their gate on
-  // the screen a reader leaves open longest. Nothing live on this screen comes
-  // off this key: the countdown and the cadence are the separately polled
-  // `["strategy", slug, sslug]`, and the rail is `["agent-runs", ...]`.
-  const { data: agent, isLoading } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug,
-    // The page resolves this key before it renders the screen, so the
-    // screen's observer mounts a tick later onto data react-query would
-    // otherwise call stale and re-fetch — one open, two requests. A cadence's
-    // worth of freshness makes the second mount reuse the first read; the
-    // interval below refetches on its own timer regardless.
-    staleTime: 5000,
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
-  });
+  // One `["agent", slug]` and one `["agent-runs", slug]` for the whole screen:
+  // the header, the loop bar and the bands all want them, and react-query
+  // dedupes the keys. Nothing live here comes off the agent key — the countdown
+  // and cadence are `["strategy", slug, sslug]`, the rail `["agent-runs", ...]`
+  // — so it takes the shared gate (`agentQuery`, PERF-305/PERF-343).
+  const { data: agent, isLoading } = useQuery(agentQuery(slug));
 
   // The rail's window, not a filter (FEAT-111). An install that has been
   // chatted with for a year has hundreds of conversations, and pulling the

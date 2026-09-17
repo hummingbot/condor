@@ -16,6 +16,7 @@ import { BrainPicker } from "@/components/chat/BrainPicker";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useSessionOptions } from "@/hooks/useChat";
 import { CHAT_SLUG, api, type AgentDetail, type StrategyDetail } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 // ── Server pin ──
 
@@ -42,7 +43,7 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
 
   const pin = useMutation({
     mutationFn: (name: string) => api.updateAgentConfig(slug, { server_name: name }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey }),
   });
 
   const choose = (name: string) => {
@@ -138,7 +139,7 @@ function ModelPicker({ slug, agentKey }: { slug: string; agentKey: string }) {
 
   const pick = useMutation({
     mutationFn: (key: string) => api.updateAgentConfig(slug, { agent_key: key }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey }),
   });
 
   return (

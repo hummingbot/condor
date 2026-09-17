@@ -17,12 +17,17 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { venuesQueryKey } from "@/components/market/useVenues";
+import type { AgentDetail } from "@/lib/api";
 import {
+  AGENT_REFETCH_MS,
+  AGENT_STALE_MS,
+  agentQuery,
   CONTROLLER_PERF_ROOTS,
   controllerPerfHistoryAllQuery,
   controllerPerfHistoryQuery,
   credentialsQuery,
   executorsQuery,
+  hasRunningLoop,
   invalidateCredentialQueries,
   invalidateServerScopedQueries,
   parseControllerPerfHistoryKey,
@@ -427,5 +432,47 @@ describe("controller performance-history keys", () => {
       parseControllerPerfHistoryKey(["controller-perf-history", PREVIOUS, CTRL, START, INTERVAL]),
     ).toBeNull();
     expect(parseControllerPerfHistoryKey(executorsQuery(PREVIOUS).queryKey)).toBeNull();
+  });
+});
+
+/**
+ * Pins the one declaration of `["agent", slug]` (ARCH-380).
+ *
+ * react-query drives a shared key at the shortest interval any observer
+ * declares, so a copy of this query that loses the running-loop gate silently
+ * re-opens the 5s poll of the most expensive read on the workspace (PERF-343).
+ * Every observer now spreads `agentQuery`; this checks the gate it carries.
+ */
+describe("agentQuery / hasRunningLoop", () => {
+  const withStatuses = (...statuses: string[]) =>
+    ({
+      strategies: statuses.map((status, i) => ({ slug: `s${i}`, name: `S${i}`, status })),
+    }) as unknown as AgentDetail;
+
+  type GateArg = Parameters<ReturnType<typeof agentQuery>["refetchInterval"]>[0];
+  const gate = (data: AgentDetail | undefined) =>
+    agentQuery("x").refetchInterval({ state: { data } } as unknown as GateArg);
+
+  it("builds the ['agent', slug] key", () => {
+    expect(agentQuery("x").queryKey).toEqual(["agent", "x"]);
+  });
+
+  it("polls every 5s only while some strategy is running", () => {
+    expect(AGENT_REFETCH_MS).toBe(5000);
+    expect(gate(withStatuses("stopped", "running"))).toBe(5000);
+    expect(gate(withStatuses("stopped", "paused"))).toBe(false);
+    expect(gate(withStatuses())).toBe(false);
+    expect(gate(undefined)).toBe(false);
+  });
+
+  it("declares its own staleTime and stays disabled without a slug", () => {
+    expect(agentQuery("x").staleTime).toBe(AGENT_STALE_MS);
+    expect(agentQuery("x").enabled).toBe(true);
+    expect(agentQuery("").enabled).toBe(false);
+  });
+
+  it("hasRunningLoop is false for a missing agent", () => {
+    expect(hasRunningLoop(undefined)).toBe(false);
+    expect(hasRunningLoop(withStatuses("running"))).toBe(true);
   });
 });

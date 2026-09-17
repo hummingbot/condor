@@ -19,6 +19,7 @@ import { useState } from "react";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 /**
  * What a start/stop/pause/resume just made stale.
@@ -36,7 +37,7 @@ function invalidateLifecycle(
   sslug: string,
 ) {
   queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
-  queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+  queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
 }
 
 // ── Start Session Dialog ──

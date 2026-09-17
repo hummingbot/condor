@@ -39,6 +39,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const { AgentControls } = await import("./AgentControls");
+const { agentQuery } = await import("@/lib/queryClient");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -61,18 +62,9 @@ function detail(status: string): AgentDetail {
   } as unknown as AgentDetail;
 }
 
-/** The gate every observer of this key now declares (PERF-305/PERF-343). */
+/** The real gated observer every reader of this key uses (PERF-305/PERF-343). */
 function GatedReader() {
-  useQuery({
-    queryKey: ["agent", "brigado"],
-    queryFn: () => getAgent(),
-    refetchInterval: (q) =>
-      (q.state.data as AgentDetail | undefined)?.strategies.some(
-        (s) => s.status === "running",
-      )
-        ? 5000
-        : false,
-  });
+  useQuery(agentQuery("brigado"));
   return null;
 }
 

@@ -1,6 +1,7 @@
-import { QueryClient } from "@tanstack/react-query";
+import { type Query, QueryClient } from "@tanstack/react-query";
 
 import { venuesQueryKey } from "@/components/market/useVenues";
+import { api, type AgentDetail } from "@/lib/api";
 
 /**
  * App-wide TanStack Query cache.
@@ -161,6 +162,60 @@ export function executorsQuery(
      * invalidates when it cannot know which narrowings are currently mounted.
      */
     prefix: ["executors", server] as [string, string | null | undefined],
+  };
+}
+
+/**
+ * Poll cadence for `["agent", slug]` while one of the agent's loops is running.
+ *
+ * `GET /agents/{slug}` is the most expensive read on the workspace route: it
+ * builds a summary per strategy and prices each one's sessions through the
+ * Hummingbot API. So the key polls only while a loop is live — an idle agent is
+ * read once — and only a live loop can move what it carries (the "Live" badge,
+ * the delete guard, a strategy card's status). Starting a loop re-arms the gate
+ * because the lifecycle controls invalidate the key (see `AgentControls`).
+ *
+ * Every observer has to declare the gate through `agentQuery`, for the reason
+ * `EXECUTORS_REFETCH_MS` spells out: react-query drives a shared key at the
+ * *shortest* interval any observer asks for. PERF-305 gated the key in the
+ * knowledge panels, and the workspace's two flat `refetchInterval: 5000`
+ * declarations then silently overrode that gate on the screen a reader leaves
+ * open longest (PERF-343).
+ */
+export const AGENT_REFETCH_MS = 5000;
+
+/**
+ * Freshness for `["agent", slug]`.
+ *
+ * The workspace page resolves this key before it renders the screen, so the
+ * screen's observer mounts a tick later onto data react-query would otherwise
+ * call stale and re-fetch — one open, two requests. A cadence's worth of
+ * freshness makes the second mount reuse the first read; the gated interval
+ * still refetches on its own timer. Declared here rather than left to the
+ * client default so a change to that default cannot split the observers.
+ */
+export const AGENT_STALE_MS = 5000;
+
+/** Whether any of the agent's strategies has a loop running right now. */
+export function hasRunningLoop(
+  agent: Pick<AgentDetail, "strategies"> | undefined,
+): boolean {
+  return (agent?.strategies ?? []).some((s) => s.status === "running");
+}
+
+/**
+ * The one declaration of `GET /agents/{slug}`: key, fetch, freshness and the
+ * running-loop poll gate. Observe it with `useQuery(agentQuery(slug))` and
+ * invalidate it with `agentQuery(slug).queryKey` — never a hand-written copy.
+ */
+export function agentQuery(slug: string) {
+  return {
+    queryKey: ["agent", slug] as ["agent", string],
+    queryFn: () => api.getAgent(slug),
+    enabled: !!slug,
+    staleTime: AGENT_STALE_MS,
+    refetchInterval: (q: Query<AgentDetail, Error, AgentDetail, ["agent", string]>) =>
+      hasRunningLoop(q.state.data) ? AGENT_REFETCH_MS : false,
   };
 }
 

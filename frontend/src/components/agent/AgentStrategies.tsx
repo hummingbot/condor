@@ -8,6 +8,7 @@ import { EntityCard } from "@/components/agent/EntityCard";
 import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type StrategySummary } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 /**
  * The loops this agent owns — read, created, opened and deleted.
@@ -58,18 +59,12 @@ export function AgentStrategies({
     null,
   );
 
-  const { data: agent } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug,
-    // Only a live loop can change these cards; an idle agent is read once.
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
-  });
+  // Only a live loop can change these cards; an idle agent is read once (`agentQuery`).
+  const { data: agent } = useQuery(agentQuery(slug));
 
   /** Both catalogues count strategies, so both are re-read after a change. */
   const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+    queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
     queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
   };
 
@@ -248,7 +243,7 @@ function CreateStrategyDialog({
     mutationFn: () =>
       api.createStrategy(agentSlug, { name, description, default_trading_context: defaultContext }),
     onSuccess: (strategy) => {
-      queryClient.invalidateQueries({ queryKey: ["agent", agentSlug] });
+      queryClient.invalidateQueries({ queryKey: agentQuery(agentSlug).queryKey });
       // The knowledge panel counts strategies off its own query.
       queryClient.invalidateQueries({ queryKey: ["agent-brain", agentSlug] });
       onClose();

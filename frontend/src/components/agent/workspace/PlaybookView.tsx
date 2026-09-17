@@ -23,6 +23,7 @@ import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { countdown } from "@/lib/agent-attribution";
 import { api, type StrategyDetail } from "@/lib/api";
 import { formatCurrency } from "@/lib/formatters";
+import { agentQuery } from "@/lib/queryClient";
 
 /**
  * The Playbook disclosure's body: what the strategy is *told*, not what it did.
@@ -73,7 +74,7 @@ export function PlaybookView({
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
       queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
       onDeleted();
     },

@@ -44,6 +44,7 @@ import {
   type SkillCard,
   type SkillProposal,
 } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 import { formatRoutineName } from "@/lib/routineUtils";
 
 /**
@@ -162,19 +163,11 @@ export function AgentKnowledge({
   /**
    * The loops, for the banner above the sections.
    *
-   * The same `["agent", slug]` key `AgentStrategies` reads, so the two share
-   * one set of records through react-query and the banner costs no second
-   * fetch when the Strategies section is open. Same conditional cadence for
-   * the same reason (PERF-305): only a live loop can move a countdown, and an
-   * idle agent should not buy 5s of Hummingbot round-trips to be told so.
+   * The same `["agent", slug]` query `AgentStrategies` reads, so the banner
+   * costs no second fetch when the Strategies section is open, and polls only
+   * while a loop is live (`agentQuery`, PERF-305).
    */
-  const { data: agentDetail } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug,
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
-  });
+  const { data: agentDetail } = useQuery(agentQuery(slug));
 
   // One dirty flag for whichever editor is mounted — only ever one is.
   const [dirty, setDirty] = useState(false);
@@ -196,7 +189,7 @@ export function AgentKnowledge({
   const refresh = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
     // The agent page polls a different key for the same AGENT.md.
-    queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+    queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
     // A body lives under its own key, and keys match element by element — so
     // "agent-brain" never reaches "agent-brain-body". Without this the reader
     // stays mounted across a save and renders the text from before it, and
@@ -718,7 +711,7 @@ function BrainTab({
             api
               .updateAgentMd(slug, value)
               .then(() =>
-                queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+                queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey }),
               )
           }
           invalidateKey={["agent-brain", slug]}

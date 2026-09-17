@@ -25,6 +25,7 @@ import {
 } from "@/components/agent/workspace/workspaceUrl";
 import { writePane } from "@/components/chat/paneUrl";
 import { api } from "@/lib/api";
+import { agentQuery, hasRunningLoop } from "@/lib/queryClient";
 
 /**
  * One agent, one screen, one route (FEAT-103).
@@ -59,29 +60,8 @@ export function AgentWorkspace() {
   // This route's own search string is the whole of the workspace's grammar.
   const adapter = useWorkspaceUrl(searchParams, setSearchParams);
 
-  // The header's, and the two guards below. The same `["agent", slug]` the body
-  // reads, so react-query serves both from one poll rather than two — and on
-  // the same gate, because sharing a key means sharing the shortest interval
-  // declared on it (PERF-343). Only a live loop can move the "Live" badge or
-  // the delete guard; the strategy controls invalidate this key when they
-  // start one, so the gate re-arms without a reload.
-  const {
-    data: agent,
-    isLoading,
-    error,
-  } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug,
-    // The page resolves this key before it renders the screen, so the
-    // screen's observer mounts a tick later onto data react-query would
-    // otherwise call stale and re-fetch — one open, two requests. A cadence's
-    // worth of freshness makes the second mount reuse the first read; the
-    // interval below refetches on its own timer regardless.
-    staleTime: 5000,
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
-  });
+  // The header's, and the two guards below — one poll shared with the body (gate: `agentQuery`).
+  const { data: agent, isLoading, error } = useQuery(agentQuery(slug));
 
   const deleteAgentMutation = useMutation({
     mutationFn: () => api.deleteAgent(slug),
@@ -173,7 +153,7 @@ export function AgentWorkspace() {
     );
   }
 
-  const isRunning = (agent.strategies || []).some((st) => st.status === "running");
+  const isRunning = hasRunningLoop(agent);
 
   return (
     <>

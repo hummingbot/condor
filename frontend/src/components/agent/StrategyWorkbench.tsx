@@ -26,6 +26,7 @@ import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useSeconds } from "@/hooks/useSeconds";
 import { api, type AgentRunRow } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
+import { agentQuery } from "@/lib/queryClient";
 
 /** Which run, and which tick of it, a link into the run screen names. */
 type LabUrlParams = Pick<WorkspaceUrlPatch, "run" | "tick">;
@@ -105,7 +106,7 @@ export function StrategyWorkbench({
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
       queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
       onDeleted();
     },
