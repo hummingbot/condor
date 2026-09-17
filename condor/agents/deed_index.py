@@ -78,7 +78,7 @@ from condor.agents.deeds import (
     tag_for,
 )
 from condor.agents.ownership import (
-    read_ledger_namespace,
+    read_ledger,
     read_owned,
     strip_deploy_suffix,
 )
@@ -248,7 +248,7 @@ def _loop_runs() -> Iterator[tuple[Path, str, str]]:
             yield session_dir, strategy.key, f"s{num}"
 
 
-def _run_key_of(directory: Path, strategy: str) -> str:
+def _run_key_of(namespace: str, strategy: str) -> str:
     """``{agent}.{strategy}`` for a pseudo-run, read off the ledger it wrote.
 
     A conversation's directory is named after the conversation, so who was bound
@@ -258,7 +258,6 @@ def _run_key_of(directory: Path, strategy: str) -> str:
     unbound turn — the common case — resolves to Condor, which is
     ``binding.py``'s settled rule and not a fallback.
     """
-    namespace = read_ledger_namespace(directory)
     suffix = f"-{strategy}"
     agent = namespace[: -len(suffix)] if namespace.endswith(suffix) else ""
     return f"{agent or CHAT_SLUG}.{strategy}"
@@ -298,9 +297,9 @@ def _index_pseudo_run(
     landed and its ledger write did not. A run that only stopped things owns
     nothing and is indexed as nothing.
     """
-    owned = read_owned(directory)
+    namespace, owned = read_ledger(directory)
     if owned:
-        run_key = _run_key_of(directory, strategy)
+        run_key = _run_key_of(namespace, strategy)
         _note_tag(tags, strategy, run_key, run_id)
         for bot in owned:
             _claim(bots, bot.base, OwnerRef(run_key, run_id, bot.since))

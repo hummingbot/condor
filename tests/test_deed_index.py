@@ -129,6 +129,26 @@ def test_a_bound_specialists_deploy_is_attributed_to_that_specialist():
     assert build_deed_index().bots["hand-rolled-bot"].run_key == "brigado.chat"
 
 
+def test_a_run_with_a_ledger_opens_it_once(monkeypatch):
+    """Owned bots and namespace come from one read, as the docstring promises."""
+    _chat_deploy("c_x", "hand-rolled-bot", agent_slug="brigado")
+    reset_deed_index_cache()
+
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def watching_read_text(self, *args, **kwargs):
+        reads.append(self.name)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", watching_read_text)
+
+    index = build_deed_index()
+
+    assert reads.count("owned_bots.json") == 1
+    assert index.bots["hand-rolled-bot"].run_key == "brigado.chat"
+
+
 def test_a_delegation_and_the_dashboard_get_their_own_run_keys():
     """Three pseudo-strategies, not two: `brigado.chat` must mean one run."""
     deeds.record_direct(
