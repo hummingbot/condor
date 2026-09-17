@@ -195,7 +195,10 @@ export const AgentKnowledge = memo(function AgentKnowledge({
 
   const refresh = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
-    // The agent page polls a different key for the same AGENT.md.
+    // The same AGENT.md, and the front-matter facts read off it, also arrive
+    // under ["agent", slug] — the banner above reads that key and so does the
+    // workspace page. Its poll is gated to a running loop (`agentQuery`), so
+    // for an idle agent this invalidation is the only thing that re-reads it.
     queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
     // A body lives under its own key, and keys match element by element — so
     // "agent-brain" never reaches "agent-brain-body". Without this the reader

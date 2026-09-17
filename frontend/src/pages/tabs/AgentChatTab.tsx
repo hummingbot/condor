@@ -678,9 +678,12 @@ export function AgentChatTab() {
             />
           </div>
 
-          {/* What a dock row or the header button opened, beside the
-              conversation rather than on top of it — so the agent that produced
-              the report is still there to ask about it. */}
+          {/* Whatever has claimed the pane — the agent panel, a strategy
+              sheet, the desk, the routine library — beside the conversation
+              rather than on top of it, so the agent that produced the report is
+              still there to ask about it. The doors are the `WorkspaceRail`
+              tiles at the far edge (plus an Execution row in the desk and a
+              pasted `?panel=`); the bar above the transcript carries none. */}
           <WorkspacePaneOutlet />
 
           {pane?.kind === "agent" && (

@@ -25,11 +25,12 @@ import { agentQuery } from "@/lib/queryClient";
  * carries. That endpoint is not cheap — it prices every session's executors
  * through the Hummingbot API — so the poll is conditional (PERF-305): an idle
  * agent is read once and a live one keeps the 5s cadence, because "running" is
- * exactly when a card's PnL and instances can still change. The agent page
- * polls the same key unconditionally and react-query takes the shortest
- * interval among observers, so page behaviour is unchanged; it is the chat's
- * agent panel, where nothing else observes the key, that used to pay 5s of
- * Hummingbot round-trips for an agent with no loop running.
+ * exactly when a card's PnL and instances can still change. The gate is not
+ * this component's to keep on its own: react-query drives a shared key at the
+ * shortest interval any observer asks for, so every reader of `["agent", slug]`
+ * declares it through the one `agentQuery` factory — the workspace page and its
+ * run screen included, whose two flat 5s declarations silently overrode this
+ * gate on the screen a reader leaves open longest until PERF-343.
  *
  * Opening a strategy hands it to `onOpenStrategy` when the host has somewhere
  * to put it — the chat's workspace pane does, and opens the same workbench the
