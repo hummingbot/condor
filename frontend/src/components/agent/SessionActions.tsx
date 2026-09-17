@@ -23,7 +23,7 @@ interface SessionActionsProps {
   slug: string;
   sslug: string;
   sessionNum: number;
-  /** Jump to a tick's full snapshot. Wired to the reviewer's Snapshots tab. */
+  /** Jump to a tick's full snapshot. RunOverview wires it to the Lab's `?tick=` param. */
   onSnapshotClick?: (tick: number) => void;
 }
 

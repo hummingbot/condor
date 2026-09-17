@@ -14,7 +14,7 @@ import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DeployedFleet } from "@/components/agent/DeployedFleet";
 import { LoopPulse } from "@/components/agent/LoopPulse";
-import { formatRunId, isLiveRun, runFacts, runLabel } from "@/components/agent/lab/runs";
+import { formatRunId, isLiveRun, liveControllerIds, runFacts, runLabel } from "@/components/agent/lab/runs";
 import {
   workspaceHref,
   type WorkspaceUrlPatch,
@@ -154,10 +154,8 @@ export function StrategyWorkbench({
   const serverName = (strategy?.config?.server_name as string) || "";
 
   // Executor-mode ids: a running engine tags its own executors with its agent_id.
-  // A bot-mode strategy adds nothing here — its controllers tag executors with
-  // their own config ids — which is why the live charts below stayed empty for it.
-  // The session reviewer widens this with the live bots' controller ids, which it
-  // can resolve per session; here we widen it with the newest session's.
+  // liveControllerIds widens them with the newest session's live bot controllers
+  // (RunOverview does the same for the run it shows).
   const agentControllerIds = useMemo(
     () => instances.map((inst) => inst.agent_id).filter(Boolean),
     [instances],
@@ -178,15 +176,10 @@ export function StrategyWorkbench({
     refetchInterval: 10000,
   });
 
-  const controllerIds = useMemo(() => {
-    const ids = new Set(agentControllerIds);
-    const perf = latestSessionPerf?.performance;
-    const live = new Set(perf?.bot_names ?? []);
-    for (const c of perf?.controllers ?? []) {
-      if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
-    }
-    return Array.from(ids);
-  }, [agentControllerIds, latestSessionPerf]);
+  const controllerIds = useMemo(
+    () => liveControllerIds(latestSessionPerf?.performance, agentControllerIds),
+    [agentControllerIds, latestSessionPerf],
+  );
 
   // Real-time executor data via WS
   const { executors: liveExecutors } = useAgentExecutors(

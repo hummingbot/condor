@@ -13,7 +13,7 @@
 // be a state and not a footnote.
 
 import type { AgentActionRow } from "@/lib/agent-attribution";
-import type { AgentRunRow } from "@/lib/api";
+import type { AgentPerformance, AgentRunRow } from "@/lib/api";
 import { formatDuration } from "@/lib/formatters";
 
 /**
@@ -243,3 +243,29 @@ export const BEAT_TITLES: Record<BeatState, string> = {
   idle: "no actions on this tick",
   unlogged: "no action log for this run",
 };
+
+/**
+ * The controller ids whose executors a live chart should stream for a run.
+ *
+ * `seed` is the caller's executor-mode ids: a running engine tags its own
+ * executors with its agent_id. A bot-mode run adds nothing there — a bot's
+ * controllers tag their executors with their own config id, never with the
+ * agent_id — which is why the live charts once stayed empty for it. So the
+ * seed is widened with every controller whose bot is alive now.
+ *
+ * Liveness is `bot_name` in `perf.bot_names`, never the controller's own
+ * `status` (see `AgentControllerRow.status`: the snapshot reports "running"
+ * even for archived instances). A controller with no id is skipped. The seed
+ * is never mutated, and its ids come first, each once.
+ */
+export function liveControllerIds(
+  perf: Pick<AgentPerformance, "bot_names" | "controllers"> | null | undefined,
+  seed: readonly string[] = [],
+): string[] {
+  const ids = new Set(seed);
+  const live = new Set(perf?.bot_names ?? []);
+  for (const c of perf?.controllers ?? []) {
+    if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
+  }
+  return Array.from(ids);
+}

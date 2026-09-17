@@ -10,6 +10,7 @@ import {
   SnapshotBody,
 } from "@/components/agent/AgentSessionContent";
 import { SessionActions } from "@/components/agent/SessionActions";
+import { liveControllerIds } from "@/components/agent/lab/runs";
 import { api } from "@/lib/api";
 import {
   type ParsedJournal,
@@ -74,17 +75,10 @@ export function RunOverview({
     [journalContent],
   );
 
-  // A bot's controllers tag their executors with their own config id, never
-  // with the agent_id, so streaming a bot-mode run needs the live bots' own
-  // controller ids added to the caller's.
-  const sessionControllerIds = useMemo(() => {
-    const ids = new Set(controllerIds ?? []);
-    const live = new Set(perf?.bot_names ?? []);
-    for (const c of perf?.controllers ?? []) {
-      if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
-    }
-    return Array.from(ids);
-  }, [controllerIds, perf?.bot_names, perf?.controllers]);
+  const sessionControllerIds = useMemo(
+    () => liveControllerIds(perf, controllerIds ?? []),
+    [controllerIds, perf],
+  );
 
   return (
     <div className="space-y-4">

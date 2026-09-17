@@ -7,6 +7,7 @@ import {
   hasPricedMoney,
   isLiveRun,
   isLoopRun,
+  liveControllerIds,
   parseRunId,
   runDurationSec,
   runFacts,
@@ -246,5 +247,42 @@ describe("deeds join to ticks", () => {
     expect(byTick.get(1)?.map((r) => r.verb)).toEqual(["a", "c"]);
     expect(byTick.get(3)?.map((r) => r.verb)).toEqual(["b"]);
     expect(byTick.get(2)).toBeUndefined();
+  });
+});
+
+describe("liveControllerIds", () => {
+  type Perf = Parameters<typeof liveControllerIds>[0];
+  const ctl = (bot_name: string, controller_id: string) => ({ bot_name, controller_id });
+  const perf = (bot_names?: string[], controllers?: { bot_name: string; controller_id: string }[]) =>
+    ({ bot_names, controllers }) as Perf;
+
+  it("adds only controllers whose bot is live", () => {
+    const p = perf(["bot-a"], [ctl("bot-a", "c1"), ctl("bot-old", "c2")]);
+    expect(liveControllerIds(p, ["agent.s.1"])).toEqual(["agent.s.1", "c1"]);
+  });
+
+  it("skips a controller with no id even when its bot is live", () => {
+    expect(liveControllerIds(perf(["bot-a"], [ctl("bot-a", ""), ctl("bot-a", "c1")]))).toEqual(["c1"]);
+  });
+
+  it("keeps seed ids first and never duplicates them", () => {
+    const p = perf(["bot-a"], [ctl("bot-a", "c1"), ctl("bot-a", "seed")]);
+    expect(liveControllerIds(p, ["seed", "x"])).toEqual(["seed", "x", "c1"]);
+  });
+
+  it("returns the seed unchanged when there is nothing live to add", () => {
+    expect(liveControllerIds(null, ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(undefined, ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(perf(), ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(perf(undefined, [ctl("bot-a", "c1")]), ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(undefined)).toEqual([]);
+  });
+
+  it("does not mutate the seed", () => {
+    const seed: readonly string[] = Object.freeze(["s"]);
+    const out = liveControllerIds(perf(["bot-a"], [ctl("bot-a", "c1")]), seed);
+    expect(seed).toEqual(["s"]);
+    expect(out).toEqual(["s", "c1"]);
+    expect(out).not.toBe(seed);
   });
 });
