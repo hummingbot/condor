@@ -5,15 +5,13 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
-import {
-  InstanceCard,
-  MarkdownEditor,
-  PerformancePanel,
-} from "@/components/agent/AgentOverviewTab";
 import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DeployedFleet } from "@/components/agent/DeployedFleet";
+import { InstanceCard } from "@/components/agent/InstanceCard";
 import { LoopPulse } from "@/components/agent/LoopPulse";
+import { MarkdownEditor } from "@/components/agent/MarkdownEditor";
+import { PerformancePanel } from "@/components/agent/PerformancePanel";
 import {
   effectiveTradingContext,
   formatRunId,

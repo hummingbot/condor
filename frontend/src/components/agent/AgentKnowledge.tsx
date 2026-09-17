@@ -19,7 +19,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { ActivityFeed } from "@/components/agent/ActivityFeed";
-import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { MarkdownEditor } from "@/components/agent/MarkdownEditor";
 import { AgentStrategies } from "@/components/agent/AgentStrategies";
 import { LoopBanner } from "@/components/agent/LoopBanner";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";

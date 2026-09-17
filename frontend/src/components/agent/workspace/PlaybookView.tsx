@@ -15,7 +15,7 @@ import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { MarkdownEditor } from "@/components/agent/MarkdownEditor";
 import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { effectiveTradingContext, formatRunId } from "@/components/agent/lab/runs";

@@ -20,7 +20,7 @@ import type { AgentPerformance, AgentPerformanceResponse } from "@/lib/api";
 // The library is substituted at the resolver for every test file (CORR-368);
 // `chartDouble` is only how this file reads back what the chart drew.
 import { chartDouble } from "@/test/lightweight-charts-double";
-import { PerformancePanel } from "./AgentOverviewTab";
+import { PerformancePanel } from "./PerformancePanel";
 
 const getStrategyPerformance = vi.fn<(slug: string, sslug: string) => Promise<AgentPerformanceResponse>>();
 
