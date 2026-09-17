@@ -263,3 +263,73 @@ def test_evicted_session_refetched_and_refrozen(perf_env, monkeypatch):
     )
     assert totals2 == totals1
     assert totals2["total_pnl"] == pytest.approx(10.0)
+
+
+def test_failed_fetch_is_not_cached_in_rollup(perf_env):
+    """CORR-666: a render with a failed executor fetch skips the 30s rollup cache."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1, 2])
+    api = _FakeExecutorsApi(
+        {f"{RUN_KEY}_2": [_closed_executor(2.0)]}, fail_ids={f"{RUN_KEY}_1"}
+    )
+    use_client(_FakeClient(api))
+
+    _compute(strategy_dir)
+    assert agents_routes._PERF_CACHE == {}
+    # No manual cache clear: the next poll must go back to the backend.
+    _compute(strategy_dir)
+    assert api.calls[f"{RUN_KEY}_1"] == 2
+
+    api.fail_ids.clear()
+    api.rows_by_aid[f"{RUN_KEY}_1"] = [_closed_executor(1.0)]
+    _, totals = _compute(strategy_dir)
+    assert api.calls[f"{RUN_KEY}_1"] == 3
+    assert totals["total_pnl"] == pytest.approx(3.0)
+    # A clean result is cached again.
+    assert len(agents_routes._PERF_CACHE) == 1
+
+
+def test_batch_raise_is_not_cached_in_rollup(perf_env, monkeypatch):
+    """CORR-666: when the batch call itself raises, the empty rollup is not cached."""
+    from condor.agents import performance as performance_module
+
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1, 2])
+    api = _FakeExecutorsApi(
+        {
+            f"{RUN_KEY}_1": [_closed_executor(1.0)],
+            f"{RUN_KEY}_2": [_closed_executor(2.0)],
+        }
+    )
+    use_client(_FakeClient(api))
+
+    real_batch = performance_module.fetch_agent_performance_batch
+
+    async def _raising_batch(*args, **kwargs):
+        raise RuntimeError("batch down")
+
+    monkeypatch.setattr(
+        performance_module, "fetch_agent_performance_batch", _raising_batch
+    )
+    sessions, totals = _compute(strategy_dir)
+    assert sessions == []
+    assert totals["total_pnl"] == 0
+    assert agents_routes._PERF_CACHE == {}
+
+    monkeypatch.setattr(performance_module, "fetch_agent_performance_batch", real_batch)
+    _, totals = _compute(strategy_dir)
+    assert api.calls[f"{RUN_KEY}_1"] == 1
+    assert api.calls[f"{RUN_KEY}_2"] == 1
+    assert totals["total_pnl"] == pytest.approx(3.0)
+
+
+def test_no_client_rollup_is_still_cached(perf_env):
+    """CORR-666: an offline/unpriced server (no client) keeps its cached rollup."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    use_client(None)
+
+    sessions, totals = _compute(strategy_dir)
+    assert sessions == []
+    assert totals["total_pnl"] == 0
+    assert len(agents_routes._PERF_CACHE) == 1

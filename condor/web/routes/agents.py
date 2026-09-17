@@ -1018,6 +1018,9 @@ async def _compute_strategy_performance(
     would hold for 30 seconds and then be handed the money anyway by whoever
     rendered the page first (SEC-334). ``_CLOSED_PERF_CACHE`` needs no such
     split: it is only ever read on the branch that already has a client.
+
+    A render in which any executor fetch failed is returned but not cached, so
+    the next poll re-fetches instead of serving the failed ids' $0 rows for 30s.
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
@@ -1047,6 +1050,7 @@ async def _compute_strategy_performance(
     # apply_bot_mode_pnl from the controller history, which handles both fixed and
     # runtime-named (per-session config) bots.
     sessions: list[AgentPerformanceModel] = []
+    fetch_failed = False
     if client and ids:
         from condor.agents.engine import get_all_engines
 
@@ -1089,6 +1093,9 @@ async def _compute_strategy_performance(
                 log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
                 perf_map = {}
                 failed_ids = set(fetch_ids)
+        # A failed id still comes back as an all-zero row (or not at all when
+        # the batch raised); that is an outage, not a result worth caching.
+        fetch_failed = bool(failed_ids)
 
         for agent_id, num, kind in ids:
             perf = perf_map.get(agent_id)
@@ -1166,7 +1173,8 @@ async def _compute_strategy_performance(
     }
 
     result = (sessions, totals)
-    _cache_set(cache_key, result)
+    if not fetch_failed:
+        _cache_set(cache_key, result)
     return result
 
 
