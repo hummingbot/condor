@@ -202,19 +202,20 @@ def _conversation_runs(
     it is compared. Without that, Condor's own rail would be empty for exactly
     the conversations it is meant to show.
     """
-    from condor.memory.paths import CHAT_SLUG
     from condor.runtime.conversations import list_conversations
 
     rows: list[dict[str, Any]] = []
     for owner in _conversation_owners(user_id):
         try:
-            metas = list_conversations(owner, limit=limit)  # type: ignore[arg-type]
+            # Filtered before the limit, not after: otherwise the owner's newest
+            # ``limit`` chats with any agent fill the window first (CORR-652).
+            metas = list_conversations(
+                owner, limit=limit, agent_slug=agent_slug  # type: ignore[arg-type]
+            )
         except Exception:  # noqa: BLE001 - one owner's store, not the listing
             log.debug("Could not list conversations for %s", owner, exc_info=True)
             continue
         for meta in metas:
-            if (meta.agent_slug or CHAT_SLUG) != agent_slug:
-                continue
             rows.append(
                 {
                     "run_id": run_id_for(KIND_CONVERSATION, meta.id),

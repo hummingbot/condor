@@ -294,6 +294,35 @@ def test_hundreds_of_conversations_page_rather_than_all_arriving(tmp_path):
     assert len(list_all_runs("brigado", USER, limit=200)) == 150
 
 
+def test_a_specialists_older_conversations_are_not_hidden_by_newer_condor_chats(
+    tmp_path,
+):
+    """The agent filter runs before the window, not after it (CORR-652).
+
+    Condor is the default binding, so on a chatty install the owner's newest
+    hundred chats are all with Condor; a specialist's rail must still find its
+    own older ones rather than reporting none.
+    """
+    import os
+
+    base = 1_800_000_000
+    brigado = []
+    for i in range(5):
+        d = _write_conversation(USER, f"b-{i}", agent_slug="brigado")
+        os.utime(d / "meta.json", (base + i, base + i))
+        brigado.append(f"b-{i}")
+    for i in range(120):
+        d = _write_conversation(USER, f"u-{i:03d}", agent_slug="")
+        os.utime(d / "meta.json", (base + 100 + i, base + 100 + i))
+
+    specialist = list_all_runs("brigado", USER, limit=100)
+    assert sorted(r["id"] for r in specialist) == brigado
+
+    condor = list_all_runs("condor", USER, limit=100)
+    assert len(condor) == 100
+    assert not {r["id"] for r in condor} & set(brigado)
+
+
 # ── The route ──
 
 
