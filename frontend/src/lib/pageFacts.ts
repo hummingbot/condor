@@ -358,7 +358,7 @@ function agentIdentityFacts(
     running: names(
       live.map((s) => `${s.name} (tick ${s.instances[0]?.tick_count ?? 0})`),
     ),
-    "daily pnl": m.pnl(sum((s) => s.daily_pnl)),
+    "latest session pnl": m.pnl(sum((s) => s.latest_session_pnl)),
     "total pnl": m.pnl(sum((s) => s.total_pnl)),
     "open positions": sum((s) => s.open_positions),
     skills: brain?.skills?.length,
@@ -400,7 +400,7 @@ function strategyScopeFacts(
       ? `session ${live.session_num}, tick ${live.tick_count} (${live.execution_mode})`
       : "no live instance",
     model: live?.agent_key,
-    "daily pnl": m.pnl(summary?.daily_pnl ?? live?.daily_pnl),
+    "latest session pnl": m.pnl(summary?.latest_session_pnl ?? live?.total_pnl),
     "total pnl": m.pnl(summary?.total_pnl ?? live?.total_pnl),
     "open positions": summary?.open_positions ?? live?.open_count,
     sessions: detail?.sessions?.length,

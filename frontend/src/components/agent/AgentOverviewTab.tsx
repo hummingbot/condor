@@ -109,8 +109,8 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
         </div>
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>
-          <span className={pnlTextClass(instance.daily_pnl)}>
-            PnL: {formatCurrencyPnl(instance.daily_pnl)}
+          <span className={pnlTextClass(instance.total_pnl)}>
+            PnL: {formatCurrencyPnl(instance.total_pnl)}
           </span>
         </div>
       </div>

@@ -105,7 +105,7 @@ const running = {
       agent_id: "brigado.fleet_op_3",
       status: "running",
       tick_count: 1,
-      daily_pnl: 0,
+      total_pnl: 0,
       risk_limits: {},
       last_tick_at: 0,
       frequency_sec: 3600,

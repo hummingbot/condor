@@ -1147,7 +1147,7 @@ def test_instance_from_engine_takes_money_fields_off_the_perf_row(monkeypatch):
 
     row = AgentPerformanceModel.from_perf(_every_field_perf(), session_num=3)
     inst = _instance_from_engine(_Engine(), {"demo.s_3": row})
-    assert inst.daily_pnl == row.total_pnl
+    assert not hasattr(inst, "daily_pnl")
     for name in (
         "realized_pnl",
         "unrealized_pnl",
@@ -1161,8 +1161,8 @@ def test_instance_from_engine_takes_money_fields_off_the_perf_row(monkeypatch):
         assert getattr(inst, name) == getattr(row, name), name
 
     bare = _instance_from_engine(_Engine(), {})
-    assert bare.daily_pnl == 42.0
-    assert (bare.realized_pnl, bare.total_pnl, bare.open_count) == (0.0, 0.0, 0)
+    assert bare.total_pnl == 42.0
+    assert (bare.realized_pnl, bare.open_count) == (0.0, 0)
     assert bare.win_rate is None
 
 

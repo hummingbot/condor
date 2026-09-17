@@ -36,7 +36,6 @@ function instance(over: Partial<RunningInstance> = {}): RunningInstance {
     status: "running",
     agent_key: "sonnet",
     tick_count: 14,
-    daily_pnl: 0,
     realized_pnl: 0,
     unrealized_pnl: 0,
     total_pnl: 0,

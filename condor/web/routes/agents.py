@@ -131,7 +131,6 @@ class RunningInstance(BaseModel):
     status: str
     agent_key: str = ""
     tick_count: int = 0
-    daily_pnl: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     total_pnl: float = 0.0
@@ -173,7 +172,9 @@ class StrategySummary(BaseModel):
     session_count: int = 0
     experiment_count: int = 0
     tick_count: int = 0
-    daily_pnl: float = 0.0
+    #: PnL of the newest session only; ``total_pnl`` is the rollup across all
+    #: sessions.
+    latest_session_pnl: float = 0.0
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
@@ -199,7 +200,9 @@ class AgentSummary(BaseModel):
     session_count: int = 0
     experiment_count: int = 0
     tick_count: int = 0
-    daily_pnl: float = 0.0
+    #: PnL of the newest session only; ``total_pnl`` is the rollup across all
+    #: sessions.
+    latest_session_pnl: float = 0.0
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
@@ -1221,8 +1224,13 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         session_num=info["session_num"],
         status=info["status"],
         tick_count=info["tick_count"],
-        daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
-        **(p.model_dump(include=_INSTANCE_PERF_FIELDS) if p else {}),
+        # Absent a performance row, fall back to the engine's ``daily_pnl`` key,
+        # which is the session's skill-data ``total_pnl`` despite its name.
+        **(
+            p.model_dump(include=_INSTANCE_PERF_FIELDS)
+            if p
+            else {"total_pnl": float(info["daily_pnl"])}
+        ),
         server_name=info.get("server_name", ""),
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
@@ -1324,7 +1332,7 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
         session_count=count_sessions(strategy_dir),
         experiment_count=count_experiments(strategy_dir),
         tick_count=tick_count,
-        daily_pnl=latest_session_pnl,
+        latest_session_pnl=latest_session_pnl,
         total_pnl=float(totals.get("total_pnl", 0.0)),
         total_volume=float(totals.get("volume", 0.0)),
         open_positions=int(totals.get("open_positions", 0)),
@@ -1387,7 +1395,7 @@ def _aggregate_strategy_perf(strategies: list[StrategySummary]) -> dict[str, Any
         "session_count": sum(s.session_count for s in strategies),
         "experiment_count": sum(s.experiment_count for s in strategies),
         "tick_count": sum(s.tick_count for s in strategies),
-        "daily_pnl": sum(s.daily_pnl for s in strategies),
+        "latest_session_pnl": sum(s.latest_session_pnl for s in strategies),
         "total_pnl": sum(s.total_pnl for s in strategies),
         "total_volume": sum(s.total_volume for s in strategies),
         "open_positions": sum(s.open_positions for s in strategies),

@@ -758,7 +758,6 @@ export interface RunningInstance {
   status: string;
   agent_key: string;
   tick_count: number;
-  daily_pnl: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
@@ -799,7 +798,8 @@ export interface StrategySummary {
   session_count: number;
   experiment_count: number;
   tick_count: number;
-  daily_pnl: number;
+  /** PnL of the newest session only; `total_pnl` is the rollup across all sessions. */
+  latest_session_pnl: number;
   total_pnl: number;
   total_volume: number;
   open_positions: number;
@@ -883,7 +883,8 @@ export interface AgentSummary {
   session_count: number;
   experiment_count: number;
   tick_count: number;
-  daily_pnl: number;
+  /** PnL of the newest session only; `total_pnl` is the rollup across all sessions. */
+  latest_session_pnl: number;
   total_pnl: number;
   total_volume: number;
   open_positions: number;

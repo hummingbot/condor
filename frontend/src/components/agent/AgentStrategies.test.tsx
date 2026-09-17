@@ -55,7 +55,7 @@ function strategy(status: string): StrategySummary {
     session_count: 1,
     experiment_count: 0,
     tick_count: 0,
-    daily_pnl: 0,
+    latest_session_pnl: 0,
     total_pnl: 0,
     total_volume: 0,
     open_positions: 0,
