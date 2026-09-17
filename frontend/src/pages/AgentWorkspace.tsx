@@ -14,15 +14,15 @@ import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { AgentRunScreen } from "@/components/agent/workspace/AgentRunScreen";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
-import {
-  OPEN_PARAM,
-  sectionForView,
-} from "@/components/agent/workspace/sections";
+import { sectionForView } from "@/components/agent/workspace/sections";
 import {
   runsRedirect,
   strategyRedirect,
 } from "@/components/agent/workspace/views";
-import { useWorkspaceUrl } from "@/components/agent/workspace/workspaceUrl";
+import {
+  useWorkspaceUrl,
+  workspaceHref,
+} from "@/components/agent/workspace/workspaceUrl";
 import { writePane } from "@/components/chat/paneUrl";
 import { api } from "@/lib/api";
 
@@ -136,15 +136,10 @@ export function AgentWorkspace() {
       });
       return <Navigate to={`/?${pane}`} replace />;
     }
-    const params = new URLSearchParams(searchParams);
-    params.delete("view");
-    params.delete("tab");
     const section = sectionForView(legacyView);
-    if (section) params.set(OPEN_PARAM, section);
-    const query = params.toString();
     return (
       <Navigate
-        to={`/agents/${encodeURIComponent(slug)}${query ? `?${query}` : ""}`}
+        to={workspaceHref(slug, section ? { open: section } : {}, searchParams)}
         replace
       />
     );

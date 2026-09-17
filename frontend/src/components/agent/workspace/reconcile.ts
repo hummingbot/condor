@@ -34,6 +34,7 @@
 //
 // Nothing here fetches and nothing here renders (the ARCH-300 split).
 
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { agentBucketLabel } from "@/components/perf/agentFilter";
 import {
   PSEUDO_STRATEGIES,
@@ -126,11 +127,11 @@ export function recordsHref(
   item: { runKey: string; scope: string },
 ): string {
   if (item.runKey === `${slug}.${sslug}`) {
-    return (
-      `/agents/${encodeURIComponent(slug)}?open=fleet` +
-      `&strategy=${encodeURIComponent(sslug)}` +
-      `&fscope=${encodeURIComponent(item.scope)}`
-    );
+    return workspaceHref(slug, {
+      open: "fleet",
+      strategy: sslug,
+      fscope: item.scope,
+    });
   }
   return `/bots?scope=${encodeURIComponent(item.scope)}`;
 }

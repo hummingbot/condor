@@ -15,6 +15,7 @@ import {
   alertsFor,
   type WorkspaceAlert,
 } from "@/components/agent/workspace/views";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { countdown, type AgentActionRow } from "@/lib/agent-attribution";
 import type {
   AgentSummary,
@@ -281,10 +282,7 @@ export function spineKeys(spine: readonly PerfLeaf[]): string[] {
 
 /** The workspace this row opens — `/agents/:slug`, scoped when we know it. */
 export function rowHref(row: Pick<FleetRow, "slug" | "strategy">): string {
-  const base = `/agents/${encodeURIComponent(row.slug)}`;
-  return row.strategy
-    ? `${base}?strategy=${encodeURIComponent(row.strategy.slug)}`
-    : base;
+  return workspaceHref(row.slug, { strategy: row.strategy?.slug ?? null });
 }
 
 /**
@@ -300,9 +298,8 @@ export function decisionHref(
   row: Pick<FleetRow, "slug" | "strategy" | "lastDid">,
 ): string {
   if (!row.lastDid || !row.strategy || row.lastDid.tick <= 0) return rowHref(row);
-  return (
-    `/agents/${encodeURIComponent(row.slug)}` +
-    `?strategy=${encodeURIComponent(row.strategy.slug)}` +
-    `&tick=${row.lastDid.tick}`
-  );
+  return workspaceHref(row.slug, {
+    strategy: row.strategy.slug,
+    tick: row.lastDid.tick,
+  });
 }

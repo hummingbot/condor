@@ -9,6 +9,7 @@ import {
   type Lead,
   type Term,
 } from "@/components/agent/workspace/reconcile";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useSeconds } from "@/hooks/useSeconds";
 import { useServer } from "@/hooks/useServer";
@@ -192,7 +193,7 @@ export function MoneyView({
             <>
               {" "}
               <Link
-                to={`/agents/${encodeURIComponent(slug)}?open=fleet&strategy=${encodeURIComponent(sslug)}`}
+                to={workspaceHref(slug, { open: "fleet", strategy: sslug })}
                 className="inline-flex items-center gap-0.5 underline-offset-2 hover:text-[var(--color-primary)] hover:underline"
               >
                 Open the fleet <ArrowUpRight className="h-3 w-3" />

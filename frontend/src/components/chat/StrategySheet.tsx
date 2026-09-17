@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
 import { StrategyWorkbench } from "@/components/agent/StrategyWorkbench";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { api } from "@/lib/api";
 
@@ -61,9 +62,7 @@ export function StrategySheet({
       // and a reader who wants the whole window wants the thing they can link
       // to and come back to.
       onFullscreen={() =>
-        navigate(
-          `/agents/${slug}?open=playbook&strategy=${encodeURIComponent(sslug)}`,
-        )
+        navigate(workspaceHref(slug, { open: "playbook", strategy: sslug }))
       }
       onClose={onClose}
     >

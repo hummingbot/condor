@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { EntityCard } from "@/components/agent/EntityCard";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type StrategySummary } from "@/lib/api";
 
@@ -97,9 +98,7 @@ export function AgentStrategies({
   function openStrategy(strategySlug: string) {
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else
-      navigate(
-        `/agents/${slug}?open=runs&strategy=${encodeURIComponent(strategySlug)}`,
-      );
+      navigate(workspaceHref(slug, { open: "runs", strategy: strategySlug }));
   }
 
   /**
@@ -112,7 +111,7 @@ export function AgentStrategies({
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else
       navigate(
-        `/agents/${slug}?open=playbook&strategy=${encodeURIComponent(strategySlug)}`,
+        workspaceHref(slug, { open: "playbook", strategy: strategySlug }),
       );
   }
 

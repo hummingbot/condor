@@ -14,6 +14,10 @@ import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DeployedFleet } from "@/components/agent/DeployedFleet";
 import { LoopPulse } from "@/components/agent/LoopPulse";
 import { formatRunId, isLiveRun, runFacts, runLabel } from "@/components/agent/lab/runs";
+import {
+  workspaceHref,
+  type WorkspaceUrlPatch,
+} from "@/components/agent/workspace/workspaceUrl";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
@@ -22,6 +26,9 @@ import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useSeconds } from "@/hooks/useSeconds";
 import { api, type AgentRunRow } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
+
+/** Which run, and which tick of it, a link into the run screen names. */
+type LabUrlParams = Pick<WorkspaceUrlPatch, "run" | "tick">;
 
 /**
  * A strategy, everywhere a strategy is shown.
@@ -200,11 +207,8 @@ export function StrategyWorkbench({
    * URL for a frame.
    */
   const labUrl = useCallback(
-    (params: Record<string, string | number> = {}) => {
-      const query = new URLSearchParams({ open: "runs", strategy: sslug });
-      for (const [k, v] of Object.entries(params)) query.set(k, String(v));
-      return `/agents/${encodeURIComponent(slug)}?${query}`;
-    },
+    (params: LabUrlParams = {}) =>
+      workspaceHref(slug, { open: "runs", strategy: sslug, ...params }),
     [slug, sslug],
   );
 
@@ -567,7 +571,7 @@ function RunsBand({
 }: {
   slug: string;
   sslug: string;
-  labUrl: (params?: Record<string, string | number>) => string;
+  labUrl: (params?: LabUrlParams) => string;
 }) {
   const { data: runs = [] } = useQuery({
     queryKey: ["agent-runs", slug],

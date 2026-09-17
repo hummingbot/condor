@@ -19,6 +19,7 @@
 
 import { isLoopRun, parseRunId, type RunRef } from "@/components/agent/lab/runs";
 import { OPEN_PARAM } from "@/components/agent/workspace/sections";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
 
 /** Everything the URL says, once. */
@@ -127,10 +128,7 @@ export function pickRun(
  * the rail it was addressing lives now (FEAT-119).
  */
 export function runsRedirect(slug: string, search: string): string {
-  const params = new URLSearchParams(search);
-  params.delete("view");
-  params.set(OPEN_PARAM, "runs");
-  return `/agents/${encodeURIComponent(slug)}?${params}`;
+  return workspaceHref(slug, { open: "runs" }, search);
 }
 
 /**
@@ -146,11 +144,7 @@ export function strategyRedirect(
   sslug: string,
   search: string,
 ): string {
-  const params = new URLSearchParams(search);
-  params.delete("view");
-  params.set(OPEN_PARAM, "playbook");
-  params.set("strategy", sslug);
-  return `/agents/${encodeURIComponent(slug)}?${params}`;
+  return workspaceHref(slug, { open: "playbook", strategy: sslug }, search);
 }
 
 // ── Alerts ──

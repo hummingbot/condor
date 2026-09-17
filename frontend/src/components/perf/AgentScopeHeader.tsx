@@ -2,6 +2,7 @@ import { Bot, ExternalLink, Server, Zap } from "lucide-react";
 import { type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { agentBucketLabel, isAgentBucket } from "@/components/perf/agentFilter";
 import { agentColor } from "@/lib/agentColor";
 import { loopFacts, loopStatus, type FleetOwner } from "@/lib/agent-attribution";
@@ -114,13 +115,14 @@ export function AgentScopeHeader({
   // demonstration of it.
   const openSession = (snapshotTick?: number) => {
     if (!owner) return;
-    const params = new URLSearchParams({
-      view: snapshotTick ? "tick" : "runs",
-      strategy: owner.strategySlug,
-    });
-    if (live?.sessionNum) params.set("run", `s${live.sessionNum}`);
-    if (snapshotTick) params.set("tick", String(snapshotTick));
-    navigate(`/agents/${owner.agentSlug}?${params}`);
+    navigate(
+      workspaceHref(owner.agentSlug, {
+        open: "runs",
+        strategy: owner.strategySlug,
+        run: live?.sessionNum ? `s${live.sessionNum}` : null,
+        tick: snapshotTick || null,
+      }),
+    );
   };
 
   const did = live?.lastDid ?? null;
