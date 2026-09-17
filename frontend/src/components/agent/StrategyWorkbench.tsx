@@ -10,6 +10,7 @@ import {
   MarkdownEditor,
   PerformancePanel,
 } from "@/components/agent/AgentOverviewTab";
+import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DeployedFleet } from "@/components/agent/DeployedFleet";
 import { LoopPulse } from "@/components/agent/LoopPulse";
@@ -27,7 +28,6 @@ import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useSeconds } from "@/hooks/useSeconds";
 import { api, type AgentRunRow } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
-import { agentQuery } from "@/lib/queryClient";
 
 /** Which run, and which tick of it, a link into the run screen names. */
 type LabUrlParams = Pick<WorkspaceUrlPatch, "run" | "tick">;
@@ -107,8 +107,7 @@ export function StrategyWorkbench({
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
+      invalidateStrategyCatalog(queryClient, slug);
       onDeleted();
     },
   });

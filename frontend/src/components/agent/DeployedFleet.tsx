@@ -3,6 +3,7 @@ import { ChevronRight, Layers, Server, Unlink } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { invalidateOwnership } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import {
   BEFORE_LEDGER,
@@ -12,7 +13,6 @@ import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useFleetData } from "@/hooks/useFleetData";
 import { attributionOf } from "@/lib/agent-attribution";
 import { api, type ControllerInfo } from "@/lib/api";
-import { agentQuery } from "@/lib/queryClient";
 
 /**
  * What this strategy put into the world, on the strategy's own page.
@@ -176,11 +176,7 @@ export function DeployedFleet({
   const unclaim = useMutation({
     mutationFn: (botName: string) => api.unclaimBot(slug, sslug, botName),
     onSuccess: () => {
-      // The same three readers the claim invalidates: the ledger decides the
-      // fleet map, the strategy's money and the tree.
-      queryClient.invalidateQueries({ queryKey: ["fleet-map"] });
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
-      queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
+      invalidateOwnership(queryClient, slug, sslug);
       setUnassigning(null);
     },
   });
@@ -461,10 +457,7 @@ function EmptyReason({
     mutationFn: (bot: { name: string; deployedAt: number }) =>
       api.claimBot(slug, sslug, bot.name, bot.deployedAt),
     onSuccess: () => {
-      // The ledger decides the fleet map, the strategy's money and the tree.
-      queryClient.invalidateQueries({ queryKey: ["fleet-map"] });
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
-      queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
+      invalidateOwnership(queryClient, slug, sslug);
     },
   });
 

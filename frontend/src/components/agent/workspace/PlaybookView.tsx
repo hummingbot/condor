@@ -16,6 +16,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { formatRunId } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
@@ -23,7 +24,6 @@ import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { countdown } from "@/lib/agent-attribution";
 import { api, type StrategyDetail } from "@/lib/api";
 import { formatCurrency } from "@/lib/formatters";
-import { agentQuery } from "@/lib/queryClient";
 
 /**
  * The Playbook disclosure's body: what the strategy is *told*, not what it did.
@@ -74,8 +74,7 @@ export function PlaybookView({
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
+      invalidateStrategyCatalog(queryClient, slug);
       onDeleted();
     },
   });

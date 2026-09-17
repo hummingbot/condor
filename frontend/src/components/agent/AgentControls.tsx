@@ -1,9 +1,4 @@
-import {
-  type QueryClient,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Clock,
   MessageSquareText,
@@ -17,28 +12,9 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { invalidateLifecycle } from "@/components/agent/agentQueries";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
-import { agentQuery } from "@/lib/queryClient";
-
-/**
- * What a start/stop/pause/resume just made stale.
- *
- * Two keys, not one. The strategy's own record is the obvious half; the agent
- * detail is the half that used to be missed, and it is load-bearing because
- * `strategies[].status` is what the workspace reads for the "Live" badge and
- * the delete guard — and what re-arms the gated `["agent", slug]` poll
- * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
- * over a loop that had just started, with nothing left to reopen it.
- */
-function invalidateLifecycle(
-  queryClient: QueryClient,
-  slug: string,
-  sslug: string,
-) {
-  queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
-  queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
-}
 
 // ── Start Session Dialog ──
 
