@@ -50,8 +50,10 @@ export function StartSessionDialog({
   const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
   const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
   const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
-  // Seeded from the strategy's stored answer, so a strategy already opted in
-  // does not quietly start opted out every time someone opens this dialog.
+  // Every field above and this one is seeded from agentConfig once, on mount.
+  // AgentControls mounts the dialog only while it is open, so each open seeds
+  // from the config as it stands then: a strategy already opted in (say, by the
+  // RestartChip after the page loaded) does not start opted out (CORR-387).
   const [restartOnBoot, setRestartOnBoot] = useState(!!agentConfig.restart_on_boot);
 
   const { data: servers } = useQuery({
@@ -412,14 +414,19 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
         )}
       </div>
 
-      <StartSessionDialog
-        open={showStartDialog}
-        onClose={() => setShowStartDialog(false)}
-        slug={slug}
-        sslug={sslug}
-        agentConfig={agentConfig}
-        defaultContext={defaultContext}
-      />
+      {/* Mounted per open, not hidden: its fields are useState seeds, so a
+          dialog kept mounted would post the config from the first render and
+          override a restart_on_boot/server/budget written since (CORR-387). */}
+      {showStartDialog && (
+        <StartSessionDialog
+          open
+          onClose={() => setShowStartDialog(false)}
+          slug={slug}
+          sslug={sslug}
+          agentConfig={agentConfig}
+          defaultContext={defaultContext}
+        />
+      )}
     </>
   );
 }
