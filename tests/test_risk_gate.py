@@ -1326,3 +1326,94 @@ def test_shutdown_mode_leaves_safe_calls_alone(tmp_path):
         {"tool": "control_agent", "input": {"action": "stop"}},
     ):
         assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected"
+
+
+# ---------------------------------------------------------------------------
+# SEC-697: the two ungated doors onto arbitrary Python are refused in shutdown
+# mode too. SEC-631 built the mode out of `is_dangerous_tool_call`, which does
+# not flag either tool, so a cleanup pass could re-open what it had just closed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        _code_call(code="await client.gateway.start({'image': 'x'})"),
+        _code_call(action="run", code="print(1)"),
+        # The tool's own default is `run`, so an unreadable action executes.
+        _code_call(code="print(1)"),
+        {"tool": "run_code", "input": None},
+        _code_call(action=None, code="print(1)"),
+    ],
+)
+def test_shutdown_mode_cannot_execute_a_snippet(tmp_path, call):
+    refusals = RefusalLog()
+    result = asyncio.run(_shutdown_gate(tmp_path, refusals)(call, _OPTIONS))
+
+    assert _outcome(result) == "cancelled"
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "run_code"
+    assert "shutting down" in noted["reason"]
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["run", "run_async", "start", "create_routine", "edit_routine", "delete_routine"],
+)
+def test_shutdown_mode_cannot_write_or_execute_a_routine(tmp_path, action):
+    refusals = RefusalLog()
+    call = _routine_call(
+        action=action,
+        name="pwn",
+        code="async def run(config, context):\n    await client.gateway.start({})",
+    )
+
+    result = asyncio.run(_shutdown_gate(tmp_path, refusals)(call, _OPTIONS))
+
+    assert _outcome(result) == "cancelled", action
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "manage_routines"
+    assert "shutting down" in noted["reason"]
+
+
+def test_shutdown_mode_refuses_a_routine_action_it_cannot_read(tmp_path):
+    """Fails closed, so a newly added write cannot default to allowed."""
+    gate = _shutdown_gate(tmp_path)
+
+    for call in (
+        {"tool": "manage_routines", "input": None},
+        _routine_call(name="x"),
+        _routine_call(action=None, name="x"),
+        _routine_call(action="publish_routine", name="x"),
+    ):
+        assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "cancelled", call
+
+
+def test_shutdown_mode_still_stops_a_running_routine(tmp_path):
+    """The brake, unlike in a dry run: a winddown owns instances and must kill them.
+
+    `stop` sits in MUTATING_ROUTINE_ACTIONS because a *dry run* can reach
+    neither `start` nor `run_async`, so the only instance it could stop belongs
+    to a live seat. A winddown is that live seat, and a continuous routine of
+    its own may be placing orders while the cleanup runs.
+    """
+    refusals = RefusalLog()
+    gate = _shutdown_gate(tmp_path, refusals)
+
+    result = asyncio.run(gate(_routine_call(action="stop", name="ri_1"), _OPTIONS))
+
+    assert _outcome(result) == "selected"
+    assert refusals.drain() == []
+
+
+def test_shutdown_mode_still_reads_routines_and_past_runs(tmp_path):
+    gate = _shutdown_gate(tmp_path)
+
+    for call in (
+        _routine_call(action="list"),
+        _routine_call(action="describe", name="x"),
+        _routine_call(action="read_routine", name="x"),
+        _code_call(action="history"),
+        _code_call(action="get", run_id="cr_1"),
+    ):
+        assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected", call

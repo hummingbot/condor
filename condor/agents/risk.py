@@ -44,6 +44,7 @@ from condor.runtime.danger import (
     LEVERAGED_EXECUTOR_TOOLS,
     dry_run_refusal,
     is_dangerous_tool_call,
+    shutdown_refusal,
     tool_call_input,
     tool_call_name,
 )
@@ -956,19 +957,36 @@ def auto_approve_with_risk_check(
         # and a routine is ordinary tick work, so gating either by name would
         # put a confirmation in front of every candle read. But both run
         # arbitrary Python holding the unrestricted API client, which makes them
-        # the ways to mutate the world for real from inside a dry run: every
-        # *named* write above is refused there, `await client.gateway.start(...)`
-        # inside a snippet was not (SEC-616), and neither was writing that same
-        # line into a routine and running it (SEC-626).
+        # the ways to mutate the world for real from inside a *constrained*
+        # session: every *named* write above is refused there, `await
+        # client.gateway.start(...)` inside a snippet was not (SEC-616), and
+        # neither was writing that same line into a routine and running it
+        # (SEC-626).
+        #
+        # Both constrained modes reach this line, because both had the same hole
+        # and for the same reason: the branches above only ever see calls
+        # `is_dangerous_tool_call` flagged, and these two tools are deliberately
+        # not flagged, so a shutdown pass could still run a snippet or a routine
+        # after a kill switch fired and re-open the exposure the winddown had
+        # just closed (SEC-697). What each mode forbids differs — a dry run
+        # forbids mutation, a winddown forbids exposure and so still lets the
+        # brake through — which is why they are two policies and not one.
         #
         # Which calls those are is `danger.py`'s policy and not this gate's, so
         # a third such tool never has to reach this file. Reads on both tools —
         # past runs, the routine list, a routine's source — change nothing and
-        # stay free.
+        # stay free in both modes.
         if execution_mode == "dry_run":
             refusal = dry_run_refusal(tool_call)
             if refusal:
                 return deny(tool_call_name(tool_call), refusal, level=logging.INFO)
+        elif execution_mode == "shutdown":
+            # Kept at WARNING, unlike a dry run's: there every mutation is
+            # refused and twenty warnings a tick is not a signal, whereas a
+            # cleanup pass reaching for arbitrary Python is one.
+            refusal = shutdown_refusal(tool_call)
+            if refusal:
+                return deny(tool_call_name(tool_call), refusal)
 
         # Auto-approve everything else
         for opt in options:

@@ -237,6 +237,12 @@ READ_ONLY_ROUTINE_ACTIONS = {
     "get_instance",
     "list_instances",
 }
+#: The routine writes an emergency winddown may still make: the brake (SEC-697).
+#: The mirror of ``SHUTDOWN_BOT_ACTIONS`` in the gate, and the reason ``stop``
+#: sits above with the mutations rather than here-and-there: the note on that set
+#: puts it there because a *dry run* has no instance of its own to stop, which is
+#: the one thing a live seat winding down certainly does have.
+SHUTDOWN_ROUTINE_ACTIONS = frozenset({"stop"})
 #: The candle reader, and the answer to what refusing the two tools above costs
 #: a rehearsal (CORR-625). Both of those are refused in dry-run for holding the
 #: unrestricted API client, and since ARCH-308 they were between them the only
@@ -438,6 +444,18 @@ def _is_mutating_action(
     return action not in read_only
 
 
+def _tool_call_action(tool_call: dict[str, Any]) -> str:
+    """The call's ``action`` argument, or ``""`` when there is nothing to read.
+
+    Collapses "no arguments", "no action", "null" and "not a string" into one
+    value that is in no allowlist, so a caller carving an exception out of a
+    refusal fails closed on every one of them.
+    """
+    input_data = tool_call_input(tool_call)
+    action = input_data.get("action") if input_data is not None else None
+    return action if isinstance(action, str) else ""
+
+
 def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     """Did this call change something? The log's question, not the gate's.
 
@@ -575,6 +593,58 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
             "this session runs in dry-run mode, and get_market_data was asked "
             "for something this build does not know is a read — use "
             "'candles', 'historical_candles' or 'connectors'"
+        )
+
+    return None
+
+
+def shutdown_refusal(tool_call: dict[str, Any]) -> str | None:
+    """Why an emergency winddown must not auto-approve this call (SEC-697).
+
+    The sibling of :func:`dry_run_refusal` over the same two doors, and it
+    exists for the same structural reason: the *gate*'s shutdown branch refuses
+    only calls :func:`is_dangerous_tool_call` has flagged, and neither
+    ``run_code`` nor ``manage_routines`` is flagged — deliberately, because
+    gating either by name would put a confirmation in front of every tick's
+    candle read. So after a kill switch fired, the cleanup pass could still
+    execute a snippet, or write a routine and run it, each holding the same
+    unrestricted API client that lets it open a position or deploy a bot. That
+    is exactly what shutdown mode exists to prevent, and it happened silently:
+    an auto-approved call records no refusal. SEC-631 introduced the mode and
+    missed these two; SEC-616 and SEC-626 had closed the identical hole for
+    dry-run only.
+
+    Split from ``dry_run_refusal`` rather than folded into it because the two
+    modes forbid different things. A dry run forbids *mutation*, so its routine
+    half refuses ``stop`` too. A winddown forbids *exposure*, and a stop is the
+    brake — the module's standing rule is that the failure mode of standing in
+    front of a brake is worse than the failure mode of letting one through, and
+    the gate's own shutdown allowlist is built of brakes (``stop_executor``,
+    ``stop_bot``, ``stop_controllers``). ``stop`` is in
+    ``MUTATING_ROUTINE_ACTIONS`` on the argument that a dry run cannot have
+    started an instance, so the only one it could stop belongs to a live seat —
+    and that argument is precisely what does not hold here. A winddown *is* the
+    live seat, a continuous routine of its own may be placing orders right now,
+    and killing it is the cleanup rather than an escape from it.
+
+    Reads stay free in both modes and for the same reason: listing routines,
+    reading one's source, reading back a past run or snippet, changes nothing.
+    """
+    if is_code_execution_call(tool_call):
+        return (
+            "this session is shutting down after a kill switch, and a snippet "
+            "holds the unrestricted API client, so it could open exposure the "
+            "winddown just closed — 'history' and 'get' still work"
+        )
+
+    if (
+        is_mutating_routine_call(tool_call)
+        and _tool_call_action(tool_call) not in SHUTDOWN_ROUTINE_ACTIONS
+    ):
+        return (
+            "this session is shutting down after a kill switch, and a routine "
+            "is Python holding the same unrestricted API client as a snippet — "
+            "'stop' still works, and so do 'list', 'describe' and 'read_routine'"
         )
 
     return None
