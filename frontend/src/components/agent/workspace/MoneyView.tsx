@@ -80,7 +80,9 @@ export function MoneyView({
 }) {
   const { server: ambient } = useServer();
   const server = serverName || ambient;
-  const fleet = useFleetData(server, { population: "running" });
+  // No history walk (PERF-373): this view folds the running fleet and charts
+  // nothing, so a per-controller performance-history request is pure cost.
+  const fleet = useFleetData(server, { population: "running", history: false });
 
   // The fold's clock feeds only the measured runtime, which this view does not
   // print — so a mount-time reading is enough, and it keeps the render pure.

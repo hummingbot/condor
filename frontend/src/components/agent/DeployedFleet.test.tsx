@@ -63,31 +63,36 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
+const fleetArgs = vi.fn();
+
 vi.mock("@/hooks/useFleetData", () => ({
-  useFleetData: () => ({
-    ...FLEET,
-    bots: [],
-    executors: [],
-    paging: {},
-    snapshots: [],
-    truncated: false,
-    runs: [],
-    terminatedControllers: [],
-    deeds: null,
-    // The real `ConvertFn` returns `{ value, converted }`, and the real
-    // formatters mark an unconverted figure. Mirrored rather than stubbed to a
-    // number: a mock that returns a bare number let the component read `.value`
-    // off it and render NaN, which `tsc --noEmit` over the test never sees.
-    convert: (value: number) => ({ value, converted: true }),
-    currencySymbol: "$",
-    // The real one: `formatCurrencyPnl` carries its own sign ("+$12.34",
-    // "-$12.34"), and a stub without it hid a row that added a second "+".
-    rateFormatPnl: (value: number) => formatCurrencyPnl(value),
-    rateFormatValue: money,
-    rateFormatDetailed: money,
-    error: null,
-    serverOnline: true,
-  }),
+  useFleetData: (...args: unknown[]) => {
+    fleetArgs(...args);
+    return {
+      ...FLEET,
+      bots: [],
+      executors: [],
+      paging: {},
+      snapshots: [],
+      truncated: false,
+      runs: [],
+      terminatedControllers: [],
+      deeds: null,
+      // The real `ConvertFn` returns `{ value, converted }`, and the real
+      // formatters mark an unconverted figure. Mirrored rather than stubbed to a
+      // number: a mock that returns a bare number let the component read `.value`
+      // off it and render NaN, which `tsc --noEmit` over the test never sees.
+      convert: (value: number) => ({ value, converted: true }),
+      currencySymbol: "$",
+      // The real one: `formatCurrencyPnl` carries its own sign ("+$12.34",
+      // "-$12.34"), and a stub without it hid a row that added a second "+".
+      rateFormatPnl: (value: number) => formatCurrencyPnl(value),
+      rateFormatValue: money,
+      rateFormatDetailed: money,
+      error: null,
+      serverOnline: true,
+    };
+  },
 }));
 
 function controller(over: Partial<ControllerInfo> = {}): ControllerInfo {
@@ -151,6 +156,7 @@ const panel = () => (
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   FLEET = { controllers: [], owners: [], isLoading: false };
+  fleetArgs.mockClear();
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -309,6 +315,16 @@ describe("the rows it shows", () => {
       "brigado_2",
       "brigado-fleet_op-20260903-181000",
       ["off"],
+    );
+  });
+});
+
+describe("what it asks the fleet for (PERF-373)", () => {
+  it("folds the running population without walking the performance history", async () => {
+    await render(panel());
+    expect(fleetArgs).toHaveBeenCalledWith(
+      "brigado_2",
+      expect.objectContaining({ population: "running", history: false }),
     );
   });
 });

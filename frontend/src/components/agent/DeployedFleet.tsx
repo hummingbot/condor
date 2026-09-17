@@ -67,7 +67,8 @@ export function DeployedFleet({
 }) {
   const runKey = `${slug}.${sslug}`;
 
-  const fleet = useFleetData(serverName || null, { population: "running" });
+  // No history walk (PERF-373): these rows fold records and draw no curve.
+  const fleet = useFleetData(serverName || null, { population: "running", history: false });
 
   /** The controllers this run key owns, and the totals across them. */
   const { mine, total } = useMemo(() => {

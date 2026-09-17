@@ -32,9 +32,9 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-const fleetData = vi.fn<() => Partial<FleetData>>();
+const fleetData = vi.fn<(...args: unknown[]) => Partial<FleetData>>();
 vi.mock("@/hooks/useFleetData", () => ({
-  useFleetData: () => fleetData(),
+  useFleetData: (...args: unknown[]) => fleetData(...args),
 }));
 
 declare global {
@@ -267,6 +267,18 @@ describe("the display currency (CORR-377)", () => {
 
     expect(container.querySelector("[data-money-rollup]")).not.toBeNull();
     expect(container.querySelector("[data-money-unaccounted]")).toBeNull();
+  });
+});
+
+describe("what it asks the fleet for (PERF-373)", () => {
+  it("folds the running population without walking the performance history", () => {
+    fleetData.mockReturnValue(fleet([]));
+    getStrategyPerformance.mockReturnValue(new Promise(() => {}));
+    render();
+    expect(fleetData).toHaveBeenCalledWith(
+      "brigado",
+      expect.objectContaining({ population: "running", history: false }),
+    );
   });
 });
 
