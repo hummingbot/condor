@@ -170,10 +170,15 @@ export function StrategyWorkbench({
     [strategy],
   );
 
+  // Gated on `hasRunning`, like its only consumer: controllerIds feeds
+  // useAgentExecutors only while an engine runs, and the route behind this key
+  // is uncached (a Hummingbot executor walk, bot histories and the actions log
+  // per call). Idle, nothing reads the result, so nothing asks for it; the
+  // `["strategy", slug, sslug]` refetch that finds an instance re-enables it.
   const { data: latestSessionPerf } = useQuery({
     queryKey: ["strategy-session-executors", slug, sslug, latestSessionNum],
     queryFn: () => api.getStrategySessionExecutors(slug, sslug, latestSessionNum),
-    enabled: !!slug && !!sslug && latestSessionNum > 0,
+    enabled: !!slug && !!sslug && latestSessionNum > 0 && hasRunning,
     refetchInterval: 10000,
   });
 
