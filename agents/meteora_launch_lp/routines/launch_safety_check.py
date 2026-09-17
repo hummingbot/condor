@@ -9,14 +9,17 @@ It does NOT check sellability (honeypot) — that needs a live two-way quote thr
 the agent does itself with manage_amm(quote_swap, side=SELL) + (side=BUY). See the launch_safety_check
 SKILL. This routine covers the deterministic on-chain/static gates only.
 
-RPC: defaults to the public mainnet endpoint (rate-limited but fine for occasional checks); override
-with rpc_url for a private endpoint. No credentials are hardcoded.
+RPC: Gateway's configured Solana endpoint, resolved at run time — never a public one, which
+rate-limits and answers a throttled read as an empty result rather than an error, turning a
+safety gate into a silent pass. ``rpc_url`` pins a different endpoint when a run needs one.
+No credentials are hardcoded.
 """
 
 import logging
+from typing import Any
 
 import aiohttp
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -24,7 +27,7 @@ logger = logging.getLogger(__name__)
 CATEGORY = "Analysis"
 
 DAMM_V2_API = "https://damm-v2.datapi.meteora.ag/pools"
-DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
+NETWORK = "solana-mainnet-beta"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 
@@ -32,14 +35,10 @@ class Config(BaseModel):
     """Objective safety gates for a graduated Meteora DAMM v2 token."""
 
     pool_address: str = Field(description="DAMM v2 pool address to vet (required)")
-    rpc_url: str = Field(default=DEFAULT_RPC, description="Solana RPC endpoint")
-
-    @field_validator("rpc_url", mode="before")
-    @classmethod
-    def _rpc_url_default(cls, v):
-        # Callers (e.g. strategy configs) may pass an empty string meaning "no private RPC" —
-        # fall back to the public endpoint instead of failing every RPC gate on an invalid URL.
-        return v or DEFAULT_RPC
+    rpc_url: str = Field(
+        default="",
+        description="Solana RPC endpoint; empty asks Gateway for the one it is configured with",
+    )
 
     max_top10_holder_pct: float = Field(
         default=60.0, description="Fail if top-10 holders exceed this % of supply"
@@ -74,8 +73,44 @@ async def _rpc(session, url, method, params):
         return data.get("result")
 
 
+async def resolve_rpc_url(client: Any, cfg: Config) -> str:
+    """The Solana RPC the on-chain gates are read from: Gateway's, not a public one.
+
+    Nothing falls back. A public endpoint throttles, and a throttled read comes
+    back empty rather than as an error — which here would read as "no large
+    holders" and "no mint authority", passing the very gates it failed to check.
+    A provider whose endpoint is assembled from an API key is named and refused,
+    because that key is Gateway's and this routine cannot see it.
+    """
+    if cfg.rpc_url:
+        return cfg.rpc_url
+    net = await client.gateway.get_network_config(NETWORK)
+    provider = (net.get("rpc_provider") or "url").strip()
+    node_url = (net.get("node_url") or "").strip()
+    if provider != "url":
+        raise ValueError(
+            f"Gateway resolves its Solana RPC through the {provider!r} provider, whose endpoint is "
+            f"built from an API key this routine cannot read. Set rpc_url explicitly for this run."
+        )
+    if not node_url:
+        raise ValueError(
+            f"Gateway reports no nodeURL for {NETWORK} — set rpc_url explicitly, or fix the chain config."
+        )
+    return node_url
+
+
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     gates: list[tuple[str, bool, str]] = []  # (name, passed, detail)
+
+    from config_manager import get_client
+
+    client = await get_client(
+        getattr(context, "_chat_id", 0), context=context, server=getattr(context, "server_name", None)
+    )
+    try:
+        rpc_url = await resolve_rpc_url(client, config)
+    except Exception as e:
+        return f"launch_safety_check: {e}"
 
     # 1. Pool + token metadata from the Meteora DAMM v2 API.
     try:
@@ -144,7 +179,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             if config.require_mint_renounced:
                 info = await _rpc(
                     session,
-                    config.rpc_url,
+                    rpc_url,
                     "getAccountInfo",
                     [base_mint, {"encoding": "jsonParsed"}],
                 )
@@ -164,11 +199,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 )
 
             supply_res = await _rpc(
-                session, config.rpc_url, "getTokenSupply", [base_mint]
+                session, rpc_url, "getTokenSupply", [base_mint]
             )
             total = float((supply_res or {}).get("value", {}).get("uiAmount") or 0)
             largest = await _rpc(
-                session, config.rpc_url, "getTokenLargestAccounts", [base_mint]
+                session, rpc_url, "getTokenLargestAccounts", [base_mint]
             )
             accounts = (largest or {}).get("value", [])
             top10 = sum(float(a.get("uiAmount") or 0) for a in accounts[:10])
