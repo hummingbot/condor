@@ -3519,9 +3519,11 @@ async def list_agent_runs(
     putting it here would either make the rail slow or make it lie. A run's PnL
     is read in the run overview, from the strategy's ``/performance`` query.
 
-    ``limit`` is the rail's window, not a filter: a chatty install has hundreds
-    of conversations and the rail asks for a bigger page when the reader wants
-    one. The two per-user kinds are scoped to the caller, because a conversation
+    ``limit`` is the rail's window over delegations and conversations, not a
+    filter: a chatty install has hundreds of conversations and the rail asks
+    for a bigger page when the reader wants one. Loop runs are always carried,
+    however many newer chats there are, so the response can hold more than
+    ``limit`` rows. The two per-user kinds are scoped to the caller, because a conversation
     is private — so two people legitimately see different rails for one agent,
     and the rail says so rather than letting it read as data loss.
     """

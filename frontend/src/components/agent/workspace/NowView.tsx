@@ -8,6 +8,7 @@ import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { hasPricedMoney } from "@/components/agent/lab/runs";
 import { SessionKpis } from "@/components/agent/session/SessionKpis";
 import { SessionOverview } from "@/components/agent/session/SessionOverview";
+import { OutsideWindow } from "@/components/agent/workspace/OutsideWindow";
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { api, type AgentPerformance } from "@/lib/api";
@@ -41,6 +42,7 @@ export function NowView({
   journal,
   pnlSeries,
   onOpenTick,
+  onShowOlderRuns,
 }: {
   slug: string;
   sslug: string;
@@ -57,6 +59,12 @@ export function NowView({
   pnlSeries?: { timestamp: string; pnl: number }[] | null;
   /** An alert, or the decision's own tick badge, is an address into a tick. */
   onOpenTick: (tick: number) => void;
+  /**
+   * Set when the strategy has sessions but none is in the loaded runs window
+   * (CORR-376): the empty state then says so and widens the window, rather
+   * than claiming the strategy never ran.
+   */
+  onShowOlderRuns?: () => void;
 }) {
   const [showReport, setShowReport] = useState(false);
   const last = decisions[decisions.length - 1] ?? null;
@@ -152,6 +160,8 @@ export function NowView({
               </span>
             )}
           </>
+        ) : sessionNum === 0 && onShowOlderRuns ? (
+          <OutsideWindow onShowOlderRuns={onShowOlderRuns} />
         ) : (
           <p className="text-xs text-[var(--color-text-muted)]">
             {sessionNum > 0

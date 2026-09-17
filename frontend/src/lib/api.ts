@@ -3273,9 +3273,11 @@ export const api = {
   /**
    * Every stretch of work an agent has done, newest first (FEAT-111).
    *
-   * `limit` is the rail's window and not a filter: a chatty install has
-   * hundreds of conversations, and the rail asks for a bigger page rather than
-   * pulling the archive on every five-second poll.
+   * `limit` is the rail's window over chats and delegations, not a filter: a
+   * chatty install has hundreds of conversations, and the rail asks for a
+   * bigger page rather than pulling the archive on every five-second poll.
+   * Loop runs (sessions, experiments) are always carried, so the list can be
+   * longer than `limit` (CORR-376).
    */
   getAgentRuns: async (slug: string, limit?: number): Promise<AgentRunRow[]> => {
     const data = await apiFetch<{ runs: AgentRunRow[] }>(

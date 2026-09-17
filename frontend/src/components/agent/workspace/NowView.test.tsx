@@ -239,3 +239,21 @@ describe("the deployed table", () => {
     expect(text().split("Deployed").length - 1).toBe(1);
   });
 });
+
+describe("a strategy whose runs are outside the loaded window (CORR-376)", () => {
+  it("says so and offers to widen it, rather than that it never ran", async () => {
+    const onShowOlderRuns = vi.fn();
+    await render({ sessionNum: 0, onShowOlderRuns });
+    expect(text()).not.toContain("This strategy has not run yet.");
+    const more = container.querySelector<HTMLButtonElement>("[data-show-older-runs]")!;
+    expect(more).not.toBeNull();
+    await act(async () => more.click());
+    expect(onShowOlderRuns).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps `has not run yet` for a strategy that genuinely has not", async () => {
+    await render({ sessionNum: 0 });
+    expect(text()).toContain("This strategy has not run yet.");
+    expect(container.querySelector("[data-show-older-runs]")).toBeNull();
+  });
+});

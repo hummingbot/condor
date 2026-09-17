@@ -210,6 +210,24 @@ describe("the run in scope", () => {
     ).toBe("d:abc");
   });
 
+  it("adds no fallback when a named session is not in a chat-only window (CORR-376)", () => {
+    // The window can hold only chats; resolving the address is the backend's
+    // job (loop runs always ride along), not a guess made here.
+    const chatsOnly = [
+      run({
+        run_id: "c:only",
+        kind: "conversation",
+        id: "only",
+        number: 0,
+        strategy_slug: "",
+        strategy_name: "",
+        started_at: 9_000,
+      }),
+    ];
+    expect(pickRun(chatsOnly, "brl_mm", null)).toBeNull();
+    expect(pickRun(chatsOnly, "brl_mm", { kind: "session", number: 3, id: "3" })).toBeNull();
+  });
+
   it("never opens on a chat by default", () => {
     // A chat is addressable, not the default selection: a bare `/agents/:slug`
     // opens on the loop, which is what the rest of the screen is about.

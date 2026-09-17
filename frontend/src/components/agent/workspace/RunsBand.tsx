@@ -10,6 +10,7 @@ import { isDelegationStatus } from "@/components/agent/delegationStatus";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { ExperimentDetail } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
+import { OutsideWindow } from "@/components/agent/workspace/OutsideWindow";
 import { api, type AgentRunRow } from "@/lib/api";
 
 /**
@@ -31,6 +32,7 @@ export function RunsBand({
   onClearRun,
   hasMore,
   onShowMore,
+  onShowOlderRuns,
 }: {
   slug: string;
   runs: AgentRunRow[];
@@ -43,6 +45,8 @@ export function RunsBand({
   onClearRun: () => void;
   hasMore: boolean;
   onShowMore: () => void;
+  /** Set when the scoped strategy's runs are outside the window (CORR-376). */
+  onShowOlderRuns?: () => void;
 }) {
   return (
     // A bounded height rather than the page's: the rail scrolls beside its
@@ -62,7 +66,12 @@ export function RunsBand({
         onShowMore={onShowMore}
       />
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <RunBody slug={slug} run={selectedRun} onClearRun={onClearRun} />
+        <RunBody
+          slug={slug}
+          run={selectedRun}
+          onClearRun={onClearRun}
+          onShowOlderRuns={onShowOlderRuns}
+        />
       </div>
     </div>
   );
@@ -154,12 +163,21 @@ function RunBody({
   slug,
   run,
   onClearRun,
+  onShowOlderRuns,
 }: {
   slug: string;
   run: AgentRunRow | null;
   /** Put the selection back to the newest run — the sheet's way out. */
   onClearRun: () => void;
+  onShowOlderRuns?: () => void;
 }) {
+  if (!run && onShowOlderRuns) {
+    return (
+      <div className="py-8 text-center">
+        <OutsideWindow onShowOlderRuns={onShowOlderRuns} />
+      </div>
+    );
+  }
   if (!run) {
     return (
       <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">

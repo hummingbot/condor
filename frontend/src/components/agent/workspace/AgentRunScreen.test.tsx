@@ -69,11 +69,20 @@ const stub =
 // The answers' stub keeps one readout: the last decision it was handed, under
 // the real view's own `data-now-decision` hook (CORR-369).
 vi.mock("@/components/agent/workspace/NowView", () => ({
-  NowView: ({ decisions }: { decisions: { action: string }[] }) => {
+  NowView: ({
+    decisions,
+    onShowOlderRuns,
+  }: {
+    decisions: { action: string }[];
+    onShowOlderRuns?: () => void;
+  }) => {
     mounted.push("answers");
     return (
       <div data-body="answers">
         <div data-now-decision>{decisions.at(-1)?.action ?? ""}</div>
+        {onShowOlderRuns && (
+          <button type="button" data-now-older-runs onClick={onShowOlderRuns} />
+        )}
       </div>
     );
   },
@@ -663,5 +672,65 @@ describe("a live run, left open (CORR-369)", () => {
     await advance(10_000);
     expect(getSessionJournal).toHaveBeenCalledTimes(2);
     expect(getSessionActions).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a strategy whose runs are behind newer chats (CORR-376)", () => {
+  const chats = Array.from({ length: 100 }, (_, i) => ({
+    ...CHAT,
+    id: `chat-${i}`,
+    run_id: `c:chat-${i}`,
+    started_at: 1_000 + i,
+  })) as AgentRunRow[];
+  const SESSION_1 = {
+    ...RUN,
+    id: "1",
+    run_id: "s:1",
+    number: 1,
+    status: "stopped",
+    started_at: 10,
+    tick_count: 2,
+    has_actions_log: false,
+  } as unknown as AgentRunRow;
+
+  beforeEach(() => {
+    getStrategy.mockResolvedValue({
+      slug: "brl_mm",
+      instances: [],
+      config: {},
+      sessions: [{ number: 1 }],
+    } as unknown as StrategyDetail);
+  });
+
+  it("never says it has not run, and widens the window instead", async () => {
+    getAgentRuns.mockResolvedValue(chats);
+    await render("/?open=runs");
+
+    expect(container.textContent).not.toContain("This strategy has not run yet.");
+    expect(container.textContent).not.toContain("This agent has no runs yet.");
+    expect(container.querySelector("[data-now-older-runs]")).not.toBeNull();
+
+    await click(container.querySelector<HTMLButtonElement>("[data-show-older-runs]")!);
+    expect(getAgentRuns).toHaveBeenCalledWith("brigado", 200);
+  });
+
+  it("widens from the answer stack too", async () => {
+    getAgentRuns.mockResolvedValue(chats);
+    await render("/");
+    await click(container.querySelector<HTMLButtonElement>("[data-now-older-runs]")!);
+    expect(getAgentRuns).toHaveBeenCalledWith("brigado", 200);
+  });
+
+  it("opens `?run=s:1` once the session row is carried", async () => {
+    getAgentRuns.mockResolvedValue([...chats, SESSION_1]);
+    await render("/?run=s:1");
+
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Run"]')!;
+    expect(picker.value).toBe("s:1");
+    // TickSpine is mounted (an empty journal draws its empty state).
+    expect(
+      container.querySelector('[data-testid="tick-spine"], [data-spine-empty]'),
+    ).not.toBeNull();
+    expect(container.querySelector("[data-now-older-runs]")).toBeNull();
   });
 });

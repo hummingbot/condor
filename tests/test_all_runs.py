@@ -323,6 +323,81 @@ def test_a_specialists_older_conversations_are_not_hidden_by_newer_condor_chats(
     assert not {r["id"] for r in condor} & set(brigado)
 
 
+def test_a_session_is_not_pushed_out_of_the_window_by_newer_chats_and_delegations(
+    tmp_path,
+):
+    """Only the two per-user kinds page; loop runs always ride along (CORR-376).
+
+    150 conversations *and* 150 delegations, every one newer than the session:
+    cutting the union to ``limit`` (or to ``limit`` plus the loop rows) drops the
+    session, and the workspace then says a strategy that ran "has not run yet".
+    """
+    import os
+
+    base = 1_800_000_000.0
+    sdir = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    session = _write_session(sdir, 1, ticks=2)
+    (session / "config.yml").write_text("{}\n")
+    os.utime(session / "config.yml", (base, base))
+
+    stamps: dict[str, float] = {}
+    for i in range(150):
+        at = base + 10 + 2 * i
+        born = datetime.fromtimestamp(at, timezone.utc)
+        d = _write_conversation(USER, f"c-{i:03d}", agent_slug="brigado", created=born)
+        os.utime(d / "meta.json", (at, at))
+        stamps[f"c:c-{i:03d}"] = at
+    for i in range(150):
+        at = base + 11 + 2 * i
+        d = _write_delegation(USER, f"d-{i:03d}", agent_slug="brigado", started=at)
+        os.utime(d / "status.json", (at, at))
+        stamps[f"d:d-{i:03d}"] = at
+
+    rows = list_all_runs("brigado", USER, limit=25)
+
+    assert "s:1" in [r["run_id"] for r in rows]
+    paged = [
+        r["run_id"] for r in rows if r["kind"] not in (KIND_SESSION, KIND_EXPERIMENT)
+    ]
+    newest = sorted(stamps, key=stamps.__getitem__, reverse=True)[:25]
+    assert paged == newest
+    # Still one time-ordered list, with the old session at the bottom.
+    assert rows[-1]["run_id"] == "s:1"
+    ordered = [r["started_at"] or 0.0 for r in rows]
+    assert ordered == sorted(ordered, reverse=True)
+
+
+def test_a_zero_window_is_still_empty_even_with_loop_runs(tmp_path):
+    sdir = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    _write_session(sdir, 1)
+    _write_conversation(USER, "c-1", agent_slug="brigado")
+
+    assert list_all_runs("brigado", USER, limit=0) == []
+
+
+def test_an_unreadable_strategy_contributes_no_rows(tmp_path, monkeypatch):
+    from condor.agents import sessions_index
+
+    bad = _write_strategy(tmp_path, "brigado", "broken", "Broken")
+    _write_session(bad, 1)
+    good = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    _write_session(good, 2)
+    _write_conversation(USER, "c-1", agent_slug="brigado")
+
+    real = sessions_index.list_runs
+
+    def flaky(home, run_key):
+        if run_key.endswith(".broken"):
+            raise OSError("unreadable")
+        return real(home, run_key)
+
+    monkeypatch.setattr(sessions_index, "list_runs", flaky)
+
+    rows = list_all_runs("brigado", USER, limit=25)
+    assert sorted(r["run_id"] for r in rows) == ["c:c-1", "s:2"]
+    assert {r["strategy_slug"] for r in rows if r["kind"] == KIND_SESSION} == {"brl_mm"}
+
+
 # ── The route ──
 
 

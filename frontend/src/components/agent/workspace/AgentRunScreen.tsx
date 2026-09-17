@@ -294,10 +294,20 @@ export function AgentRunScreen({
    * confusion FEAT-109 was spent settling.
    */
   const lastTick = decisions[decisions.length - 1]?.tick ?? 0;
+
+  // The window bounds chats and delegations only; loop runs always ride along
+  // (CORR-376). So "there may be more" is a count of the kinds that page, and a
+  // strategy the playbook says has sessions but whose runs are not in the
+  // window is *outside it* — not a strategy that "has not run yet". The second
+  // guard covers a hand-edited `limit` and servers older than that fix.
+  const hasMoreRuns =
+    runs.filter((r) => !isLoopRun(r.kind)).length >= runLimit;
+  const showOlderRuns = () => setRunLimit((n) => n + RUN_PAGE);
+  const runsOutsideWindow =
+    (strategy?.sessions?.length ?? 0) > 0 && scopedRuns.length === 0;
+
   const railFacts = {
-    runs: runs.length
-      ? `${runs.length}${runs.length >= runLimit ? "+" : ""}`
-      : null,
+    runs: runs.length ? `${runs.length}${hasMoreRuns ? "+" : ""}` : null,
     detail: deployments.length ? `${deployments.length} deployed` : null,
     money: null,
     fleet: null,
@@ -364,6 +374,7 @@ export function AgentRunScreen({
                   journal={journal}
                   pnlSeries={pnlSeries}
                   onOpenTick={(next) => setParams({ tick: next })}
+                  onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
                 />
               </div>
 
@@ -382,8 +393,9 @@ export function AgentRunScreen({
                     onStrategyFilter={(next) => setParams({ strategy: next })}
                     onSelectRun={openRun}
                     onClearRun={() => setParams({ run: null })}
-                    hasMore={runs.length >= runLimit}
-                    onShowMore={() => setRunLimit((n) => n + RUN_PAGE)}
+                    hasMore={hasMoreRuns}
+                    onShowMore={showOlderRuns}
+                    onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
                   />
                 </Disclosure>
 

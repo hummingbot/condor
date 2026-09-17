@@ -85,7 +85,10 @@ const DELEGATION = {
 let container: HTMLDivElement;
 let root: Root;
 
-async function render(run: AgentRunRow) {
+async function render(
+  run: AgentRunRow | null,
+  extra: Partial<Parameters<typeof RunsBand>[0]> = {},
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -95,7 +98,7 @@ async function render(run: AgentRunRow) {
         <QueryClientProvider client={client}>
           <RunsBand
             slug="brigado"
-            runs={[run]}
+            runs={run ? [run] : []}
             selectedRun={run}
             strategyFilter={null}
             onStrategyFilter={() => {}}
@@ -103,6 +106,7 @@ async function render(run: AgentRunRow) {
             onClearRun={() => {}}
             hasMore={false}
             onShowMore={() => {}}
+            {...extra}
           />
         </QueryClientProvider>
       </MemoryRouter>,
@@ -183,5 +187,22 @@ describe("a delegation run", () => {
       kind: "delegate",
       started_at: 300,
     });
+  });
+});
+
+describe("no run in scope (CORR-376)", () => {
+  it("says the runs are outside the window when the strategy has sessions", async () => {
+    const onShowOlderRuns = vi.fn();
+    await render(null, { onShowOlderRuns });
+    expect(container.textContent).not.toContain("This agent has no runs yet.");
+    const more = container.querySelector<HTMLButtonElement>("[data-show-older-runs]")!;
+    await act(async () => more.click());
+    expect(onShowOlderRuns).toHaveBeenCalledTimes(1);
+  });
+
+  it("still says there are no runs when nothing is outside the window", async () => {
+    await render(null);
+    expect(container.textContent).toContain("This agent has no runs yet.");
+    expect(container.querySelector("[data-show-older-runs]")).toBeNull();
   });
 });
