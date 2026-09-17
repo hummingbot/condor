@@ -989,3 +989,141 @@ def test_delegation_whose_session_disconnects_is_an_error(tmp_path, monkeypatch)
     assert bot.messages, "the failure must still be announced"
     assert bot.messages[-1].startswith("❌")
     assert "failed" in bot.messages[-1]
+
+
+def _record_thread_hops(monkeypatch):
+    """Patch ``asyncio.to_thread`` with a recorder that still runs the callable."""
+    calls = []
+    real_to_thread = asyncio.to_thread
+
+    async def recorder(fn, *args, **kwargs):
+        calls.append(("to_thread", fn))
+        result = await real_to_thread(fn, *args, **kwargs)
+        calls.append(("returned", fn))
+        return result
+
+    monkeypatch.setattr(asyncio, "to_thread", recorder)
+    return calls
+
+
+def test_terminal_writes_run_off_the_loop(tmp_path, monkeypatch):
+    # PERF-669: the transcript render, the events sidecar, deeds and the status
+    # record (with its retention sweep) run on a worker thread, not the loop.
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    _write_agent(tmp_path, "scout")
+
+    async def fake_run(**kw):
+        return "scan complete: 3 pools"
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
+    calls = _record_thread_hops(monkeypatch)
+    real_retire = delegate_module.retire_delegation
+
+    def spy_retire(dt):
+        calls.append(("retire", None))
+        return real_retire(dt)
+
+    monkeypatch.setattr(delegate_module, "retire_delegation", spy_retire)
+    bot = _FakeBot()
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan SOL pools",
+            bot=bot,
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    assert dt.status == "done"
+    persist = delegate_module._persist_run
+    assert ("to_thread", persist) in calls
+    record_dir = paths.delegation_dir(1, dt.task_id)
+    assert "scan complete: 3 pools" in (record_dir / "transcript.md").read_text()
+    assert (record_dir / "events.json").exists()
+    assert '"done"' in (record_dir / "status.json").read_text()
+    assert any("done" in m for m in bot.messages)
+    # The registry evicts only once the records are on disk.
+    assert calls.index(("returned", persist)) < calls.index(("retire", None))
+
+
+def test_a_stopped_delegation_still_records_synchronously(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    _write_agent(tmp_path, "scout")
+
+    async def slow(**kw):
+        await asyncio.sleep(60)
+        return "never"
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", slow)
+    calls = _record_thread_hops(monkeypatch)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="long task",
+            bot=_FakeBot(),
+        )
+        await asyncio.sleep(0)
+        assert await stop_delegation(dt.task_id) is True
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    assert dt.status == "stopped"
+    status = (paths.delegation_dir(1, dt.task_id) / "status.json").read_text()
+    assert '"stopped"' in status
+    assert ("to_thread", delegate_module._persist_run) not in calls
+
+
+def test_stop_refuses_a_delegation_already_writing_its_records(tmp_path, monkeypatch):
+    # Once the model run has an outcome the task is only persisting/notifying;
+    # a stop then would skip the notification and retire, so it is refused.
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    _write_agent(tmp_path, "scout")
+
+    async def fake_run(**kw):
+        return "ok"
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
+    real_to_thread = asyncio.to_thread
+    in_persist = None
+
+    async def gated(fn, *args, **kwargs):
+        if fn is delegate_module._persist_run:
+            in_persist.set()
+        return await real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", gated)
+    bot = _FakeBot()
+
+    async def scenario():
+        nonlocal in_persist
+        in_persist = asyncio.Event()
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="t",
+            bot=bot,
+        )
+        await asyncio.wait_for(in_persist.wait(), timeout=5)
+        refused = await stop_delegation(dt.task_id)
+        await _drain(dt)
+        return dt, refused
+
+    dt, refused = asyncio.run(scenario())
+
+    assert refused is False
+    assert dt.status == "done"
+    assert any("done" in m for m in bot.messages)

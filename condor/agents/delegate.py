@@ -540,20 +540,16 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
         dt.error = str(e)
         log.exception("Delegation %s failed", dt.task_id)
     finally:
-        # What the run did to the world, beside the transcript of it saying so
-        # (FEAT-105). First, and outside every other guard: a delegation that
-        # deployed a bot must be on record as its owner even if persisting the
-        # transcript or notifying the user then fails. Writes nothing when the
-        # run mutated nothing.
-        deeds.record_deeds(
-            deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug),
-            list(dt.tool_calls.values()),
-        )
-        try:
-            _persist_transcript(dt)
-        except Exception:
-            log.exception("Failed to persist delegation transcript for %s", dt.task_id)
-        _record_delegation_status(dt)
+        # The terminal disk writes (deeds, transcript + events sidecar, status
+        # record and its retention sweep) are ~10-50 ms of rendering and file IO,
+        # so a finished run does them on a worker thread rather than on the loop
+        # uvicorn and the Telegram poller share (PERF-669, as PERF-293 did for
+        # the ask path). A stopped one stays synchronous: a cancelled task cannot
+        # reliably await a fresh thread hop, and the record must still land.
+        if dt.status == "stopped":
+            _persist_run(dt)
+        else:
+            await asyncio.to_thread(_persist_run, dt)
         if dt.status != "stopped":
             _record_completion_turn(dt)
             try:
@@ -582,10 +578,35 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
         retire_delegation(dt)
 
 
+def _persist_run(dt: DelegateTask) -> None:
+    """Write everything a finished delegation leaves on disk, in order.
+
+    Pure synchronous file IO, so :func:`_run` can hand it to a worker thread.
+    """
+    # What the run did to the world, beside the transcript of it saying so
+    # (FEAT-105). First, and outside every other guard: a delegation that
+    # deployed a bot must be on record as its owner even if persisting the
+    # transcript or notifying the user then fails. Writes nothing when the
+    # run mutated nothing.
+    deeds.record_deeds(
+        deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug),
+        list(dt.tool_calls.values()),
+    )
+    try:
+        _persist_transcript(dt)
+    except Exception:
+        log.exception("Failed to persist delegation transcript for %s", dt.task_id)
+    _record_delegation_status(dt)
+
+
 async def stop_delegation(task_id: str) -> bool:
     """Cancel a running delegation. Returns False if unknown/already finished."""
     dt = _delegations.get(task_id)
     if dt is None or dt._task is None or dt._task.done():
+        return False
+    # Already past the model run and only writing its records / notifying: the
+    # outcome is decided, and cancelling now would skip the notification.
+    if dt.status != "running":
         return False
     dt._task.cancel()
     dt.status = "stopped"
