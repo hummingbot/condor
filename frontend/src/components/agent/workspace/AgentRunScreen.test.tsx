@@ -33,6 +33,8 @@ const getAgent = vi.fn();
 const getAgentRuns = vi.fn();
 const getStrategy = vi.fn();
 const getConversationDeployments = vi.fn();
+const getSessionJournal = vi.fn();
+const getSessionActions = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -41,8 +43,8 @@ vi.mock("@/lib/api", () => ({
     getStrategy: (...a: unknown[]) => getStrategy(...a),
     getConversationDeployments: (...a: unknown[]) =>
       getConversationDeployments(...a),
-    getSessionJournal: () => Promise.resolve({ content: "" }),
-    getSessionActions: () => Promise.resolve({ actions: [] }),
+    getSessionJournal: (...a: unknown[]) => getSessionJournal(...a),
+    getSessionActions: (...a: unknown[]) => getSessionActions(...a),
     getSessionReport: () => Promise.resolve({ report: null }),
     getStrategySessionExecutors: () => Promise.resolve({ executors: [] }),
   },
@@ -64,8 +66,17 @@ const stub =
     return <div data-body={name} data-server={serverName} />;
   };
 
+// The answers' stub keeps one readout: the last decision it was handed, under
+// the real view's own `data-now-decision` hook (CORR-369).
 vi.mock("@/components/agent/workspace/NowView", () => ({
-  NowView: stub("answers"),
+  NowView: ({ decisions }: { decisions: { action: string }[] }) => {
+    mounted.push("answers");
+    return (
+      <div data-body="answers">
+        <div data-now-decision>{decisions.at(-1)?.action ?? ""}</div>
+      </div>
+    );
+  },
 }));
 vi.mock("@/components/agent/workspace/MoneyView", () => ({
   MoneyView: stub("money"),
@@ -239,6 +250,8 @@ beforeEach(() => {
   getConversationDeployments
     .mockReset()
     .mockResolvedValue({ deployments: [], predates_ledger: false });
+  getSessionJournal.mockReset().mockResolvedValue({ content: "" });
+  getSessionActions.mockReset().mockResolvedValue({ actions: [] });
 });
 
 afterEach(() => {
@@ -586,5 +599,69 @@ describe("a count in the Playbook that names a run", () => {
     scrolled = [];
     await click(count());
     expect(scrolledTo()).toEqual(["runs"]);
+  });
+});
+
+describe("a live run, left open (CORR-369)", () => {
+  const journalWith = (tick: number, action: string) => ({
+    content: `## Decisions\n- **#${tick}** (12:00) ${action} -- because\n`,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function renderLive() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/"]}>
+          <QueryClientProvider client={client}>
+            <Host />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    // Short of the first poll, but past the render the first read lands in
+    // under fake timers.
+    await advance(1_000);
+  }
+
+  async function advance(ms: number) {
+    for (let i = 0; i < 10; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(i === 0 ? ms : 0);
+      });
+    }
+  }
+
+  it("shows the newer last decision after 10s, with no refocus or remount", async () => {
+    getSessionJournal
+      .mockReset()
+      .mockResolvedValueOnce(journalWith(1, "hold"))
+      .mockResolvedValue(journalWith(2, "deploy pmm"));
+    await renderLive();
+    expect(getSessionJournal).toHaveBeenCalledTimes(1);
+    const decision = () =>
+      container.querySelector("[data-now-decision]")!.textContent;
+    expect(decision()).toBe("hold");
+    const node = container.querySelector("[data-now-decision]");
+
+    await advance(10_000);
+    expect(decision()).toBe("deploy pmm");
+    // The same element: the answer came from the poll, not a fresh mount.
+    expect(container.querySelector("[data-now-decision]")).toBe(node);
+  });
+
+  it("reads each once per poll, however many bands observe the keys", async () => {
+    await renderLive();
+    await advance(10_000);
+    expect(getSessionJournal).toHaveBeenCalledTimes(2);
+    expect(getSessionActions).toHaveBeenCalledTimes(2);
   });
 });

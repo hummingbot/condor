@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
+import { isLiveRun } from "@/components/agent/lab/runs";
 import {
   alertsFor,
   journalNamesDeploy,
@@ -29,6 +30,14 @@ import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-age
  * Still three queries and still the tick spine's and the detail bands' own, key
  * for key, so react-query hands every caller the same cache entries and the
  * whole screen makes one round of requests.
+ *
+ * The journal's and the action log's polling is set here, once, for the same
+ * reason (CORR-369): react-query polls a shared key at the shortest interval
+ * among its observers, so this declaration refreshes the spine, the Detail band
+ * and the actions table too — which is why none of them declares one. Gated on
+ * a live run, so a finished run costs no polls at all; without it the last
+ * decision, the failed-action alert and the spine froze at page open while the
+ * countdown kept moving.
  */
 export function useWorkspaceAlerts({
   slug,
@@ -56,17 +65,20 @@ export function useWorkspaceAlerts({
 } {
   const sessionNum = run && run.kind === "session" && sslug ? run.number : 0;
   const enabled = !!sslug && sessionNum > 0;
+  const liveInterval = run && isLiveRun(run) ? LIVE_RUN_REFETCH_MS : false;
 
   const { data: journalData } = useQuery({
     queryKey: ["strategy", slug, sslug, "session", sessionNum, "journal"],
     queryFn: () => api.getSessionJournal(slug, sslug!, sessionNum),
     enabled,
+    refetchInterval: liveInterval,
   });
 
   const { data: actionsData } = useQuery({
     queryKey: ["session-actions", slug, sslug, sessionNum],
     queryFn: () => api.getSessionActions(slug, sslug!, sessionNum),
     enabled,
+    refetchInterval: liveInterval,
   });
 
   const { data: perfData } = useQuery({
@@ -115,6 +127,9 @@ export function useWorkspaceAlerts({
     sessionNum,
   };
 }
+
+/** How often a live run's journal and action log are re-read — the vitals' own cadence. */
+const LIVE_RUN_REFETCH_MS = 10_000;
 
 /** One frozen empty list, so "no journal yet" is a stable identity. */
 const EMPTY_DECISIONS: Decision[] = [];
