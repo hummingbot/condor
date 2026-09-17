@@ -26,6 +26,7 @@ from .client import (
     PermissionCallback,
     PromptDone,
     TextChunk,
+    ThoughtChunk,
     ToolCallEvent,
     ToolCallUpdate,
 )
@@ -908,7 +909,12 @@ class PydanticAIClient:
 
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-                from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
+                from pydantic_ai.messages import (
+                    TextPart,
+                    ThinkingPart,
+                    ToolCallPart,
+                    ToolReturnPart,
+                )
                 from pydantic_graph import End
 
                 self._permission_gate.reset()
@@ -971,6 +977,18 @@ class PydanticAIClient:
                             for part in node.model_response.parts:
                                 if isinstance(part, TextPart) and part.content:
                                     yield TextChunk(text=part.content)
+
+                                # A reasoning model's thinking. Dropping it left
+                                # every pydantic-ai chat with no thought display
+                                # at all, while ACP chats had one — the whole
+                                # path below this (EventType.THOUGHT, the WS
+                                # `thought_chunk` frame, the dashboard's
+                                # RunStrip) was already there and simply never
+                                # fed. Emitted as the same ThoughtChunk the ACP
+                                # client emits, so neither side has to know
+                                # which client produced it.
+                                elif isinstance(part, ThinkingPart) and part.content:
+                                    yield ThoughtChunk(text=part.content)
 
                                 elif isinstance(part, ToolCallPart):
                                     tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
