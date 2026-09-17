@@ -134,11 +134,20 @@ export function StrategyWorkbench({
   // Close strategy modal on Escape (the discard dialog owns Escape while open)
   useEscapeKey(showStrategyModal && !showDiscardConfirm, requestCloseStrategyModal);
 
+  // Polled only while an engine (a session or an experiment, running or
+  // paused) has an instance: that is when the pulse, countdown and charts
+  // move. Idle, the route still re-reads the playbook, learnings, config and
+  // session indexes, plus Hummingbot on each performance-cache expiry, for
+  // nothing. The gate matches AgentRunScreen's observer of this key (PERF-374),
+  // because react-query polls a key at the shortest interval among its
+  // observers. Lifecycle actions and edits invalidate the key, and the
+  // predicate is re-evaluated on that refetch, so the poll re-arms without a
+  // reload; a loop started elsewhere shows on the next focus or remount.
   const { data: strategy, isLoading, error } = useQuery({
     queryKey: ["strategy", slug, sslug],
     queryFn: () => api.getStrategy(slug, sslug),
     enabled: !!slug && !!sslug,
-    refetchInterval: 5000,
+    refetchInterval: (q) => ((q.state.data?.instances?.length ?? 0) > 0 ? 5000 : false),
   });
 
   // Routine instances for ReportBrowser

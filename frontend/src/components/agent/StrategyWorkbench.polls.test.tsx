@@ -1,6 +1,6 @@
 /**
- * The workbench asks for the newest session's executors only while an engine
- * runs (PERF-383).
+ * The workbench asks for the newest session's executors (PERF-383) and
+ * re-reads the strategy detail (PERF-386) only while an engine runs.
  *
  * That query's one reader is the `controllerIds` memo, which feeds
  * `useAgentExecutors` only under `hasRunning`, and everything it drives renders
@@ -208,5 +208,58 @@ describe("the newest session's executors poll (PERF-383)", () => {
     await mount();
     expect(host.querySelector("[data-market-strip]")).not.toBeNull();
     expect(host.querySelector("[data-executor-chart]")).not.toBeNull();
+  });
+});
+
+describe("the strategy detail poll (PERF-386)", () => {
+  it("reads an idle strategy once and never again", async () => {
+    getStrategy.mockResolvedValue(idle as never);
+    await mount();
+    expect(host.textContent).toContain("2 sessions");
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+
+    await elapse(30_000);
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+    expect(getExecutors).toHaveBeenCalledTimes(0);
+  });
+
+  it("polls every 5s while an instance runs and goes quiet once it stops", async () => {
+    getStrategy.mockResolvedValue(running as never);
+    await mount();
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+
+    await elapse(20_000);
+    expect(getStrategy.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(getExecutors.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+    // The engine stops: the next poll sees no instance and disarms both.
+    getStrategy.mockResolvedValue(idle as never);
+    await elapse(5_000);
+    await elapse(0);
+    const strategyReads = getStrategy.mock.calls.length;
+    const executorReads = getExecutors.mock.calls.length;
+
+    await elapse(20_000);
+    expect(getStrategy).toHaveBeenCalledTimes(strategyReads);
+    expect(getExecutors).toHaveBeenCalledTimes(executorReads);
+  });
+
+  it("re-arms the 5s cadence without a remount once the strategy starts", async () => {
+    getStrategy.mockResolvedValue(idle as never);
+    await mount();
+    await elapse(10_000);
+    expect(getStrategy).toHaveBeenCalledTimes(1);
+
+    getStrategy.mockResolvedValue(running as never);
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["strategy", "brigado", "fleet_op"] });
+    });
+    await elapse(0);
+    expect(getStrategy).toHaveBeenCalledTimes(2);
+
+    await elapse(5_000);
+    expect(getStrategy).toHaveBeenCalledTimes(3);
+    await elapse(5_000);
+    expect(getStrategy).toHaveBeenCalledTimes(4);
   });
 });
