@@ -20,7 +20,7 @@ import {
   useSections,
   type SectionId,
 } from "@/components/agent/workspace/sections";
-import { useWorkspaceAlerts } from "@/components/agent/workspace/useWorkspaceAlerts";
+import { useRunReading } from "@/components/agent/workspace/useRunReading";
 import {
   ownsStrategy,
   pickRun,
@@ -196,7 +196,7 @@ export function AgentRunScreen({
   // cut from. Read at this level so the two are served from one round of
   // requests rather than each band declaring the query it wants.
   const { alerts, decisions, journal, deployments, perf, pnlSeries, sessionNum } =
-    useWorkspaceAlerts({ slug, sslug, run: selectedRun, instance });
+    useRunReading({ slug, sslug, run: selectedRun, instance });
 
   /**
    * Opening a run, which is now four different things (FEAT-111).

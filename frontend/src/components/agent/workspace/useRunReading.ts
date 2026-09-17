@@ -18,14 +18,9 @@ import {
 import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-agent";
 
 /**
- * One run, in the three readings the screen is built out of.
- *
- * It started as the alert rules alone — a hook rather than a lump inside a
- * body, because the count had to be carried where the alerts were not. What
- * made it the run's whole reading is FEAT-119: the vitals, the last decision,
- * the chart and the deployed table are five facets of one run and they are on
- * one screen now, so the three responses they are cut from are read once here
- * and handed out, rather than each band re-declaring the query it wants.
+ * One run's whole reading: its journal, actions and session-executors responses
+ * are read once here and handed out as alerts, decisions, journal, deployments,
+ * perf, pnlSeries and sessionNum.
  *
  * Still three queries and still the tick spine's and the detail bands' own, key
  * for key, so react-query hands every caller the same cache entries and the
@@ -39,7 +34,7 @@ import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-age
  * decision, the failed-action alert and the spine froze at page open while the
  * countdown kept moving.
  */
-export function useWorkspaceAlerts({
+export function useRunReading({
   slug,
   sslug,
   run,

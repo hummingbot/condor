@@ -29,7 +29,7 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-const { useWorkspaceAlerts } = await import("./useWorkspaceAlerts");
+const { useRunReading } = await import("./useRunReading");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -55,7 +55,7 @@ function Probe({
   status: string;
   instance?: RunningInstance | null;
 }) {
-  const { alerts } = useWorkspaceAlerts({
+  const { alerts } = useRunReading({
     slug: "brigado",
     sslug: "brl_mm",
     run: run(status),
@@ -110,7 +110,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("useWorkspaceAlerts polling", () => {
+describe("useRunReading polling", () => {
   it("re-reads a running run's journal and action log every 10s", async () => {
     await mount("running");
     expect(getSessionJournal).toHaveBeenCalledTimes(1);

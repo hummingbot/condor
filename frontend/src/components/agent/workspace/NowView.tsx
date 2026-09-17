@@ -26,7 +26,7 @@ import type { Decision, ParsedJournal } from "@/lib/parse-agent";
  * net-subtractive, which is the test for whether a consolidation is real.
  *
  * It still fetches almost nothing of its own. The vitals, the journal, the
- * chart's series and the ledger all come off `useWorkspaceAlerts`' three
+ * chart's series and the ledger all come off `useRunReading`'s three
  * responses, which the tick spine and the detail bands were reading anyway; the
  * one query in here is the run's own report, which used to hang off the strip
  * in the overview and travels with it.
