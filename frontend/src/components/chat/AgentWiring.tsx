@@ -25,16 +25,12 @@ import type {
  * trades against.
  *
  * These are the *wiring*, not the agent — which is why they sit in the agent
- * panel's own bar rather than in the dock card that opens it. The card names
- * one thing, the agent, in one line; everything else about that agent is a
- * click away, and this pair is the first thing waiting on the other side of
- * the click, at the top of the panel it opens.
- *
- * They lived in the dock card until the card was cut back to the name alone.
- * The card could not both be a one-line identity and carry two switches, and
- * of the two the switches are the ones that already have somewhere to be: the
- * panel is on screen for exactly as long as anyone is thinking about what this
- * agent is made of.
+ * panel's own bar, the one place the conversation's model and server are
+ * shown. The session tab deliberately names only the agent (`SessionTabs`),
+ * and so does the rail's Agent tile that opens the panel; this pair is the
+ * first thing waiting on the other side of that click, and the panel is on
+ * screen for exactly as long as anyone is thinking about what this agent is
+ * made of.
  */
 export function AgentWiring({
   slot,

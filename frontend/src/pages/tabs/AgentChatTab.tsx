@@ -566,11 +566,14 @@ export function AgentChatTab() {
               split exists at all (see `WorkspacePane`), so below it this is the
               plain `min-w-0` column it has always been. */}
           <div className="flex min-w-0 flex-1 flex-col xl:min-w-[360px]">
-            {/* Which sessions are live, and the one door into whoever is
-                answering. Nothing else: the agent is named by its own tab and
-                again by the panel the button opens — a chip here repeating
-                both, plus the model and the server, was the same agent said
-                three times across one row. */}
+            {/* Which sessions are live: the rail toggle (narrow screens only)
+                and the session tabs. Nothing else, and no door to the agent
+                panel — that is the `WorkspaceRail` Agent tile (also reachable
+                from an Execution row and from closing a strategy sheet, all via
+                `openPane({ kind: "agent" })`). The agent is named by its own
+                tab and again by that panel — a chip here repeating both, plus
+                the model and the server, was the same agent said three times
+                across one row. */}
             <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
               <button
                 onClick={() => setRailOpen((v) => !v)}

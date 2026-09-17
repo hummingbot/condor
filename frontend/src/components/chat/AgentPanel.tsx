@@ -34,7 +34,8 @@ import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
  * the same reason — a report is read and the chat behind it merely stays alive,
  * while here both columns are being used in the same minute, and two thirds put
  * the transcript on its 360px floor. The dock stays, and the door back out is
- * the pressed Tune button in the bar above.
+ * the `WorkspaceRail` Agent tile — which reads active while this panel or a
+ * strategy sheet opened from it is up — or the panel's own close.
  *
  * A routine row hands the pane to the routine library rather than growing a
  * second one, and a strategy row does the same with its workbench — the very

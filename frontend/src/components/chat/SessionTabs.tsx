@@ -318,9 +318,9 @@ function SessionTab({
   onClose: () => void;
 }) {
   // The tab answers one question: *who* you are talking to. The model and the
-  // server belong to the agent panel, one click away in the dock, so neither is
-  // restated here. An unbound chat is "Condor" — the same word the rail uses
-  // for the same conversation.
+  // server belong to the agent panel, one click away on the rail's Agent tile,
+  // so neither is restated here. An unbound chat is "Condor" — the same word
+  // the rail uses for the same conversation.
   const agentShort = slot.info.label || slot.info.agent_slug || "Condor";
   const TabIcon = slot.info.agent_slug ? Bot : Zap;
   const busy = isStreaming || slot.pending;
