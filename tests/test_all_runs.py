@@ -461,6 +461,47 @@ def test_the_route_bounds_what_a_caller_can_ask_for(monkeypatch, tmp_path):
     assert seen == [10, MAX_RUN_LIMIT, 1]
 
 
+def test_the_route_lists_off_the_event_loop(monkeypatch, tmp_path):
+    """PERF-650: the disk walk runs in a worker thread, not on the loop."""
+    import threading
+
+    import condor.agents.all_runs as all_runs_module
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
+    _write_agent(tmp_path, "brigado", "Brigado")
+
+    threads: list[threading.Thread] = []
+
+    def recording(slug, user_id, *, limit):
+        threads.append(threading.current_thread())
+        return []
+
+    monkeypatch.setattr(all_runs_module, "list_all_runs", recording)
+
+    assert _call_route().runs == []
+    assert len(threads) == 1
+    assert threads[0] is not threading.main_thread()
+
+
+def test_an_unknown_agent_404s_before_any_listing(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    import condor.agents.all_runs as all_runs_module
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        all_runs_module,
+        "list_all_runs",
+        lambda slug, user_id, *, limit: calls.append(slug) or [],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        _call_route(slug="nobody_here")
+    assert exc.value.status_code == 404
+    assert calls == []
+
+
 def test_a_conversation_of_another_person_is_not_in_this_rail(monkeypatch, tmp_path):
     from condor.agents import agent as agent_module
 

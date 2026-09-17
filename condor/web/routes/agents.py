@@ -3540,7 +3540,15 @@ async def list_agent_runs(
     from condor.agents.all_runs import list_all_runs
 
     _get_agent(slug)
-    rows = list_all_runs(slug, user.id, limit=max(1, min(limit, MAX_RUN_LIMIT)))
+    # In a worker thread, not on the loop (PERF-650): three disk walks (every
+    # session of every strategy, the delegation records, the conversation
+    # metas) on a 5s poll, and this loop is also uvicorn's, the Telegram
+    # poller's and the chat WebSocket's. Same shape as list_delegation_history
+    # (PERF-293). The agent lookup above stays inline so an unknown slug 404s
+    # before any listing runs.
+    rows = await asyncio.to_thread(
+        list_all_runs, slug, user.id, limit=max(1, min(limit, MAX_RUN_LIMIT))
+    )
     return RunsResponse(runs=[RunRow(**row) for row in rows])
 
 
