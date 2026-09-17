@@ -30,8 +30,6 @@ function snapshot(agentResponse: string): ParsedSnapshot {
   return {
     tick: 12,
     timestamp: "2026-09-03 20:15",
-    model: "claude-fable-5",
-    executionMode: "loop",
     systemPrompt: "",
     systemPromptLength: 0,
     executorState: "",
