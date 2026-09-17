@@ -206,17 +206,26 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
 
 
 def render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
-    """Markdown for a tick's folded tool calls, as every snapshot records them."""
+    """Markdown for a tick's folded tool calls, as every snapshot records them.
+
+    Inputs pass through the shared ``conversations._redact`` first: snapshots
+    are readable by any dashboard user and any journal seat, and a tick can
+    hand a routine a ``password``/``api_key`` config field. Redacting here is
+    the single choke point for every snapshot writer.
+    """
+    from condor.runtime.conversations import _redact
+
     parts: list[str] = []
     for i, tc in enumerate(tool_calls, 1):
         tc_name = tc.get("name", tc.get("title", "unknown"))
         tc_status = tc.get("status", "")
         parts.append(f"### {i}. {tc_name} ({tc_status})")
         if tc.get("input"):
+            tc_input = _redact(tc["input"])
             input_str = (
-                json.dumps(tc["input"], indent=2)
-                if isinstance(tc["input"], dict)
-                else str(tc["input"])
+                json.dumps(tc_input, indent=2)
+                if isinstance(tc_input, dict)
+                else str(tc_input)
             )
             parts.append(f"**Input:**\n```json\n{input_str}\n```")
         if tc.get("output"):
