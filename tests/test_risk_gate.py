@@ -397,6 +397,88 @@ def test_loop_mode_approves_update_config_within_limit():
     assert result["outcome"]["outcome"] == "selected"
 
 
+@pytest.mark.parametrize(
+    "cap", ["nan", float("nan"), "-inf", -1, "-5", 0, "0", "0.0", " 0 ", "twenty", True]
+)
+def test_bot_deploy_refuses_unreadable_or_non_positive_loss_cap(cap):
+    """SEC-632: a NaN cap never fires on the backend and a zero cap is never
+    installed, so neither may clear the gate — and none of them may escape the
+    callback as an exception instead of a logged refusal."""
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=500.0)),
+        RiskState(),
+        execution_mode="loop",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote=cap,
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert "max_global_drawdown_quote" in result["reason"]
+    logged = refusals.drain()
+    assert len(logged) == 1
+    assert "manage_bots" in logged[0]["tool"]
+
+
+def test_bot_deploy_accepts_a_dollar_prefixed_loss_cap():
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=500.0)),
+        RiskState(),
+        execution_mode="loop",
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote="$100",
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "selected"
+
+
+@pytest.mark.parametrize("amount", ["nan", "-inf", "abc"])
+def test_update_config_refuses_unreadable_amount(amount):
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=500.0)),
+        RiskState(),
+        execution_mode="loop",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "update_config",
+                bot_name="x",
+                config_name="cfg",
+                config_data={"total_amount_quote": amount},
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert "total_amount_quote" in result["reason"]
+    assert len(refusals.drain()) == 1
+
+
 def test_loop_mode_still_approves_bot_stop():
     """Stops are risk-reducing — never blocked by the loss-cap gate."""
     engine = RiskEngine(RiskLimits())

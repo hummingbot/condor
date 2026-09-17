@@ -402,22 +402,35 @@ class RiskEngine:
                 return refusal
 
         if action == "deploy":
-            cap = input_data.get("max_global_drawdown_quote")
-            if not cap:
+            # Parsed like every other figure the gate values (SEC-632): a NaN
+            # cap is truthy but never fires on the backend, and a zero cap is
+            # never installed, so both are refused rather than approved.
+            try:
+                cap = _quote_amount(
+                    input_data.get("max_global_drawdown_quote"),
+                    "max_global_drawdown_quote",
+                )
+            except ValueError as exc:
+                return False, f"manage_bots {action}: {exc}"
+            if cap <= 0:
                 return False, (
                     "Bot deploy must declare max_global_drawdown_quote "
                     f"(≤ ${self.limits.max_position_size_quote:.2f}) so the "
                     "platform kill switch bounds the loss"
                 )
-            if float(cap) > self.limits.max_position_size_quote:
+            if cap > self.limits.max_position_size_quote:
                 return False, (
-                    f"max_global_drawdown_quote ${float(cap):.2f} exceeds "
+                    f"max_global_drawdown_quote ${cap:.2f} exceeds "
                     f"position limit ${self.limits.max_position_size_quote:.2f}"
                 )
         elif action == "update_config":
-            amount = float(
-                (input_data.get("config_data") or {}).get("total_amount_quote", 0) or 0
-            )
+            try:
+                amount = _quote_amount(
+                    (input_data.get("config_data") or {}).get("total_amount_quote"),
+                    "total_amount_quote",
+                )
+            except ValueError as exc:
+                return False, f"manage_bots {action}: {exc}"
             if amount > self.limits.max_position_size_quote:
                 return False, (
                     f"update_config total_amount_quote ${amount:.2f} exceeds "
