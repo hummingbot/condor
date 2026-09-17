@@ -61,6 +61,7 @@ vi.mock("@/lib/api", () => ({
     getRoutineInstances: vi.fn(async () => []),
     getServers: vi.fn(async () => []),
     getStrategyPerformance: vi.fn(async () => null),
+    setRestartOnBoot: vi.fn(),
   },
 }));
 
@@ -246,5 +247,30 @@ describe("the meta strip's counts", () => {
     await render(false);
     expect(linkTo("session")).toBeUndefined();
     expect(host.textContent).toContain("0 sessions");
+  });
+});
+
+/**
+ * The restart chip on the loop's spine says when its write was refused.
+ *
+ * It never renders optimistically, so a refusal otherwise leaves it on the old
+ * value with nothing to tell that apart from a click that did not land.
+ */
+describe("the restart chip's write", () => {
+  it("surfaces a refused write beside the chip", async () => {
+    vi.mocked(api.setRestartOnBoot).mockRejectedValueOnce(new Error("strategy.md is read-only"));
+    await render(false);
+    const sw = () => host.querySelector<HTMLButtonElement>('button[role="switch"]');
+    expect(sw()).not.toBeNull();
+    await act(async () => sw()!.click());
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(api.setRestartOnBoot).toHaveBeenCalledWith("brigado", "fleet_op", true);
+    expect(sw()?.getAttribute("aria-checked")).toBe("false");
+    const alerts = [...host.querySelectorAll('[role="alert"]')].map((n) => n.textContent);
+    expect(alerts).toContain("strategy.md is read-only");
   });
 });

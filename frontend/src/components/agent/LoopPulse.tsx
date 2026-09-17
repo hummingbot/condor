@@ -62,6 +62,7 @@ export function LoopPulse({
   onOpenTick,
   onSetRestartOnBoot,
   settingRestartOnBoot = false,
+  restartError,
 }: {
   /** The live session, when there is one. */
   instance: RunningInstance | null;
@@ -78,6 +79,11 @@ export function LoopPulse({
   onSetRestartOnBoot?: (enabled: boolean) => void;
   /** Whether that write is in flight, so the chip can say so rather than lie. */
   settingRestartOnBoot?: boolean;
+  /**
+   * Why the last write was refused. The chip keeps showing what is stored, so
+   * without this a failed flip is indistinguishable from a missed click.
+   */
+  restartError?: string;
 }) {
   const running = instance?.status === "running";
   const now = useSeconds(running);
@@ -161,6 +167,7 @@ export function LoopPulse({
           enabled={!!config.restart_on_boot}
           onChange={onSetRestartOnBoot}
           pending={settingRestartOnBoot}
+          error={restartError}
         />
       </div>
 
@@ -273,10 +280,12 @@ function RestartChip({
   enabled,
   onChange,
   pending,
+  error,
 }: {
   enabled: boolean;
   onChange?: (enabled: boolean) => void;
   pending: boolean;
+  error?: string;
 }) {
   const label = enabled ? "resumes on restart" : "stops on restart";
   const tone = enabled
@@ -295,22 +304,29 @@ function RestartChip({
   }
 
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      disabled={pending}
-      onClick={() => onChange(!enabled)}
-      title={
-        enabled
-          ? "Condor restarts this loop in a fresh session after it restarts. Click to turn off."
-          : "This loop stays stopped after Condor restarts. Click to have it resume."
-      }
-      className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)] disabled:opacity-50 ${tone}`}
-    >
-      <Power className="h-3 w-3" />
-      {pending ? "saving…" : label}
-    </button>
+    <>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        disabled={pending}
+        onClick={() => onChange(!enabled)}
+        title={
+          enabled
+            ? "Condor restarts this loop in a fresh session after it restarts. Click to turn off."
+            : "This loop stays stopped after Condor restarts. Click to have it resume."
+        }
+        className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)] disabled:opacity-50 ${tone}`}
+      >
+        <Power className="h-3 w-3" />
+        {pending ? "saving…" : label}
+      </button>
+      {error && (
+        <span role="alert" data-write-error className="text-[11px] text-red-400">
+          {error}
+        </span>
+      )}
+    </>
   );
 }
 

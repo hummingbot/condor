@@ -428,7 +428,8 @@ function ConfigCard({
    * about the current tick, it is a setting the loop runs under. Written
    * straight through and invalidated, so the switch reflects what is on disk
    * and a failed write snaps back instead of leaving the reader believing a
-   * loop is armed when it is not.
+   * loop is armed when it is not — with the refusal printed beside it, since a
+   * switch that snaps back silently reads as a click that did not register.
    */
   const restartMutation = useMutation({
     mutationFn: (enabled: boolean) => api.setRestartOnBoot(slug, sslug, enabled),
@@ -570,6 +571,11 @@ function ConfigCard({
               ? "resumes on restart"
               : "stops on restart"}
         </button>
+        {restartMutation.isError && (
+          <span role="alert" data-write-error className="text-xs text-red-400">
+            {restartMutation.error.message}
+          </span>
+        )}
       </header>
 
       <div className="grid gap-x-8 gap-y-5 p-3 sm:grid-cols-2 xl:grid-cols-4">

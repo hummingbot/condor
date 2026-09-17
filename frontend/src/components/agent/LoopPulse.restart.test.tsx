@@ -132,6 +132,27 @@ describe("the restart chip", () => {
     // Disabled means the second click is not a second write racing the first.
     expect(calls).toEqual([]);
   });
+
+  it("says why the last flip was refused, beside the chip", async () => {
+    await render(
+      <LoopPulse
+        instance={null}
+        status="idle"
+        config={{}}
+        onSetRestartOnBoot={() => {}}
+        restartError="Request failed: 500"
+      />,
+    );
+    expect(chip()?.getAttribute("aria-checked")).toBe("false");
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("Request failed: 500");
+  });
+
+  it("shows no message when nothing was refused", async () => {
+    await render(
+      <LoopPulse instance={null} status="idle" config={{}} onSetRestartOnBoot={() => {}} />,
+    );
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
 });
 
 describe("the rest of the pulse", () => {

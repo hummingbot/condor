@@ -72,6 +72,15 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
       >
         <Server className="h-3 w-3" /> {serverName || "No server pin"}
       </button>
+      {/* The menu has closed and the chip still reads the stored pin, so a
+          refused write (no access to that server, a read-only AGENT.md, a
+          stopped backend) would otherwise look like a click that did not
+          register. Cleared by the next pick, which resets the mutation. */}
+      {pin.isError && (
+        <span role="alert" data-write-error className="text-xs text-red-400">
+          {pin.error.message}
+        </span>
+      )}
 
       {/* Portalled, not `absolute`: this is the last chip in a `flex-wrap` row
           inside a header the workspace scrolls nothing of, so a 220px panel
@@ -143,17 +152,26 @@ function ModelPicker({ slug, agentKey }: { slug: string; agentKey: string }) {
   });
 
   return (
-    <BrainPicker
-      agents={agents}
-      customProviders={customProviders}
-      selectedAgentKey={agentKey}
-      onSelect={(sel) => {
-        if (sel.agentKey !== undefined && sel.agentKey !== agentKey) {
-          pick.mutate(sel.agentKey);
-        }
-      }}
-      disabled={pick.isPending}
-    />
+    <>
+      <BrainPicker
+        agents={agents}
+        customProviders={customProviders}
+        selectedAgentKey={agentKey}
+        onSelect={(sel) => {
+          if (sel.agentKey !== undefined && sel.agentKey !== agentKey) {
+            pick.mutate(sel.agentKey);
+          }
+        }}
+        disabled={pick.isPending}
+      />
+      {/* Same reason as the server pin: the picker falls back to the stored
+          model, so the refusal has to be said or it reads as nothing. */}
+      {pick.isError && (
+        <span role="alert" data-write-error className="text-xs text-red-400">
+          {pick.error.message}
+        </span>
+      )}
+    </>
   );
 }
 

@@ -96,7 +96,8 @@ export function StrategyWorkbench({
   // "Resume after restart", written straight from the loop's own spine. It
   // invalidates the strategy rather than tracking the answer locally, so the
   // chip reflects what is actually on disk and a failed write snaps back
-  // instead of leaving the reader believing a loop is armed when it is not.
+  // instead of leaving the reader believing a loop is armed when it is not;
+  // the refusal itself goes to the chip as `restartError`.
   const restartMutation = useMutation({
     mutationFn: (enabled: boolean) => api.setRestartOnBoot(slug, sslug, enabled),
     onSuccess: () => {
@@ -335,6 +336,7 @@ export function StrategyWorkbench({
           onOpenTick={handleOpenTick}
           onSetRestartOnBoot={(enabled) => restartMutation.mutate(enabled)}
           settingRestartOnBoot={restartMutation.isPending}
+          restartError={restartMutation.error?.message}
         />
       </div>
 

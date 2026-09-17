@@ -56,6 +56,7 @@ vi.mock("@/components/routines/ReportBrowser", () => ({
 }));
 
 const { PlaybookView } = await import("./PlaybookView");
+const { api } = await import("@/lib/api");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -185,6 +186,27 @@ describe("PlaybookView", () => {
     const sw = container.querySelector('[role="switch"]');
     expect(sw?.getAttribute("aria-checked")).toBe("true");
     expect(sw?.textContent).toContain("resumes on restart");
+  });
+
+  it("says why a refused restart write snapped back", async () => {
+    vi.mocked(api.setRestartOnBoot).mockRejectedValueOnce(
+      new Error("Another user's loop is running this strategy — stop it first"),
+    );
+    render();
+    const sw = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await act(async () => sw.click());
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(api.setRestartOnBoot).toHaveBeenCalledWith("brigado", "pmm_king", false);
+    const after = container.querySelector('[role="switch"]');
+    expect(after?.getAttribute("aria-checked")).toBe("true");
+    // Beside the switch, in the Configuration card's own header.
+    expect(after?.closest("header")?.querySelector('[role="alert"]')?.textContent).toContain(
+      "Another user's loop is running this strategy",
+    );
   });
 });
 
