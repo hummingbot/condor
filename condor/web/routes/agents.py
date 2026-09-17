@@ -275,9 +275,8 @@ class AgentPerformanceModel(BaseModel):
 
         The one place dataclass fields map onto this model, so a field added to
         both reaches every route without being threaded through by hand. The copy
-        is shallow on purpose: ``perf.to_dict()`` goes through ``asdict``, which
-        deep-copies every executor row, and adds ``bot_name``, which is not a
-        field here. ``overrides`` carry what the dataclass does not know (the
+        is shallow on purpose: ``dataclasses.asdict`` would deep-copy every
+        executor row. ``overrides`` carry what the dataclass does not know (the
         session number, kind, experiment metadata).
         """
         values = {

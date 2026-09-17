@@ -393,11 +393,11 @@ def test_merge_is_disjoint_addition():
     # Without bot_name: executor-only behavior.
     base = asyncio.run(fetch_agent_performance(client, agent_id))
     assert base.realized_pnl == 4.0
-    assert base.bot_name == ""
+    assert base.bot_names == []
 
     # With bot_name "river": adds river's 7/7/1500 on top, no double count.
     merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["river"]))
-    assert merged.bot_name == "river"
+    assert merged.bot_names == ["river"]
     assert merged.realized_pnl == 4.0 + 7.0
     assert merged.unrealized_pnl == 7.0
     assert merged.total_pnl == merged.realized_pnl + merged.unrealized_pnl
@@ -430,7 +430,7 @@ def test_merge_appends_bot_positions_as_rows():
     # base name resolves suffix-tolerantly to the deployed instance
     merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["dn-mm"]))
     # bot_name reflects the resolved deployed instance, not just the base
-    assert merged.bot_name == "dn-mm-20260724-1"
+    assert merged.bot_names == ["dn-mm-20260724-1"]
     assert len(merged.executors) == 1
     assert merged.executors[0]["pair"] == "XYZ:CL-USD"
     assert merged.open_count == 1
@@ -523,7 +523,7 @@ def test_no_snapshot_leaves_executor_totals_unchanged():
     no_bot = asyncio.run(fetch_agent_performance(client, agent_id))
     # bot_name set but no matching snapshot → totals identical to executor-only.
     ghost = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["ghost"]))
-    assert ghost.bot_name == "ghost"
+    assert ghost.bot_names == ["ghost"]
     assert ghost.unrealized_pnl == no_bot.unrealized_pnl == 2.0
     assert ghost.total_pnl == no_bot.total_pnl
     assert ghost.controllers == []
@@ -533,10 +533,18 @@ def test_batch_merges_only_named_agents():
     a1, a2 = "river.scalp_1", "plain.scalp_1"
     client = _FakeClient(rows_by_id={})
     out = asyncio.run(fetch_agent_performance_batch(client, [a1, a2], {a1: ["river"]}))
-    assert out[a1].bot_name == "river"
+    assert out[a1].bot_names == ["river"]
     assert out[a1].realized_pnl == 7.0
-    assert out[a2].bot_name == ""  # not named → untouched, executor-only
+    assert out[a2].bot_names == []  # not named → untouched, executor-only
     assert out[a2].realized_pnl == 0.0
+
+
+def test_agent_performance_has_no_single_bot_shims():
+    # READ-685: the single-bot wire is gone (FEAT-018); every reader uses the
+    # ``bot_names`` list, and the wire model projects fields via from_perf.
+    perf = AgentPerformance(agent_id="a.s_1", bot_names=["river"])
+    assert not hasattr(perf, "bot_name")
+    assert not hasattr(perf, "to_dict")
 
 
 # ── Config field ──

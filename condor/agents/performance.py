@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Any, Mapping
@@ -85,14 +85,6 @@ class AgentPerformance:
     # provider, so the session report does not walk every instance's history a
     # second time) gets one, and only when its inputs match the standalone fetch.
     pnl_series: list[dict[str, Any]] | None = None
-
-    @property
-    def bot_name(self) -> str:
-        """The first operated bot — wire compat for single-bot consumers."""
-        return self.bot_names[0] if self.bot_names else ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "bot_name": self.bot_name}
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
