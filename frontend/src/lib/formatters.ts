@@ -307,6 +307,40 @@ export function formatRuntimeHours(hours: number): string {
   return mins >= 1 ? `${mins}m` : "<1m";
 }
 
+/**
+ * A length of time, compactly: `45s`, `12m`, `4h12m`, `1d1h`.
+ *
+ * The one seconds-to-string rule for a duration (ARCH-404), the counterpart of
+ * `formatAge`/`formatRelativeTime` for a *span* rather than a moment. It floors,
+ * so a run never reads longer than it was, and returns `""` for anything that is
+ * not a real length (null, negative, non-finite) so a caller can skip the span.
+ *
+ * `{ ms: true }` is for a measured run whose common case is sub-minute — a code
+ * snippet — and changes only that branch: under a second it prints
+ * milliseconds (a 340ms run would otherwise read `0s`), and up to a minute one
+ * decimal with a trailing `.0` trimmed (`1.5s`, `30s`). The feed row and the
+ * sheet it opens both go through this, so they agree by construction.
+ */
+export function formatDuration(
+  seconds: number | null,
+  opts: { ms?: boolean } = {},
+): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "";
+  if (opts.ms && seconds < 60) {
+    if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+    return `${seconds.toFixed(1).replace(/\.0$/, "")}s`;
+  }
+  const s = Math.floor(seconds);
+  if (s >= 86400) {
+    const days = Math.floor(s / 86400);
+    return `${days}d${Math.floor((s % 86400) / 3600)}h`;
+  }
+  if (s >= 3600)
+    return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+  if (s >= 60) return `${Math.floor(s / 60)}m`;
+  return `${s}s`;
+}
+
 export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {

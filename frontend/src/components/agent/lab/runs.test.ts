@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   actionsByTick,
   beatState,
-  formatDuration,
   formatRunId,
   hasPricedMoney,
   isLiveRun,
@@ -152,13 +151,6 @@ describe("duration", () => {
     expect(runDurationSec(run({ started_at: 0 }), 5_000)).toBeNull();
   });
 
-  it("formats compactly", () => {
-    expect(formatDuration(45)).toBe("45s");
-    expect(formatDuration(720)).toBe("12m");
-    expect(formatDuration(15_120)).toBe("4h12m");
-    expect(formatDuration(90_000)).toBe("1d1h");
-    expect(formatDuration(null)).toBe("");
-  });
 
   it("says ticks alone when there is no duration to say", () => {
     expect(runFacts(run({ tick_count: 20, started_at: 100, ended_at: 15_220 }), 0)).toBe(

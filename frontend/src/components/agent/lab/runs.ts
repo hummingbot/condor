@@ -14,6 +14,7 @@
 
 import type { AgentActionRow } from "@/lib/agent-attribution";
 import type { AgentRunRow } from "@/lib/api";
+import { formatDuration } from "@/lib/formatters";
 
 /**
  * The four kinds of work a run can be (FEAT-111).
@@ -135,18 +136,8 @@ export function runDurationSec(
   return seconds >= 0 ? seconds : null;
 }
 
-/** `4h12m`, `12m`, `45s`. Compact enough to sit beside a tick count. */
-export function formatDuration(seconds: number | null): string {
-  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "";
-  const s = Math.floor(seconds);
-  if (s >= 86400) {
-    const days = Math.floor(s / 86400);
-    return `${days}d${Math.floor((s % 86400) / 3600)}h`;
-  }
-  if (s >= 3600) return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
-  if (s >= 60) return `${Math.floor(s / 60)}m`;
-  return `${s}s`;
-}
+/** `4h12m`, `12m`, `45s` — the shared duration rule, re-exported for `runFacts`'s callers. */
+export { formatDuration };
 
 /**
  * The rail's second line: `20 ticks · 4h12m`.

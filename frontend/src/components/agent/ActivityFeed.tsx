@@ -15,6 +15,7 @@ import {
   formatDelegationTime,
 } from "@/components/agent/delegationStatus";
 import { api, type DelegationKind, type DelegationSummary } from "@/lib/api";
+import { formatDuration } from "@/lib/formatters";
 
 /** How a kind reads in a row: its glyph and what to call it. */
 const KIND: Record<DelegationKind, { icon: typeof Send; label: string }> = {
@@ -48,23 +49,15 @@ function kindOf(d: DelegationSummary): DelegationKind {
   return d.kind ?? "delegate";
 }
 
-/** A duration in the same compact units the elapsed time uses. */
-function compactSecs(secs: number): string {
-  if (secs < 60) return `${Math.round(secs)}s`;
-  if (secs < 3600) return `${Math.round(secs / 60)}m`;
-  return `${(secs / 3600).toFixed(1)}h`;
-}
-
 /**
  * How long a code run took, from the duration the store actually measured.
  *
- * Sub-second is the common case for a snippet, so this one goes down to
- * milliseconds where `compactSecs` would round a real 340ms run to "0s".
+ * Sub-second is the common case for a snippet, hence `{ ms: true }` — the same
+ * call `CodeRunSheet` makes, so the row and the sheet it opens agree.
  */
-function codeDuration(d: DelegationSummary): string {
+function codeRunDuration(d: DelegationSummary): string {
   const secs = (d.ended_at ?? 0) - (d.started_at ?? 0);
-  if (secs <= 0) return "";
-  return secs < 1 ? `${Math.round(secs * 1000)}ms` : compactSecs(secs);
+  return secs > 0 ? formatDuration(secs, { ms: true }) : "";
 }
 
 /**
@@ -91,7 +84,7 @@ function summarize(rows: DelegationSummary[]) {
         )
       : null,
     median: durations.length
-      ? compactSecs(durations[Math.floor(durations.length / 2)])
+      ? formatDuration(durations[Math.floor(durations.length / 2)])
       : null,
   };
 }
@@ -272,8 +265,8 @@ export function ActivityFeed({
                         {d.tool_count}
                       </span>
                     )}
-                    {k === "code" && codeDuration(d) && (
-                      <span data-code-duration>{codeDuration(d)}</span>
+                    {k === "code" && codeRunDuration(d) && (
+                      <span data-code-duration>{codeRunDuration(d)}</span>
                     )}
                   </span>
                 </span>

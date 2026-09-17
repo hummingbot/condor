@@ -1,4 +1,5 @@
 import type { DelegationStatus, DelegationSummary } from "@/lib/api";
+import { formatDuration } from "@/lib/formatters";
 
 // How a delegation's states read, owned in one place: the fleet report's task
 // list, the chat workspace's context dock and the history view all colour them.
@@ -55,11 +56,6 @@ export function formatDelegationTime(
 ): string {
   if (!d.started_at) return "";
   const secs = Math.max(0, now / 1000 - d.started_at);
-  const compact =
-    secs < 60
-      ? `${Math.floor(secs)}s`
-      : secs < 3600
-        ? `${Math.floor(secs / 60)}m`
-        : `${Math.floor(secs / 3600)}h`;
+  const compact = formatDuration(secs);
   return d.status === "running" ? compact : `${compact} ago`;
 }

@@ -7,13 +7,7 @@ import {
 } from "@/components/agent/delegationStatus";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { api, type DelegationSummary } from "@/lib/api";
-
-/** A duration the store measured, in the units it is worth reading in. */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.round(ms / 60_000)}m`;
-}
+import { formatDuration } from "@/lib/formatters";
 
 /** One labelled block of a run's output, absent when there is nothing to show. */
 function Block({
@@ -86,7 +80,7 @@ export function CodeRunSheet({
       ) : (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-muted)]">
-            <span data-code-duration>{formatDuration(data.duration_ms)}</span>
+            <span data-code-duration>{formatDuration(data.duration_ms / 1000, { ms: true })}</span>
             {data.server && <span>· {data.server}</span>}
             {/* The run's own status word, not the feed's translation of it. */}
             <span>· {data.status}</span>

@@ -6,6 +6,7 @@ import {
   formatCompactVolume,
   formatCurrencyVolume,
   formatDateTime,
+  formatDuration,
   formatRelativeTime,
   formatRuntimeHours,
   formatTime,
@@ -539,5 +540,36 @@ describe("namesATool", () => {
     expect(namesATool('"undefined"')).toBe(false);
     expect(namesATool(42)).toBe(false);
     expect(namesATool({ name: "run_code" })).toBe(false);
+  });
+});
+
+// ARCH-404: one duration rule for the agent area. The feed row, the code-run
+// sheet it opens, the lab run rail and the delegation elapsed time all used to
+// carry their own copy, so the same run read `2s` in the row and `1.5s` in the
+// sheet.
+describe("formatDuration", () => {
+  it("floors into compact units", () => {
+    expect(formatDuration(45)).toBe("45s");
+    expect(formatDuration(720)).toBe("12m");
+    expect(formatDuration(15_120)).toBe("4h12m");
+    expect(formatDuration(90_000)).toBe("1d1h");
+    expect(formatDuration(null)).toBe("");
+  });
+
+  it("is empty for anything that is not a real length", () => {
+    expect(formatDuration(-1)).toBe("");
+    expect(formatDuration(Number.NaN)).toBe("");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("");
+  });
+
+  it("reads sub-minute runs to the millisecond or decimal with { ms: true }", () => {
+    expect(formatDuration(1.5, { ms: true })).toBe("1.5s");
+    expect(formatDuration(0.34, { ms: true })).toBe("340ms");
+    expect(formatDuration(30, { ms: true })).toBe("30s");
+  });
+
+  it("never lets { ms: true } touch the minute-and-up branches", () => {
+    expect(formatDuration(90, { ms: true })).toBe("1m");
+    expect(formatDuration(15_120, { ms: true })).toBe("4h12m");
   });
 });
