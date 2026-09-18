@@ -390,11 +390,35 @@ async def stash_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
 
 
 async def install_dependencies() -> tuple[bool, str]:
-    """Run uv sync to install any new dependencies."""
+    """Run uv sync to install any new dependencies, then bring the Claude bridge current."""
     rc, output = await _run_cmd("uv", "sync", cwd=CONDOR_DIR, timeout=DEPS_TIMEOUT)
     if rc != 0:
         return False, f"Dependency install failed:\n{output}"
-    return True, output
+    bridge = await upgrade_outdated_bridge()
+    return True, f"{output}\n{bridge}".strip()
+
+
+async def upgrade_outdated_bridge() -> str:
+    """Upgrade ``claude-agent-acp`` when it is outdated; a line saying what happened.
+
+    The bridge is a global npm package, outside ``uv sync``'s reach, so an
+    install that never re-runs setup would keep a stale one forever. Never fails
+    the update: the code and Python deps are already current, and a bridge that
+    could not be upgraded keeps working the way it did — the model picker says
+    it is outdated and names the fix.
+    """
+    from condor.llm.readiness import outdated_bridge
+
+    outdated = outdated_bridge("claude-agent-acp")
+    if not outdated:
+        return ""
+    rc, output = await _run_cmd("sh", "-c", outdated["fix"], timeout=DEPS_TIMEOUT)
+    if rc != 0:
+        return (
+            f"Claude bridge {outdated['installed']} is outdated and could not be "
+            f"upgraded — run `{outdated['fix']}`:\n{output}"
+        )
+    return f"Upgraded the Claude bridge (was {outdated['installed']})."
 
 
 async def paths_changed(
