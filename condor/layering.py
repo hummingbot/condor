@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -233,6 +234,99 @@ def carry_fork_stamp(path: Path, meta: dict) -> dict:
         if isinstance(existing, dict) and key in existing:
             meta[key] = existing[key]
     return meta
+
+
+@dataclass(frozen=True)
+class StaleFork:
+    """A forked item whose stock counterpart has moved, or gone, since the fork."""
+
+    path: Path
+    """The local file that is being used instead of stock."""
+    rel: str
+    """Its path relative to the local root — what a message should show."""
+    forked_from: str
+    """The digest of the stock file at fork time, from the stamp."""
+    stock_digest: str | None
+    """The stock file's digest now; ``None`` when it no longer exists."""
+
+    @property
+    def retired(self) -> bool:
+        """Whether upstream removed the stock counterpart entirely."""
+        return self.stock_digest is None
+
+
+def _legacy_digest(path: Path) -> str:
+    """What :func:`content_digest` returned before newlines were normalized.
+
+    A stamp written from a CRLF working tree holds the raw-bytes hash, and after
+    normalization it would compare as changed for a reason that has nothing to
+    do with upstream. Checking the legacy form as well keeps those stamps
+    meaningful instead of reporting every one of them stale once.
+    """
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()[:12]}"
+
+
+def stale_forks(agent_slug: str | None) -> list[StaleFork]:
+    """Forked items of one agent whose stock counterpart has since moved.
+
+    The other half of copy-on-write, and the half that was missing.
+    :func:`fork_path` records ``forked_from`` and nothing ever read it back, so
+    a customized playbook kept shadowing stock for ever: the update succeeded,
+    upstream's rewrite landed on disk, and the agent never saw it. Upstream
+    churns exactly these files, and they carry trading rules and risk limits, so
+    the divergence is both silent and consequential.
+
+    This only *reports*. Local still wins — that is the deliberate promise of
+    FEAT-115, and an update that quietly took upstream's version back would be
+    the old loud failure wearing a new coat. What the operator gets is the
+    sentence nobody was being told.
+
+    Items with no stamp are skipped: a file the operator authored from scratch
+    was never a fork of anything, so there is nothing for it to be stale
+    against.
+    """
+    local, stock = _homes(agent_slug)
+    if not local.is_dir():
+        return []
+
+    out: list[StaleFork] = []
+    for path in sorted(local.rglob("*.md")):
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        forked_from = (meta or {}).get(FORKED_FROM_KEY)
+        if not forked_from:
+            continue
+
+        rel = path.relative_to(local)
+        counterpart = stock / rel
+        if not counterpart.is_file():
+            # Upstream retired it. Reads resolve local-before-stock and nothing
+            # reconciles the roots, so a withdrawn playbook keeps running.
+            out.append(StaleFork(path, str(rel), str(forked_from), None))
+            continue
+
+        now = content_digest(counterpart)
+        if now == forked_from or _legacy_digest(counterpart) == forked_from:
+            continue
+        out.append(StaleFork(path, str(rel), str(forked_from), now))
+    return out
+
+
+def all_stale_forks() -> list[StaleFork]:
+    """:func:`stale_forks` across every agent this install has, plus the shared root."""
+    from condor.memory.paths import iter_agent_slugs
+
+    out: list[StaleFork] = []
+    seen: set[Path] = set()
+    for slug in [None, *iter_agent_slugs()]:
+        for fork in stale_forks(slug):
+            if fork.path in seen:
+                continue
+            seen.add(fork.path)
+            out.append(fork)
+    return out
 
 
 def write_preserving_stamp(path: Path, content: str) -> None:
