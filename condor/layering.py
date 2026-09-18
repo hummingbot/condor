@@ -39,7 +39,7 @@ import logging
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 from condor.fsutil import atomic_write_text
@@ -245,7 +245,7 @@ class StaleFork:
     rel: str
     """Its path relative to the local root — what a message should show."""
     forked_from: str
-    """The digest of the stock file at fork time, from the stamp."""
+    """The digest of the stock file at fork time; ``""`` when never stamped."""
     stock_digest: str | None
     """The stock file's digest now; ``None`` when it no longer exists."""
 
@@ -253,6 +253,19 @@ class StaleFork:
     def retired(self) -> bool:
         """Whether upstream removed the stock counterpart entirely."""
         return self.stock_digest is None
+
+    @property
+    def unprovenanced(self) -> bool:
+        """Shadowing stock with no record of ever having been the same file.
+
+        Two ways to get here, and they need the same sentence. A file with no
+        frontmatter cannot hold a stamp -- a routine's ``.py`` is the case that
+        matters, since the library ships nineteen of them -- so a forked skill
+        folder stamps its ``SKILL.md`` and nothing else. And a file the agent
+        *created* under a name upstream later ships collides the same way: local
+        wins per item, so upstream's version never appears.
+        """
+        return not self.forked_from
 
 
 def _legacy_digest(path: Path) -> str:
@@ -290,27 +303,81 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
         return []
 
     out: list[StaleFork] = []
-    for path in sorted(local.rglob("*.md")):
-        try:
-            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
-        except OSError:
-            continue
-        forked_from = (meta or {}).get(FORKED_FROM_KEY)
-        if not forked_from:
+    for path in sorted(local.rglob("*")):
+        if not path.is_file():
             continue
 
         rel = path.relative_to(local)
         counterpart = stock / rel
+        forked_from = _stamp_of(path)
+
         if not counterpart.is_file():
-            # Upstream retired it. Reads resolve local-before-stock and nothing
-            # reconciles the roots, so a withdrawn playbook keeps running.
-            out.append(StaleFork(path, str(rel), str(forked_from), None))
+            # No stock counterpart. Either upstream retired something this
+            # install forked -- worth saying, since reads never reconcile the
+            # roots and a withdrawn playbook keeps running -- or it is an
+            # ordinary file the agent authored, which was never a fork of
+            # anything and has nothing to be stale against.
+            if forked_from:
+                out.append(StaleFork(path, str(rel), forked_from, None))
             continue
 
         now = content_digest(counterpart)
-        if now == forked_from or _legacy_digest(counterpart) == forked_from:
+        if forked_from:
+            if now == forked_from or _legacy_digest(counterpart) == forked_from:
+                continue
+            out.append(StaleFork(path, str(rel), forked_from, now))
             continue
-        out.append(StaleFork(path, str(rel), str(forked_from), now))
+
+        # No stamp, but stock ships this exact path, so the local copy is
+        # shadowing it. Identical content means the fork simply never diverged
+        # -- nothing to report. Different content means upstream's version is
+        # unreachable and nothing recorded that it ever matched.
+        if now != content_digest(path):
+            out.append(StaleFork(path, str(rel), "", now))
+    return out
+
+
+def _stamp_of(path: Path) -> str:
+    """The ``forked_from`` digest recorded on ``path``, or ``""``.
+
+    Only markdown can carry one: :func:`_stamp` deliberately refuses to invent
+    frontmatter for a file that has none, because that would change what the
+    file *is* and the machinery reading a routine's ``.py`` would not survive it.
+    """
+    if path.suffix != ".md":
+        return ""
+    try:
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return str((meta or {}).get(FORKED_FROM_KEY) or "")
+
+
+def locally_overridden(rel_paths: list[str]) -> list[str]:
+    """Which of ``rel_paths`` this install already has its own version of.
+
+    ``rel_paths`` are repo-relative, as ``incoming_paths`` reports them, so only
+    those under ``agents/`` can have a local counterpart at all.
+
+    This is the *predictive* half of the staleness story. :func:`stale_forks`
+    compares a fork against the stock file on disk, and that only moves once the
+    fast-forward has landed -- so it answers "upstream has already moved on"
+    after the fact. This answers "the update you are about to apply will change
+    files you have overridden" while there is still a decision to make.
+    """
+    from condor.paths import local_agents_root
+
+    root = local_agents_root()
+    if not root.is_dir():
+        return []
+
+    out: list[str] = []
+    for rel in rel_paths:
+        parts = PurePosixPath(rel).parts
+        if len(parts) < 2 or parts[0] != "agents":
+            continue
+        if (root.joinpath(*parts[1:])).is_file():
+            out.append(rel)
     return out
 
 
