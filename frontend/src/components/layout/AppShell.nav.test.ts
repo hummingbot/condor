@@ -33,6 +33,21 @@ describe("the nav", () => {
     expect(paths).toContain("/bots");
   });
 
+  it("puts Vaults after Routines and before Settings", () => {
+    // Order is the claim that Vaults is still the product rather than its
+    // configuration: it is the last thing you *do* before the last thing you
+    // *set*. An entry that drifts past Settings reads as a setting.
+    const paths: string[] = NAV_ITEMS.map((item) => item.to);
+    expect(paths.indexOf("/vaults")).toBe(paths.indexOf("/routines") + 1);
+    expect(paths.indexOf("/settings")).toBe(paths.indexOf("/vaults") + 1);
+  });
+
+  it("does not lay the vault pages out full bleed", () => {
+    // They are centred columns with their own max width, so `main`'s padding
+    // is what puts them where they belong. A route on this list loses it.
+    expect(FULL_BLEED_ROUTES).not.toContain("/vaults");
+  });
+
   it("gives every nav entry a distinct address and label", () => {
     expect(new Set(NAV_ITEMS.map((i) => i.to)).size).toBe(NAV_ITEMS.length);
     expect(new Set(NAV_ITEMS.map((i) => i.label)).size).toBe(NAV_ITEMS.length);

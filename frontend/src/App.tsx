@@ -7,6 +7,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
 import { AuthContext, SERVER_KEY, useAuth, useAuthState } from "@/lib/auth";
 import { invalidateServerScopedQueries, queryClient } from "@/lib/queryClient";
+import { WalletProvider } from "@/lib/wallet/WalletProvider";
 import {
   AgentRunsRedirect,
   AgentStrategyRedirect,
@@ -22,6 +23,9 @@ import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
 import { Routines } from "@/pages/Routines";
 import { Settings } from "@/pages/Settings";
+import { VaultCreate } from "@/pages/VaultCreate";
+import { VaultDetail } from "@/pages/VaultDetail";
+import { Vaults } from "@/pages/Vaults";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -58,7 +62,11 @@ function ServerProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <ServerContext value={{ server, setServer: handleSetServer }}>
-      {children}
+      {/* The wallet provider lives inside the server context because it asks
+          the selected server which chain it is on: dev keypairs are offered
+          only once that answer is `surfpool`, and "we could not tell" has to
+          mean "no dev wallets". */}
+      <WalletProvider server={server}>{children}</WalletProvider>
     </ServerContext>
   );
 }
@@ -125,6 +133,12 @@ export default function App() {
                   element={<Navigate to="/bots?population=terminated&group=bot" replace />}
                 />
                 <Route path="/routines" element={<Routines />} />
+                {/* A vault's runner is a key, not a login. These three read
+                    the wallet from the provider `ServerProvider` mounts, which
+                    is why it wraps at that level rather than here. */}
+                <Route path="/vaults" element={<Vaults />} />
+                <Route path="/vaults/new" element={<VaultCreate />} />
+                <Route path="/vaults/:account" element={<VaultDetail />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
                 {/* `/agents` has pointed at the home since the fleet grid
                     was deleted, and the home is the conversation with every

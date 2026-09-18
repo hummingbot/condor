@@ -778,6 +778,19 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Boot reconciliation failed; continuing startup")
 
+    # Vault cranks, one per server that has a Gateway to reach. Failing to start
+    # them must not fail startup: a vault that is not being cranked is a vault
+    # that is not trading, which is visible and recoverable — a bot that will not
+    # boot is neither.
+    try:
+        from condor.vaults_crank import start_configured_cranks
+
+        cranked = await start_configured_cranks()
+        if cranked:
+            logger.info("Vault cranks started for %s", ", ".join(cranked))
+    except Exception:
+        logger.exception("Vault cranks failed to start; continuing startup")
+
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
 
@@ -850,6 +863,12 @@ async def teardown(application: Application) -> None:
     from condor.runtime.state import flush_all
 
     await get_supervisor().stop_all()
+    try:
+        from condor.vaults_crank import stop_all_cranks
+
+        await stop_all_cranks()
+    except Exception:
+        logger.exception("Vault cranks did not stop cleanly")
     # Writes are debounced, so force the last one out on a clean shutdown.
     flush_all()
     # A prompt still streaming when the bot went down holds its turn in

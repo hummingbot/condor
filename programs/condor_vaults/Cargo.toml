@@ -1,0 +1,37 @@
+[package]
+name = "condor_vaults"
+version = "0.1.0"
+description = "Condor Vaults: a Swig wallet owned by a program, born as a Meteora DBC token"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "condor_vaults"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+# anchor-lang and nothing else, and that is a choice rather than a lack of
+# options — see `swig.rs` for what was on the table. Both foreign wire formats
+# are built by hand, pinned by the constants at the top of each file and by the
+# encoder tests beside them.
+anchor-lang = { version = "1.0.2", features = ["init-if-needed"] }
+
+[dev-dependencies]
+# Test-only, so the on-chain build never carries it: the discriminator test
+# recomputes sha256("global:<name>") and compares it with the constants read
+# off Meteora's IDLs, which is what makes those constants checkable rather
+# than merely copied.
+sha2 = "0.10"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -42,6 +42,8 @@ class ServerInfo(BaseModel):
     name: str
     host: str
     port: int
+    # Direct Gateway address for routes hummingbot-api does not proxy (vaults,
+    # Swig wallets, the chain badge). None means not configured — no default.
     online: bool = False
     permission: str = "trader"
     # The server this user's commands land on when none is named — the same
@@ -719,6 +721,18 @@ class UpdateServerRequest(BaseModel):
     port: Optional[int] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    # "" clears it; None leaves it alone.
+
+
+class GatewayChainInfo(BaseModel):
+    """What chain a server's Gateway is pointed at — read through Gateway's own
+    RPC, never a URL the browser could see. ``rpc_host`` is host[:port] only."""
+
+    kind: Literal["surfpool", "node"]
+    rpc_host: str
+    surfnet_version: Optional[str] = None
+    solana_core: Optional[str] = None
+    slot: Optional[int] = None
 
 
 class GatewayStartRequest(BaseModel):
@@ -764,3 +778,271 @@ class GatewayWalletDefaultRequest(BaseModel):
 class AddCredentialRequest(BaseModel):
     connector_name: str
     credentials: dict[str, Any]
+
+
+# ── Vaults: the wallet a runner signs with (plan M2) ──
+
+
+class WalletNonceRequest(BaseModel):
+    address: str
+
+
+class WalletNonceResponse(BaseModel):
+    nonce: str
+    issued_at: str
+    # The exact string the wallet signs. Composed here so there is one
+    # implementation of it rather than one per surface.
+    message: str
+
+
+class WalletAttachRequest(BaseModel):
+    address: str
+    # base64, 64 bytes
+    signature: str
+    nonce: str
+
+
+class WalletInfo(BaseModel):
+    address: str
+    attached_at: int
+
+
+class ExtraSigner(BaseModel):
+    """An ephemeral signature Gateway's build already applied, handed back so
+    the submit can re-merge it: some wallets re-serialize with only their own."""
+
+    pubkey: str
+    signature: str
+
+
+class WalletSubmitRequest(BaseModel):
+    network: str = "mainnet-beta"
+    signed_transaction: str
+    extra_signers: list[ExtraSigner] = []
+
+
+class WalletPollRequest(BaseModel):
+    network: str = "mainnet-beta"
+    signature: str
+
+
+# ── Vaults: the record and its flows (plan M4) ──
+
+
+class VaultTokenInfo(BaseModel):
+    """Set only once a vault has been tokenized. None means private."""
+
+    mint: Optional[str] = None
+    dbc_pool: Optional[str] = None
+    name: Optional[str] = None
+    symbol: Optional[str] = None
+    image: Optional[str] = None
+    links: dict[str, str] = {}
+    launch_signature: Optional[str] = None
+    # Circulating over max supply at launch, in basis points.
+    issue_bps: int = 0
+
+
+class VaultAgentRef(BaseModel):
+    repo: str
+    repo_hash: str
+    commit: str
+    agent_slug: str
+    strategy_slug: str
+
+
+class VaultScan(BaseModel):
+    passed: bool
+    at: int
+    findings: list[str] = []
+
+
+class VaultPin(BaseModel):
+    agent_ref: dict[str, Any]
+    version: int = 0
+    config_hash: Optional[str] = None
+    fee_bps: int = 0
+    signature: Optional[str] = None
+    scan: Optional[VaultScan] = None
+    pending: Optional[dict[str, Any]] = None
+    # The private config is NEVER in a listing: it is served to the runner
+    # alone, from GET /vaults/{account}/config.
+
+
+class VaultDelegate(BaseModel):
+    address: str
+    granted_at: int
+
+
+class VaultChainState(BaseModel):
+    """What the chain says, which is the answer that counts.
+
+    Every field here is read from the `Vault` account at list time. When the
+    account is absent this whole object is None and the record is a draft or a
+    ghost — see `reconcile`.
+    """
+
+    runner: str
+    swig_account: str
+    funds_owner: str
+    mint: str
+    dbc_pool: str
+    config_hash: str
+    quote_mint: Optional[str] = None
+    version: int = 0
+    fee_bps: int = 0
+    # Circulating over max supply at launch; 0 while the vault is private.
+    issue_bps: int = 0
+    # The launch terms this vault chose, recorded by the program at tokenize.
+    # `migration_fee_pct` is the split between the strategy's capital (this
+    # share of the raise) and the holders' exit depth (the rest, permanently
+    # locked). 20-80, and the single number that most changes what a vault is.
+    migration_fee_pct: int = 0
+    creator_trading_fee_pct: int = 0
+    migration_fee_option: int = 0
+    # False means no outside holders: the runner may still withdraw.
+    tokenized: bool = False
+    state: str  # Running | Paused | WindingDown | Redeemable
+    delegate: Optional[str] = None
+    created_ts: int = 0
+    tokenized_ts: int = 0
+    wind_down_ts: int = 0
+    # Where the vault's token trades once its curve graduated — the pool the
+    # DEX browser lists and an LP executor market-makes. None while private.
+    damm_pool: Optional[str] = None
+
+
+class VaultInfo(BaseModel):
+    account: str
+    # Has the one create transaction — Swig, delegate and strategy together —
+    # been confirmed on chain? False is a build nobody signed, not a half-made
+    # vault: there are no intermediate steps to resume.
+    live: bool
+    label: str
+    server: str
+    network: str
+    wallet_address: str
+    runner_address: str
+    quote_mint: Optional[str] = None
+    delegate: Optional[VaultDelegate] = None
+    token: Optional[VaultTokenInfo] = None
+    pin: Optional[dict[str, Any]] = None
+    created_at: int = 0
+    # None until the `Vault` account exists on chain.
+    chain: Optional[VaultChainState] = None
+    # Non-null only when the chain disagrees with the record; the text names
+    # what differs, and the vault does not run while it is set.
+    drift: Optional[str] = None
+
+
+class CreateVaultRequest(BaseModel):
+    """A private vault, whole, in one signature.
+
+    The strategy is part of creating a vault, not a step after it: the same
+    transaction roots the Swig at the program, installs the delegate that trades
+    it, and pins what it runs. No token, no symbol, nothing to price — those
+    belong to `VaultTokenizeRequest`, which is a decision for later and often
+    never.
+    """
+
+    label: str
+    quote_mint: str
+    fund_lamports: int = 0
+    network: str = "mainnet-beta"
+    agent_slug: str
+    strategy_slug: str
+    # The private config. Condor keeps it; the chain keeps its hash.
+    config: dict[str, Any]
+    # The share of realised LP fees the sweep burns.
+    fee_bps: int = 5000
+
+
+class VaultTokenizeRequest(BaseModel):
+    """The terms are in the launch config, not here.
+
+    A vault's launch price and its migration fee are config parameters, so the
+    runner builds the config first (`VaultLaunchConfigRequest`) and Condor
+    remembers its address. The program checks every term of it and records the
+    ones a holder needs to read.
+    """
+
+    name: str
+    symbol: str
+    uri: str
+    # Circulating over max supply at launch.
+    issue_bps: int
+
+
+class VaultLaunchConfigRequest(BaseModel):
+    """The vault's own DBC config — the launch terms, which are the runner's to
+    choose within the bounds the program enforces.
+
+    Every one of these is on the `Vault` account after `tokenize`, so a buyer
+    reads what was chosen before they can buy.
+    """
+
+    # What the vault is worth per token at the start of the curve, in quote.
+    # Informed by NAV; a runner may strike it above or below.
+    initial_market_cap: float
+    migration_market_cap: float
+    #: 20-80. The share of the raise that becomes the vault's capital; the rest
+    #: is permanently locked liquidity. This is the split between the strategy
+    #: and the holders' exit depth, which is why it is the runner's to set.
+    migration_fee_percentage: Optional[float] = None
+    #: 0-50: the runner's share of trading fees.
+    creator_trading_fee_percentage: Optional[float] = None
+    #: 0-5: which fixed fee the migrated pool charges.
+    migration_fee_option: Optional[int] = None
+    base_fee_bps: Optional[int] = None
+
+
+class VaultLabelRequest(BaseModel):
+    label: str
+
+
+class VaultStageRequest(BaseModel):
+    signature: str
+
+
+class VaultPublishRequest(BaseModel):
+    """A new version: a new agent pin, a new private config, or both."""
+
+    agent_slug: Optional[str] = None
+    strategy_slug: Optional[str] = None
+    config: dict[str, Any]
+    fee_bps: Optional[int] = None
+
+
+class VaultFeeRequest(BaseModel):
+    fee_bps: int
+
+
+class VaultActiveRequest(BaseModel):
+    active: bool
+
+
+class VaultRedeemRequest(BaseModel):
+    # Raw token units, as a string: a u64 does not survive JSON's double.
+    amount: str
+
+
+class VaultBuild(BaseModel):
+    """What the browser signs. The same shape Gateway's build routes return."""
+
+    transaction: str
+    fee_payer: str
+    recent_blockhash: str
+    last_valid_block_height: int
+    current_block_height: int
+    extra_signers: list[ExtraSigner] = []
+
+
+class VaultCreateResponse(BaseModel):
+    account: str
+    build: VaultBuild
+
+
+class VaultScanResponse(BaseModel):
+    passed: bool
+    findings: list[str] = []
+    at: int

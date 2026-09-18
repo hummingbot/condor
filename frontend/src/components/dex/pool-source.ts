@@ -7,7 +7,13 @@
 export type PoolSource =
   | { kind: "gecko"; view: "trending" | "top" | "new" | "token" }
   | { kind: "gateway"; connector: string }
-  | { kind: "favorites" };
+  | { kind: "favorites" }
+  // The pools of vaults this account runs. Its own tab rather than a filter,
+  // for the same reason the others are: the rows do not come from an upstream
+  // at all. A vault's pool exists the moment its curve graduates, long before
+  // any indexer has seen it, so it is built from what Condor already knows —
+  // which is also why it is the one tab that lists a pool with no volume yet.
+  | { kind: "vaults" };
 
 export const GECKO_TABS = [
   { view: "trending", label: "Trending" },
@@ -34,5 +40,6 @@ export function sameSource(a: PoolSource, b: PoolSource): boolean {
   if (a.kind === "gecko" && b.kind === "gecko") return a.view === b.view;
   if (a.kind === "gateway" && b.kind === "gateway")
     return a.connector === b.connector;
+  if (a.kind === "vaults" && b.kind === "vaults") return true;
   return a.kind === "favorites" && b.kind === "favorites";
 }

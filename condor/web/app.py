@@ -38,6 +38,8 @@ from condor.web.routes import (
     sharing,
     transcribe,
     updates,
+    vaults,
+    wallet,
     ws,
 )
 
@@ -130,6 +132,11 @@ def create_app() -> FastAPI:
     app.include_router(sharing.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
     app.include_router(updates.router, prefix="/api/v1")
+    # Vaults (plan M2/M4): the wallet a runner signs with, and the vaults it
+    # runs. Both are server-scoped — a signature lands on whichever chain the
+    # named server's Gateway is pointed at.
+    app.include_router(wallet.router, prefix="/api/v1")
+    app.include_router(vaults.router, prefix="/api/v1")
 
     # Report bodies are NOT mounted here. They used to be served by an
     # unauthenticated ``/reports/{filename:path}`` route, which made every

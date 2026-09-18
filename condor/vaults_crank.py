@@ -1,0 +1,603 @@
+"""The crank: what keeps a vault's strategy running, and what it refuses to do.
+
+One loop per server. Each pass reads the vaults from the chain — not from
+Condor's records, which are a local convenience — and for each one decides
+whether Condor should be running it, whether anything on chain is waiting for a
+push, and whether a wind-down needs finishing.
+
+**What the crank is not.** It is not a privileged party. Everything it does is
+something the program already allows: the strategy ticks are signed by a
+delegate the runner installed and can remove, `collect_seed` and
+`collect_leftover` are permissionless and pay the caller nothing, and the one
+instruction restricted to Condor — `finalize_wind_down` — is restricted because
+a stranger could otherwise strand a position behind a removed delegate, not
+because Condor is owed anything. A runner who self-hosts runs this same loop
+against their own vault and needs nothing from Condor at all.
+
+**Start checks, every pass.** A vault only ticks when all of these hold, and
+each one has a failure it is there to prevent:
+
+* the chain says `Running` — the runner's pause is not advisory;
+* the stored version, config hash and fee equal the chain's — otherwise Condor
+  would be running parameters the runner did not sign, which is the whole point
+  of putting a hash on chain;
+* Condor's own scan passed *this version* — a private run policy, not an
+  attestation (nothing on chain says Condor reviewed anything);
+* the Swig still carries the delegate Condor holds — a revoked delegate means
+  the runner has taken the wallet back, and the crank must notice rather than
+  fail transaction by transaction;
+* exactly one live engine per vault — two would double every position.
+
+A vault that fails a check is skipped with the reason logged once, not retried
+into a hot loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Optional
+
+from condor import vault_store, vault_sweep
+from condor.gateway_client import VaultGateway
+from condor.vault_config import config_hash
+
+log = logging.getLogger(__name__)
+
+#: How often a server's vaults are reconsidered. Slow on purpose: everything
+#: urgent is driven by the engine's own tick, and this loop only decides which
+#: engines should exist.
+DEFAULT_INTERVAL_S = 30.0
+
+#: The delegate pays for every transaction it signs, so it needs SOL of its own.
+#: Below this the crank tops it up from the vault; above it, it leaves it alone.
+DELEGATE_FLOOR_LAMPORTS = 20_000_000  # 0.02 SOL
+DELEGATE_TOPUP_LAMPORTS = 50_000_000  # 0.05 SOL
+
+
+class StartRefused(Exception):
+    """A start check said no. The message is what the vault page shows."""
+
+
+def check_can_run(record: dict[str, Any], chain: dict[str, Any]) -> None:
+    """Raise :class:`StartRefused` unless Condor should be ticking this vault.
+
+    Pure, so the rules can be read and tested without a chain, a Gateway or an
+    engine — which is the only way a list like this stays honest.
+    """
+    state = chain.get("state")
+    if state != "Running":
+        raise StartRefused(f"the chain says {state}, not Running")
+
+    if not chain.get("delegate"):
+        raise StartRefused("no delegate is installed, so nothing can sign its trades")
+
+    held = (record.get("delegate") or {}).get("address")
+    if held and held != chain.get("delegate"):
+        raise StartRefused(
+            f"the installed delegate is {chain['delegate']}, not the one Condor holds "
+            f"({held}) — this vault is being run by someone else"
+        )
+
+    pin = record.get("pin") or {}
+    if not pin.get("config"):
+        raise StartRefused("Condor has no config for this vault, only its hash")
+
+    for key, label in (
+        ("version", "version"),
+        ("config_hash", "config hash"),
+        ("fee_bps", "fee"),
+    ):
+        stored, on_chain = pin.get(key), chain.get(key)
+        if stored is not None and on_chain is not None and stored != on_chain:
+            raise StartRefused(
+                f"the stored {label} ({stored}) is not the chain's ({on_chain})"
+            )
+
+    # The hash is the commitment. Recomputing it here rather than trusting the
+    # stored one is what makes "nobody can run a vault on parameters its runner
+    # did not sign" true of Condor's own operators.
+    recomputed = config_hash(pin["config"])
+    if recomputed != chain.get("config_hash"):
+        raise StartRefused(
+            f"the stored config hashes to {recomputed[:16]}…, and the chain carries "
+            f"{str(chain.get('config_hash'))[:16]}… — it is not the config this vault signed"
+        )
+
+    scan = pin.get("scan")
+    if not scan or not scan.get("passed"):
+        raise StartRefused(
+            "Condor's own check has not passed for this version"
+            + (
+                f": {'; '.join(scan['findings'])}"
+                if scan and scan.get("findings")
+                else ""
+            )
+        )
+
+
+class VaultCrank:
+    """One server's vaults, reconsidered on an interval."""
+
+    def __init__(
+        self,
+        server: str,
+        network: str = "mainnet-beta",
+        interval_s: float = DEFAULT_INTERVAL_S,
+    ):
+        self.server = server
+        self.network = network
+        self.interval_s = interval_s
+        self._task: Optional[asyncio.Task] = None
+        self._engines: dict[str, Any] = {}
+        # One log line per reason per vault, rather than one per pass: a vault
+        # that is paused for a week should not write 20,000 identical lines.
+        self._last_refusal: dict[str, str] = {}
+
+    async def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(
+            self._loop(), name=f"vault-crank:{self.server}"
+        )
+        log.info("vault crank started for %s", self.server)
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        for account in list(self._engines):
+            await self._stop_engine(account)
+        log.info("vault crank stopped for %s", self.server)
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await self.pass_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One vault's bad pass must not take the loop down; the next
+                # pass is thirty seconds away and the chain has not moved.
+                log.exception("vault crank pass failed for %s", self.server)
+            await asyncio.sleep(self.interval_s)
+
+    async def pass_once(self) -> None:
+        gw = await VaultGateway.for_server(_config_manager(), self.server, self.network)
+
+        on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+        records = {
+            account: record
+            for _user, account, record in vault_store.iter_all_users()
+            if record.get("server") == self.server
+        }
+
+        for account, chain in on_chain.items():
+            record = records.get(account)
+            if record is None:
+                # Someone else's vault on the same chain. Condor reads it and
+                # leaves it alone: it holds no config for it and no delegate on
+                # it, and a vault is nobody's to run but its runner's.
+                continue
+            try:
+                await self._tend(gw, account, record, _snake(chain))
+            except Exception:
+                log.exception("vault %s could not be tended", account)
+
+        # An engine whose vault has gone (a re-forked chain, a deleted record)
+        # has nothing left to trade for.
+        for account in list(self._engines):
+            if account not in on_chain:
+                await self._stop_engine(account)
+
+    async def _tend(
+        self, gw: VaultGateway, account: str, record: dict, chain: dict
+    ) -> None:
+        state = chain.get("state")
+
+        if state == "WindingDown":
+            await self._stop_engine(account)
+            await self._wind_down(gw, account, record, chain)
+            return
+
+        if state == "Redeemable":
+            await self._stop_engine(account)
+            return
+
+        # A migrated pool has two things waiting for a push, and both are
+        # permissionless: the seed (80% of the raise) and the unsold supply.
+        # Condor pays the gas because it is there, not because it must be.
+        if chain.get("tokenized"):
+            await self._collect(gw, account, chain)
+
+        try:
+            check_can_run(record, chain)
+        except StartRefused as refusal:
+            await self._stop_engine(account)
+            if self._last_refusal.get(account) != str(refusal):
+                self._last_refusal[account] = str(refusal)
+                log.info("not running vault %s: %s", account, refusal)
+            return
+
+        self._last_refusal.pop(account, None)
+        await self._ensure_engine(account, record, chain)
+        await self._top_up_delegate(gw, account, chain)
+        await self._sweep(gw, account, chain)
+
+    async def _sweep(self, gw: VaultGateway, account: str, chain: dict) -> None:
+        """Accrue every closed LP position's fee share, and spend it when due.
+
+        **Polled, not hooked.** The plan called for a callback on executor
+        termination in the engine; polling is better here, for two reasons that
+        only became clear once the ledger existed. A hook fires once, so a
+        Condor restart between the close and the callback loses that executor's
+        share forever — while the ledger is keyed by executor id, which makes
+        re-reading the same terminated executor free. And a hook would put
+        knowledge of vaults inside the agent engine, which has no other reason
+        to know they exist.
+        """
+        if not chain.get("tokenized"):
+            # A private vault has no token to buy. Fees simply stay in it,
+            # which is the whole difference between the two phases.
+            return
+        try:
+            executors = await self._terminated_lp_executors(account)
+        except Exception as e:
+            log.debug("vault %s: could not read executors (%s)", account, e)
+            return
+
+        fee_bps = int(chain.get("fee_bps") or 0)
+        for executor in executors:
+            info = executor.get("custom_info") or {}
+            fees = float(info.get("fees_earned_quote") or 0)
+            if fees <= 0:
+                continue
+            vault_sweep.record_close(account, str(executor.get("id")), fees, fee_bps)
+
+        lamports = vault_sweep.due(account)
+        if not lamports:
+            return
+        vault_sweep.take_pending(account, lamports)
+        await sweep_once(gw, account, chain, lamports)
+
+    async def _terminated_lp_executors(self, account: str) -> list[dict]:
+        """The LP executors this vault has finished with.
+
+        Only LP: the sweep reads `fees_earned_quote`, which is a fee an LP
+        position earned. A directional executor's profit is not a fee and
+        sweeping it would be a different product (plan §7).
+        """
+        from condor.fetchers.executors import fetch_all_executors, get_executor_type
+        from config_manager import get_config_manager
+
+        client = await get_config_manager().get_client(self.server)
+        rows = await fetch_all_executors(
+            client, max_items=200, account_name=_account_name(account)
+        )
+        return [
+            row
+            for row in rows
+            if get_executor_type(row) == "lp_executor"
+            and not row.get("is_active", True)
+        ]
+
+    async def _collect(self, gw: VaultGateway, account: str, chain: dict) -> None:
+        """Push the two permissionless post-migration calls, if they are due.
+
+        Both refuse on chain when there is nothing to do — DBC keeps a one-time
+        flag for each — so this does not need to know whether it has already
+        run; it needs only to not treat a refusal as an error.
+        """
+        pool_config = chain.get("dbc_config") or chain.get("config")
+        if not pool_config:
+            return
+        for route in ("collect-seed", "collect-leftover"):
+            try:
+                result = await gw.execute(
+                    route, {"swigAccount": account, "dbcConfig": pool_config}
+                )
+                log.info(
+                    "vault %s: %s landed (%s)", account, route, result.get("signature")
+                )
+            except Exception as e:
+                # Expected on almost every pass: there is usually nothing to
+                # collect. Debug, not warning — a log that cries wolf every
+                # thirty seconds is a log nobody reads.
+                log.debug("vault %s: %s not due (%s)", account, route, e)
+
+    async def _wind_down(
+        self, gw: VaultGateway, account: str, record: dict, chain: dict
+    ) -> None:
+        """Close everything, convert to the quote asset, then finalize.
+
+        Deliberately not permissionless. A stranger's close-and-swap signed by
+        the vault's own authority would need oracle-bounded prices to be safe
+        from a pool priced against it, and that is a design problem rather than
+        a missing endpoint. Until then the administrator does it and holders can
+        see that it happened.
+
+        What *is* permissionless is what comes after: once the pot is funded and
+        finalize has run, `redeem` pays out of an account this program owns, with
+        no delegate, no administrator and no key able to decline.
+        """
+        # The redeemable quote has to leave the Swig *before* finalize, and it
+        # has to leave at top level: Swig refuses to be reached by CPI on any
+        # execution path, so the program cannot move it however it is written.
+        # `finalize_wind_down` verifies the sweep and refuses until it has
+        # happened, which is what makes the order here load-bearing rather than
+        # merely tidy.
+        try:
+            swept = await gw.execute("sweep-to-pot", {"swigAccount": account})
+            if swept.get("signature"):
+                log.info(
+                    "vault %s swept %s into the redemption pot %s",
+                    account,
+                    swept.get("swept"),
+                    swept.get("pot"),
+                )
+        except Exception as e:
+            log.debug("vault %s could not sweep yet (%s)", account, e)
+            return
+
+        try:
+            result = await gw.execute("finalize-wind-down", {"swigAccount": account})
+        except Exception as e:
+            # The usual reason is the honest one: a position is still open, so a
+            # balance is still in the wrong asset. The program refuses, and the
+            # next pass tries again once the positions are closed.
+            log.debug("vault %s not ready to finalize (%s)", account, e)
+            return
+        log.info("vault %s wind-down finalized (%s)", account, result.get("signature"))
+
+    async def _top_up_delegate(
+        self, gw: VaultGateway, account: str, chain: dict
+    ) -> None:
+        """Keep the delegate solvent enough to sign.
+
+        The delegate pays its own transaction fees and holds nothing else. A
+        delegate that runs out of SOL stops the vault in a way that looks, from
+        every surface, like the strategy failing.
+        """
+        delegate = chain.get("delegate")
+        if not delegate:
+            return
+        try:
+            balances = await gw.balances(delegate)
+        except Exception as e:
+            log.debug("could not read delegate balance for %s: %s", account, e)
+            return
+        lamports = _native_lamports(balances)
+        if lamports is None or lamports >= DELEGATE_FLOOR_LAMPORTS:
+            return
+        log.info(
+            "vault %s: delegate %s is below the floor (%s lamports); topping up",
+            account,
+            delegate,
+            lamports,
+        )
+        try:
+            # An ordinary transfer out of the wallet, signed by the wallet. No
+            # vault instruction is needed or wanted: paying for gas is not a
+            # privileged act, and the delegate is already allowed to spend.
+            await gw.fund_delegate(account, DELEGATE_TOPUP_LAMPORTS)
+        except Exception as e:
+            log.warning("vault %s: could not top up the delegate: %s", account, e)
+
+    # ── engines ───────────────────────────────────────────────────────────────
+
+    async def _ensure_engine(self, account: str, record: dict, chain: dict) -> None:
+        existing = self._engines.get(account)
+        if existing is not None and getattr(existing, "_running", False):
+            return
+
+        from condor.agents.agent import AgentStore
+        from condor.agents.engine import TickEngine
+        from condor.agents.strategy import StrategyStore
+
+        pin = record["pin"]
+        ref = pin["agent_ref"]
+        agent_slug = ref.get("agentSlug") or ref.get("agent_slug")
+        strategy_slug = ref.get("strategySlug") or ref.get("strategy_slug")
+        agent = AgentStore().get(agent_slug)
+        strategy = StrategyStore().get(agent_slug, strategy_slug)
+        if agent is None or strategy is None:
+            log.warning(
+                "vault %s pins %s/%s, which this install does not have",
+                account,
+                agent_slug,
+                strategy_slug,
+            )
+            return
+
+        # The run's config is the vault's signed config, and the wallet it
+        # trades from is the vault's — never Gateway's default, which is one
+        # address for the whole instance and would make two vaults one wallet.
+        config = dict(pin["config"])
+        config["account_name"] = _account_name(account)
+        config["wallet_address"] = chain["funds_owner"]
+        config["vault_account"] = account
+        config["execution_mode"] = "loop"
+
+        engine = TickEngine(
+            agent=agent,
+            strategy=strategy,
+            config=config,
+            chat_id=0,
+            user_id=int(record.get("user_id") or 0),
+        )
+        await engine.start()
+        self._engines[account] = engine
+        log.info(
+            "vault %s running %s/%s v%s",
+            account,
+            agent_slug,
+            strategy_slug,
+            chain.get("version"),
+        )
+
+    async def _stop_engine(self, account: str) -> None:
+        engine = self._engines.pop(account, None)
+        if engine is None:
+            return
+        try:
+            await engine.stop()
+        except Exception:
+            # A stop that finds no engine is "already stopped" — Condor
+            # restarts kill engines, and the record outlives them.
+            log.debug("vault %s engine was already gone", account, exc_info=True)
+        log.info("vault %s stopped", account)
+
+
+def _account_name(swig_account: str) -> str:
+    """The hummingbot-api account this vault trades through.
+
+    One per vault, so each binds its own Gateway wallet: without that every
+    account falls back to Gateway's *default* wallet and two vaults trading at
+    once are the same wallet on chain.
+    """
+    return f"vault_{swig_account[:12]}"
+
+
+def _native_lamports(balances: Any) -> Optional[int]:
+    """The SOL in a balances response, however Gateway shaped it."""
+    if isinstance(balances, dict):
+        inner = balances.get("balances", balances)
+        if isinstance(inner, dict):
+            for key in ("SOL", "So11111111111111111111111111111111111111112"):
+                if key in inner:
+                    return int(float(inner[key]) * 1_000_000_000)
+    return None
+
+
+def _snake(chain: dict[str, Any]) -> dict[str, Any]:
+    """Gateway answers in camelCase; everything below reads snake_case."""
+    out = {}
+    for key, value in chain.items():
+        snake = "".join("_" + c.lower() if c.isupper() else c for c in key)
+        out[snake] = value
+    return out
+
+
+def _config_manager():
+    from config_manager import get_config_manager
+
+    return get_config_manager()
+
+
+# ── the sweep hook ────────────────────────────────────────────────────────────
+
+
+async def sweep_once(
+    gw: VaultGateway, vault_account: str, chain: dict[str, Any], lamports: int
+) -> None:
+    """Buy the vault's token with `lamports` of quote, then burn what arrives.
+
+    Two transactions rather than one, and that is safe here for a reason worth
+    stating: tokens bought but not yet burned sit in the vault's own wallet,
+    which is treasury — already excluded from the circulating supply `redeem`
+    divides by. A burn that never lands is therefore a deferred burn, not a
+    loss, and the next sweep clears it.
+    """
+    mint = chain.get("mint")
+    funds_owner = chain.get("fundsOwner") or chain.get("funds_owner")
+    quote_mint = chain.get("quoteMint") or chain.get("quote_mint")
+    if not (mint and funds_owner and quote_mint):
+        log.warning("vault %s: cannot sweep, it is not tokenized", vault_account)
+        return
+
+    amount = lamports / 1_000_000_000
+    buy = gw.buy_on_market if chain.get("dammPool") else gw.buy_on_curve
+    try:
+        result = await buy(funds_owner, mint, quote_mint, amount)
+    except Exception as e:
+        # The migration gap is the common case: the curve has filled and the
+        # pool has not landed yet, so neither venue will trade. Waiting is
+        # correct — the accrual is already recorded and the next pass retries.
+        log.warning(
+            "vault %s: sweep buy of %s SOL failed (%s)", vault_account, amount, e
+        )
+        return
+
+    signature = result.get("signature", "")
+    bought = result.get("amountOut") or result.get("totalOutputSwapped") or 0
+    vault_sweep.record_sweep(vault_account, signature, lamports, str(bought))
+    log.info("vault %s: bought %s of %s (%s)", vault_account, bought, mint, signature)
+
+    await burn_treasury_purchase(gw, vault_account, bought)
+
+
+async def burn_treasury_purchase(
+    gw: VaultGateway, vault_account: str, bought: Any
+) -> None:
+    """Burn what the sweep just bought, out of the wallet that bought it.
+
+    The amount is what this pass bought and never the wallet's whole balance:
+    the rest of it is treasury — unsold supply, which nobody has paid for and
+    which a burn would simply destroy.
+    """
+    try:
+        amount = float(bought)
+    except (TypeError, ValueError):
+        return
+    if amount <= 0:
+        return
+    try:
+        await gw.burn(vault_account, amount)
+    except Exception as e:
+        log.warning(
+            "vault %s: bought but did not burn (%s). The tokens are in the vault's "
+            "treasury, out of circulation, and the next sweep will burn them.",
+            vault_account,
+            e,
+        )
+
+
+# ── the process-wide set of cranks ────────────────────────────────────────────
+
+
+_cranks: dict[str, VaultCrank] = {}
+
+
+def get_crank(server: str, network: str = "mainnet-beta") -> VaultCrank:
+    """The crank for a server, created on first ask.
+
+    One per server, not one per vault: a crank is a decision loop about which
+    engines should exist, and a server is the unit that has a Gateway, a chain
+    and a set of vaults on it.
+    """
+    crank = _cranks.get(server)
+    if crank is None:
+        crank = VaultCrank(server, network)
+        _cranks[server] = crank
+    return crank
+
+
+async def start_configured_cranks() -> list[str]:
+    """Start a crank for every server Condor has a vault on.
+
+    Not every configured server: the vault routes live in Condor's Gateway fork,
+    so a loop pointed at a stock Gateway would do nothing but log a 404 twice a
+    minute. A record is written by the create flow, so by the time there is
+    anything to crank there is a record to find it by, and an install with no
+    vaults starts no loops and says nothing about it.
+    """
+    servers = {
+        record.get("server")
+        for _user, _account, record in vault_store.iter_all_users()
+        if record.get("server")
+    }
+    started: list[str] = []
+    for name in sorted(servers):
+        await get_crank(name).start()
+        started.append(name)
+    return started
+
+
+async def stop_all_cranks() -> None:
+    for crank in list(_cranks.values()):
+        await crank.stop()
+    _cranks.clear()

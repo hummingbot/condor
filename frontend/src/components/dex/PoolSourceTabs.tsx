@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Search, Star, X } from "lucide-react";
+import { Check, ChevronDown, Search, Star, Vault as VaultIcon, X } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
@@ -239,6 +239,8 @@ interface Props {
   query: string;
   onQueryChange: (q: string) => void;
   favoriteCount: number;
+  /** How many of this account's vaults have a pool to list. */
+  vaultPoolCount: number;
 }
 
 export function PoolSourceTabs({
@@ -253,6 +255,7 @@ export function PoolSourceTabs({
   query,
   onQueryChange,
   favoriteCount,
+  vaultPoolCount,
 }: Props) {
   const isSearch = source.kind === "gecko" && source.view === "token";
   const searchLabel =
@@ -319,6 +322,22 @@ export function PoolSourceTabs({
             </span>
           )}
         </button>
+        {/* Rendered only when this account runs a vault whose curve has
+            graduated: a tab that is always empty is a tab that teaches people
+            it is always empty. */}
+        {vaultPoolCount > 0 && (
+          <button
+            onClick={() => onSourceChange({ kind: "vaults" })}
+            className={`${tabClass(source.kind === "vaults")} flex items-center gap-1`}
+            title="Pools of the vaults you run — where their own tokens trade"
+          >
+            <VaultIcon className="h-3 w-3" />
+            Vaults
+            <span className="text-[10px] text-[var(--color-text-muted)]">
+              {vaultPoolCount}
+            </span>
+          </button>
+        )}
       </div>
 
       <div className="ml-auto flex items-center gap-2">

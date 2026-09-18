@@ -221,6 +221,52 @@ export function Dex() {
     retry: false,
   });
 
+  // A vault's own pool exists the moment its curve graduates — long before any
+  // indexer has seen it — so these rows are built from the vault records rather
+  // than looked up. That is also why they carry no volume or TVL: nothing has
+  // measured them yet, and inventing a number would be worse than a dash.
+  const { data: vaultRows } = useQuery({
+    queryKey: ["vaults", server],
+    queryFn: () => api.listVaults(server!),
+    enabled: !!server,
+    retry: false,
+    throwOnError: false,
+    staleTime: 30_000,
+  });
+  const vaultPools = useMemo<PoolSummary[]>(
+    () =>
+      (vaultRows ?? [])
+        .filter((vault) => vault.chain?.damm_pool && vault.chain.mint && vault.chain.quote_mint)
+        .map((vault) => {
+          const chain = vault.chain!;
+          const symbol = vault.token?.symbol || vault.label || "VAULT";
+          return {
+            address: chain.damm_pool!,
+            name: `${symbol} / SOL`,
+            source: "gateway",
+            dex_id: "meteora",
+            network: DEFAULT_NETWORK,
+            gecko_network: "solana",
+            gateway_network: "mainnet-beta",
+            base_symbol: symbol,
+            quote_symbol: "SOL",
+            base_token_symbol: symbol,
+            quote_token_symbol: "SOL",
+            base_token_address: chain.mint!,
+            quote_token_address: chain.quote_mint!,
+            trading_pair: `${chain.mint}-SOL`,
+            lp_provider: "meteora/clmm",
+            lp_supported: true,
+            tradable: true,
+            has_bins: false,
+            reserve_usd: null,
+            volume_24h: null,
+            price_change_24h: null,
+          } satisfies PoolSummary;
+        }),
+    [vaultRows],
+  );
+
   const favoriteAddresses = useMemo(
     () => favorites.filter((f) => f.network === network).map((f) => f.address),
     [favorites, network],
@@ -315,17 +361,26 @@ export function Dex() {
   }
 
   const isFavorites = source.kind === "favorites";
-  const pools = isFavorites ? favoritePools : (pagedPools?.pools ?? []);
-  const loading = isFavorites
-    ? favoritesFetching && !favoritePools.length
-    : isFetching && !pagedPools;
+  const isVaults = source.kind === "vaults";
+  const pools = isVaults
+    ? vaultPools
+    : isFavorites
+      ? favoritePools
+      : (pagedPools?.pools ?? []);
+  const loading = isVaults
+    ? false
+    : isFavorites
+      ? favoritesFetching && !favoritePools.length
+      : isFetching && !pagedPools;
 
   // A throttled fetch and a chain with no pools both arrive as zero rows, and
   // only one of them is worth waiting out — so the table says which it was.
   const throttledPage =
     (isFavorites ? favoritePage?.upstream : pagedPools?.upstream)
       ?.throttled_request ?? false;
-  const emptyMessage = isFavorites
+  const emptyMessage = isVaults
+    ? "No vault has graduated yet — a vault's pool appears here once its curve fills."
+    : isFavorites
     ? throttledPage
       ? "GeckoTerminal is rate limiting Condor — your favorites will reappear in a moment."
       : "No favorites yet — star a pool to keep it here."
@@ -367,6 +422,7 @@ export function Dex() {
           query={query}
           onQueryChange={setQuery}
           favoriteCount={favoriteAddresses.length}
+          vaultPoolCount={vaultPools.length}
         />
 
         {/* A pasted pool address is an answer, not a search result: it goes above

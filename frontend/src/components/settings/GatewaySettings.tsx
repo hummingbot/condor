@@ -15,7 +15,7 @@ import { useEffect, useRef, useState } from "react";
 import { venuesQueryKey } from "@/components/market/useVenues";
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
-import { api } from "@/lib/api";
+import { type GatewayChainInfo, api } from "@/lib/api";
 
 const IMAGE_OPTIONS = [
   { label: "Development", value: "hummingbot/gateway:development" },
@@ -288,6 +288,55 @@ function GatewayNetworks({ server, running }: { server: string; running: boolean
   );
 }
 
+/**
+ * Surfpool fork or real node, beside the running light. Amber for a fork: it is
+ * the one fact that changes what every transaction on this server means. The
+ * host is all the backend sends — the RPC URL may carry a key.
+ */
+function ChainBadge({
+  chain,
+  error,
+  loading,
+}: {
+  chain: GatewayChainInfo | undefined;
+  error: Error | null;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <span className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)]">
+        chain…
+      </span>
+    );
+  }
+  if (error) {
+    return (
+      <span
+        title={error.message}
+        className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-red)]"
+      >
+        chain unreachable
+      </span>
+    );
+  }
+  if (!chain) return null;
+  const fork = chain.kind === "surfpool";
+  return (
+    <span
+      title={
+        fork
+          ? `surfpool ${chain.surfnet_version ?? ""} (solana-core ${chain.solana_core ?? "?"}), slot ${chain.slot ?? "?"}`
+          : `real node${chain.solana_core ? ` (solana-core ${chain.solana_core})` : ""}, slot ${chain.slot ?? "?"}`
+      }
+      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+        fork ? "bg-amber-400/15 text-amber-400" : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+      }`}
+    >
+      {fork ? "surfpool fork" : "mainnet node"} · {chain.rpc_host}
+    </span>
+  );
+}
+
 export function GatewaySettings() {
   const { server } = useServer();
   // Container pull/start/stop/restart are owner-only on the backend (SEC-166).
@@ -353,6 +402,18 @@ export function GatewaySettings() {
     wasRunningRef.current = status?.running;
   }, [status?.running, server, qc]);
 
+  // Which chain this Gateway is on, read through Gateway's own RPC (FEAT: vaults
+  // M1) — the same Gateway this server's bots trade through, since Condor
+  // reaches it through this server's hummingbot-api and there is no second one
+  // to configure. Only asked while the container runs.
+  const { data: chain, error: chainError, isLoading: chainLoading } = useQuery({
+    queryKey: ["gateway-chain", server],
+    queryFn: () => api.getGatewayChain(server!),
+    enabled: !!server && (status?.running ?? false),
+    retry: false,
+    refetchInterval: 30_000,
+  });
+
   const { data: logsData, isFetching: fetchingLogs } = useQuery({
     queryKey: ["gateway-logs", server],
     queryFn: () => api.getGatewayLogs(server!),
@@ -415,8 +476,9 @@ export function GatewaySettings() {
               }`}
             />
             <div>
-              <span className="text-sm font-medium text-[var(--color-text)]">
+              <span className="flex items-center gap-2 text-sm font-medium text-[var(--color-text)]">
                 Gateway {isLoading ? "..." : running ? "Running" : "Stopped"}
+                {running && <ChainBadge chain={chain} error={chainError} loading={chainLoading} />}
               </span>
               <p className="text-xs text-[var(--color-text-muted)]">
                 Server: {server}

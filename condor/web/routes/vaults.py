@@ -1,0 +1,812 @@
+"""The Vaults tab's API (plan M4).
+
+Every mutation here returns a **build** — an unsigned transaction for the
+runner's browser — and a separate confirm call records the result once the
+signature is on chain. Condor holds no key, so it cannot pretend a vault
+changed; the only evidence that something happened is a confirmed signature,
+and the store follows the chain rather than leading it.
+
+Two phases, and most of this file is about keeping them straight:
+
+* a **private** vault has no token and no outside holders. Its runner installs
+  a delegate without anybody's co-signature, owes nothing to anyone, and moves
+  assets in and out through that delegate — there is no withdraw *instruction*,
+  because the delegate can already do it and the runner controls the delegate.
+  Condor's part is a place to keep the label and the private config.
+* a **tokenized** vault has holders. Withdrawals stop, the administrator
+  co-signs delegate changes, and the numbers on the page stop being one
+  person's business.
+
+Reconcile runs before every listing: the chain is the record, and a local file
+that disagrees with it is corrected or dropped (`vault_store`).
+"""
+
+from __future__ import annotations
+
+import logging
+import secrets
+from typing import Any, Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+
+from condor import vault_store, wallet_store
+from condor.gateway_client import VaultGateway
+from condor.vault_config import NotCanonical, config_hash
+from condor.web.auth import get_current_user, require_server_access_query
+from condor.web.models import (
+    CreateVaultRequest,
+    VaultBuild,
+    VaultCreateResponse,
+    VaultInfo,
+    VaultLabelRequest,
+    VaultLaunchConfigRequest,
+    VaultPublishRequest,
+    VaultRedeemRequest,
+    VaultScanResponse,
+    VaultStageRequest,
+    VaultTokenizeRequest,
+    WebUser,
+)
+from config_manager import get_config_manager
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/vaults", tags=["vaults"])
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+async def _gateway(server: str, network: str = "mainnet-beta") -> VaultGateway:
+    return await VaultGateway.for_server(get_config_manager(), server, network)
+
+
+def _runner(user: WebUser) -> str:
+    """The wallet this user signs with, or a 409 telling them to attach one.
+
+    A vault's runner is a key, not an account: everything the runner may do is
+    checked on chain against `Vault.runner`, so Condor cannot act for a user who
+    has not proved which key is theirs (plan D13).
+    """
+    record = wallet_store.get_wallet(user.id)
+    if record is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect and attach a wallet first — a vault's runner is a key, and Condor holds none",
+        )
+    return record["address"]
+
+
+async def _upstream(gw: VaultGateway, coro):
+    """Call Gateway, and turn a failure into an error that names the server.
+
+    The server is the whole address now: its Gateway is whichever one its
+    hummingbot-api talks to, and there is no second one to tell it apart from.
+    """
+    try:
+        return await coro
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"The Gateway on '{gw.server}' refused: {e}",
+        )
+
+
+def _as_build(payload: dict[str, Any]) -> VaultBuild:
+    return VaultBuild(
+        transaction=payload["transaction"],
+        fee_payer=payload["feePayer"],
+        recent_blockhash=payload["recentBlockhash"],
+        last_valid_block_height=payload["lastValidBlockHeight"],
+        current_block_height=payload["currentBlockHeight"],
+        extra_signers=payload.get("extraSigners", []),
+    )
+
+
+def _to_info(account: str, record: dict[str, Any]) -> VaultInfo:
+    return VaultInfo(
+        account=account,
+        live=vault_store.is_live(record),
+        label=record.get("label", ""),
+        server=record.get("server", ""),
+        network=record.get("network", "mainnet-beta"),
+        wallet_address=record.get("wallet_address", ""),
+        runner_address=record.get("runner_address", ""),
+        quote_mint=record.get("quote_mint"),
+        delegate=record.get("delegate"),
+        token=record.get("token"),
+        pin=_public_pin(record.get("pin")),
+        created_at=record.get("created_at", 0),
+        chain=record.get("chain"),
+        drift=record.get("drift"),
+    )
+
+
+def _public_pin(pin: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """A pin without its config. The values are the runner's; only the hash is
+    anyone else's business, and a listing is read by more than the runner."""
+    if not pin:
+        return None
+    return {k: v for k, v in pin.items() if k != "config"}
+
+
+async def _reconcile(
+    gw: VaultGateway, user_id: int, records: dict[str, Any]
+) -> dict[str, Any]:
+    """Fold the chain into the local records, then persist what moved.
+
+    A vault Gateway lists but Condor has no record of is *not* added here: this
+    store is per-user and a listing is not proof of whose it is. What the chain
+    corrects is Condor's own rows.
+    """
+    try:
+        on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+    except Exception as e:
+        # "I could not reach the chain" is not "it is gone" (plan §4). The
+        # records are shown as they stand and nothing is written.
+        logger.warning("vault reconcile skipped: %s", e)
+        return records
+
+    reconciled: dict[str, Any] = {}
+    for account, record in records.items():
+        chain = on_chain.get(account)
+        updated, changed = vault_store.reconcile_record(
+            dict(record),
+            swig=(
+                vault_store.ABSENT
+                if chain is None and vault_store.is_live(record)
+                else None
+            ),
+            vault=_chain_fields(chain) if chain else vault_store.ABSENT,
+        )
+        if changed:
+            reconciled[account] = updated
+        records[account] = updated
+    if reconciled:
+        vault_store.apply_reconcile(user_id, reconciled)
+    return {k: v for k, v in records.items() if not v.get(vault_store.GONE)}
+
+
+def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
+    """Gateway's camelCase decode, as the store keeps it."""
+    return {
+        "runner": chain["runner"],
+        "swig_account": chain["swigAccount"],
+        "funds_owner": chain["fundsOwner"],
+        "mint": chain.get("mint"),
+        "dbc_pool": chain.get("dbcPool"),
+        "config_hash": chain.get("configHash"),
+        "quote_mint": chain.get("quoteMint"),
+        "version": chain.get("version", 0),
+        "fee_bps": chain.get("feeBps", 0),
+        "issue_bps": chain.get("issueBps", 0),
+        # The launch terms this vault chose. `migration_fee_pct` is the split
+        # between the strategy's capital and the holders' exit depth, which is
+        # the number that most changes what the vault is.
+        "migration_fee_pct": chain.get("migrationFeePct", 0),
+        "creator_trading_fee_pct": chain.get("creatorTradingFeePct", 0),
+        "migration_fee_option": chain.get("migrationFeeOption", 0),
+        "tokenized": bool(chain.get("tokenized")),
+        "state": chain.get("state"),
+        "delegate": chain.get("delegate"),
+        "created_ts": chain.get("createdTs", 0),
+        "tokenized_ts": chain.get("tokenizedTs", 0),
+        "wind_down_ts": chain.get("windDownTs", 0),
+        # Where the token trades once the curve graduated. Derived by Gateway
+        # from terms the program already fixes, so nobody has to be told which
+        # fee config a vault migrated into.
+        "damm_pool": chain.get("dammPool"),
+    }
+
+
+def _require(user: WebUser, account: str) -> dict[str, Any]:
+    record = vault_store.get(user.id, account)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no vault {account}")
+    return record
+
+
+# ── listing and creation ──────────────────────────────────────────────────────
+
+
+@router.get("", response_model=list[VaultInfo])
+async def list_vaults(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    gw = await _gateway(server)
+    records = vault_store.for_server(user.id, server)
+    records = await _reconcile(gw, user.id, records)
+    return [_to_info(account, record) for account, record in sorted(records.items())]
+
+
+@router.post("", response_model=VaultCreateResponse)
+async def create_vault(
+    req: CreateVaultRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """A vault, in one signature: the Swig, its delegate, and its strategy.
+
+    Three instructions in one transaction, because there is no useful moment
+    between them — a vault with no delegate cannot trade and a vault with no
+    strategy has nothing to trade. Signing them separately would have needed a
+    resumable draft to survive a closed tab, which is machinery for a problem
+    that only existed because there were three.
+
+    The record is written before the signature so that a Swig signed in a tab
+    that then closed is still findable; `confirm` promotes it once the chain
+    carries the config's hash, and reconcile drops it if the transaction never
+    landed.
+    """
+    runner = _runner(user)
+    try:
+        digest = config_hash(req.config)
+    except NotCanonical as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    agent_ref = {
+        "repoHash": "00" * 32,
+        "commit": "00" * 20,
+        "agentSlug": req.agent_slug,
+        "strategySlug": req.strategy_slug,
+    }
+    gw = await _gateway(server, req.network)
+    build = await _upstream(
+        gw,
+        gw.build(
+            "build-create-vault",
+            {
+                "walletAddress": runner,
+                "quoteMint": req.quote_mint,
+                "fundLamports": str(req.fund_lamports),
+                "agentRef": agent_ref,
+                "configHash": digest,
+                "feeBps": req.fee_bps,
+            },
+        ),
+    )
+    vault_store.create_record(
+        user.id,
+        account=build["swigAccount"],
+        label=req.label,
+        server=server,
+        network=req.network,
+        swig_id=build["swigId"],
+        wallet_address=build["walletAddress"],
+        runner_address=runner,
+        quote_mint=req.quote_mint,
+        pending={
+            "delegate": build["delegate"],
+            "agent_ref": agent_ref,
+            "config": req.config,
+            "config_hash": digest,
+            "fee_bps": req.fee_bps,
+        },
+    )
+    logger.info("user %s built vault %s on %s", user.id, build["swigAccount"], server)
+    return VaultCreateResponse(account=build["swigAccount"], build=_as_build(build))
+
+
+@router.post("/{account}/confirm")
+async def confirm_created(
+    account: str, req: VaultStageRequest, user: WebUser = Depends(get_current_user)
+):
+    """The signature landed — promote what was pending, if the chain agrees.
+
+    The check is the point: Condor stores the config's values, the chain stores
+    its hash, and the values are only ever believed because they hash to it.
+    Storing them on the browser's say-so would let a failed transaction leave
+    Condor holding parameters no vault ever agreed to.
+    """
+    record = _require(user, account)
+    pending = record.get("pending")
+    if not pending:
+        if vault_store.is_live(record):
+            return {"live": True, "version": (record["pin"] or {}).get("version", 1)}
+        raise HTTPException(status_code=409, detail="nothing is staged for this vault")
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    chain = await _upstream(gw, gw.vault(account))
+    _require_hash(chain, pending["config_hash"])
+    record = vault_store.confirm(
+        user.id,
+        account,
+        pin={
+            "agent_ref": pending["agent_ref"],
+            "version": chain.get("version", 1),
+            "config_hash": chain.get("configHash"),
+            "fee_bps": chain.get("feeBps", pending["fee_bps"]),
+            "config": pending["config"],
+            "scan": None,
+        },
+        delegate=pending.get("delegate"),
+        signature=req.signature,
+    )
+    return {"live": True, "version": (record["pin"] or {}).get("version", 1)}
+
+
+def _require_hash(chain: dict[str, Any], expected: str) -> None:
+    """Refuse unless the chain carries the hash that was staged."""
+    if chain.get("configHash") != expected:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the chain does not carry the staged config's hash "
+                f"(chain {chain.get('configHash')}, staged {expected}) — "
+                "the transaction may not have landed"
+            ),
+        )
+
+
+@router.post("/{account}/build-install-delegate", response_model=VaultBuild)
+async def build_install_delegate(
+    account: str, user: WebUser = Depends(get_current_user)
+):
+    """Replace the key that trades this vault.
+
+    Not part of creating one any more — the create transaction installs the
+    first delegate. This is how an administrator is changed afterwards: Gateway
+    mints the new key and, for a tokenized vault, adds the administrator's
+    co-signature. A private vault gets neither asked for nor given one.
+    """
+    record = _require(user, account)
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    build = await _upstream(
+        gw,
+        gw.build(
+            "build-install-delegate",
+            {"walletAddress": record["runner_address"], "swigAccount": account},
+        ),
+    )
+    vault_store.update(
+        user.id,
+        account,
+        lambda r: r.update(pending_delegate=build.get("mint")),
+    )
+    return _as_build(build)
+
+
+@router.post("/{account}/delegated")
+async def confirm_delegated(
+    account: str, req: VaultStageRequest, user: WebUser = Depends(get_current_user)
+):
+    import time
+
+    record = _require(user, account)
+    delegate = record.get("pending_delegate")
+    if not delegate:
+        raise HTTPException(status_code=409, detail="no delegate is staged")
+    vault_store.update(
+        user.id,
+        account,
+        lambda r: r.update(
+            delegate={"address": delegate, "granted_at": int(time.time())},
+            pending_delegate=None,
+        ),
+    )
+    return {"delegate": delegate}
+
+
+# ── the strategy ──────────────────────────────────────────────────────────────
+
+
+@router.post("/{account}/build-publish", response_model=VaultBuild)
+async def build_publish(
+    account: str, req: VaultPublishRequest, user: WebUser = Depends(get_current_user)
+):
+    """A new version: a new agent pin, a new private config, or both.
+
+    The config is staged as `pending` and only promoted once `/published`
+    proves the chain carries its hash. Storing it first would let a failed
+    transaction leave Condor holding parameters no vault ever agreed to.
+
+    There is no `build-pin`: a vault is pinned by the transaction that creates
+    it, so version 1 never needs one and every later version is this.
+    """
+    record = _require(user, account)
+    if not vault_store.is_live(record):
+        raise HTTPException(
+            status_code=409, detail="this vault's create transaction has not landed"
+        )
+    try:
+        digest = config_hash(req.config)
+    except NotCanonical as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    agent_ref = _agent_ref(record, req)
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    build = await _upstream(
+        gw,
+        gw.build(
+            "build-publish",
+            {
+                "walletAddress": record["runner_address"],
+                "swigAccount": account,
+                "agentRef": agent_ref,
+                "configHash": digest,
+            },
+        ),
+    )
+    vault_store.update(
+        user.id,
+        account,
+        lambda r: r.__setitem__(
+            "pin",
+            {
+                **(r.get("pin") or {}),
+                "pending": {
+                    "agent_ref": agent_ref,
+                    "config": req.config,
+                    "config_hash": digest,
+                },
+            },
+        ),
+    )
+    return _as_build(build)
+
+
+def _agent_ref(record: dict[str, Any], req: VaultPublishRequest) -> dict[str, str]:
+    """What the pin points at. Nothing on chain validates it — Condor's own scan
+    is what gates whether Condor will run it (plan D17)."""
+    pin = record.get("pin") or {}
+    previous = pin.get("agent_ref") or {}
+    agent = req.agent_slug or previous.get("agentSlug")
+    strategy = req.strategy_slug or previous.get("strategySlug")
+    if not agent or not strategy:
+        raise HTTPException(
+            status_code=400, detail="agent_slug and strategy_slug are required"
+        )
+    return {
+        "repoHash": previous.get("repoHash") or "00" * 32,
+        "commit": previous.get("commit") or "00" * 20,
+        "agentSlug": agent,
+        "strategySlug": strategy,
+    }
+
+
+@router.post("/{account}/published")
+async def confirm_published(
+    account: str, req: VaultStageRequest, user: WebUser = Depends(get_current_user)
+):
+    """Promote the pending config — but only if the chain carries its hash."""
+    record = _require(user, account)
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    chain = await _upstream(gw, gw.vault(account))
+    pending = (record.get("pin") or {}).get("pending")
+    if not pending:
+        raise HTTPException(status_code=409, detail="nothing is staged for this vault")
+    _require_hash(chain, pending["config_hash"])
+    promoted = {
+        "agent_ref": pending["agent_ref"],
+        "version": chain.get("version", 1),
+        "config_hash": chain.get("configHash"),
+        "fee_bps": chain.get("feeBps", 0),
+        "config": pending["config"],
+        "signature": req.signature,
+        # A new version is a new thing to check: the old verdict was about the
+        # old config, and carrying it over would let an unscanned version run.
+        "scan": None,
+    }
+    vault_store.update(user.id, account, lambda r: r.__setitem__("pin", promoted))
+    return {"version": promoted["version"]}
+
+
+@router.get("/{account}/config")
+async def read_config(account: str, user: WebUser = Depends(get_current_user)):
+    """The private config, to its runner alone.
+
+    Not in any listing, not in the vault object, not to an admin. Anyone else
+    gets the hash, which is what the chain gives them anyway.
+    """
+    record = _require(user, account)
+    pin = record.get("pin") or {}
+    if not pin.get("config"):
+        raise HTTPException(status_code=404, detail="this vault has no config stored")
+    return {
+        "config": pin["config"],
+        "config_hash": pin.get("config_hash"),
+        "version": pin.get("version"),
+    }
+
+
+# ── running, and the one-way door ─────────────────────────────────────────────
+
+#: The runner-signed builds that are nothing but a forward: this layer checks
+#: who is asking and which vault, and Gateway's schema checks the rest. One
+#: route rather than one per instruction, because a handler whose whole body is
+#: "pass it on" is a handler that will be copied wrong.
+RUNNER_BUILDS = {
+    "set-fee": "build-set-fee",
+    "set-active": "build-set-active",
+    "wind-down": "build-wind-down",
+    "claim-income": "build-claim-income",
+}
+
+
+@router.post("/{account}/build/{name}", response_model=VaultBuild)
+async def build_for_runner(
+    account: str,
+    name: str,
+    body: dict[str, Any] = Body(default=None),
+    user: WebUser = Depends(get_current_user),
+):
+    """One of the runner's plain builds, forwarded.
+
+    The allowlist is what keeps this from being an open proxy into Gateway: a
+    name that is not in it is a 404 here, not a request sent onward.
+    """
+    route = RUNNER_BUILDS.get(name)
+    if route is None:
+        raise HTTPException(status_code=404, detail=f"no such build: {name}")
+    return await _simple_build(user, account, route, body or {})
+
+
+async def _simple_build(
+    user: WebUser, account: str, route: str, body: dict[str, Any]
+) -> VaultBuild:
+    record = _require(user, account)
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    build = await _upstream(
+        gw,
+        gw.build(
+            route,
+            {"walletAddress": record["runner_address"], "swigAccount": account, **body},
+        ),
+    )
+    return _as_build(build)
+
+
+# ── tokenizing: the launch config, then the launch ────────────────────────────
+
+
+@router.post("/{account}/build-launch-config", response_model=VaultBuild)
+async def build_launch_config(
+    account: str,
+    req: VaultLaunchConfigRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """The vault's own DBC config — the terms it will launch on.
+
+    One per vault, because a vault prices its launch off the assets it already
+    holds, which is why the program checks a config's *terms* rather than its
+    address. The migration fee is the one that matters most: it is the split
+    between the strategy's capital and the depth holders exit through, and it
+    is the runner's to choose between 20 and 80.
+
+    Its address is remembered here on confirmation, so the launch form does not
+    ask anyone to paste one.
+    """
+    record = _require(user, account)
+    if record.get("token"):
+        raise HTTPException(status_code=409, detail="this vault is already tokenized")
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    body = {
+        "walletAddress": record["runner_address"],
+        "swigAccount": account,
+        "initialMarketCap": req.initial_market_cap,
+        "migrationMarketCap": req.migration_market_cap,
+    }
+    for key, value in (
+        ("migrationFeePercentage", req.migration_fee_percentage),
+        ("creatorTradingFeePercentage", req.creator_trading_fee_percentage),
+        ("migrationFeeOption", req.migration_fee_option),
+        ("baseFeeBps", req.base_fee_bps),
+    ):
+        if value is not None:
+            body[key] = value
+    build = await _upstream(gw, gw.build("build-launch-config", body))
+    vault_store.update(
+        user.id,
+        account,
+        lambda r: r.__setitem__(
+            "launch_config", {"address": build["config"], "confirmed": False}
+        ),
+    )
+    return _as_build(build)
+
+
+@router.post("/{account}/launch-config-created")
+async def confirm_launch_config(
+    account: str, req: VaultStageRequest, user: WebUser = Depends(get_current_user)
+):
+    """The config transaction landed, so the launch may use its address."""
+    record = _require(user, account)
+    config = record.get("launch_config")
+    if not config:
+        raise HTTPException(status_code=409, detail="no launch config is staged")
+    vault_store.update(
+        user.id,
+        account,
+        lambda r: r.__setitem__(
+            "launch_config",
+            {**config, "confirmed": True, "signature": req.signature},
+        ),
+    )
+    return {"config": config["address"]}
+
+
+@router.post("/{account}/build-tokenize", response_model=VaultBuild)
+async def build_tokenize(
+    account: str, req: VaultTokenizeRequest, user: WebUser = Depends(get_current_user)
+):
+    """Launch the token. One way: from here nobody withdraws, ever."""
+    record = _require(user, account)
+    if not vault_store.is_live(record):
+        raise HTTPException(
+            status_code=409, detail="this vault's create transaction has not landed"
+        )
+    if record.get("token"):
+        raise HTTPException(status_code=409, detail="this vault is already tokenized")
+    config = record.get("launch_config") or {}
+    if not config.get("confirmed"):
+        raise HTTPException(
+            status_code=409,
+            detail="build and sign this vault's launch config first — its terms are what the program checks",
+        )
+    return await _simple_build(
+        user,
+        account,
+        "build-tokenize",
+        {
+            "dbcConfig": config["address"],
+            "name": req.name,
+            "symbol": req.symbol,
+            "uri": req.uri,
+            "issueBps": req.issue_bps,
+        },
+    )
+
+
+# ── redemption: the one thing a holder does here ──────────────────────────────
+
+
+@router.post("/{account}/build-redeem", response_model=VaultBuild)
+async def build_redeem(
+    account: str,
+    req: VaultRedeemRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Burn tokens, take the quote asset pro-rata.
+
+    The only route here that is not the runner's: a holder is anyone with the
+    token, so this asks for no record and checks no ownership — Condor may well
+    have never heard of this vault. What it needs is an attached wallet, because
+    the burn comes out of that wallet's account.
+
+    After a wind-down the payment comes from an account the *program* owns, so
+    nothing in this path — not Condor, not the administrator, not the delegate —
+    is able to refuse it. This route only builds the transaction that asks.
+    """
+    holder = _runner(user)
+    gw = await _gateway(server)
+    build = await _upstream(
+        gw,
+        gw.build(
+            "build-redeem",
+            {"walletAddress": holder, "swigAccount": account, "amount": req.amount},
+        ),
+    )
+    return _as_build(build)
+
+
+# ── the run gate ──────────────────────────────────────────────────────────────
+
+
+@router.post("/{account}/scan", response_model=VaultScanResponse)
+async def scan(account: str, user: WebUser = Depends(get_current_user)):
+    """Condor's own decision about whether it will run this version.
+
+    Not an attestation and not on chain (plan D17). It gates what *Condor's*
+    crank starts, and its verdict is shown to the runner so a refusal is not a
+    mystery. A runner who self-hosts is not bound by it at all.
+    """
+    import time
+
+    record = _require(user, account)
+    pin = record.get("pin") or {}
+    config = pin.get("config")
+    if config is None:
+        raise HTTPException(status_code=409, detail="nothing pinned to scan")
+    findings = _scan_config(config)
+    verdict = {"passed": not findings, "findings": findings, "at": int(time.time())}
+    vault_store.update(
+        user.id, account, lambda r: r.setdefault("pin", {}).__setitem__("scan", verdict)
+    )
+    return VaultScanResponse(**verdict)
+
+
+def _scan_config(config: dict[str, Any]) -> list[str]:
+    """The checks Condor makes before its crank runs somebody's strategy.
+
+    Deliberately shallow and deliberately explicit: it looks for the shapes that
+    have actually cost money — an unbounded size, a slippage that is not a
+    bound, a pair the vault cannot trade. It is not a safety proof and does not
+    pretend to be one.
+    """
+    findings: list[str] = []
+    if not isinstance(config, dict):
+        return ["the config is not an object"]
+    amount = config.get("amount_lamports")
+    if isinstance(amount, int) and amount <= 0:
+        findings.append("amount_lamports is not positive, so a run would open nothing")
+    slippage = config.get("slippage_bps")
+    if isinstance(slippage, int) and slippage > 1000:
+        findings.append(
+            f"slippage_bps is {slippage} (over 10%), which is a bound in name only"
+        )
+    if not config.get("pair"):
+        findings.append("no pair: the crank would not know what to trade")
+    return findings
+
+
+# ── housekeeping ──────────────────────────────────────────────────────────────
+
+
+@router.patch("/{account}", response_model=VaultInfo)
+async def rename(
+    account: str, req: VaultLabelRequest, user: WebUser = Depends(get_current_user)
+):
+    record = vault_store.update(
+        user.id, account, lambda r: r.__setitem__("label", req.label)
+    )
+    return _to_info(account, record)
+
+
+@router.delete("/{account}")
+async def delete_draft(account: str, user: WebUser = Depends(get_current_user)):
+    """Drafts only, and only while no delegate is installed.
+
+    Forgetting a vault that exists on chain would not remove it; it would only
+    cost this user the ability to reach it. So the rows that can be deleted are
+    the ones that never became anything.
+    """
+    record = _require(user, account)
+    if vault_store.is_live(record):
+        raise HTTPException(
+            status_code=409,
+            detail="this vault is running on chain — wind it down instead; deleting the row would only hide it",
+        )
+    if record.get("delegate"):
+        raise HTTPException(
+            status_code=409, detail="a delegate is installed on this vault's wallet"
+        )
+    vault_store.delete(user.id, account)
+    return {"deleted": True}
+
+
+# ── what the vault holds ──────────────────────────────────────────────────────
+
+
+@router.get("/{account}/holdings")
+async def holdings(account: str, user: WebUser = Depends(get_current_user)):
+    """Everything in the vault's wallet, and where its own token trades.
+
+    Read straight from the chain through Gateway rather than from any local
+    store: a vault's balances move every time its strategy does, and a cached
+    copy would be a second answer to a question the chain already answers.
+
+    The vault's **own token** appears here like any other balance, because that
+    is what it is. After graduation the unsold supply sits in this same wallet,
+    so the runner can market-make their own token — an LP position against its
+    own pool, earning fees for the vault and deepening the market its holders
+    exit through. `treasury` names that balance separately only because it is
+    the one that must be left out of a redemption's denominator.
+    """
+    record = _require(user, account)
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    chain = await _upstream(gw, gw.vault(account))
+    balances = await _upstream(gw, gw.balances(record["wallet_address"]))
+    return {
+        "account": account,
+        "wallet_address": record["wallet_address"],
+        "quote_mint": chain.get("quoteMint"),
+        "balances": balances.get("balances", balances),
+        # The wallet's own balance of its own token: unsold supply, not
+        # circulating, excluded from what a redemption divides by.
+        "treasury": chain.get("treasuryBalance"),
+        "circulating_supply": chain.get("redeemableSupply"),
+        "mint": chain.get("mint"),
+        # The migrated pool: what the DEX browser lists and an LP executor trades.
+        "damm_pool": chain.get("dammPool"),
+    }

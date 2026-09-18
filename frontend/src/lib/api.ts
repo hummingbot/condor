@@ -87,6 +87,7 @@ export interface ServerInfo {
   name: string;
   host: string;
   port: number;
+  /** Direct Gateway address for routes hummingbot-api does not proxy; null = not set. */
   online: boolean;
   permission: string;
   /** The server commands fall back to when none is named — shared with Telegram. */
@@ -1543,6 +1544,16 @@ export interface GatewayStatus {
   container_status?: string;
 }
 
+/** Which chain a server's Gateway is pointed at, read through Gateway's own RPC.
+ *  `rpc_host` is host[:port] only — the URL may carry a provider key. */
+export interface GatewayChainInfo {
+  kind: "surfpool" | "node";
+  rpc_host: string;
+  surfnet_version?: string | null;
+  solana_core?: string | null;
+  slot?: number | null;
+}
+
 export interface GatewayNetworkInfo {
   network_id: string;
   chain: string;
@@ -2315,6 +2326,117 @@ export interface PendingConfirmation {
   tool?: string;
   /** Its arguments, or null when they could not be read. */
   input?: Record<string, unknown> | null;
+}
+
+
+// ── Vaults (plan M2/M4) ──
+
+/** The wallet a Condor account has proved it controls. */
+export interface AttachedWallet {
+  address: string;
+  attached_at: number;
+}
+
+export interface ExtraSigner {
+  pubkey: string;
+  signature: string;
+}
+
+/** What Gateway built and the browser signs. */
+export interface VaultBuild {
+  transaction: string;
+  fee_payer: string;
+  recent_blockhash: string;
+  last_valid_block_height: number;
+  current_block_height: number;
+  extra_signers: ExtraSigner[];
+}
+
+/** What the chain says about a vault. Null until the account exists. */
+export interface VaultChainState {
+  runner: string;
+  swig_account: string;
+  funds_owner: string;
+  mint: string | null;
+  dbc_pool: string | null;
+  config_hash: string | null;
+  quote_mint: string | null;
+  version: number;
+  fee_bps: number;
+  /** Circulating over max supply at launch; 0 while private. */
+  issue_bps: number;
+  /**
+   * The share of the raise that became the vault's capital, 20–80. The rest is
+   * permanently locked liquidity, so this is the split between the strategy and
+   * the holders' exit depth. 0 while private.
+   */
+  migration_fee_pct: number;
+  /** The runner's share of trading fees, at most 50. */
+  creator_trading_fee_pct: number;
+  /** Which fixed-fee option the migrated pool charges (0–5). */
+  migration_fee_option: number;
+  /** False means no outside holders: the runner may still withdraw. */
+  tokenized: boolean;
+  state: "Running" | "Paused" | "WindingDown" | "Redeemable";
+  delegate: string | null;
+  created_ts: number;
+  tokenized_ts: number;
+  wind_down_ts: number;
+  /** Where the token trades once the curve graduated. Null while private. */
+  damm_pool: string | null;
+}
+
+export interface VaultTokenInfo {
+  mint: string | null;
+  dbc_pool: string | null;
+  name?: string | null;
+  symbol?: string | null;
+  image?: string | null;
+  links?: Record<string, string>;
+  issue_bps?: number;
+}
+
+export interface VaultInfo {
+  account: string;
+  /**
+   * Has the one create transaction — Swig, delegate and strategy together —
+   * been confirmed on chain? `false` is a build nobody signed, not a
+   * half-made vault: there are no intermediate steps to resume.
+   */
+  live: boolean;
+  label: string;
+  server: string;
+  network: string;
+  wallet_address: string;
+  runner_address: string;
+  quote_mint: string | null;
+  delegate: { address: string; granted_at: number } | null;
+  token: VaultTokenInfo | null;
+  pin: Record<string, unknown> | null;
+  created_at: number;
+  chain: VaultChainState | null;
+  /** Set when the stored record disagrees with the chain; the vault does not run while it is. */
+  drift: string | null;
+}
+
+/** What a vault's wallet holds, read from the chain. */
+export interface VaultHoldings {
+  account: string;
+  wallet_address: string;
+  quote_mint: string | null;
+  balances: Record<string, number> | { mint: string; amount: string }[];
+  /** The wallet's own balance of its own token: unsold supply, not circulating. */
+  treasury: string | null;
+  circulating_supply: string | null;
+  mint: string | null;
+  /** The migrated pool — where the vault's token trades and an executor LPs. */
+  damm_pool: string | null;
+}
+
+export interface VaultScanResult {
+  passed: boolean;
+  findings: string[];
+  at: number;
 }
 
 export const api = {
@@ -3541,7 +3663,8 @@ export const api = {
       port?: number;
       username?: string;
       password?: string;
-    },
+      /** "" clears it. */
+      },
   ) =>
     apiFetch<{ updated: boolean }>(
       `/api/v1/settings/servers/${encodeURIComponent(name)}`,
@@ -3567,9 +3690,202 @@ export const api = {
       },
     ),
 
+  // ── Vaults: the wallet ──
+
+  walletNonce: (address: string) =>
+    apiFetch<{ nonce: string; issued_at: string; message: string }>(
+      "/api/v1/wallet/nonce",
+      { method: "POST", body: JSON.stringify({ address }) },
+    ),
+
+  attachWallet: (data: { address: string; signature: string; nonce: string }) =>
+    apiFetch<AttachedWallet>("/api/v1/wallet", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getWallet: () => apiFetch<AttachedWallet | null>("/api/v1/wallet"),
+
+  /** Refused while the wallet still runs a vault — detaching would revoke nothing. */
+  detachWallet: () =>
+    apiFetch<{ detached: boolean }>("/api/v1/wallet", { method: "DELETE" }),
+
+  submitTransaction: (
+    server: string,
+    data: { network: string; signed_transaction: string; extra_signers: ExtraSigner[] },
+  ) =>
+    apiFetch<{ signature: string; status: string; fee: number | null }>(
+      `/api/v1/wallet/submit${query({ server })}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  pollTransaction: (server: string, data: { network: string; signature: string }) =>
+    apiFetch<{ txStatus: string; error: string | null }>(
+      `/api/v1/wallet/poll${query({ server })}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  // ── Vaults: the records ──
+
+  listVaults: (server: string) =>
+    apiFetch<VaultInfo[]>(`/api/v1/vaults${query({ server })}`),
+
+  createVault: (
+    server: string,
+    data: {
+      label: string;
+      quote_mint: string;
+      fund_lamports: number;
+      network?: string;
+      agent_slug: string;
+      strategy_slug: string;
+      config: Record<string, unknown>;
+      fee_bps?: number;
+    },
+  ) =>
+    apiFetch<{ account: string; build: VaultBuild }>(`/api/v1/vaults${query({ server })}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * The create transaction landed. Promotes the staged strategy — but only if
+   * the chain carries its hash, which is the whole reason the config is stored
+   * here and hashed there.
+   */
+  confirmVaultCreate: (account: string, signature: string) =>
+    apiFetch<{ live: boolean; version: number }>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/confirm`,
+      { method: "POST", body: JSON.stringify({ signature }) },
+    ),
+
+  confirmVaultPublished: (account: string, signature: string) =>
+    apiFetch<{ version: number }>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/published`,
+      { method: "POST", body: JSON.stringify({ signature }) },
+    ),
+
+  /** Replacing the key that trades a vault; the create transaction installs the first. */
+  buildInstallDelegate: (account: string) =>
+    apiFetch<VaultBuild>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/build-install-delegate`,
+      { method: "POST" },
+    ),
+
+  confirmVaultDelegated: (account: string, signature: string) =>
+    apiFetch<{ delegate: string }>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/delegated`,
+      { method: "POST", body: JSON.stringify({ signature }) },
+    ),
+
+  buildVaultPublish: (
+    account: string,
+    data: { agent_slug?: string; strategy_slug?: string; config: Record<string, unknown> },
+  ) =>
+    apiFetch<VaultBuild>(`/api/v1/vaults/${encodeURIComponent(account)}/build-publish`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * The runner's plain builds, by name: `set-fee`, `set-active`, `wind-down`,
+   * `claim-income`. One call rather than one per instruction — the backend
+   * checks who is asking and Gateway's schema checks the body.
+   */
+  buildVaultAction: (
+    account: string,
+    name: "set-fee" | "set-active" | "wind-down" | "claim-income",
+    body?: Record<string, unknown>,
+  ) =>
+    apiFetch<VaultBuild>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/build/${name}`,
+      { method: "POST", body: JSON.stringify(body ?? {}) },
+    ),
+
+  /**
+   * The vault's own DBC config: the terms it launches on. The migration fee is
+   * the split between the strategy's capital and the depth holders exit
+   * through, which is why it is the runner's to choose.
+   */
+  buildVaultLaunchConfig: (
+    account: string,
+    data: {
+      initial_market_cap: number;
+      migration_market_cap: number;
+      migration_fee_percentage?: number;
+      creator_trading_fee_percentage?: number;
+      migration_fee_option?: number;
+      base_fee_bps?: number;
+    },
+  ) =>
+    apiFetch<VaultBuild>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/build-launch-config`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  confirmVaultLaunchConfig: (account: string, signature: string) =>
+    apiFetch<{ config: string }>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/launch-config-created`,
+      { method: "POST", body: JSON.stringify({ signature }) },
+    ),
+
+  /** One way. From here the treasury is the only path from supply to capital. */
+  buildVaultTokenize: (
+    account: string,
+    data: { name: string; symbol: string; uri: string; issue_bps: number },
+  ) =>
+    apiFetch<VaultBuild>(`/api/v1/vaults/${encodeURIComponent(account)}/build-tokenize`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Burn tokens, take the quote asset pro-rata. Any holder, not just the
+   * runner — after a wind-down the payment comes out of an account the program
+   * owns, and nothing in the path can refuse it.
+   */
+  buildVaultRedeem: (server: string, account: string, amount: string) =>
+    apiFetch<VaultBuild>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/build-redeem${query({ server })}`,
+      { method: "POST", body: JSON.stringify({ amount }) },
+    ),
+
+  /** Everything in the vault's wallet, plus where its own token trades. */
+  getVaultHoldings: (account: string) =>
+    apiFetch<VaultHoldings>(`/api/v1/vaults/${encodeURIComponent(account)}/holdings`),
+
+  /** The private config, to its runner alone. */
+  getVaultConfig: (account: string) =>
+    apiFetch<{ config: Record<string, unknown>; config_hash: string; version: number }>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/config`,
+    ),
+
+  /** Condor's own decision about whether it will run this version. Not on chain. */
+  scanVault: (account: string) =>
+    apiFetch<VaultScanResult>(`/api/v1/vaults/${encodeURIComponent(account)}/scan`, {
+      method: "POST",
+    }),
+
+  renameVault: (account: string, label: string) =>
+    apiFetch<VaultInfo>(`/api/v1/vaults/${encodeURIComponent(account)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ label }),
+    }),
+
+  deleteVault: (account: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/vaults/${encodeURIComponent(account)}`, {
+      method: "DELETE",
+    }),
+
   getGatewayStatus: (server: string) =>
     apiFetch<GatewayStatus>(
       `/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`,
+    ),
+
+  /** 502 when Gateway, or the RPC it names, does not answer. */
+  getGatewayChain: (server: string) =>
+    apiFetch<GatewayChainInfo>(
+      `/api/v1/settings/gateway/chain?server=${encodeURIComponent(server)}`,
     ),
 
   startGateway: (server: string, data: { image: string; port?: number }) =>

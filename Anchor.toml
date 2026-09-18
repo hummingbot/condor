@@ -1,0 +1,26 @@
+[toolchain]
+anchor_version = "1.0.2"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+condor_vaults = "Bbn3CpNCSH6WmD9uhNJXe76Dy9ouPki2nYyzVvb8jYVy"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+# The dev chain: surfpool as a mainnet fork on :8899, so Swig, Meteora DBC and
+# DAMM v2 are all there lazily — this program CPIs into three mainnet programs
+# and none of them can be usefully stubbed.
+[surfpool]
+online = true
+datasource_rpc_url = "https://api.mainnet-beta.solana.com"
+rpc_port = 8899
+block_production_mode = "clock"
+startup_wait = 60000

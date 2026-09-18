@@ -16,6 +16,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { PositionsTab } from "@/components/portfolio/PositionsTab";
+import { VaultsSection } from "@/components/portfolio/VaultsSection";
 import { useLpPositions } from "@/hooks/useLpPositions";
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
@@ -1078,6 +1079,12 @@ export function Portfolio() {
             </table>
           </div>
         )}
+
+        {/* Below the accounts rather than among them: a vault's assets live in
+            a Swig wallet the program owns, and once it is tokenized they are
+            not this account's money at all. Folding them into the total above
+            would say otherwise. */}
+        {server && <VaultsSection server={server} />}
       </div>
 
       <div style={{ display: tab === "positions" ? undefined : "none" }}>

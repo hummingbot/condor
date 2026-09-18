@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.gateway_client import GatewayClient, host_of, probe_rpc
 from condor.server_data_service import (
     CREDENTIAL_DERIVED,
     ServerDataType,
@@ -20,6 +21,7 @@ from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
     CredentialInfo,
+    GatewayChainInfo,
     GatewayNetworkUpdateRequest,
     GatewayPullRequest,
     GatewayStartRequest,
@@ -343,6 +345,46 @@ def _redact_network_config(value):
     if isinstance(value, str) and _URL_VALUE.match(value):
         return _redact_url(value)
     return value
+
+
+@router.get("/gateway/chain", response_model=GatewayChainInfo)
+async def gateway_chain(
+    server: str = Query(...),
+    chain: str = Query("solana"),
+    network: str = Query("mainnet-beta"),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Is this server's Gateway on a surfpool fork or a real node?
+
+    Asked of the server's own Gateway, through its hummingbot-api, on the RPC
+    Gateway itself reports — so the answer is about the node every transaction
+    is built against *and* traded on, there being only one Gateway to ask. The
+    browser gets the host only: the URL may carry a provider key. A TRADER may
+    read it — knowing which chain you are trading on is not a mutation. No
+    answer is an error, never a guess.
+    """
+    if chain != "solana":
+        raise HTTPException(status_code=400, detail="only chain=solana is supported")
+    cm = get_config_manager()
+    gw = await GatewayClient.for_server(cm, server)
+    try:
+        rpc_url = await gw.solana_rpc_url(network)
+    except Exception as e:
+        logger.warning("Gateway for '%s' did not report its Solana RPC: %s", server, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"The Gateway on '{server}' did not report its Solana RPC "
+            f"({type(e).__name__})",
+        )
+    try:
+        return await probe_rpc(rpc_url)
+    except Exception as e:
+        logger.warning("Gateway RPC for '%s' did not answer: %s", server, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gateway's Solana RPC at {host_of(rpc_url)} did not answer "
+            f"({type(e).__name__})",
+        )
 
 
 @router.get("/gateway/networks")

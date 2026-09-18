@@ -4,6 +4,7 @@ import {
   Droplets,
   Settings,
   Swords,
+  Vault,
   Wallet,
   Zap,
 } from "lucide-react";
@@ -29,6 +30,13 @@ import {
  * it — so the nav loses an entry and the reader loses nothing. `/fleet`
  * redirects to that panel's own address.
  *
+ * Vaults arrived with the vault work: a vault is a wallet that trades a
+ * strategy and is owned by a program, which is not a scope of anything already
+ * in this list — the browser behind Bots reports on *this install's* executors,
+ * and a vault's are owned by a key on chain. It sits between Routines and
+ * Settings because it is the last thing that is still the product rather than
+ * its configuration.
+ *
  * Floor left it in FEAT-116, for the reason Executors left it. *What does the
  * fleet add up to* is the report the browser behind Bots already draws — at its
  * own root, split by the level below it — so the floor is the fleet scope of
@@ -42,6 +50,7 @@ export const NAV_ITEMS = [
   { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/routines", icon: Zap, label: "Routines" },
+  { to: "/vaults", icon: Vault, label: "Vaults" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
 

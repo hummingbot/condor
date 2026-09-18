@@ -83,6 +83,18 @@ export const ROUTINE_CONFIG_KEY_PREFIX = "routine_config:";
  */
 export const CHAT_DRAFT_KEY_PREFIX = "condor.chat.draft:";
 
+/**
+ * Which browser wallet this device last connected to, so the vault pages can
+ * reconnect silently instead of prompting on every load (lib/wallet).
+ *
+ * CLEARED, and not a close call: a wallet name says whose key the outgoing user
+ * signs with, and a remembered one would make the *next* session silently
+ * reconnect to it — putting a stranger's wallet behind the Connect button of
+ * someone who never chose it. The attachment itself lives on the server against
+ * a user id and is unaffected; this is only the convenience of not being asked.
+ */
+export const WALLET_NAME_KEY = "condor.wallet.name";
+
 // ── KEPT keys ──
 //
 // Declared here and deliberately absent from SESSION_KEYS below, each with the
@@ -285,6 +297,7 @@ const SESSION_KEYS = [
   LAST_MARKET_KEY,
   MARKET_FAVORITES_KEY,
   DEX_FAVORITES_KEY,
+  WALLET_NAME_KEY,
 ];
 
 /** Key families written one entry per routine / connector / conversation. */

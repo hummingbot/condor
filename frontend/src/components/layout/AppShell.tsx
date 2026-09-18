@@ -20,6 +20,7 @@ import { useViewFacts } from "@/lib/viewFacts";
 import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
+import { WalletControl } from "./WalletControl";
 
 /**
  * Full-bleed routes that carry a parameter, so an exact match cannot find them.
@@ -138,6 +139,10 @@ function AppShellBody() {
         <div className="ml-auto flex items-center gap-3">
           <ServerSelector />
           <CurrencySelector />
+          {/* Which key is signing, beside which server is selected: the two
+              answers to "whose is this, right now". Renders nothing at all when
+              no wallet is installed and none is attached. */}
+          <WalletControl />
 
           <div className="flex items-center gap-1">
             {/* Inside the ChatProvider on purpose: the bell reads the same
