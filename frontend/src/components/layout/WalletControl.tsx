@@ -3,9 +3,11 @@
  * connected as.
  *
  * It sits beside the server selector because it answers the same kind of
- * question — *whose* is this, right now. A vault's runner is a key rather than
- * a login, so the address here is the one the chain will check, and the control
- * is deliberately loud when the browser's wallet and the attached one disagree.
+ * question — *whose* is this, right now — and it answers only that one. Whether
+ * the key this browser holds is also the one this Condor account signs as
+ * belongs to the surfaces where it changes an outcome: the vault that would
+ * refuse the signature, and Settings beside the wallet it is about. In the
+ * header it was a warning on every page about something the page was not doing.
  *
  * It renders whenever the wallet layer is live — including when this browser
  * has no wallet at all, because that is the case someone most needs told. The
@@ -24,7 +26,7 @@ import { WalletPicker } from "@/components/wallet/WalletPicker";
 import { useWallet } from "@/lib/wallet/context";
 
 export function WalletControl() {
-  const { available, connected, attached, mismatched, connect } = useWallet();
+  const { available, connected, connect } = useWallet();
   const [open, setOpen] = useState(false);
   const [picking, setPicking] = useState(false);
   // State rather than a ref: the menu positions itself against this element
@@ -45,18 +47,8 @@ export function WalletControl() {
         ref={setAnchor}
         type="button"
         onClick={() => (address ? setOpen((v) => !v) : setPicking(true))}
-        title={
-          mismatched
-            ? `This browser holds ${address}, and this account signs as ${attached}`
-            : address
-              ? `Signing as ${address}`
-              : "Connect a wallet"
-        }
-        className={`inline-flex items-center gap-1.5 rounded-md border bg-[var(--color-bg)] px-2 py-1 text-[11px] font-medium transition-colors hover:text-[var(--color-text)] ${
-          mismatched
-            ? "border-amber-500/50 text-amber-600 dark:text-amber-400"
-            : "border-[var(--color-border)] text-[var(--color-text-muted)]"
-        }`}
+        title={address ? `This browser holds ${address}` : "Connect a wallet"}
+        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
       >
         {address ? (
           <>

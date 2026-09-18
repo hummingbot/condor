@@ -6,16 +6,17 @@
  * the provider configured — the node this server's Gateway uses, so what the
  * card shows is the chain a signature from here would land on.
  *
- * One section no other app's wallet menu has: **attached**. Connecting a wallet
- * and being that wallet are different facts here. A vault's runner is checked
- * on chain against the key that attached, and the browser can be connected to
- * any other one — so when they disagree the card says so at the top, because
- * the signature would be rejected for a reason invisible from the outside.
+ * It is about the key this browser is holding and nothing else: which address,
+ * what it holds, and the two things you can do about it. Whether that key is
+ * also the one this Condor account signs as is a different question, and it is
+ * answered where it changes an outcome — on the vault that would refuse the
+ * signature, and in Settings beside the wallet it is about. Answering it here
+ * as well put a warning on a card that had nothing to do with it, every time
+ * the menu opened.
  */
 import { useBalance, useTokens } from "@solana/connector/react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle,
   Check,
   Coins,
   Copy,
@@ -34,13 +35,13 @@ import { AddressAvatar, Spinner } from "./primitives";
 
 export function WalletMenu({ onDone }: { onDone: () => void }) {
   const { server } = useServer();
-  const { connected, attached, mismatched, disconnect, attach } = useWallet();
+  const { connected, attached, disconnect, attach } = useWallet();
   const [copied, setCopied] = useState(false);
   const [tokensOpen, setTokensOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const address = connected?.address ?? attached ?? "";
+  const address = connected?.address ?? "";
   const balance = useBalance();
   const tokens = useTokens();
 
@@ -80,16 +81,6 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="w-80 p-3">
-      {mismatched && (
-        <p className="mb-3 flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-700 dark:text-amber-300">
-          <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
-          <span>
-            This account is attached to {shortAddress(attached!)}. You can look
-            at anything; only that key can sign for its vaults.
-          </span>
-        </p>
-      )}
-
       <div className="mb-3 flex items-start gap-3">
         <AddressAvatar address={address} className="h-10 w-10" />
         <div className="min-w-0 flex-1">
