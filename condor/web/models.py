@@ -893,8 +893,11 @@ class VaultChainState(BaseModel):
     runner: str
     swig_account: str
     funds_owner: str
-    mint: str
-    dbc_pool: str
+    # None while the vault is private, which is most of them and is a finished
+    # state rather than an unfinished one. Typed as required strings, these two
+    # made the listing fail for exactly the vaults the product is mostly about.
+    mint: Optional[str] = None
+    dbc_pool: Optional[str] = None
     config_hash: str
     quote_mint: Optional[str] = None
     version: int = 0

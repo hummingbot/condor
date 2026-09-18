@@ -10,7 +10,7 @@
 import { Copy, Lock, ShieldCheck, Wallet } from "lucide-react";
 import { useState } from "react";
 
-import { WalletPicker } from "@/components/wallet/WalletPicker";
+import { ConnectWalletButton } from "@/components/wallet/ConnectWalletButton";
 import type { VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
 
@@ -108,8 +108,7 @@ export function StateBadge({ vault }: { vault: VaultInfo }) {
  * button with no explanation.
  */
 export function WalletGate({ children }: { children: React.ReactNode }) {
-  const { attached, connected, connect, attach, available, mismatched } = useWallet();
-  const [picking, setPicking] = useState(false);
+  const { attached, connected, attach, mismatched } = useWallet();
 
   if (attached && connected && !mismatched) return <>{children}</>;
 
@@ -143,15 +142,7 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
         )}
       </p>
       <div className="flex flex-wrap items-center justify-center gap-2">
-        {!connected && (
-          <button
-            type="button"
-            onClick={() => setPicking(true)}
-            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
-          >
-            Connect wallet
-          </button>
-        )}
+        {!connected && <ConnectWalletButton />}
         {connected && !attached && (
           <button
             type="button"
@@ -162,13 +153,6 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
           </button>
         )}
       </div>
-      {picking && (
-        <WalletPicker
-          available={available}
-          onConnect={connect}
-          onClose={() => setPicking(false)}
-        />
-      )}
     </div>
   );
 }

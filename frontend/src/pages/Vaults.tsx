@@ -30,6 +30,7 @@ import {
   PhaseBadge,
   StateBadge,
 } from "@/components/vaults/shared";
+import { ConnectWalletButton } from "@/components/wallet/ConnectWalletButton";
 import { useServer } from "@/hooks/useServer";
 import { api, type VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
@@ -167,16 +168,21 @@ export function Vaults() {
             otherwise.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => navigate("/vaults/new")}
-          disabled={!attached}
-          title={attached ? undefined : "Attach a wallet first — a vault's runner is a key"}
-          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          New vault
-        </button>
+        {attached ? (
+          <button
+            type="button"
+            onClick={() => navigate("/vaults/new")}
+            className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New vault
+          </button>
+        ) : (
+          // Not a disabled button: creating a vault needs a key, and the thing
+          // to offer someone who has not connected one is the way to connect
+          // it — not a control they cannot satisfy and no way to find out why.
+          <ConnectWalletButton />
+        )}
       </div>
 
       {vaults.isLoading && (
@@ -189,20 +195,38 @@ export function Vaults() {
       )}
 
       {!me && (vaults.data?.length ?? 0) > 0 && (
-        <p className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-[12px] text-[var(--color-text-muted)]">
-          Connect a wallet to see which of these are yours. Anyone can read them; only their
-          runner&rsquo;s key can change one.
-        </p>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5">
+          <p className="text-[12px] text-[var(--color-text-muted)]">
+            Connect a wallet to see which of these are yours. Anyone can read them; only their
+            runner&rsquo;s key can change one.
+          </p>
+          <ConnectWalletButton variant="outline" />
+        </div>
       )}
 
       {vaults.data?.length === 0 && (
         <div className="rounded-lg border border-dashed border-[var(--color-border)] p-8 text-center">
           <VaultIcon className="mx-auto mb-3 h-8 w-8 text-[var(--color-text-muted)]" />
-          <p className="text-sm font-medium">No vaults yet</p>
-          <p className="mx-auto mt-1 max-w-sm text-[12px] text-[var(--color-text-muted)]">
+          <p className="text-sm font-medium">
+            {me ? "No vaults yet" : "No vaults on this chain yet"}
+          </p>
+          <p className="mx-auto mt-1 mb-4 max-w-sm text-[12px] text-[var(--color-text-muted)]">
             A new vault starts private: you fund it, it runs your strategy, and you can take the
             money out whenever you like.
+            {!me && " Connect a wallet to make one — a vault's runner is a key, not a login."}
           </p>
+          {me ? (
+            <button
+              type="button"
+              onClick={() => navigate("/vaults/new")}
+              className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              New vault
+            </button>
+          ) : (
+            <ConnectWalletButton />
+          )}
         </div>
       )}
 

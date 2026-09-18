@@ -7,9 +7,11 @@
  * a login, so the address here is the one the chain will check, and the control
  * is deliberately loud when the browser's wallet and the attached one disagree.
  *
- * Nothing renders when there is no wallet to offer and none attached, so the
- * header does not grow a permanent control for a feature most installs will
- * never use.
+ * It renders whenever the wallet layer is live — including when this browser
+ * has no wallet at all, because that is the case someone most needs told. The
+ * picker says which wallets exist and where to get one; a control that hid
+ * itself would leave them with a page asking them to connect and nothing to
+ * click.
  */
 import { ChevronDown, Wallet } from "lucide-react";
 import { useState } from "react";
@@ -29,8 +31,6 @@ export function WalletControl() {
   // during render, and a ref read there is a value React has not promised is
   // current. The same shape the DEX chain selector uses.
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
-
-  if (!connected && !attached && available.length === 0) return null;
 
   const address = connected?.address ?? attached;
 
