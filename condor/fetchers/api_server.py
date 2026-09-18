@@ -1,7 +1,7 @@
-"""What a hummingbot-api server runs, and the client defaults its bots inherit (FEAT-121).
+"""What a hummingbot-api server runs, the defaults its bots inherit, and upgrading it.
 
-Two questions the Settings → Hummingbot API panel asks about the server the navbar
-points at:
+What the Settings → Hummingbot API panel asks about the server the navbar points at
+(FEAT-121), and what it asks that server to do to itself (FEAT-122):
 
 ``/system/info`` — the versions and the provenance. Which hummingbot-api and which
 hummingbot library, the image reference and its registry digest, the compose project,
@@ -47,6 +47,17 @@ CLIENT_CONFIG_PATH = "/bot-orchestration/rate-oracle/config"
 
 #: The credentials profile Condor deploys from, and therefore the only one it configures.
 CLIENT_CONFIG_ACCOUNT = "master_account"
+
+#: Whether the server can replace its own container with the published image, and what
+#: that would cost. Read-only, and answers a refusal rather than an error (FEAT-122).
+UPGRADE_PREFLIGHT_PATH = "/system/upgrade/preflight"
+
+#: Starts the upgrade. 409 when refused, and a refusal means nothing was changed.
+UPGRADE_PATH = "/system/upgrade"
+
+#: The current or last run. Survives the API restart the upgrade itself causes, because
+#: the new container collects the helper's exit code and logs on boot.
+UPGRADE_STATUS_PATH = "/system/upgrade/status"
 
 
 class ApiServerSettingsUnsupported(raw_api.ApiRouteUnsupported):
@@ -138,5 +149,76 @@ async def update_client_config(
         CLIENT_CONFIG_PATH,
         params={"account_name": account},
         json=changes,
+        unsupported=ApiServerSettingsUnsupported,
+    )
+
+
+# ── Upgrading the server's own hummingbot-api (FEAT-122) ──
+#
+# The API replaces its own container with the published image. Everything dangerous
+# about that lives on the *server* -- it re-runs its own preflight before starting, it
+# refuses a pinned deployment outright, and it refuses when it cannot establish a fact
+# it needs. These three functions carry the answers; they add no judgement of their own,
+# because a second opinion here about whether an upgrade is safe is a second opinion that
+# can disagree with the one that actually runs.
+
+
+async def fetch_upgrade_preflight(client) -> dict[str, Any]:
+    """Whether this server can upgrade itself, and what the upgrade would cost.
+
+    ``can_upgrade`` is False with a ``blocked_reason`` for every refusal — a pinned
+    image, a registry that cannot be read, an unreachable Docker daemon — so a caller
+    renders the reason rather than an error.
+
+    Raises:
+        ApiServerSettingsUnsupported: The server's API predates the route.
+        aiohttp.ClientResponseError: Any other upstream failure, status preserved.
+    """
+    return await raw_api.request(
+        client,
+        "get",
+        UPGRADE_PREFLIGHT_PATH,
+        unsupported=ApiServerSettingsUnsupported,
+    )
+
+
+async def start_upgrade(
+    client, *, acknowledge_executor_loss: bool = False
+) -> dict[str, Any]:
+    """Pull the published image and hand the container recreate to a helper container.
+
+    Args:
+        acknowledge_executor_loss: The caller's consent to every RUNNING executor being
+            closed as ``SYSTEM_CLEANUP`` and not restored. Defaults to False, so a caller
+            that forgets the flag is refused rather than served.
+
+    Raises:
+        ApiServerSettingsUnsupported: The server's API predates the route.
+        aiohttp.ClientResponseError: 409 when the server refused, carrying its reason —
+            and a refusal means nothing on the server was pulled or changed.
+    """
+    return await raw_api.request(
+        client,
+        "post",
+        UPGRADE_PATH,
+        json={"acknowledge_executor_loss": acknowledge_executor_loss},
+        unsupported=ApiServerSettingsUnsupported,
+    )
+
+
+async def fetch_upgrade_status(client) -> dict[str, Any]:
+    """The current or last upgrade run: phase, detail, digests, exit code, log tail.
+
+    Raises:
+        ApiServerSettingsUnsupported: The server's API predates the route.
+        aiohttp.ClientResponseError: Any other upstream failure, status preserved.
+        aiohttp.ClientError: A transport failure — which, while an upgrade is recreating
+            the container, is the expected answer rather than a fault. The caller decides
+            what that means; see ``condor/web/routes/settings.py``.
+    """
+    return await raw_api.request(
+        client,
+        "get",
+        UPGRADE_STATUS_PATH,
         unsupported=ApiServerSettingsUnsupported,
     )

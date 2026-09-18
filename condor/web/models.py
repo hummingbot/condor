@@ -771,6 +771,18 @@ class ApiClientConfigUpdateRequest(BaseModel):
         return v
 
 
+class ApiUpgradeRequest(BaseModel):
+    """Consent to what upgrading a server's hummingbot-api destroys (FEAT-122).
+
+    Restarting the API closes every RUNNING executor as ``SYSTEM_CLEANUP`` and they are
+    not restored; bot containers are separate and keep running. The one field is that
+    acknowledgement, and it defaults to False — a request that omits it is a caller who
+    consented to nothing, which the server refuses with a 409 rather than serving.
+    """
+
+    acknowledge_executor_loss: bool = False
+
+
 class GatewayNetworkUpdateRequest(BaseModel):
     # Partial network config (snake_case keys, e.g. {"node_url": "https://..."}).
     # The Gateway validates values against its own JSON schema.
