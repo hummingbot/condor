@@ -717,10 +717,14 @@ def _steps_for(component_key: str, status_: ComponentStatus) -> list[str]:
         steps.append("Recreate the containers")
         steps.append("Wait for the API to answer")
     else:
+        # Must stay in step with ``run._plan``: the confirm screen and the
+        # progress screen are meant to be the same list.
         steps.append("Fast-forward the Condor checkout")
+        steps.append("Restore any work stashed to clear the way")
         steps.append("Sync dependencies")
         steps.append("Rebuild the dashboard if the update touched it")
-        steps.append("Ask you to relaunch Condor to apply it")
+        steps.append("Check the install over")
+        steps.append("Relaunch Condor to apply it")
     return steps
 
 
