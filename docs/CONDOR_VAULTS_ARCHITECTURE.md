@@ -202,9 +202,8 @@ Each economic term is a **bound** (the creator's decision, copied onto the
 | fee claimer | constant | `Protocol.fee_claimer` |
 | leftover receiver | constant | the vault's treasury |
 | `total_supply` | constant | **1,000,000** for every vault. A supply is a denominator, and one that differs per vault only makes two vaults harder to compare. |
-| `circulating_supply` | bound | **200,000** by default: what the curve offers. Gateway solves DBC's `leftover` for it exactly — DBC takes what is held back and solves for the rest, and its migration share is linear in that, so the inversion is closed-form rather than a search. The ceiling moves with the market caps (about 74 % of supply at a 2× ratio), because the rest is the liquidity the curve must migrate with. |
-| both, on the `Vault` | **read off the config** |
-| retained supply | bound | 0–50 % of supply held back from the curve (`leftover`). It lands in the treasury after graduation and is what the strategy market-makes its own token with. |
+| `circulating_supply` | bound, **read off the config** | **200,000** by default: what the curve offers. Both supply figures are read off the launch config at `tokenize`, never passed in — as an argument (`issue_bps`) it was a number a buyer was told to read as a dilution ceiling while it committed the creator to nothing. Gateway solves DBC's `leftover` for it exactly — DBC takes what is held back and solves for the rest, and its migration share is linear in that, so the inversion is closed-form rather than a search. The ceiling moves with the market caps (about 74 % of supply at a 2× ratio), because the rest is the liquidity the curve must migrate with. |
+| retained supply | derived | whatever the offer and the migration liquidity leave — `total_supply − circulating_supply − migration`. It lands in the treasury after graduation and is what the strategy market-makes its own token with. |
 
 ### 6.1 Pricing the launch
 
