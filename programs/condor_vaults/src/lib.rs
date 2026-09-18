@@ -1,17 +1,17 @@
-//! `condor_vaults` — a Swig wallet that trades a strategy and is owned by a
+//! `condor_vaults` — a wallet that trades a strategy and is owned by a
 //! program rather than by a person.
 //!
 //! **A vault has two lives, and the second is optional.**
 //!
-//! It is created as a Swig wallet whose root authority is a PDA of this
-//! program, with a `Vault` record addressed by that Swig. At first it is
-//! *private*: it has no mint, and it runs its runner's strategy with its
-//! runner's money. Nothing about it needs Condor — no delegate anyone else
-//! holds, no registry, no permission — and there is deliberately no `withdraw`
-//! instruction, because none is needed: the delegate the runner installed can
-//! already move anything in the wallet, at top level, through Gateway. A
-//! private vault is a wallet its owner controls, and the program's job there is
-//! to stay out of the way.
+//! It is created as two PDAs of this program from one random id: the `Vault`
+//! record, and a wallet that holds the money and acts only through this
+//! program's `execute` instructions. At first it is *private*: it has no
+//! mint, and it runs its runner's strategy with its runner's money. Nothing
+//! about it needs Condor — no delegate anyone else holds, no registry, no
+//! permission — and there is deliberately no `withdraw` instruction, because
+//! none is needed: `execute_unchecked` lets the runner or their delegate send
+//! anything anywhere. A private vault is a wallet its owner controls, and the
+//! program's job there is to stay out of the way.
 //!
 //! `tokenize` ends it. The vault launches a Token-2022 mint on a Meteora
 //! bonding curve whose **pool creator is the same PDA**, sells `issue_bps` of
@@ -33,16 +33,15 @@
 //! * **No attestation.** Nothing on chain says Condor reviewed anything. Condor
 //!   scans a strategy before its own crank runs it and refuses on failure, in
 //!   its own database — a private run policy, not an endorsement (plan D17).
-//! * **No Swig action limits.** They fight LP flows, and the honest statement
-//!   is that the installed administrator is trusted while installed. What
-//!   bounds it is that the runner can replace it and that it can never rewrite
-//!   the role table.
-//! * **No name registry.** A vault's identity is its Swig address. Two vaults
-//!   may call themselves the same thing, and every listing shows the address.
+//! * **No pool allowlist.** `execute` checks who *owns* every account a call
+//!   may write, so a pool created this morning is tradable and a recipient
+//!   that is a key is refused, whoever's key it is (`venues.rs`).
+//! * **No name registry.** A vault's identity is its `Vault` address. Two
+//!   vaults may call themselves the same thing, and every listing shows it.
 //!
-//! Layout: `state.rs` holds the two accounts, `swig.rs` and `dbc.rs` the two
-//! foreign wire formats (see `swig.rs` for why by hand), `token.rs` the three
-//! SPL calls, and `instructions/` one file per handler.
+//! Layout: `state.rs` holds the two accounts, `dbc.rs` the DBC wire format
+//! (hand-written: it publishes no Rust crate), `venues.rs` what `execute`
+//! allows, `token.rs` the SPL calls, and `instructions/` one file per handler.
 
 use anchor_lang::prelude::*;
 

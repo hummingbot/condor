@@ -13,7 +13,7 @@
 //! * **launches** the pool with its own PDA as creator, so every creator-side
 //!   stream is routed by rule rather than by a key (plan D8);
 //! * **collects the seed** — the migration fee, 80 % of the raise, into the
-//!   Swig — which DBC's own one-time flag makes idempotent, so the call can be
+//!   wallet — which DBC's own one-time flag makes idempotent, so the call can be
 //!   permissionless;
 //! * **claims the runner's income**: curve trading fees, the surplus above the
 //!   threshold, and the migrated position's fees.

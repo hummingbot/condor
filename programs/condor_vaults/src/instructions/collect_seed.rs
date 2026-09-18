@@ -2,7 +2,7 @@
 //!
 //! When the curve fills, Meteora's keeper migrates the pool and 80 % of the
 //! raise sits in DBC as the *creator's* migration fee. The creator is this
-//! program's PDA, so the fee has exactly one destination: the Swig's own
+//! program's PDA, so the fee has exactly one destination: the wallet's own
 //! associated account for the quote asset. Nobody can send it anywhere else,
 //! which is why anybody may send it — the caller pays the gas and gets
 //! nothing, and DBC's own one-time flag makes a second call a no-op that the

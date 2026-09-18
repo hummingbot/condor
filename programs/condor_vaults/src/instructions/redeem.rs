@@ -1,18 +1,14 @@
 //! `redeem` — burn the token, take a pro-rata share of what the vault holds.
 //!
 //! Available only once a wind-down has finished, and it pays out of the
-//! **redemption pot**: an ordinary token account owned by this program's
-//! authority PDA, which `finalize_wind_down` refused to run until the
-//! administrator had swept the wallet into it.
+//! **redemption pot**: the wallet's own token account for the quote asset,
+//! which `finalize_wind_down` refused to run until everything else in the
+//! wallet had been converted into it.
 //!
-//! **No Swig is involved, and that is the point.** Swig's execution paths
-//! refuse to be reached by CPI (`sign_v2` opens with
-//! `check_stack_height(1, SwigError::Cpi)`), so a redemption routed through the
-//! Swig could not work at all — proven on the fork, not inferred. Paying from a
-//! program-owned account instead means a holder is paid by a program that has
-//! no way to refuse: no delegate, no administrator, no key. That is a stronger
-//! guarantee than the design this replaces, in the one phase where a stranger's
-//! money is at stake.
+//! The wallet is this program's PDA, so a holder is paid by a program that has
+//! no way to refuse: no delegate, no administrator, no key stands between the
+//! burn and the payout, in the one phase where a stranger's money is at
+//! stake.
 //!
 //! **The denominator is what is circulating**, which is the mint's supply less
 //! two balances that are not: the tokens in the migrated pool's vault, and the

@@ -2,8 +2,8 @@
 //! runner's.
 //!
 //! A vault has two incomes and they never mix (plan §1.5). The *vault's* income
-//! is its strategy's LP fees, less the sweep, and it arrives in the Swig
-//! without passing through here. The *runner's* income is what the token's own
+//! is its strategy's LP fees, and it arrives in the wallet without passing
+//! through here. The *runner's* income is what the token's own
 //! market pays the pool creator: trading fees on the curve, the surplus above
 //! the migration threshold, and — after graduation — the fees on the
 //! permanently locked position the creator holds. All three are the PDA's to

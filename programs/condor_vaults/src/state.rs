@@ -1,15 +1,16 @@
 //! Two accounts, and nothing that duplicates a chain fact.
 //!
 //! `Protocol` is one per program: who may rotate keys, who cranks, and which
-//! Meteora partner config every vault launches from. `Vault` is one per Swig,
-//! and its address is `["vault", swig_account]` — so a vault has exactly one
-//! Swig and a Swig has exactly one vault, with no registry in between (D4).
+//! Meteora partner config every vault launches from. `Vault` is one per id,
+//! and its address is `["vault", id]`; its wallet is `["vault_authority", id]`
+//! — so a vault has exactly one wallet and a wallet exactly one vault, with no
+//! registry in between (D4).
 
 use anchor_lang::prelude::*;
 
 pub const PROTOCOL_SEED: &[u8] = b"protocol";
 pub const VAULT_SEED: &[u8] = b"vault";
-/// The seeds of the PDA that is the Swig's root authority *and* the DBC pool's
+/// The seeds of the PDA that is the vault's wallet *and* the DBC pool's
 /// creator. One address holds both jobs so that every creator-side stream —
 /// the seed, the curve fees, the surplus, the position fees — is routed by a
 /// program rule rather than by somebody's key (plan §1.1).
@@ -215,7 +216,7 @@ pub struct Vault {
     pub tokenized_ts: i64,
     pub wind_down_ts: i64,
     pub bump: u8,
-    /// The bump of `["vault_authority", swig_account]`. Stored rather than
+    /// The bump of `["vault_authority", id]`. Stored rather than
     /// found: this program signs as that PDA in most of its instructions, and
     /// `find_program_address` is ~1500 CU each time.
     pub authority_bump: u8,

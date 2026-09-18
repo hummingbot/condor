@@ -2,8 +2,8 @@
 //!
 //! `issue_bps` is circulating over max supply at the moment of tokenization.
 //! The remainder is not burned and is not the runner's — DBC's leftover
-//! receiver is the **Swig's funds owner**, so it lands in the vault's wallet
-//! alongside its capital.
+//! receiver is the **vault's wallet**, so it lands there alongside its
+//! capital.
 //!
 //! That it lands *in the wallet* rather than in a pot of its own is the whole
 //! design. The treasury is not a special kind of supply waiting to be issued;
