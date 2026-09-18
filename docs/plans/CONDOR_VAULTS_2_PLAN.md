@@ -101,11 +101,14 @@ authority moves to a multisig, the administrator stays hot (§1.7).
   in Condor's own database, keyed by vault and version. No key, no flag, no
   badge, no endorsement. Listings show verifiable facts only: commit, config
   hash, version, and the installed administrator.
-- **The delegate key is the custody risk while a vault runs.**
-  It is the only signer that can move funds, unrestricted, until the runner
-  replaces it or winds down. The vault page says so. Swig action limits are not
-  used: they fight LP flows, and the honest statement is that the installed
-  administrator is trusted while installed.
+- **The delegate key is the custody risk while a vault runs — until §1.8.**
+  Today it is the only signer that can move funds, unrestricted, until the
+  runner replaces it or winds down, and the vault page says so. Swig's
+  *magnitude* limits were rejected in rev 13 because they fight LP flows; §1.8
+  uses its *destination* limits instead, which do not — a role may move any
+  amount into an allowlisted pool and nothing anywhere else. Once that lands,
+  the sentence above becomes: the delegate can trade the allowlisted pools and
+  cannot transfer.
 - **Creation is permissionless, and so is running a private vault.** Anyone can
   create one, install any delegate they like, and never involve Condor. Only a
   **tokenized** vault requires the key in `Protocol.administrator` to co-sign an
@@ -316,6 +319,140 @@ single rotation. Three rules keep that true:
 3. **Nothing time-sensitive needs the authority.** Its powers are rotate a key,
    wind down an abandoned vault. Everything the crank does every tick is paid
    by the hot key.
+
+### 1.8 After tokenize: a role that can trade and cannot transfer
+
+**The problem.** The delegate role is `Permission::AllButManageAuthority` — sign
+anything, never edit the role table. Trade and withdraw are therefore one
+power, and that single fact shapes everything downstream: the administrator
+must co-sign every install on a tokenized vault, the runner is locked out of
+signing for their own strategy, and "the manager can't withdraw" is a statement
+about *which key* holds the role, not about what the role can do. Holders need
+the second kind of statement. Redemption has teeth only if nothing between
+`tokenize` and `redeem` can move the assets to a wallet.
+
+**What Swig actually enforces** (read from `program/src/actions/sign_v2.rs` and
+`state/src/action/*.rs`, `anagrambuild/swig-wallet`, main, 2026-09-18):
+
+- **Default deny.** Unless the role holds `All` or `AllButManageAuthority` —
+  which skip every check — each inner instruction that uses the wallet as
+  signer must be covered by a program permission, and every net outflow the
+  transaction causes must be covered by a spend permission. No match →
+  `PermissionDeniedMissingPermission`.
+- **Program permissions** gate which program may be invoked: `ProgramAll`
+  (anything; "highly privileged"), `ProgramCurated` (a list hard-coded in the
+  Swig program: **System, SPL Token, Token-2022, Stake — and nothing else**), or
+  `Program(program_id)`, repeatable, one per allowed program. The check is on
+  the instruction's program id; it does not look inside that program's CPIs.
+- **Spend is measured as net outflow per transaction**, after execution:
+  lamports on the wallet address, and per mint on the wallet's token accounts.
+  Outflow must be covered by `SolLimit`/`SolRecurringLimit` or
+  `SolDestinationLimit(destination, amount)`, and `TokenLimit(mint)`/
+  `TokenRecurringLimit` or `TokenDestinationLimit(mint, destination, amount)`.
+  Inflow is never checked. Destination limits are repeatable, key on one exact
+  destination account, and carry a `u64` that decrements — `u64::MAX` means
+  "unlimited to this one place".
+- **Editing a role's actions needs `ManageAuthority`**, which only the root
+  holds. The root is this program's PDA (§1.1), so *the program* is what adds
+  and removes permissions, under whatever rule it chooses to enforce.
+
+**The consequence.** "Trade, but never send to a wallet" is expressible, and
+the primitive is the destination limit, not the magnitude cap. A `TokenLimit`
+would be leaky: `Program(Token)` comes free with `ProgramCurated`, so a role
+with `TokenLimit(USDC, cap)` may `transfer` USDC to its own key's ATA, up to the
+cap, and a recurring cap bounds the *rate* of theft rather than the fact of it.
+A `TokenDestinationLimit(USDC, <pool vault>)` cannot be spent anywhere but that
+vault. That is the difference between a speed bump and a lock.
+
+**The role, concretely.** From `tokenize` onward, the trading role holds:
+
+| action | value | why |
+|---|---|---|
+| `ProgramCurated` | — | System, Token, Token-2022: ATA creation, wrapping, the transfers every DEX instruction is made of |
+| `Program(p)` per allowed DEX | Meteora DLMM `LBUZ…wxo`, Meteora DAMM v2 `cpamd…sGG`, Raydium CLMM `CAMM…rWqK`; Raydium CPMM and Pump AMM once their ids are confirmed against Gateway's connector constants (the first three are) | the venues the strategy may touch, and no others — **no router** (below) |
+| `TokenDestinationLimit(mint, vault, u64::MAX)` × 2 per allowlisted pool | the pool's own reserve/vault token account for each side | any amount into this pool; nothing into any other account |
+| `SolDestinationLimit(own wSOL ATA, u64::MAX)` | the wallet's own wrapped-SOL account | wrapping is a SOL transfer to yourself, and a wSOL-quoted pool needs it |
+| `SolRecurringLimit(small, window)` | e.g. 0.1 SOL per day, in slots | rent for position accounts, bin arrays and new ATAs, which are created at addresses nobody knows in advance. Also the entire amount of SOL the role could ever leak per window — bounded, and shown on the vault page |
+| — | **no** `TokenLimit`, `SolLimit`, `ProgramAll`, `All` | each of those is the hole |
+
+What each flow does under it: a **swap on a pool** sends the input mint to that
+pool's vault (covered) and receives the output (unchecked). **Adding LP** sends
+both mints to the pool's vaults (covered) and pays rent (SOL budget).
+**Removing LP / claiming fees** is inflow. **Wrapping SOL** is a transfer to the
+wallet's own ATA (covered). **Transferring to any wallet** — System or Token,
+any amount, including the manager's own — hits no matching action and fails.
+That last line is the guarantee holders are owed, and it holds against the
+administrator's key exactly as it holds against the manager's.
+
+**Routers, and why v1 is pools only.** Jupiter, DFlow and Titan route through
+pools chosen at quote time, so the transaction's outflows land in vault
+accounts nobody can list in advance; a destination-scoped role cannot cover
+them. `Program(Jupiter)` alone does not help — the spend check is on where the
+money went, not on who was called. The only way to admit a router is a
+`TokenLimit` per mint, which reopens the transfer hole up to the cap. So **v1
+swaps directly with allowlisted pools** on the DEX programs above, which is the
+same set of pools the strategy LPs into. If a router is wanted later, the
+honest form is a *small recurring* `TokenLimit` presented to holders as exactly
+what it is: the most the strategy could lose to a bad route — or to a bad
+manager — per window.
+
+**Which pools, and who decides.** Destination limits are per pool, so a pool
+has to be admitted before the role can touch it, and that admission is the one
+remaining place a manager could do harm: a fresh pool with mints the vault
+already holds, priced by the manager, drained by the vault swapping into it.
+Two rules, one instruction:
+
+1. At `tokenize` the vault declares its **asset universe** — the mints the
+   strategy may hold, recorded on the `Vault` beside `quote_mint`, read by
+   holders before they buy. The vault's own mint is in it (market-making the
+   treasury against its own pool is a stated feature, §1.4).
+2. `allow_pool(pool)` reads the pool account, requires its program to be an
+   allowed DEX and both mints to be in the universe, and then — as Swig root —
+   adds the two `TokenDestinationLimit`s. The vault's own migrated DAMM v2
+   pool is admitted by `tokenize` itself; its address is derived.
+
+**v1 makes `allow_pool` administrator-signed.** That is curation, and it is
+trust — but it is far less trust than today, when the administrator holds an
+unrestricted key over the wallet. The administrator can add a pool; it still
+cannot move a token anywhere but into one. **v2** makes it permissionless with
+a canonical-pool rule (the deepest existing pool per pair on each program),
+which removes the administrator from the trading path entirely. Either way the
+own-token rug is closed mechanically: a mint outside the universe has no pool
+the role can reach.
+
+**Pool creation** is not something the vault role does in v1. A pool's vaults
+do not exist until it is created, so nothing can be allowlisted ahead of the
+transaction, and creating pools is precisely the rug vector. The runner creates
+a pool with their own wallet, like anyone; the vault LPs into it once admitted.
+(The launch itself is unaffected: the DBC curve and the migrated pool are
+created by the program's own flow.)
+
+**The manager's own key.** Because the program now guarantees the *shape* of
+the role rather than the identity of the key, post-tokenize `install_delegate`
+installs this scoped role and needs no co-signature. A runner may install their
+own key and sign their own trades on a tokenized vault; Condor's crank gets an
+identical role for the agent. The administrator's co-signature on install —
+rev 15, "a runner holding the delegate could walk the seed out" — is retired,
+because the delegate can no longer walk anything out. The administrator keeps
+two jobs: `allow_pool` (v1) and `finalize_wind_down`.
+
+**Costs, measured before building.** Each destination action is ~80 bytes on
+the Swig account; twenty pools × two sides is ~3 KB of rent the runner pays at
+`allow_pool` time (Swig reallocs; confirm its ceiling). `sign_v2` scans actions
+linearly, so compute grows with the allowlist — measure a 40-action role on the
+fork. Recurring windows are in **slots**, and Swig's docs warn slot time is
+moving from 400 ms to 200 ms; the rent budget window has to be re-scaled with
+it. `u64::MAX` limits never need replenishing.
+
+**What changes.** `swig.rs` grows four action encodings — `Program`,
+`TokenDestinationLimit`, `SolDestinationLimit`, `SolRecurringLimit` — with
+layouts taken from `state/src/action/*.rs` at the pinned commit, not
+reconstructed (discriminants: Program 3, SolLimit 1, SolRecurringLimit 2,
+SolDestinationLimit 16, TokenDestinationLimit 18). `install_delegate` branches
+on `is_tokenized()` and builds the scoped role; `tokenize` records the universe
+and admits the migrated pool; `allow_pool` is new; Gateway gains
+`build-allow-pool`; the vault page lists the universe and the admitted pools,
+because both are what a holder is now trusting instead of a key.
 
 **Before the first mainnet vault:** the protocol authority *and the program
 upgrade authority* move to a Squads vault. The administrator key stays hot; its
@@ -923,6 +1060,8 @@ All revisions 2026-09-17, in one design session.
 | 13 | Creation permissionless; protocol authority may wind down; no Swig action limits; timers dropped; roles renamed manager → **runner**, delegate holder → **administrator** | final vocabulary and trust model |
 | 14 | Attestor removed; the scan is Condor's private run gate; plan rewritten as one document | an on-chain review claim is a liability |
 | 15 | Threat model: administrator registry, co-signed install, administrator-signed finalize; fee share back to 50/50, flat 100 bps migrated-pool fee | a runner could otherwise install their own delegate and drain the seed |
+| 16 | **2026-09-18.** `quote_mint` chosen at launch (the config that fixes what the pool quotes in), not at creation; a private vault does not wind down; `fee_bps` and the buy-and-burn sweep removed; native SOL wrapped into the wSOL ATA before a tokenized wind-down's sweep; `build-deposit` route | a private vault is an agent wallet its runner controls — nothing about a token should be asked of it before there is one; buybacks are the manager's discretion, not a mechanic |
+| 17 | **2026-09-18.** §1.8: after tokenize the trading role is destination-scoped — trade allowlisted pools, transfer nowhere — via Swig's `Program` + `TokenDestinationLimit`; asset universe fixed at launch; `allow_pool` (administrator-signed in v1); co-signed install retired; routers deferred; pools only for v1 | redemption has teeth only if nothing between `tokenize` and `redeem` can move assets to a wallet; rev 13 rejected Swig *magnitude* limits, and destination limits are a different primitive |
 | 16 | Simplicity pass: `remove_delegate`, in-kind redeem, the seed flag, `fee_buyback_bps`, the sweep tool and prompt rule, every MCP change, the Settings section and the Buy/Sell widget removed; `active` folded into `state`; `route_creator_fees` → runner-signed `claim_income`; vault page to four tabs. One platform key, `set_authority` / `set_administrator`, registry deferred; multisig-ready rules and the before-mainnet list | fewer moving parts, same properties |
 | 17 | **Vault creation split from tokenizing.** A vault is private until it launches a token: `withdraw` exists and refuses from `tokenize` onward; `quote_mint` moves to creation; `pin` needs no token; the administrator co-signs only once tokenized; NAV comes back, because a launch priced against existing assets has something to be priced against. Config checked by terms rather than address, since each vault prices its own launch | "before token, the vault is private, meaning runner can deposit/withdraw freely for own use" — and a private vault has nobody to protect, so a self-hosted runner needs nothing from Condor |
 | 18 | `issue_bps` on chain — circulating over max supply at launch. The second-DBC sale was dropped: DBC creates its own mint, so it would have been a second token | "they set the circulating vs max supply, essentially" — and one token per vault is what makes redemption mean anything |
@@ -956,7 +1095,10 @@ All revisions 2026-09-17, in one design session.
 | Is NAV shown? | yes — reversing rev 9. It was meaningless when the token was born before the assets; a launch priced against existing assets makes it the thing the token was sold on |
 | Dev keypairs on mainnet? | refused unless the chain endpoint says `surfpool` |
 | What is "quote asset locked by the user"? | the first buy — optional quote into the curve |
-| Where is the quote asset chosen? | at creation: a private vault needs a unit of account from its first deposit |
+| Where is the quote asset chosen? | **at launch** (rev 16, reversing this row). It is what the curve sells for, what the migrated pool quotes in, what a wind-down converts into and what a redemption pays — fixed by the launch config, written to the vault at `tokenize`. A private vault has none and needs none |
+| Can the manager sign the vault's own trades? | private: yes — install your own key as the delegate. Tokenized: today no (the delegate can sign anything, so it must be the administrator's); after §1.8 yes, because the role can trade and cannot transfer, so whose key holds it stops mattering |
+| Why not Swig's `TokenLimit` to bound the manager? | it bounds the *amount*, not the *place*: `Program(Token)` comes with `ProgramCurated`, so a transfer to the manager's own ATA is allowed up to the cap. `TokenDestinationLimit` to pool vaults is the lock; `TokenLimit` is a speed bump |
+| Routers (Jupiter, DFlow, Titan) in the scoped role? | not in v1: a route's outflows land in pool vaults chosen at quote time, which no destination limit can name in advance. Admitting one means a `TokenLimit`, i.e. the hole above. v1 swaps on allowlisted pools directly |
 | hbapi one-live-vault limit? | fixed in Phase 1 (M5) |
 | A vanished runner? | the protocol authority may wind down, no notice |
 | Delegate blast radius? | accepted and stated; no Swig action limits |
