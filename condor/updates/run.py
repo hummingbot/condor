@@ -50,6 +50,11 @@ FAILED = "failed"
 PENDING = "pending"
 OK = "ok"
 SKIPPED = "skipped"
+# Ran, did not fail the update, but the operator needs to read the output --
+# a stash that would not pop, a doctor check that came back unhappy. Distinct
+# from OK because "the update succeeded" must not swallow "and here is what is
+# still wrong", and distinct from FAILED because neither aborts the run.
+WARNED = "warned"
 
 # Command output kept per step. Enough to diagnose, far under Telegram's limit.
 OUTPUT_TAIL_CHARS = 2000
@@ -318,6 +323,13 @@ async def resolve(component_key: str, action: str) -> tuple[bool, str]:
         ok, message = await updater.discard_paths(component.repo_dir, conflicting)
     elif action == "stash":
         ok, message = await updater.stash_paths(component.repo_dir, conflicting)
+    elif action == "keep-mine":
+        # Re-checked here rather than trusted from the button: the block that
+        # offered this may be minutes old, and moving a path that is not
+        # forkable would put it somewhere nothing reads.
+        if not all(components.is_forkable(component_key, p) for p in conflicting):
+            return False, "Those files cannot be kept this way."
+        ok, message = await updater.move_to_local_root(component.repo_dir, conflicting)
     else:
         return False, f"Unknown resolution: {action}"
 
@@ -356,6 +368,7 @@ def _plan(component_keys: list[str], statuses: dict[str, components.ComponentSta
             # No restart step: the run stops with the new code on disk and asks
             # for the relaunch instead (see the module docstring).
             steps.append(Step(f"{key}.fast-forward", "Fast-forwarding Condor"))
+            steps.append(Step(f"{key}.unstash", "Restoring stashed work"))
             steps.append(Step(f"{key}.deps", "Syncing dependencies"))
             steps.append(Step(f"{key}.frontend", "Rebuilding the dashboard"))
     return steps
@@ -532,6 +545,19 @@ async def _update_condor(run: Run) -> bool:
         if not ok:
             await _fail(run, "Condor could not be fast-forwarded.")
             return False
+
+    # Work parked by the `stash` resolution goes back now that the fast-forward
+    # has landed. Stashing was never meant to be where it ended -- the point of
+    # parking work rather than discarding it is getting it back, and the common
+    # case applies cleanly. A conflicting pop does not fail the update: the
+    # stash is intact either way, and the step says so.
+    step = await _begin(run, f"{prefix}.unstash")
+    if step is not None:
+        popped, output = await updater.stash_pop(component.repo_dir)
+        if "Nothing of ours" in output:
+            await _finish(run, step, SKIPPED, output)
+        else:
+            await _finish(run, step, OK if popped else WARNED, output)
 
     after = await updater.get_local_commit_full(component.repo_dir)
     run.target_commit = after

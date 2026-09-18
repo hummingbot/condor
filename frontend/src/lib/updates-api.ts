@@ -67,7 +67,14 @@ export interface Preflight {
   ok: boolean;
 }
 
-export type StepState = "pending" | "running" | "ok" | "failed" | "skipped";
+export type StepState =
+  | "pending"
+  | "running"
+  | "ok"
+  /** Ran, did not fail the update, but the output is worth reading. */
+  | "warned"
+  | "failed"
+  | "skipped";
 
 export interface Step {
   key: string;

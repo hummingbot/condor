@@ -33,6 +33,8 @@ _STEP_GLYPH = {
     "ok": "✓",
     "failed": "✗",
     "skipped": "–",
+    # Ran, did not fail the update, but the output is worth reading.
+    "warned": "!",
 }
 
 

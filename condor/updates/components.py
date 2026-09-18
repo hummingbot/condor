@@ -24,6 +24,7 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from utils import updater
@@ -525,6 +526,35 @@ async def running_executor_count() -> int | None:
 # ── Preflight ──
 
 
+def is_forkable(component_key: str, rel_path: str) -> bool:
+    """Whether a conflicting path can be kept by moving it to the local root.
+
+    Only Condor's shipped agent library. ``agents/<slug>/...`` has a local
+    counterpart that reads shadow per item, so moving an edit there is exactly
+    what the product would have done with it. Anything else -- ``main.py``, a
+    compose file, anything in hummingbot-api -- has no such layer, and "keeping"
+    it by moving it somewhere nothing reads would be a quieter way of losing it
+    than discarding.
+    """
+    if component_key != CONDOR:
+        return False
+    parts = PurePosixPath(rel_path).parts
+    return len(parts) > 2 and parts[0] == "agents" and not parts[1].startswith("_")
+
+
+def _resolutions_for(component_key: str, paths: list[str]) -> list[str]:
+    """The ways out of a conflict, with the non-lossy one offered where it works.
+
+    ``keep-mine`` appears only when every conflicting path is forkable. Offering
+    it on a mixed set would be worse than not offering it: it reads as "keep all
+    of this", and the paths it could not move would be reset anyway.
+    """
+    base = ["discard", "stash", "cancel"]
+    if paths and all(is_forkable(component_key, p) for p in paths):
+        return ["keep-mine", *base]
+    return base
+
+
 def _incoming_unknown(component: Component, branch: str, because: str) -> Block:
     """The block for "we could not work out what this update would bring in".
 
@@ -648,7 +678,7 @@ async def repo_blocks(component: Component) -> list[Block]:
                     "commits."
                 ),
                 paths=tracked,
-                resolutions=["discard", "stash", "cancel"],
+                resolutions=_resolutions_for(component.key, tracked),
             )
         )
     if untracked:
@@ -661,7 +691,7 @@ async def repo_blocks(component: Component) -> list[Block]:
                     "not in git would be overwritten by the incoming commits."
                 ),
                 paths=untracked,
-                resolutions=["discard", "stash", "cancel"],
+                resolutions=_resolutions_for(component.key, untracked),
             )
         )
     return blocks

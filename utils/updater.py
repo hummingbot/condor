@@ -18,10 +18,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -409,12 +411,15 @@ async def discard_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
         )
         if rc != 0:
             return False, f"Could not restore {len(to_checkout)} file(s):\n{out}"
-        messages.append(f"Restored {len(to_checkout)} tracked file(s).")
+        messages.append(
+            f"Discarded your changes to {len(to_checkout)} tracked file(s); "
+            "they are back to the committed version."
+        )
     if to_clean:
         rc, out = await _run_git("clean", "-fd", "--", *to_clean, repo_dir=repo_dir)
         if rc != 0:
             return False, f"Could not remove {len(to_clean)} file(s):\n{out}"
-        messages.append(f"Removed {len(to_clean)} untracked file(s).")
+        messages.append(f"Deleted {len(to_clean)} untracked file(s).")
 
     return True, " ".join(messages) or "Nothing to discard."
 
@@ -440,6 +445,79 @@ async def stash_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
     if ref:
         return True, f"Stashed as stash@{{0}} ({ref}). Restore with: git stash pop"
     return True, out or "Stashed."
+
+
+async def stash_pop(repo_dir: str) -> tuple[bool, str]:
+    """Put back the work ``stash_paths`` parked, if it still applies cleanly.
+
+    Stashing was never meant to be the end of the story -- the whole point of
+    parking work rather than discarding it is getting it back, and a clean pop
+    is the common case once the fast-forward has landed. What the original
+    caution was right about is the *failure*: a conflicting pop leaves a
+    half-merged tree plus a stash entry nobody was told about. So a conflict
+    aborts and says where the work still is, rather than leaving the operator
+    to discover both.
+    """
+    _, listing = await _run_git("stash", "list", repo_dir=repo_dir)
+    if "condor /update" not in listing:
+        return True, "Nothing of ours was stashed."
+
+    rc, out = await _run_git("stash", "pop", repo_dir=repo_dir)
+    if rc != 0:
+        return False, (
+            f"{out}\n\nYour work is still in stash@{{0}} — nothing was lost. "
+            "Resolve it by hand with: git stash pop"
+        )
+    return True, "Restored the work that was stashed before the update."
+
+
+async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool, str]:
+    """Move edited agent files into the gitignored local root, then reset stock.
+
+    The non-lossy exit from a ``dirty-conflict``. FEAT-115 redirects writes made
+    *through the product* into ``.condor/agents``, where they shadow stock per
+    item and no update can touch them -- but a text editor knows nothing about
+    that, and these are markdown files sitting in a git checkout, which is
+    exactly what people open in one. Such an edit blocked the update, and the
+    only one-click way out destroyed it.
+
+    This puts the edit where the product would have put it: the customization
+    survives and keeps being used, the tracked file fast-forwards normally, and
+    the install ends up in the state FEAT-115 supports rather than a dead end.
+    """
+    from condor.paths import local_agents_root
+
+    if not rel_paths:
+        return True, "Nothing to move."
+
+    moved: list[str] = []
+    local_root = local_agents_root()
+    for rel in rel_paths:
+        source = Path(repo_dir) / rel
+        if not source.is_file():
+            continue
+        # ``agents/scout/AGENT.md`` -> ``<local>/scout/AGENT.md``
+        target = local_root / Path(rel).relative_to("agents")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+        except (OSError, ValueError) as exc:
+            return False, f"Could not move {rel}: {exc}"
+        moved.append(rel)
+
+    if not moved:
+        return True, "Nothing to move."
+
+    # The tracked copies go back to HEAD so the fast-forward is unobstructed.
+    rc, out = await _run_git("checkout", "HEAD", "--", *moved, repo_dir=repo_dir)
+    if rc != 0:
+        return False, f"Moved your edits, but could not reset the tracked files:\n{out}"
+
+    return True, (
+        f"Kept your version of {len(moved)} file(s), moved into .condor/agents "
+        "where updates leave them alone. The shipped copies will now "
+        "fast-forward; your versions stay in use."
+    )
 
 
 async def install_dependencies() -> tuple[bool, str]:

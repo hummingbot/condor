@@ -328,6 +328,7 @@ def test_the_plan_is_laid_out_before_anything_runs(_a_sibling_api):
         "hummingbot-api.up",
         "hummingbot-api.health",
         "condor.fast-forward",
+        "condor.unstash",
         "condor.deps",
         "condor.frontend",
     ]
