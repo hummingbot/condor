@@ -792,6 +792,14 @@ can never be given anything.
 The crank keeps no registry of its own: engines register with the loop
 supervisor, and it holds only which agent id belongs to which vault.
 
+**The seat sees the vault's money and no other.** An account with a Gateway
+wallet bound to it gets that wallet's balances filed under its own name —
+hummingbot-api used to read the default wallet and file everything under
+`master_account`, so a vault's agent read the operator's balance as its own —
+and a seat given an account is scoped to it for reads as well as writes. Both
+were found by watching the first tick reason about 200 SOL and 235 USDC on
+Hyperliquid, none of which the vault held.
+
 **Sweep** (`condor/vault_sweep.py`). On each pass the crank reads the vault's
 terminated LP executors and accrues `fee_bps` of each one's
 `fees_earned_quote` — income, never `cum_fees_quote`, which is gas: a burn
