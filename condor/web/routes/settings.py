@@ -358,10 +358,17 @@ async def gateway_chain(
 
     Asked of the server's own Gateway, through its hummingbot-api, on the RPC
     Gateway itself reports — so the answer is about the node every transaction
-    is built against *and* traded on, there being only one Gateway to ask. The
-    browser gets the host only: the URL may carry a provider key. A TRADER may
-    read it — knowing which chain you are trading on is not a mutation. No
-    answer is an error, never a guess.
+    is built against *and* traded on, there being only one Gateway to ask.
+
+    The whole URL is in the answer, because the browser's wallet layer is a
+    Solana cluster and a cluster is configured with one. That is a deliberate
+    trade: a provider key in the URL reaches anyone who can read this endpoint,
+    which is anyone with TRADER access to the server — the same people who can
+    already spend through it. ``rpc_host`` is beside it for the surfaces that
+    only want something to show.
+
+    A TRADER may read it: knowing which chain you are trading on is not a
+    mutation. No answer is an error, never a guess.
     """
     if chain != "solana":
         raise HTTPException(status_code=400, detail="only chain=solana is supported")

@@ -74,7 +74,13 @@ export function WalletControl() {
         align="right"
         className="w-auto"
       >
-        <WalletMenu onDone={() => setOpen(false)} />
+        <WalletMenu
+          onDone={() => setOpen(false)}
+          onConnectRequest={() => {
+            setOpen(false);
+            setPicking(true);
+          }}
+        />
       </AnchoredMenu>
 
       {picking && (

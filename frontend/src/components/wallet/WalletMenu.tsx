@@ -14,7 +14,16 @@
  */
 import { useBalance, useTokens } from "@solana/connector/react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Check, Coins, Copy, Globe, LogOut, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Coins,
+  Copy,
+  Globe,
+  LogOut,
+  RefreshCw,
+  Wallet,
+} from "lucide-react";
 import { useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
@@ -24,9 +33,19 @@ import { useWallet } from "@/lib/wallet/context";
 import { shortAddress } from "./address";
 import { AddressAvatar, Spinner } from "./primitives";
 
-export function WalletMenu({ onDone }: { onDone: () => void }) {
+export function WalletMenu({
+  onDone,
+  onConnectRequest,
+}: {
+  onDone: () => void;
+  /** Raise the picker. It belongs to the control that owns this menu: a dialog
+   *  opened from inside a menu that closes on an outside click is a dialog
+   *  that closes when you click it. */
+  onConnectRequest: () => void;
+}) {
   const { server } = useServer();
-  const { connected, attached, mismatched, disconnect, attach, detach } = useWallet();
+  const { connected, attached, mismatched, disconnect, attach, detach } =
+    useWallet();
   const [copied, setCopied] = useState(false);
   const [tokensOpen, setTokensOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -76,8 +95,8 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
         <p className="mb-3 flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-700 dark:text-amber-300">
           <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
           <span>
-            This account is attached to {shortAddress(attached!)}. You can look at anything; only
-            that key can sign for its vaults.
+            This account is attached to {shortAddress(attached!)}. You can look
+            at anything; only that key can sign for its vaults.
           </span>
         </p>
       )}
@@ -85,7 +104,9 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
       <div className="mb-3 flex items-start gap-3">
         <AddressAvatar address={address} className="h-10 w-10" />
         <div className="min-w-0 flex-1">
-          <p className="truncate font-mono text-[15px] font-semibold">{shortAddress(address)}</p>
+          <p className="truncate font-mono text-[15px] font-semibold">
+            {shortAddress(address)}
+          </p>
           <p className="text-[11px] text-[var(--color-text-muted)]">
             {connected?.name ?? "attached, not connected"}
           </p>
@@ -97,7 +118,11 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
             title="Copy address"
             className="rounded-full border border-[var(--color-border)] p-1.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
           >
-            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            {copied ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
           </button>
           <span
             title={
@@ -121,27 +146,48 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
         </div>
       </div>
 
-      <div className="mb-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5">
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] text-[var(--color-text-muted)]">Holds</span>
-          <button
-            type="button"
-            onClick={() => void balance.refetch()}
-            title="Read it again"
-            className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-          >
-            {balance.isLoading ? <Spinner /> : <RefreshCw className="h-3 w-3" />}
-          </button>
+      {/* `useBalance` and `useTokens` read whatever account is *connected*;
+          neither takes an address. With nothing connected they answer for
+          nobody, and printing that under an attached address would be this
+          key's balance stated as zero. So the numbers appear only when the
+          browser is holding the key they describe. */}
+      {connected ? (
+        <div className="mb-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-[var(--color-text-muted)]">
+              Holds
+            </span>
+            <button
+              type="button"
+              onClick={() => void balance.refetch()}
+              title="Read it again"
+              className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            >
+              {balance.isLoading ? (
+                <Spinner />
+              ) : (
+                <RefreshCw className="h-3 w-3" />
+              )}
+            </button>
+          </div>
+          <div className="mt-0.5 flex items-baseline justify-between gap-2">
+            <span className="font-mono text-xl font-semibold">
+              {balance.error ? "—" : balance.formattedSol}
+            </span>
+            <span className="text-[12px] text-[var(--color-text-muted)]">
+              SOL
+            </span>
+          </div>
         </div>
-        <div className="mt-0.5 flex items-baseline justify-between gap-2">
-          <span className="font-mono text-xl font-semibold">
-            {balance.error ? "—" : balance.formattedSol}
-          </span>
-          <span className="text-[12px] text-[var(--color-text-muted)]">SOL</span>
-        </div>
-      </div>
+      ) : (
+        <p className="mb-3 rounded-xl border border-dashed border-[var(--color-border)] px-3 py-2.5 text-[11px] text-[var(--color-text-muted)]">
+          This account is attached to this key, but the browser is not holding
+          it right now. Connect it to see what it holds and to sign for its
+          vaults.
+        </p>
+      )}
 
-      {held.length > 0 && (
+      {connected && held.length > 0 && (
         <div className="mb-3 rounded-xl border border-[var(--color-border)]">
           <button
             type="button"
@@ -152,12 +198,17 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
               <Coins className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
               Tokens
             </span>
-            <span className="text-[var(--color-text-muted)]">{held.length}</span>
+            <span className="text-[var(--color-text-muted)]">
+              {held.length}
+            </span>
           </button>
           {tokensOpen && (
             <dl className="max-h-48 overflow-y-auto border-t border-[var(--color-border)] px-3 py-2">
               {held.map((token) => (
-                <div key={token.mint} className="flex items-baseline justify-between gap-3 py-0.5">
+                <div
+                  key={token.mint}
+                  className="flex items-baseline justify-between gap-3 py-0.5"
+                >
                   <dt className="truncate text-[12px]">
                     {token.symbol ?? `${token.mint.slice(0, 4)}…`}
                   </dt>
@@ -171,7 +222,20 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
-      {error && <p className="mb-2 text-[11px] text-[var(--color-red)]">{error}</p>}
+      {error && (
+        <p className="mb-2 text-[11px] text-[var(--color-red)]">{error}</p>
+      )}
+
+      {!connected && (
+        <button
+          type="button"
+          onClick={onConnectRequest}
+          className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-2 text-[12px] font-medium text-white"
+        >
+          <Wallet className="h-3.5 w-3.5" />
+          Connect this browser
+        </button>
+      )}
 
       {/* Attaching is Condor's own step: it proves to this account that the
           browser holds this key, which is what every vault action is checked
@@ -188,7 +252,9 @@ export function WalletMenu({ onDone }: { onDone: () => void }) {
           }
           className="mb-2 w-full rounded-lg bg-[var(--color-accent)] px-3 py-2 text-[12px] font-medium text-white disabled:opacity-60"
         >
-          {busy ? "Signing…" : `Attach ${shortAddress(connected.address)} to this account`}
+          {busy
+            ? "Signing…"
+            : `Attach ${shortAddress(connected.address)} to this account`}
         </button>
       )}
       {attached && (

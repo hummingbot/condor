@@ -81,7 +81,8 @@ export function WalletPicker({
           <div>
             <h2 className="text-lg font-semibold">Connect your wallet</h2>
             <p className="mt-0.5 text-[12px] text-[var(--color-text-muted)]">
-              A vault&rsquo;s runner is a key, not a login. Condor never holds one.
+              A vault&rsquo;s runner is a key, not a login. Condor never holds
+              one.
             </p>
           </div>
           <button
@@ -103,11 +104,11 @@ export function WalletPicker({
         <div className="space-y-2">
           {installed.map((wallet) => (
             <WalletRow
-              key={wallet.name}
+              key={wallet.id}
               wallet={wallet}
-              recent={wallet.name === recent}
-              busy={connecting === wallet.name}
-              onClick={() => choose(wallet.name)}
+              recent={wallet.id === recent}
+              busy={connecting === wallet.id}
+              onClick={() => choose(wallet.id)}
             />
           ))}
         </div>
@@ -120,28 +121,30 @@ export function WalletPicker({
             <div className="space-y-2">
               {dev.map((wallet) => (
                 <WalletRow
-                  key={wallet.name}
+                  key={wallet.id}
                   wallet={wallet}
                   label={wallet.name.slice("dev:".length)}
-                  recent={wallet.name === recent}
-                  busy={connecting === wallet.name}
-                  onClick={() => choose(wallet.name)}
+                  recent={wallet.id === recent}
+                  busy={connecting === wallet.id}
+                  onClick={() => choose(wallet.id)}
                 />
               ))}
             </div>
             <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
-              Their secrets are in this page&rsquo;s bundle. They appear only because the chain
-              endpoint said surfpool.
+              Their secrets are in this page&rsquo;s bundle. They appear only
+              because the chain endpoint said surfpool.
             </p>
           </>
         )}
 
         {available.length === 0 && (
           <div className="rounded-xl border border-dashed border-[var(--color-border)] p-5 text-center">
-            <p className="text-[13px] font-medium">No Solana wallet in this browser</p>
+            <p className="text-[13px] font-medium">
+              No Solana wallet in this browser
+            </p>
             <p className="mx-auto mt-1 mb-3 max-w-xs text-[12px] text-[var(--color-text-muted)]">
-              Install one, then reopen this. Condor talks to the Wallet Standard, so any of these
-              works.
+              Install one, then reopen this. Condor talks to the Wallet
+              Standard, so any of these works.
             </p>
             <div className="flex flex-wrap justify-center gap-2">
               {INSTALL.map((entry) => (
@@ -191,7 +194,11 @@ function WalletRow({
           </span>
         )}
       </span>
-      {busy ? <Spinner className="h-5 w-5" /> : <WalletAvatar src={wallet.icon} alt="" className="h-8 w-8" />}
+      {busy ? (
+        <Spinner className="h-5 w-5" />
+      ) : (
+        <WalletAvatar src={wallet.icon} alt="" className="h-8 w-8" />
+      )}
     </button>
   );
 }
