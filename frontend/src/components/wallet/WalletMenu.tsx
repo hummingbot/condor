@@ -22,7 +22,6 @@ import {
   Globe,
   LogOut,
   RefreshCw,
-  Wallet,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -33,19 +32,9 @@ import { useWallet } from "@/lib/wallet/context";
 import { shortAddress } from "./address";
 import { AddressAvatar, Spinner } from "./primitives";
 
-export function WalletMenu({
-  onDone,
-  onConnectRequest,
-}: {
-  onDone: () => void;
-  /** Raise the picker. It belongs to the control that owns this menu: a dialog
-   *  opened from inside a menu that closes on an outside click is a dialog
-   *  that closes when you click it. */
-  onConnectRequest: () => void;
-}) {
+export function WalletMenu({ onDone }: { onDone: () => void }) {
   const { server } = useServer();
-  const { connected, attached, mismatched, disconnect, attach, detach } =
-    useWallet();
+  const { connected, attached, mismatched, disconnect, attach } = useWallet();
   const [copied, setCopied] = useState(false);
   const [tokensOpen, setTokensOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -226,16 +215,6 @@ export function WalletMenu({
         <p className="mb-2 text-[11px] text-[var(--color-red)]">{error}</p>
       )}
 
-      {!connected && (
-        <button
-          type="button"
-          onClick={onConnectRequest}
-          className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-2 text-[12px] font-medium text-white"
-        >
-          <Wallet className="h-3.5 w-3.5" />
-          Connect this browser
-        </button>
-      )}
 
       {/* Attaching is Condor's own step: it proves to this account that the
           browser holds this key, which is what every vault action is checked
@@ -257,22 +236,6 @@ export function WalletMenu({
             : `Attach ${shortAddress(connected.address)} to this account`}
         </button>
       )}
-      {attached && (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() =>
-            run(async () => {
-              await detach();
-              onDone();
-            })
-          }
-          className="mb-2 w-full rounded-lg border border-[var(--color-border)] px-3 py-2 text-[12px] font-medium hover:bg-[var(--color-surface-hover)] disabled:opacity-60"
-        >
-          Detach {shortAddress(attached)} from this account
-        </button>
-      )}
-
       {connected && (
         <button
           type="button"

@@ -32,7 +32,12 @@ export function WalletControl() {
   // current. The same shape the DEX chain selector uses.
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
 
-  const address = connected?.address ?? attached;
+  // The connected key alone. The menu is an account card — what this wallet
+  // holds, what it can sign — and none of that is answerable about a key the
+  // browser is not holding. Showing the attached address here put a menu
+  // behind it that could only explain its own emptiness; not connected is a
+  // Connect button, which is the one useful thing in that state.
+  const address = connected?.address ?? null;
 
   return (
     <div className="relative">
@@ -42,7 +47,7 @@ export function WalletControl() {
         onClick={() => (address ? setOpen((v) => !v) : setPicking(true))}
         title={
           mismatched
-            ? "This browser's wallet is not the one attached to this account"
+            ? `This browser holds ${address}, and this account signs as ${attached}`
             : address
               ? `Signing as ${address}`
               : "Connect a wallet"
@@ -74,13 +79,7 @@ export function WalletControl() {
         align="right"
         className="w-auto"
       >
-        <WalletMenu
-          onDone={() => setOpen(false)}
-          onConnectRequest={() => {
-            setOpen(false);
-            setPicking(true);
-          }}
-        />
+        <WalletMenu onDone={() => setOpen(false)} />
       </AnchoredMenu>
 
       {picking && (

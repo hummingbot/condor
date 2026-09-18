@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Star } from "lucide-react";
 import { useState } from "react";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { ConnectWalletButton } from "@/components/wallet/ConnectWalletButton";
 import { AddressAvatar } from "@/components/wallet/primitives";
 import { api } from "@/lib/api";
@@ -24,9 +25,10 @@ import { useWallet } from "@/lib/wallet/context";
 export const BROWSER_CHAIN = "solana";
 
 export function BrowserWallets() {
-  const { connected, attached, mismatched, attach } = useWallet();
+  const { connected, attached, mismatched, attach, detach } = useWallet();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   const wallet = useQuery({
     queryKey: ["wallet"],
@@ -43,6 +45,19 @@ export function BrowserWallets() {
   const preferMut = useMutation({
     mutationFn: () => api.setPreferredWallet(BROWSER_CHAIN, "browser"),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["wallet"] }),
+    onError: (e: Error) => setError(e.message),
+  });
+
+  // Detaching lives here rather than in the wallet menu, which is an account
+  // card for the key this browser is holding. Forgetting a key you are *not*
+  // holding is exactly the case that menu cannot serve, and it is the case
+  // someone who has switched wallets is in.
+  const detachMut = useMutation({
+    mutationFn: () => detach(),
+    onSuccess: () => {
+      setConfirming(false);
+      queryClient.invalidateQueries({ queryKey: ["wallet"] });
+    },
     onError: (e: Error) => setError(e.message),
   });
 
@@ -83,24 +98,39 @@ export function BrowserWallets() {
             </div>
           </div>
 
-          {!isDefault && (
-            <button
-              type="button"
-              onClick={() => {
+          <div className="flex shrink-0 items-center gap-1">
+            {!isDefault && !confirming && (
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  preferMut.mutate();
+                }}
+                disabled={preferMut.isPending}
+                title="Make this the wallet Condor means on Solana"
+                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)] disabled:opacity-50"
+              >
+                {preferMut.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Star className="h-3.5 w-3.5" />
+                )}
+              </button>
+            )}
+            <InlineConfirm
+              confirming={confirming}
+              onRequest={() => {
                 setError(null);
-                preferMut.mutate();
+                setConfirming(true);
               }}
-              disabled={preferMut.isPending}
-              title="Make this the wallet Condor means on Solana"
-              className="shrink-0 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)] disabled:opacity-50"
-            >
-              {preferMut.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Star className="h-3.5 w-3.5" />
-              )}
-            </button>
-          )}
+              onConfirm={() => detachMut.mutate()}
+              onCancel={() => setConfirming(false)}
+              pending={detachMut.isPending}
+              triggerLabel="Detach this wallet from this account"
+              confirmLabel="Confirm detach"
+              cancelLabel="Cancel detach"
+            />
+          </div>
         </div>
       ) : (
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
