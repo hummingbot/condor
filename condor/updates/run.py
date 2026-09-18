@@ -544,8 +544,10 @@ async def _update_condor(run: Run) -> bool:
             if not ok:
                 await _fail(
                     run,
-                    "Code and deps are updated, but the dashboard would come "
-                    "back on the previous bundle.",
+                    "Code and deps are updated, but the dashboard could not be "
+                    "rebuilt — so it is still serving the bundle it was "
+                    "serving before, which is intact. The build writes to "
+                    "frontend/dist.new and only swaps it in on success.",
                 )
                 return False
 
