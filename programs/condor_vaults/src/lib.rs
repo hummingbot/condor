@@ -50,8 +50,8 @@ pub mod dbc;
 pub mod error;
 pub mod instructions;
 pub mod state;
-pub mod swig;
 pub mod token;
+pub mod venues;
 
 use instructions::*;
 use state::AgentRef;
@@ -88,15 +88,13 @@ pub mod condor_vaults {
 
     // ── a private vault ─────────────────────────────────────────────────────
 
-    /// The Swig, rooted at this program's PDA, and the `Vault` record. The
-    /// quote asset is chosen here: it is the unit of account from the first
-    /// deposit, long before there is a token.
+    /// The `Vault` record and its wallet, two PDAs from one id, funded.
     pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64) -> Result<()> {
         instructions::create_vault::create_vault(ctx, id, fund_lamports)
     }
 
-    /// Install the delegate that trades. The administrator co-signs only once
-    /// the vault is tokenized — a private vault answers to nobody.
+    /// Set the key that trades. No co-signature in either phase: what the key
+    /// may do is decided by `execute`, not by whose it is.
     pub fn install_delegate(ctx: Context<InstallDelegate>, delegate: Pubkey) -> Result<()> {
         instructions::install_delegate::install_delegate(ctx, delegate)
     }
@@ -108,6 +106,19 @@ pub mod condor_vaults {
         config_hash: [u8; 32],
     ) -> Result<()> {
         instructions::strategy::pin(ctx, agent_ref, config_hash)
+    }
+
+    /// The wallet invokes any program with any accounts. Private vaults only:
+    /// this is the runner's own money, and it is also how they take it out.
+    pub fn execute_unchecked<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
+        instructions::execute::execute_unchecked(ctx, data)
+    }
+
+    /// The wallet invokes an allowed venue, and every account the call may
+    /// write is the wallet's, the venue's, or the caller's own. The only way a
+    /// tokenized vault's wallet acts.
+    pub fn execute<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
+        instructions::execute::execute(ctx, data)
     }
 
     // ── tokenizing ──────────────────────────────────────────────────────────

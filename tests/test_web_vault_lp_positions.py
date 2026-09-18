@@ -88,7 +88,7 @@ class FakeGateway:
 @pytest.fixture
 def client(monkeypatch):
     upstream = FakeClient()
-    gateway = FakeGateway(upstream, {"swigAccount": ACCOUNT, "fundsOwner": WALLET})
+    gateway = FakeGateway(upstream, {"account": ACCOUNT, "wallet": WALLET})
 
     async def fake_gateway(server, network="mainnet-beta"):
         assert server == SERVER

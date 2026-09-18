@@ -6,7 +6,7 @@
  * symbol and no price, because none of those is a decision anyone has to make
  * yet; tokenizing is a separate, later, one-way step on the vault's own page.
  *
- * The Swig, the delegate that trades it and the strategy it runs go in one
+ * The wallet, the delegate that trades it and the strategy it runs go in one
  * transaction, because there is no useful moment between them: a vault with no
  * delegate cannot trade and a vault with no strategy has nothing to trade. The
  * three-prompt version of this page needed a resumable draft to survive a

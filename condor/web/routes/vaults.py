@@ -145,7 +145,7 @@ async def _reconcile(
     corrects is Condor's own rows.
     """
     try:
-        on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+        on_chain = {v["account"]: v for v in await gw.list_vaults()}
     except Exception as e:
         # "I could not reach the chain" is not "it is gone" (plan §4). The
         # records are shown as they stand and nothing is written.
@@ -176,8 +176,7 @@ def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
     """Gateway's camelCase decode, as the store keeps it."""
     return {
         "runner": chain["runner"],
-        "swig_account": chain["swigAccount"],
-        "funds_owner": chain["fundsOwner"],
+        "wallet": chain["wallet"],
         "mint": chain.get("mint"),
         "dbc_pool": chain.get("dbcPool"),
         "config_hash": chain.get("configHash"),
@@ -234,7 +233,7 @@ async def list_vaults(
     records = await _reconcile(gw, user.id, records)
 
     try:
-        on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+        on_chain = {v["account"]: v for v in await gw.list_vaults()}
     except Exception as e:
         # The chain is unreachable; the records are still worth showing, and
         # each already carries the last chain state reconcile saw.
@@ -264,7 +263,7 @@ def _chain_only_info(account: str, chain: dict[str, Any], server: str) -> VaultI
         label="",
         server=server,
         network=chain.get("network", "mainnet-beta"),
-        wallet_address=fields["funds_owner"],
+        wallet_address=fields["wallet"],
         runner_address=fields["runner"],
         quote_mint=fields.get("quote_mint"),
         delegate=None,
@@ -286,7 +285,7 @@ async def create_vault(
     server: str = Query(...),
     user: WebUser = Depends(require_server_access_query),
 ):
-    """A vault, in one signature: the Swig, its delegate, and its strategy.
+    """A vault, in one signature: the wallet, its delegate, and its strategy.
 
     Three instructions in one transaction, because there is no useful moment
     between them — a vault with no delegate cannot trade and a vault with no
@@ -294,7 +293,7 @@ async def create_vault(
     resumable draft to survive a closed tab, which is machinery for a problem
     that only existed because there were three.
 
-    The record is written before the signature so that a Swig signed in a tab
+    The record is written before the signature so that a vault signed in a tab
     that then closed is still findable; `confirm` promotes it once the chain
     carries the config's hash, and reconcile drops it if the transaction never
     landed.
@@ -325,11 +324,11 @@ async def create_vault(
     )
     vault_store.create_record(
         user.id,
-        account=build["swigAccount"],
+        account=build["vaultAccount"],
         label=req.label,
         server=server,
         network=req.network,
-        swig_id=build["swigId"],
+        vault_id=build["id"],
         wallet_address=build["walletAddress"],
         runner_address=runner,
         pending={
@@ -339,8 +338,8 @@ async def create_vault(
             "config_hash": digest,
         },
     )
-    logger.info("user %s built vault %s on %s", user.id, build["swigAccount"], server)
-    return VaultCreateResponse(account=build["swigAccount"], build=_as_build(build))
+    logger.info("user %s built vault %s on %s", user.id, build["vaultAccount"], server)
+    return VaultCreateResponse(account=build["vaultAccount"], build=_as_build(build))
 
 
 @router.post("/{account}/confirm")
@@ -409,7 +408,7 @@ async def build_install_delegate(
         gw,
         gw.build(
             "build-install-delegate",
-            {"walletAddress": record["runner_address"], "swigAccount": account},
+            {"walletAddress": record["runner_address"], "vaultAccount": account},
         ),
     )
     vault_store.update(
@@ -474,7 +473,7 @@ async def build_publish(
             "build-publish",
             {
                 "walletAddress": record["runner_address"],
-                "swigAccount": account,
+                "vaultAccount": account,
                 "agentRef": agent_ref,
                 "configHash": digest,
             },
@@ -606,7 +605,11 @@ async def _simple_build(
         gw,
         gw.build(
             route,
-            {"walletAddress": record["runner_address"], "swigAccount": account, **body},
+            {
+                "walletAddress": record["runner_address"],
+                "vaultAccount": account,
+                **body,
+            },
         ),
     )
     return _as_build(build)
@@ -638,7 +641,7 @@ async def build_launch_config(
     gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
     body = {
         "walletAddress": record["runner_address"],
-        "swigAccount": account,
+        "vaultAccount": account,
         # The quote asset is chosen here, not at creation: this config is what
         # fixes it, the program writes it onto the vault at `tokenize`, and it
         # can never change afterwards.
@@ -768,7 +771,7 @@ async def build_redeem(
         gw,
         gw.build(
             "build-redeem",
-            {"walletAddress": holder, "swigAccount": account, "amount": req.amount},
+            {"walletAddress": holder, "vaultAccount": account, "amount": req.amount},
         ),
     )
     return _as_build(build)
@@ -889,7 +892,7 @@ async def holdings(
     network = _network_of(user, account, server)
     gw = await _gateway(server, network)
     chain = await _upstream(gw, gw.vault(account))
-    wallet = chain.get("fundsOwner")
+    wallet = chain.get("wallet")
     if not wallet:
         raise HTTPException(status_code=404, detail=f"no vault {account} on {server}")
     balances = await _upstream(gw, gw.balances(wallet))
@@ -943,7 +946,7 @@ async def lp_positions(
     network = _network_of(user, account, server)
     gw = await _gateway(server, network)
     chain = await _upstream(gw, gw.vault(account))
-    wallet = chain.get("fundsOwner")
+    wallet = chain.get("wallet")
     if not wallet:
         raise HTTPException(status_code=404, detail=f"no vault {account} on {server}")
 

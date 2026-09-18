@@ -1,47 +1,29 @@
 //! `wind_down` and `finalize_wind_down` — the only exit, and it is one-way.
 //!
-//! `wind_down` stops the strategy for good: from that moment `publish_version`,
-//! `set_active` all refuse, so a vault cannot be wound down and
-//! then quietly restarted under a new strategy. The runner calls it; so may the
-//! protocol authority, for a vault whose runner has vanished, with no notice
-//! period — a forced liquidation into the quote asset is not a theft, and a
-//! notice period on an abandoned vault only delays the holders.
-//!
-//! Between the two calls the administrator does the work off chain: close every
-//! position, sweep the fees that come out of them like any others, swap every
-//! non-quote balance to `quote_mint` at Gateway-quoted slippage.
+//! `wind_down` stops the strategy for good: from that moment `publish_version`
+//! and `set_active` refuse, so a vault cannot be wound down and then quietly
+//! restarted under a new strategy. The runner calls it; so may the protocol
+//! authority, for a vault whose runner has vanished, with no notice period — a
+//! forced liquidation into the quote asset is not a theft, and a notice period
+//! on an abandoned vault only delays the holders.
 //!
 //! **Only a tokenized vault winds down.** The whole ceremony exists to pay
-//! holders: convert to the quote asset the launch chose, move it where the
-//! program can pay out of, stop the strategy for good. A private vault has no
-//! holders, no quote asset and nothing to convert — its runner empties it
-//! through the delegate whenever they like, which needs no instruction and no
-//! permission. `wind_down` refuses one.
+//! holders: convert everything into the quote asset the launch chose and stop
+//! the strategy. A private vault has no holders, no quote asset and nothing to
+//! convert — its runner empties it through `execute_unchecked` whenever they
+//! like. `wind_down` refuses one.
 //!
-//! `finalize_wind_down` is **administrator-signed**, and that is a deliberate
-//! narrowing of an otherwise permissionless design (plan §1.6). The check it
-//! performs can only look at the accounts it is handed, so a stranger could pass
-//! a short list and finalize a vault with positions still open, stranding them
-//! behind a removed delegate. Making the caller the one party that knows the
-//! whole list closes that.
+//! Between the two calls the conversion happens through `execute`, by the
+//! crank or by anyone the vault lets act: close every position, swap every
+//! non-quote balance to `quote_mint`. Nothing moves anywhere — the wallet's
+//! own quote account is what `redeem` pays from, because the wallet is this
+//! program's PDA and signs the payout itself.
 //!
-//! ## Why the pot moves out of the Swig
-//!
-//! Swig refuses to be reached by CPI on any of its execution paths —
-//! `sign_v2` opens with `check_stack_height(1, SwigError::Cpi)` — so this
-//! program **cannot** pay a redemption out of the Swig wallet, however it is
-//! written. That was found by running it against the real program, not by
-//! reading it (plan M3, the D3 gate).
-//!
-//! So the redeemable quote leaves the Swig *before* finalize, into an ordinary
-//! token account owned by this program's PDA, moved by the administrator at top
-//! level where a Swig sign is legal. This instruction does not perform that
-//! move; it **verifies** it, and refuses until it has happened.
-//!
-//! The result is better than the design it replaces. After finalize the pot is
-//! program-owned, so `redeem` needs no Swig, no delegate and no administrator —
-//! a holder is paid by a program that cannot refuse. And whether the sweep
-//! happened is checkable by anyone: the wallet is empty and the pot is funded.
+//! `finalize_wind_down` is **administrator-signed**, a deliberate narrowing
+//! (plan §1.6): the check it performs can only look at the accounts it is
+//! handed, so a stranger could pass a short list and finalize a vault with
+//! positions still open, stranding them. Making the caller the one party that
+//! knows the whole list closes that.
 
 use anchor_lang::prelude::*;
 
@@ -49,7 +31,7 @@ use crate::error::VaultError;
 use crate::state::{
     Protocol, Vault, VaultState, PROTOCOL_SEED, VAULT_AUTHORITY_SEED, VAULT_SEED, WIND_DOWN_DUST,
 };
-use crate::{swig, token};
+use crate::token;
 
 #[derive(Accounts)]
 pub struct WindDown<'info> {
@@ -63,7 +45,7 @@ pub struct WindDown<'info> {
     pub protocol: Option<Account<'info, Protocol>>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
@@ -100,33 +82,25 @@ pub fn wind_down(ctx: Context<WindDown>) -> Result<()> {
 
 #[derive(Accounts)]
 pub struct FinalizeWindDown<'info> {
-    /// The administrator. Pays, because removing a role rewrites the Swig.
-    #[account(mut, address = protocol.administrator @ VaultError::NotAdministrator)]
+    /// The administrator — the one party that knows the whole account list.
+    #[account(address = protocol.administrator @ VaultError::NotAdministrator)]
     pub administrator: Signer<'info>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
-    /// CHECK: the Swig's root authority, signing by CPI.
+    /// CHECK: the wallet. Read here for its address; it signs nothing.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
         bump = vault.authority_bump,
     )]
     pub vault_authority: UncheckedAccount<'info>,
-    /// CHECK: this vault's Swig account.
-    #[account(mut, address = vault.swig_account @ VaultError::SwigMismatch)]
-    pub swig_account: UncheckedAccount<'info>,
-    /// CHECK: the Swig program, pinned by address.
-    #[account(address = swig::SWIG_PROGRAM_ID)]
-    pub swig_program: UncheckedAccount<'info>,
-    /// CHECK: the wallet's quote account, which must be emptied into the pot.
-    pub wallet_quote_account: UncheckedAccount<'info>,
-    /// CHECK: the redemption pot — the authority PDA's own account for the
-    /// quote asset, derived in the handler. What `redeem` pays out of.
+    /// CHECK: the wallet's own quote account, derived in the handler. What
+    /// `redeem` pays out of, so it has to hold something.
     pub redemption_pot: UncheckedAccount<'info>,
     /// CHECK: the quote mint's token program.
     pub quote_token_program: UncheckedAccount<'info>,
@@ -150,7 +124,7 @@ pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {
     // it is the unsold treasury, it is already excluded from the redemption
     // denominator, and nobody has a claim on it. Requiring it to be sold first
     // would make finishing a wind-down depend on there being a bid.
-    let funds_owner = ctx.accounts.vault.funds_owner;
+    let funds_owner = ctx.accounts.vault_authority.key();
     let quote_mint = ctx.accounts.vault.quote_mint;
     let own_mint = ctx.accounts.vault.mint;
     for account in ctx.remaining_accounts.iter() {
@@ -169,63 +143,21 @@ pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {
         );
     }
 
-    // The quote must already be out of the Swig and in the pot. Verified, not
-    // performed: this program cannot move it, because Swig will not sign by CPI.
-    //
-    // A vault only reaches `WindingDown` by being tokenized, so the quote asset
-    // is always there to check against.
-    let quote_token_program = ctx.accounts.quote_token_program.key();
-    let wallet_quote = token::require_associated(
-        &ctx.accounts.wallet_quote_account.to_account_info(),
-        &funds_owner,
-        &quote_mint,
-        &quote_token_program,
-    )?;
-    require!(
-        wallet_quote.amount <= WIND_DOWN_DUST,
-        VaultError::WindDownIncomplete
-    );
+    // Everything is in the quote asset now, and it is in the wallet's own
+    // quote account — which is what `redeem` pays from, so holders are owed
+    // that it holds something. Verified, not performed: the conversion is
+    // `execute` calls, and this only checks that they happened.
     let pot = token::require_associated(
         &ctx.accounts.redemption_pot.to_account_info(),
-        &ctx.accounts.vault_authority.key(),
+        &funds_owner,
         &quote_mint,
-        &quote_token_program,
+        &ctx.accounts.quote_token_program.key(),
     )?;
-    // Holders are owed something, so the pot has to hold it.
     require!(pot.amount > 0, VaultError::RedemptionPotEmpty);
 
-    // Remove the delegate: nothing trades from here on, and the only movement
-    // left is `redeem`.
-    if ctx.accounts.vault.has_delegate() {
-        let root_role_id = swig::role_id_of(
-            &ctx.accounts.swig_account.to_account_info(),
-            &ctx.accounts.vault_authority.key(),
-        )?
-        .ok_or(VaultError::NoRootRole)?;
-        let delegate = ctx.accounts.vault.delegate;
-        if let Some(role_id) =
-            swig::role_id_of(&ctx.accounts.swig_account.to_account_info(), &delegate)?
-        {
-            let swig_account = ctx.accounts.vault.swig_account;
-            let bump = ctx.accounts.vault.authority_bump;
-            let seeds: [&[u8]; 3] = [
-                VAULT_AUTHORITY_SEED,
-                swig_account.as_ref(),
-                std::slice::from_ref(&bump),
-            ];
-            swig::remove_role(
-                &ctx.accounts.swig_program,
-                &ctx.accounts.swig_account,
-                &ctx.accounts.administrator,
-                &ctx.accounts.system_program,
-                &ctx.accounts.vault_authority,
-                root_role_id,
-                role_id,
-                &[&seeds],
-            )?;
-        }
-        ctx.accounts.vault.delegate = Pubkey::default();
-    }
+    // No delegate from here on: nothing trades, and the only movement left is
+    // `redeem`, which the wallet signs for itself.
+    ctx.accounts.vault.delegate = Pubkey::default();
 
     ctx.accounts.vault.state = VaultState::Redeemable;
     Ok(())

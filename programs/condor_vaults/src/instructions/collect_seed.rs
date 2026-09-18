@@ -29,13 +29,13 @@ pub struct CollectSeed<'info> {
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
     #[account(
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the DBC creator, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
         bump = vault.authority_bump,
     )]
     pub vault_authority: UncheckedAccount<'info>,
@@ -100,18 +100,12 @@ pub fn collect_seed(ctx: Context<CollectSeed>) -> Result<()> {
     // The seed lands in the wallet's own account, or nowhere.
     token::require_associated(
         &ctx.accounts.token_quote_account.to_account_info(),
-        &ctx.accounts.vault.funds_owner,
+        &ctx.accounts.vault_authority.key(),
         &ctx.accounts.vault.quote_mint,
         &ctx.accounts.token_quote_program.key(),
     )?;
 
-    let swig_account = ctx.accounts.vault.swig_account;
-    let bump = ctx.accounts.vault.authority_bump;
-    let seeds: [&[u8]; 3] = [
-        VAULT_AUTHORITY_SEED,
-        swig_account.as_ref(),
-        std::slice::from_ref(&bump),
-    ];
+        let seeds = ctx.accounts.vault.authority_seeds();
 
     let accounts = dbc::DbcAccounts {
         pool_authority: &ctx.accounts.pool_authority,

@@ -91,13 +91,13 @@ function VaultCard({ vault }: { vault: VaultInfo }) {
     >
       <div className="mb-2 flex items-start justify-between gap-3">
         {/* A vault is a wallet, so it wears a wallet's face — seeded by the
-            Swig account, which is the address the chain knows it by. Four
+            Vault account, which is the address the chain knows it by. Four
             "Untitled vault" cards are told apart by this and nothing else. */}
         <div className="flex min-w-0 items-start gap-2.5">
           <AddressAvatar address={vault.account} className="mt-0.5 h-8 w-8" />
           <div className="min-w-0">
             <h3 className="truncate text-sm font-semibold">{vault.label || "Untitled vault"}</h3>
-            <CopyAddress address={vault.account} label="Swig account" />
+            <CopyAddress address={vault.account} label="Vault account" />
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">

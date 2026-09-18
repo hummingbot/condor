@@ -23,7 +23,7 @@ each one has a failure it is there to prevent:
   of putting a hash on chain;
 * Condor's own scan passed *this version* — a private run policy, not an
   attestation (nothing on chain says Condor reviewed anything);
-* the Swig still carries the delegate Condor holds — a revoked delegate means
+* the vault still names the delegate Condor holds — a replaced delegate means
   the runner has taken the wallet back, and the crank must notice rather than
   fail transaction by transaction;
 * exactly one live engine per vault — two would double every position.
@@ -172,7 +172,7 @@ class VaultCrank:
     async def pass_once(self) -> None:
         gw = await VaultGateway.for_server(_config_manager(), self.server, self.network)
 
-        on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+        on_chain = {v["account"]: v for v in await gw.list_vaults()}
         # Keyed by account, carrying the user whose store it came from: the
         # engine needs that user to get an API client, and deriving it from the
         # store the record was read out of beats writing it into the record,
@@ -254,7 +254,7 @@ class VaultCrank:
         for route in ("collect-seed", "collect-leftover"):
             try:
                 result = await gw.execute(
-                    route, {"swigAccount": account, "dbcConfig": pool_config}
+                    route, {"vaultAccount": account, "dbcConfig": pool_config}
                 )
                 log.info(
                     "vault %s: %s landed (%s)", account, route, result.get("signature")
@@ -268,39 +268,23 @@ class VaultCrank:
     async def _wind_down(
         self, gw: VaultGateway, account: str, record: dict, chain: dict
     ) -> None:
-        """Close everything, convert to the quote asset, then finalize.
+        """Finalize once everything is in the quote asset.
+
+        The conversion — close every position, swap every other balance to
+        the quote asset — is `execute` calls the strategy's own executors
+        make, and nothing here moves money: the wallet is the program's PDA,
+        its quote account is what `redeem` pays from, and the program signs
+        the payout itself. This only asks the program to check that the
+        conversion happened and to stop the strategy for good.
 
         Deliberately not permissionless. A stranger's close-and-swap signed by
         the vault's own authority would need oracle-bounded prices to be safe
-        from a pool priced against it, and that is a design problem rather than
-        a missing endpoint. Until then the administrator does it and holders can
-        see that it happened.
-
-        What *is* permissionless is what comes after: once the pot is funded and
-        finalize has run, `redeem` pays out of an account this program owns, with
-        no delegate, no administrator and no key able to decline.
+        from a pool priced against it. What *is* permissionless is what comes
+        after: `redeem` pays out with no delegate, no administrator and no key
+        able to decline.
         """
-        # The redeemable quote has to leave the Swig *before* finalize, and it
-        # has to leave at top level: Swig refuses to be reached by CPI on any
-        # execution path, so the program cannot move it however it is written.
-        # `finalize_wind_down` verifies the sweep and refuses until it has
-        # happened, which is what makes the order here load-bearing rather than
-        # merely tidy.
         try:
-            swept = await gw.execute("sweep-to-pot", {"swigAccount": account})
-            if swept.get("signature"):
-                log.info(
-                    "vault %s swept %s into the redemption pot %s",
-                    account,
-                    swept.get("swept"),
-                    swept.get("pot"),
-                )
-        except Exception as e:
-            log.debug("vault %s could not sweep yet (%s)", account, e)
-            return
-
-        try:
-            result = await gw.execute("finalize-wind-down", {"swigAccount": account})
+            result = await gw.execute("finalize-wind-down", {"vaultAccount": account})
         except Exception as e:
             # The usual reason is the honest one: a position is still open, so a
             # balance is still in the wrong asset. The program refuses, and the
@@ -345,7 +329,7 @@ class VaultCrank:
 
     # ── engines ───────────────────────────────────────────────────────────────
 
-    async def _ensure_account(self, account: str, funds_owner: str) -> None:
+    async def _ensure_account(self, account: str, wallet: str) -> None:
         """One hummingbot-api account per vault, bound to that vault's wallet.
 
         Without the binding an account trades as Gateway's *default* wallet —
@@ -368,7 +352,7 @@ class VaultCrank:
         # route (plan M5).
         await client.accounts._post(
             f"/accounts/{name}/gateway-wallet",
-            json={"chain": "solana", "address": funds_owner},
+            json={"chain": "solana", "address": wallet},
         )
 
     async def _ensure_engine(
@@ -380,7 +364,7 @@ class VaultCrank:
 
         # The account and its wallet binding come first: an engine started
         # against an unbound account trades from the wrong address.
-        await self._ensure_account(account, chain["funds_owner"])
+        await self._ensure_account(account, chain["wallet"])
 
         from condor.agents.agent import AgentStore
         from condor.agents.engine import TickEngine
@@ -412,7 +396,7 @@ class VaultCrank:
         # different chain.
         config["server_name"] = self.server
         config["account_name"] = _account_name(account)
-        config["wallet_address"] = chain["funds_owner"]
+        config["wallet_address"] = chain["wallet"]
         config["vault_account"] = account
         config["execution_mode"] = "loop"
 
@@ -454,14 +438,14 @@ def _supervisor():
     return get_supervisor()
 
 
-def _account_name(swig_account: str) -> str:
+def _account_name(account: str) -> str:
     """The hummingbot-api account this vault trades through.
 
     One per vault, so each binds its own Gateway wallet: without that every
     account falls back to Gateway's *default* wallet and two vaults trading at
     once are the same wallet on chain.
     """
-    return f"vault_{swig_account[:12]}"
+    return f"vault_{account[:12]}"
 
 
 def _native_lamports(balances: Any) -> Optional[int]:

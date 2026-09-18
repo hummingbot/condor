@@ -5,15 +5,15 @@ them plus the two things the chain cannot hold — a label, and the private conf
 whose hash is on chain. It is deliberately the only local record: the prototype
 kept a vault in four places and spent its time reconciling them.
 
-`paths.user_dir(user_id)/vaults.json`, keyed by the Swig account address, which
+`paths.user_dir(user_id)/vaults.json`, keyed by the Vault PDA address, which
 is the vault's identity everywhere (D4). Per-user because the key in the record
 is the runner's, and the runner is a person.
 
 **A record is written before the signature and promoted after it.** Creating a
-vault is one transaction — the Swig, the delegate and the strategy together — so
+vault is one transaction — the wallet, the delegate and the strategy together — so
 there is no ladder of steps to resume, only `pending`: what the browser was
 asked to sign. `confirm` promotes it, and only if the chain carries the config's
-hash. Until then the record exists so that a Swig signed in a closed tab is
+hash. Until then the record exists so that a vault signed in a closed tab is
 still findable, and reconcile drops it if the transaction never landed.
 
 The lifecycle state — Running, Paused, WindingDown, Redeemable — is on chain and
@@ -140,14 +140,14 @@ def create_record(
     label: str,
     server: str,
     network: str,
-    swig_id: str,
+    vault_id: str,
     wallet_address: str,
     runner_address: str,
     pending: dict[str, Any],
 ) -> dict[str, Any]:
     """The record for a vault whose transaction has been built but not signed.
 
-    Written *before* the signature, so a Swig signed in a tab that then closed
+    Written *before* the signature, so a vault signed in a tab that then closed
     is still findable. ``pending`` is what the browser was asked to sign — the
     delegate, the strategy pin and its config — and stays pending until
     :func:`confirm` finds its hash on chain. Reconcile drops the record if the
@@ -164,7 +164,8 @@ def create_record(
         "label": label,
         "server": server,
         "network": network,
-        "swig_id": swig_id,
+        # hex; both PDAs derive from it, and Gateway re-derives the wallet with it
+        "vault_id": vault_id,
         "wallet_address": wallet_address,
         "runner_address": runner_address,
         "delegate": None,

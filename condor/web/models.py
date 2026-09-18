@@ -43,7 +43,7 @@ class ServerInfo(BaseModel):
     host: str
     port: int
     # Direct Gateway address for routes hummingbot-api does not proxy (vaults,
-    # Swig wallets, the chain badge). None means not configured — no default.
+    # the chain badge). None means not configured — no default.
     online: bool = False
     permission: str = "trader"
     # The server this user's commands land on when none is named — the same
@@ -905,8 +905,8 @@ class VaultChainState(BaseModel):
     """
 
     runner: str
-    swig_account: str
-    funds_owner: str
+    #: The wallet: where the money is, derived from the vault id by the program.
+    wallet: str
     # None while the vault is private, which is most of them and is a finished
     # state rather than an unfinished one. Typed as required strings, these two
     # made the listing fail for exactly the vaults the product is mostly about.
@@ -938,7 +938,7 @@ class VaultChainState(BaseModel):
 
 class VaultInfo(BaseModel):
     account: str
-    # Has the one create transaction — Swig, delegate and strategy together —
+    # Has the one create transaction — wallet, delegate and strategy together —
     # been confirmed on chain? False is a build nobody signed, not a half-made
     # vault: there are no intermediate steps to resume.
     live: bool
@@ -963,7 +963,7 @@ class CreateVaultRequest(BaseModel):
     """A private vault, whole, in one signature.
 
     The strategy is part of creating a vault, not a step after it: the same
-    transaction roots the Swig at the program, installs the delegate that trades
+    transaction funds the wallet, installs the delegate that trades
     it, and pins what it runs. No token, no symbol, nothing to price — those
     belong to `VaultTokenizeRequest`, which is a decision for later and often
     never.

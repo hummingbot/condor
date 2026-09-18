@@ -50,20 +50,16 @@ pub struct Redeem<'info> {
     #[account(mut)]
     pub holder: Signer<'info>,
     #[account(
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
-    /// CHECK: the pot's owner, signing the payout directly. No Swig.
+    /// CHECK: the wallet — the pot's owner, signing the payout itself.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
         bump = vault.authority_bump,
     )]
     pub vault_authority: UncheckedAccount<'info>,
-    /// CHECK: the Swig's funds owner — read only, to derive the treasury
-    /// balance that is excluded from the circulating supply.
-    #[account(address = vault.funds_owner @ VaultError::SwigMismatch)]
-    pub funds_owner: UncheckedAccount<'info>,
 
     /// CHECK: the vault's token mint; the burn changes its supply.
     #[account(mut, address = vault.mint @ VaultError::WrongMint)]
@@ -124,7 +120,7 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
     );
     let treasury = token::require_associated(
         &ctx.accounts.treasury_token_account.to_account_info(),
-        &ctx.accounts.vault.funds_owner,
+        &ctx.accounts.vault_authority.key(),
         &ctx.accounts.vault.mint,
         &ctx.accounts.token_program.key(),
     )?;
@@ -175,15 +171,9 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
         amount,
     )?;
 
-    // Straight out of the pot, signed by the PDA that owns it. One CPI, to the
-    // token program, and nothing that can decline.
-    let swig_account = ctx.accounts.vault.swig_account;
-    let bump = ctx.accounts.vault.authority_bump;
-    let seeds: [&[u8]; 3] = [
-        VAULT_AUTHORITY_SEED,
-        swig_account.as_ref(),
-        std::slice::from_ref(&bump),
-    ];
+    // Straight out of the wallet's own quote account, signed by the wallet. One
+    // CPI, to the token program, and nothing that can decline.
+        let seeds = ctx.accounts.vault.authority_seeds();
     let metas: Vec<AccountMeta> = token::transfer_checked_metas(
         &ctx.accounts.redemption_pot.key(),
         &ctx.accounts.quote_mint.key(),

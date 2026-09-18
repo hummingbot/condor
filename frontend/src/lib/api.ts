@@ -2365,8 +2365,8 @@ export interface VaultBuild {
 /** What the chain says about a vault. Null until the account exists. */
 export interface VaultChainState {
   runner: string;
-  swig_account: string;
-  funds_owner: string;
+  /** The wallet: where the money is, derived from the vault id by the program. */
+  wallet: string;
   mint: string | null;
   dbc_pool: string | null;
   config_hash: string | null;
@@ -2408,7 +2408,7 @@ export interface VaultTokenInfo {
 export interface VaultInfo {
   account: string;
   /**
-   * Has the one create transaction — Swig, delegate and strategy together —
+   * Has the one create transaction — wallet, delegate and strategy together —
    * been confirmed on chain? `false` is a build nobody signed, not a
    * half-made vault: there are no intermediate steps to resume.
    */

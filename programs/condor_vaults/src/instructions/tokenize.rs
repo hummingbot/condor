@@ -67,14 +67,14 @@ pub struct Tokenize<'info> {
     pub protocol: Account<'info, Protocol>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
         has_one = runner @ VaultError::NotRunner,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the DBC pool creator, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
         bump = vault.authority_bump,
     )]
     pub vault_authority: UncheckedAccount<'info>,
@@ -137,16 +137,10 @@ pub fn tokenize(
         &ctx.accounts.config.to_account_info(),
         &ctx.accounts.quote_mint.key(),
         &ctx.accounts.protocol.fee_claimer,
-        &ctx.accounts.vault.funds_owner,
+        &ctx.accounts.vault_authority.key(),
     )?;
 
-    let swig_account = ctx.accounts.vault.swig_account;
-    let bump = ctx.accounts.vault.authority_bump;
-    let seeds: [&[u8]; 3] = [
-        VAULT_AUTHORITY_SEED,
-        swig_account.as_ref(),
-        std::slice::from_ref(&bump),
-    ];
+        let seeds = ctx.accounts.vault.authority_seeds();
 
     let ix = Instruction {
         program_id: dbc::DBC_PROGRAM_ID,
@@ -222,7 +216,7 @@ fn check_launch_terms(
     config: &AccountInfo,
     quote_mint: &Pubkey,
     fee_claimer: &Pubkey,
-    funds_owner: &Pubkey,
+    wallet: &Pubkey,
 ) -> Result<LaunchTerms> {
     use crate::state::launch_rules as rules;
     let c = dbc::read_pool_config(config)?;
@@ -233,7 +227,7 @@ fn check_launch_terms(
     // pot of its own, where the delegate could never put it to work.
     require_keys_eq!(
         c.leftover_receiver,
-        *funds_owner,
+        *wallet,
         VaultError::LaunchTermsMismatch
     );
 

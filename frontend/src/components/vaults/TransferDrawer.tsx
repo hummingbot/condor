@@ -7,7 +7,7 @@
  * the copy says so:
  *
  * * **In** is an ordinary transfer the runner's own wallet signs. Gateway
- *   builds it so the destination is derived from the Swig rather than typed;
+ *   builds it so the destination is the vault's wallet rather than typed;
  *   a vault has two addresses that look equally plausible to paste.
  * * **Out** is the *delegate* moving what it can already move. There is no
  *   withdraw instruction in the program — installing a delegate is what grants

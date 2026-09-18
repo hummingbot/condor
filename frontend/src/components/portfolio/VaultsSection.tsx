@@ -1,7 +1,7 @@
 /**
  * The vaults this account runs, in Portfolio.
  *
- * A vault's assets are not in any hummingbot-api account: they live in a Swig
+ * A vault's assets are not in any hummingbot-api account: they live in a wallet
  * wallet owned by the vault program, which is why they are read here from the
  * chain rather than folded into the accounts table above. Keeping them a
  * separate section is also the honest presentation — money in a tokenized vault

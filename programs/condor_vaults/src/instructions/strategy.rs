@@ -16,7 +16,6 @@ use crate::error::VaultError;
 use crate::state::{
     AgentRef, Vault, VaultState, VAULT_AUTHORITY_SEED, VAULT_SEED,
 };
-use crate::swig;
 
 #[derive(Accounts)]
 pub struct Pin<'info> {
@@ -27,7 +26,7 @@ pub struct Pin<'info> {
     // the one dependency a private vault is meant not to have (D29).
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
         has_one = runner @ VaultError::NotRunner,
     )]
@@ -56,7 +55,7 @@ pub fn pin(ctx: Context<Pin>, agent_ref: AgentRef, config_hash: [u8; 32]) -> Res
 fn expected_authority(vault: &Vault) -> Result<Pubkey> {
     let bump = [vault.authority_bump];
     Pubkey::create_program_address(
-        &[VAULT_AUTHORITY_SEED, vault.swig_account.as_ref(), &bump],
+        &[VAULT_AUTHORITY_SEED, vault.id.as_ref(), &bump],
         &crate::ID,
     )
     .map_err(|_| error!(VaultError::PoolCreatorMismatch))
@@ -67,7 +66,7 @@ pub struct RunnerOnly<'info> {
     pub runner: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
         has_one = runner @ VaultError::NotRunner,
     )]
@@ -117,11 +116,4 @@ pub fn set_active(ctx: Context<RunnerOnly>, active: bool) -> Result<()> {
 /// same way rather than each writing the seeds out again.
 pub fn authority_of(vault: &Vault) -> Result<Pubkey> {
     expected_authority(vault)
-}
-
-/// The vault's Swig still carries the administrator's delegate. Used by the
-/// crank's start checks through the account decode, and by `finalize` to know
-/// there is something to remove.
-pub fn delegate_role_id(swig_account: &AccountInfo, delegate: &Pubkey) -> Result<Option<u32>> {
-    swig::role_id_of(swig_account, delegate)
 }

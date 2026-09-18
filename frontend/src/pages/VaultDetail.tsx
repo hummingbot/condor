@@ -139,7 +139,7 @@ export function VaultDetail() {
                   and Portfolio says so where it shows it. */}
               <span className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
                 Vault account
-                <CopyAddress address={vault.account} label="Vault account (Swig)" />
+                <CopyAddress address={vault.account} label="Vault account" />
               </span>
             </div>
           </div>
@@ -318,7 +318,7 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
       <Card title="Keys">
         <dl>
           <Row label="Vault account — what the chain knows it by">
-            <CopyAddress address={vault.account} label="Vault account (Swig)" />
+            <CopyAddress address={vault.account} label="Vault account" />
           </Row>
           <Row label="Wallet — fund it by sending here">
             <CopyAddress address={vault.wallet_address} label="Funds owner" />

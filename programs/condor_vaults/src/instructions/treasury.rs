@@ -43,7 +43,7 @@ use anchor_lang::solana_program::program::invoke;
 
 use crate::dbc;
 use crate::error::VaultError;
-use crate::state::{Vault, VAULT_SEED};
+use crate::state::{Vault, VAULT_AUTHORITY_SEED, VAULT_SEED};
 use crate::token;
 
 #[derive(Accounts)]
@@ -52,14 +52,18 @@ pub struct CollectLeftover<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
-    /// CHECK: the leftover receiver DBC pays, which it checks against the
-    /// config. Not a signer: that is what makes this call permissionless.
-    #[account(address = vault.funds_owner @ VaultError::SwigMismatch)]
-    pub funds_owner: UncheckedAccount<'info>,
+    /// CHECK: the wallet — the leftover receiver DBC pays, which it checks
+    /// against the config. Not a signer: that is what makes this call
+    /// permissionless.
+    #[account(
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
+        bump = vault.authority_bump,
+    )]
+    pub vault_authority: UncheckedAccount<'info>,
 
     /// CHECK: DBC's signer PDA.
     #[account(address = dbc::DBC_POOL_AUTHORITY)]
@@ -105,7 +109,7 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
     );
     token::require_associated(
         &ctx.accounts.token_base_account.to_account_info(),
-        &ctx.accounts.vault.funds_owner,
+        &ctx.accounts.vault_authority.key(),
         &ctx.accounts.vault.mint,
         &ctx.accounts.token_base_program.key(),
     )?;
@@ -123,7 +127,7 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
             AccountMeta::new(ctx.accounts.token_base_account.key(), false),
             AccountMeta::new(ctx.accounts.base_vault.key(), false),
             AccountMeta::new_readonly(ctx.accounts.base_mint.key(), false),
-            AccountMeta::new_readonly(ctx.accounts.funds_owner.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), false),
             AccountMeta::new_readonly(ctx.accounts.token_base_program.key(), false),
             AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
             AccountMeta::new_readonly(ctx.accounts.dbc_program.key(), false),
@@ -139,7 +143,7 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
             ctx.accounts.token_base_account.to_account_info(),
             ctx.accounts.base_vault.to_account_info(),
             ctx.accounts.base_mint.to_account_info(),
-            ctx.accounts.funds_owner.to_account_info(),
+            ctx.accounts.vault_authority.to_account_info(),
             ctx.accounts.token_base_program.to_account_info(),
             ctx.accounts.event_authority.to_account_info(),
             ctx.accounts.dbc_program.to_account_info(),

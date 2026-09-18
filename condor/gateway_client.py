@@ -1,7 +1,7 @@
 """Gateway, reached through the server's hummingbot-api.
 
 Condor needs routes hummingbot-api has no typed method for — ``/chains/solana/status``,
-``/wallet/swig/*``, the launch builds, the vault routes — so it sends them
+the launch builds, the vault routes — so it sends them
 through hbapi's passthrough (``/gateway/proxy/{path}``) rather than opening its
 own connection.
 
@@ -223,9 +223,9 @@ class VaultGateway:
     async def protocol(self) -> dict:
         return await self.client.get(f"{self.BASE}/protocol", {"network": self.network})
 
-    async def vault(self, swig_account: str) -> dict:
+    async def vault(self, account: str) -> dict:
         return await self.client.get(
-            f"{self.BASE}/{swig_account}", {"network": self.network}
+            f"{self.BASE}/{account}", {"network": self.network}
         )
 
     # builds
@@ -261,7 +261,7 @@ class VaultGateway:
 
     async def withdraw(
         self,
-        swig_account: str,
+        account: str,
         destination: str,
         amount: str,
         mint: Optional[str] = None,
@@ -269,7 +269,7 @@ class VaultGateway:
         """Move assets out of a private vault, signed by its delegate."""
         body = {
             "network": self.network,
-            "swigAccount": swig_account,
+            "vaultAccount": account,
             "destination": destination,
             "amount": amount,
         }
@@ -277,13 +277,13 @@ class VaultGateway:
             body["mint"] = mint
         return await self.client.post(f"{self.BASE}/withdraw", body)
 
-    async def fund_delegate(self, swig_account: str, lamports: int) -> dict:
+    async def fund_delegate(self, account: str, lamports: int) -> dict:
         """Move SOL from the vault's wallet to its delegate, so it can pay for gas."""
         return await self.client.post(
             f"{self.BASE}/fund-delegate",
             {
                 "network": self.network,
-                "swigAccount": swig_account,
+                "vaultAccount": account,
                 "lamports": str(lamports),
             },
         )

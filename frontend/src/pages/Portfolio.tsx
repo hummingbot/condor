@@ -1081,7 +1081,7 @@ export function Portfolio() {
         )}
 
         {/* Below the accounts rather than among them: a vault's assets live in
-            a Swig wallet the program owns, and once it is tokenized they are
+            a wallet the program owns, and once it is tokenized they are
             not this account's money at all. Folding them into the total above
             would say otherwise. */}
         {server && <VaultsSection server={server} />}

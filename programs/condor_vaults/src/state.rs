@@ -158,13 +158,17 @@ impl VaultState {
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {
-    /// The wallet that created it. Publishes the strategy, sets the fee,
-    /// pauses, installs the administrator, claims its income, winds down once.
-    /// Cannot withdraw anything, ever.
+    /// The wallet that created it. Publishes the strategy, pauses, installs
+    /// the delegate, claims its income, winds down once. While the vault is
+    /// private it may also empty it, through `execute_unchecked`; from
+    /// `tokenize` on it cannot move a token to anyone.
     pub runner: Pubkey,
-    pub swig_account: Pubkey,
-    /// Where the money actually is: the Swig's funds-owner PDA.
-    pub funds_owner: Pubkey,
+    /// The 32 random bytes chosen at creation. Both PDAs derive from them —
+    /// `["vault", id]` is this account and the vault's public identity;
+    /// `["vault_authority", id]` is the wallet, a system account with no data
+    /// that holds the SOL and owns every token account and position. Stored so
+    /// every instruction can re-derive the wallet's signing seeds.
+    pub id: [u8; 32],
     /// Set by `tokenize`; the Token-2022 mint DBC created. Default until then,
     /// and that default *is* what "private" means.
     pub mint: Pubkey,
@@ -227,8 +231,9 @@ impl Vault {
     /// Whether anyone but the runner has a claim on what is inside.
     ///
     /// Everything that separates the two phases hangs off this one question:
-    /// a private vault's runner may withdraw and may install a delegate alone;
-    /// a tokenized one's may do neither.
+    /// a private vault's wallet acts through `execute_unchecked`, which may do
+    /// anything; a tokenized one's only through `execute`, which may not move
+    /// a token to anyone.
     pub fn is_tokenized(&self) -> bool {
         self.mint != Pubkey::default()
     }
@@ -237,13 +242,26 @@ impl Vault {
         self.version > 0
     }
 
-    /// The seeds this program signs with, as the Swig root and the DBC creator.
-    pub fn authority_seeds<'a>(&'a self, swig_account: &'a Pubkey) -> [&'a [u8]; 3] {
+    /// The seeds this program signs with as the wallet — for every venue it
+    /// trades on and as the DBC pool creator.
+    pub fn authority_seeds(&self) -> [&[u8]; 3] {
         [
             VAULT_AUTHORITY_SEED,
-            swig_account.as_ref(),
+            self.id.as_ref(),
             std::slice::from_ref(&self.authority_bump),
         ]
+    }
+
+    /// The wallet's address, derived rather than stored: one fewer field that
+    /// could disagree with the seeds.
+    pub fn wallet(&self) -> Pubkey {
+        Pubkey::create_program_address(&self.authority_seeds(), &crate::ID)
+            .expect("stored authority bump derives the wallet")
+    }
+
+    /// Whether `key` may act for the wallet.
+    pub fn may_act(&self, key: &Pubkey) -> bool {
+        *key == self.runner || (self.has_delegate() && *key == self.delegate)
     }
 }
 

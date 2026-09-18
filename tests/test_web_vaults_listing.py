@@ -16,8 +16,8 @@ from condor.web.routes.vaults import _chain_only_info, _to_info
 
 PRIVATE_CHAIN = {
     "runner": "2LjWzppfJyTfTJT3gPAvmk6wukYUwi8cv1CuXjBHhfGj",
-    "swigAccount": "4YfP3qnEiNeof88jsBE3LpeiV8M1VFPBtyZejmhQXaer",
-    "fundsOwner": "3xV8qNoHiNCopjSmdqt83c1Gg5VgZTWd36ENZqWf6Vd6",
+    "account": "4YfP3qnEiNeof88jsBE3LpeiV8M1VFPBtyZejmhQXaer",
+    "wallet": "3xV8qNoHiNCopjSmdqt83c1Gg5VgZTWd36ENZqWf6Vd6",
     "mint": None,
     "dbcPool": None,
     "configHash": "ab" * 32,
@@ -33,7 +33,7 @@ RECORD = {
     "label": "Cover LP",
     "server": "vaults",
     "network": "mainnet-beta",
-    "wallet_address": PRIVATE_CHAIN["fundsOwner"],
+    "wallet_address": PRIVATE_CHAIN["wallet"],
     "runner_address": PRIVATE_CHAIN["runner"],
     "quote_mint": PRIVATE_CHAIN["quoteMint"],
     "delegate": {"address": PRIVATE_CHAIN["delegate"], "granted_at": 1},
@@ -46,8 +46,7 @@ RECORD = {
 def test_a_private_vault_has_no_mint_and_still_validates():
     state = VaultChainState(
         runner=PRIVATE_CHAIN["runner"],
-        swig_account=PRIVATE_CHAIN["swigAccount"],
-        funds_owner=PRIVATE_CHAIN["fundsOwner"],
+        wallet=PRIVATE_CHAIN["wallet"],
         mint=None,
         dbc_pool=None,
         config_hash=PRIVATE_CHAIN["configHash"],
@@ -58,7 +57,7 @@ def test_a_private_vault_has_no_mint_and_still_validates():
 
 
 def test_a_record_for_a_private_vault_becomes_a_row():
-    row = _to_info(PRIVATE_CHAIN["swigAccount"], {**RECORD, "chain": _snake_private()})
+    row = _to_info(PRIVATE_CHAIN["account"], {**RECORD, "chain": _snake_private()})
     assert row.live is True
     assert row.label == "Cover LP"
     assert row.chain is not None and row.chain.mint is None
@@ -67,10 +66,10 @@ def test_a_record_for_a_private_vault_becomes_a_row():
 def test_a_vault_with_no_record_still_lists():
     """Somebody else's vault, or one created from another install: the chain
     has it, so the listing has it — with nothing of anyone's private record."""
-    row = _chain_only_info(PRIVATE_CHAIN["swigAccount"], PRIVATE_CHAIN, "vaults")
-    assert row.account == PRIVATE_CHAIN["swigAccount"]
+    row = _chain_only_info(PRIVATE_CHAIN["account"], PRIVATE_CHAIN, "vaults")
+    assert row.account == PRIVATE_CHAIN["account"]
     assert row.runner_address == PRIVATE_CHAIN["runner"]
-    assert row.wallet_address == PRIVATE_CHAIN["fundsOwner"]
+    assert row.wallet_address == PRIVATE_CHAIN["wallet"]
     # `live` is true because the account exists: the flag asks whether the
     # create transaction landed, which for a vault read off the chain is
     # already answered.

@@ -50,14 +50,14 @@ pub struct ClaimIncome<'info> {
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
     #[account(
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
         has_one = runner @ VaultError::NotRunner,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the DBC creator, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
         bump = vault.authority_bump,
     )]
     pub vault_authority: UncheckedAccount<'info>,
@@ -137,13 +137,7 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
         &ctx.accounts.token_quote_program.key(),
     )?;
 
-    let swig_account = ctx.accounts.vault.swig_account;
-    let bump = ctx.accounts.vault.authority_bump;
-    let seeds: [&[u8]; 3] = [
-        VAULT_AUTHORITY_SEED,
-        swig_account.as_ref(),
-        std::slice::from_ref(&bump),
-    ];
+        let seeds = ctx.accounts.vault.authority_seeds();
 
     match source {
         IncomeSource::Surplus => {
@@ -218,14 +212,14 @@ pub struct ClaimPositionFee<'info> {
     #[account(mut)]
     pub runner: Signer<'info>,
     #[account(
-        seeds = [VAULT_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
         has_one = runner @ VaultError::NotRunner,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the position's owner, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.swig_account.as_ref()],
+        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
         bump = vault.authority_bump,
     )]
     pub vault_authority: UncheckedAccount<'info>,
@@ -308,13 +302,7 @@ pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
         &ctx.accounts.token_b_program.key(),
     )?;
 
-    let swig_account = ctx.accounts.vault.swig_account;
-    let bump = ctx.accounts.vault.authority_bump;
-    let seeds: [&[u8]; 3] = [
-        VAULT_AUTHORITY_SEED,
-        swig_account.as_ref(),
-        std::slice::from_ref(&bump),
-    ];
+        let seeds = ctx.accounts.vault.authority_seeds();
 
     let ix = Instruction {
         program_id: dbc::DAMM_V2_PROGRAM_ID,

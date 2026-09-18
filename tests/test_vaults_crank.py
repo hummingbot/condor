@@ -132,8 +132,8 @@ def test_each_vault_gets_its_own_account_name():
 
 
 def test_camel_case_from_gateway_reads_as_snake():
-    assert _snake({"swigAccount": "A", "issueBps": 1, "state": "Running"}) == {
-        "swig_account": "A",
+    assert _snake({"dbcPool": "A", "issueBps": 1, "state": "Running"}) == {
+        "dbc_pool": "A",
         "issue_bps": 1,
         "state": "Running",
     }

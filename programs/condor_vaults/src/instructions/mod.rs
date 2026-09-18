@@ -3,6 +3,7 @@
 
 pub mod collect_seed;
 pub mod create_vault;
+pub mod execute;
 pub mod income;
 pub mod install_delegate;
 pub mod protocol;
@@ -14,6 +15,7 @@ pub mod wind_down;
 
 pub use collect_seed::*;
 pub use create_vault::*;
+pub use execute::*;
 pub use income::*;
 pub use install_delegate::*;
 pub use protocol::*;

@@ -18,14 +18,6 @@ pub enum VaultError {
     SeedAlreadyCollected,
     #[msg("version counter overflow")]
     VersionOverflow,
-    #[msg("the account is not a Swig wallet account")]
-    NotSwigAccount,
-    #[msg("the Swig account is not the one this vault was created for")]
-    SwigMismatch,
-    #[msg("this program's authority PDA holds no role on the Swig account")]
-    NoRootRole,
-    #[msg("the delegate holds no role on the Swig account")]
-    NoDelegateRole,
     #[msg("the signer is not the program's upgrade authority")]
     NotUpgradeAuthority,
     #[msg("the signer is not the protocol authority")]
@@ -42,8 +34,24 @@ pub enum VaultError {
     NotTokenized,
     #[msg("the vault is already tokenized")]
     AlreadyTokenized,
-    #[msg("the vault is tokenized: nobody may withdraw from it")]
+    #[msg("the vault is tokenized: its wallet acts only through `execute`, which cannot move a token to anyone")]
     NotPrivate,
+    #[msg("the wallet must be funded with at least the rent floor for an empty account, or it would not exist")]
+    FundingBelowRent,
+    #[msg("the signer is neither this vault's runner nor its delegate")]
+    NotRunnerOrDelegate,
+    #[msg("the vault is not running or paused, so its wallet does not act")]
+    VaultNotActive,
+    #[msg("the wallet will not invoke this program")]
+    SelfInvoke,
+    #[msg("that program is not a venue the wallet may trade on")]
+    ProgramNotAllowed,
+    #[msg("that instruction is not one the wallet may send to that program")]
+    InstructionNotAllowed,
+    #[msg("a writable account is neither the wallet's, the venue's, nor the caller's own — see the log for which")]
+    AccountNotAllowed,
+    #[msg("an account this call created is not owned by the wallet — see the log for which")]
+    RecipientNotVault,
     #[msg("the DBC config's terms are not the ones every Condor vault launches with")]
     LaunchTermsMismatch,
     #[msg("the migration fee must be between 20% and 80%: it is the split between the vault's capital and its holders' exit liquidity")]
@@ -58,7 +66,7 @@ pub enum VaultError {
     NotRedeemable,
     #[msg("the wind-down is not finished: a position or a balance remains in the wallet")]
     WindDownIncomplete,
-    #[msg("the redemption pot is empty: sweep the quote asset out of the wallet before finalizing")]
+    #[msg("the wallet holds none of the quote asset, so there is nothing for holders to redeem")]
     RedemptionPotEmpty,
     #[msg("the token account is not the vault's own for this mint")]
     WrongTokenAccount,
