@@ -217,10 +217,66 @@ async def list_vaults(
     server: str = Query(...),
     user: WebUser = Depends(require_server_access_query),
 ):
+    """Every vault on this network, with this user's own filled in.
+
+    A vault is a public account: its runner, its state, its phase and its terms
+    are on chain for anyone to read, and a listing that showed only the ones
+    Condor happens to hold a record of would be hiding chain data behind a local
+    file. So the chain is the list, and a record adds what only its owner has —
+    the label, the pinned strategy, and whether the two disagree.
+
+    What a record never adds to somebody else's row is the private config: that
+    is served by `/config`, to its runner alone.
+    """
     gw = await _gateway(server)
     records = vault_store.for_server(user.id, server)
     records = await _reconcile(gw, user.id, records)
-    return [_to_info(account, record) for account, record in sorted(records.items())]
+
+    try:
+        on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+    except Exception as e:
+        # The chain is unreachable; the records are still worth showing, and
+        # each already carries the last chain state reconcile saw.
+        logger.warning("vault listing fell back to records alone: %s", e)
+        on_chain = {}
+
+    rows = [_to_info(account, record) for account, record in sorted(records.items())]
+    rows += [
+        _chain_only_info(account, chain, server)
+        for account, chain in sorted(on_chain.items())
+        if account not in records
+    ]
+    return rows
+
+
+def _chain_only_info(account: str, chain: dict[str, Any], server: str) -> VaultInfo:
+    """A vault this user has no record of — everything from the chain, nothing else.
+
+    `live` is true because the account exists: the flag asks whether the create
+    transaction landed, and for a vault read *off* the chain that question is
+    already answered.
+    """
+    fields = _chain_fields(chain)
+    return VaultInfo(
+        account=account,
+        live=True,
+        label="",
+        server=server,
+        network=chain.get("network", "mainnet-beta"),
+        wallet_address=fields["funds_owner"],
+        runner_address=fields["runner"],
+        quote_mint=fields.get("quote_mint"),
+        delegate=None,
+        token=(
+            {"mint": fields["mint"], "dbc_pool": fields.get("dbc_pool")}
+            if fields.get("mint")
+            else None
+        ),
+        pin=None,
+        created_at=fields.get("created_ts", 0),
+        chain=fields,
+        drift=None,
+    )
 
 
 @router.post("", response_model=VaultCreateResponse)

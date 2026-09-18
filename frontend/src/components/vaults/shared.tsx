@@ -9,8 +9,8 @@
  */
 import { Copy, Lock, ShieldCheck, Wallet } from "lucide-react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
 
+import { WalletPicker } from "@/components/wallet/WalletPicker";
 import type { VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
 
@@ -109,6 +109,7 @@ export function StateBadge({ vault }: { vault: VaultInfo }) {
  */
 export function WalletGate({ children }: { children: React.ReactNode }) {
   const { attached, connected, connect, attach, available, mismatched } = useWallet();
+  const [picking, setPicking] = useState(false);
 
   if (attached && connected && !mismatched) return <>{children}</>;
 
@@ -116,14 +117,18 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-6 text-center">
       <Wallet className="mx-auto mb-3 h-8 w-8 text-[var(--color-text-muted)]" />
       <h2 className="mb-1 text-base font-semibold">
-        {attached ? "Connect the wallet you attached" : "Attach a wallet"}
+        {mismatched
+          ? "Connect the wallet you attached"
+          : attached
+            ? "Connect the wallet you attached"
+            : "Attach a wallet"}
       </h2>
       <p className="mx-auto mb-4 max-w-md text-sm text-[var(--color-text-muted)]">
         {mismatched ? (
           <>
-            This browser is connected to <CopyAddress address={connected!.address} />, but this
-            Condor account is attached to <CopyAddress address={attached!} />. Switch accounts in
-            your wallet, or detach in Settings.
+            This browser is connected to <CopyAddress address={connected!.address} />, and this
+            account signs as <CopyAddress address={attached!} />. Only that key can sign what this
+            page builds — switch accounts in your wallet, or detach from the wallet menu.
           </>
         ) : attached ? (
           <>
@@ -138,18 +143,15 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
         )}
       </p>
       <div className="flex flex-wrap items-center justify-center gap-2">
-        {!connected &&
-          available.map((wallet) => (
-            <button
-              key={wallet.name}
-              type="button"
-              onClick={() => connect(wallet.name)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
-            >
-              {wallet.icon && <img src={wallet.icon} alt="" className="h-4 w-4" />}
-              {wallet.name}
-            </button>
-          ))}
+        {!connected && (
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+          >
+            Connect wallet
+          </button>
+        )}
         {connected && !attached && (
           <button
             type="button"
@@ -159,16 +161,14 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
             Attach {shortAddress(connected.address)}
           </button>
         )}
-        {!connected && available.length === 0 && (
-          <p className="text-[12px] text-[var(--color-text-muted)]">
-            No Solana wallet found in this browser.{" "}
-            <Link to="/settings" className="underline">
-              Settings
-            </Link>{" "}
-            shows which chain this server is pointed at.
-          </p>
-        )}
       </div>
+      {picking && (
+        <WalletPicker
+          available={available}
+          onConnect={connect}
+          onClose={() => setPicking(false)}
+        />
+      )}
     </div>
   );
 }

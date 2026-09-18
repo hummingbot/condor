@@ -725,11 +725,19 @@ class UpdateServerRequest(BaseModel):
 
 
 class GatewayChainInfo(BaseModel):
-    """What chain a server's Gateway is pointed at — read through Gateway's own
-    RPC, never a URL the browser could see. ``rpc_host`` is host[:port] only."""
+    """What chain a server's Gateway is pointed at, read through Gateway's own RPC.
+
+    ``rpc_url`` is the whole thing, because the browser's wallet layer reads the
+    chain itself — balances, tokens, history — and a cluster is configured with
+    a URL. ``rpc_host`` stays beside it for the places that only ever wanted
+    something to *show*: a badge that printed a provider URL would put a key on
+    screen, and this way the choice between the two is made per surface rather
+    than by whoever wrote the endpoint.
+    """
 
     kind: Literal["surfpool", "node"]
     rpc_host: str
+    rpc_url: str
     surfnet_version: Optional[str] = None
     solana_core: Optional[str] = None
     slot: Optional[int] = None

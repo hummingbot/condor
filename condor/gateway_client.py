@@ -134,6 +134,9 @@ async def probe_rpc(url: str) -> dict:
     slot = slot_env.get("result") if isinstance(slot_env, dict) else None
     info = classify_rpc(version, surfnet)
     info["rpc_host"] = host_of(url)
+    # The whole URL, for the browser's wallet layer: a Solana cluster is
+    # configured with one, and ConnectorKit's own reads go straight to it.
+    info["rpc_url"] = url
     info["slot"] = slot if isinstance(slot, int) else None
     return info
 

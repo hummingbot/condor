@@ -8,10 +8,24 @@ import { createContext, use } from "react";
 
 import type { VaultBuild } from "@/lib/api";
 
-import type { AvailableWallet, ConnectedWallet } from "./standard";
+/** A wallet the picker can offer. `id` is what `connect` takes — ConnectorKit
+ *  keys its session on a stable connector id, not on a display name. */
+export interface AvailableWallet {
+  id: string;
+  name: string;
+  icon: string;
+}
+
+/** The wallet this browser is connected to. */
+export interface ConnectedWallet {
+  id: string;
+  name: string;
+  icon: string;
+  address: string;
+}
 
 export interface WalletState {
-  /** Installed wallets, plus dev keypairs on a fork. */
+  /** Wallets this browser can offer, dev keypairs among them on a fork. */
   available: AvailableWallet[];
   /** The wallet this browser is connected to, if any. */
   connected: ConnectedWallet | null;
@@ -26,7 +40,7 @@ export interface WalletState {
    * the signature rather than after it.
    */
   mismatched: boolean;
-  connect(name: string): Promise<void>;
+  connect(id: string): Promise<void>;
   disconnect(): void;
   attach(): Promise<void>;
   detach(): Promise<void>;

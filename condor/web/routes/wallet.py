@@ -127,6 +127,34 @@ async def detach(user: WebUser = Depends(get_current_user)):
 # ── sign and submit ───────────────────────────────────────────────────────────
 
 
+@router.get("/balances")
+async def balances(
+    address: str = Query(...),
+    server: str = Query(...),
+    network: str = Query("mainnet-beta"),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """What an address holds, read through this server's Gateway.
+
+    Any address, not just the attached one: the wallet control shows the key the
+    browser is connected to, which may not be the one this Condor account
+    attached — and showing a balance for the wrong one would be worse than
+    showing none. It is public chain data either way.
+    """
+    gw = await _gateway(server)
+    try:
+        answer = await gw.post(
+            "/chains/solana/balances",
+            {"network": network, "address": address, "tokens": []},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"The Gateway on '{server}' could not read {address[:8]}…: {e}",
+        )
+    return {"address": address, "balances": answer.get("balances", answer)}
+
+
 @router.post("/submit")
 async def submit(
     req: WalletSubmitRequest,

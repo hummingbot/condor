@@ -1548,7 +1548,10 @@ export interface GatewayStatus {
  *  `rpc_host` is host[:port] only — the URL may carry a provider key. */
 export interface GatewayChainInfo {
   kind: "surfpool" | "node";
+  /** host[:port] — what a badge shows, since a provider URL carries a key. */
   rpc_host: string;
+  /** The whole URL: what the wallet layer configures its cluster with. */
+  rpc_url: string;
   surfnet_version?: string | null;
   solana_core?: string | null;
   slot?: number | null;

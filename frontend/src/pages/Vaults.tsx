@@ -1,5 +1,6 @@
 /**
- * The Vaults tab: every vault this account runs, and the door to a new one.
+ * The Vaults tab: every vault on this chain, yours first, and the door to a new
+ * one.
  *
  * A vault is a wallet that trades a strategy and is owned by a program rather
  * than by a person. Most of them are **private** — no token, no outside
@@ -10,6 +11,13 @@
  * What a card must make unambiguous, because getting it wrong costs money:
  * which phase the vault is in, what the chain says its state is, and whether
  * the local record disagrees with the chain.
+ *
+ * **A vault is public, so this page is readable without a wallet.** A vault's
+ * runner, state, phase and launch terms are on chain for anyone; connecting a
+ * wallet does not reveal them, it only says which of them are yours. Gating the
+ * list behind a connected-and-attached wallet hid chain data behind a local
+ * file, and told someone whose browser held a different key that they could not
+ * look — at their own vaults, on a public chain.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Plus, Vault as VaultIcon } from "lucide-react";
@@ -21,11 +29,31 @@ import {
   CopyAddress,
   PhaseBadge,
   StateBadge,
-  WalletGate,
 } from "@/components/vaults/shared";
 import { useServer } from "@/hooks/useServer";
 import { api, type VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
+
+/** One titled block of cards. Two of them at most: yours, and everyone's. */
+function Section({
+  title,
+  count,
+  children,
+}: {
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 flex items-baseline gap-2 text-[12px] font-semibold tracking-wide text-[var(--color-text-muted)] uppercase">
+        {title}
+        <span className="font-normal normal-case">{count}</span>
+      </h2>
+      <div className="grid gap-3 sm:grid-cols-2">{children}</div>
+    </section>
+  );
+}
 
 function feePct(bps: number): string {
   return `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
@@ -104,14 +132,21 @@ export function Vaults() {
   const { server } = useServer();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { attached } = useWallet();
+  const { attached, connected } = useWallet();
 
   const vaults = useQuery({
     queryKey: ["vaults", server],
     queryFn: () => api.listVaults(server!),
-    enabled: !!server && !!attached,
+    enabled: !!server,
     retry: false,
   });
+
+  // "Mine" is the key in the browser, not the one attached: it is the wallet
+  // whose vaults you are looking for, and it answers before any signature.
+  // Where they differ the wallet menu says so.
+  const me = connected?.address ?? attached;
+  const mine = (vaults.data ?? []).filter((vault) => vault.runner_address === me);
+  const others = (vaults.data ?? []).filter((vault) => vault.runner_address !== me);
 
   const cleanup = useMutation({
     mutationFn: (account: string) => api.deleteVault(account),
@@ -144,27 +179,36 @@ export function Vaults() {
         </button>
       </div>
 
-      <WalletGate>
-        {vaults.isLoading && (
-          <p className="text-[12px] text-[var(--color-text-muted)]">Reading the chain…</p>
-        )}
-        {vaults.error && (
-          <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] text-red-600 dark:text-red-400">
-            {(vaults.error as Error).message}
+      {vaults.isLoading && (
+        <p className="text-[12px] text-[var(--color-text-muted)]">Reading the chain…</p>
+      )}
+      {vaults.error && (
+        <p className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] text-red-600 dark:text-red-400">
+          {(vaults.error as Error).message}
+        </p>
+      )}
+
+      {!me && (vaults.data?.length ?? 0) > 0 && (
+        <p className="mb-4 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-[12px] text-[var(--color-text-muted)]">
+          Connect a wallet to see which of these are yours. Anyone can read them; only their
+          runner&rsquo;s key can change one.
+        </p>
+      )}
+
+      {vaults.data?.length === 0 && (
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] p-8 text-center">
+          <VaultIcon className="mx-auto mb-3 h-8 w-8 text-[var(--color-text-muted)]" />
+          <p className="text-sm font-medium">No vaults yet</p>
+          <p className="mx-auto mt-1 max-w-sm text-[12px] text-[var(--color-text-muted)]">
+            A new vault starts private: you fund it, it runs your strategy, and you can take the
+            money out whenever you like.
           </p>
-        )}
-        {vaults.data?.length === 0 && (
-          <div className="rounded-lg border border-dashed border-[var(--color-border)] p-8 text-center">
-            <VaultIcon className="mx-auto mb-3 h-8 w-8 text-[var(--color-text-muted)]" />
-            <p className="text-sm font-medium">No vaults yet</p>
-            <p className="mx-auto mt-1 max-w-sm text-[12px] text-[var(--color-text-muted)]">
-              A new vault starts private: you fund it, it runs your strategy, and you can take the
-              money out whenever you like.
-            </p>
-          </div>
-        )}
-        <div className="grid gap-3 sm:grid-cols-2">
-          {vaults.data?.map((vault) => (
+        </div>
+      )}
+
+      {mine.length > 0 && (
+        <Section title="My vaults" count={mine.length}>
+          {mine.map((vault) => (
             <div key={vault.account} className="relative">
               <VaultCard vault={vault} />
               {/* A record with no confirmed transaction behind it: the build
@@ -182,8 +226,16 @@ export function Vaults() {
               )}
             </div>
           ))}
-        </div>
-      </WalletGate>
+        </Section>
+      )}
+
+      {others.length > 0 && (
+        <Section title={mine.length > 0 ? "All vaults" : "Vaults on this chain"} count={others.length}>
+          {others.map((vault) => (
+            <VaultCard key={vault.account} vault={vault} />
+          ))}
+        </Section>
+      )}
     </div>
   );
 }
