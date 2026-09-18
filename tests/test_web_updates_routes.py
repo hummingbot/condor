@@ -10,6 +10,7 @@ and the browser start disagreeing.
 """
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -413,3 +414,32 @@ def test_routes_module_shells_out_to_nothing():
 
     # The one thing it does import for update knowledge is the engine.
     assert "condor" in imported
+
+
+# ---------------------------------------------------------------------------
+# Relaunch: the verb the Local surface was missing (C3)
+# ---------------------------------------------------------------------------
+
+
+def test_relaunch_restarts_when_something_is_pending(as_user, admin):
+    """Telegram has always had this button; the dashboard now makes the same call."""
+    called = []
+    with patch.object(
+        updates, "relaunch_pending", lambda: {"target_commit": "abc1234"}
+    ):
+        with patch.object(updates, "request_relaunch", lambda: called.append(True)):
+            response = as_user(admin, "admin").post("/api/v1/updates/relaunch")
+
+    assert response.status_code == 202
+    assert response.json()["relaunching"] is True
+    assert called == [True], "the restart was never requested"
+
+
+def test_relaunch_refuses_when_there_is_nothing_to_apply(as_user, admin):
+    called = []
+    with patch.object(updates, "relaunch_pending", lambda: None):
+        with patch.object(updates, "request_relaunch", lambda: called.append(True)):
+            response = as_user(admin, "admin").post("/api/v1/updates/relaunch")
+
+    assert response.status_code == 409
+    assert called == [], "a restart was requested with nothing pending"

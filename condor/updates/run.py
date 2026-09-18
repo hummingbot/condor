@@ -248,6 +248,21 @@ async def _emit(run: Run) -> None:
 _relaunch: dict[str, Any] | None = None
 
 
+def request_relaunch() -> None:
+    """Apply a pending update by restarting Condor in place.
+
+    A one-line pass-through to :func:`utils.updater.request_restart`, and it
+    earns its place: the surfaces are views over this package and do not import
+    ``utils`` directly, so without it the web route would have to reach past the
+    engine to do the one thing the engine exists to coordinate.
+
+    Not an exec. ``request_restart`` raises SIGTERM, ``teardown()`` runs, and
+    ``main()`` execs once the loop is gone -- so persistence is flushed, agent
+    loops record their final state and ACP/MCP children are not orphaned.
+    """
+    updater.request_restart()
+
+
 def relaunch_pending() -> dict[str, Any] | None:
     """What this process is missing, or ``None`` if it is running the update.
 

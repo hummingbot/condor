@@ -556,22 +556,20 @@ function FinishedView({
         )}
       </div>
 
-      {/* The one step the engine deliberately leaves undone. Spelled out here
-          rather than left to the banner alone: this is the screen the person
-          who just pressed Update is looking at. */}
+      {/* The banner above handles the restart itself, including the countdown
+          and the cancel. This says the same thing on the screen the person who
+          just pressed Update is actually looking at, without a second set of
+          controls competing with it. */}
       {relaunch?.required && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 p-3 text-xs leading-relaxed text-[var(--color-text)]">
           <RotateCw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-yellow)]" />
           <span>
             Condor is still running{" "}
-            <span className="font-mono">{relaunch.from_commit}</span>. Relaunch
-            it —{" "}
-            <code className="rounded bg-[var(--color-surface-hover)] px-1 py-0.5 font-mono text-[11px]">
-              make restart
-            </code>{" "}
-            — to come up on{" "}
-            <span className="font-mono">{relaunch.target_commit}</span>. Bots and
-            open positions are untouched.
+            <span className="font-mono">{relaunch.from_commit}</span>. It is
+            restarting to come up on{" "}
+            <span className="font-mono">{relaunch.target_commit}</span> — see the
+            banner at the top of the page, which counts down and can be
+            cancelled. Bots and open positions are untouched.
           </span>
         </div>
       )}

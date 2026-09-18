@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from condor import updates
@@ -152,3 +152,40 @@ async def dismiss_run(
     require_admin(user)
     run = updates.acknowledge_run(body.run_id if body else "")
     return {"run": run.to_wire() if run is not None else None}
+
+
+@router.post("/relaunch", status_code=202)
+async def post_relaunch(user: WebUser = Depends(get_current_user)) -> dict:
+    """Apply a finished update by restarting Condor in place.
+
+    The Local surface could discover, preflight, resolve and apply an update
+    entirely in the browser, and then had to tell the operator to go and run
+    ``make restart`` — the one step that makes any of it take effect. Telegram
+    has had a button for this all along, and it makes exactly this call.
+
+    The asymmetry used to be explained as a safety trade: that re-execing races
+    whatever started Condor into a second copy on the same port. That is not
+    what the code does. ``request_restart()`` raises SIGTERM rather than
+    exec'ing, so ``teardown()`` runs and ``main()`` execs only once the loop is
+    gone; the exec then replaces the process image in place, keeping the pid,
+    the parent and the controlling terminal, so nothing exits and there is no
+    second copy. The listening socket is non-inheritable (PEP 446) and released
+    by the exec, so the successor rebinds cleanly.
+
+    202, not 200: the answer is "accepted", and the process serving it is about
+    to be replaced. The panel already knows how to poll across that — it is what
+    ``GET /updates/run`` was built for.
+    """
+    require_admin(user)
+    pending = updates.relaunch_pending()
+    if pending is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Nothing to apply — this process is already running the code on disk.",
+        )
+    log.info("Relaunch requested from the dashboard by user %s", user.id)
+    updates.request_relaunch()
+    return {
+        "relaunching": True,
+        "target_commit": (pending.get("target_commit") or "")[:7],
+    }

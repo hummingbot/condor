@@ -148,6 +148,20 @@ export const updatesApi = {
       body: JSON.stringify({ run_id: runId }),
     }),
 
+  /**
+   * Apply a finished update by restarting Condor in place.
+   *
+   * The request is expected not to answer: the process handling it tears down
+   * and execs. 202 if it does answer, a network error if the socket closes
+   * first — both mean the same thing, so callers treat a failure here as
+   * "probably restarting" and let the reconnect decide.
+   */
+  relaunch: () =>
+    adminFetch<{ relaunching: boolean; target_commit: string }>(
+      "/api/v1/updates/relaunch",
+      { method: "POST" },
+    ),
+
   /** Trigger the update. Answers immediately with the run to watch. */
   start: (components: string[]) =>
     adminFetch<{ run_id: string; state: RunState }>("/api/v1/updates/start", {
