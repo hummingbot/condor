@@ -582,6 +582,56 @@ async def _executor_warning() -> Warning | None:
     )
 
 
+_STALE_FORK_CAP = 8
+
+
+def _stale_fork_warning() -> Warning | None:
+    """Local versions of shipped files that this install will keep using.
+
+    Non-blocking on purpose. Owning a customization is what FEAT-115 shipped;
+    what never shipped is the notice, so the divergence compounded silently on
+    files carrying trading rules. This is that notice.
+
+    The path list is capped -- an install that has forked thirty playbooks needs
+    a number and a few examples, not thirty lines in a Telegram message.
+    """
+    from condor.layering import all_stale_forks
+
+    try:
+        stale = all_stale_forks()
+    except OSError:
+        log.debug("Could not check for stale forks", exc_info=True)
+        return None
+    if not stale:
+        return None
+
+    moved = [f for f in stale if not f.retired]
+    retired = [f for f in stale if f.retired]
+
+    parts: list[str] = []
+    if moved:
+        shown = ", ".join(f.rel for f in moved[:_STALE_FORK_CAP])
+        if len(moved) > _STALE_FORK_CAP:
+            shown += f", and {len(moved) - _STALE_FORK_CAP} more"
+        parts.append(
+            f"You have local versions of {len(moved)} shipped "
+            f"file{'s' if len(moved) != 1 else ''} that upstream has since "
+            f"changed ({shown}). Your versions stay in use, so those changes "
+            "will not reach your agents."
+        )
+    if retired:
+        shown = ", ".join(f.rel for f in retired[:_STALE_FORK_CAP])
+        if len(retired) > _STALE_FORK_CAP:
+            shown += f", and {len(retired) - _STALE_FORK_CAP} more"
+        parts.append(
+            f"{len(retired)} local file{'s' if len(retired) != 1 else ''} "
+            f"no longer exist{'' if len(retired) != 1 else 's'} upstream "
+            f"({shown}) and will keep running. Mute a retired playbook rather "
+            "than deleting it."
+        )
+    return Warning(component=CONDOR, code="stale-forks", message=" ".join(parts))
+
+
 async def preflight(component_keys: list[str]) -> Preflight:
     """Can this update run, what will it do, and what should the admin know."""
     known = _table()
@@ -639,6 +689,9 @@ async def preflight(component_keys: list[str]) -> Preflight:
         if executor_warning is not None:
             warnings.append(executor_warning)
     if CONDOR in selected:
+        stale_warning = _stale_fork_warning()
+        if stale_warning is not None:
+            warnings.append(stale_warning)
         warnings.append(
             Warning(
                 component=CONDOR,
