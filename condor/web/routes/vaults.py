@@ -205,10 +205,10 @@ def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
         "quote_mint": chain.get("quoteMint"),
         "version": chain.get("version", 0),
         "issue_bps": chain.get("issueBps", 0),
-        # The launch terms this vault chose. `locked_liquidity_pct` is the split
-        # between the holders' exit depth and the strategy's capital, which is
-        # the number that most changes what the vault is.
-        "locked_liquidity_pct": chain.get("lockedLiquidityPct", 0),
+        # The launch terms this vault chose. The threshold is how much the
+        # curve raises before it becomes a pool, and so how large the vault a
+        # holder is buying into will be.
+        "graduation_quote_threshold": chain.get("graduationQuoteThreshold", "0"),
         "creator_trading_fee_pct": chain.get("creatorTradingFeePct", 0),
         "pool_fee_option": chain.get("poolFeeOption", 0),
         "tokenized": bool(chain.get("tokenized")),
@@ -654,9 +654,11 @@ async def build_launch_config(
 
     One per vault, because a vault prices its launch off the assets it already
     holds, which is why the program checks a config's *terms* rather than its
-    address. The locked liquidity is the one that matters most: it is the split
-    between the depth holders exit through and the strategy's capital, and it
-    is the creator's to choose between 20 and 80.
+    address. The graduation market cap is the one that matters most: it fixes
+    how much quote the curve raises before it becomes a pool, and so how large
+    the vault a holder is buying into will be. Half of that raise is
+    permanently locked as the market they exit through; the rest, less the
+    protocol's 2 % graduation fee, is the strategy's capital.
 
     Its address is remembered here on confirmation, so the launch form does not
     ask anyone to paste one.
@@ -676,7 +678,6 @@ async def build_launch_config(
         "graduationMarketCap": req.graduation_market_cap,
     }
     for key, value in (
-        ("lockedLiquidityPct", req.locked_liquidity_pct),
         ("creatorTradingFeePercentage", req.creator_trading_fee_percentage),
         ("poolFeeOption", req.pool_fee_option),
         ("baseFeeBps", req.base_fee_bps),

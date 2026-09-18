@@ -375,8 +375,10 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
             </Row>
           )}
           <Row label="Issued to the manager">{pct(chain?.issue_bps)}</Row>
-          <Row label="Raise locked as liquidity">
-            {chain?.locked_liquidity_pct ? `${chain.locked_liquidity_pct}%` : "—"}
+          <Row label="Raised before graduation">
+            {chain?.graduation_quote_threshold && chain.graduation_quote_threshold !== "0"
+              ? chain.graduation_quote_threshold
+              : "—"}
           </Row>
           <Row label="Creator's cut of trading fees">
             {chain?.creator_trading_fee_pct ? `${chain.creator_trading_fee_pct}%` : "—"}
@@ -606,9 +608,10 @@ function TokenTab({
             {chain.dbc_pool ? <CopyAddress address={chain.dbc_pool} /> : "—"}
           </Row>
           <Row label="Issued at launch — circulating over max supply">{pct(chain.issue_bps)}</Row>
-          <Row label="Locked as liquidity — the rest, less the 2% protocol fee, is capital">
-            {chain.locked_liquidity_pct}%
+          <Row label="Raised before graduation">
+            {chain.graduation_quote_threshold === "0" ? "—" : chain.graduation_quote_threshold}
           </Row>
+          <Row label="Locked as liquidity">50% — the rest, less the 2% protocol fee, is capital</Row>
           <Row label="Creator's share of trading fees">{chain.creator_trading_fee_pct}%</Row>
           <Row label="Pool fee after graduation">
             {[25, 30, 100, 200, 400, 600][chain.pool_fee_option] ?? "—"} bps
@@ -748,12 +751,13 @@ function LaunchConfigCard({
   const [quoteMint, setQuoteMint] = useState(WSOL);
   const [initialCap, setInitialCap] = useState("10");
   const [graduationCap, setGraduationCap] = useState("100");
-  const [lockedLiquidity, setLockedLiquidity] = useState("50");
   const [creatorFee, setCreatorFee] = useState("50");
   const [poolFee, setPoolFee] = useState("2");
 
-  const fee = Number(lockedLiquidity);
-  const outOfBounds = !Number.isFinite(fee) || fee < 20 || fee > 80;
+  // Half the raise is locked as liquidity on every launch — a constant in the
+  // program, so there is nothing to type and nothing to get wrong.
+  const caps = [Number(initialCap), Number(graduationCap)];
+  const capsWrong = !caps.every(Number.isFinite) || caps[1] <= caps[0];
 
   return (
     <Card title="Launch config">
@@ -795,22 +799,6 @@ function LaunchConfigCard({
             className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
           />
         </Labelled>
-        <Labelled
-          label="Locked as liquidity"
-          hint="20–80%. Permanently locked in the graduated pool — the depth your holders sell into. The rest, less the 2% protocol graduation fee, is the strategy's capital. High means a deep market behind a small strategy; low is the reverse."
-        >
-          <div className="flex items-center gap-2">
-            <input
-              value={lockedLiquidity}
-              onChange={(e) => setLockedLiquidity(e.target.value)}
-              inputMode="decimal"
-              className={`w-24 rounded-md border bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px] ${
-                outOfBounds ? "border-red-500/60" : "border-[var(--color-border)]"
-              }`}
-            />
-            <span className="text-[12px] text-[var(--color-text-muted)]">%</span>
-          </div>
-        </Labelled>
         <Labelled label="Your share of trading fees" hint="At most 50%. You may take less.">
           <div className="flex items-center gap-2">
             <input
@@ -838,7 +826,7 @@ function LaunchConfigCard({
       </div>
       <Action
         pending={pending}
-        disabled={outOfBounds}
+        disabled={capsWrong}
         onClick={() =>
           onAct({
             build: () =>
@@ -846,7 +834,6 @@ function LaunchConfigCard({
                 quote_mint: quoteMint,
                 initial_market_cap: Number(initialCap),
                 graduation_market_cap: Number(graduationCap),
-                locked_liquidity_pct: Number(lockedLiquidity),
                 creator_trading_fee_percentage: Number(creatorFee),
                 pool_fee_option: Number(poolFee),
               }),

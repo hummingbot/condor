@@ -41,18 +41,19 @@ pub mod launch_rules {
     //!   else. Those are changed by a program upgrade, which is the right weight
     //!   for a rule that binds every holder of every vault.
 
-    /// How much of the raise is permanently locked as liquidity in the
-    /// graduated pool. The rest — less the protocol's graduation fee — is the
-    /// vault's capital. **This is the split between the holders' exit and the
-    /// strategy**: at 20 the pool gets about 2 SOL and the strategy 8; at 80 it
-    /// is a small strategy behind a deep market. Both are defensible and they
-    /// are not the same product, which is exactly why the creator chooses and
-    /// the number is on chain. (DBC stores the complement, as its
-    /// `migration_fee_percentage`; `tokenize` converts.)
-    pub const MIN_LOCKED_LIQUIDITY_PCT: u8 = 20;
-    pub const MAX_LOCKED_LIQUIDITY_PCT: u8 = 80;
-    /// What the form offers. Not enforced — it is a starting point, not a rule.
-    pub const DEFAULT_LOCKED_LIQUIDITY_PCT: u8 = 50;
+    /// **Constant.** Half the raise is permanently locked as liquidity in the
+    /// graduated pool; the rest, less the protocol's graduation fee, is the
+    /// vault's capital. DBC stores the complement as its
+    /// `migration_fee_percentage`, and `tokenize` converts.
+    ///
+    /// One number rather than a range. It was a range — the split between the
+    /// holders' exit depth and the strategy's size is a real decision, and two
+    /// defensible vaults can differ on it. But a curve is only feasible for
+    /// some combinations of this number and the market caps, so most of the
+    /// range could not be launched at all, and a bound a creator cannot reach
+    /// is a promise the product does not keep. Fifty is the value that builds.
+    /// Widening it again means finding the feasible region first.
+    pub const LOCKED_LIQUIDITY_PCT: u8 = 50;
 
     /// **Constant.** The protocol's graduation fee: the share of the unlocked
     /// raise — the vault's capital — that DBC holds for `Protocol.fee_claimer`
@@ -86,11 +87,21 @@ pub mod launch_rules {
     /// What the form offers: the same 100 bps the curve charged.
     pub const DEFAULT_POOL_FEE_OPTION: u8 = POOL_FEE_OPTION_100_BPS;
 
-    /// **Constant, and load-bearing.** Ten wrapped SOL is the one threshold
-    /// Meteora's mainnet keepers graduate (their word: migrate) automatically. At any other number the
-    /// curve fills and nothing happens until somebody notices — which is a
-    /// vault's capital sitting in a dead pool.
-    pub const GRADUATION_QUOTE_THRESHOLD: u64 = 10_000_000_000;
+    // There is no constant for the graduation threshold, and there was one:
+    // ten wrapped SOL, on the belief that Meteora's keepers only graduate that
+    // number. It made every launch unbuildable. DBC *derives* the threshold
+    // from the market caps and the supply split and offers no way to set it, so
+    // a program that insisted on a particular value refused every config its
+    // own builder produced — which is what happens when a constant is chosen
+    // for a market rather than read from one.
+    //
+    // What the creator chooses is the **graduation market cap**, in the quote
+    // asset, and the threshold follows from it. It is recorded on the `Vault`
+    // (`graduation_quote_threshold`) because it is the one number that says how
+    // much this curve raises before it becomes a pool, which is what a buyer is
+    // deciding about. Graduation itself is permissionless — anyone may call
+    // DBC's `migration_damm_v2` once the curve is full — so nothing here
+    // depends on a keeper's preferences.
 
     /// **Constant.** `TokenType::Token2022`, and a fixed supply: `issue_bps`
     /// means nothing against a mint that can print more.
@@ -211,9 +222,11 @@ pub struct Vault {
     /// account. All three are bounded by `launch_rules`; all three are 0 while
     /// the vault is private.
     ///
-    /// `locked_liquidity_pct` is the one that changes what the product *is*: it
-    /// is the split between the holders' exit depth and the strategy's capital.
-    pub locked_liquidity_pct: u8,
+    /// `graduation_quote_threshold` is the one that changes what the product
+    /// *is*: how much quote the curve raises before it becomes a pool, and so
+    /// how large the vault this token is a claim on will be. In the quote
+    /// asset's own units.
+    pub graduation_quote_threshold: u64,
     pub creator_trading_fee_pct: u8,
     /// The graduated pool's fee tier, as DBC's `MigrationFeeOption` index.
     pub pool_fee_option: u8,
@@ -279,23 +292,14 @@ impl Vault {
 mod tests {
     use super::launch_rules as rules;
 
-    /// The locked liquidity is the split between the holders' exit depth and
-    /// the vault's capital, so both ends of the range have to be launchable —
-    /// they are two different products, not a good value and a bad one.
-    #[test]
-    fn the_locked_liquidity_range_is_a_real_range() {
-        assert!(rules::MIN_LOCKED_LIQUIDITY_PCT < rules::DEFAULT_LOCKED_LIQUIDITY_PCT);
-        assert!(rules::DEFAULT_LOCKED_LIQUIDITY_PCT < rules::MAX_LOCKED_LIQUIDITY_PCT);
-        assert_eq!(rules::MIN_LOCKED_LIQUIDITY_PCT, 20);
-        assert_eq!(rules::MAX_LOCKED_LIQUIDITY_PCT, 80);
-    }
-
-    /// The floor keeps a market: below it a token nobody can sell. The ceiling
-    /// keeps a strategy: above it there is nothing left to run.
+    /// Every launch locks half and keeps half, so every vault has both a market
+    /// to exit through and a strategy to run. A value that left either at zero
+    /// would be a different product wearing this one's guarantees.
     #[test]
     fn every_launch_has_both_a_market_and_a_strategy() {
-        assert!(rules::MIN_LOCKED_LIQUIDITY_PCT >= 20, "at least a fifth of the raise stays as liquidity");
-        assert!(100 - rules::MAX_LOCKED_LIQUIDITY_PCT >= 20, "at least a fifth of the raise becomes capital");
+        assert_eq!(rules::LOCKED_LIQUIDITY_PCT, 50);
+        assert!(rules::LOCKED_LIQUIDITY_PCT >= 20, "a market deep enough to sell into");
+        assert!(100 - rules::LOCKED_LIQUIDITY_PCT >= 20, "capital enough to run a strategy");
     }
 
     /// The customizable option (6) is excluded: on that path the graduated pool's
@@ -317,9 +321,4 @@ mod tests {
         assert_eq!(rules::PROTOCOL_GRADUATION_FEE_PCT + rules::CREATOR_GRADUATION_SHARE_PCT, 100);
     }
 
-    /// Ten wrapped SOL is the one threshold Meteora's keepers graduate for us.
-    #[test]
-    fn the_threshold_is_the_one_meteora_serves() {
-        assert_eq!(rules::GRADUATION_QUOTE_THRESHOLD, 10_000_000_000);
-    }
 }

@@ -918,11 +918,10 @@ class VaultChainState(BaseModel):
     # Circulating over max supply at launch; 0 while the vault is private.
     issue_bps: int = 0
     # The launch terms this vault chose, recorded by the program at tokenize.
-    # `locked_liquidity_pct` is the share of the raise permanently locked as
-    # liquidity — the holders' exit depth; the rest, less the 2 % protocol
-    # graduation fee, is the strategy's capital. 20-80, and the single number
-    # that most changes what a vault is.
-    locked_liquidity_pct: int = 0
+    # `graduation_quote_threshold` is how much quote the curve raises before it
+    # becomes a pool — the creator's graduation market cap in the quote asset's
+    # own units — and so how large the vault this token is a claim on will be.
+    graduation_quote_threshold: str = "0"
     creator_trading_fee_pct: int = 0
     pool_fee_option: int = 0
     # False means no outside holders: the creator may still withdraw.
@@ -1015,11 +1014,6 @@ class VaultLaunchConfigRequest(BaseModel):
     # Informed by NAV; a creator may strike it above or below.
     initial_market_cap: float
     graduation_market_cap: float
-    #: 20-80. The share of the raise permanently locked as liquidity in the
-    #: graduated pool; the rest, less the protocol's graduation fee, is the
-    #: vault's capital. This is the split between the holders' exit depth and
-    #: the strategy, which is why it is the creator's to set.
-    locked_liquidity_pct: Optional[float] = None
     #: 0-50: the creator's share of trading fees.
     creator_trading_fee_percentage: Optional[float] = None
     #: 0-5: which fixed fee the graduated pool charges.

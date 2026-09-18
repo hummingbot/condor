@@ -54,8 +54,6 @@ pub enum VaultError {
     RecipientNotVault,
     #[msg("the DBC config's terms are not the ones every Condor vault launches with")]
     LaunchTermsMismatch,
-    #[msg("the locked liquidity must be between 20% and 80%: it is the split between the holders' exit depth and the vault's capital")]
-    LockedLiquidityOutOfRange,
     #[msg("the config is not the one this vault's pool was launched from")]
     PoolConfigMismatchForPool,
     #[msg("the vault is winding down; its strategy can no longer change")]

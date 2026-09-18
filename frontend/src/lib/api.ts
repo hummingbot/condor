@@ -2379,8 +2379,8 @@ export interface VaultChainState {
    * permanently locked liquidity, so this is the split between the strategy and
    * the holders' exit depth. 0 while private.
    */
-  /** Share of the raise permanently locked as liquidity, 20–80; the rest, less the 2 % protocol graduation fee, is capital. */
-  locked_liquidity_pct: number;
+  /** How much quote the curve raises before it becomes a pool, in the quote asset's own units. "0" while private. */
+  graduation_quote_threshold: string;
   /** The creator's share of trading fees, at most 50. */
   creator_trading_fee_pct: number;
   /** Which fixed-fee option the graduated pool charges (0–5). */
@@ -3876,7 +3876,6 @@ export const api = {
       quote_mint: string;
       initial_market_cap: number;
       graduation_market_cap: number;
-      locked_liquidity_pct?: number;
       creator_trading_fee_percentage?: number;
       pool_fee_option?: number;
       base_fee_bps?: number;

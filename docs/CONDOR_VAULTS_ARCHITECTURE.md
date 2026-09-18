@@ -190,12 +190,12 @@ Each economic term is a **bound** (the creator's decision, copied onto the
 
 | Term | Kind | Rule |
 |---|---|---|
-| `locked_liquidity_pct` | bound | 20–80. The share of the raise permanently locked as liquidity in the graduated pool; the rest, less the protocol's graduation fee, is the vault's capital. This is the split between the holders' exit depth and the strategy. (DBC stores the complement as its `migration_fee_percentage`; `tokenize` converts.) |
+| `graduation_quote_threshold` | bound | How much quote the curve raises before it becomes a pool — the creator's graduation market cap, in the quote asset's own units. The number that most changes what the vault is, so it is recorded on the `Vault` for holders to read. Not bounded by the program: how large a vault to raise is the creator's to choose and the buyer's to judge. |
 | `creator_trading_fee_pct` | bound | ≤ 50 |
 | `pool_fee_option` | bound | the graduated pool's fee tier: one of Meteora's fixed options (customizable option excluded) |
 | **`protocol_graduation_fee_pct`** | constant | **2 %** of the unlocked raise — i.e. of the vault's capital — held by DBC for `Protocol.fee_claimer` as the partner's share, claimed once after graduation (`claim-protocol-graduation-fee`). The one platform fee a holder pays, and it is on chain rather than on a pricing page |
 | pool creator's share of the unlocked raise | constant | the other 98 % — the pool creator is the vault's own treasury, so it becomes capital nobody can withdraw |
-| graduation threshold | constant | 10 wSOL-equivalent, the one Meteora's keepers graduate (their word: migrate) automatically |
+| `locked_liquidity_pct` | constant | **50 %** of the raise is permanently locked as liquidity in the graduated pool; the rest, less the graduation fee, is the vault's capital. It was a 20–80 bound, and should have been: the split between exit depth and strategy size is a real decision. But DBC's curve is only feasible for some pairings of that number with the market caps, and most of the range could not be launched at all — a bound a creator cannot reach is a promise the product does not keep. Widening it again means mapping the feasible region first. |
 | token type / supply | constant | Token-2022, fixed |
 | fee claimer | constant | `Protocol.fee_claimer` |
 | leftover receiver | constant | the vault's treasury |
@@ -391,22 +391,20 @@ Not yet exercised against the rewritten program: the tokenized half —
 `tokenize` → `execute`-only trading → `collect_seed` / `collect_leftover` →
 `wind_down` → conversion → `finalize_wind_down` → `redeem`.
 
-**Two gaps that block tokenizing at all**, found by building a real launch
-config on the fork and reading the account back:
+The tokenized half now runs as far as the curve: `tokenize` lands (mint,
+pool, quote asset, `issue_bps` and the threshold recorded on the `Vault`), a
+tokenized treasury trades through `execute`, and both doors it is supposed to
+close are shut — `execute_unchecked` and the delegate withdrawal are refused
+the moment a mint exists. What is still unexercised is everything downstream
+of a *full* curve: `collect_seed`, `collect_leftover`, `claim_income`, the
+wind-down conversion, `finalize_wind_down` and `redeem`.
 
-* **The graduation threshold cannot be set.** `launch_rules` requires the DBC
-  config's `migration_quote_threshold` to equal exactly 10 SOL, but the SDK
-  *derives* that number from the market caps and the supply split — a config
-  built for caps 50 → 100 came back with 52.24 SOL. So no config this builder
-  produces passes `tokenize`, except by coincidence. Choosing the caps freely
-  and fixing the threshold are mutually exclusive; one of the two has to give.
-* **The 20–80 locked-liquidity range is not launchable.** Only 50, and only at
-  some cap ratios, survives DBC's curve construction; 20, 30, 70 and 80 all
-  fail on-chain with `InvalidTokenSupply`. Probably related: the builder passes
-  `leftover: 0` while the comment beside it says the unsold remainder is the
-  retained supply, so `issue_bps` (written by `tokenize`) and the config's
-  `leftover` are two independent numbers describing one quantity, with nothing
-  reconciling them.
+**A security review of the program is in `CONDOR_VAULTS_SECURITY_REVIEW.md`,
+and this document does not yet reflect it.** Several of its findings contradict
+claims made above — in particular §5.1's recipient rule has a hole, §7's
+wind-down cannot execute, and §9's "can at worst trade badly" understates what
+a creator with liquidity on the other side of the trade can do. Read the two
+together until they are reconciled.
 
 Open design items: routers under `execute`, a permissionless wind-down
 conversion with price bounds, and the multisig handover of the upgrade

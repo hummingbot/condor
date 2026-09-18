@@ -25,15 +25,16 @@
 //! `Vault`** here, so a holder reads what this vault chose instead of decoding
 //! a config account:
 //!
-//! * `locked_liquidity_pct`, 20–80 — the split between the holders' exit depth
-//!   and the strategy's capital, and the number that most changes what the
-//!   vault is;
+//! * the **graduation threshold**, which follows from the market cap the
+//!   creator struck: how much quote the curve raises before it becomes a pool,
+//!   and so how large the vault this token is a claim on will be;
 //! * `creator_trading_fee_pct`, at most 50;
 //! * `pool_fee_option`, any of Meteora's fixed-fee options for the graduated pool.
 //!
 //! The constants are the 10 SOL threshold Meteora's keepers actually serve, the
 //! unlocked raise split 98 % to the treasury and 2 % to the protocol
-//! (`PROTOCOL_GRADUATION_FEE_PCT`), Token-2022 with a fixed supply,
+//! (`PROTOCOL_GRADUATION_FEE_PCT`), half the raise locked as liquidity
+//! (`LOCKED_LIQUIDITY_PCT`), Token-2022 with a fixed supply,
 //! Condor as fee claimer, and the **leftover receiver set to the vault's own
 //! treasury** — which keeps the unissued supply out of the creator's hands and,
 //! because it is the treasury, puts it where the delegate can market-make with it.
@@ -194,7 +195,7 @@ pub fn tokenize(
     // pays. One decision, made once, at the moment it starts to matter.
     vault.quote_mint = ctx.accounts.quote_mint.key();
     vault.issue_bps = issue_bps;
-    vault.locked_liquidity_pct = terms.locked_liquidity_pct;
+    vault.graduation_quote_threshold = terms.graduation_quote_threshold;
     vault.creator_trading_fee_pct = terms.creator_trading_fee_pct;
     vault.pool_fee_option = terms.pool_fee_option;
     vault.tokenized_ts = Clock::get()?.unix_timestamp;
@@ -203,7 +204,7 @@ pub fn tokenize(
 
 /// The terms a vault chose, once they have been checked.
 pub struct LaunchTerms {
-    pub locked_liquidity_pct: u8,
+    pub graduation_quote_threshold: u64,
     pub creator_trading_fee_pct: u8,
     pub pool_fee_option: u8,
 }
@@ -238,19 +239,19 @@ fn check_launch_terms(
             && c.token_type == rules::TOKEN_TYPE_TOKEN_2022
             && c.fixed_token_supply
             && c.creator_migration_fee_pct == rules::CREATOR_GRADUATION_SHARE_PCT
-            && c.migration_quote_threshold == rules::GRADUATION_QUOTE_THRESHOLD,
+            // DBC stores the share of the raise that becomes a fee — the
+            // creator's and the partner's — and locks the rest. Ours is the
+            // locked rest, and it is half.
+            && 100u8.saturating_sub(c.migration_fee_pct) == rules::LOCKED_LIQUIDITY_PCT,
         VaultError::LaunchTermsMismatch
     );
 
-    // Bounds: the creator's decisions, recorded on the vault for holders to read.
-    // DBC stores the share that becomes a fee — the creator's and the
-    // partner's — and locks the rest. Our number is the locked rest.
-    let locked_liquidity_pct = 100u8.saturating_sub(c.migration_fee_pct);
-    require!(
-        locked_liquidity_pct >= rules::MIN_LOCKED_LIQUIDITY_PCT
-            && locked_liquidity_pct <= rules::MAX_LOCKED_LIQUIDITY_PCT,
-        VaultError::LockedLiquidityOutOfRange
-    );
+    // Bounds: the creator's decisions, recorded on the vault for holders to
+    // read. The threshold is not checked against anything — how much a vault
+    // raises is the creator's to choose and the buyer's to judge — but it is
+    // read here so it lands on the `Vault` rather than only in a config account
+    // nobody will decode.
+    require!(c.migration_quote_threshold > 0, VaultError::LaunchTermsMismatch);
     require!(
         c.creator_trading_fee_pct <= rules::MAX_CREATOR_TRADING_FEE_PCT,
         VaultError::LaunchTermsMismatch
@@ -261,7 +262,7 @@ fn check_launch_terms(
     );
 
     Ok(LaunchTerms {
-        locked_liquidity_pct,
+        graduation_quote_threshold: c.migration_quote_threshold,
         creator_trading_fee_pct: c.creator_trading_fee_pct,
         pool_fee_option: c.migration_fee_option,
     })
