@@ -324,22 +324,19 @@ def _plan(component_keys: list[str], statuses: dict[str, components.ComponentSta
             continue
         if key == components.HUMMINGBOT_API:
             status = statuses.get(key)
-            mode = status.mode if status else "image"
             steps.append(
                 Step(f"{key}.fast-forward", "Fast-forwarding the hummingbot-api repo")
             )
-            steps.append(
-                Step(
-                    f"{key}.image",
-                    (
-                        "Rebuilding the API image"
-                        if mode == "source"
-                        else "Pulling the API image"
-                    ),
-                )
-            )
-            steps.append(Step(f"{key}.up", "Recreating the containers"))
-            steps.append(Step(f"{key}.health", "Waiting for the API to answer"))
+            # The image steps only exist when the published tag can correspond
+            # to this checkout. Off the default branch the container is the
+            # operator's, so there is nothing to pull and nothing to restart
+            # for -- and a plan that listed them anyway would be promising to do
+            # something the run then skips.
+            image = status.facets.get("image") if status else None
+            if image is None or not image.up_to_date:
+                steps.append(Step(f"{key}.image", "Pulling the API image"))
+                steps.append(Step(f"{key}.up", "Recreating the containers"))
+                steps.append(Step(f"{key}.health", "Waiting for the API to answer"))
         else:
             # No restart step: the run stops with the new code on disk and asks
             # for the relaunch instead (see the module docstring).
@@ -464,17 +461,9 @@ async def _update_hb_api(run: Run) -> bool:
                 await _fail(run, "The hummingbot-api checkout could not be moved.")
                 return False
 
-    mode = await updater.compose_mode(component.repo_dir, component.service)
     step = await _begin(run, f"{prefix}.image")
     if step is not None:
-        if mode == "source":
-            ok, output = await updater.compose_build(
-                component.repo_dir, component.service
-            )
-        else:
-            ok, output = await updater.compose_pull(
-                component.repo_dir, component.service
-            )
+        ok, output = await updater.compose_pull(component.repo_dir, component.service)
         await _finish(run, step, OK if ok else FAILED, output)
         if not ok:
             await _fail(run, "The API image could not be produced.")

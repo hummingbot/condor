@@ -36,7 +36,8 @@ export interface ComponentStatus {
   key: string;
   name: string;
   facets: Partial<Record<"repo" | "image", Facet>>;
-  mode: "image" | "source" | null;
+  /** Always "image": hummingbot-api is deployed from the published image. */
+  mode: "image" | null;
   up_to_date: boolean;
 }
 

@@ -629,20 +629,6 @@ async def compose_service(repo_dir: str, service: str) -> dict | None:
     return definition if isinstance(definition, dict) else None
 
 
-async def compose_mode(repo_dir: str, service: str) -> str:
-    """How this install produces ``service``: ``source``, ``image`` or ``unknown``.
-
-    A ``build:`` key means the image is built here, so an update is
-    ``compose build``. No ``build:`` key means a published image is pulled, so
-    an update is ``compose pull`` -- and the git checkout, whatever it says,
-    has nothing to do with the version running inside the container.
-    """
-    definition = await compose_service(repo_dir, service)
-    if definition is None:
-        return "unknown"
-    return "source" if definition.get("build") else "image"
-
-
 async def local_image_digest(image_ref: str) -> str | None:
     """The registry digest of the local copy of ``image_ref``, or None.
 
@@ -739,16 +725,6 @@ async def compose_pull(repo_dir: str, service: str) -> tuple[bool, str]:
     )
     if rc != 0:
         return False, output or "docker compose pull failed (no output)"
-    return True, output
-
-
-async def compose_build(repo_dir: str, service: str) -> tuple[bool, str]:
-    """Rebuild one service's image from source."""
-    rc, output = await _run_cmd(
-        "docker", "compose", "build", service, cwd=repo_dir, timeout=DOCKER_TIMEOUT
-    )
-    if rc != 0:
-        return False, output or "docker compose build failed (no output)"
     return True, output
 
 

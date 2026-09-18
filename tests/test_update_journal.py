@@ -335,14 +335,32 @@ def test_the_plan_is_laid_out_before_anything_runs(_a_sibling_api):
     assert "Pulling" in steps[1].label
 
 
-def test_source_mode_builds_instead_of_pulling(_a_sibling_api):
+def test_an_image_this_checkout_does_not_track_gets_no_image_steps(_a_sibling_api):
+    """The plan must not promise a pull the run is going to skip.
+
+    Off the default branch the published tag has nothing to do with the code on
+    disk, so the image is the operator's and is left alone. The checkout is
+    still fast-forwarded -- it supplies the shared files the container reads.
+    """
     status = components.ComponentStatus(
-        key=components.HUMMINGBOT_API, name="x", facets={}, mode="source"
+        key=components.HUMMINGBOT_API,
+        name="x",
+        facets={
+            "image": components.Facet(
+                kind="image",
+                current="sha256:abc",
+                behind=0,
+                detail=["Left alone; you own this image."],
+            )
+        },
+        mode="image",
     )
     steps = run_module._plan(
         [components.HUMMINGBOT_API], {components.HUMMINGBOT_API: status}
     )
-    assert "Rebuilding" in steps[1].label
+    labels = [s.label for s in steps]
+    assert labels == ["Fast-forwarding the hummingbot-api repo"]
+    assert not any("Pulling" in label for label in labels)
 
 
 # ---------------------------------------------------------------------------
