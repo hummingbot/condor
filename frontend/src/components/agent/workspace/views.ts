@@ -20,6 +20,7 @@
 import { isLoopRun, parseRunId, type RunRef } from "@/components/agent/lab/runs";
 import { OPEN_PARAM } from "@/components/agent/workspace/sections";
 import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
+import { countdown } from "@/lib/agent-attribution";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
 
 /** Everything the URL says, once. */
@@ -212,7 +213,9 @@ export function journalNamesDeploy(
  * 2. **It says it deployed and the ledger is empty.** Either the ownership
  *    claim failed or the narrative is wrong, and both are worth a person.
  * 3. **The tick is late.** The rule the loop bar's countdown draws in amber,
- *    said once more where somebody reading anything else will see it.
+ *    worded with the same `countdown()`. Only the fleet rows raise it
+ *    (`fleetAlerts`): they have no loop bar. The run screen passes `loop: null`,
+ *    because its loop bar never unmounts and already says so (READ-424).
  *
  * `nowSec` is a parameter and not a `Date.now()` inside, for the reason every
  * clock in this codebase is: an alert that appears on its own is not testable,
@@ -270,7 +273,7 @@ export function alertsFor(input: {
     if (late > 0) {
       alerts.push({
         kind: "overdue",
-        text: `The next tick is ${Math.floor(late)}s overdue.`,
+        text: `The next tick is overdue by ${countdown(late)}.`,
       });
     }
   }

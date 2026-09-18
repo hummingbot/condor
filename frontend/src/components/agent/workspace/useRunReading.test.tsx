@@ -15,7 +15,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
-import type { AgentRunRow, RunningInstance } from "@/lib/api";
+import type { AgentRunRow } from "@/lib/api";
 
 const getSessionJournal = vi.fn();
 const getSessionActions = vi.fn();
@@ -48,18 +48,11 @@ const run = (status: string) =>
 /** Every `alerts` the hook returned, one per render of the probe. */
 let seen: WorkspaceAlert[][] = [];
 
-function Probe({
-  status,
-  instance = null,
-}: {
-  status: string;
-  instance?: RunningInstance | null;
-}) {
+function Probe({ status }: { status: string }) {
   const { alerts } = useRunReading({
     slug: "brigado",
     sslug: "brl_mm",
     run: run(status),
-    instance,
   });
   seen.push(alerts);
   return null;
@@ -68,14 +61,14 @@ function Probe({
 let container: HTMLDivElement;
 let root: Root;
 
-async function mount(status: string, instance: RunningInstance | null = null) {
+async function mount(status: string) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <Probe status={status} instance={instance} />
+        <Probe status={status} />
       </QueryClientProvider>,
     );
   });
@@ -147,94 +140,41 @@ describe("useRunReading polling", () => {
     await advance(60_000);
     expect(getStrategySessionExecutors).toHaveBeenCalledTimes(1);
   });
-
-  it("does not poll a finished run's executors while another session's engine runs", async () => {
-    const other = { agent_id: "a1", status: "running" } as unknown as RunningInstance;
-    await mount("stopped", other);
-    await advance(60_000);
-    expect(getStrategySessionExecutors).toHaveBeenCalledTimes(1);
-  });
 });
 
-describe("the overdue clock (PERF-372)", () => {
-  /** A loop whose next tick fell due `lateSec` seconds ago (negative: still ahead). */
-  const loop = (lateSec: number, status = "running") =>
-    ({
-      agent_id: "a1",
-      status,
-      frequency_sec: 60,
-      last_tick_at: Date.now() / 1000 - 60 - lateSec,
-    }) as unknown as RunningInstance;
-  const overdue = () =>
-    seen.at(-1)!.filter((a) => a.kind === "overdue").map((a) => a.text);
+describe("the run screen raises no overdue alert (READ-424)", () => {
+  // The loop bar above the tabs already counts a late tick in amber and never
+  // unmounts, so the hook no longer reads the live engine at all: no overdue
+  // banner, no Now badge, and no once-a-second clock to keep one current. Fleet
+  // rows, which have no loop bar, keep the rule — see fleet.test.ts.
 
-  // The 1 s intervals still running. Not `vi.getTimerCount()`: react-query's
-  // own 10 s poll is a timer too, and it is not the clock under test.
-  let clocks: Set<unknown>;
+  // The 1 s intervals started. Not `vi.getTimerCount()`: react-query's own 10 s
+  // poll is a timer too.
+  let clocks: number;
   beforeEach(() => {
-    clocks = new Set();
+    clocks = 0;
     const set = globalThis.setInterval;
-    const clear = globalThis.clearInterval;
     vi.spyOn(globalThis, "setInterval").mockImplementation(((
       fn: () => void,
       ms?: number,
     ) => {
-      const id = set(fn, ms);
-      if (ms === 1000) clocks.add(id);
-      return id;
+      if (ms === 1000) clocks += 1;
+      return set(fn, ms);
     }) as typeof setInterval);
-    vi.spyOn(globalThis, "clearInterval").mockImplementation(((
-      id?: Parameters<typeof clearInterval>[0],
-    ) => {
-      clocks.delete(id);
-      clear(id);
-    }) as typeof clearInterval);
   });
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("counts a late tick up once a second", async () => {
-    await mount("running", loop(2));
-    expect(overdue()).toEqual(["The next tick is 2s overdue."]);
-
-    await advance(1_000);
-    expect(overdue()).toEqual(["The next tick is 3s overdue."]);
-  });
-
-  it("keeps the first second of lateness", async () => {
-    await mount("running", loop(0.5));
-    expect(overdue()).toEqual(["The next tick is 0s overdue."]);
-  });
-
-  it("does not re-render a loop that is on time", async () => {
-    await mount("running", loop(-30));
+  it("runs no per-second clock and re-renders nothing between polls", async () => {
+    await mount("running");
     const renders = seen.length;
     const alerts = seen.at(-1);
 
     for (let i = 0; i < 5; i++) await advance(1_000);
+    expect(clocks).toBe(0);
     expect(seen.length).toBe(renders);
     expect(seen.at(-1)).toBe(alerts);
-    expect(overdue()).toEqual([]);
-  });
-
-  it.each([
-    ["no loop", null],
-    ["a loop that is not running", loop(120, "stopped")],
-  ])("holds the same alerts with %s, and runs no clock", async (_, instance) => {
-    await mount("stopped", instance);
-    const alerts = seen.at(-1);
-    await advance(5_000);
-    expect(seen.at(-1)).toBe(alerts);
-    expect(overdue()).toEqual([]);
-    expect(clocks.size).toBe(0);
-  });
-
-  it("leaves no interval behind once unmounted", async () => {
-    await mount("stopped", loop(2));
-    expect(clocks.size).toBe(1);
-    act(() => root.unmount());
-    expect(clocks.size).toBe(0);
-    root = createRoot(container);
+    expect(alerts).toEqual([]);
   });
 });

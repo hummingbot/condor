@@ -367,6 +367,26 @@ describe("the page's tabs", () => {
     expect(mounted).not.toContain("fleet");
   });
 
+  it("leave Now unbadged for a late tick — the loop bar already says so (READ-424)", async () => {
+    getStrategy.mockResolvedValue({
+      slug: "brl_mm",
+      instances: [
+        {
+          agent_id: "a1",
+          status: "running",
+          frequency_sec: 60,
+          last_tick_at: Date.now() / 1000 - 60 - 2_800,
+        },
+      ],
+      config: {},
+    } as unknown as StrategyDetail);
+    await render("/?strategy=brl_mm");
+    expect(
+      container.querySelector("[data-loop-countdown]")?.textContent,
+    ).toMatch(/^overdue 46m 4\ds$/);
+    expect(tab("now").textContent).toBe("Now");
+  });
+
   it("are not drawn when the agent has no strategy", async () => {
     getAgent.mockResolvedValue({ ...AGENT, strategies: [] });
     getAgentRuns.mockResolvedValue([]);

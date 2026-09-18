@@ -159,6 +159,8 @@ describe("the alerts", () => {
   it("raise an overdue tick", () => {
     const alerts = fleetAlerts(instance(), 1_400);
     expect(alerts.map((a) => a.kind)).toEqual(["overdue"]);
+    // Worded with the loop bar's own `countdown()`, not raw seconds (READ-424).
+    expect(alerts[0].text).toBe("The next tick is overdue by 5m 40s.");
   });
 
   it("never raise the unledgered alarm, which this page cannot check", () => {

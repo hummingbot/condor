@@ -209,7 +209,7 @@ export function AgentRunScreen({
   // level so the bands are served from one round of requests rather than each
   // declaring the query it wants.
   const { alerts, decisions, journal, deployments, perf, pnlSeries, sessionNum } =
-    useRunReading({ slug, sslug, run: selectedRun, instance });
+    useRunReading({ slug, sslug, run: selectedRun });
 
   // The controllers whose executors the Runs tab's market chart streams: the
   // engine's own id, widened with every live bot controller of the run.

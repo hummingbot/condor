@@ -361,7 +361,7 @@ describe("what Now leads with", () => {
   it("raises an overdue tick", () => {
     const alerts = alertsFor({ ...healthy, nowSec: 1_090 });
     expect(alerts.map((a) => a.kind)).toEqual(["overdue"]);
-    expect(alerts[0].text).toContain("30s overdue");
+    expect(alerts[0].text).toBe("The next tick is overdue by 30s.");
   });
 
   it("does not call a stopped loop overdue", () => {

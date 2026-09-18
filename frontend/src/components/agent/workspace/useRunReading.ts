@@ -7,13 +7,11 @@ import {
   journalNamesDeploy,
   type WorkspaceAlert,
 } from "@/components/agent/workspace/views";
-import { useOverdueSeconds } from "@/hooks/useOverdueSeconds";
 import {
   api,
   type AgentPerformance,
   type AgentRunRow,
   type DeploymentRow,
-  type RunningInstance,
 } from "@/lib/api";
 import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-agent";
 
@@ -38,12 +36,10 @@ export function useRunReading({
   slug,
   sslug,
   run,
-  instance,
 }: {
   slug: string;
   sslug: string | null;
   run: AgentRunRow | null;
-  instance: RunningInstance | null;
 }): {
   alerts: WorkspaceAlert[];
   /** The run's decisions, newest last — the journal's own order. */
@@ -80,8 +76,8 @@ export function useRunReading({
     queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
     queryFn: () => api.getStrategySessionExecutors(slug, sslug!, sessionNum),
     enabled,
-    // Gated on the run, not on `instance`: the strategy's engine may be running
-    // a different session than the one on screen (PERF-384).
+    // Gated on the run, not on the live engine: the strategy's engine may be
+    // running a different session than the one on screen (PERF-384).
     refetchInterval: liveInterval,
   });
 
@@ -95,12 +91,6 @@ export function useRunReading({
   );
   const decisions = journal?.decisions ?? EMPTY_DECISIONS;
 
-  // The overdue tick is the only alert that changes on its own. Its clock is
-  // the lateness itself, not the time (PERF-372): a loop that is on time reads
-  // -1 every second and re-renders nothing here, where a raw clock re-rendered
-  // the whole screen once a second to print the same alerts.
-  const overdueSec = useOverdueSeconds(instance);
-
   const actions = actionsData?.actions;
   const deployments = perfData?.deployments;
   const alerts = useMemo(
@@ -109,10 +99,13 @@ export function useRunReading({
         actions: actions ?? [],
         deployments: (deployments ?? []).length,
         journalNamesDeploy: journalNamesDeploy(decisions),
-        loop: instance,
-        nowSec: nowSecFor(instance, overdueSec),
+        // No overdue alert here (READ-424): the loop bar above the tabs already
+        // counts a late tick in amber, and never unmounts. Fleet rows, which
+        // have no loop bar, still raise it through `fleetAlerts`.
+        loop: null,
+        nowSec: 0,
       }),
-    [actions, deployments, decisions, instance, overdueSec],
+    [actions, deployments, decisions],
   );
 
   return {
@@ -131,20 +124,3 @@ const LIVE_RUN_REFETCH_MS = 10_000;
 
 /** One frozen empty list, so "no journal yet" is a stable identity. */
 const EMPTY_DECISIONS: Decision[] = [];
-
-/**
- * A `nowSec` that reads back as `overdueSec` in {@link alertsFor}'s rule.
- *
- * Half a second past the whole count, because the rule guards on `late > 0`:
- * the first second of lateness is count 0, and `due + 0` would drop the alert.
- * Not late (-1) maps to the due time itself, which the same guard reads as on
- * time.
- */
-function nowSecFor(
-  loop: { last_tick_at: number; frequency_sec: number } | null,
-  overdueSec: number,
-): number {
-  if (!loop) return 0;
-  const due = loop.last_tick_at + loop.frequency_sec;
-  return overdueSec < 0 ? due : due + overdueSec + 0.5;
-}
