@@ -235,6 +235,29 @@ def carry_fork_stamp(path: Path, meta: dict) -> dict:
     return meta
 
 
+def write_preserving_stamp(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` without destroying its fork stamp.
+
+    The three *stores* already do this by hand, rendering their frontmatter
+    through :func:`carry_fork_stamp`. The web routes did not: they took a body
+    the browser had round-tripped and wrote it straight down, and because the
+    GET that produced it had read the **stock** file — which carries no stamp —
+    the fork's stamp was written by :func:`fork_path` and erased by the very
+    next line. Editing an agent through the dashboard is the primary way anyone
+    edits these files, so in practice the stamp almost never survived.
+
+    Factored out rather than inlined at the two call sites so a third write path
+    cannot reintroduce the same bug by forgetting the dance.
+    """
+    if path.suffix != ".md":
+        atomic_write_text(path, content)
+        return
+    meta, body = parse_frontmatter(content)
+    atomic_write_text(
+        path, render_frontmatter(carry_fork_stamp(path, dict(meta or {})), body)
+    )
+
+
 def clear_fork_stamp(path: Path) -> None:
     """Drop ``forked_from``/``forked_at`` — used when publishing back into stock.
 
