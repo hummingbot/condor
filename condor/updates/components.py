@@ -244,19 +244,13 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
             "unknown",
         )
 
-    mode = "source" if definition.get("build") else "image"
+    # A ``build:`` key would mean the image is produced here, but no shipped
+    # compose file has one and hummingbot-api is deployed from the published
+    # image, so "source" is a mode the product cannot enter. An operator who
+    # hand-adds a build key is running their own image, which is exactly what
+    # the checkout gate and the locally-built check below already cover.
+    mode = "image"
     image_ref = str(definition.get("image") or "")
-
-    if mode == "source":
-        # Built here: the repo is the version, and there is no registry to ask.
-        return (
-            Facet(
-                kind="image",
-                current=image_ref or "(built from source)",
-                detail=["Built from source; the repo below is the version."],
-            ),
-            mode,
-        )
 
     if not image_ref:
         return (
@@ -345,6 +339,71 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
     )
 
 
+# hummingbot-api's CI publishes only on merges to the default branch, and only
+# the `latest` and version tags (verified against the registry: `latest`,
+# `1.0.1`, and one stale one-off). There is no per-branch tag, so on any other
+# checkout the published image has nothing to do with the code on disk --
+# offering to pull it means silently replacing the container with the default
+# branch's code. PRs merge straight to the default branch, so there is no second
+# mapping to make: either the checkout is the one the tag is built from, or the
+# operator owns the image.
+_CANONICAL_REMOTES = ("github.com/hummingbot/hummingbot-api",)
+
+
+def _is_canonical_remote(url: str) -> bool:
+    """Whether ``url`` is the repository whose merges publish the tag.
+
+    A fork has a default branch too, usually with the same name, so the branch
+    name alone would claim the published image matches code it has never seen.
+    Normalized loosely on purpose -- ssh, https, with or without ``.git`` -- and
+    conservative: anything unrecognized is treated as not canonical, which
+    skips the image rather than overwriting it.
+    """
+    cleaned = url.strip().removesuffix(".git").replace(":", "/").lower()
+    return any(cleaned.endswith(r) or f"/{r}" in cleaned for r in _CANONICAL_REMOTES)
+
+
+async def image_tracks_this_checkout(repo_dir: str) -> tuple[bool, str]:
+    """Whether the published tag can correspond to this checkout, and why not.
+
+    Four conditions, each of which is a way the branch *name* alone gets it
+    wrong:
+
+    * the remote must be the canonical repository -- a fork's ``main`` is not
+      the ``main`` the tag is built from;
+    * ``HEAD`` must not be detached -- ``--abbrev-ref`` answers the literal
+      string ``HEAD``, which would otherwise read as an ordinary branch name;
+    * the branch must be the remote's default -- read, not hardcoded;
+    * the checkout must not be ahead -- unpushed commits mean the branch is the
+      default one and the code is not.
+
+    Returns ``(True, "")`` when an image update is meaningful, otherwise
+    ``(False, reason)`` with the reason in words an operator can act on.
+    """
+    rc, url = await updater._run_git("remote", "get-url", "origin", repo_dir=repo_dir)
+    if rc != 0 or not url:
+        return False, "this checkout has no origin remote"
+    if not _is_canonical_remote(url):
+        return (
+            False,
+            f"origin is {url.strip()}, not the repository the image is built from",
+        )
+
+    if await updater.is_detached(repo_dir):
+        return False, "HEAD is detached, so it is not on any branch"
+
+    default = await updater.remote_default_branch(repo_dir)
+    branch = await updater.get_current_branch(repo_dir)
+    if default is None:
+        return False, "the remote's default branch could not be determined"
+    if branch != default:
+        return False, f"this checkout is on `{branch}`, not `{default}`"
+
+    if await updater.ahead_count(repo_dir, branch) > 0:
+        return False, f"this checkout has commits that are not on `{default}`"
+    return True, ""
+
+
 async def status(key: str) -> ComponentStatus:
     """Every facet of one component, fetched concurrently."""
     component = _table()[key]
@@ -358,10 +417,30 @@ async def status(key: str) -> ComponentStatus:
             up_to_date=repo.up_to_date,
         )
 
-    repo, (image, mode) = await asyncio.gather(
+    repo, (image, mode), (tracks, why_not) = await asyncio.gather(
         _repo_facet(component.repo_dir),
         _image_facet(component.repo_dir, component.service),
+        image_tracks_this_checkout(component.repo_dir),
     )
+
+    if not tracks:
+        # The comparison is still *correct* -- it is just meaningless here, and
+        # acting on it would replace the operator's container with the default
+        # branch's code. Keep the running digest visible, drop the offer, and
+        # say why. Stated rather than silently skipped: a silent skip is the
+        # same class of defect as the silent pull it replaces.
+        image = Facet(
+            kind="image",
+            current=image.current,
+            behind=0,
+            detail=[
+                f"The container runs the published image, which is built only "
+                f"from the default branch — and {why_not}. Left alone; you own "
+                f"this image."
+            ],
+            error=image.error,
+        )
+
     return ComponentStatus(
         key=component.key,
         name=component.name,
@@ -593,12 +672,17 @@ def _steps_for(component_key: str, status_: ComponentStatus) -> list[str]:
     steps: list[str] = []
     if component_key == HUMMINGBOT_API:
         repo = status_.facets.get("repo")
+        image = status_.facets.get("image")
         if repo is not None and not repo.up_to_date and repo.error is None:
-            steps.append("Fast-forward the hummingbot-api checkout")
-        if status_.mode == "source":
-            steps.append("Rebuild the hummingbot-api image from source")
-        else:
-            steps.append("Pull the published hummingbot-api image")
+            # Worth saying what this is *for*: the checkout supplies the shared
+            # files the container reads, so it is fast-forwarded even when the
+            # image is left alone.
+            steps.append("Fast-forward the hummingbot-api checkout (shared files)")
+        if image is not None and image.up_to_date:
+            # Either already current, or an image this checkout does not track.
+            # Nothing to pull, and nothing to restart for.
+            return steps
+        steps.append("Pull the published hummingbot-api image")
         steps.append("Recreate the containers")
         steps.append("Wait for the API to answer")
     else:

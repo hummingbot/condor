@@ -282,10 +282,17 @@ def test_an_image_with_no_local_digest_is_unknown_not_behind():
     assert facet.error and "never been pulled" in facet.error
 
 
-def test_a_build_key_means_source_mode_and_no_registry_lookup():
-    facet, mode = _facet(service={"build": {"context": "."}, "image": "local/api"})
-    assert mode == "source"
-    assert facet.up_to_date is True
+def test_a_hand_added_build_key_no_longer_means_a_second_mode():
+    """ "source" was a mode the product could not enter, so it is gone.
+
+    No shipped compose file has a ``build:`` key and hummingbot-api is deployed
+    from the published image, so the branch was dead code. An operator who adds
+    one is running their own image, which the checkout gate and the
+    locally-built check already cover -- by leaving it alone, not by rebuilding
+    it on their behalf.
+    """
+    _, mode = _facet(service={"build": {"context": "."}, "image": "local/api"})
+    assert mode == "image"
 
 
 def test_docker_being_down_is_an_error_not_a_verdict():
