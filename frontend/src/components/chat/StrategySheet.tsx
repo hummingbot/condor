@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft } from "lucide-react";
 import { useCallback, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -19,6 +20,7 @@ import {
 import type { PaneView } from "@/components/chat/paneUrl";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { api } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 type StrategyPane = Extract<PaneView, { kind: "strategy" }>;
 
@@ -73,6 +75,11 @@ export function StrategySheet({
     queryFn: () => api.getStrategy(slug, sslug),
     enabled: !!slug && !!sslug,
   });
+  // The panel this pane replaced was reading the same key, so the name in the
+  // back control is a cache hit too — and the slug until it is not.
+  const { data: agent } = useQuery(agentQuery(slug));
+  const backTitle = `Back to ${agent?.name || slug}`;
+  const title = strategy?.name || sslug;
 
   const onSection = useCallback(
     (next: PaneSection, patch?: WorkspaceUrlPatch) => {
@@ -148,8 +155,38 @@ export function StrategySheet({
 
   return (
     <WorkspaceSheet
-      title={strategy?.name || sslug}
+      title={title}
       subtitle={slug}
+      // The way back to the agent, where the page has its own (the header's
+      // `ArrowLeft`). The right edge's fold also lands there, but it is drawn
+      // as "close the panel" and does not read as "back to Brigado".
+      header={
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            title={backTitle}
+            aria-label={backTitle}
+            data-strategy-back
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
+              {title}
+            </h2>
+            <button
+              type="button"
+              onClick={onClose}
+              className="block max-w-full truncate text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+              title={backTitle}
+            >
+              {slug}
+            </button>
+          </div>
+        </div>
+      }
       paneProfile="tune"
       bleed
       onFullscreen={expand}
