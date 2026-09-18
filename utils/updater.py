@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -628,6 +629,34 @@ def restart_pending() -> bool:
     return _restart_pending
 
 
+def set_tmux_remain_on_exit(on: bool) -> None:
+    """Toggle ``remain-on-exit`` on Condor's own tmux session, best effort.
+
+    The Makefile turns this on for the startup probe and back off once the boot
+    is confirmed, deliberately: a crash three hours later must still take the
+    session down, or ``make status`` would report a dead Condor as running. That
+    leaves an in-process restart with no such protection — the successor's own
+    startup failure closes the pane and takes the traceback with it.
+
+    So the same dance is repeated around the exec: on just before, off again
+    once the new process has got far enough to serve. Silent when there is no
+    tmux, which is the ordinary case for a foreground or containerized run.
+    """
+    session = os.environ.get("CONDOR_TMUX_SESSION", "condor")
+    value = "on" if on else "off"
+    for scope in ("set-option", "set-window-option"):
+        try:
+            result = subprocess.run(
+                ["tmux", scope, "-t", session, "remain-on-exit", value],
+                capture_output=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if result.returncode == 0:
+            return
+
+
 def exec_restart() -> None:
     """Replace this process with a fresh one. Never returns.
 
@@ -644,7 +673,40 @@ def exec_restart() -> None:
             pass
     # sys.argv[0] is usually the relative "main.py"; make sure it still resolves.
     os.chdir(CONDOR_DIR)
-    os.execv(python, [python] + sys.argv)
+    # Keep the pane alive across the handover so the successor's own startup
+    # failure is readable. main() turns it back off once it is serving.
+    set_tmux_remain_on_exit(True)
+    try:
+        os.execv(python, [python] + sys.argv)
+    except OSError:
+        # A failed exec is the one way a restart can end with nothing running
+        # and nothing said. The process image is still this one, but the event
+        # loop is gone and the tmux pane is about to close, so a log line alone
+        # can vanish with it -- hence a file as well, in the runtime root where
+        # the next boot (and the operator) can find it.
+        logger.exception("exec_restart failed; Condor is not coming back")
+        _record_restart_failure()
+        raise
+
+
+def _record_restart_failure() -> None:
+    """Leave the reason a restart died somewhere it will survive the pane."""
+    import traceback
+    from datetime import datetime, timezone
+
+    try:
+        from condor.paths import runtime_root
+
+        path = runtime_root() / "restart-failure.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"{datetime.now(timezone.utc).isoformat()}\n"
+            f"exec {sys.executable} {' '.join(sys.argv)}\n\n"
+            f"{traceback.format_exc()}",
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001 - never mask the original failure
+        logger.debug("Could not write restart-failure.log", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

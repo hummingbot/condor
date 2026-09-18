@@ -332,7 +332,11 @@ def _run_keyboard(run) -> InlineKeyboardMarkup | None:
     # Offered, never taken automatically: an in-process restart is an ``execv``
     # that can race whatever started Condor into a second copy of it, so it is
     # only ever something the admin chooses (see :mod:`condor.updates.run`).
-    if run.state == "failed" or updates.relaunch_pending() is not None:
+    # Only when there is something to apply. The failed-run arm used to be here
+    # too, which put a Restart Now button directly beneath the engine's own
+    # "dependencies failed -- fix it before restarting": pressing it booted the
+    # new code against the old venv.
+    if updates.relaunch_pending() is not None:
         rows.append(
             [InlineKeyboardButton("Restart Now", callback_data="admin:update_restart")]
         )
