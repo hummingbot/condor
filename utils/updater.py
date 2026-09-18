@@ -75,9 +75,22 @@ async def _run_cmd(
     return proc.returncode, output
 
 
+# A crashed git leaves .git/index.lock behind and every later subcommand fails
+# on it. The raw error does reach output_tail, but it says "Another git process
+# seems to be running" -- which sends the reader looking for a process that is
+# not there. One line naming the file turns a dead end into a fix.
+_LOCK_HINT = (
+    "\nStale git lock: remove {repo}/.git/index.lock if no git process is "
+    "actually running."
+)
+
+
 async def _run_git(*args: str, repo_dir: str = CONDOR_DIR) -> tuple[int, str]:
     """Run a git command in the given repo and return (returncode, stdout)."""
-    return await _run_cmd("git", *args, cwd=repo_dir, timeout=GIT_TIMEOUT)
+    rc, out = await _run_cmd("git", *args, cwd=repo_dir, timeout=GIT_TIMEOUT)
+    if rc != 0 and "index.lock" in out:
+        out += _LOCK_HINT.format(repo=repo_dir)
+    return rc, out
 
 
 async def get_local_commit(repo_dir: str = CONDOR_DIR) -> str:
@@ -93,9 +106,48 @@ async def get_local_commit_full(repo_dir: str = CONDOR_DIR) -> str:
 
 
 async def get_current_branch(repo_dir: str = CONDOR_DIR) -> str:
-    """Return the current branch name."""
+    """Return the current branch name, or the literal ``HEAD`` when detached.
+
+    ``rev-parse --abbrev-ref`` answers ``HEAD`` for a detached checkout rather
+    than failing, and every caller downstream then treats that string as a
+    branch name. Use :func:`is_detached` to ask the question this cannot
+    answer.
+    """
     _, out = await _run_git("rev-parse", "--abbrev-ref", "HEAD", repo_dir=repo_dir)
     return out
+
+
+async def is_detached(repo_dir: str = CONDOR_DIR) -> bool:
+    """Whether ``HEAD`` points at a commit rather than a branch.
+
+    ``symbolic-ref`` is the only probe that distinguishes the two:
+    ``rev-parse --abbrev-ref HEAD`` returns the *string* ``HEAD`` when detached,
+    which reads as an ordinary branch name everywhere downstream. That is how a
+    detached checkout came to fast-forward onto the remote's default branch --
+    ``ahead_count(repo, "HEAD")`` resolves ``origin/HEAD``, finds nothing ahead,
+    so no ``diverged`` block fires, and ``git merge --ff-only origin/HEAD``
+    quietly succeeds and leaves the checkout detached.
+    """
+    rc, _ = await _run_git("symbolic-ref", "-q", "HEAD", repo_dir=repo_dir)
+    return rc != 0
+
+
+async def remote_default_branch(repo_dir: str = CONDOR_DIR) -> str | None:
+    """The remote's default branch (e.g. ``main``), or ``None`` if unknown.
+
+    Read from ``refs/remotes/origin/HEAD`` rather than hardcoded, so a repo that
+    renames its default branch does not need a code change here. ``None`` when
+    the ref is absent -- a clone made with ``--single-branch``, or one that has
+    never run ``git remote set-head`` -- and callers must treat that as "cannot
+    tell" rather than assuming anything.
+    """
+    rc, out = await _run_git(
+        "symbolic-ref", "-q", "refs/remotes/origin/HEAD", repo_dir=repo_dir
+    )
+    if rc != 0 or not out:
+        return None
+    # refs/remotes/origin/main -> main
+    return out.strip().rsplit("/", 1)[-1] or None
 
 
 async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
