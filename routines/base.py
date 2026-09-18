@@ -22,6 +22,7 @@ from condor.memory.paths import (
     agent_home_layers,
     shared_routines_roots,
 )
+from condor.paths import local_agents_root
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +42,24 @@ def library_dir() -> Path:
 def assistant_routines_dir(agent_slug: str | None) -> Path:
     """The **writable** routines dir of an assistant — the one it owns.
 
-    There is a single home for the general library — the repo-root ``routines/``,
-    owned by the chat ``condor``. A trading agent / domain expert owns
-    ``<local>/<slug>/routines``.
+    Every assistant writes under the local agent root, the chat included:
 
-    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) → ``routines``
+    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) →
+      ``<local>/condor/routines``
     - trading agent / domain expert (slug) → ``<local>/<slug>/routines``
 
-    The explicit ``"condor"`` carve-out is load-bearing (FEAT-033): Condor is now
-    an ordinary entry under the agent roots, so threading its slug through
-    naively would relocate the general library to ``<slug>/routines`` and empty
-    the catalog — silently, since a missing dir simply lists nothing.
+    The chat used to write into the repo-root ``routines/`` instead, which is
+    tracked and actively maintained upstream (13 files, 48 commits touching them
+    over 60) — so asking the chat agent to improve a shipped routine edited a
+    file upstream also edits, and the next update that touched it raised a
+    dirty-conflict whose escapes were lossy.
+
+    The explicit ``"condor"`` carve-out that remains is still load-bearing
+    (FEAT-033): Condor is an ordinary entry under the agent roots, so threading
+    its slug through naively would relocate the general *library* as well and
+    empty the catalog — silently, since a missing dir simply lists nothing. That
+    is why only the write target moves here, and the shipped root stays as the
+    read fallback in :func:`assistant_routines_dirs`.
 
     This is what an assistant may **write**, not everything it may run: since
     FEAT-038 every assistant also *reads* the shared library, and since FEAT-115
@@ -63,18 +71,21 @@ def assistant_routines_dir(agent_slug: str | None) -> Path:
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return agent_home_layers(agent_slug)[0] / "routines"
-    return _PROJECT_ROOT / "routines"
+    return local_agents_root() / CHAT_SLUG / "routines"
 
 
 def assistant_routines_dirs(agent_slug: str | None) -> tuple[Path, ...]:
     """An assistant's own routine dirs in **read** order: local, then stock.
 
-    The chat's general library is the repo-root ``routines/`` and has no second
-    layer — it is not under either agent root.
+    The chat now has two layers like every other assistant: a writable local one
+    under the agent root, and the shipped ``routines/`` as the read fallback. The
+    fallback is what keeps FEAT-033's carve-out satisfied — the general library
+    stays fully visible, which is the thing that would break silently if the
+    slug were simply threaded through.
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return tuple(home / "routines" for home in agent_home_layers(agent_slug))
-    return (_PROJECT_ROOT / "routines",)
+    return (local_agents_root() / CHAT_SLUG / "routines", _PROJECT_ROOT / "routines")
 
 
 @dataclass
