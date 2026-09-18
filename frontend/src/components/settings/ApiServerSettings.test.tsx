@@ -25,6 +25,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const getApiServerInfo = vi.fn();
 const getApiClientConfig = vi.fn();
 const updateApiClientConfig = vi.fn();
+const getApiUpgradePreflight = vi.fn();
+const startApiUpgrade = vi.fn();
+const getApiUpgradeStatus = vi.fn();
 const serverHolder = { current: "alpha" as string | null };
 const ownerHolder = { current: true };
 
@@ -33,6 +36,9 @@ vi.mock("@/lib/api", () => ({
     getApiServerInfo: (s: string) => getApiServerInfo(s),
     getApiClientConfig: (s: string) => getApiClientConfig(s),
     updateApiClientConfig: (s: string, c: unknown) => updateApiClientConfig(s, c),
+    getApiUpgradePreflight: (s: string) => getApiUpgradePreflight(s),
+    startApiUpgrade: (s: string, ack: boolean) => startApiUpgrade(s, ack),
+    getApiUpgradeStatus: (s: string) => getApiUpgradeStatus(s),
   },
   errorStatus: (e: unknown) => (e as { status?: number } | null)?.status,
 }));
@@ -78,6 +84,35 @@ const CONFIG = {
   available_sources: ["binance", "gate_io", "kucoin"],
 };
 
+/** A server that could be upgraded, with executors that the restart would destroy. */
+const READY = {
+  image_ref: "hummingbot/hummingbot-api:latest",
+  current_digest: "hummingbot/hummingbot-api@sha256:aaa",
+  available_digest: "sha256:bbb",
+  up_to_date: false,
+  pinned: false,
+  pinned_reason: null,
+  override_file: null,
+  compose: {
+    project: "hummingbot-api",
+    working_dir: "/root/hummingbot-api",
+    config_files: ["/root/hummingbot-api/docker-compose.yml"],
+  },
+  running_executors: 4,
+  running_bots: 2,
+  can_upgrade: true,
+  blocked_reason: null,
+};
+
+/** The default: nothing to do, which is what most of these tests want out of the way. */
+const UP_TO_DATE = {
+  ...READY,
+  up_to_date: true,
+  running_executors: 0,
+  can_upgrade: false,
+  blocked_reason: "Already running the published hummingbot/hummingbot-api:latest.",
+};
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -101,6 +136,29 @@ function field(label: string): HTMLInputElement | HTMLSelectElement {
   const el = container.querySelector(`[aria-label="${label}"]`);
   if (!el) throw new Error(`no field labelled ${label}`);
   return el as HTMLInputElement | HTMLSelectElement;
+}
+
+function buttonSaying(text: string): HTMLButtonElement {
+  const button = [...container.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(text),
+  );
+  if (!button) throw new Error(`no button saying ${text}`);
+  return button as HTMLButtonElement;
+}
+
+/** The card's own trigger, not the confirm inside the dialog it opens. */
+const upgradeButton = () => buttonSaying("Upgrade") as HTMLButtonElement;
+const confirmButton = () => buttonSaying("Upgrade now") as HTMLButtonElement;
+
+async function click(el: Element) {
+  await act(async () => {
+    (el as HTMLElement).click();
+  });
+  for (let i = 0; i < 10; i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+  }
 }
 
 function saveButton(): HTMLButtonElement {
@@ -132,6 +190,11 @@ beforeEach(() => {
   getApiServerInfo.mockReset().mockResolvedValue(INFO);
   getApiClientConfig.mockReset().mockResolvedValue(CONFIG);
   updateApiClientConfig.mockReset().mockResolvedValue({ success: true, message: "ok" });
+  getApiUpgradePreflight.mockReset().mockResolvedValue(UP_TO_DATE);
+  startApiUpgrade.mockReset().mockResolvedValue({ run_id: "abc123", phase: "pulling" });
+  getApiUpgradeStatus
+    .mockReset()
+    .mockResolvedValue({ run_id: null, phase: "idle", detail: null, log_tail: [] });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -324,6 +387,7 @@ describe("ApiServerSettings", () => {
     );
     getApiServerInfo.mockRejectedValue(tooOld);
     getApiClientConfig.mockRejectedValue(tooOld);
+    getApiUpgradePreflight.mockRejectedValue(tooOld);
     await mount();
 
     expect(container.textContent).toContain("older than this panel");
@@ -341,5 +405,141 @@ describe("ApiServerSettings", () => {
 
     expect(container.textContent).toContain("timed out");
     expect(container.querySelector(".border-red-500\\/30")).not.toBeNull();
+  });
+  // ── Upgrading the server (FEAT-122) ──
+  //
+  // The server owns every judgement about whether an upgrade is safe; this panel's job
+  // is to show its refusal and never to send a request it has already been told would be
+  // refused. So what is pinned here is what the button will *not* do.
+
+  it("refuses a pinned server and names the override file that pins it", async () => {
+    getApiUpgradePreflight.mockResolvedValue({
+      ...READY,
+      pinned: true,
+      override_file: "docker-compose.override.yml",
+      can_upgrade: false,
+      blocked_reason:
+        "This server's image is pinned: compose override file docker-compose.override.yml " +
+        "can pin the image. Upgrade this server over SSH.",
+    });
+    await mount();
+
+    expect(container.textContent).toContain("docker-compose.override.yml");
+    expect(upgradeButton().disabled).toBe(true);
+  });
+
+  it("does not offer an upgrade to a trader", async () => {
+    ownerHolder.current = false;
+    getApiUpgradePreflight.mockResolvedValue(READY);
+    await mount();
+
+    const button = upgradeButton();
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe("Only the server's owner can change this.");
+  });
+
+  it("will not send an upgrade until the executor loss is acknowledged", async () => {
+    getApiUpgradePreflight.mockResolvedValue(READY);
+    await mount();
+
+    await click(upgradeButton());
+    expect(container.textContent).toContain("4 running executors will be closed");
+    expect(container.textContent).toContain("2 bots keep running");
+
+    // The confirm is dead until the checkbox is ticked, and nothing has been sent.
+    expect(confirmButton().disabled).toBe(true);
+    await click(confirmButton());
+    expect(startApiUpgrade).not.toHaveBeenCalled();
+
+    await click(field("Acknowledge executor loss"));
+    expect(confirmButton().disabled).toBe(false);
+    await click(confirmButton());
+    expect(startApiUpgrade).toHaveBeenCalledWith("alpha", true);
+  });
+
+  it("asks for no acknowledgement when nothing is running", async () => {
+    getApiUpgradePreflight.mockResolvedValue({ ...READY, running_executors: 0 });
+    await mount();
+
+    await click(upgradeButton());
+    expect(container.textContent).toContain("No executors are running");
+    expect(container.querySelector('[aria-label="Acknowledge executor loss"]')).toBeNull();
+
+    await click(confirmButton());
+    expect(startApiUpgrade).toHaveBeenCalledWith("alpha", false);
+  });
+
+  it("keeps following the server the run was started on after the navbar moves", async () => {
+    // Repointing the poll at whatever the navbar now shows would report another host's
+    // idle status as this run's outcome.
+    getApiUpgradePreflight.mockResolvedValue({ ...READY, running_executors: 0 });
+    getApiUpgradeStatus.mockResolvedValue({
+      run_id: "abc123",
+      phase: "recreating",
+      detail: "Recreating the hummingbot-api container.",
+      log_tail: [],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const render = async () => {
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={client}>
+            <ApiServerSettings />
+          </QueryClientProvider>,
+        );
+      });
+      for (let i = 0; i < 20; i++) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        });
+      }
+    };
+
+    await render();
+    await click(upgradeButton());
+    await click(confirmButton());
+
+    serverHolder.current = "beta";
+    await render();
+
+    expect(getApiUpgradeStatus).toHaveBeenCalledWith("alpha");
+    expect(getApiUpgradeStatus).not.toHaveBeenCalledWith("beta");
+    // And the banner says which server it is talking about.
+    expect(container.textContent).toContain("alpha: recreating");
+  });
+
+  it("shows the helper's log tail when the recreate failed", async () => {
+    getApiUpgradePreflight.mockResolvedValue({ ...READY, running_executors: 0 });
+    getApiUpgradeStatus.mockResolvedValue({
+      run_id: "abc123",
+      phase: "failed",
+      detail: "The recreate failed (exit code 1).",
+      exit_code: 1,
+      log_tail: ["service hummingbot-api: volume not found"],
+    });
+    await mount();
+
+    await click(upgradeButton());
+    await click(confirmButton());
+
+    expect(container.textContent).toContain("volume not found");
+    expect(container.textContent).toContain("exit code 1");
+  });
+
+  it("reports a server that is not answering as restarting, not as broken", async () => {
+    getApiUpgradePreflight.mockResolvedValue({ ...READY, running_executors: 0 });
+    getApiUpgradeStatus.mockResolvedValue({
+      run_id: null,
+      phase: "restarting",
+      detail: "The server is not answering. It is being replaced; this is expected.",
+      log_tail: [],
+    });
+    await mount();
+
+    await click(upgradeButton());
+    await click(confirmButton());
+
+    expect(container.textContent).toContain("restarting");
+    expect(container.textContent).toContain("expected");
   });
 });

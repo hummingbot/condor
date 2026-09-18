@@ -1,14 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Lock, Save } from "lucide-react";
-import { useState } from "react";
+import { AlertTriangle, ArrowUpCircle, Loader2, Lock, Save } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
-import { api, errorStatus, type ApiClientConfigUpdate } from "@/lib/api";
+import {
+  api,
+  errorStatus,
+  type ApiClientConfigUpdate,
+  type ApiUpgradeStatus,
+} from "@/lib/api";
 
 /**
- * Settings → Hummingbot API: what the navbar-selected server runs, and the client
- * defaults every bot deployed from it next will inherit (FEAT-121).
+ * Settings → Hummingbot API: what the navbar-selected server runs, the client defaults
+ * every bot deployed from it next will inherit (FEAT-121), and upgrading that server's
+ * hummingbot-api to the published image (FEAT-122).
  *
  * Scoped by `useServer()` alone, like the Gateway and Keys panels beside it — the navbar
  * select is the only picker, so this panel and the rest of the app can never disagree
@@ -305,6 +311,210 @@ function BotDefaultsCard({ server }: { server: string }) {
   );
 }
 
+/** Phases where the run is still going and the panel keeps polling. */
+const LIVE_PHASES = new Set(["pulling", "recreating", "restarting"]);
+
+/**
+ * Replacing this server's hummingbot-api container with the published image (FEAT-122).
+ *
+ * Every judgement about whether that is safe belongs to the server, which re-runs its own
+ * preflight before it starts: this card shows `blocked_reason` verbatim and disables the
+ * button, and never decides for itself that an upgrade is fine. A second opinion here
+ * could only disagree with the one that actually runs.
+ *
+ * What is decided here is consent. A restart closes every RUNNING executor as
+ * SYSTEM_CLEANUP and they are not restored, so when any is running the confirm button
+ * stays disabled behind an explicit checkbox — the server refuses an unacknowledged
+ * request anyway, and a dialog that could send one would just be a 409 the operator has
+ * to translate.
+ */
+function UpgradeCard({ server }: { server: string }) {
+  const qc = useQueryClient();
+  // Predicts the refusal only; `_require_owner` on POST /settings/api/upgrade enforces it.
+  const { isOwner } = useServerPermission();
+
+  const [confirming, setConfirming] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  // The server the run was started on, captured here rather than read from useServer():
+  // switching the navbar mid-run must not silently repoint the poll at another host and
+  // report its idle status as this run's outcome.
+  const [runServer, setRunServer] = useState<string | null>(null);
+
+  const preflight = useQuery({
+    queryKey: ["api-upgrade-preflight", server],
+    queryFn: () => api.getApiUpgradePreflight(server),
+    retry: false,
+  });
+
+  const status = useQuery({
+    queryKey: ["api-upgrade-status", runServer],
+    queryFn: () => api.getApiUpgradeStatus(runServer as string),
+    enabled: runServer !== null,
+    // Pinned rather than left at the default: this poll is *expected* to fail while the
+    // container is being replaced, and a query that gave up would strand the panel at
+    // exactly the moment it is the only thing reporting.
+    retry: true,
+    refetchInterval: (query) =>
+      LIVE_PHASES.has((query.state.data as ApiUpgradeStatus | undefined)?.phase ?? "") ? 2000 : false,
+  });
+
+  const run = runServer === null ? null : (status.data ?? null);
+
+  // Once the run lands, the image, digest and version the rest of the panel shows are the
+  // old container's. In an effect rather than in render: invalidating a query mid-render
+  // schedules the refetch whose result re-renders this component, which invalidates again.
+  const finished = run?.phase === "done";
+  useEffect(() => {
+    if (!finished || runServer === null) return;
+    qc.invalidateQueries({ queryKey: ["api-server-info", runServer] });
+    qc.invalidateQueries({ queryKey: ["servers"] });
+  }, [finished, runServer, qc]);
+
+  const startMut = useMutation({
+    mutationFn: () => api.startApiUpgrade(server, acknowledged),
+    onSuccess: () => {
+      setConfirming(false);
+      setAcknowledged(false);
+      setRunServer(server);
+    },
+  });
+
+  if (preflight.isLoading) {
+    return (
+      <Card title="Upgrade">
+        <Loader2 className="h-4 w-4 animate-spin text-[var(--color-text-muted)]" />
+      </Card>
+    );
+  }
+  if (preflight.error) {
+    return (
+      <Card title="Upgrade">
+        <Problem error={preflight.error} />
+      </Card>
+    );
+  }
+  const info = preflight.data;
+  if (!info) return null;
+
+  const executors = info.running_executors ?? 0;
+  const bots = info.running_bots ?? 0;
+  const needsAck = executors > 0;
+  const blocked = info.blocked_reason;
+  const canPress = isOwner && info.can_upgrade && run === null;
+
+  return (
+    <Card title="Upgrade">
+      {info.can_upgrade ? (
+        <p className="text-sm text-[var(--color-text)]">
+          Update available for <span className="font-mono text-xs">{info.image_ref}</span>.
+        </p>
+      ) : (
+        <p className="text-xs text-[var(--color-text-muted)]">{blocked}</p>
+      )}
+
+      {run && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] p-3 text-xs">
+          <div className="flex items-center gap-2">
+            {LIVE_PHASES.has(run.phase) && (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--color-text-muted)]" />
+            )}
+            <span className="font-medium text-[var(--color-text)]">
+              {runServer}: {run.phase}
+            </span>
+          </div>
+          {run.detail && <p className="mt-1 text-[var(--color-text-muted)]">{run.detail}</p>}
+          {run.phase === "done" && run.new_digest && (
+            <p className="mt-1 font-mono text-[var(--color-text-muted)]">{run.new_digest}</p>
+          )}
+          {run.log_tail.length > 0 && (
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-[var(--color-text-muted)]">
+              {run.log_tail.join("\n")}
+            </pre>
+          )}
+          {!LIVE_PHASES.has(run.phase) && (
+            <button
+              onClick={() => setRunServer(null)}
+              className="mt-2 text-[var(--color-text-muted)] underline"
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
+
+      {!confirming && (
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <p className="text-xs text-[var(--color-text-muted)]">
+            {bots} bot{bots === 1 ? "" : "s"} keep running; only the API container is
+            recreated.
+          </p>
+          <button
+            onClick={() => setConfirming(true)}
+            disabled={!canPress}
+            title={isOwner ? (blocked ?? undefined) : OWNER_ONLY_HINT}
+            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ArrowUpCircle className="h-3 w-3" />
+            Upgrade
+          </button>
+        </div>
+      )}
+
+      {confirming && (
+        <div className="mt-3 space-y-2 rounded-md border border-amber-500/30 p-3 text-xs">
+          <p className="text-[var(--color-text)]">
+            Pull <span className="font-mono">{info.image_ref}</span> on{" "}
+            <span className="font-medium">{server}</span> and recreate its API container.
+          </p>
+          {needsAck ? (
+            <label className="flex items-start gap-2 text-[var(--color-red)]">
+              <input
+                type="checkbox"
+                checked={acknowledged}
+                onChange={(e) => setAcknowledged(e.target.checked)}
+                aria-label="Acknowledge executor loss"
+                className="mt-0.5"
+              />
+              <span>
+                {executors} running executor{executors === 1 ? "" : "s"} will be closed as
+                SYSTEM_CLEANUP and not restored.
+              </span>
+            </label>
+          ) : (
+            <p className="text-[var(--color-text-muted)]">No executors are running.</p>
+          )}
+          <p className="text-[var(--color-text-muted)]">
+            {bots} bot{bots === 1 ? "" : "s"} keep running. If the server does not come back
+            within 3 minutes, check <code>docker compose logs hummingbot-api</code> over SSH
+            — there is no rollback.
+          </p>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={() => startMut.mutate()}
+              disabled={(needsAck && !acknowledged) || startMut.isPending}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-red)] px-3 py-1.5 font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {startMut.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+              Upgrade now
+            </button>
+            <button
+              onClick={() => {
+                setConfirming(false);
+                setAcknowledged(false);
+              }}
+              className="text-[var(--color-text-muted)] underline"
+            >
+              Cancel
+            </button>
+          </div>
+          {startMut.error != null && <Problem error={startMut.error} />}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
 function MarketDataCard({ server }: { server: string }) {
   const { data, error } = useQuery({
     queryKey: ["api-server-info", server],
@@ -349,6 +559,9 @@ export function ApiServerSettings() {
   return (
     <div className="space-y-4">
       <VersionCard server={server} />
+      {/* Deliberately not keyed by server: an upgrade in flight keeps reporting on the
+          server it was started on, and names it, even if the navbar moves on. */}
+      <UpgradeCard server={server} />
       {/* Keyed by server: a draft typed for one server must not survive a switch to
           another, where it would read as that server's current values. */}
       <BotDefaultsCard key={server} server={server} />

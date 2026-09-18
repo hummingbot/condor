@@ -1628,6 +1628,45 @@ export interface ApiClientConfigUpdate {
   rate_limits_share_pct?: number;
 }
 
+/**
+ * Whether a server can replace its own hummingbot-api container, and what that costs.
+ *
+ * `can_upgrade` is the server's verdict and the only one that matters: it re-runs this
+ * same preflight before it starts, so a second judgement here could only disagree with
+ * the one that actually runs. When it is false, `blocked_reason` says why in the
+ * operator's terms and is meant to be shown verbatim.
+ */
+export interface ApiUpgradePreflight {
+  image_ref: string | null;
+  current_digest: string | null;
+  available_digest: string | null;
+  up_to_date: boolean | null;
+  pinned: boolean | null;
+  pinned_reason: string | null;
+  override_file: string | null;
+  compose: { project: string; working_dir: string; config_files: string[] } | null;
+  /** Closed as SYSTEM_CLEANUP by the restart, and not restored. */
+  running_executors: number | null;
+  /** Separate containers; they keep running. */
+  running_bots: number | null;
+  can_upgrade: boolean;
+  blocked_reason: string | null;
+}
+
+/**
+ * An upgrade run. `restarting` is Condor's own: the server stopped answering, which
+ * during this operation is what success looks like half-way through.
+ */
+export interface ApiUpgradeStatus {
+  run_id: string | null;
+  phase: "idle" | "pulling" | "recreating" | "restarting" | "done" | "failed";
+  detail: string | null;
+  previous_digest?: string | null;
+  new_digest?: string | null;
+  exit_code?: number | null;
+  log_tail: string[];
+}
+
 export interface CredentialInfo {
   connector_name: string;
   connector_type: string;
@@ -3708,6 +3747,31 @@ export const api = {
   getApiClientConfig: (server: string) =>
     apiFetch<ApiClientConfig>(
       `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiUpgradePreflight: (server: string) =>
+    apiFetch<ApiUpgradePreflight>(
+      `/api/v1/settings/api/upgrade/preflight?server=${encodeURIComponent(server)}`,
+    ),
+
+  /**
+   * Start replacing the server's hummingbot-api container. Owner only.
+   *
+   * `acknowledgeExecutorLoss` is consent to every running executor being closed as
+   * SYSTEM_CLEANUP; the server refuses with the reason when it is withheld.
+   */
+  startApiUpgrade: (server: string, acknowledgeExecutorLoss: boolean) =>
+    apiFetch<{ run_id: string; phase: string }>(
+      `/api/v1/settings/api/upgrade?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ acknowledge_executor_loss: acknowledgeExecutorLoss }),
+      },
+    ),
+
+  getApiUpgradeStatus: (server: string) =>
+    apiFetch<ApiUpgradeStatus>(
+      `/api/v1/settings/api/upgrade/status?server=${encodeURIComponent(server)}`,
     ),
 
   /** Partial: only the fields present are written, the rest keep their values. */
