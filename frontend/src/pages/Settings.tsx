@@ -8,6 +8,7 @@ import {
   Server,
   Shield,
   ShieldCheck,
+  Palette,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import { NotificationsSettings } from "@/components/settings/NotificationsSettin
 import { ServersSettings } from "@/components/settings/ServersSettings";
 import { SharingSettings } from "@/components/settings/SharingSettings";
 import { TelemetrySettings } from "@/components/settings/TelemetrySettings";
+import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { UpdatesSettings } from "@/components/settings/UpdatesSettings";
 import { VoiceSettings } from "@/components/settings/VoiceSettings";
 import { useIsAdmin } from "@/hooks/useIsAdmin";
@@ -35,6 +37,7 @@ type TabKey =
   | "voice"
   | "notifications"
   | "privacy"
+  | "theme"
   | "admin"
   | "updates";
 
@@ -74,6 +77,7 @@ function buildGroups(server: string | null, isAdmin: boolean): TabGroup[] {
     {
       label: "Account",
       tabs: [
+        { key: "theme", label: "Theme", icon: Palette },
         { key: "notifications", label: "Notifications", icon: Bell },
         { key: "privacy", label: "Privacy", icon: Shield },
       ],
@@ -187,6 +191,7 @@ export function Settings() {
           {tab === "keys" && <ApiKeysSettings />}
           {tab === "llm" && <CustomProvidersSettings />}
           {tab === "voice" && <VoiceSettings />}
+          {tab === "theme" && <ThemeSettings />}
           {tab === "notifications" && <NotificationsSettings />}
           {/* Two cards, not one switch. Telemetry is anonymous counts the admin
               consents to install-wide; sharing is content only its author can hand

@@ -44,7 +44,7 @@ import {
 } from "@wallet-standard/features";
 import { registerWallet } from "@wallet-standard/wallet";
 
-import { avatarSvg } from "@/components/wallet/address";
+import { avatarSvg, getAvatarStyleId, loadAvatarStyle } from "@/lib/avatarStyle";
 
 /** The fork presents itself as mainnet — that is what it forked — so a dev
  *  wallet advertises the chain the transaction will actually be signed for. */
@@ -62,8 +62,14 @@ function devSecrets(): { name: string; secret: string }[] {
     .map(([key, value]) => ({ name: key.slice(prefix.length).toLowerCase(), secret: value as string }));
 }
 
+/** A Wallet Standard icon is a fixed string handed over once at registration,
+ *  not something re-read at render, so the avatar style has to be in memory by
+ *  then — `registerDevWallets` awaits it. Reaching here without it means that
+ *  load failed, which is worth saying rather than papering over with a
+ *  different-looking placeholder that then never updates. */
 function icon(address: string): WalletIcon {
   const svg = avatarSvg(address);
+  if (!svg) throw new Error("avatar style is not loaded; cannot build a dev wallet icon");
   return `data:image/svg+xml;base64,${btoa(svg)}` as WalletIcon;
 }
 
@@ -191,6 +197,8 @@ export async function registerDevWallets(isFork: boolean): Promise<void> {
   const secrets = devSecrets();
   if (secrets.length === 0) return;
   registered = true;
+  // Before any DevWallet is constructed: its icon is baked in at construction.
+  await loadAvatarStyle(getAvatarStyleId());
   for (const { name, secret } of secrets) {
     const bytes = new Uint8Array(getBase58Encoder().encode(secret));
     const keyPair = await createKeyPairFromBytes(bytes);

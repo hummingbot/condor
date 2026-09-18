@@ -2335,9 +2335,16 @@ export interface PendingConfirmation {
 // ── Vaults (plan M2/M4) ──
 
 /** The wallet a Condor account has proved it controls. */
+/** Which wallet a chain's flows should reach for first. `browser` is the key
+ *  attached here, which only its owner can sign with; `gateway` is the one the
+ *  server holds and signs with unattended. */
+export type WalletSource = "browser" | "gateway";
+
 export interface AttachedWallet {
   address: string;
   attached_at: number;
+  /** Chain -> source. A chain that is absent has never been decided. */
+  preferred: Partial<Record<string, WalletSource>>;
 }
 
 export interface ExtraSigner {
@@ -3708,6 +3715,14 @@ export const api = {
     }),
 
   getWallet: () => apiFetch<AttachedWallet | null>("/api/v1/wallet"),
+
+  /** Say which wallet is "mine" on a chain. Kept on the account, so the answer
+   *  follows the person to their next browser. */
+  setPreferredWallet: (chain: string, source: WalletSource) =>
+    apiFetch<{ preferred: Record<string, WalletSource> }>("/api/v1/wallet/preferred", {
+      method: "PUT",
+      body: JSON.stringify({ chain, source }),
+    }),
 
   /** Refused while the wallet still runs a vault — detaching would revoke nothing. */
   detachWallet: () =>

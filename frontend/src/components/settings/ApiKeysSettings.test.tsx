@@ -25,6 +25,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerContext } from "@/hooks/useServer";
+import { WalletHarness } from "@/test/walletHarness";
+
 import { ApiKeysSettings } from "./ApiKeysSettings";
 
 declare global {
@@ -119,7 +121,9 @@ async function openSpotGrid() {
     root.render(
       <QueryClientProvider client={qc}>
         <ServerContext.Provider value={{ server: "prod", setServer: () => {} }}>
-          <ApiKeysSettings />
+          <WalletHarness>
+            <ApiKeysSettings />
+          </WalletHarness>
         </ServerContext.Provider>
       </QueryClientProvider>,
     );

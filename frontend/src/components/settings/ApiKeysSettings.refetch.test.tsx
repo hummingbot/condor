@@ -29,6 +29,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useCredentials } from "@/hooks/useCredentials";
 import { ServerContext } from "@/hooks/useServer";
+import { WalletHarness } from "@/test/walletHarness";
+
 import { ApiKeysSettings } from "./ApiKeysSettings";
 
 declare global {
@@ -97,7 +99,11 @@ async function flush() {
 /** The Keys tab, with the app-wide `useCredentials` observer mounted beside it. */
 function Harness() {
   useCredentials();
-  return <ApiKeysSettings />;
+  return (
+    <WalletHarness>
+      <ApiKeysSettings />
+    </WalletHarness>
+  );
 }
 
 /** Mount the pair on one cache that carries the real client's 5s default. */

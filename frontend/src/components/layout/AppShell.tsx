@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Bug, Eye, Moon, Sun } from "lucide-react";
+import { Bug } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
@@ -13,11 +13,9 @@ import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
-import { useTheme } from "@/hooks/useTheme";
 import { NAV_ITEMS, FULL_BLEED_ROUTES } from "@/lib/nav";
 import { routeFacts } from "@/lib/pageFacts";
 import { useViewFacts } from "@/lib/viewFacts";
-import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
 import { WalletControl } from "./WalletControl";
@@ -54,7 +52,6 @@ export function AppShell() {
 function AppShellBody() {
   const { server } = useServer();
   const { pathname, search } = useLocation();
-  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
@@ -138,7 +135,6 @@ function AppShellBody() {
         {/* Right: server selector + controls */}
         <div className="ml-auto flex items-center gap-3">
           <ServerSelector />
-          <CurrencySelector />
           {/* Which key is signing, beside which server is selected: the two
               answers to "whose is this, right now". Renders nothing at all when
               no wallet is installed and none is attached. */}
@@ -158,20 +154,6 @@ function AppShellBody() {
               title="Report an issue"
             >
               <Bug className="h-4 w-4" />
-            </button>
-
-            <button
-              onClick={toggleTheme}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title={
-                theme === "dark" ? "Switch to light mode" :
-                theme === "light" ? "Switch to color-blind mode" :
-                "Switch to dark mode"
-              }
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> :
-               theme === "light" ? <Eye className="h-4 w-4" /> :
-               <Moon className="h-4 w-4" />}
             </button>
 
           </div>

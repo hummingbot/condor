@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from condor.fetchers.executors import build_executor_row, get_executor_type
 from condor.fetchers.models import (
@@ -813,6 +813,21 @@ class WalletAttachRequest(BaseModel):
 class WalletInfo(BaseModel):
     address: str
     attached_at: int
+    #: Chain -> "browser" | "gateway": which wallet this user calls theirs on
+    #: that chain. A chain that is absent has never been decided.
+    preferred: dict[str, str] = Field(default_factory=dict)
+
+
+class WalletPreferenceRequest(BaseModel):
+    """Point one chain at the browser wallet or at Gateway's own.
+
+    Both are "my wallet" in different senses — one signs in front of you, the
+    other signs unattended on the server — and which one a flow should reach for
+    is the user's call, not a guess from whichever happens to exist.
+    """
+
+    chain: str
+    source: Literal["browser", "gateway"]
 
 
 class ExtraSigner(BaseModel):

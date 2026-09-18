@@ -46,10 +46,5 @@ export function useTheme() {
     listeners.forEach((l) => l());
   }, []);
 
-  const toggleTheme = useCallback(() => {
-    const idx = THEMES.indexOf(currentTheme);
-    setTheme(THEMES[(idx + 1) % THEMES.length]);
-  }, [setTheme]);
-
-  return { theme, setTheme, toggleTheme };
+  return { theme, setTheme };
 }

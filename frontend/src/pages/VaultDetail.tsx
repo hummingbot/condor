@@ -28,6 +28,7 @@ import {
   SignerPrompt,
   WalletGate,
 } from "@/components/vaults/shared";
+import { AddressAvatar } from "@/components/wallet/primitives";
 import { useCanSign } from "@/hooks/useCanSign";
 import { useServer } from "@/hooks/useServer";
 import { api, type VaultBuild, type VaultInfo } from "@/lib/api";
@@ -108,9 +109,12 @@ export function VaultDetail() {
 
       <header className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h1 className="truncate text-lg font-semibold">{vault.label || "Untitled vault"}</h1>
-            <CopyAddress address={vault.account} label="Swig account" />
+          <div className="flex min-w-0 items-center gap-3">
+            <AddressAvatar address={vault.account} className="h-10 w-10" />
+            <div className="min-w-0">
+              <h1 className="truncate text-lg font-semibold">{vault.label || "Untitled vault"}</h1>
+              <CopyAddress address={vault.account} label="Swig account" />
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <PhaseBadge vault={vault} />

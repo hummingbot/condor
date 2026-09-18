@@ -6,9 +6,9 @@
  * leading characters are easy to misread and a shape is not.
  */
 import { Wallet } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
-import { avatarSvg } from "./address";
+import { useAvatarSvg } from "@/lib/avatarStyle";
 
 /** A wallet's own icon, with a fallback when the extension's URL fails. */
 export function WalletAvatar({
@@ -41,13 +41,14 @@ export function WalletAvatar({
 }
 
 /**
- * A deterministic face for an address: concentric rings whose hues come from
- * the address itself, so the same key is the same shape everywhere it appears
- * and two similar-looking addresses are not similar-looking faces.
+ * A deterministic face for an address, in the style this browser chose
+ * (Settings → Theme). Same address, same face, everywhere it appears — which
+ * is the point: four leading characters are easy to misread and a shape is not.
  *
- * Drawn here rather than fetched from an avatar service: it is nine lines of
- * arithmetic, it works offline, and a wallet identity should not be a request
- * to somebody else's server.
+ * Generated in the page, never fetched: an identity should not be a request to
+ * somebody else's server, and the dashboard works on a laptop with no internet
+ * and a local chain. The style itself loads as its own chunk, so until it
+ * arrives this is an empty circle rather than a different style's face.
  */
 export function AddressAvatar({
   address,
@@ -56,12 +57,12 @@ export function AddressAvatar({
   address: string;
   className?: string;
 }) {
-  const svg = useMemo(() => avatarSvg(address), [address]);
+  const svg = useAvatarSvg(address);
   return (
     <span
       aria-hidden
-      className={`inline-block shrink-0 overflow-hidden rounded-full [&>svg]:h-full [&>svg]:w-full ${className}`}
-      dangerouslySetInnerHTML={{ __html: svg }}
+      className={`inline-block shrink-0 overflow-hidden rounded-full bg-[var(--color-surface-hover)] [&>svg]:h-full [&>svg]:w-full ${className}`}
+      dangerouslySetInnerHTML={svg ? { __html: svg } : undefined}
     />
   );
 }

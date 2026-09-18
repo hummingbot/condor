@@ -29,6 +29,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { venuesQueryKey } from "@/components/market/useVenues";
 import { ServerContext } from "@/hooks/useServer";
+import { WalletHarness } from "@/test/walletHarness";
+
 import { ApiKeysSettings } from "./ApiKeysSettings";
 
 declare global {
@@ -135,7 +137,9 @@ async function mountKeysTab() {
     root.render(
       <QueryClientProvider client={qc}>
         <ServerContext.Provider value={{ server: SERVER, setServer: () => {} }}>
-          <ApiKeysSettings />
+          <WalletHarness>
+            <ApiKeysSettings />
+          </WalletHarness>
         </ServerContext.Provider>
       </QueryClientProvider>,
     );

@@ -17,6 +17,7 @@ import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermissio
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
 import { CREDENTIAL_FIELD_PATTERNS } from "@/lib/credential-fields";
 import { credentialsQuery, gatewayWalletsQuery, invalidateCredentialQueries } from "@/lib/queryClient";
+import { BrowserWallets, BROWSER_CHAIN } from "./BrowserWallets";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
 import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
 
@@ -147,9 +148,22 @@ export function ApiKeysSettings() {
   const invalidateWallets = () =>
     qc.invalidateQueries({ queryKey: gatewayWalletsQuery(server).queryKey });
 
+  // Two records, one click. Gateway's own default decides which of its keys
+  // signs when a route names no address; Condor's preference decides whether
+  // "my wallet on this chain" means a Gateway key at all, rather than the
+  // browser one. Starring a Gateway wallet is saying both, and leaving the
+  // second unsaid is how a browser wallet stays "default" after the user has
+  // plainly chosen otherwise.
   const defaultWalletMut = useMutation({
-    mutationFn: (w: { chain: string; address: string }) => api.setDefaultGatewayWallet(server!, w),
-    onSuccess: invalidateWallets,
+    mutationFn: async (w: { chain: string; address: string }) => {
+      const result = await api.setDefaultGatewayWallet(server!, w);
+      await api.setPreferredWallet(w.chain, "gateway");
+      return result;
+    },
+    onSuccess: () => {
+      invalidateWallets();
+      qc.invalidateQueries({ queryKey: ["wallet"] });
+    },
   });
 
   const deleteWalletMut = useMutation({
@@ -157,6 +171,15 @@ export function ApiKeysSettings() {
       api.removeGatewayWallet(server!, chain, address),
     onSuccess: () => { invalidateWallets(); setConfirmDeleteWallet(null); },
   });
+
+  // What this account calls its wallet on each chain — the browser key or a
+  // Gateway one. Same query key as the wallet layer, so the two agree.
+  const { data: browserWallet } = useQuery({
+    queryKey: ["wallet"],
+    queryFn: () => api.getWallet(),
+    retry: false,
+  });
+  const prefersBrowser = browserWallet?.preferred?.[BROWSER_CHAIN] === "browser";
 
   const wallets = useMemo(
     () =>
@@ -600,11 +623,20 @@ export function ApiKeysSettings() {
         <p className="text-xs text-[var(--color-red)]">{deleteMut.error.message}</p>
       )}
 
+      {/* ── Browser wallets ──
+          Above Gateway's own, because this is the key the person in front of
+          the screen actually holds, and because "default" is a choice between
+          the two: the section that can only be chosen *from* comes second. */}
+      <BrowserWallets />
+
       {/* ── Gateway wallets ── */}
       <div>
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-          Wallets
+          Gateway wallets
         </h3>
+        <p className="mb-2 text-xs text-[var(--color-text-muted)]">
+          Keys the server holds, so a strategy can trade while nobody is watching.
+        </p>
         {walletsError ? (
           <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs text-[var(--color-text-muted)]">
             Gateway is not reachable — start it from the Gateway tab to manage wallets.
@@ -617,6 +649,12 @@ export function ApiKeysSettings() {
           <div className="space-y-2">
             {wallets.map((w) => {
               const walletKey = `${w.chain}:${w.address}`;
+              // Gateway's default key on a chain is not automatically the one
+              // this account calls its own: a browser wallet can hold that
+              // place. Both facts are worth showing, and conflating them is how
+              // someone reads "default" as "what will sign" and is wrong.
+              const chosen =
+                w.isDefault && !(w.chain === BROWSER_CHAIN && prefersBrowser);
               return (
                 <div
                   key={walletKey}
@@ -631,12 +669,20 @@ export function ApiKeysSettings() {
                         <span className="text-xs font-medium capitalize text-[var(--color-text)]">
                           {w.chain}
                         </span>
-                        {w.isDefault && (
+                        {chosen && (
                           <span
                             className="flex items-center gap-0.5 rounded bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
-                            title="Default wallet for this chain"
+                            title="What Condor means by your wallet on this chain, and the key Gateway signs with"
                           >
                             <Star className="h-2.5 w-2.5" /> default
+                          </span>
+                        )}
+                        {w.isDefault && !chosen && (
+                          <span
+                            className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)]"
+                            title="Gateway signs with this key when a route names no address — but your wallet on this chain is the browser one"
+                          >
+                            gateway default
                           </span>
                         )}
                       </div>
@@ -647,14 +693,18 @@ export function ApiKeysSettings() {
                   </div>
 
                   <div className="flex shrink-0 items-center gap-1">
-                    {!w.isDefault && confirmDeleteWallet !== walletKey && (
+                    {!chosen && confirmDeleteWallet !== walletKey && (
                       <button
                         onClick={() =>
                           defaultWalletMut.mutate({ chain: w.chain, address: w.address })
                         }
                         disabled={defaultWalletMut.isPending || !isOwner}
                         className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)] disabled:cursor-not-allowed disabled:opacity-50"
-                        title={isOwner ? "Set as default wallet for this chain" : OWNER_ONLY_HINT}
+                        title={
+                          isOwner
+                            ? "Use this wallet for this chain — Gateway's default key, and what Condor means by yours"
+                            : OWNER_ONLY_HINT
+                        }
                       >
                         <Star className="h-3.5 w-3.5" />
                       </button>

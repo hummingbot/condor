@@ -109,6 +109,15 @@ export const THEME_KEY = "condor_theme";
 export const DISPLAY_CURRENCY_KEY = "condor_display_currency";
 
 /**
+ * Which generated face an address wears (lib/avatarStyle).
+ *
+ * KEPT for the same reason as the theme: it says how this browser looks, not
+ * who was signed in. Two people sharing a machine would each rather keep the
+ * look they picked than have it reset by the other one logging out.
+ */
+export const AVATAR_STYLE_KEY = "condor.avatar.style";
+
+/**
  * Which PnL series the charts draw, as a JSON array of series keys to *hide*
  * (FEAT-085). Empty or absent means draw everything, so a browser that has
  * never touched the legend and one whose storage is unreadable behave alike.

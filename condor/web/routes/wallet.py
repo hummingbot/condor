@@ -38,6 +38,7 @@ from condor.web.models import (
     WalletNonceRequest,
     WalletNonceResponse,
     WalletPollRequest,
+    WalletPreferenceRequest,
     WalletSubmitRequest,
     WebUser,
 )
@@ -90,7 +91,11 @@ async def attach(req: WalletAttachRequest, user: WebUser = Depends(get_current_u
         record = wallet_store.attach(user.id, req.address, signature, req.nonce)
     except wallet_store.AttachRefused as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return WalletInfo(address=record["address"], attached_at=record["attached_at"])
+    return WalletInfo(
+        address=record["address"],
+        attached_at=record["attached_at"],
+        preferred=record.get("preferred", {}),
+    )
 
 
 @router.get("", response_model=WalletInfo | None)
@@ -99,8 +104,28 @@ async def read(user: WebUser = Depends(get_current_user)):
     if record is None:
         return None
     return WalletInfo(
-        address=record["address"], attached_at=record.get("attached_at", 0)
+        address=record["address"],
+        attached_at=record.get("attached_at", 0),
+        preferred=wallet_store.effective_preferred(user.id),
     )
+
+
+@router.put("/preferred", response_model=dict)
+async def set_preferred(
+    req: WalletPreferenceRequest, user: WebUser = Depends(get_current_user)
+):
+    """Which wallet is "mine" on a chain: the attached browser one, or Gateway's.
+
+    Recorded against the account rather than the browser, so the answer follows
+    the person to their next machine. It says which key a flow should reach for
+    first; it grants nothing — a browser wallet still signs only in front of its
+    owner, and Gateway's still signs only what Gateway is asked to.
+    """
+    try:
+        preferred = wallet_store.set_preferred(user.id, req.chain, req.source)
+    except wallet_store.AttachRefused as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"preferred": preferred}
 
 
 @router.delete("")

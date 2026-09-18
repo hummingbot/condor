@@ -16,6 +16,12 @@ Two stores, deliberately different in lifetime:
   the answer to "who is this vault's runner", and a shared file is how that
   answer drifts.
 
+Beside the attachment, in the same file, is the **preferred source** per chain:
+whether "my wallet on Solana" means the browser wallet attached here or the
+default wallet Gateway holds a key for. On the account rather than in the
+browser because it is an answer about the person, not about the machine they
+happen to be sitting at — the browser already knows which key it is holding.
+
 Detaching is refused while the user still has a vault that is running — see
 ``routes/wallet.py``, which owns that rule because it is the vault store that
 knows.
@@ -128,16 +134,83 @@ def _path(user_id: int):
     return paths.user_dir(user_id) / "wallet.json"
 
 
-def get_wallet(user_id: int) -> Optional[dict[str, Any]]:
+#: The one chain a browser wallet means anything on here. Solana is what every
+#: signature in this product is for; an Ethereum key in a browser extension
+#: would be an address in a list and nothing else.
+BROWSER_CHAIN = "solana"
+
+#: Where "my wallet" on a chain points. ``browser`` is the wallet attached
+#: here, which only this person can sign with; ``gateway`` is the wallet the
+#: server holds a key for and signs with unattended.
+SOURCES = ("browser", "gateway")
+
+
+def _read(user_id: int) -> dict[str, Any]:
+    """The whole file, or an empty dict. Never raises on a damaged file: a
+    preference that cannot be read is not a reason to fail a page."""
     path = _path(user_id)
     if not path.exists():
-        return None
+        return {}
     try:
         data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("wallet.json for user %s is unreadable (%s)", user_id, exc)
-        return None
-    return data if isinstance(data, dict) and data.get("address") else None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_wallet(user_id: int) -> Optional[dict[str, Any]]:
+    data = _read(user_id)
+    return data if data.get("address") else None
+
+
+def get_preferred(user_id: int) -> dict[str, str]:
+    """Which source each chain's wallet comes from, as far as this user has said.
+
+    Only chains they have chosen for: a chain that is absent has never been
+    decided, and the caller decides what that means (the route below answers
+    ``browser`` when a wallet is attached, because attaching one is choosing it).
+    """
+    preferred = _read(user_id).get("preferred")
+    if not isinstance(preferred, dict):
+        return {}
+    return {
+        chain: source
+        for chain, source in preferred.items()
+        if isinstance(chain, str) and source in SOURCES
+    }
+
+
+def effective_preferred(user_id: int) -> dict[str, str]:
+    """What the user has said, plus what attaching already implied.
+
+    A wallet attached before this preference existed — or by any path that only
+    proves a key — has said nothing, and reading that as "undecided" would show
+    someone no default at all on the one chain they have a wallet for. Attaching
+    is choosing, so an attachment with nothing said against it *is* the answer.
+    Kept out of :func:`get_preferred`, which stays literally what is on disk.
+    """
+    preferred = dict(get_preferred(user_id))
+    if BROWSER_CHAIN not in preferred and get_wallet(user_id):
+        preferred[BROWSER_CHAIN] = "browser"
+    return preferred
+
+
+def set_preferred(user_id: int, chain: str, source: str) -> dict[str, str]:
+    """Point a chain at one source or the other. Returns the whole map."""
+    if source not in SOURCES:
+        raise AttachRefused(f"unknown wallet source {source!r}")
+    data = _read(user_id)
+    if source == "browser" and not data.get("address"):
+        raise AttachRefused("no browser wallet is attached to this account")
+    preferred = dict(get_preferred(user_id))
+    preferred[chain] = source
+    data["preferred"] = preferred
+    path = _path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, data)
+    log.info("user %s prefers the %s wallet on %s", user_id, source, chain)
+    return preferred
 
 
 def attach(user_id: int, address: str, signature: bytes, nonce: str) -> dict[str, Any]:
@@ -147,7 +220,12 @@ def attach(user_id: int, address: str, signature: bytes, nonce: str) -> dict[str
     message = redeem_nonce(nonce, user_id, address)
     if not verify_ed25519(address, message.encode("utf-8"), signature):
         raise AttachRefused("the signature does not match that address")
-    record = {"address": address, "attached_at": int(time.time())}
+    record: dict[str, Any] = {"address": address, "attached_at": int(time.time())}
+    # Attaching a wallet is choosing it: it is the key this person can actually
+    # sign with, and having just proved it they should not have to say so twice.
+    preferred = dict(get_preferred(user_id))
+    preferred[BROWSER_CHAIN] = "browser"
+    record["preferred"] = preferred
     path = _path(user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(path, record)
@@ -156,7 +234,11 @@ def attach(user_id: int, address: str, signature: bytes, nonce: str) -> dict[str
 
 
 def detach(user_id: int) -> bool:
-    """Forget the wallet. True if there was one."""
+    """Forget the wallet. True if there was one.
+
+    The preference goes with it: a chain pointed at a browser wallet that is no
+    longer attached would name a key nobody here can sign with.
+    """
     path = _path(user_id)
     if not path.exists():
         return False
