@@ -109,6 +109,7 @@ MARKER_FILENAME = ".migrated-v1"
 MARKER_V2_FILENAME = ".migrated-v2"
 MARKER_V3_FILENAME = ".migrated-v3"
 MARKER_V4_FILENAME = ".migrated-v4"
+MARKER_V5_FILENAME = ".migrated-v5"
 BACKUPS_DIRNAME = "migration-backups"
 
 # Runtime output that lived under a *tracked* agent directory. Everything here
@@ -149,6 +150,8 @@ class MigrationReport:
     stranded_delegations: int = 0
     # v4: leftover copies that lost to a differing local file, set aside
     agent_backups: int = 0
+    # v5: chat-authored routines lifted out of the tracked library
+    chat_routines: int = 0
 
     @property
     def total(self) -> int:
@@ -163,6 +166,60 @@ class MigrationReport:
             + self.stranded_delegations
             + self.agent_backups
         )
+
+
+def _lift_chat_routines(report: MigrationReport) -> None:
+    """Move chat-authored routines out of the tracked library into the local root.
+
+    The chat agent's writable routines dir used to be the repo-root
+    ``routines/``, which git tracks and upstream actively maintains, so
+    ``create_routine`` and ``edit_routine`` wrote into a directory a later
+    ``git pull`` would want to change. Now that the write target is
+    ``<local>/condor/routines``, anything the product already wrote there has to
+    come with it, or it stops being found.
+
+    **Untracked files only.** A file git knows about is either shipped or a
+    modification of something shipped, and moving it would silently take the
+    operator's edit out of the tree the update is about to touch -- the
+    ``keep-mine`` resolution exists for exactly that case, and it is theirs to
+    choose. Anything already present in the destination is left alone.
+    """
+    library = paths._PROJECT_ROOT / "routines"
+    if not library.is_dir():
+        return
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "--", "routines"],
+            cwd=str(paths._PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        log.debug("Could not list untracked routines; skipping the lift")
+        return
+    if result.returncode != 0:
+        return
+
+    destination = paths.local_agents_root() / "condor" / "routines"
+    for line in result.stdout.splitlines():
+        rel = line.strip()
+        if not rel.endswith(".py") or rel.endswith("__init__.py"):
+            continue
+        source = paths._PROJECT_ROOT / rel
+        if not source.is_file():
+            continue
+        target = destination / Path(rel).relative_to("routines")
+        if target.exists():
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+        except OSError:
+            log.warning("Could not lift %s into the local root", rel, exc_info=True)
+            continue
+        report.chat_routines += 1
 
 
 def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
@@ -214,6 +271,14 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
             log.exception("Leftover agent merge failed; leaving the tree in place")
             return report
         _write_marker(root, MARKER_V4_FILENAME, "FEAT-115")
+
+    if not (root / MARKER_V5_FILENAME).is_file():
+        try:
+            _lift_chat_routines(report)
+        except Exception:  # noqa: BLE001 - same rule: never block a boot
+            log.exception("Chat routine lift failed; leaving the library in place")
+            return report
+        _write_marker(root, MARKER_V5_FILENAME, "chat-routines-local-layer")
 
     if report.total or report.dropped_stubs:
         log.warning(
