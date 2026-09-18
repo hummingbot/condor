@@ -61,6 +61,7 @@ const POOL_BASE_VAULT: usize = 8 + 160;
 const POOL_QUOTE_VAULT: usize = 8 + 192;
 const POOL_IS_MIGRATED: usize = 8 + 297;
 const POOL_MIGRATION_FEE_WITHDRAW_STATUS: usize = 8 + 303;
+const POOL_IS_WITHDRAW_LEFTOVER: usize = 8 + 301;
 const POOL_MIN_LEN: usize = 8 + 416;
 
 pub struct VirtualPool {
@@ -72,6 +73,8 @@ pub struct VirtualPool {
     pub is_migrated: bool,
     /// Bit 1 is the creator's share; set once the seed has been collected.
     pub migration_fee_withdraw_status: u8,
+    /// Set once the unsold base tokens have moved to the leftover receiver.
+    pub is_withdraw_leftover: bool,
 }
 
 impl VirtualPool {
@@ -97,6 +100,7 @@ pub fn read_virtual_pool(info: &AccountInfo) -> Result<VirtualPool> {
         quote_vault: key_at(POOL_QUOTE_VAULT),
         is_migrated: data[POOL_IS_MIGRATED] != 0,
         migration_fee_withdraw_status: data[POOL_MIGRATION_FEE_WITHDRAW_STATUS],
+        is_withdraw_leftover: data[POOL_IS_WITHDRAW_LEFTOVER] != 0,
     })
 }
 
@@ -115,6 +119,15 @@ const CONFIG_FIXED_TOKEN_SUPPLY_FLAG: usize = 8 + 236;
 const CONFIG_CREATOR_TRADING_FEE_PCT: usize = 8 + 237;
 const CONFIG_MIGRATION_FEE_PCT: usize = 8 + 239;
 const CONFIG_CREATOR_MIGRATION_FEE_PCT: usize = 8 + 240;
+const CONFIG_PARTNER_PERMANENT_LOCKED_PCT: usize = 8 + 231;
+const CONFIG_PARTNER_LIQUIDITY_PCT: usize = 8 + 232;
+const CONFIG_CREATOR_PERMANENT_LOCKED_PCT: usize = 8 + 233;
+const CONFIG_CREATOR_LIQUIDITY_PCT: usize = 8 + 234;
+const CONFIG_TOKEN_UPDATE_AUTHORITY: usize = 8 + 238;
+const CONFIG_SWAP_BASE_AMOUNT: usize = 8 + 248;
+const CONFIG_LOCKED_VESTING: usize = 8 + 288;
+const CONFIG_LOCKED_VESTING_LEN: usize = 48;
+const CONFIG_PRE_MIGRATION_TOKEN_SUPPLY: usize = 8 + 336;
 const CONFIG_MIGRATION_QUOTE_THRESHOLD: usize = 8 + 256;
 const CONFIG_MIGRATED_POOL_FEE_BPS: usize = 8 + 354;
 const CONFIG_MIN_LEN: usize = 8 + 1040;
@@ -144,6 +157,28 @@ pub struct PoolConfigParams {
     pub creator_migration_fee_pct: u8,
     pub migration_quote_threshold: u64,
     pub migrated_pool_fee_bps: u16,
+    /// How the four liquidity shares are split at graduation. The two
+    /// `permanent` ones are locked forever; the other two are withdrawable by
+    /// whoever they name, which is what "permanently locked liquidity" must
+    /// not be. Read because the fee split says nothing about the lock.
+    pub partner_permanent_locked_pct: u8,
+    pub partner_liquidity_pct: u8,
+    pub creator_permanent_locked_pct: u8,
+    pub creator_liquidity_pct: u8,
+    /// `CreatorUpdateAuthority=0, Immutable=1, PartnerUpdateAuthority=2,
+    /// CreatorUpdateAndMintAuthority=3, PartnerUpdateAndMintAuthority=4`. Two
+    /// of the five hand somebody a mint authority on the vault's own token,
+    /// which would make any share of the supply — and redemption — meaningless.
+    pub token_update_authority: u8,
+    /// True when every field of `locked_vesting_config` is zero. A non-zero
+    /// vesting allocation carves supply out to a Meteora locker: those tokens
+    /// count in the mint's supply but sit in no account this program can see,
+    /// so every holder would be underpaid by that fraction.
+    pub locked_vesting_is_empty: bool,
+    /// What the curve sells, and the supply it is a share of. The `Vault`
+    /// records both rather than a ratio promised alongside them.
+    pub swap_base_amount: u64,
+    pub pre_migration_token_supply: u64,
 }
 
 pub fn read_pool_config(info: &AccountInfo) -> Result<PoolConfigParams> {
@@ -173,6 +208,25 @@ pub fn read_pool_config(info: &AccountInfo) -> Result<PoolConfigParams> {
         ),
         migrated_pool_fee_bps: u16::from_le_bytes(
             data[CONFIG_MIGRATED_POOL_FEE_BPS..CONFIG_MIGRATED_POOL_FEE_BPS + 2]
+                .try_into()
+                .unwrap(),
+        ),
+        partner_permanent_locked_pct: data[CONFIG_PARTNER_PERMANENT_LOCKED_PCT],
+        partner_liquidity_pct: data[CONFIG_PARTNER_LIQUIDITY_PCT],
+        creator_permanent_locked_pct: data[CONFIG_CREATOR_PERMANENT_LOCKED_PCT],
+        creator_liquidity_pct: data[CONFIG_CREATOR_LIQUIDITY_PCT],
+        token_update_authority: data[CONFIG_TOKEN_UPDATE_AUTHORITY],
+        locked_vesting_is_empty: data
+            [CONFIG_LOCKED_VESTING..CONFIG_LOCKED_VESTING + CONFIG_LOCKED_VESTING_LEN]
+            .iter()
+            .all(|b| *b == 0),
+        swap_base_amount: u64::from_le_bytes(
+            data[CONFIG_SWAP_BASE_AMOUNT..CONFIG_SWAP_BASE_AMOUNT + 8]
+                .try_into()
+                .unwrap(),
+        ),
+        pre_migration_token_supply: u64::from_le_bytes(
+            data[CONFIG_PRE_MIGRATION_TOKEN_SUPPLY..CONFIG_PRE_MIGRATION_TOKEN_SUPPLY + 8]
                 .try_into()
                 .unwrap(),
         ),
@@ -354,6 +408,38 @@ mod tests {
         assert_eq!(data[8], MIGRATION_FEE_FLAG_CREATOR);
     }
 
+    /// The graduated pool's address is derived from terms the vault already
+    /// recorded, so `redeem` and `claim_position_fee` never have to be handed
+    /// one. Pinned against the TypeScript SDK's own derivation, because the two
+    /// have to agree byte for byte or Gateway builds a call the program
+    /// refuses. Mints deliberately span the ordering: the seeds go in
+    /// descending byte order, which is cp-amm's rule and not ours.
+    #[test]
+    fn the_graduated_pool_is_where_cp_amm_puts_it() {
+        let base = pubkey!("4Ayw8x3rqboX7xYswxaNfVRLk6xZAjtbBLvCQtxRinJg");
+        let wsol = pubkey!("So11111111111111111111111111111111111111112");
+        let usdc = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(
+            damm_v2_pool(2, &base, &wsol).unwrap(),
+            pubkey!("GJLv8TpgfC2z2brZMM3QuRTMS8z88S9f1cfbD5tX2Wc1")
+        );
+        assert_eq!(
+            damm_v2_pool(0, &base, &usdc).unwrap(),
+            pubkey!("Bfr2xFAPQxzBwUyWeiBQu48Y2JTDzfr8KhcLAFtz7oVy")
+        );
+        assert_eq!(
+            damm_v2_pool(5, &base, &wsol).unwrap(),
+            pubkey!("9hJqvPDidrHAp5w44CkbDavb3S7qJ4rCdoNwsH11kVF")
+        );
+    }
+
+    /// A fee option outside the seven is not a pool this program can find, and
+    /// guessing would point `redeem` at an address nobody controls.
+    #[test]
+    fn an_unknown_fee_option_has_no_pool() {
+        assert!(damm_v2_pool(7, &Pubkey::default(), &Pubkey::default()).is_err());
+    }
+
     #[test]
     fn the_creator_withdraw_flag_is_the_second_bit() {
         let pool = VirtualPool {
@@ -364,6 +450,7 @@ mod tests {
             quote_vault: Pubkey::default(),
             is_migrated: true,
             migration_fee_withdraw_status: 0b01,
+            is_withdraw_leftover: false,
         };
         assert!(!pool.creator_migration_fee_withdrawn());
         let collected = VirtualPool {
@@ -372,4 +459,90 @@ mod tests {
         };
         assert!(collected.creator_migration_fee_withdrawn());
     }
+}
+
+// ── the graduated DAMM v2 pool ───────────────────────────────────────────────
+//
+// Read for two questions the program cannot answer without it: which balance of
+// the vault's own token is locked liquidity rather than a holder's (`redeem`'s
+// denominator), and which position is the one graduation created rather than
+// one the strategy opened (`claim_position_fee`).
+
+/// The seven fixed fee configs a DBC pool may graduate into, indexed by
+/// `pool_fee_option`. The vault records which one it chose, so the graduated
+/// pool's address is derivable and never has to be taken on trust.
+pub const DAMM_V2_POOL_FEE_CONFIGS: [Pubkey; 7] = [
+    pubkey!("7F6dnUcRuyM2TwR8myT1dYypFXpPSxqwKNSFNkxyNESd"),
+    pubkey!("2nHK1kju6XjphBLbNxpM5XRGFj7p9U8vvNzyZiha1z6k"),
+    pubkey!("Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp"),
+    pubkey!("2c4cYd4reUYVRAB9kUUkrq55VPyy2FNQ3FDL4o12JXmq"),
+    pubkey!("AkmQWebAwFvWk55wBoCr5D62C6VVDTzi84NJuD9H7cFD"),
+    pubkey!("DbCRBj8McvPYHJG1ukj8RE15h2dCNUdTAESG49XpQ44u"),
+    pubkey!("A8gMrEPJkacWkcb3DGwtJwTe16HktSEfvwtuDh2MCtck"),
+];
+
+/// Where a graduated pool for this pair must live. The two mints go in
+/// descending byte order, which is cp-amm's own rule.
+pub fn damm_v2_pool(pool_fee_option: u8, base_mint: &Pubkey, quote_mint: &Pubkey) -> Result<Pubkey> {
+    let config = DAMM_V2_POOL_FEE_CONFIGS
+        .get(pool_fee_option as usize)
+        .ok_or_else(|| error!(crate::error::VaultError::LaunchTermsMismatch))?;
+    let (first, second) = if base_mint.to_bytes() > quote_mint.to_bytes() {
+        (base_mint, quote_mint)
+    } else {
+        (quote_mint, base_mint)
+    };
+    Ok(Pubkey::find_program_address(
+        &[b"pool", config.as_ref(), first.as_ref(), second.as_ref()],
+        &DAMM_V2_PROGRAM_ID,
+    )
+    .0)
+}
+
+const DAMM_POOL_TOKEN_A_MINT: usize = 8 + 160;
+const DAMM_POOL_TOKEN_B_MINT: usize = 8 + 192;
+const DAMM_POOL_TOKEN_A_VAULT: usize = 8 + 224;
+const DAMM_POOL_TOKEN_B_VAULT: usize = 8 + 256;
+const DAMM_POOL_MIN_LEN: usize = 8 + 288;
+
+/// The graduated pool's own account for `mint` — where the permanently locked
+/// half of the raise sits, which is liquidity rather than anybody's holding.
+pub fn damm_v2_vault_for(info: &AccountInfo, mint: &Pubkey) -> Result<Pubkey> {
+    use crate::error::VaultError;
+    require_keys_eq!(*info.owner, DAMM_V2_PROGRAM_ID, VaultError::PoolNotDbc);
+    let data = info.try_borrow_data()?;
+    require!(data.len() >= DAMM_POOL_MIN_LEN, VaultError::PoolNotDbc);
+    let key_at = |o: usize| Pubkey::new_from_array(data[o..o + 32].try_into().unwrap());
+    if key_at(DAMM_POOL_TOKEN_A_MINT) == *mint {
+        Ok(key_at(DAMM_POOL_TOKEN_A_VAULT))
+    } else if key_at(DAMM_POOL_TOKEN_B_MINT) == *mint {
+        Ok(key_at(DAMM_POOL_TOKEN_B_VAULT))
+    } else {
+        Err(error!(VaultError::WrongMint))
+    }
+}
+
+const DAMM_POSITION_POOL: usize = 8;
+const DAMM_POSITION_PERMANENT_LOCKED_LIQUIDITY: usize = 8 + 176;
+const DAMM_POSITION_MIN_LEN: usize = 8 + 192;
+
+/// `(pool, permanently locked liquidity)` for a cp-amm position.
+///
+/// The lock is what tells the two positions on a vault's pair apart:
+/// graduation creates one that is locked forever, and a strategy that
+/// market-makes its own token creates ones that are not.
+pub fn read_damm_v2_position(info: &AccountInfo) -> Result<(Pubkey, u128)> {
+    use crate::error::VaultError;
+    require_keys_eq!(*info.owner, DAMM_V2_PROGRAM_ID, VaultError::PoolNotDbc);
+    let data = info.try_borrow_data()?;
+    require!(data.len() >= DAMM_POSITION_MIN_LEN, VaultError::PoolNotDbc);
+    Ok((
+        Pubkey::new_from_array(data[DAMM_POSITION_POOL..DAMM_POSITION_POOL + 32].try_into().unwrap()),
+        u128::from_le_bytes(
+            data[DAMM_POSITION_PERMANENT_LOCKED_LIQUIDITY
+                ..DAMM_POSITION_PERMANENT_LOCKED_LIQUIDITY + 16]
+                .try_into()
+                .unwrap(),
+        ),
+    ))
 }

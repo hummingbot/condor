@@ -30,6 +30,27 @@ plausible complete-theft path that the review's A8 gestures at without landing.
 
 ---
 
+> **Status, 2026-09-18: every finding below has been acted on.** The report is
+> kept as written — it is the record of what was wrong and why, and several of
+> its arguments are the reason the fixes take the shape they do. What changed in
+> response is summarised in `CONDOR_VAULTS_ARCHITECTURE.md` §11, and the
+> individual fixes are: A1/B8 the signer exemption reordered and narrowed plus a
+> payer ledger in `check_after`; A2 `Approve`/`SetAuthority` refused under
+> `execute_unchecked`; A3/B2 the estate fixed once at `finalize_wind_down` and
+> `redeem` reading nothing; A4 `execute` admitted in `WindingDown`; A5 five
+> config terms now read, including `token_update_authority` and the four
+> liquidity percentages; B1 the graduated pool derived and the launch position
+> told apart by its lock; B3 a discriminator denylist; B4/B5 the sweep removed
+> in favour of the estate, with the stranding consequence written down; B7
+> `issue_bps` derived from the config; B9 the collectors gated on the estate
+> being open; B10 gas funded from the platform wallet; B11/§D the architecture's
+> trust section rewritten to say what the code actually guarantees.
+>
+> Two caveats the report raises stand: the denylist carries a venue-upgrade
+> maintenance burden, and `pool_authorities` remains caller-extensible (B12),
+> which is destruction rather than theft and is not yet addressed.
+
+
 ## Ranked findings
 
 Severity scale: **Critical** = a direct path to taking value that belongs to

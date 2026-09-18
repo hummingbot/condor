@@ -863,7 +863,8 @@ class VaultTokenInfo(BaseModel):
     links: dict[str, str] = {}
     launch_signature: Optional[str] = None
     # Circulating over max supply at launch, in basis points.
-    issue_bps: int = 0
+    circulating_supply: str = "0"
+    total_supply: str = "0"
 
 
 class VaultAgentRef(BaseModel):
@@ -916,7 +917,11 @@ class VaultChainState(BaseModel):
     quote_mint: Optional[str] = None
     version: int = 0
     # Circulating over max supply at launch; 0 while the vault is private.
-    issue_bps: int = 0
+    #: What the curve offers, and the supply it is offered from, in the token's
+    #: own units. A mint carries only its live `supply`, which `redeem` burns
+    #: down, so the program records both rather than leaving a listing to guess.
+    circulating_supply: str = "0"
+    total_supply: str = "0"
     # The launch terms this vault chose, recorded by the program at tokenize.
     # `graduation_quote_threshold` is how much quote the curve raises before it
     # becomes a pool — the creator's graduation market cap in the quote asset's
@@ -982,17 +987,18 @@ class CreateVaultRequest(BaseModel):
 class VaultTokenizeRequest(BaseModel):
     """The terms are in the launch config, not here.
 
-    A vault's launch price and its locked liquidity are config parameters, so the
-    creator builds the config first (`VaultLaunchConfigRequest`) and Condor
-    remembers its address. The program checks every term of it and records the
-    ones a holder needs to read.
+    A vault's launch price, its locked liquidity and how much of the supply it
+    retains are config parameters, so the creator builds the config first
+    (`VaultLaunchConfigRequest`) and Condor remembers its address. The program
+    checks every term of it and records the ones a holder needs to read —
+    the two supply figures among them, read off the config rather than asked
+    for here, because a number a buyer treats as a dilution ceiling should not
+    be one the creator types in beside the config that contradicts it.
     """
 
     name: str
     symbol: str
     uri: str
-    # Circulating over max supply at launch.
-    issue_bps: int
 
 
 class VaultLaunchConfigRequest(BaseModel):
@@ -1018,6 +1024,10 @@ class VaultLaunchConfigRequest(BaseModel):
     creator_trading_fee_percentage: Optional[float] = None
     #: 0-5: which fixed fee the graduated pool charges.
     pool_fee_option: Optional[int] = None
+    #: 0-50. How much of the supply the vault keeps back rather than selling on
+    #: the curve. It becomes the retained supply the strategy can market-make
+    #: with, and what the curve does sell is `circulating_supply`.
+    retained_supply_pct: Optional[float] = None
     base_fee_bps: Optional[int] = None
 
 

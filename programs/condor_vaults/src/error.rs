@@ -66,6 +66,8 @@ pub enum VaultError {
     WindDownIncomplete,
     #[msg("the treasury holds none of the quote asset, so there is nothing for holders to redeem")]
     RedemptionPotEmpty,
+    #[msg("that is not the position graduation created: only the permanently locked one pays the creator")]
+    WrongPosition,
     #[msg("the token account is not the vault's own for this mint")]
     WrongTokenAccount,
     #[msg("the mint does not match the vault's")]

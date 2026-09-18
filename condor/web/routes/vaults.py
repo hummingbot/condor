@@ -204,7 +204,8 @@ def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
         "config_hash": chain.get("configHash"),
         "quote_mint": chain.get("quoteMint"),
         "version": chain.get("version", 0),
-        "issue_bps": chain.get("issueBps", 0),
+        "circulating_supply": chain.get("circulatingSupply", "0"),
+        "total_supply": chain.get("totalSupply", "0"),
         # The launch terms this vault chose. The threshold is how much the
         # curve raises before it becomes a pool, and so how large the vault a
         # holder is buying into will be.
@@ -680,6 +681,7 @@ async def build_launch_config(
     for key, value in (
         ("creatorTradingFeePercentage", req.creator_trading_fee_percentage),
         ("poolFeeOption", req.pool_fee_option),
+        ("retainedSupplyPct", req.retained_supply_pct),
         ("baseFeeBps", req.base_fee_bps),
     ):
         if value is not None:
@@ -742,7 +744,6 @@ async def build_tokenize(
             "name": req.name,
             "symbol": req.symbol,
             "uri": req.uri,
-            "issueBps": req.issue_bps,
         },
     )
 

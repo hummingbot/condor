@@ -264,7 +264,8 @@ pub struct ClaimPositionFee<'info> {
 }
 
 /// The graduated pool pays the creator's locked position; the position is the
-/// PDA's, and what it pays is the creator's.
+/// PDA's, and what it pays is the creator's. Only *that* position: the
+/// strategy's positions on the same pair earn for the vault.
 pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
     require_keys_eq!(
         treasury_of(&ctx.accounts.vault)?,
@@ -279,6 +280,30 @@ pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
         ctx.accounts.treasury.key(),
         VaultError::WrongTokenAccount
     );
+    // **Which** pool, and **which** position. Both were open, and the pair
+    // check below does not close them: the strategy's own market-making
+    // position on this vault's token has exactly the same pair and exactly the
+    // same NFT owner, so the creator could pass that one and sweep the fees the
+    // *vault* earned — holders' income — into their personal accounts. The two
+    // incomes never mix, and this is where that is true rather than said.
+    //
+    // The pool is derived from terms the vault recorded at `tokenize`, so it
+    // cannot be substituted. The position is told apart by its lock: graduation
+    // creates one that is permanently locked, and a strategy position is not.
+    let expected_pool = dbc::damm_v2_pool(
+        ctx.accounts.vault.pool_fee_option,
+        &ctx.accounts.vault.mint,
+        &ctx.accounts.vault.quote_mint,
+    )?;
+    require_keys_eq!(
+        ctx.accounts.pool.key(),
+        expected_pool,
+        VaultError::PoolNotDbc
+    );
+    let (position_pool, permanent_locked) =
+        dbc::read_damm_v2_position(&ctx.accounts.position.to_account_info())?;
+    require_keys_eq!(position_pool, expected_pool, VaultError::PoolNotDbc);
+    require!(permanent_locked > 0, VaultError::WrongPosition);
     // The pair must be this vault's, in either order; each destination is then
     // derived from the mint that actually sits in its slot.
     let a = ctx.accounts.token_a_mint.key();

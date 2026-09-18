@@ -41,8 +41,64 @@ pub fn is_venue(program: &Pubkey) -> bool {
     VENUES.contains(program)
 }
 
-fn is_token_program(program: &Pubkey) -> bool {
+/// Venue instructions a treasury may never send, by discriminator.
+///
+/// The recipient rule is about accounts, and these are the instructions whose
+/// damage is not an account at all. `permanent_lock_position` locks the vault's
+/// liquidity forever — irreversible by any key, any instruction and any
+/// upgrade, gaining the caller nothing and costing holders everything.
+/// `update_position_operator` and `initialize_position_by_operator` hand a
+/// position's controls to a key of the caller's choosing, which is the
+/// custody question delegated to an access-control list this program does not
+/// read.
+///
+/// Denying by discriminator is an allowlist's maintenance burden in the one
+/// place the structural rule cannot reach, and it has the failure mode an
+/// allowlist always has: a venue upgrade adds an instruction and this list does
+/// not know. It is the price of trading on programs somebody else writes.
+const DENIED: [(Pubkey, [u8; 8]); 4] = [
+    // cp-amm `permanent_lock_position`
+    (DAMM_V2_PROGRAM_ID, [165, 176, 125, 6, 231, 171, 186, 213]),
+    // lb_clmm `update_position_operator`
+    (METEORA_DLMM, [202, 184, 103, 143, 180, 191, 116, 217]),
+    // lb_clmm `initialize_position_by_operator`
+    (METEORA_DLMM, [251, 189, 190, 244, 117, 254, 35, 148]),
+    // cp-amm `lock_position` — vesting a position to somebody else's schedule
+    (DAMM_V2_PROGRAM_ID, [227, 62, 2, 252, 247, 10, 171, 185]),
+];
+
+fn is_denied(program: &Pubkey, data: &[u8]) -> bool {
+    let Some(disc) = data.get(..8) else { return false };
+    DENIED
+        .iter()
+        .any(|(p, d)| p == program && disc == d.as_slice())
+}
+
+pub fn is_token_program(program: &Pubkey) -> bool {
     *program == SPL_TOKEN || *program == TOKEN_2022_PROGRAM_ID
+}
+
+/// What a *private* vault's treasury may not do, free as that phase is.
+///
+/// `execute_unchecked` checks nothing on purpose: the money is the creator's
+/// and they may move all of it anywhere. But an approval is not a movement. It
+/// is a standing permission that outlives the phase it was granted in, and
+/// `tokenize` cannot revoke one — it never sees the treasury's token accounts.
+/// A delegate approved on the *empty* quote account before launch is still
+/// approved when `collect_seed` fills that exact account with the holders'
+/// capital, and spends it with this program never invoked and no chance to
+/// refuse. So the one thing the private phase may not do is hand out authority
+/// over an account, which costs a creator nothing they actually need.
+pub fn check_private(program: &Pubkey, data: &[u8]) -> Result<()> {
+    if !is_token_program(program) {
+        return Ok(());
+    }
+    // Approve(4), SetAuthority(6), ApproveChecked(13).
+    if matches!(data.first(), Some(4) | Some(6) | Some(13)) {
+        msg!("a private vault may spend anything, but it may not delegate: an approval survives tokenize, which has no way to revoke it");
+        return Err(VaultError::InstructionNotAllowed.into());
+    }
+    Ok(())
 }
 
 /// What was true before the call, for the checks that can only be made after.
@@ -50,6 +106,14 @@ pub struct Before {
     /// Accounts that did not exist yet: something the venue is about to
     /// create, whose owner is not knowable until it has.
     pub fresh: Vec<Pubkey>,
+    /// The caller's own wallets, and what they held going in.
+    ///
+    /// A signer is let through because it is the caller spending their own
+    /// key — paying rent for an account the venue creates. Paying is all it
+    /// may do: `check_after` refuses any signer that ended the call richer.
+    /// Without that, every venue instruction with a rent receiver is a
+    /// withdrawal, because the treasury is the one paying.
+    pub payers: Vec<(Pubkey, u64)>,
 }
 
 /// Refuse anything the treasury must not do, before it does it.
@@ -64,9 +128,13 @@ pub fn check_before(
         || *program == system_program::ID
     {
         check_base_program(program, treasury, accounts, data)?;
-        return Ok(Before { fresh: Vec::new() });
+        return Ok(Before {
+            fresh: Vec::new(),
+            payers: Vec::new(),
+        });
     }
     require!(is_venue(program), VaultError::ProgramNotAllowed);
+    require!(!is_denied(program, data), VaultError::InstructionNotAllowed);
 
     // Who may own a token account the venue writes to: the venue's pool
     // authorities. DLMM's pairs own their own reserves and Raydium's pool
@@ -82,6 +150,7 @@ pub fn check_before(
     }
 
     let mut fresh = Vec::new();
+    let mut payers = Vec::new();
     for account in accounts {
         if !account.is_writable {
             continue;
@@ -90,9 +159,11 @@ pub fn check_before(
         if key == *treasury {
             continue; // the treasury itself: rent it pays, lamports it receives
         }
-        if account.is_signer {
-            continue; // the caller, spending their own key's lamports
-        }
+        // Token accounts are asked who owns them *first*, and signing does not
+        // excuse one. A token account's address is an ordinary pubkey, so a
+        // caller can hold the key to one and sign with it; a signer exemption
+        // that came first made "name your own account as the swap output" a
+        // legal instruction, which is the one thing this file exists to refuse.
         if let Some(holding) = token::read_token_account(account) {
             if holding.owner == *treasury || pool_authorities.contains(&holding.owner) {
                 continue;
@@ -103,10 +174,15 @@ pub fn check_before(
         if account.owner == program {
             continue; // pool state, bin arrays, positions: the venue's own invariants
         }
+        // The caller's own wallet: a plain system account, which is all the
+        // exemption ever meant. It may pay for the call; `check_after` refuses
+        // it if the call paid *it*.
+        if account.is_signer && *account.owner == system_program::ID && account.data_is_empty() {
+            payers.push((key, account.lamports()));
+            continue;
+        }
         // Not yet an account at all: a position or token account the venue is
         // about to create. Allowed now, and what it became is checked after.
-        // A *funded* system account with no data is somebody's wallet, and is
-        // refused — that is exactly a rent receiver someone else named.
         if *account.owner == system_program::ID && account.data_is_empty() && account.lamports() == 0 {
             fresh.push(key);
             continue;
@@ -114,11 +190,26 @@ pub fn check_before(
         msg!("account {} (owned by {}) is not the treasury's, the venue's, or the caller's", key, account.owner);
         return Err(VaultError::AccountNotAllowed.into());
     }
-    Ok(Before { fresh })
+    Ok(Before { fresh, payers })
 }
 
-/// Whatever the call created now has an owner. It had better be the treasury.
+/// Whatever the call created now has an owner. It had better be the treasury —
+/// and whoever paid for the call had better not have been paid by it.
 pub fn check_after(program: &Pubkey, treasury: &Pubkey, accounts: &[AccountInfo], before: &Before) -> Result<()> {
+    for (key, was) in &before.payers {
+        let Some(account) = accounts.iter().find(|a| a.key() == *key) else { continue };
+        if account.lamports() > *was {
+            // A rent receiver, most often: the treasury pays a venue's rent and
+            // the caller names themselves to collect it back. Repeated, that is
+            // the treasury's SOL leaving to a key one position at a time.
+            msg!(
+                "signer {} ended the call {} lamports richer; a caller may pay for a call, not be paid by it",
+                key,
+                account.lamports() - was
+            );
+            return Err(VaultError::RecipientNotVault.into());
+        }
+    }
     for key in &before.fresh {
         let Some(account) = accounts.iter().find(|a| a.key() == *key) else { continue };
         if *account.owner == system_program::ID {
@@ -208,4 +299,55 @@ fn check_base_program(program: &Pubkey, treasury: &Pubkey, accounts: &[AccountIn
         _ => return Err(VaultError::InstructionNotAllowed.into()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The recipient rule is about accounts; these are the instructions whose
+    /// damage is not an account. If a venue upgrade renumbers one of them this
+    /// test still passes — that is the standing cost of a denylist, and the
+    /// reason the list is short and each entry is justified where it is
+    /// declared.
+    #[test]
+    fn the_instructions_that_hand_away_control_are_refused() {
+        let lock = [165u8, 176, 125, 6, 231, 171, 186, 213];
+        assert!(is_denied(&DAMM_V2_PROGRAM_ID, &lock));
+        // Same bytes, different program: a discriminator only means anything
+        // against the program that defined it.
+        assert!(!is_denied(&METEORA_DLMM, &lock));
+        assert!(is_denied(
+            &METEORA_DLMM,
+            &[202, 184, 103, 143, 180, 191, 116, 217]
+        ));
+        assert!(!is_denied(&METEORA_DLMM, &[1, 2, 3, 4, 5, 6, 7, 8]));
+        // A swap is the ordinary case and must stay ordinary.
+        assert!(!is_denied(&DAMM_V2_PROGRAM_ID, &[248, 198, 158, 145, 225, 117, 135, 200]));
+    }
+
+    /// Shorter than a discriminator is not a match, and must not panic either.
+    #[test]
+    fn a_truncated_instruction_is_not_a_match() {
+        assert!(!is_denied(&DAMM_V2_PROGRAM_ID, &[]));
+        assert!(!is_denied(&DAMM_V2_PROGRAM_ID, &[165, 176, 125]));
+    }
+
+    /// A private vault may spend everything it has and may delegate nothing:
+    /// an approval outlives the phase, and `tokenize` cannot take it back.
+    #[test]
+    fn the_private_phase_may_not_hand_out_authority() {
+        for tag in [4u8, 6, 13] {
+            assert!(check_private(&SPL_TOKEN, &[tag]).is_err());
+            assert!(check_private(&TOKEN_2022_PROGRAM_ID, &[tag]).is_err());
+        }
+        // Transfer (3) and TransferChecked (12) are how a private vault is
+        // emptied, which is the whole point of the phase.
+        for tag in [3u8, 12, 9, 17] {
+            assert!(check_private(&SPL_TOKEN, &[tag]).is_ok());
+        }
+        // Everything that is not a token program is somebody else's business.
+        assert!(check_private(&METEORA_DLMM, &[4]).is_ok());
+        assert!(check_private(&SPL_TOKEN, &[]).is_ok());
+    }
 }

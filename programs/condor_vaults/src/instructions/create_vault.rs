@@ -79,8 +79,10 @@ pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64)
     // is where it is chosen and what the graduated pool will quote in.
     vault.quote_mint = Pubkey::default();
     vault.version = 0;
-    vault.issue_bps = 0;
+    vault.circulating_supply = 0;
+    vault.total_supply = 0;
     vault.graduation_quote_threshold = 0;
+    vault.redeemable_supply = 0;
     vault.creator_trading_fee_pct = 0;
     vault.pool_fee_option = 0;
     // Nothing runs until a strategy is pinned; `pin` is what starts it.

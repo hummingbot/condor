@@ -2373,7 +2373,10 @@ export interface VaultChainState {
   quote_mint: string | null;
   version: number;
   /** Circulating over max supply at launch; 0 while private. */
-  issue_bps: number;
+  /** What the curve offers, in the token's own units. "0" while private. */
+  circulating_supply: string;
+  /** The supply it is offered from. "0" while private. */
+  total_supply: string;
   /**
    * The share of the raise that became the vault's capital, 20–80. The rest is
    * permanently locked liquidity, so this is the split between the strategy and
@@ -2403,7 +2406,8 @@ export interface VaultTokenInfo {
   symbol?: string | null;
   image?: string | null;
   links?: Record<string, string>;
-  issue_bps?: number;
+  /** 0-50: supply held back from the curve, which becomes the retained supply. */
+  retained_supply_pct?: number;
 }
 
 export interface VaultInfo {
@@ -3878,6 +3882,8 @@ export const api = {
       graduation_market_cap: number;
       creator_trading_fee_percentage?: number;
       pool_fee_option?: number;
+      /** 0-50: supply held back from the curve, which becomes the retained supply. */
+      retained_supply_pct?: number;
       base_fee_bps?: number;
     },
   ) =>
@@ -3895,7 +3901,7 @@ export const api = {
   /** One way. From here the retained supply is the only path from supply to capital. */
   buildVaultTokenize: (
     account: string,
-    data: { name: string; symbol: string; uri: string; issue_bps: number },
+    data: { name: string; symbol: string; uri: string },
   ) =>
     apiFetch<VaultBuild>(`/api/v1/vaults/${encodeURIComponent(account)}/build-tokenize`, {
       method: "POST",

@@ -73,6 +73,11 @@ pub mod launch_rules {
     /// uses.
     pub const MAX_CREATOR_TRADING_FEE_PCT: u8 = 50;
 
+    /// `TokenUpdateAuthority::Immutable`. The other four values leave somebody
+    /// able to update the token's metadata, and two of them leave the creator
+    /// with a mint authority on it.
+    pub const TOKEN_UPDATE_AUTHORITY_IMMUTABLE: u8 = 1;
+
     /// What the graduated pool charges, as DBC's `MigrationFeeOption`. The allowed
     /// set is Meteora's fixed-fee options; the customizable one (6) is excluded
     /// because on that path the fee lives in a field nothing here enforces, so
@@ -103,15 +108,11 @@ pub mod launch_rules {
     // DBC's `migration_damm_v2` once the curve is full — so nothing here
     // depends on a keeper's preferences.
 
-    /// **Constant.** `TokenType::Token2022`, and a fixed supply: `issue_bps`
-    /// means nothing against a mint that can print more.
+    /// **Constant.** `TokenType::Token2022`, and a fixed supply: a share of the
+    /// supply means nothing against a mint that can print more.
     pub const TOKEN_TYPE_TOKEN_2022: u8 = 1;
 }
 
-/// Below this, a wind-down counts a balance as swept. Dust is the price of a
-/// one-asset redemption: a hundred lamports of some token nobody will ever
-/// claim must not be able to hold every holder's redemption hostage.
-pub const WIND_DOWN_DUST: u64 = 1_000;
 
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_SYMBOL_LEN: usize = 10;
@@ -211,12 +212,27 @@ pub struct Vault {
     /// could not be changed once it did.
     pub quote_mint: Pubkey,
     pub version: u32,
-    /// The share of the fixed supply sold in the first sale. The rest is the
-    /// *retained* supply: it lands in the vault, not in the creator's hands, and
-    /// can only leave through a later sale. Buyers read it as the ceiling on
-    /// how far the creator could dilute them, so it is on chain beside the
-    /// strategy rather than in a listing.
-    pub issue_bps: u16,
+    /// What the curve offers, and the supply it is offered from — both in the
+    /// token's own units, both read off the launch config at `tokenize`.
+    ///
+    /// Two numbers rather than the ratio they used to be, and the two every
+    /// listing already names. `issue_bps` said 7387 and left a buyer to wonder
+    /// 7387 of what; these say it in tokens, the
+    /// unit every other balance is in, so a holder can compare them with the
+    /// mint's supply and the treasury's own holding without converting
+    /// anything. There is no standard to follow here: an SPL or Token-2022
+    /// mint carries `supply` and nothing else — no maximum, no circulating
+    /// figure, and no extension that adds one — so these are this program's
+    /// own, and `total_supply` is worth storing precisely because `redeem` burns
+    /// and the chain's own `supply` stops being the number it was. `total_supply` less `circulating_supply` is the
+    /// retained supply: it lands in the treasury, never in the creator's hands,
+    /// and can only reach the market through a later sale.
+    ///
+    /// Neither moves after `tokenize`. `circulating_supply` is what *will* be
+    /// in holders' hands once the curve completes; what actually is, at the
+    /// moment the vault stops, is `redeemable_supply`.
+    pub circulating_supply: u64,
+    pub total_supply: u64,
     /// The launch terms this vault chose, copied from its DBC config at
     /// `tokenize` so a holder reads them here rather than decoding a config
     /// account. All three are bounded by `launch_rules`; all three are 0 while
@@ -233,6 +249,14 @@ pub struct Vault {
     pub state: VaultState,
     /// The installed delegate, or the default key for none.
     pub delegate: Pubkey,
+    /// What `redeem` divides by: the circulating supply, fixed once at
+    /// `finalize_wind_down`. Not recomputed per redemption, because the
+    /// balances it is derived from keep moving after the vault stops — the
+    /// graduated pool trades forever, and quote paid into it can never reach
+    /// the pot. Recomputing would let anyone buy the pool's inventory and
+    /// redeem it against a denominator that had just shrunk by the same
+    /// amount, diluting every holder who did nothing.
+    pub redeemable_supply: u64,
     pub created_ts: i64,
     /// When the vault stopped being private. 0 while it still is.
     pub tokenized_ts: i64,

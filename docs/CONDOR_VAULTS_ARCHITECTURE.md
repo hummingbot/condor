@@ -14,7 +14,9 @@ delegate key (theirs, or Condor's crank) trade it. While it is *private* it is
 just that person's treasury with extra structure. If they choose, they
 **tokenize** it: a fixed-supply token is sold on a Meteora bonding curve, the
 raise becomes the vault's capital, and from that moment **nobody — the creator,
-the delegate, Condor — can move a token out of the treasury to any key**. The
+the delegate, Condor — can move a token out of the treasury to any key**. They
+can still trade it at any price they choose, including against themselves; see
+§9 before deciding what that is worth. The
 treasury can still trade freely on allowed venues, including pools created
 after launch, because the program checks *recipients* structurally instead of
 keeping a list. The creator can direct the vault's trades themselves, run or
@@ -61,7 +63,7 @@ address itself is derived, never stored, so it cannot disagree with the seeds.
 | Role | Who | May | May not |
 |---|---|---|---|
 | **creator** | the treasury that called `create_vault` | **trade for the treasury directly** (everything a delegate can, through the same `execute*` instructions), pin / publish the strategy, run and pause it, install or replace the delegate, claim the pool-creator income, tokenize once, wind down once | after tokenize: move any token to any key |
-| **delegate** | one key named on the `Vault` (Condor's crank key by default; the creator may install their own) | act for the treasury through `execute*` | change anything on the `Vault`; anything `execute` refuses |
+| **delegate** | one key named on the `Vault` (Condor's crank key by default; the creator may install their own) | act for the treasury through `execute*` — which includes trading at any price, against any counterparty, including itself | change anything on the `Vault`; move a token to any key |
 | **administrator** | `Protocol.administrator` — Condor's backend | `finalize_wind_down` | trade, hold funds, move a delegate |
 | **protocol authority** | `Protocol.authority` (a multisig before mainnet) | rotate protocol keys; `wind_down` an abandoned tokenized vault | anything with a vault's funds |
 | **holder** | anyone with the vault token | `redeem` after a finished wind-down; `collect_seed` / `collect_leftover` (permissionless) | — |
@@ -170,7 +172,7 @@ upgrade, which is the right weight for a rule that binds every holder.
 
 ## 6. Tokenizing
 
-`tokenize(name, symbol, uri, issue_bps)` is one CPI into Meteora's Dynamic
+`tokenize(name, symbol, uri)` is one CPI into Meteora's Dynamic
 Bonding Curve **with the treasury as pool creator** (Meteora's term for the
 account that owns the launch's fee streams — here the treasury PDA, never the
 person). DBC does the whole mint:
@@ -199,7 +201,8 @@ Each economic term is a **bound** (the creator's decision, copied onto the
 | token type / supply | constant | Token-2022, fixed |
 | fee claimer | constant | `Protocol.fee_claimer` |
 | leftover receiver | constant | the vault's treasury |
-| `issue_bps` | argument | share of supply sold; the rest is retained supply — the ceiling on later dilution |
+| `circulating_supply`, `total_supply` | **read off the config** | What the curve offers, and the supply it is offered from, in the token's own units. They were one argument, `issue_bps`, and as an argument it was a number a buyer was told to read as a dilution ceiling while it committed the creator to nothing — the curve sold whatever the config said, and the two never met. **Neither is a standard field:** an SPL or Token-2022 mint carries only its live `supply`, and no extension adds a maximum or a circulating figure, so the program records both — `total_supply` especially, because `redeem` burns and the chain's own number stops being the one it was. |
+| retained supply | bound | 0–50 % of supply held back from the curve (`leftover`). It lands in the treasury after graduation and is what the strategy market-makes its own token with. |
 
 ### 6.1 After the curve fills (graduation)
 
@@ -238,19 +241,34 @@ Only a tokenized vault winds down; the ceremony exists to pay holders.
    act: close every position, swap every non-quote balance to `quote_mint`.
    Nothing moves anywhere; the treasury's own quote ATA *is* the redemption pot,
    because the treasury is the program's PDA and signs the payout itself.
-3. **`finalize_wind_down`** — administrator-signed, a deliberate narrowing:
-   it checks the token accounts it is handed (every non-quote balance ≤
-   `WIND_DOWN_DUST` = 1 000 units) and a stranger could pass a short list and
-   strand a position; the administrator is the party that knows the whole
-   list. Requires the pot to be non-empty, clears the delegate, sets
-   `Redeemable`.
+3. **`finalize_wind_down`** — administrator-signed. It **fixes the estate**:
+   circulating supply is read once — the mint, less what the curve still holds,
+   less the graduated pool's permanently locked liquidity, less the retained
+   supply — and written to the `Vault` as the number every redemption divides
+   by. It also requires the curve to have finished paying out (seed and
+   leftover both collected) before the estate is closed, clears the delegate,
+   and sets `Redeemable`.
+
+   It used to sweep instead: walk the treasury's token accounts and refuse
+   while any non-quote balance exceeded a dust threshold. That never worked —
+   a position NFT is one unit, and one is below dust, so the open positions it
+   existed to catch went straight through, and a DLMM position is not a token
+   account at all. What it did do was let anyone stop a wind-down permanently
+   by sending the treasury a thousand units of a worthless mint. A check a
+   dishonest caller can evade and an honest one cannot satisfy is worse than
+   none: same trust, plus a griefing vector. **The consequence is stated rather
+   than hidden — whatever is not in the pot when this lands is stranded.**
+   Converting first is the administrator's job and the crank's.
 4. **`redeem(amount)`** — any holder, any time after. Burns `amount` and pays
-   `amount / circulating × pot`, where **circulating = mint supply − pool
-   vault balance − retained supply (the treasury's own balance of its token)**. The
-   pool's tokens are permanently locked liquidity; the retained supply's were never
-   sold. Supply is read before the burn so a redemption is priced on the
-   state it was quoted against. Paid by a program with no way to refuse: no
-   delegate, no administrator, no key.
+   `amount / redeemable_supply × pot`, where `redeemable_supply` is the fixed
+   number above. Nothing is read from the caller: the denominator used to be
+   recomputed from accounts they passed, checked only for their *mint*, so a
+   holder could substitute somebody else's balance and scale their own payout
+   by it. Even supplied honestly it moved, because the graduated pool trades
+   forever and quote paid into it can never reach the pot — so buying the
+   pool's inventory raised the denominator by exactly what the buyer could then
+   redeem against. Paid by a program with no delegate, no administrator and no
+   key able to decline.
 
 ## 8. Off-chain system
 
@@ -330,26 +348,61 @@ must be the creator.
 
 ## 9. What each party is trusting
 
-* **A holder** trusts the program bytes — specifically `venues.rs` and
-  `execute.rs` — and the program's upgrade authority. Nothing in Condor's
-  backend, the crank, or the delegate key is in their trust base: any of them
-  can at worst trade badly on an allowed venue, and none can move a token to
-  a key. Redemption is paid by the program with no party able to decline.
+**Say what this is first: a managed treasury whose manager cannot withdraw, and
+who is trusted not to trade adversarially.** That is a real guarantee and a
+smaller one than "a protocol that resists a malicious trader", which is what an
+earlier version of this section implied. The difference is worth being exact
+about, because it is the difference between the two products somebody might
+think they are buying.
+
+The recipient rule in §5 answers *can the trader take the assets out?* — no,
+completely, and that is now checked rather than asserted. It says nothing about
+*can the trader hand the assets to themselves at a price?*, because the second
+question is about value and **nothing in this program observes value**: there is
+no price, no oracle, no NAV, no exposure limit, no realised-loss accounting and
+no notion of a counterparty anywhere in the crate. A creator who provides
+liquidity on the other side of an allowed pool can make the treasury trade
+against it at any price they like, and every check passes, because the value
+leaves through the price rather than the destination.
+
+* **A holder** trusts the program bytes — above all `venues.rs` and
+  `execute.rs` — the program's upgrade authority, **and the creator and
+  delegate keys, fully, for the whole value of the treasury**. Those keys
+  cannot move a token to any key, and they can trade at any price they choose,
+  including against themselves. What redemption guarantees is that whatever is
+  in the pot at the end is paid out pro-rata by a program with no party able to
+  decline — not how much is in it.
+* A holder also trusts the venues: DBC, DAMM v2, Meteora DLMM and Raydium
+  CLMM, their upgrade authorities, the quote mint's authorities, and the vault
+  token's Token-2022 extensions. This program reads their account layouts and
+  refuses a short list of their instructions; it does not audit them.
 * **A creator** of a private vault trusts nobody: it is their wallet, their
   delegate, and `execute_unchecked` is their withdrawal.
 * **Condor** is trusted with nothing it can steal. Its crank's key is a
-  delegate like any other; its administrator role can only *finalize* a
-  wind-down, and only once the treasury is already in the quote asset.
+  delegate like any other, and it can trade adversarially exactly as far as a
+  creator can. Its administrator role can only *close the estate*, which it can
+  also decline to do — an absent administrator blocks redemption indefinitely,
+  and there is no timeout and no permissionless fallback.
 * **The upgrade authority** is the residual trust. It moves to a multisig
   before the first mainnet vault; the protocol instructions take a separate
   payer and never read the authority's lamports so a Squads vault can hold it
   without a migration.
 
+**What it would take to make the larger claim true**, in rough order of cost:
+bound the asset set (the treasury may hold only the quote asset, its own token
+and a short list of majors); bound the counterparty (only pools above a
+liquidity floor, or older than the vault — which means giving up "structural
+rather than an allowlist"); bound the price per leg against an independent mark,
+which means an oracle and a policy for stale feeds; bound the per-epoch loss;
+and say who may change those four, and make it not the creator. The first and
+third are the same constraint seen twice, because an asset with no feed cannot
+be priced. None of them is a patch.
+
 What the program deliberately does **not** do: attest that Condor reviewed a
-strategy (Condor's scan is a private run policy), keep a name registry (a
-vault's identity is its address), or put oracle-bounded prices on the
-wind-down conversion (that is why finalize is administrator-signed and the
-conversion is not permissionless — see the plan for the open question).
+strategy (`config_hash` and `agent_ref` are commitments, not validations — the
+chain says which parameters were signed, never that they are sound), keep a
+name registry (a vault's identity is its address), or put oracle-bounded prices
+on the wind-down conversion.
 
 ## 10. Instruction reference
 
@@ -362,14 +415,14 @@ conversion is not permissionless — see the plan for the open question).
 | `pin(agent_ref, config_hash)` | creator | version 0 | strategy v1, starts Running |
 | `publish_version(...)` | creator | Running / Paused | new strategy version |
 | `set_active(bool)` | creator | Running / Paused | pause / resume |
-| `execute_unchecked(data)` | creator or delegate | private, Running / Paused | treasury invokes anything |
-| `execute(data)` | creator or delegate | Running / Paused | treasury invokes a venue under the recipient rule |
-| `tokenize(name, symbol, uri, issue_bps)` | creator | private | DBC launch, treasury as creator; writes quote and terms |
+| `execute_unchecked(data)` | creator or delegate | private, Running / Paused | treasury invokes anything except handing out authority over its own accounts |
+| `execute(data)` | creator or delegate | Running / Paused / **WindingDown** | treasury invokes a venue under the recipient rule. Allowed during a wind-down, because closing positions and converting to the quote asset *is* `execute` |
+| `tokenize(name, symbol, uri)` | creator | private | DBC launch, treasury as pool creator; writes the quote asset, the terms and the derived `issue_bps` |
 | `collect_seed` | anyone | graduated | pool creator's 98 % of the unlocked raise → treasury |
 | `collect_leftover` | anyone | graduated | retained supply → treasury |
 | `claim_income(source)`, `claim_position_fee` | creator | tokenized | creator streams → creator |
 | `wind_down` | creator, or protocol authority | tokenized, Running / Paused | one-way stop |
-| `finalize_wind_down` | administrator | WindingDown | checks conversion, clears delegate, Redeemable |
+| `finalize_wind_down` | administrator | WindingDown | fixes the estate, clears delegate, Redeemable |
 | `redeem(amount)` | any holder | Redeemable | burn, pro-rata quote payout |
 
 Error groups worth knowing when reading logs: `NotPrivate` (an
@@ -392,19 +445,30 @@ Not yet exercised against the rewritten program: the tokenized half —
 `wind_down` → conversion → `finalize_wind_down` → `redeem`.
 
 The tokenized half now runs as far as the curve: `tokenize` lands (mint,
-pool, quote asset, `issue_bps` and the threshold recorded on the `Vault`), a
+pool, quote asset, both supply figures and the threshold recorded on the `Vault`), a
 tokenized treasury trades through `execute`, and both doors it is supposed to
 close are shut — `execute_unchecked` and the delegate withdrawal are refused
 the moment a mint exists. What is still unexercised is everything downstream
 of a *full* curve: `collect_seed`, `collect_leftover`, `claim_income`, the
 wind-down conversion, `finalize_wind_down` and `redeem`.
 
-**A security review of the program is in `CONDOR_VAULTS_SECURITY_REVIEW.md`,
-and this document does not yet reflect it.** Several of its findings contradict
-claims made above — in particular §5.1's recipient rule has a hole, §7's
-wind-down cannot execute, and §9's "can at worst trade badly" understates what
-a creator with liquidity on the other side of the trade can do. Read the two
-together until they are reconciled.
+**A security review of the program is in `CONDOR_VAULTS_SECURITY_REVIEW.md`.**
+Every finding it raised has been acted on, and the sections above describe the
+program as it now is. The four that mattered most, and what closed them:
+
+| Finding | Closed by |
+|---|---|
+| A writable **signer** skipped the ownership check, so a token account the caller held the key to was a legal swap output — the one instruction the design exists to refuse | the ownership test runs first, and the signer exemption is narrowed to an empty system account that may *pay* for the call; `check_after` refuses any signer that ended it richer, which also closes the repeatable rent drain |
+| An SPL **approval** granted before `tokenize` survived it, and `collect_seed` later filled exactly that account | `execute_unchecked` refuses `Approve`, `ApproveChecked` and `SetAuthority` |
+| `wind_down` **disabled `execute`**, so every open position was stranded forever and the conversion the design describes was impossible | `execute` is allowed in `WindingDown`; `execute_unchecked` is not |
+| `redeem` took the pool balance **on the caller's word**, and the denominator moved anyway because the graduated pool never stops trading | the estate is fixed once at `finalize_wind_down` and `redeem` reads nothing |
+
+Also closed: the launch terms nobody read (the mint authority, the permanent-lock
+percentages, vesting), `claim_position_fee` claiming the strategy's fees as the
+creator's, `permanent_lock_position` reachable through `execute`, the collectors
+landing after redemption began, and gas top-ups drawn from the treasury. The one
+finding with no code answer is the trust model itself, and §9 now says it
+outright instead of implying otherwise.
 
 Open design items: routers under `execute`, a permissionless wind-down
 conversion with price bounds, and the multisig handover of the upgrade

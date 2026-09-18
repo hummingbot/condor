@@ -39,10 +39,11 @@
 //! treasury** — which keeps the unissued supply out of the creator's hands and,
 //! because it is the treasury, puts it where the delegate can market-make with it.
 //!
-//! `issue_bps` is the share of the fixed supply this sale offers. The rest is
-//! retained by the vault. A buyer reads it as the ceiling on how far they can
-//! later be diluted, which is why it is committed here rather than described
-//! in a listing.
+//! `circulating_supply` and `total_supply` are **read off the config**, not passed
+//! in. They were one argument, `issue_bps`, and as an argument it was a number
+//! a buyer was told to read as a dilution ceiling while it committed the
+//! creator to nothing, since the curve sold whatever the config said and the
+//! two never met. Read, they are the config's own answer, in tokens.
 //!
 //! DBC does the entire mint: Token-2022, six decimals, a fixed supply and
 //! immutable authorities, with the name, symbol and URI passed straight
@@ -115,26 +116,13 @@ pub struct Tokenize<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn tokenize(
-    ctx: Context<Tokenize>,
-    name: String,
-    symbol: String,
-    uri: String,
-    issue_bps: u16,
-) -> Result<()> {
+pub fn tokenize(ctx: Context<Tokenize>, name: String, symbol: String, uri: String) -> Result<()> {
     require!(!ctx.accounts.vault.is_tokenized(), VaultError::AlreadyTokenized);
     require!(ctx.accounts.vault.is_pinned(), VaultError::NotPinned);
     require!(
         name.len() <= MAX_NAME_LEN && symbol.len() <= MAX_SYMBOL_LEN && uri.len() <= MAX_URI_LEN,
         VaultError::MetadataTooLong
     );
-    // Selling none of it is not a sale, and selling all of it leaves nothing to
-    // fund a later one — both are almost certainly a mistake in the form.
-    require!(
-        issue_bps > 0 && issue_bps <= BPS_DENOMINATOR,
-        VaultError::BpsOutOfRange
-    );
-
     let terms = check_launch_terms(
         &ctx.accounts.config.to_account_info(),
         &ctx.accounts.quote_mint.key(),
@@ -194,7 +182,8 @@ pub fn tokenize(
     // in, and therefore the one a wind-down converts into and a redemption
     // pays. One decision, made once, at the moment it starts to matter.
     vault.quote_mint = ctx.accounts.quote_mint.key();
-    vault.issue_bps = issue_bps;
+    vault.circulating_supply = terms.circulating_supply;
+    vault.total_supply = terms.total_supply;
     vault.graduation_quote_threshold = terms.graduation_quote_threshold;
     vault.creator_trading_fee_pct = terms.creator_trading_fee_pct;
     vault.pool_fee_option = terms.pool_fee_option;
@@ -204,6 +193,8 @@ pub fn tokenize(
 
 /// The terms a vault chose, once they have been checked.
 pub struct LaunchTerms {
+    pub circulating_supply: u64,
+    pub total_supply: u64,
     pub graduation_quote_threshold: u64,
     pub creator_trading_fee_pct: u8,
     pub pool_fee_option: u8,
@@ -252,6 +243,27 @@ fn check_launch_terms(
     // read here so it lands on the `Vault` rather than only in a config account
     // nobody will decode.
     require!(c.migration_quote_threshold > 0, VaultError::LaunchTermsMismatch);
+    // The four liquidity shares. The product says half the raise is locked
+    // *permanently*; `migration_fee_pct` says only how much of it was not taken
+    // as a fee, which is a number about fees wearing a number about locks. A
+    // config may hand the graduation liquidity to somebody withdrawable
+    // instead, and until these bytes were read it did so silently.
+    require!(
+        c.partner_liquidity_pct == 0
+            && c.creator_liquidity_pct == 0
+            && c.partner_permanent_locked_pct.saturating_add(c.creator_permanent_locked_pct) == 100,
+        VaultError::LaunchTermsMismatch
+    );
+    // Two of the five values here hand somebody a mint authority on the vault's
+    // own token. A supply that can grow makes `issue_bps` meaningless and a
+    // redemption denominator a suggestion, so only `Immutable` will do.
+    require!(
+        c.token_update_authority == rules::TOKEN_UPDATE_AUTHORITY_IMMUTABLE,
+        VaultError::LaunchTermsMismatch
+    );
+    // Vested supply counts in the mint but sits in an account this program
+    // cannot see, so every holder would be underpaid by that fraction.
+    require!(c.locked_vesting_is_empty, VaultError::LaunchTermsMismatch);
     require!(
         c.creator_trading_fee_pct <= rules::MAX_CREATOR_TRADING_FEE_PCT,
         VaultError::LaunchTermsMismatch
@@ -261,7 +273,18 @@ fn check_launch_terms(
         VaultError::LaunchTermsMismatch
     );
 
+    // Both supplies are the config's answer, never a promise made beside it.
+    // They used to be one argument, `issue_bps`, which a buyer was told to read
+    // as a dilution ceiling while it committed the creator to nothing: the
+    // curve sold whatever the config said, and the two numbers never met.
+    require!(
+        c.swap_base_amount > 0 && c.swap_base_amount <= c.pre_migration_token_supply,
+        VaultError::LaunchTermsMismatch
+    );
+
     Ok(LaunchTerms {
+        circulating_supply: c.swap_base_amount,
+        total_supply: c.pre_migration_token_supply,
         graduation_quote_threshold: c.migration_quote_threshold,
         creator_trading_fee_pct: c.creator_trading_fee_pct,
         pool_fee_option: c.migration_fee_option,

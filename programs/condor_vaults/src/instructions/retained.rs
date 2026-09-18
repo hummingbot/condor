@@ -1,6 +1,6 @@
 //! The retained supply: the part of the supply that was not sold at launch.
 //!
-//! `issue_bps` is circulating over max supply at the moment of tokenization.
+//! `circulating_supply` over `total_supply` is what the curve offered.
 //! The remainder is not burned and is not the creator's — DBC's leftover
 //! receiver is the **vault's treasury**, so it lands there alongside its
 //! capital.
@@ -34,8 +34,8 @@
 //! own balance of the token from its denominator exactly as it subtracts the
 //! pool's. Whichever way they leave the treasury — sold by the delegate or worked
 //! as half of an LP position — the quote comes back to the vault, so
-//! circulating supply and vault capital move together, and `issue_bps` is still
-//! the ceiling on how far a holder can be diluted.
+//! circulating supply and vault capital move together, and what the curve
+//! offered is still the ceiling on how far a holder can be diluted.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -43,7 +43,7 @@ use anchor_lang::solana_program::program::invoke;
 
 use crate::dbc;
 use crate::error::VaultError;
-use crate::state::{Vault, TREASURY_SEED, VAULT_SEED};
+use crate::state::{VaultState, Vault, TREASURY_SEED, VAULT_SEED};
 use crate::token;
 
 #[derive(Accounts)]
@@ -95,6 +95,15 @@ pub struct CollectLeftover<'info> {
 
 pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
     require!(ctx.accounts.vault.is_tokenized(), VaultError::NotTokenized);
+    // Not once the estate is closed. `finalize_wind_down` fixed the
+    // denominator and holders began redeeming against it; quote arriving after
+    // that pays late redeemers more than early ones, which is not the pro-rata
+    // this promises. A curve somebody else finishes buying does not get to
+    // reopen it.
+    require!(
+        ctx.accounts.vault.state != VaultState::Redeemable,
+        VaultError::NotRedeemable
+    );
     let pool = dbc::read_virtual_pool(&ctx.accounts.virtual_pool.to_account_info())?;
     require_keys_eq!(
         pool.config,

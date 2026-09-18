@@ -25,7 +25,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
-import { isTokenized } from "@/components/vaults/format";
+import { isTokenized, supplyShare } from "@/components/vaults/format";
 import {
   CopyAddress,
   PhaseBadge,
@@ -72,10 +72,6 @@ function Tabs({
       ))}
     </div>
   );
-}
-
-function feePct(bps: number): string {
-  return `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
 }
 
 function VaultCard({ vault }: { vault: VaultInfo }) {
@@ -132,7 +128,7 @@ function VaultCard({ vault }: { vault: VaultInfo }) {
           <>
             <dt title="Circulating over max supply at launch">Issued</dt>
             <dd className="text-right font-mono text-[var(--color-text)]">
-              {feePct(chain.issue_bps)}
+              {supplyShare(chain.circulating_supply, chain.total_supply)}
             </dd>
           </>
         )}

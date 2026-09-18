@@ -14,8 +14,8 @@
 //! program's job there is to stay out of the way.
 //!
 //! `tokenize` ends it. The vault launches a Token-2022 mint on a Meteora
-//! bonding curve whose **pool creator is the same PDA**, sells `issue_bps` of
-//! the fixed supply, and keeps the rest as a retained supply the strategy market-makes
+//! bonding curve whose **pool creator is the same PDA**, sells the share of
+//! the fixed supply its config offers, and keeps the rest as a retained supply the strategy market-makes
 //! with — an LP position on the vault's own pool, single- or double-sided,
 //! which is how unissued supply turns into vault capital as buyers arrive. When
 //! the curve fills, 80 % of what it raised becomes the vault's capital by a rule
@@ -123,15 +123,10 @@ pub mod condor_vaults {
     // ── tokenizing ──────────────────────────────────────────────────────────
 
     /// One way. Launches the token on Meteora's curve with the PDA as pool
-    /// creator, selling `issue_bps` of the supply.
-    pub fn tokenize(
-        ctx: Context<Tokenize>,
-        name: String,
-        symbol: String,
-        uri: String,
-        issue_bps: u16,
-    ) -> Result<()> {
-        instructions::tokenize::tokenize(ctx, name, symbol, uri, issue_bps)
+    /// creator. What share of the supply is sold is the config's to say, and
+    /// the program reads it rather than being told.
+    pub fn tokenize(ctx: Context<Tokenize>, name: String, symbol: String, uri: String) -> Result<()> {
+        instructions::tokenize::tokenize(ctx, name, symbol, uri)
     }
 
     /// Move the unsold supply from DBC into the vault's treasury, where the

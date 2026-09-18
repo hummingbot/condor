@@ -33,9 +33,13 @@ pub struct InstallDelegate<'info> {
 }
 
 pub fn install_delegate(ctx: Context<InstallDelegate>, delegate: Pubkey) -> Result<()> {
+    // Only while the strategy can still change. A wind-down is a decision
+    // already taken, and swapping the key that executes it mid-way — now that
+    // `execute` works in `WindingDown` — is a way to hand the conversion to
+    // somebody else after holders were told it was finished changing.
     require!(
-        ctx.accounts.vault.state != VaultState::Redeemable,
-        VaultError::NotRedeemable
+        ctx.accounts.vault.state.accepts_strategy_changes(),
+        VaultError::WindingDown
     );
     ctx.accounts.vault.delegate = delegate;
     Ok(())

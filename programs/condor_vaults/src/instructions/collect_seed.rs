@@ -18,7 +18,7 @@ use anchor_lang::solana_program::program::invoke_signed;
 use crate::dbc;
 use crate::error::VaultError;
 use crate::instructions::strategy::treasury_of;
-use crate::state::{Protocol, Vault, PROTOCOL_SEED, TREASURY_SEED, VAULT_SEED};
+use crate::state::{VaultState, Protocol, Vault, PROTOCOL_SEED, TREASURY_SEED, VAULT_SEED};
 use crate::token;
 
 #[derive(Accounts)]
@@ -70,6 +70,15 @@ pub struct CollectSeed<'info> {
 
 pub fn collect_seed(ctx: Context<CollectSeed>) -> Result<()> {
     require!(ctx.accounts.vault.is_tokenized(), VaultError::NotTokenized);
+    // Not once the estate is closed. `finalize_wind_down` fixed the
+    // denominator and holders began redeeming against it; quote arriving after
+    // that pays late redeemers more than early ones, which is not the pro-rata
+    // this promises. A curve somebody else finishes buying does not get to
+    // reopen it.
+    require!(
+        ctx.accounts.vault.state != VaultState::Redeemable,
+        VaultError::NotRedeemable
+    );
     let pool = dbc::read_virtual_pool(&ctx.accounts.virtual_pool.to_account_info())?;
     require_keys_eq!(
         pool.config,

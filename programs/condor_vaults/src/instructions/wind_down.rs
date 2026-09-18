@@ -19,17 +19,20 @@
 //! own quote account is what `redeem` pays from, because the treasury is this
 //! program's PDA and signs the payout itself.
 //!
-//! `finalize_wind_down` is **administrator-signed**, a deliberate narrowing
-//! (plan §1.6): the check it performs can only look at the accounts it is
-//! handed, so a stranger could pass a short list and finalize a vault with
-//! positions still open, stranding them. Making the caller the one party that
-//! knows the whole list closes that.
+//! `finalize_wind_down` **fixes the estate**: it reads the circulating supply
+//! once — the mint, less what the curve still holds, less the graduated pool's
+//! permanently locked liquidity, less the retained supply — and writes it to
+//! the `Vault` as the number every redemption divides by. It is
+//! administrator-signed, not because the reads need privilege but because
+//! closing the estate before the conversion is finished strands whatever is
+//! left, and that call should have a name on it.
 
 use anchor_lang::prelude::*;
 
+use crate::dbc;
 use crate::error::VaultError;
 use crate::state::{
-    Protocol, Vault, VaultState, PROTOCOL_SEED, TREASURY_SEED, VAULT_SEED, WIND_DOWN_DUST,
+    Protocol, Vault, VaultState, PROTOCOL_SEED, TREASURY_SEED, VAULT_SEED,
 };
 use crate::token;
 
@@ -82,7 +85,9 @@ pub fn wind_down(ctx: Context<WindDown>) -> Result<()> {
 
 #[derive(Accounts)]
 pub struct FinalizeWindDown<'info> {
-    /// The administrator — the one party that knows the whole account list.
+    /// The administrator. Not because the check below needs privilege — it
+    /// needs none — but because closing the estate at the wrong moment strands
+    /// whatever has not been converted, and that call wants a name on it.
     #[account(address = protocol.administrator @ VaultError::NotAdministrator)]
     pub administrator: Signer<'info>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
@@ -99,14 +104,32 @@ pub struct FinalizeWindDown<'info> {
         bump = vault.treasury_bump,
     )]
     pub treasury: UncheckedAccount<'info>,
+    /// CHECK: the vault's own mint. Its supply is where the denominator starts.
+    #[account(address = vault.mint @ VaultError::WrongMint)]
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: the curve, pinned by address. Read for what it still holds and
+    /// for whether it has finished paying out.
+    #[account(address = vault.dbc_pool @ VaultError::PoolNotDbc)]
+    pub dbc_pool: UncheckedAccount<'info>,
+    /// CHECK: the curve's own account for the token; checked against the pool.
+    pub dbc_base_vault: UncheckedAccount<'info>,
+    /// CHECK: the graduated pool. Derived from the terms the vault recorded, so
+    /// it cannot be substituted. Required exactly when the curve has migrated.
+    pub damm_pool: Option<UncheckedAccount<'info>>,
+    /// CHECK: that pool's own account for the token — the permanently locked
+    /// half of the raise. Read off the pool, never taken on trust.
+    pub damm_base_vault: Option<UncheckedAccount<'info>>,
+    /// CHECK: the treasury's own account for the vault token: retained supply,
+    /// which was never sold and is nobody's claim. Derived in the handler.
+    pub retained_token_account: UncheckedAccount<'info>,
     /// CHECK: the treasury's own quote account, derived in the handler. What
     /// `redeem` pays out of, so it has to hold something.
     pub redemption_pot: UncheckedAccount<'info>,
+    /// CHECK: the vault token's program (Token-2022).
+    pub token_program: UncheckedAccount<'info>,
     /// CHECK: the quote mint's token program.
     pub quote_token_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
-    // remaining_accounts: every token account of the funds owner the caller
-    // knows about, including the NFT accounts of any open positions.
 }
 
 pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {
@@ -114,51 +137,108 @@ pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {
         ctx.accounts.vault.state == VaultState::WindingDown,
         VaultError::NotWindingDown
     );
+    let treasury = ctx.accounts.treasury.key();
+    let vault_mint = ctx.accounts.vault.mint;
 
-    // Anything of the treasury's that still holds more than dust and is not the
-    // quote asset stops the finalize. A position NFT is such a balance — one
-    // unit of its own mint — so an open position is caught by the same rule
-    // that catches a forgotten token, and neither needs a special case.
+    // **There is no emptiness sweep, and there was one.** It walked the token
+    // accounts the caller handed it and refused while any non-quote balance
+    // exceeded dust. It never worked: a position NFT is one unit, and one is
+    // below dust, so the open positions it was written to catch went straight
+    // through; a DLMM position is not a token account at all, so it was not
+    // even looked at. What it did do was hand anyone a way to stop a wind-down
+    // for good — send the treasury a thousand units of a worthless mint and no
+    // honest list can ever come back clean. The only escape was for the
+    // administrator to pass a filtered list, at which point the check was
+    // verifying nothing. A check that a dishonest caller can evade and an
+    // honest one cannot satisfy is worse than no check: it is the same trust,
+    // plus a griefing vector. What replaces it is below — the facts the chain
+    // can actually attest.
     //
-    // The vault's *own* token is the one exception, and it is not a loophole:
-    // it is the unsold retained supply, it is already excluded from the redemption
-    // denominator, and nobody has a claim on it. Requiring it to be sold first
-    // would make finishing a wind-down depend on there being a bid.
-    let funds_owner = ctx.accounts.treasury.key();
-    let quote_mint = ctx.accounts.vault.quote_mint;
-    let own_mint = ctx.accounts.vault.mint;
-    for account in ctx.remaining_accounts.iter() {
-        let Some(balance) = token::read_token_account(account) else {
-            continue;
-        };
-        if balance.owner != funds_owner {
-            continue;
-        }
-        if balance.mint == quote_mint || balance.mint == own_mint {
-            continue;
-        }
+    // The consequence is stated rather than hidden: whatever is not in the pot
+    // when this lands is stranded. Converting first is the administrator's job
+    // and the crank's, and holders are trusting them for it.
+
+    // The curve first: what it still holds of the token, and whether it has
+    // finished paying. A seed or a leftover arriving *after* the estate is
+    // fixed would pay early redeemers out of one pot and late ones out of
+    // another, which is not the pro-rata this promises.
+    let pool = dbc::read_virtual_pool(&ctx.accounts.dbc_pool.to_account_info())?;
+    require_keys_eq!(
+        pool.base_vault,
+        ctx.accounts.dbc_base_vault.key(),
+        VaultError::PoolNotDbc
+    );
+    if pool.is_migrated {
         require!(
-            balance.amount <= WIND_DOWN_DUST,
+            pool.creator_migration_fee_withdrawn() && pool.is_withdraw_leftover,
             VaultError::WindDownIncomplete
         );
     }
+    let unsold = token::require_token_account(&ctx.accounts.dbc_base_vault.to_account_info())?;
+    require_keys_eq!(unsold.mint, vault_mint, VaultError::WrongMint);
 
-    // Everything is in the quote asset now, and it is in the treasury's own
-    // quote account — which is what `redeem` pays from, so holders are owed
-    // that it holds something. Verified, not performed: the conversion is
-    // `execute` calls, and this only checks that they happened.
+    // Then the graduated pool, if there is one. Its balance of the token is
+    // liquidity locked forever, not a holding, so it never redeems.
+    let locked = match (&ctx.accounts.damm_pool, &ctx.accounts.damm_base_vault) {
+        (Some(pool_account), Some(base_vault)) => {
+            require!(pool.is_migrated, VaultError::PoolNotGraduated);
+            let expected = dbc::damm_v2_pool(
+                ctx.accounts.vault.pool_fee_option,
+                &vault_mint,
+                &ctx.accounts.vault.quote_mint,
+            )?;
+            require_keys_eq!(pool_account.key(), expected, VaultError::PoolNotDbc);
+            require_keys_eq!(
+                base_vault.key(),
+                dbc::damm_v2_vault_for(&pool_account.to_account_info(), &vault_mint)?,
+                VaultError::PoolNotDbc
+            );
+            token::require_token_account(&base_vault.to_account_info())?.amount
+        }
+        (None, None) => {
+            // A vault can wind down without ever graduating. Then there is no
+            // pool, and the tokens the curve did not sell are still the curve's.
+            require!(!pool.is_migrated, VaultError::WindDownIncomplete);
+            0
+        }
+        _ => return Err(VaultError::WindDownIncomplete.into()),
+    };
+
+    // And the treasury's own balance of its own token: retained supply, which
+    // was offered to nobody.
+    let retained = token::require_associated(
+        &ctx.accounts.retained_token_account.to_account_info(),
+        &treasury,
+        &vault_mint,
+        &ctx.accounts.token_program.key(),
+    )?;
+
+    // The estate, fixed here and never recomputed. Everything above keeps
+    // moving after this instruction — the graduated pool trades forever — and
+    // a denominator that moved with it would let a buyer shrink it and redeem
+    // against the difference.
+    let mint = token::read_mint(&ctx.accounts.mint.to_account_info())?;
+    let redeemable = mint
+        .supply
+        .checked_sub(unsold.amount)
+        .and_then(|s| s.checked_sub(locked))
+        .and_then(|s| s.checked_sub(retained.amount))
+        .ok_or(VaultError::MathOverflow)?;
+    require!(redeemable > 0, VaultError::NothingToRedeem);
+
     let pot = token::require_associated(
         &ctx.accounts.redemption_pot.to_account_info(),
-        &funds_owner,
-        &quote_mint,
+        &treasury,
+        &ctx.accounts.vault.quote_mint,
         &ctx.accounts.quote_token_program.key(),
     )?;
     require!(pot.amount > 0, VaultError::RedemptionPotEmpty);
 
+    let vault = &mut ctx.accounts.vault;
+    vault.redeemable_supply = redeemable;
     // No delegate from here on: nothing trades, and the only movement left is
     // `redeem`, which the treasury signs for itself.
-    ctx.accounts.vault.delegate = Pubkey::default();
-
-    ctx.accounts.vault.state = VaultState::Redeemable;
+    vault.delegate = Pubkey::default();
+    vault.state = VaultState::Redeemable;
     Ok(())
 }

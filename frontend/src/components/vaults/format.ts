@@ -29,3 +29,26 @@ export function shortAddress(address: string, size = 4): string {
 export function pctOfBps(bps: number): string {
   return `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
 }
+
+/**
+ * What share of a vault token's supply the curve offered, from the two figures
+ * the program records.
+ *
+ * Two numbers rather than a stored percentage because neither is an SPL or
+ * Token-2022 field — a mint carries only its live `supply`, which redemption
+ * burns down — so the ratio is computed where it is shown and the tokens stay
+ * comparable with every other balance. BigInt throughout: these are base units
+ * of a fixed supply, and at 1e15 a float has already stopped being exact.
+ */
+export function supplyShare(circulating?: string | null, total?: string | null): string {
+  if (!circulating || !total) return "—";
+  try {
+    const c = BigInt(circulating);
+    const t = BigInt(total);
+    if (t === 0n) return "—";
+    const tenths = Number((c * 1000n) / t) / 10;
+    return `${tenths.toFixed(tenths % 1 === 0 ? 0 : 1)}%`;
+  } catch {
+    return "—";
+  }
+}

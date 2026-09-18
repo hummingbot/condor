@@ -8,9 +8,12 @@
 //! * **`execute_unchecked`** invokes any program with any accounts. It is what
 //!   a private vault's delegate — or its creator — trades with, and it is also
 //!   how a private vault is emptied: a transfer is an instruction like any
-//!   other. Nothing is checked, because nothing needs to be: the only person
-//!   with a claim on what is inside is the one who created it (§1.3). It
-//!   refuses from `tokenize` onward, and that refusal is the one-way door.
+//!   other. Almost nothing is checked, because almost nothing needs to be: the
+//!   only person with a claim on what is inside is the one who created it
+//!   (§1.3). The exception is handing out *authority* — an SPL approval
+//!   outlives the private phase and `tokenize` cannot revoke it, so
+//!   `venues::check_private` refuses those. It refuses everything from
+//!   `tokenize` onward, and that refusal is the one-way door.
 //! * **`execute`** invokes an allowed venue under `venues::check_before` and
 //!   `check_after`: every account the call may write is the treasury's, the
 //!   venue's, or the caller's own, and everything the call created belongs to
@@ -56,13 +59,16 @@ pub struct Execute<'info> {
     // remaining_accounts: the instruction's accounts, in order.
 }
 
-fn may_act<'info>(ctx: &Context<'info, Execute<'info>>) -> Result<()> {
+/// `states` differ between the two instructions, and the difference matters:
+/// a wind-down's whole middle act — close every position, swap every balance to
+/// the quote asset — is `execute` calls. Refusing them in `WindingDown` would
+/// strand every open position forever, because nothing can move the vault back
+/// to `Running`. `execute_unchecked` stays out of that state: by then the vault
+/// is tokenized anyway, so it is refused twice over.
+fn may_act<'info>(ctx: &Context<'info, Execute<'info>>, states: &[VaultState]) -> Result<()> {
     let vault = &ctx.accounts.vault;
     require!(vault.may_act(&ctx.accounts.signer.key()), VaultError::NotCreatorOrDelegate);
-    require!(
-        matches!(vault.state, VaultState::Running | VaultState::Paused),
-        VaultError::VaultNotActive
-    );
+    require!(states.contains(&vault.state), VaultError::VaultNotActive);
     require!(ctx.accounts.target_program.executable, VaultError::ProgramNotAllowed);
     // Not itself: a treasury that could call `install_delegate` or `tokenize`
     // as the creator would be a treasury that could rewrite who owns it.
@@ -95,13 +101,21 @@ fn invoke_as_treasury<'info>(ctx: &Context<'info, Execute<'info>>, data: Vec<u8>
 }
 
 pub fn execute_unchecked<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
-    may_act(&ctx)?;
+    may_act(&ctx, &[VaultState::Running, VaultState::Paused])?;
     require!(!ctx.accounts.vault.is_tokenized(), VaultError::NotPrivate);
+    venues::check_private(&ctx.accounts.target_program.key(), &data)?;
     invoke_as_treasury(&ctx, data)
 }
 
 pub fn execute<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
-    may_act(&ctx)?;
+    may_act(
+        &ctx,
+        &[
+            VaultState::Running,
+            VaultState::Paused,
+            VaultState::WindingDown,
+        ],
+    )?;
     let program = ctx.accounts.target_program.key();
     let treasury = ctx.accounts.treasury.key();
     let before = venues::check_before(&program, &treasury, ctx.remaining_accounts, &data)?;

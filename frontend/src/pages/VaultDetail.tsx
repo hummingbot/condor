@@ -19,7 +19,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
-import { isTokenized } from "@/components/vaults/format";
+import { isTokenized, supplyShare } from "@/components/vaults/format";
 import {
   CopyAddress,
   PhaseBadge,
@@ -51,9 +51,6 @@ const QUOTE_ASSETS = [
   { symbol: "SOL", mint: WSOL },
   { symbol: "USDC", mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
 ];
-
-const pct = (bps: number | undefined) =>
-  bps === undefined ? "—" : `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
 
 export function VaultDetail() {
   const { account = "" } = useParams();
@@ -374,7 +371,9 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
               <CopyAddress address={chain.damm_pool} />
             </Row>
           )}
-          <Row label="Issued to the manager">{pct(chain?.issue_bps)}</Row>
+          <Row label="Offered on the curve">
+            {supplyShare(chain?.circulating_supply, chain?.total_supply)}
+          </Row>
           <Row label="Raised before graduation">
             {chain?.graduation_quote_threshold && chain.graduation_quote_threshold !== "0"
               ? chain.graduation_quote_threshold
@@ -594,7 +593,6 @@ function TokenTab({
   const [name, setName] = useState(vault.label);
   const [symbol, setSymbol] = useState("");
   const [uri, setUri] = useState("");
-  const [issuePct, setIssuePct] = useState("30");
   const [confirmed, setConfirmed] = useState(false);
 
   if (isTokenized(vault) && chain?.mint) {
@@ -607,7 +605,9 @@ function TokenTab({
           <Row label="Curve pool">
             {chain.dbc_pool ? <CopyAddress address={chain.dbc_pool} /> : "—"}
           </Row>
-          <Row label="Issued at launch — circulating over max supply">{pct(chain.issue_bps)}</Row>
+          <Row label="Offered on the curve — circulating over total supply">
+            {supplyShare(chain.circulating_supply, chain.total_supply)}
+          </Row>
           <Row label="Raised before graduation">
             {chain.graduation_quote_threshold === "0" ? "—" : chain.graduation_quote_threshold}
           </Row>
@@ -670,22 +670,11 @@ function TokenTab({
             placeholder="https://… metadata URI"
             className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-[13px]"
           />
-          <div>
-            <label className="mb-1 block text-[12px] font-medium">Issue at launch</label>
-            <div className="flex items-center gap-2">
-              <input
-                value={issuePct}
-                onChange={(e) => setIssuePct(e.target.value)}
-                inputMode="decimal"
-                className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
-              />
-              <span className="text-[12px] text-[var(--color-text-muted)]">% of max supply</span>
-            </div>
-            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              Circulating over max supply. The other {(100 - Number(issuePct) || 0).toFixed(0)}% stays
-              in the vault&rsquo;s retained supply — buyers read it as the most they could later be diluted by.
-            </p>
-          </div>
+          <p className="text-[11px] text-[var(--color-text-muted)]">
+            How much of the supply the curve sells is the config&rsquo;s to say, not this form&rsquo;s.
+            The program reads it off the config and records it, so what a buyer sees as the dilution
+            ceiling is the same number the curve is actually selling against.
+          </p>
         </div>
 
         <label className="mt-4 flex items-start gap-2 text-[12px]">
@@ -709,7 +698,6 @@ function TokenTab({
                   name: name.trim(),
                   symbol: symbol.trim(),
                   uri: uri.trim(),
-                  issue_bps: Math.round(Number(issuePct) * 100),
                 }),
             })
           }
@@ -752,6 +740,7 @@ function LaunchConfigCard({
   const [initialCap, setInitialCap] = useState("10");
   const [graduationCap, setGraduationCap] = useState("100");
   const [creatorFee, setCreatorFee] = useState("50");
+  const [retained, setRetained] = useState("0");
   const [poolFee, setPoolFee] = useState("2");
 
   // Half the raise is locked as liquidity on every launch — a constant in the
@@ -799,6 +788,20 @@ function LaunchConfigCard({
             className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
           />
         </Labelled>
+        <Labelled
+          label="Held back from the curve"
+          hint="0–50%. Supply the curve may not sell. It lands in the treasury as retained supply the strategy can market-make with; what the curve does sell is what buyers read as the dilution ceiling."
+        >
+          <div className="flex items-center gap-2">
+            <input
+              value={retained}
+              onChange={(e) => setRetained(e.target.value)}
+              inputMode="decimal"
+              className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
+            />
+            <span className="text-[12px] text-[var(--color-text-muted)]">%</span>
+          </div>
+        </Labelled>
         <Labelled label="Your share of trading fees" hint="At most 50%. You may take less.">
           <div className="flex items-center gap-2">
             <input
@@ -836,6 +839,7 @@ function LaunchConfigCard({
                 graduation_market_cap: Number(graduationCap),
                 creator_trading_fee_percentage: Number(creatorFee),
                 pool_fee_option: Number(poolFee),
+                retained_supply_pct: Number(retained),
               }),
             // Condor remembers the address so the launch form never asks for it.
             confirm: (signature) => api.confirmVaultLaunchConfig(vault.account, signature),
