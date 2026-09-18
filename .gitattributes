@@ -1,0 +1,29 @@
+# Line endings are part of a file's bytes, and Condor digests some of those
+# bytes: `content_digest` in condor/layering.py stamps a forked agent file with
+# a hash of the stock file it came from, and the staleness check compares that
+# stamp against the stock file later. Leaving endings to each host's git config
+# makes that hash platform-dependent.
+#
+# `text=auto` normalizes to LF in the repository. The explicit `eol=lf` entries
+# are the files whose bytes are either hashed or executed, where a CRLF working
+# tree would be actively wrong rather than merely inconsistent.
+* text=auto
+
+# Agent content: hashed by content_digest, so the working tree must match what
+# was committed byte for byte on every platform.
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Executed by a POSIX shell; a CRLF copy fails with a bad-interpreter error.
+*.sh text eol=lf
+Makefile text eol=lf
+
+# Binary, so git must not touch them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
