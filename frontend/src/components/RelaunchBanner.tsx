@@ -1,5 +1,5 @@
 import { RotateCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useRelaunch } from "@/hooks/useRelaunch";
 import { updatesApi } from "@/lib/updates-api";
@@ -33,16 +33,28 @@ const COUNTDOWN_SECONDS = 5;
 const RECONNECT_TIMEOUT_MS = 90_000;
 const RECONNECT_INTERVAL_MS = 1_000;
 
-type Phase = "idle" | "counting" | "restarting" | "cancelled" | "stuck";
+type Phase = "counting" | "restarting" | "cancelled" | "stuck";
 
+type Relaunch = {
+  from_commit?: string;
+  target_commit?: string;
+};
+
+/**
+ * Gate only. The countdown lives in `RelaunchStrip`, which is mounted the
+ * moment a relaunch becomes required — so its opening phase is its *initial*
+ * state rather than something an effect has to set after the first render.
+ */
 export function RelaunchBanner() {
   const { data } = useRelaunch();
-  const [phase, setPhase] = useState<Phase>("idle");
+  if (!data?.required) return null;
+  return <RelaunchStrip data={data} />;
+}
+
+function RelaunchStrip({ data }: { data: Relaunch }) {
+  const [phase, setPhase] = useState<Phase>("counting");
   const [left, setLeft] = useState(COUNTDOWN_SECONDS);
   const [showHow, setShowHow] = useState(false);
-  const started = useRef(false);
-
-  const required = data?.required ?? false;
 
   // Wait for the server to answer again, then reload once to pick up the new
   // bundle. Polled rather than pushed: the socket is down for the whole window,
@@ -80,29 +92,22 @@ export function RelaunchBanner() {
     waitForServer();
   }, [waitForServer]);
 
-  // Start the countdown once, the first time a relaunch becomes required.
-  useEffect(() => {
-    if (!required || started.current) return;
-    started.current = true;
-    setPhase("counting");
-  }, [required]);
-
+  // One timer, and everything it does happens inside the callback. Firing the
+  // relaunch from the effect body instead would be a synchronous setState
+  // during an effect, which cascades renders.
   useEffect(() => {
     if (phase !== "counting") return;
-    if (left <= 0) {
-      void relaunchNow();
-      return;
-    }
-    const id = window.setTimeout(() => setLeft((n) => n - 1), 1000);
+    const id = window.setTimeout(() => {
+      if (left <= 1) void relaunchNow();
+      else setLeft(left - 1);
+    }, 1000);
     return () => window.clearTimeout(id);
   }, [phase, left, relaunchNow]);
 
-  if (!required) return null;
-
   const moved =
-    data?.from_commit && data?.target_commit
+    data.from_commit && data.target_commit
       ? `${data.from_commit} → ${data.target_commit}`
-      : (data?.target_commit ?? "");
+      : (data.target_commit ?? "");
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 px-4 py-2">
