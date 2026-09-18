@@ -276,6 +276,17 @@ describe("the strategy pane's section, run and tick", () => {
     expect(other.get("sec")).toBeNull();
   });
 
+  it("reads a retired `sec=detail` as Fleet, and carries it so (ARCH-427)", () => {
+    const here = q("?panel=strategy&loop=brigado/brl_mm&sec=detail");
+    expect(readPane(here, {})).toMatchObject({ kind: "strategy", section: "fleet" });
+    const same = writePane(here, {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+    });
+    expect(same.get("sec")).toBe("fleet");
+  });
+
   it("clears its keys on the way out of the strategy pane", () => {
     const next = writePane(
       q("?panel=strategy&loop=brigado/brl_mm&sec=runs&run=s:3&tick=4"),

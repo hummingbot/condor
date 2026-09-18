@@ -9,9 +9,11 @@ import {
 } from "@/components/agent/DelegationSheet";
 import { isDelegationStatus } from "@/components/agent/delegationStatus";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
-import { ExperimentDetail } from "@/components/agent/lab/RunOverview";
+import { ExperimentDetail } from "@/components/agent/lab/ExperimentDetail";
 import { RunRail } from "@/components/agent/lab/RunRail";
-import { actionsByTick } from "@/components/agent/lab/runs";
+import { actionsByTick, isLiveRun } from "@/components/agent/lab/runs";
+import { SessionCanvasPanel } from "@/components/agent/session/SessionCanvasPanel";
+import { SessionExecutors } from "@/components/agent/session/SessionExecutors";
 import { OutsideWindow } from "@/components/agent/workspace/OutsideWindow";
 import { api, type AgentRunRow } from "@/lib/api";
 import { parseJournal } from "@/lib/parse-agent";
@@ -38,6 +40,8 @@ export function RunsBand({
   onShowOlderRuns,
   onOpenTick,
   onShowNow,
+  serverName,
+  controllerIds,
 }: {
   slug: string;
   runs: AgentRunRow[];
@@ -56,6 +60,10 @@ export function RunsBand({
   onOpenTick: (run: AgentRunRow, tick: number) => void;
   /** Where the selected run's vitals and last decision are: the Now tab. */
   onShowNow: () => void;
+  /** The agent's own server, where the selected session's market chart reads. */
+  serverName: string;
+  /** The controllers whose executors the selected session's chart streams. */
+  controllerIds: string[];
 }) {
   return (
     // The tab's whole height: the rail scrolls beside its body, which is what
@@ -81,6 +89,8 @@ export function RunsBand({
           onShowOlderRuns={onShowOlderRuns}
           onOpenTick={onOpenTick}
           onShowNow={onShowNow}
+          serverName={serverName}
+          controllerIds={controllerIds}
         />
       </div>
     </div>
@@ -170,17 +180,27 @@ function ConversationRun({ run }: { run: AgentRunRow }) {
  * sentence pointing elsewhere. Each row opens that tick's snapshot over the
  * screen. The journal and the action log are the keys `TickSpine` and the Now
  * tab already read, so a run in scope costs no second fetch.
+ *
+ * Headed by the two readings no other tab draws (ARCH-427, which retired the
+ * Detail tab that used to hold them): the agent's canvas — its thesis, as it
+ * last revised it — and the session's market chart, every executor it ran on
+ * the pair's candles with the ticks as bubbles that open them. Both draw
+ * nothing for a session that has neither.
  */
 function SessionTicks({
   slug,
   run,
   onOpenTick,
   onShowNow,
+  serverName,
+  controllerIds,
 }: {
   slug: string;
   run: AgentRunRow;
   onOpenTick: (run: AgentRunRow, tick: number) => void;
   onShowNow: () => void;
+  serverName: string;
+  controllerIds: string[];
 }) {
   const sslug = run.strategy_slug;
   const sessionNum = run.number;
@@ -225,6 +245,18 @@ function SessionTicks({
           Vitals and last decision on Now →
         </button>
       </div>
+
+      <SessionCanvasPanel slug={slug} sslug={sslug} sessionNum={sessionNum} />
+      <SessionExecutors
+        chartsOnly
+        slug={slug}
+        sslug={sslug}
+        sessionNum={sessionNum}
+        serverName={serverName}
+        controllerIds={controllerIds}
+        onSnapshotClick={(tick) => onOpenTick(run, tick)}
+        isLiveSession={isLiveRun(run)}
+      />
 
       {isLoading ? (
         <div className="flex h-24 items-center justify-center">
@@ -307,6 +339,8 @@ function RunBody({
   onShowOlderRuns,
   onOpenTick,
   onShowNow,
+  serverName,
+  controllerIds,
 }: {
   slug: string;
   run: AgentRunRow | null;
@@ -315,6 +349,8 @@ function RunBody({
   onShowOlderRuns?: () => void;
   onOpenTick: (run: AgentRunRow, tick: number) => void;
   onShowNow: () => void;
+  serverName: string;
+  controllerIds: string[];
 }) {
   if (!run && onShowOlderRuns) {
     return (
@@ -348,6 +384,8 @@ function RunBody({
       run={run}
       onOpenTick={onOpenTick}
       onShowNow={onShowNow}
+      serverName={serverName}
+      controllerIds={controllerIds}
     />
   );
 }

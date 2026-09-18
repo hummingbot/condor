@@ -39,10 +39,25 @@ vi.mock("@/components/agent/lab/RunRail", () => ({
     return <div data-body="rail" data-selected={selectedKey ?? ""} />;
   },
 }));
-vi.mock("@/components/agent/lab/RunOverview", () => ({
+vi.mock("@/components/agent/lab/ExperimentDetail", () => ({
   ExperimentDetail: () => {
     mounted.push("experiment");
     return <div data-body="experiment" />;
+  },
+}));
+vi.mock("@/components/agent/session/SessionCanvasPanel", () => ({
+  SessionCanvasPanel: () => {
+    mounted.push("canvas");
+    return <div data-body="canvas" />;
+  },
+}));
+/** What the market-chart stub was last handed (ARCH-427). */
+let chartProps: Record<string, unknown> | null = null;
+vi.mock("@/components/agent/session/SessionExecutors", () => ({
+  SessionExecutors: (props: Record<string, unknown>) => {
+    mounted.push("chart");
+    chartProps = props;
+    return <div data-body="chart" />;
   },
 }));
 /** The task the delegation stub was last handed. */
@@ -125,6 +140,8 @@ async function render(
             onShowMore={() => {}}
             onOpenTick={() => {}}
             onShowNow={() => {}}
+            serverName="local"
+            controllerIds={["brigado_ctrl"]}
             {...extra}
           />
         </QueryClientProvider>
@@ -142,6 +159,7 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   mounted.length = 0;
   delegationTask = null;
+  chartProps = null;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -178,6 +196,36 @@ describe("a loop session", () => {
     expect(rows[1].textContent).toContain("Deploy pmm_king");
     await act(async () => rows[1].click());
     expect(onOpenTick).toHaveBeenCalledWith(SESSION, 1);
+  });
+
+  it("heads the ticks with the canvas and the market chart the Detail tab held (ARCH-427)", async () => {
+    getSessionJournal.mockResolvedValue({ content: "" });
+    getSessionActions.mockResolvedValue({ actions: [] });
+    const onOpenTick = vi.fn();
+    await render(SESSION, { onOpenTick });
+    expect(mounted).toContain("canvas");
+    expect(mounted).toContain("chart");
+    // The charts only — Fleet has the table and the positions — for the
+    // selected session, streamed from the agent's own server.
+    expect(chartProps).toMatchObject({
+      chartsOnly: true,
+      slug: "brigado",
+      sslug: "brl_mm",
+      sessionNum: 2,
+      serverName: "local",
+      controllerIds: ["brigado_ctrl"],
+      isLiveSession: false,
+    });
+    // A tick bubble on the chart opens that tick, as a tick row does.
+    (chartProps!.onSnapshotClick as (tick: number) => void)(4);
+    expect(onOpenTick).toHaveBeenCalledWith(SESSION, 4);
+  });
+
+  it("streams a live session's chart", async () => {
+    getSessionJournal.mockResolvedValue({ content: "" });
+    getSessionActions.mockResolvedValue({ actions: [] });
+    await render({ ...SESSION, status: "running" } as AgentRunRow);
+    expect(chartProps?.isLiveSession).toBe(true);
   });
 });
 

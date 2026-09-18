@@ -28,8 +28,8 @@ import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-age
  *
  * The journal's and the action log's polling is set here, once, for the same
  * reason (CORR-369): react-query polls a shared key at the shortest interval
- * among its observers, so this declaration refreshes the spine, the Detail band
- * and the actions table too — which is why none of them declares one. Gated on
+ * among its observers, so this declaration refreshes the spine and the Runs
+ * tab's ticks too — which is why neither declares one. Gated on
  * a live run, so a finished run costs no polls at all; without it the last
  * decision, the failed-action alert and the spine froze at page open while the
  * countdown kept moving.

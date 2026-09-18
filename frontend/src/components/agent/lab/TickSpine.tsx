@@ -52,7 +52,7 @@ export function TickSpine({
     enabled: sessionNum > 0,
   });
 
-  // The same call `SessionActions` makes, argument for argument, so the two
+  // The same call the Runs tab's ticks make, argument for argument, so the two
   // share one cache entry rather than each paying for the log.
   const { data: actionsData } = useQuery({
     queryKey: ["session-actions", slug, sslug, sessionNum],
@@ -60,7 +60,7 @@ export function TickSpine({
     enabled: sessionNum > 0,
   });
 
-  // Hoisted for the same reason `RunOverview` hoists it: the compiler infers
+  // Hoisted rather than reached through: the compiler infers
   // `journalData` as the dependency and will not preserve a memo that declares
   // a narrower one.
   const journalContent = journalData?.content;

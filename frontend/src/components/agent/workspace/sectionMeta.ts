@@ -1,4 +1,4 @@
-import { Layers, ListTree, ScrollText, Table2 } from "lucide-react";
+import { Layers, ListTree, ScrollText } from "lucide-react";
 
 import type { SectionId } from "@/components/agent/workspace/sections";
 
@@ -22,11 +22,6 @@ export const SECTION_META: Record<
     label: "Runs",
     hint: "Every run of every strategy — loops, dry runs, tasks and chats",
     Icon: ListTree,
-  },
-  detail: {
-    label: "Detail",
-    hint: "The bots and executors this run ran, its deeds, and what it wrote",
-    Icon: Table2,
   },
   fleet: {
     label: "Fleet",

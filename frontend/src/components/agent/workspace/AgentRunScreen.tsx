@@ -4,8 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { SnapshotDetail } from "@/components/agent/session/Snapshot";
-import { RunOverview } from "@/components/agent/lab/RunOverview";
-import { isLoopRun } from "@/components/agent/lab/runs";
+import { isLoopRun, liveControllerIds } from "@/components/agent/lab/runs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
 import { declaredServerOf } from "@/components/agent/workspace/fleet";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
@@ -51,7 +50,7 @@ const RUN_PAGE = 100;
  * Two hosts, one layout. Beside a conversation (the chat's side panel) and on
  * the whole window (`/agents/:slug`), it is the same thing: who the agent is
  * and the loop's controls (the header), the strategy and run in scope (the
- * loop bar), then a tab strip — Now, Runs, Detail, Fleet, Playbook — over one
+ * loop bar), then a tab strip — Now, Runs, Fleet, Playbook — over one
  * body. The page used to be an index down the left over five disclosures
  * stacked under the answer stack; expanding the panel landed on a different
  * screen rather than a bigger one, so full screen is now the panel made big.
@@ -205,11 +204,19 @@ export function AgentRunScreen({
     [instances, runAgentId],
   );
 
-  // One run, in the three readings the answer stack and the Detail bands are
-  // cut from. Read at this level so the two are served from one round of
-  // requests rather than each band declaring the query it wants.
+  // One run, in the three readings the answer stack is cut from. Read at this
+  // level so the bands are served from one round of requests rather than each
+  // declaring the query it wants.
   const { alerts, decisions, journal, deployments, perf, pnlSeries, sessionNum } =
     useRunReading({ slug, sslug, run: selectedRun, instance });
+
+  // The controllers whose executors the Runs tab's market chart streams: the
+  // engine's own id, widened with every live bot controller of the run.
+  const instanceId = instance?.agent_id;
+  const streamIds = useMemo(
+    () => liveControllerIds(perf, instanceId ? [instanceId] : []),
+    [perf, instanceId],
+  );
 
   /**
    * Opening a run, which is now four different things (FEAT-111).
@@ -287,7 +294,6 @@ export function AgentRunScreen({
   const facts: Record<PaneSection, string | null> = {
     now: alerts.length > 0 ? String(alerts.length) : null,
     runs: runs.length ? `${runs.length}${hasMoreRuns ? "+" : ""}` : null,
-    detail: deployments.length ? String(deployments.length) : null,
     fleet: null,
     playbook: null,
   };
@@ -329,25 +335,9 @@ export function AgentRunScreen({
               setParams({ strategy: run.strategy_slug, run: run.run_id, tick })
             }
             onShowNow={() => setSection("now")}
-          />
-        );
-      case "detail":
-        return selectedRun && sessionNum > 0 ? (
-          <RunOverview
-            slug={agent.slug}
-            sslug={sslug}
-            sessionNum={sessionNum}
             serverName={strategyServer}
-            controllerIds={instance ? [instance.agent_id] : undefined}
-            isLiveSession={
-              selectedRun.status === "running" || selectedRun.status === "paused"
-            }
-            onSelectTick={(next) => setParams({ tick: next })}
+            controllerIds={streamIds}
           />
-        ) : (
-          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-            Pick a loop run in Runs to read what it ran.
-          </p>
         );
       case "fleet":
         /* `/bots`' browser is a two-column layout: it gets its own sideways

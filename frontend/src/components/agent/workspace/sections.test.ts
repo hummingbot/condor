@@ -12,13 +12,17 @@
  * hold to.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { PANE_SECTION_KEY } from "@/lib/sessionState";
 
 import {
   SECTIONS,
+  lastPaneSection,
   openForPaneSection,
   pageSection,
   parseSections,
+  readPaneSection,
   sectionForView,
 } from "./sections";
 
@@ -83,14 +87,47 @@ describe("sectionForView — where a retired ?view= lands", () => {
   });
 
   it("covers every section the screen has", () => {
-    // `detail` is new here and was `runs`' lower half, so no retired address
-    // can name it.
     const landed = new Set(
       ["runs", "money", "fleet", "playbook"].map(sectionForView),
     );
-    for (const id of SECTIONS) {
-      if (id !== "detail") expect(landed.has(id)).toBe(true);
-    }
+    for (const id of SECTIONS) expect(landed.has(id)).toBe(true);
+  });
+});
+
+describe("the retired Detail tab (ARCH-427)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is no longer a section", () => {
+    expect(SECTIONS).toEqual(["runs", "fleet", "playbook"]);
+  });
+
+  it("opens Fleet from `?open=detail`, where its records went", () => {
+    expect(parseSections("detail")).toEqual(["fleet"]);
+    expect(pageSection("detail")).toBe("fleet");
+    // Merged with a live id, it collapses rather than opening Fleet twice.
+    expect(parseSections("detail.fleet")).toEqual(["fleet"]);
+    expect(parseSections("playbook.detail")).toEqual(["fleet", "playbook"]);
+  });
+
+  it("reads a pane's `?sec=detail` as Fleet", () => {
+    expect(readPaneSection("detail")).toBe("fleet");
+    expect(readPaneSection("runs")).toBe("runs");
+    expect(readPaneSection("now")).toBe("now");
+    expect(readPaneSection("money")).toBeNull();
+    expect(readPaneSection(null)).toBeNull();
+  });
+
+  it("re-opens a pane remembered on Detail on Fleet", () => {
+    const store = new Map([[PANE_SECTION_KEY, "detail"]]);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+    });
+    expect(lastPaneSection()).toBe("fleet");
+    store.set(PANE_SECTION_KEY, "nonsense");
+    expect(lastPaneSection()).toBe("now");
   });
 });
 

@@ -50,6 +50,7 @@ export function SessionExecutors({
   onSnapshotClick,
   isLiveSession = false,
   botMode = false,
+  chartsOnly = false,
 }: {
   slug: string;
   sslug: string;
@@ -64,6 +65,14 @@ export function SessionExecutors({
    *  the bot instance's own database and never reach the agent_id-keyed executor
    *  table, so "no rows" means "not retained here" — not "nothing happened". */
   botMode?: boolean;
+  /**
+   * Only the per-pair charts — every executor of the session on the pair's
+   * candles, with the ticks as bubbles that open them (ARCH-427). The positions
+   * and the executor table are Fleet's; this is the one reading Fleet does not
+   * draw, since it charts a single executor at a time. Draws nothing while
+   * loading or when the session has no executors, so it can head another band.
+   */
+  chartsOnly?: boolean;
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
@@ -129,7 +138,7 @@ export function SessionExecutors({
   const { data: positionsData } = useQuery({
     queryKey: ["positions-held", serverName],
     queryFn: () => api.getPositionsHeld(serverName),
-    enabled: !!serverName && (controllerIds?.length ?? 0) > 0,
+    enabled: !chartsOnly && !!serverName && (controllerIds?.length ?? 0) > 0,
     refetchInterval: 10000,
   });
 
@@ -156,6 +165,8 @@ export function SessionExecutors({
     setSortKey(key);
   }, [sortKey]);
 
+  if (chartsOnly && (!sessionDetail || chartGroups.length === 0)) return null;
+
   if (!sessionDetail) {
     return (
       <div className="flex h-32 items-center justify-center">
@@ -179,7 +190,9 @@ export function SessionExecutors({
   return (
     <div className="space-y-3">
       {/* Positions Held */}
-      <SessionPositions positions={positions} formatPnl={formatPnlValue} formatPrice={formatPriceValue} />
+      {!chartsOnly && (
+        <SessionPositions positions={positions} formatPnl={formatPnlValue} formatPrice={formatPriceValue} />
+      )}
 
       {/* Chart-focused view — each trading pair gets a prominent chart */}
       {chartGroups.map(([key, group]) => {
@@ -215,20 +228,22 @@ export function SessionExecutors({
       })}
 
       {/* Executor table */}
-      <ExecutorTable
-        executors={executorInfos}
-        sortKey={sortKey}
-        sortDir={sortDir}
-        onSort={handleSort}
-        onRowClick={(ex) => setSelectedExecutor(ex)}
-        selectedExecutorId={selectedExecutor?.id ?? null}
-        rateFormatPnl={formatPnlValue}
-        rateFormatValue={formatValue}
-        rateFormatDetailed={formatValueDetailed}
-      />
+      {!chartsOnly && (
+        <ExecutorTable
+          executors={executorInfos}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onRowClick={(ex) => setSelectedExecutor(ex)}
+          selectedExecutorId={selectedExecutor?.id ?? null}
+          rateFormatPnl={formatPnlValue}
+          rateFormatValue={formatValue}
+          rateFormatDetailed={formatValueDetailed}
+        />
+      )}
 
       {/* Executor Detail Panel */}
-      {selectedExecutor && (
+      {!chartsOnly && selectedExecutor && (
         <DetailPanel
           executor={selectedExecutor}
           server={serverName}

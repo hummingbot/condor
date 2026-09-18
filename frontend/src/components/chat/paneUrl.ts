@@ -28,7 +28,7 @@ import {
   type KnowledgeTabId,
 } from "@/components/agent/knowledgeTabs";
 import {
-  isPaneSection,
+  readPaneSection,
   type PaneSection,
 } from "@/components/agent/workspace/sections";
 import { parseRunId } from "@/components/agent/lab/runs";
@@ -150,7 +150,8 @@ export function readPane(
       const loop = params.get(LOOP_PARAM) ?? "";
       const slash = loop.indexOf("/");
       if (slash <= 0 || slash === loop.length - 1) return null;
-      const sec = params.get(SECTION_PARAM);
+      // A retired tab (`detail`) reads as its successor, not as no tab.
+      const sec = readPaneSection(params.get(SECTION_PARAM));
       // Kept as spelled, once it parses: the page's grammar owns the spelling.
       const runRaw = params.get(RUN_PARAM);
       const run = runRaw && parseRunId(runRaw) ? runRaw : null;
@@ -160,7 +161,7 @@ export function readPane(
         kind: "strategy",
         agentSlug: loop.slice(0, slash),
         strategySlug: loop.slice(slash + 1),
-        ...(isPaneSection(sec) ? { section: sec } : {}),
+        ...(sec ? { section: sec } : {}),
         ...(run ? { run } : {}),
         ...(tick !== null ? { tick } : {}),
       };
@@ -209,9 +210,9 @@ export function writePane(
     // the next and "unset" is how a caller clears one.
     const sameLoop =
       params.get(PANEL_PARAM) === "strategy" && params.get(LOOP_PARAM) === loop;
-    const carried = params.get(SECTION_PARAM);
+    const carried = readPaneSection(params.get(SECTION_PARAM));
     const section =
-      pane.section ?? (sameLoop && isPaneSection(carried) ? carried : undefined);
+      pane.section ?? (sameLoop && carried ? carried : undefined);
     next.set(LOOP_PARAM, loop);
     if (section) next.set(SECTION_PARAM, section);
     else next.delete(SECTION_PARAM);

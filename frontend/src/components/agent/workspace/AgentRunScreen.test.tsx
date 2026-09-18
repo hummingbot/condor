@@ -117,9 +117,19 @@ vi.mock("@/components/agent/lab/RunRail", () => ({
     return <div data-body="rail" />;
   },
 }));
-vi.mock("@/components/agent/lab/RunOverview", () => ({
-  RunOverview: stub("detail"),
+vi.mock("@/components/agent/lab/ExperimentDetail", () => ({
   ExperimentDetail: stub("experiment"),
+}));
+vi.mock("@/components/agent/session/SessionCanvasPanel", () => ({
+  SessionCanvasPanel: stub("canvas"),
+}));
+/** What the Runs tab's market-chart stub was last handed (ARCH-427). */
+let chartProps: { serverName?: string; controllerIds?: string[] } | null = null;
+vi.mock("@/components/agent/session/SessionExecutors", () => ({
+  SessionExecutors: (props: NonNullable<typeof chartProps>) => {
+    chartProps = props;
+    return stub("chart")(props);
+  },
 }));
 vi.mock("@/components/agent/session/Snapshot", () => ({
   SnapshotDetail: stub("tick"),
@@ -257,6 +267,7 @@ beforeEach(() => {
   mounted.length = 0;
   delegationTask = null;
   railProps = null;
+  chartProps = null;
   localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -292,10 +303,17 @@ describe("what a bare address opens on", () => {
     const tabs = [...container.querySelectorAll("[data-pane-tab]")].map((el) =>
       el.getAttribute("data-pane-tab"),
     );
-    // Money is gone: it charted the fold Fleet already charts.
-    expect(tabs).toEqual(["now", "runs", "detail", "fleet", "playbook"]);
+    // Money is gone: it charted the fold Fleet already charts. Detail is gone
+    // too (ARCH-427): Fleet has its records, Runs its ticks and its canvas.
+    expect(tabs).toEqual(["now", "runs", "fleet", "playbook"]);
     expect(mounted).not.toContain("fleet");
     expect(mounted).not.toContain("playbook");
+  });
+
+  it("opens a retired `?open=detail` on Fleet, where its records went", async () => {
+    await render("/?open=detail");
+    expect(bodies()).toEqual(["fleet"]);
+    expect(tab("fleet").getAttribute("aria-selected")).toBe("true");
   });
 
   it("is the panel's layout — no index down the side, no disclosures", async () => {
@@ -393,6 +411,28 @@ describe("which server Fleet folds (ARCH-382)", () => {
     root = createRoot(container);
     await render("/?strategy=brl_mm&open=fleet");
     expect(servers()).toEqual(["pin"]);
+  });
+});
+
+describe("the Runs tab's market chart (ARCH-427)", () => {
+  it("reads the agent's own server and streams the engine's executors", async () => {
+    getAgent.mockResolvedValue({
+      ...AGENT,
+      server_name: "pin",
+      strategies: [
+        { ...AGENT.strategies[0], server_name: "own" },
+        AGENT.strategies[1],
+      ],
+    } as unknown as AgentDetail);
+    getStrategy.mockResolvedValue({
+      slug: "brl_mm",
+      instances: [{ agent_id: "a1", status: "running" }],
+      config: {},
+    } as unknown as StrategyDetail);
+    await render("/?strategy=brl_mm&open=runs");
+    expect(mounted).toContain("canvas");
+    expect(chartProps?.serverName).toBe("own");
+    expect(chartProps?.controllerIds).toEqual(["a1"]);
   });
 });
 
@@ -938,9 +978,9 @@ describe("the side panel's variant", () => {
   });
 
   it("mounts only the open tab's body", async () => {
-    await renderPane("detail");
-    expect(bodies()).toEqual(["detail"]);
-    expect(mounted).not.toContain("fleet");
+    await renderPane("fleet");
+    expect(bodies()).toEqual(["fleet"]);
+    expect(mounted).not.toContain("answers");
     expect(mounted).not.toContain("playbook");
   });
 

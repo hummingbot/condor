@@ -14,10 +14,27 @@ import { PANE_SECTION_KEY } from "@/lib/sessionState";
  *
  * Money was a sixth and is gone: it headlined the whole fleet's fold, which is
  * what Fleet already charts — two tabs answering one question under two names.
+ * Detail went the same way (ARCH-427): its bots, controllers and executors are
+ * Fleet's records narrowed to the run, its deeds and decisions are the Runs
+ * tab's ticks, and the two bands only it drew — the agent's canvas and the
+ * run's market chart — now head the session on Runs.
  */
-export const SECTIONS = ["runs", "detail", "fleet", "playbook"] as const;
+export const SECTIONS = ["runs", "fleet", "playbook"] as const;
 
 export type SectionId = (typeof SECTIONS)[number];
+
+/**
+ * Where a retired tab's address lands.
+ *
+ * `detail` is in `?open=` bookmarks, in the pane's `?sec=` and in a reader's
+ * remembered pane tab. Its controllers and executors are Fleet's now, so that
+ * is where it opens — rather than on Now, as if the address had named nothing.
+ */
+const RETIRED: ReadonlyMap<string, SectionId> = new Map([["detail", "fleet"]]);
+
+function current(id: string): string {
+  return RETIRED.get(id) ?? id;
+}
 
 /** Which section the page shows, in the query string. */
 export const OPEN_PARAM = "open";
@@ -33,7 +50,7 @@ export function parseSections(raw: string | null | undefined): SectionId[] | nul
   if (raw === null || raw === undefined) return null;
   const text = raw.trim();
   if (!text) return [];
-  const ids = ordered(text.split(".").map((part) => part.trim()));
+  const ids = ordered(text.split(".").map((part) => current(part.trim())));
   return ids;
 }
 
@@ -86,6 +103,15 @@ export function isPaneSection(value: unknown): value is PaneSection {
 }
 
 /**
+ * A stored or linked pane tab, read: the tab it names, a retired tab's
+ * successor (`detail` → Fleet), else `null`.
+ */
+export function readPaneSection(value: unknown): PaneSection | null {
+  const id = typeof value === "string" ? current(value) : value;
+  return isPaneSection(id) ? id : null;
+}
+
+/**
  * The section the pane was last on, for a pane opened without one.
  *
  * Closing the pane erases its address, so without this every re-open landed on
@@ -94,8 +120,7 @@ export function isPaneSection(value: unknown): value is PaneSection {
  */
 export function lastPaneSection(): PaneSection {
   try {
-    const raw = localStorage.getItem(PANE_SECTION_KEY);
-    return isPaneSection(raw) ? raw : "now";
+    return readPaneSection(localStorage.getItem(PANE_SECTION_KEY)) ?? "now";
   } catch {
     return "now";
   }
