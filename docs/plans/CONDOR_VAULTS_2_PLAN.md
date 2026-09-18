@@ -322,6 +322,20 @@ single rotation. Three rules keep that true:
 
 ### 1.8 After tokenize: a role that can trade and cannot transfer
 
+> **Corrected the same day it was written.** The Swig facts below hold, but the
+> conclusion drawn from them does not: destination-scoped Swig actions constrain
+> where the vault's assets *go*, and every DEX instruction lets the caller name
+> where the *proceeds* go. Verified against Meteora's source
+> (`programs/lb_clmm/src/instructions/swap.rs`): `user_token_out` is constrained
+> by **mint only** — never by owner — so a swap of the vault's USDC into a pool
+> with `user_token_out` set to the manager's own account is a withdrawal that
+> every destination limit permits. `initialize_position` takes `owner: Signer`,
+> which the manager's key satisfies while the vault funds it. Swig cannot see
+> either, and the program cannot sit in the Swig's signing path (no CPI). So the
+> role described here is **necessary and not sufficient**; the sufficient design
+> is §1.9, which moves the tokenized phase off the Swig entirely. §1.8 is kept
+> for the Swig analysis, which §1.9 relies on, and for the record of why.
+
 **The problem.** The delegate role is `Permission::AllButManageAuthority` — sign
 anything, never edit the role table. Trade and withdraw are therefore one
 power, and that single fact shapes everything downstream: the administrator
@@ -453,6 +467,100 @@ on `is_tokenized()` and builds the scoped role; `tokenize` records the universe
 and admits the migrated pool; `allow_pool` is new; Gateway gains
 `build-allow-pool`; the vault page lists the universe and the admitted pools,
 because both are what a holder is now trusting instead of a key.
+
+### 1.9 After tokenize: the program is the wallet
+
+**The requirement, stated exactly.** The manager may swap and provide liquidity
+freely — including into pools that did not exist yesterday — and may not move
+value to any account they control. §1.8 shows that no permission system that
+only inspects *outflow destinations* can deliver the second half, because DEX
+instructions name their recipients as ordinary accounts. The check has to look
+at the **recipient accounts of each instruction**, and the only party that can
+do that non-bypassably is the program that holds the signing key. The Swig
+refuses to be reached by CPI, so that program cannot be one that asks the Swig
+to sign. It has to *be* the signer.
+
+**The design.** At `tokenize`, the vault's assets move from the Swig's funds
+owner into a token account set owned by the vault's authority PDA — the same
+account `redeem` already pays from, moved at launch instead of at wind-down.
+From then on the Swig holds nothing and has no delegate role; every trade is the
+program's `execute` instruction:
+
+```
+execute(target_program, instruction_data, accounts…)
+  1. target_program ∈ the allowed DEX set (Program-level allowlist, on the Protocol)
+  2. every writable account passed is one of:
+       a. a token account owned by the vault PDA           (the vault's own)
+       b. a token/position account owned by target_program's own pool authority
+          — recognised per DEX by deriving that authority, not by "is a PDA"
+       c. a non-token account owned by target_program        (pool state, bin arrays, oracles)
+       d. a position account whose recorded owner is the vault PDA
+  3. invoke_signed(target_program, …) as the vault PDA
+  4. post-condition: no token account owned by the vault PDA was closed,
+     and the vault PDA still owns every position account it owned before
+```
+
+Rule 2 is what buys the freedom: it is structural, not an allowlist. A pool
+the manager found this morning passes if its vault accounts are owned by the
+DEX's own authority, and fails if any recipient is a key. A swap whose
+`user_token_out` is the manager's ATA fails 2a — the account is a token account
+with an owner that is neither the vault nor the DEX. A position initialised
+with the manager as owner fails 2d. A plain `transfer` to anyone fails 1.
+
+**What it costs.** A recognition table per DEX: how to derive that program's
+pool authority (DLMM: the `lb_pair` PDA owns its reserves; DAMM v2: a fixed
+pool-authority PDA; Raydium CLMM: the pool state; Pump AMM: its pool PDA), and
+how to read a position's owner. Each is a few lines, pinned to that program's
+current layout, and each is the whole of what a holder is trusting about that
+venue — so the set is small, declared on the `Protocol`, and extended by
+upgrade. Gateway gains a signing mode where "the wallet" is a program PDA and
+every instruction is wrapped in `execute` — the analogue of `sendAsSwigDelegate`
+— and the executor path uses it for tokenized vaults. `tokenize` gains the
+Swig→PDA move (one instruction, signed by the runner, before the launch).
+
+**What it removes**, which is most of the tokenized half's machinery:
+
+- `sweep-to-pot` and the redemption pot — the assets already sit where
+  `redeem` pays from.
+- `finalize_wind_down`'s sweep verification and the administrator's signature on
+  it — the wind-down conversion is `execute` calls like any other, made by the
+  crank or by anyone, and finalize checks balances it can read directly.
+- The co-signed install and the administrator registry (rev 15) — there is no
+  delegate key to walk anything out with.
+- `allow_pool` and its curation — admission is rule 2, at call time.
+- Swig's `check_stack_height` as a design constraint on anything after launch.
+
+The administrator is left with no structural power over a tokenized vault. What
+remains of "trust Condor" is that Condor's crank is *a* caller of `execute`,
+with exactly the powers of any other caller.
+
+**Routers.** A router CPIs into pools of its choosing, but under `execute` that
+no longer matters: the vault's own output account is passed by *us*, and rule 2
+holds regardless of the route. Jupiter's CPI is feasible and size-constrained
+(address lookup tables, versioned transactions); it is v2 work, not a design
+problem. DFlow and Titan need the same recognition entries.
+
+**Pool creation** likewise becomes possible under rule 2 — the new pool's
+vaults are owned by the DEX authority the moment they exist — and stays out of
+v1 for the reason that has nothing to do with custody: it is the cheapest way
+to build a pricing attack.
+
+**What this does not solve, and never could:** the price rug. A manager who
+swaps the vault's USDC into a real-but-thin SOL/USDC pool they seeded at a
+skewed price loses the vault money to themselves *through the pool*, and every
+recipient check passes. That is a pricing problem, not a custody one, and it is
+bounded the way §1.8 already said: an **asset universe** fixed at launch (a
+mint the manager invented has no pool the vault may reach), plus either a
+minimum-reserve / canonical-pool rule at call time or a per-window cap on flow
+into non-canonical pools. Holders should read this as what it is: the
+manager can trade badly, deliberately, up to that bound; the manager cannot
+take.
+
+**The private phase is untouched.** Swig stays exactly what it is there — any
+key, any transaction, the runner's own money — which is what it was chosen
+for. The two phases were always different products (§1.3); this makes them
+different mechanisms too, with the boundary at the one instruction that is
+already one-way.
 
 **Before the first mainnet vault:** the protocol authority *and the program
 upgrade authority* move to a Squads vault. The administrator key stays hot; its
@@ -1062,6 +1170,7 @@ All revisions 2026-09-17, in one design session.
 | 15 | Threat model: administrator registry, co-signed install, administrator-signed finalize; fee share back to 50/50, flat 100 bps migrated-pool fee | a runner could otherwise install their own delegate and drain the seed |
 | 16 | **2026-09-18.** `quote_mint` chosen at launch (the config that fixes what the pool quotes in), not at creation; a private vault does not wind down; `fee_bps` and the buy-and-burn sweep removed; native SOL wrapped into the wSOL ATA before a tokenized wind-down's sweep; `build-deposit` route | a private vault is an agent wallet its runner controls — nothing about a token should be asked of it before there is one; buybacks are the manager's discretion, not a mechanic |
 | 17 | **2026-09-18.** §1.8: after tokenize the trading role is destination-scoped — trade allowlisted pools, transfer nowhere — via Swig's `Program` + `TokenDestinationLimit`; asset universe fixed at launch; `allow_pool` (administrator-signed in v1); co-signed install retired; routers deferred; pools only for v1 | redemption has teeth only if nothing between `tokenize` and `redeem` can move assets to a wallet; rev 13 rejected Swig *magnitude* limits, and destination limits are a different primitive |
+| 18 | **2026-09-18, same session.** §1.8 corrected — destination-scoped Swig actions cannot stop a swap whose `user_token_out` is the manager's, verified in Meteora's `swap.rs`; §1.9 moves the tokenized phase to a program-owned PDA with an `execute` that validates recipients structurally; this deletes the pot, sweep-to-pot, the co-signed install and `allow_pool` | "freedom to swap and LP into new pools, and no withdrawal" needs a check on *recipients*, which only the signer's own program can make, and the Swig will not let a program be that signer |
 | 16 | Simplicity pass: `remove_delegate`, in-kind redeem, the seed flag, `fee_buyback_bps`, the sweep tool and prompt rule, every MCP change, the Settings section and the Buy/Sell widget removed; `active` folded into `state`; `route_creator_fees` → runner-signed `claim_income`; vault page to four tabs. One platform key, `set_authority` / `set_administrator`, registry deferred; multisig-ready rules and the before-mainnet list | fewer moving parts, same properties |
 | 17 | **Vault creation split from tokenizing.** A vault is private until it launches a token: `withdraw` exists and refuses from `tokenize` onward; `quote_mint` moves to creation; `pin` needs no token; the administrator co-signs only once tokenized; NAV comes back, because a launch priced against existing assets has something to be priced against. Config checked by terms rather than address, since each vault prices its own launch | "before token, the vault is private, meaning runner can deposit/withdraw freely for own use" — and a private vault has nobody to protect, so a self-hosted runner needs nothing from Condor |
 | 18 | `issue_bps` on chain — circulating over max supply at launch. The second-DBC sale was dropped: DBC creates its own mint, so it would have been a second token | "they set the circulating vs max supply, essentially" — and one token per vault is what makes redemption mean anything |
@@ -1099,6 +1208,8 @@ All revisions 2026-09-17, in one design session.
 | Can the manager sign the vault's own trades? | private: yes — install your own key as the delegate. Tokenized: today no (the delegate can sign anything, so it must be the administrator's); after §1.8 yes, because the role can trade and cannot transfer, so whose key holds it stops mattering |
 | Why not Swig's `TokenLimit` to bound the manager? | it bounds the *amount*, not the *place*: `Program(Token)` comes with `ProgramCurated`, so a transfer to the manager's own ATA is allowed up to the cap. `TokenDestinationLimit` to pool vaults is the lock; `TokenLimit` is a speed bump |
 | Routers (Jupiter, DFlow, Titan) in the scoped role? | not in v1: a route's outflows land in pool vaults chosen at quote time, which no destination limit can name in advance. Admitting one means a `TokenLimit`, i.e. the hole above. v1 swaps on allowlisted pools directly |
+| Can Swig's actions stop a swap whose output goes to the manager? | **no.** They constrain where the vault's tokens *leave to*, and a DEX swap's output account is constrained by mint only (`lb_clmm/src/instructions/swap.rs`, `user_token_out`). The recipient check has to be made by the signer's program, which is why the tokenized phase moves to a program PDA (§1.9) |
+| Why keep Swig at all, then? | for the private phase, which is what it was chosen for: any delegate key, any transaction, the runner's own money, no program changes for a new venue. Nothing in §1.9 touches it |
 | hbapi one-live-vault limit? | fixed in Phase 1 (M5) |
 | A vanished runner? | the protocol authority may wind down, no notice |
 | Delegate blast radius? | accepted and stated; no Swig action limits |
