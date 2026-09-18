@@ -860,12 +860,21 @@ async def delete_draft(account: str, user: WebUser = Depends(get_current_user)):
 
 
 @router.get("/{account}/holdings")
-async def holdings(account: str, user: WebUser = Depends(get_current_user)):
+async def holdings(
+    account: str,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
     """Everything in the vault's wallet, and where its own token trades.
 
     Read straight from the chain through Gateway rather than from any local
     store: a vault's balances move every time its strategy does, and a cached
     copy would be a second answer to a question the chain already answers.
+
+    The wallet comes from the chain too, not from a record, which is what makes
+    this readable for *any* vault on the server rather than only the ones this
+    user happens to run. A vault is a public account — the listing already says
+    so — and what it holds is the most public thing about it.
 
     The vault's **own token** appears here like any other balance, because that
     is what it is. After graduation the unsold supply sits in this same wallet,
@@ -874,13 +883,16 @@ async def holdings(account: str, user: WebUser = Depends(get_current_user)):
     exit through. `treasury` names that balance separately only because it is
     the one that must be left out of a redemption's denominator.
     """
-    record = _require(user, account)
-    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    network = _network_of(user, account, server)
+    gw = await _gateway(server, network)
     chain = await _upstream(gw, gw.vault(account))
-    balances = await _upstream(gw, gw.balances(record["wallet_address"]))
+    wallet = chain.get("fundsOwner")
+    if not wallet:
+        raise HTTPException(status_code=404, detail=f"no vault {account} on {server}")
+    balances = await _upstream(gw, gw.balances(wallet))
     return {
         "account": account,
-        "wallet_address": record["wallet_address"],
+        "wallet_address": wallet,
         "quote_mint": chain.get("quoteMint"),
         "balances": balances.get("balances", balances),
         # The wallet's own balance of its own token: unsold supply, not
@@ -891,3 +903,103 @@ async def holdings(account: str, user: WebUser = Depends(get_current_user)):
         # The migrated pool: what the DEX browser lists and an LP executor trades.
         "damm_pool": chain.get("dammPool"),
     }
+
+
+def _network_of(user: WebUser, account: str, server: str) -> str:
+    """The network a vault is on — its record's, or the server's default.
+
+    A vault this user has no record of is read on the network the rest of the
+    page is already using; there is only one per server in practice, and the
+    chain read below fails loudly if that is ever wrong.
+    """
+    record = vault_store.get(user.id, account)
+    return (record or {}).get("network", "mainnet-beta")
+
+
+@router.get("/{account}/lp-positions")
+async def lp_positions(
+    account: str,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Every liquidity position the vault's wallet still holds.
+
+    Fanned out across the protocols this Gateway actually reports, rather than
+    a list written here: a vault's strategy may LP anywhere, and a hard-coded
+    set of connectors is one that stops being true the first time somebody adds
+    one.
+
+    Two kinds of no-answer, kept apart because they mean different things.
+    ``unsupported`` is a *capability*: a fungible-LP AMM has no positions to
+    enumerate, Gateway says so every time, and reporting that as a failure would
+    put a warning on every vault page forever. ``errors`` is everything else — a
+    protocol that should have answered and did not — and it stays loud, because
+    "no positions" and "nobody could tell you" are different answers and only
+    one of them is good news.
+    """
+    network = _network_of(user, account, server)
+    gw = await _gateway(server, network)
+    chain = await _upstream(gw, gw.vault(account))
+    wallet = chain.get("fundsOwner")
+    if not wallet:
+        raise HTTPException(status_code=404, detail=f"no vault {account} on {server}")
+
+    client = gw.client
+    network_id = f"solana-{network}"
+    try:
+        connectors = await client.connectors()
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"the Gateway on '{server}' did not list its connectors ({type(e).__name__})",
+        )
+
+    positions: list[dict[str, Any]] = []
+    errors: list[str] = []
+    unsupported: list[str] = []
+    for connector in connectors:
+        if connector.get("chain") != "solana":
+            continue
+        name = connector.get("name", "")
+        types = connector.get("trading_types", [])
+        for kind, read in (
+            ("clmm", client.clmm_positions_owned),
+            ("amm", client.amm_positions_owned),
+        ):
+            if kind not in types:
+                continue
+            try:
+                rows = await read(name, network_id, wallet)
+            except Exception as e:
+                detail = _detail(e)
+                bucket = unsupported if _is_unsupported(detail) else errors
+                bucket.append(f"{name} {kind}: {detail}")
+                continue
+            for row in rows or []:
+                positions.append({**row, "protocol": name, "kind": kind})
+
+    return {
+        "account": account,
+        "wallet_address": wallet,
+        "positions": positions,
+        "errors": errors,
+        "unsupported": unsupported,
+    }
+
+
+#: How Gateway words a protocol that cannot enumerate a wallet's positions at
+#: all. Matched on its sentence rather than on a list of connector names here,
+#: which is the same list this route exists to avoid keeping.
+_UNSUPPORTED = "not supported"
+
+
+def _is_unsupported(detail: str) -> bool:
+    return _UNSUPPORTED in detail.lower()
+
+
+def _detail(error: Exception) -> str:
+    """The upstream's own words where it gave any — a 400 from Gateway says
+    exactly why it will not enumerate a fungible-LP AMM, and that sentence is
+    more use than the exception class."""
+    message = getattr(error, "message", None) or str(error)
+    return message or type(error).__name__

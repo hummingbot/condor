@@ -62,6 +62,45 @@ class GatewayClient:
     async def post(self, path: str, json: Any) -> Any:
         return await self._client.gateway._post(f"{PROXY_PREFIX}{path}", json=json)
 
+    # ── hummingbot-api's own routes ──
+    #
+    # Not proxied, and not re-implemented against Gateway either: these are
+    # hbapi's, and it does more than forward them — it resolves the wallet,
+    # prices balances against its own ticker pool, and turns Gateway's refusals
+    # into detail a caller can read. Its typed client already has each one.
+
+    async def connectors(self) -> list[dict]:
+        """Every connector this Gateway has, with its chain and trading types.
+
+        Asked rather than listed here: which protocols a wallet's positions can
+        be read from is Gateway's answer, and a copy of that list is one that
+        goes stale the first time somebody adds a connector.
+        """
+        body = await self._client.gateway._get("/gateway/connectors")
+        return body.get("connectors", []) if isinstance(body, dict) else []
+
+    async def clmm_positions_owned(
+        self, connector: str, network_id: str, wallet_address: str
+    ) -> list[dict]:
+        return await self._client.gateway_clmm.get_positions_owned(
+            connector=connector, network=network_id, wallet_address=wallet_address
+        )
+
+    async def amm_positions_owned(
+        self, connector: str, network_id: str, wallet_address: str
+    ) -> list[dict]:
+        return await self._client.gateway_amm.get_positions_owned(
+            connector=connector, network=network_id, wallet_address=wallet_address
+        )
+
+    async def portfolio_state(self, account_name: str) -> dict:
+        """What hbapi says one account holds, priced.
+
+        The prices are the point: Gateway answers balances and nothing else, so
+        without this a vault's assets are a list of amounts with no total.
+        """
+        return await self._client.portfolio.get_state(account_names=[account_name])
+
     async def solana_status(self, network: str = "mainnet-beta") -> dict:
         return await self.get("/chains/solana/status", {"network": network})
 
@@ -221,7 +260,11 @@ class VaultGateway:
     # decides is how to say it on the chain.
 
     async def withdraw(
-        self, swig_account: str, destination: str, amount: str, mint: Optional[str] = None
+        self,
+        swig_account: str,
+        destination: str,
+        amount: str,
+        mint: Optional[str] = None,
     ) -> dict:
         """Move assets out of a private vault, signed by its delegate."""
         body = {

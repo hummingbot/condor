@@ -19,7 +19,6 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
-import { VaultHoldings } from "@/components/vaults/VaultHoldings";
 import { isTokenized } from "@/components/vaults/format";
 import {
   CopyAddress,
@@ -29,15 +28,23 @@ import {
   WalletGate,
 } from "@/components/vaults/shared";
 import { AddressAvatar } from "@/components/wallet/primitives";
+import { VaultPortfolio } from "@/components/vaults/VaultPortfolio";
 import { useCanSign } from "@/hooks/useCanSign";
 import { useServer } from "@/hooks/useServer";
 import { api, type VaultBuild, type VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
 
-const TABS = ["Summary", "Strategy", "Activity", "Token"] as const;
-type Tab = (typeof TABS)[number];
+// Summary, Portfolio and Activity are public: a vault is an account on a
+// public chain, and what it is, what it holds and what it has done are the
+// three things anyone looking at one wants. Agent and Token stay behind the
+// gate — the first shows a config only its runner may read, and every control
+// on the second is a signature.
+const PUBLIC_TABS = ["Summary", "Portfolio", "Activity"] as const;
+const RUNNER_TABS = ["Agent", "Token"] as const;
+type Tab = (typeof PUBLIC_TABS)[number] | (typeof RUNNER_TABS)[number];
 
-const pct = (bps: number) => `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
+const pct = (bps: number | undefined) =>
+  bps === undefined ? "—" : `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
 
 export function VaultDetail() {
   const { account = "" } = useParams();
@@ -46,6 +53,9 @@ export function VaultDetail() {
   const { signAndSubmit } = useWallet();
   const { canSign } = useCanSign();
   const [tab, setTab] = useState<Tab>("Summary");
+  // The runner's two tabs are listed for everyone: behind the gate they say
+  // whose key is missing, which is more use than a tab that is not there.
+  const tabs: Tab[] = [...PUBLIC_TABS, ...RUNNER_TABS];
   const [error, setError] = useState<string | null>(null);
 
   const vaults = useQuery({
@@ -113,7 +123,15 @@ export function VaultDetail() {
             <AddressAvatar address={vault.account} className="h-10 w-10" />
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold">{vault.label || "Untitled vault"}</h1>
-              <CopyAddress address={vault.account} label="Swig account" />
+              {/* Labelled, because a vault has two addresses on this page and
+                  an unlabelled one is read as whichever the reader expected.
+                  This is the account the chain knows the vault by; the wallet
+                  that holds the money is a different address, derived from it,
+                  and Portfolio says so where it shows it. */}
+              <span className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
+                Vault account
+                <CopyAddress address={vault.account} label="Vault account (Swig)" />
+              </span>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -183,7 +201,7 @@ export function VaultDetail() {
       </header>
 
       <nav className="mb-3 flex gap-1 border-b border-[var(--color-border)]">
-        {TABS.map((name) => (
+        {tabs.map((name) => (
           <button
             key={name}
             type="button"
@@ -199,22 +217,34 @@ export function VaultDetail() {
         ))}
       </nav>
 
-      <WalletGate>
-        {/* Above the tabs, not inside one: once a vault is redeemable this is
-            the only thing anyone comes to the page to do. */}
-        {finished && (
-          <RedeemCard
-            vault={vault}
-            server={server}
-            onAct={act.mutate}
-            pending={act.isPending}
-          />
-        )}
-        {tab === "Summary" && <SummaryTab vault={vault} onAct={act.mutate} pending={act.isPending} />}
-        {tab === "Strategy" && <StrategyTab vault={vault} onAct={act.mutate} pending={act.isPending} />}
-        {tab === "Activity" && <ActivityTab vault={vault} />}
-        {tab === "Token" && <TokenTab vault={vault} onAct={act.mutate} pending={act.isPending} />}
-      </WalletGate>
+      {/* Above the tabs, not inside one: once a vault is redeemable this is
+          the only thing anyone comes to the page to do — and it is a signature,
+          so it is the runner's. */}
+      {finished && canSign && (
+        <RedeemCard vault={vault} server={server} onAct={act.mutate} pending={act.isPending} />
+      )}
+
+      {tab === "Summary" && (
+        <>
+          <SummaryTab vault={vault} />
+          {/* The one action that belongs beside the summary rather than in a
+              tab: taking assets back out of a private vault. Offered only to
+              the key that can sign it — see `useCanSign`. */}
+          {canSign && !isTokenized(vault) && <WithdrawCard vault={vault} />}
+        </>
+      )}
+      {tab === "Portfolio" && <VaultPortfolio vault={vault} />}
+      {tab === "Activity" && <ActivityTab vault={vault} />}
+      {(tab === "Agent" || tab === "Token") && (
+        <WalletGate>
+          {tab === "Agent" && (
+            <StrategyTab vault={vault} onAct={act.mutate} pending={act.isPending} />
+          )}
+          {tab === "Token" && (
+            <TokenTab vault={vault} onAct={act.mutate} pending={act.isPending} />
+          )}
+        </WalletGate>
+      )}
     </div>
   );
 }
@@ -247,22 +277,48 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function SummaryTab({ vault }: { vault: VaultInfo; onAct: Act; pending: boolean }) {
+/**
+ * What this vault *is*: its state, its terms, and the keys that matter.
+ *
+ * Public, and written to be read by someone who did not make it — a holder, or
+ * anyone deciding whether to become one. So it leads with the two things that
+ * decide what a vault even is: whether it is private or tokenized (one way, and
+ * irreversible), and whether it is running. What it holds moved to Portfolio,
+ * which can say it properly.
+ */
+function SummaryTab({ vault }: { vault: VaultInfo }) {
   const chain = vault.chain;
   const tokenized = isTokenized(vault);
 
   return (
     <>
-      <VaultHoldings vault={vault} />
-      <Card title="The wallet">
+      <Card title="Status">
         <dl>
-          <Row label="Address — fund it by sending here">
+          <Row label="Phase">
+            {tokenized ? "Tokenized — it has holders" : "Private — its runner's money alone"}
+          </Row>
+          <Row label="State">{chain?.state ?? "—"}</Row>
+          <Row label="Strategy version">{chain?.version ? `v${chain.version}` : "—"}</Row>
+          <Row label="Created">{when(chain?.created_ts)}</Row>
+          {!!chain?.tokenized_ts && <Row label="Tokenized">{when(chain.tokenized_ts)}</Row>}
+          {!!chain?.wind_down_ts && <Row label="Wound down">{when(chain.wind_down_ts)}</Row>}
+        </dl>
+        <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+          {tokenized
+            ? "Other people's money is in here. Nothing leaves but a redemption after a wind-down, and the strategy's config is committed on chain as a hash so a run can prove which one it executed."
+            : "Private is a finished state, not an unfinished one. Its runner can take the money out at any time; tokenizing is the one-way step that ends that."}
+        </p>
+      </Card>
+
+      <Card title="Keys">
+        <dl>
+          <Row label="Vault account — what the chain knows it by">
+            <CopyAddress address={vault.account} label="Vault account (Swig)" />
+          </Row>
+          <Row label="Wallet — fund it by sending here">
             <CopyAddress address={vault.wallet_address} label="Funds owner" />
           </Row>
-          <Row label="Quote asset">
-            {vault.quote_mint ? <CopyAddress address={vault.quote_mint} /> : "—"}
-          </Row>
-          <Row label="Runner">
+          <Row label="Runner — the key that manages it">
             <CopyAddress address={vault.runner_address} />
           </Row>
           <Row label="Delegate — the key that signs its trades">
@@ -272,24 +328,70 @@ function SummaryTab({ vault }: { vault: VaultInfo; onAct: Act; pending: boolean 
               <span className="text-amber-600 dark:text-amber-400">none installed</span>
             )}
           </Row>
+          <Row label="Quote asset">
+            {vault.quote_mint ? <CopyAddress address={vault.quote_mint} /> : "—"}
+          </Row>
         </dl>
         <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+          The vault account and the wallet are two addresses, not one: the first is the vault&rsquo;s
+          identity and the permissions on it, and the second — derived from the first — is what
+          actually holds the assets. Send funds to the wallet. Neither is a token mint; a vault only
+          has one of those once it tokenizes.
+        </p>
+        <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
           While a delegate is installed it can move everything in this wallet. That is what lets it
-          trade, and it is the custody risk for as long as it is there — you can replace it or
-          remove it at any time.
+          trade, and it is the custody risk for as long as it is there — the runner can replace it
+          or remove it at any time.
           {!tokenized && (
             <>
               {" "}
-              It is also how you take assets back out while this vault is private: there is no
-              withdraw instruction, because the delegate you installed can already do it.
+              It is also how assets come back out while this vault is private: there is no withdraw
+              instruction, because the delegate the runner installed can already do it.
             </>
           )}
         </p>
       </Card>
 
-      {!tokenized && <WithdrawCard vault={vault} />}
+      <Card title={tokenized ? "Its token" : "If it tokenizes"}>
+        <dl>
+          {chain?.mint && (
+            <Row label="Mint">
+              <CopyAddress address={chain.mint} />
+            </Row>
+          )}
+          {chain?.dbc_pool && (
+            <Row label="Curve — where it was sold">
+              <CopyAddress address={chain.dbc_pool} />
+            </Row>
+          )}
+          {chain?.damm_pool && (
+            <Row label="Pool — where it trades now">
+              <CopyAddress address={chain.damm_pool} />
+            </Row>
+          )}
+          <Row label="Manager fee on profits">{pct(chain?.fee_bps)}</Row>
+          <Row label="Issued to the manager">{pct(chain?.issue_bps)}</Row>
+          <Row label="Raise kept as capital">
+            {chain?.migration_fee_pct ? `${chain.migration_fee_pct}%` : "—"}
+          </Row>
+          <Row label="Creator's cut of trading fees">
+            {chain?.creator_trading_fee_pct ? `${chain.creator_trading_fee_pct}%` : "—"}
+          </Row>
+        </dl>
+        <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+          {tokenized
+            ? "The raise split in two at graduation: the capital the strategy trades, and the liquidity holders exit through."
+            : "These terms are fixed at tokenization and cannot be changed afterwards. Until then they are what this vault would launch on."}
+        </p>
+      </Card>
     </>
   );
+}
+
+/** A chain timestamp, or an em dash. Seconds, as the program writes them. */
+function when(ts: number | undefined): string {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString();
 }
 
 /**

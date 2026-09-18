@@ -28,8 +28,8 @@ export function VaultsSection({ server }: { server: string }) {
   const rows = vaults.data ?? [];
   const holdings = useQueries({
     queries: rows.map((vault) => ({
-      queryKey: ["vault-holdings", vault.account],
-      queryFn: () => api.getVaultHoldings(vault.account),
+      queryKey: ["vault-holdings", vault.server, vault.account],
+      queryFn: () => api.getVaultHoldings(vault.account, vault.server),
       retry: false,
       staleTime: 30_000,
     })),

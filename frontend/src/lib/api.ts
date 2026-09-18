@@ -2430,6 +2430,42 @@ export interface VaultInfo {
 }
 
 /** What a vault's wallet holds, read from the chain. */
+/** One liquidity position, however its protocol describes it. The fields below
+ *  are the ones every connector answers with; the rest ride along untyped. */
+export interface VaultLpPosition {
+  protocol: string;
+  kind: "clmm" | "amm";
+  pool_address: string;
+  position_address?: string;
+  trading_pair?: string;
+  base_token?: string;
+  quote_token?: string;
+  base_token_address?: string;
+  quote_token_address?: string;
+  base_token_amount?: string | number;
+  quote_token_amount?: string | number;
+  base_fee_amount?: string | number;
+  quote_fee_amount?: string | number;
+  lower_price?: string | number;
+  upper_price?: string | number;
+  price?: string | number;
+  in_range?: boolean;
+}
+
+export interface VaultLpPositions {
+  account: string;
+  wallet_address: string;
+  positions: VaultLpPosition[];
+  /** Protocols that should have answered and did not, in their own words. */
+  errors: string[];
+  /** Protocols that *cannot* enumerate a wallet's positions at all — a
+   *  fungible-LP AMM has none to list. A permanent property of the protocol
+   *  rather than something that went wrong, so it is kept out of `errors` and
+   *  off the page: a warning that shows on every load teaches people to ignore
+   *  warnings. Carried here so the answer is still complete. */
+  unsupported: string[];
+}
+
 export interface VaultHoldings {
   account: string;
   wallet_address: string;
@@ -3881,9 +3917,20 @@ export const api = {
       { method: "POST", body: JSON.stringify({ amount }) },
     ),
 
-  /** Everything in the vault's wallet, plus where its own token trades. */
-  getVaultHoldings: (account: string) =>
-    apiFetch<VaultHoldings>(`/api/v1/vaults/${encodeURIComponent(account)}/holdings`),
+  /** Everything in the vault's wallet, plus where its own token trades.
+   *  Readable for any vault on the server: a vault is a public account. */
+  getVaultHoldings: (account: string, server: string) =>
+    apiFetch<VaultHoldings>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/holdings${query({ server })}`,
+    ),
+
+  /** Every liquidity position the vault's wallet still holds, across the
+   *  protocols this Gateway can enumerate. `errors` names the ones it could
+   *  not read, which is not the same answer as "none". */
+  getVaultLpPositions: (account: string, server: string) =>
+    apiFetch<VaultLpPositions>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/lp-positions${query({ server })}`,
+    ),
 
   /** The private config, to its runner alone. */
   getVaultConfig: (account: string) =>
