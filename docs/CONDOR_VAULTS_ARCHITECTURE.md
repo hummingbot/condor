@@ -201,10 +201,39 @@ Each economic term is a **bound** (the creator's decision, copied onto the
 | token type / supply | constant | Token-2022, fixed |
 | fee claimer | constant | `Protocol.fee_claimer` |
 | leftover receiver | constant | the vault's treasury |
-| `circulating_supply`, `total_supply` | **read off the config** | What the curve offers, and the supply it is offered from, in the token's own units. They were one argument, `issue_bps`, and as an argument it was a number a buyer was told to read as a dilution ceiling while it committed the creator to nothing — the curve sold whatever the config said, and the two never met. **Neither is a standard field:** an SPL or Token-2022 mint carries only its live `supply`, and no extension adds a maximum or a circulating figure, so the program records both — `total_supply` especially, because `redeem` burns and the chain's own number stops being the one it was. |
+| `total_supply` | constant | **1,000,000** for every vault. A supply is a denominator, and one that differs per vault only makes two vaults harder to compare. |
+| `circulating_supply` | bound | **200,000** by default: what the curve offers. Gateway solves DBC's `leftover` for it exactly — DBC takes what is held back and solves for the rest, and its migration share is linear in that, so the inversion is closed-form rather than a search. The ceiling moves with the market caps (about 74 % of supply at a 2× ratio), because the rest is the liquidity the curve must migrate with. |
+| both, on the `Vault` | **read off the config** |
 | retained supply | bound | 0–50 % of supply held back from the curve (`leftover`). It lands in the treasury after graduation and is what the strategy market-makes its own token with. |
 
-### 6.1 After the curve fills (graduation)
+### 6.1 Pricing the launch
+
+The creator's own assets are what they are tokenizing, so the launch price is a
+judgement about them. Condor prices the treasury from the same cached tickers
+the Portfolio tab uses, **in the asset the vault will sell its token for** — a
+price in one currency against a market cap in another is how a launch ends up
+orders of magnitude out — and names any token it could not price rather than
+quietly leaving it out of the total.
+
+From that value *V* and the offered supply *C*, the form derives rather than
+asks:
+
+* the **floor price** `V / C`, at which the creator's assets would buy the
+  entire offer. Below it their assets are worth more tokens than exist to sell
+  them, and the form refuses.
+* at any price *p* above it, `creator_buy_amount = V / p` — their share of the
+  offer — and `initial_market_cap = p × 1,000,000`.
+* the **premium**, `p / (V/C) − 1`: how far above the vault's own assets per
+  offered token the launch is priced. At the floor the creator takes the whole
+  offer and the curve fills the moment it opens; at +100 % they take half and
+  buyers take the rest. That difference is what buyers are paying for the
+  strategy rather than for the assets, and it is the creator's to set.
+
+The creator's stake is bought on the curve like anyone else's, so it is bounded
+by the offer and its value stays below the graduation market cap by
+construction.
+
+### 6.2 After the curve fills (graduation)
 
 * **`collect_seed`** (permissionless): the pool creator's 98 % of the unlocked
   raise — the vault's capital — moves from DBC into the treasury's quote ATA. The pool

@@ -32,6 +32,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from condor import vault_store, wallet_store
+from condor.market_rates import get_rates
 from condor.gateway_client import VaultGateway
 from condor.vault_config import NotCanonical, config_hash
 from condor.web.auth import get_current_user, require_server_access_query
@@ -681,7 +682,7 @@ async def build_launch_config(
     for key, value in (
         ("creatorTradingFeePercentage", req.creator_trading_fee_percentage),
         ("poolFeeOption", req.pool_fee_option),
-        ("retainedSupplyPct", req.retained_supply_pct),
+        ("circulatingSupply", req.circulating_supply),
         ("baseFeeBps", req.base_fee_bps),
     ):
         if value is not None:
@@ -897,6 +898,15 @@ async def delete_draft(account: str, user: WebUser = Depends(get_current_user)):
 async def holdings(
     account: str,
     server: str = Query(...),
+    quote: str = Query(
+        "USDC",
+        description=(
+            "Symbol to price the treasury in. The launch form asks for the "
+            "asset the vault will sell its token for, because a price in one "
+            "currency and a market cap in another is how a launch ends up two "
+            "orders of magnitude off."
+        ),
+    ),
     user: WebUser = Depends(require_server_access_query),
 ):
     """Everything in the vault's treasury, and where its own token trades.
@@ -929,14 +939,60 @@ async def holdings(
         "treasury_address": treasury,
         "quote_mint": chain.get("quoteMint"),
         "balances": balances.get("balances", balances),
+        # What those balances are worth, which Gateway cannot say: it answers
+        # amounts and holds no prices. Any token the ticker pool could not
+        # price is named in `unpriced`, so a caller can say the total is
+        # partial rather than showing it as if it were complete.
+        **await _treasury_value(server, balances.get("balances", balances), quote),
         # The treasury's own balance of its own token: unsold supply, not
         # circulating, excluded from what a redemption divides by.
         "retained_supply": chain.get("retainedSupply"),
-        "circulating_supply": chain.get("redeemableSupply"),
+        # The estate, once a wind-down has fixed it. Not the launch
+        # `circulating_supply` on the `Vault`, which is what the curve offered.
+        "redeemable_supply": chain.get("redeemableSupply"),
         "mint": chain.get("mint"),
         # The graduated pool: what the DEX browser lists and an LP executor trades.
         "damm_pool": chain.get("dammPool"),
     }
+
+
+async def _treasury_value(
+    server: str, balances: dict[str, Any], quote: str
+) -> dict[str, Any]:
+    """What the treasury holds, priced in `quote`, from the cached ticker pool.
+
+    This is what a creator is tokenizing, and so what the launch price is a
+    judgement about: pricing the token above this says the vault is worth more
+    than the assets in it, which is the whole proposition of a managed vault,
+    and pricing it below says the opposite.
+
+    A token the pool cannot price is **named, not skipped**. Quietly dropping it
+    would under-report the assets by an unknown amount, and the number this
+    feeds is the one a creator uses to decide what their vault is worth.
+    """
+    amounts = {
+        symbol: float(amount)
+        for symbol, amount in (balances or {}).items()
+        if float(amount or 0) > 0
+    }
+    wanted = [f"{symbol}-{quote}" for symbol in amounts if symbol != quote]
+    try:
+        rates = await get_rates(server, wanted) if wanted else {}
+    except Exception as e:
+        logger.warning("could not price a treasury on %s: %s", server, e)
+        return {"value": None, "unpriced": sorted(amounts), "quote": quote}
+
+    value = amounts.get(quote, 0.0)
+    unpriced = []
+    for symbol, amount in amounts.items():
+        if symbol == quote:
+            continue
+        rate = rates.get(f"{symbol}-{quote}")
+        if rate is None:
+            unpriced.append(symbol)
+            continue
+        value += amount * float(rate)
+    return {"value": value, "unpriced": sorted(unpriced), "quote": quote}
 
 
 def _network_of(user: WebUser, account: str, server: str) -> str:

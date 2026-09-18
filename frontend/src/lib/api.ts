@@ -2481,7 +2481,12 @@ export interface VaultHoldings {
   /** The wallet's own balance of its own token: unsold supply, not circulating. */
   /** The vault's own token still held by the treasury: unsold, not circulating. */
   retained_supply: string | null;
-  circulating_supply: string | null;
+  /** The estate, once a wind-down fixed it — not the launch circulating supply. */
+  redeemable_supply: string | null;
+  /** The treasury priced from the cached tickers, and what could not be priced. */
+  value: number | null;
+  unpriced: string[];
+  quote: string;
   mint: string | null;
   /** The graduated pool — where the vault's token trades and an executor LPs. */
   damm_pool: string | null;
@@ -3882,8 +3887,8 @@ export const api = {
       graduation_market_cap: number;
       creator_trading_fee_percentage?: number;
       pool_fee_option?: number;
-      /** 0-50: supply held back from the curve, which becomes the retained supply. */
-      retained_supply_pct?: number;
+      /** Tokens the curve offers, of a fixed 1,000,000 total. Default 200,000. */
+      circulating_supply?: number;
       base_fee_bps?: number;
     },
   ) =>
@@ -3934,9 +3939,13 @@ export const api = {
 
   /** Everything in the vault's wallet, plus where its own token trades.
    *  Readable for any vault on the server: a vault is a public account. */
-  getVaultHoldings: (account: string, server: string) =>
+  /** `quote` is the symbol the treasury is priced in — the launch form asks in
+   *  the asset the vault will sell its token for, because a price in one
+   *  currency against a market cap in another is how a launch ends up orders of
+   *  magnitude off. Defaults to USDC. */
+  getVaultHoldings: (account: string, server: string, quote?: string) =>
     apiFetch<VaultHoldings>(
-      `/api/v1/vaults/${encodeURIComponent(account)}/holdings${query({ server })}`,
+      `/api/v1/vaults/${encodeURIComponent(account)}/holdings${query({ server, quote })}`,
     ),
 
   /** Every liquidity position the vault's wallet still holds, across the

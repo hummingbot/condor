@@ -1024,10 +1024,10 @@ class VaultLaunchConfigRequest(BaseModel):
     creator_trading_fee_percentage: Optional[float] = None
     #: 0-5: which fixed fee the graduated pool charges.
     pool_fee_option: Optional[int] = None
-    #: 0-50. How much of the supply the vault keeps back rather than selling on
-    #: the curve. It becomes the retained supply the strategy can market-make
-    #: with, and what the curve does sell is `circulating_supply`.
-    retained_supply_pct: Optional[float] = None
+    #: Tokens the curve offers, of a fixed 1,000,000 total. Default 200,000.
+    #: The rest is split between the graduated pool's permanently locked
+    #: liquidity and the retained supply the strategy market-makes with.
+    circulating_supply: Optional[float] = None
     base_fee_bps: Optional[int] = None
 
 

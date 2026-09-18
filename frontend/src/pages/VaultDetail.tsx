@@ -47,6 +47,15 @@ type Tab = (typeof PUBLIC_TABS)[number] | (typeof CREATOR_TABS)[number];
  *  migrate, and the program's fixed graduation threshold is denominated in the
  *  quote asset — so this is a short list on purpose, not a token picker. */
 const WSOL = "So11111111111111111111111111111111111111112";
+
+/** Every vault token has the same supply, and the same share of it goes on the
+ *  curve unless the creator says otherwise. Both are Gateway's defaults; they
+ *  are repeated here only so the form can do the arithmetic before it asks. */
+const TOTAL_SUPPLY = 1_000_000;
+const DEFAULT_CIRCULATING_SUPPLY = 200_000;
+
+const money = (n: number, quote: string) =>
+  `${n.toLocaleString(undefined, { maximumSignificantDigits: 6 })} ${quote}`;
 const QUOTE_ASSETS = [
   { symbol: "SOL", mint: WSOL },
   { symbol: "USDC", mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
@@ -723,6 +732,15 @@ function TokenTab({
  * a high one and a low one are different products rather than a right and a
  * wrong answer.
  */
+function Readout({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-0.5">
+      <span className="text-[var(--color-text-muted)]">{label}</span>
+      <span className="font-mono">{value}</span>
+    </div>
+  );
+}
+
 function LaunchConfigCard({
   vault,
   onAct,
@@ -737,16 +755,36 @@ function LaunchConfigCard({
   // wSOL by default, since that is what Meteora's keepers graduate on the
   // threshold the program requires.
   const [quoteMint, setQuoteMint] = useState(WSOL);
-  const [initialCap, setInitialCap] = useState("10");
   const [graduationCap, setGraduationCap] = useState("100");
   const [creatorFee, setCreatorFee] = useState("50");
-  const [retained, setRetained] = useState("0");
+  const [offered, setOffered] = useState(String(DEFAULT_CIRCULATING_SUPPLY));
   const [poolFee, setPoolFee] = useState("2");
 
-  // Half the raise is locked as liquidity on every launch — a constant in the
-  // program, so there is nothing to type and nothing to get wrong.
-  const caps = [Number(initialCap), Number(graduationCap)];
-  const capsWrong = !caps.every(Number.isFinite) || caps[1] <= caps[0];
+  // What the treasury is worth, priced from the same cached tickers the
+  // Portfolio tab uses. It is the thing being tokenized, so it is what the
+  // launch price is a judgement about.
+  const quoteSymbol = QUOTE_ASSETS.find((a) => a.mint === quoteMint)?.symbol ?? "USDC";
+  const holdings = useQuery({
+    queryKey: ["vault-holdings", vault.server, vault.account, quoteSymbol],
+    queryFn: () => api.getVaultHoldings(vault.account, vault.server, quoteSymbol),
+  });
+  const nav = holdings.data?.value ?? null;
+  const offeredTokens = Number(offered);
+
+  // The price at which the creator's own assets would buy the whole offer.
+  // Below it their assets are worth more tokens than exist to sell them, so it
+  // is a floor rather than a suggestion; above it they take less of the offer
+  // and the difference is the premium they are asking for the strategy.
+  const floorPrice = nav !== null && offeredTokens > 0 ? nav / offeredTokens : null;
+  const [price, setPrice] = useState("");
+  const effectivePrice = Number(price || (floorPrice ?? 0));
+  const creatorBuyAmount = nav !== null && effectivePrice > 0 ? nav / effectivePrice : null;
+  const initialCap = effectivePrice > 0 ? effectivePrice * TOTAL_SUPPLY : null;
+  const premium = floorPrice && effectivePrice > 0 ? effectivePrice / floorPrice - 1 : null;
+
+  const overOffer = creatorBuyAmount !== null && creatorBuyAmount > offeredTokens;
+  const capsWrong =
+    initialCap === null || !Number.isFinite(Number(graduationCap)) || Number(graduationCap) <= initialCap;
 
   return (
     <Card title="Launch config">
@@ -772,15 +810,21 @@ function LaunchConfigCard({
             ))}
           </select>
         </Labelled>
-        <Labelled label="Start value" hint="What the vault is worth per token at the start of the curve, in the quote asset. Its NAV is what this is priced against — you may strike it above or below.">
+        <Labelled
+          label="Launch price"
+          hint="What one token costs at the start of the curve, in the quote asset. Your vault's assets buy you tokens at this price — so the higher you set it, the fewer of the offered tokens are yours and the more of the curve is left for buyers."
+        >
           <input
-            value={initialCap}
-            onChange={(e) => setInitialCap(e.target.value)}
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
             inputMode="decimal"
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
+            placeholder={floorPrice !== null ? floorPrice.toPrecision(4) : "—"}
+            className={`w-full rounded-md border bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px] ${
+              overOffer ? "border-red-500/60" : "border-[var(--color-border)]"
+            }`}
           />
         </Labelled>
-        <Labelled label="End value" hint="Where the curve fills, in the quote asset. Must exceed the start.">
+        <Labelled label="End value" hint="Where the curve fills, in the quote asset. Must exceed what the launch price values the vault at.">
           <input
             value={graduationCap}
             onChange={(e) => setGraduationCap(e.target.value)}
@@ -789,17 +833,17 @@ function LaunchConfigCard({
           />
         </Labelled>
         <Labelled
-          label="Held back from the curve"
-          hint="0–50%. Supply the curve may not sell. It lands in the treasury as retained supply the strategy can market-make with; what the curve does sell is what buyers read as the dilution ceiling."
+          label="Offered on the curve"
+          hint={`Tokens the curve sells, of a fixed ${TOTAL_SUPPLY.toLocaleString()} total. The rest is split between the graduated pool's permanently locked liquidity and the retained supply the strategy market-makes with.`}
         >
           <div className="flex items-center gap-2">
             <input
-              value={retained}
-              onChange={(e) => setRetained(e.target.value)}
+              value={offered}
+              onChange={(e) => setOffered(e.target.value)}
               inputMode="decimal"
-              className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
+              className="w-28 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
             />
-            <span className="text-[12px] text-[var(--color-text-muted)]">%</span>
+            <span className="text-[12px] text-[var(--color-text-muted)]">of {TOTAL_SUPPLY.toLocaleString()}</span>
           </div>
         </Labelled>
         <Labelled label="Your share of trading fees" hint="At most 50%. You may take less.">
@@ -827,19 +871,70 @@ function LaunchConfigCard({
           </select>
         </Labelled>
       </div>
+      <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2.5 text-[12px]">
+        {nav === null ? (
+          <p className="text-[var(--color-text-muted)]">
+            The vault&rsquo;s assets are not priced yet, so there is nothing to price the launch
+            against. Fund it first, or check the Portfolio tab.
+          </p>
+        ) : (
+          <>
+            <Readout label="Vault assets" value={money(nav, holdings.data?.quote ?? "USDC")} />
+            <Readout
+              label="Your tokens at this price"
+              value={
+                creatorBuyAmount === null
+                  ? "—"
+                  : `${Math.round(creatorBuyAmount).toLocaleString()} of ${offeredTokens.toLocaleString()} offered`
+              }
+            />
+            <Readout
+              label="Launch values the vault at"
+              value={initialCap === null ? "—" : money(initialCap, holdings.data?.quote ?? "USDC")}
+            />
+            <Readout
+              label="Premium to assets"
+              value={
+                premium === null
+                  ? "—"
+                  : `${premium >= 0 ? "+" : ""}${(premium * 100).toFixed(1)}%`
+              }
+            />
+            {(holdings.data?.unpriced?.length ?? 0) > 0 && (
+              <p className="mt-1.5 text-[var(--color-yellow)]">
+                {holdings.data?.unpriced.join(", ")} could not be priced, so the total above is
+                short by whatever they are worth.
+              </p>
+            )}
+            {overOffer && (
+              <p className="mt-1.5 text-[var(--color-red)]">
+                At this price your assets are worth more tokens than the curve is selling. Raise the
+                price, or offer more tokens, until your share fits inside the offer.
+              </p>
+            )}
+            {!overOffer && premium !== null && (
+              <p className="mt-1.5 text-[var(--color-text-muted)]">
+                {premium <= 0.0001
+                  ? "At this price your assets take the entire offer and the curve fills the moment it opens. Price above the floor to leave the curve something to sell."
+                  : `Buyers are paying ${(premium * 100).toFixed(0)}% above what the vault's assets are worth per offered token. That difference is what they are paying for the strategy.`}
+              </p>
+            )}
+          </>
+        )}
+      </div>
       <Action
         pending={pending}
-        disabled={capsWrong}
+        disabled={capsWrong || overOffer || nav === null}
         onClick={() =>
           onAct({
             build: () =>
               api.buildVaultLaunchConfig(vault.account, {
                 quote_mint: quoteMint,
-                initial_market_cap: Number(initialCap),
+                initial_market_cap: initialCap ?? 0,
                 graduation_market_cap: Number(graduationCap),
+                circulating_supply: offeredTokens,
                 creator_trading_fee_percentage: Number(creatorFee),
                 pool_fee_option: Number(poolFee),
-                retained_supply_pct: Number(retained),
               }),
             // Condor remembers the address so the launch form never asks for it.
             confirm: (signature) => api.confirmVaultLaunchConfig(vault.account, signature),
