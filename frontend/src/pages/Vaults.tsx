@@ -21,6 +21,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Plus, Vault as VaultIcon } from "lucide-react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
@@ -37,23 +38,39 @@ import { api, type VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
 
 /** One titled block of cards. Two of them at most: yours, and everyone's. */
-function Section({
-  title,
-  count,
-  children,
+type Tab = "all" | "mine";
+
+/** All / My vaults. A filter over one list, so it is a tab rather than two
+ *  stacked headings: the same vaults, seen two ways, and the count beside each
+ *  tab says what switching would show before you switch. */
+function Tabs({
+  tab,
+  onPick,
+  counts,
 }: {
-  title: string;
-  count: number;
-  children: React.ReactNode;
+  tab: Tab;
+  onPick: (tab: Tab) => void;
+  counts: Record<Tab, number>;
 }) {
   return (
-    <section className="mb-6">
-      <h2 className="mb-2 flex items-baseline gap-2 text-[12px] font-semibold tracking-wide text-[var(--color-text-muted)] uppercase">
-        {title}
-        <span className="font-normal normal-case">{count}</span>
-      </h2>
-      <div className="grid gap-3 sm:grid-cols-2">{children}</div>
-    </section>
+    <div className="mb-3 flex gap-1 border-b border-[var(--color-border)]">
+      {(["all", "mine"] as const).map((key) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onPick(key)}
+          aria-current={tab === key ? "page" : undefined}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium transition-colors ${
+            tab === key
+              ? "border-b-2 border-[var(--color-accent)] text-[var(--color-text)]"
+              : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          {key === "all" ? "All" : "My vaults"}
+          <span className="text-[11px] text-[var(--color-text-muted)]">{counts[key]}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -141,6 +158,8 @@ export function Vaults() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { attached, connected } = useWallet();
+  // All, until there is a key to say what "mine" means.
+  const [tab, setTab] = useState<Tab>("all");
 
   const vaults = useQuery({
     queryKey: ["vaults", server],
@@ -149,12 +168,14 @@ export function Vaults() {
     retry: false,
   });
 
-  // "Mine" is the key in the browser, not the one attached: it is the wallet
-  // whose vaults you are looking for, and it answers before any signature.
-  // Where they differ the wallet menu says so.
-  const me = connected?.address ?? attached;
+  // "Mine" is the key in the browser and nothing else. Falling back to the
+  // attached address put vaults under "My vaults" that the wallet in this
+  // browser cannot sign for — every button on them leads to a refusal — and
+  // the list is the one place that distinction is cheap to make. With nothing
+  // connected, nothing is mine; the banner above says how to fix that.
+  const me = connected?.address ?? null;
   const mine = (vaults.data ?? []).filter((vault) => vault.runner_address === me);
-  const others = (vaults.data ?? []).filter((vault) => vault.runner_address !== me);
+  const shown = tab === "mine" ? mine : (vaults.data ?? []);
 
   const cleanup = useMutation({
     mutationFn: (account: string) => api.deleteVault(account),
@@ -237,36 +258,45 @@ export function Vaults() {
         </div>
       )}
 
-      {mine.length > 0 && (
-        <Section title="My vaults" count={mine.length}>
-          {mine.map((vault) => (
-            <div key={vault.account} className="relative">
-              <VaultCard vault={vault} />
-              {/* A record with no confirmed transaction behind it: the build
-                  was never signed, or it never landed. There is nothing to
-                  resume — creating a vault is one signature — so the only
-                  thing to offer is forgetting it. */}
-              {!vault.live && (
-                <button
-                  type="button"
-                  onClick={() => cleanup.mutate(vault.account)}
-                  className="absolute right-3 bottom-3 text-[10px] text-[var(--color-text-muted)] underline hover:text-[var(--color-text)]"
-                >
-                  discard
-                </button>
-              )}
+      {(vaults.data?.length ?? 0) > 0 && (
+        <>
+          <Tabs
+            tab={tab}
+            onPick={setTab}
+            counts={{ all: vaults.data?.length ?? 0, mine: mine.length }}
+          />
+
+          {shown.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-[12px] text-[var(--color-text-muted)]">
+              {me
+                ? "None of these vaults runs on the key this browser is holding."
+                : "Connect a wallet to see which of these are yours."}
+            </p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {shown.map((vault) => (
+                <div key={vault.account} className="relative">
+                  <VaultCard vault={vault} />
+                  {/* A record with no confirmed transaction behind it: the build
+                      was never signed, or it never landed. There is nothing to
+                      resume — creating a vault is one signature — so the only
+                      thing to offer is forgetting it. */}
+                  {!vault.live && vault.runner_address === me && (
+                    <button
+                      type="button"
+                      onClick={() => cleanup.mutate(vault.account)}
+                      className="absolute right-3 bottom-3 text-[10px] text-[var(--color-text-muted)] underline hover:text-[var(--color-text)]"
+                    >
+                      discard
+                    </button>
+                  )}
+                </div>
+              ))}
             </div>
-          ))}
-        </Section>
+          )}
+        </>
       )}
 
-      {others.length > 0 && (
-        <Section title={mine.length > 0 ? "All vaults" : "Vaults on this chain"} count={others.length}>
-          {others.map((vault) => (
-            <VaultCard key={vault.account} vault={vault} />
-          ))}
-        </Section>
-      )}
     </div>
   );
 }
