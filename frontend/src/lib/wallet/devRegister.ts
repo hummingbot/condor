@@ -70,7 +70,13 @@ function devSecrets(): { name: string; secret: string }[] {
 function icon(address: string): WalletIcon {
   const svg = avatarSvg(address);
   if (!svg) throw new Error("avatar style is not loaded; cannot build a dev wallet icon");
-  return `data:image/svg+xml;base64,${btoa(svg)}` as WalletIcon;
+  // UTF-8 bytes, not the string: several DiceBear styles carry non-Latin-1
+  // characters in their metadata (curly quotes, mostly), and bare `btoa`
+  // throws on those. It threw during registration, so *no* dev wallet
+  // appeared and the picker looked like the feature was simply off.
+  const bytes = new TextEncoder().encode(svg);
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  return `data:image/svg+xml;base64,${btoa(binary)}` as WalletIcon;
 }
 
 class DevAccount implements WalletAccount {
