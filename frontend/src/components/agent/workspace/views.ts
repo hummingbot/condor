@@ -30,7 +30,7 @@ export interface WorkspaceUrl {
   run: RunRef | null;
   /** `?tick=`, or `null` when no tick is open over the screen. */
   tick: number | null;
-  /** The raw `?open=`, for {@link useSections} — `null` when it names none. */
+  /** The raw `?open=`, for {@link pageSection} — `null` when it names none. */
   open: string | null;
 }
 
@@ -57,7 +57,7 @@ type RunScope = Pick<AgentRunRow, "strategy_slug" | "started_at">;
  *
  * The one ownership rule every reader of the parameter shares: `pickStrategy`
  * honours a named slug only through it, and the bands that *narrow* on the
- * parameter (the Runs rail's filter, the Money fold) take its answer rather
+ * parameter (the Runs rail's filter, the Fleet fold) take its answer rather
  * than the raw string, so a stale slug from an old link or a deleted strategy
  * narrows nothing instead of filtering every row out and printing a `$0.00`
  * rollup for a scope that does not exist (CORR-397).

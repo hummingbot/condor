@@ -22,7 +22,7 @@ describe("agent invalidation sets", () => {
     expect(keys()).toEqual([
       { queryKey: ["strategy", "brigado", "brl_mm"] },
       { queryKey: ["agent", "brigado"] },
-      // MoneyView stops polling a stopped strategy's rollup (PERF-375).
+      // A stopped strategy's rollup stops polling (PERF-375).
       { queryKey: ["strategy-performance", "brigado", "brl_mm"] },
     ]);
   });

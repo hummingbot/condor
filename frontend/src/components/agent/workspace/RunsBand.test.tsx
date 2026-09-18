@@ -1,10 +1,10 @@
 /**
  * The Runs band on its own (ARCH-399): what a selected rail row opens.
  *
- * The host's tests assert the band is mounted behind its disclosure; these
- * assert what is inside it without mounting the screen — a conversation's
- * ledger, the sentence that tells *deployed nothing* apart from *ran before we
- * recorded it*, and the delegation sheet a background task opens.
+ * The host's tests assert the band is mounted behind its tab; these assert
+ * what is inside it without mounting the screen — a session's ticks, a
+ * conversation's ledger, the sentence that tells *deployed nothing* apart from
+ * *ran before we recorded it*, and the delegation sheet a background task opens.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -20,11 +20,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRunRow } from "@/lib/api";
 
 const getConversationDeployments = vi.fn();
+const getSessionJournal = vi.fn();
+const getSessionActions = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getConversationDeployments: (...a: unknown[]) =>
       getConversationDeployments(...a),
+    getSessionJournal: (...a: unknown[]) => getSessionJournal(...a),
+    getSessionActions: (...a: unknown[]) => getSessionActions(...a),
   },
 }));
 
@@ -56,6 +60,19 @@ const { RunsBand } = await import("./RunsBand");
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
+
+const SESSION = {
+  id: "session_2",
+  run_id: "s:2",
+  kind: "session",
+  number: 2,
+  strategy_slug: "brl_mm",
+  title: "",
+  status: "done",
+  started_at: 100,
+  ended_at: 900,
+  has_actions_log: true,
+} as unknown as AgentRunRow;
 
 const CHAT = {
   id: "7f3a",
@@ -106,6 +123,8 @@ async function render(
             onClearRun={() => {}}
             hasMore={false}
             onShowMore={() => {}}
+            onOpenTick={() => {}}
+            onShowNow={() => {}}
             {...extra}
           />
         </QueryClientProvider>
@@ -127,11 +146,39 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   getConversationDeployments.mockReset();
+  getSessionJournal.mockReset();
+  getSessionActions.mockReset();
 });
 
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+});
+
+describe("a loop session", () => {
+  it("lists every tick newest first, with what each did, and opens one", async () => {
+    getSessionJournal.mockResolvedValue({
+      content: [
+        "## Ticks",
+        "- tick#1 | 2026-09-18 14:00 | actions=1 | Deployed 6 controllers",
+        "- tick#2 | 2026-09-18 15:00 | actions=0 | Held; all PnL positive",
+      ].join("\n"),
+    });
+    getSessionActions.mockResolvedValue({
+      actions: [
+        { tick: 1, at: 1, tool: "t", verb: "v", summary: "Deploy pmm_king", ok: true, error: "" },
+      ],
+    });
+    const onOpenTick = vi.fn();
+    await render(SESSION, { onOpenTick });
+    expect(getSessionJournal).toHaveBeenCalledWith("brigado", "brl_mm", 2);
+    const rows = [...container.querySelectorAll<HTMLButtonElement>("[data-run-tick]")];
+    expect(rows.map((r) => r.dataset.runTick)).toEqual(["2", "1"]);
+    expect(rows[0].textContent).toContain("Held; all PnL positive");
+    expect(rows[1].textContent).toContain("Deploy pmm_king");
+    await act(async () => rows[1].click());
+    expect(onOpenTick).toHaveBeenCalledWith(SESSION, 1);
+  });
 });
 
 describe("a conversation run", () => {

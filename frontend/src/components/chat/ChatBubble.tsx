@@ -48,7 +48,7 @@ import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 export function ChatBubble() {
   const chat = useChat();
   const { server } = useServer();
-  const { pathname, search } = useLocation();
+  const { pathname, search, state: locationState } = useLocation();
   const navigate = useNavigate();
 
   const [open, setOpen] = useState<boolean>(() => {
@@ -177,7 +177,10 @@ export function ChatBubble() {
     // Hijacking `activeSlotId` is right here: it is the gesture that asks
     // for the conversation to become the workspace's.
     if (slot && slotId) chat.setActiveSlotId(slotId);
-    navigate("/");
+    // A page expanded out of the chat's side panel knows the way back to it
+    // (`PaneReturnState`), so the panel comes back open on what was showing.
+    const returnTo = (locationState as { returnTo?: unknown } | null)?.returnTo;
+    navigate(typeof returnTo === "string" && returnTo.startsWith("/") ? returnTo : "/");
   };
 
   return (

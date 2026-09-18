@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink } from "lucide-react";
+import { ChevronRight, ExternalLink } from "lucide-react";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 
 import {
@@ -10,8 +11,10 @@ import { isDelegationStatus } from "@/components/agent/delegationStatus";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { ExperimentDetail } from "@/components/agent/lab/RunOverview";
 import { RunRail } from "@/components/agent/lab/RunRail";
+import { actionsByTick } from "@/components/agent/lab/runs";
 import { OutsideWindow } from "@/components/agent/workspace/OutsideWindow";
 import { api, type AgentRunRow } from "@/lib/api";
+import { parseJournal } from "@/lib/parse-agent";
 
 /**
  * The Runs band: every run this agent has had, beside what the selected one opens.
@@ -33,6 +36,8 @@ export function RunsBand({
   hasMore,
   onShowMore,
   onShowOlderRuns,
+  onOpenTick,
+  onShowNow,
 }: {
   slug: string;
   runs: AgentRunRow[];
@@ -47,12 +52,15 @@ export function RunsBand({
   onShowMore: () => void;
   /** Set when the scoped strategy's runs are outside the window (CORR-376). */
   onShowOlderRuns?: () => void;
+  /** Open one tick of a session over the screen — selecting the run with it. */
+  onOpenTick: (run: AgentRunRow, tick: number) => void;
+  /** Where the selected run's vitals and last decision are: the Now tab. */
+  onShowNow: () => void;
 }) {
   return (
-    // A bounded height rather than the page's: the rail scrolls beside its
-    // body, which is what it was built to do, and a rail as tall as every run
-    // would push the four disclosures below it off the end of the screen.
-    <div className="flex h-[70vh] min-h-0">
+    // The tab's whole height: the rail scrolls beside its body, which is what
+    // it was built to do.
+    <div className="flex h-full min-h-0">
       <RunRail
         runs={runs}
         strategyFilter={strategyFilter}
@@ -71,6 +79,8 @@ export function RunsBand({
           run={selectedRun}
           onClearRun={onClearRun}
           onShowOlderRuns={onShowOlderRuns}
+          onOpenTick={onOpenTick}
+          onShowNow={onShowNow}
         />
       </div>
     </div>
@@ -153,23 +163,158 @@ function ConversationRun({ run }: { run: AgentRunRow }) {
 }
 
 /**
- * What a rail row opens, for the three kinds that are not this screen.
+ * A loop session's turns: every tick, newest first, with what it did.
  *
- * A loop run *is* the screen — selecting one re-scopes everything above — so it
- * says so rather than drawing a second copy of the answer stack inside the
- * disclosure that selected it.
+ * Selecting a session re-scopes the whole screen, but the Now tab reads its
+ * *last* decision only — so without this a four-tick run showed one tick and a
+ * sentence pointing elsewhere. Each row opens that tick's snapshot over the
+ * screen. The journal and the action log are the keys `TickSpine` and the Now
+ * tab already read, so a run in scope costs no second fetch.
+ */
+function SessionTicks({
+  slug,
+  run,
+  onOpenTick,
+  onShowNow,
+}: {
+  slug: string;
+  run: AgentRunRow;
+  onOpenTick: (run: AgentRunRow, tick: number) => void;
+  onShowNow: () => void;
+}) {
+  const sslug = run.strategy_slug;
+  const sessionNum = run.number;
+  const { data: journalData, isLoading } = useQuery({
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "journal"],
+    queryFn: () => api.getSessionJournal(slug, sslug, sessionNum),
+    enabled: sessionNum > 0,
+  });
+  const { data: actionsData } = useQuery({
+    queryKey: ["session-actions", slug, sslug, sessionNum],
+    queryFn: () => api.getSessionActions(slug, sslug, sessionNum),
+    enabled: sessionNum > 0,
+  });
+
+  // Hoisted: the compiler infers `journalData` as the dependency and will not
+  // preserve a memo that declares a narrower one.
+  const journalContent = journalData?.content;
+  const ticks = useMemo(
+    () =>
+      journalContent ? [...parseJournal(journalContent).ticks].reverse() : [],
+    [journalContent],
+  );
+  const byTick = useMemo(
+    () => actionsByTick(actionsData?.actions ?? []),
+    [actionsData?.actions],
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="text-sm font-medium">
+          Session {run.number}
+          <span className="ml-2 font-mono text-xs text-[var(--color-text-muted)]">
+            {ticks.length} tick{ticks.length === 1 ? "" : "s"}
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onShowNow}
+          className="text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)] hover:underline"
+        >
+          Vitals and last decision on Now →
+        </button>
+      </div>
+
+      {isLoading ? (
+        <div className="flex h-24 items-center justify-center">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+        </div>
+      ) : ticks.length === 0 ? (
+        <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-xs text-[var(--color-text-muted)]">
+          No ticks recorded for this run yet.
+        </p>
+      ) : (
+        <ol data-run-ticks className="divide-y divide-[var(--color-border)] rounded-lg border border-[var(--color-border)]">
+          {ticks.map((entry) => {
+            const deeds = byTick.get(entry.tick) ?? [];
+            const failed = deeds.some((d) => !d.ok);
+            return (
+              <li key={entry.tick}>
+                <button
+                  type="button"
+                  data-run-tick={entry.tick}
+                  onClick={() => onOpenTick(run, entry.tick)}
+                  className="group flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                >
+                  <span
+                    className={`mt-0.5 shrink-0 font-mono text-xs font-bold tabular-nums ${
+                      failed ? "text-[var(--color-red)]" : "text-[var(--color-primary)]"
+                    }`}
+                  >
+                    #{entry.tick}
+                  </span>
+                  <span className="min-w-0 flex-1 space-y-1">
+                    <span className="flex items-baseline gap-2">
+                      <span className="min-w-0 flex-1 text-sm">
+                        {entry.summary || (
+                          <span className="text-[var(--color-text-muted)]">
+                            No summary written
+                          </span>
+                        )}
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] text-[var(--color-text-muted)]">
+                        {entry.timestamp}
+                      </span>
+                    </span>
+                    {deeds.length > 0 && (
+                      <span className="flex flex-wrap gap-1">
+                        {deeds.map((d, i) => (
+                          <span
+                            key={i}
+                            title={d.error || d.summary}
+                            className={`rounded px-1.5 py-px text-[10px] ${
+                              d.ok
+                                ? "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                                : "bg-red-500/10 text-[var(--color-red)]"
+                            }`}
+                          >
+                            {d.summary}
+                          </span>
+                        ))}
+                      </span>
+                    )}
+                  </span>
+                  <ChevronRight className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100" />
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What a rail row opens: a session's ticks, an experiment's detail, a task's
+ * sheet or a chat's ledger.
  */
 function RunBody({
   slug,
   run,
   onClearRun,
   onShowOlderRuns,
+  onOpenTick,
+  onShowNow,
 }: {
   slug: string;
   run: AgentRunRow | null;
   /** Put the selection back to the newest run — the sheet's way out. */
   onClearRun: () => void;
   onShowOlderRuns?: () => void;
+  onOpenTick: (run: AgentRunRow, tick: number) => void;
+  onShowNow: () => void;
 }) {
   if (!run && onShowOlderRuns) {
     return (
@@ -198,9 +343,11 @@ function RunBody({
     );
   }
   return (
-    <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-      Session {run.number} is the run on this screen — its vitals, its last
-      decision and what it deployed are above.
-    </p>
+    <SessionTicks
+      slug={slug}
+      run={run}
+      onOpenTick={onOpenTick}
+      onShowNow={onShowNow}
+    />
   );
 }

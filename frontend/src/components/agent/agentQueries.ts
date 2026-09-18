@@ -21,9 +21,9 @@ import { agentQuery } from "@/lib/queryClient";
  * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
  * over a loop that had just started, with nothing left to reopen it.
  *
- * The third key is the strategy's run rollup. MoneyView polls it only while
- * the strategy is running or paused (PERF-375), so after a stop nothing else
- * would re-read it and the band would keep the number polled before the stop.
+ * The third key is the strategy's run rollup (`PerformancePanel`). A rollup
+ * polled only while the strategy runs (PERF-375) would otherwise keep the
+ * number it had before the stop.
  */
 export function invalidateLifecycle(
   queryClient: QueryClient,

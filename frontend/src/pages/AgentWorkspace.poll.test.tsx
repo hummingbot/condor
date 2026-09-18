@@ -49,7 +49,6 @@ vi.mock("@/lib/api", () => ({
 // being counted here; the same stubs `AgentRunScreen.test.tsx` uses.
 const stub = () => () => null;
 vi.mock("@/components/agent/workspace/NowView", () => ({ NowView: stub() }));
-vi.mock("@/components/agent/workspace/MoneyView", () => ({ MoneyView: stub() }));
 vi.mock("@/components/agent/workspace/AgentFleet", () => ({
   AgentFleet: stub(),
 }));

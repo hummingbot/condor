@@ -29,16 +29,14 @@ import { formatCurrency } from "@/lib/formatters";
  * The Playbook disclosure's body: what the strategy is *told*, not what it did.
  *
  * This band used to host the whole `StrategyWorkbench` — which is a page, and
- * was written to be one. On the chat's pane it still is the right thing, and it
- * is unchanged there. On this screen it was the same page a second time: its
+ * was written to be one. On this screen it was the same page a second time: its
  * `<h1>` repeated the header two inches above, its `AgentControls` repeated the
  * header's Pause/Stop, its `LoopPulse` repeated the loop bar's cadence and
  * countdown, its `DeployedFleet` repeated the answer stack's ledger — under a
  * *different* count, since the two fold differently — and its `PerformancePanel`
- * repeated the vitals strip, which is the very duplication `MoneyView` removed
- * from the Money band for the same reason. Meanwhile the one thing the band is
- * named for, `strategy.md`, was not on screen at all: it was behind a button,
- * in a modal, over a page that was already a copy of the page behind it.
+ * repeated the vitals strip. Meanwhile the one thing the band is named for,
+ * `strategy.md`, was not on screen at all: it was behind a button, in a modal,
+ * over a page that was already a copy of the page behind it.
  *
  * So this is the band cut to its own promise — *the strategy's playbook, its
  * config and what it has learned* — and to the two doors that exist nowhere
@@ -96,7 +94,9 @@ export function PlaybookView({
     : 0;
 
   return (
-    <div className="space-y-4 pt-3">
+    // A container, so the two documents and the settings lay themselves out by
+    // the width this band actually has — the page, or the chat's side panel.
+    <div className="@container space-y-4 pt-3">
       {/* ① What it is for, and the two doors that are only here. The name is
           deliberately absent: the loop bar names the strategy in scope and the
           header names the agent, and a third copy is the duplication this band
@@ -189,7 +189,7 @@ export function PlaybookView({
       {/* ② The two documents, side by side at width. They are the same kind of
           thing read two ways — what a session is told, and what sessions have
           written back — so they are one row rather than one above the other. */}
-      <div className="grid items-start gap-4 lg:grid-cols-2">
+      <div className="grid items-start gap-4 @3xl:grid-cols-2">
         <DocCard
           title="Playbook"
           file="strategy.md"
@@ -342,7 +342,9 @@ function DocCard({
           />
         ) : content.trim() ? (
           <div className="chat-markdown max-h-[420px] overflow-y-auto text-sm leading-relaxed text-[var(--color-text)]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {withoutFrontMatter(content)}
+            </ReactMarkdown>
           </div>
         ) : (
           <div className="flex items-start gap-2 rounded-md border border-dashed border-[var(--color-border)] p-3 text-xs leading-relaxed text-[var(--color-text-muted)]">
@@ -559,7 +561,7 @@ function ConfigCard({
         )}
       </header>
 
-      <div className="grid gap-x-8 gap-y-5 p-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-x-8 gap-y-5 p-3 @lg:grid-cols-2 @5xl:grid-cols-4">
         {groups.map((group) => (
           <div key={group.title} className="min-w-0">
             <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -603,4 +605,17 @@ function ConfigCard({
       )}
     </section>
   );
+}
+
+/**
+ * The document without its YAML front matter, for reading.
+ *
+ * Markdown has no notion of front matter: the opening `---` rendered as a rule
+ * and the closing one turned every key above it into one enormous setext
+ * heading. The same settings are in the Configuration card on this band, laid
+ * out; the editor still shows the file whole.
+ */
+function withoutFrontMatter(md: string): string {
+  const m = /^\uFEFF?---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(md);
+  return m ? md.slice(m[0].length).replace(/^\s+/, "") : md;
 }

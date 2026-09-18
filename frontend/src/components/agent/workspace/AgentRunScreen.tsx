@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ChevronRight, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, X } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { SnapshotDetail } from "@/components/agent/session/Snapshot";
@@ -8,17 +8,16 @@ import { RunOverview } from "@/components/agent/lab/RunOverview";
 import { isLoopRun } from "@/components/agent/lab/runs";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
 import { declaredServerOf } from "@/components/agent/workspace/fleet";
-import { MoneyView } from "@/components/agent/workspace/MoneyView";
 import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
 import { PlaybookView } from "@/components/agent/workspace/PlaybookView";
 import { RunsBand } from "@/components/agent/workspace/RunsBand";
-import { SectionRail } from "@/components/agent/workspace/SectionRail";
 import { SECTION_META } from "@/components/agent/workspace/sectionMeta";
 import {
-  serializeSections,
-  useSections,
-  type SectionId,
+  PANE_SECTIONS,
+  openForPaneSection,
+  pageSection,
+  type PaneSection,
 } from "@/components/agent/workspace/sections";
 import { useRunReading } from "@/components/agent/workspace/useRunReading";
 import {
@@ -26,7 +25,10 @@ import {
   pickRun,
   pickStrategy,
 } from "@/components/agent/workspace/views";
-import type { WorkspaceUrlAdapter } from "@/components/agent/workspace/workspaceUrl";
+import type {
+  WorkspaceUrlAdapter,
+  WorkspaceUrlPatch,
+} from "@/components/agent/workspace/workspaceUrl";
 import {
   api,
   type AgentRunRow,
@@ -44,44 +46,30 @@ import { agentQuery } from "@/lib/queryClient";
 const RUN_PAGE = 100;
 
 /**
- * One agent's page: the run you are looking at, read top to bottom (FEAT-119).
+ * One agent's run screen: the run you are looking at, one section at a time.
  *
- * This was a spine of twelve entries over a body that swapped — five **Doing**
- * views and the seven **Being** sections — which meant the reader learned a
- * navigation before they learned anything about the agent, and that the money
- * and the deployments could not be read at the same time. The seven Being
- * sections went to the chat's panel (FEAT-118), so the two surfaces answer two
- * questions now: what the agent *is* lives there, what it *did* lives here.
+ * Two hosts, one layout. Beside a conversation (the chat's side panel) and on
+ * the whole window (`/agents/:slug`), it is the same thing: who the agent is
+ * and the loop's controls (the header), the strategy and run in scope (the
+ * loop bar), then a tab strip — Now, Runs, Detail, Fleet, Playbook — over one
+ * body. The page used to be an index down the left over five disclosures
+ * stacked under the answer stack; expanding the panel landed on a different
+ * screen rather than a bigger one, so full screen is now the panel made big.
  *
- * What is left is one screen, in two halves:
+ * Only the tab's *address* differs: the pane keeps its own key (`paneUrl`),
+ * the page spells it `?open=`. A tab renders nothing until it is chosen, which
+ * is what keeps the fleet fold and the playbook's editors off a first paint.
  *
- * - **The answer stack** is always on it. Who the agent is and the loop's
- *   controls (the header), the strategy and run in scope (the loop bar), then
- *   the run's vitals, whatever wants attention, the last decision whole, the
- *   realized-PnL chart and the table of what it deployed. Nothing to click.
- * - **Five disclosures** under it — Runs, Detail, Money, Fleet, Playbook —
- *   which open *in place* and render nothing at all while closed. That last
- *   part is what makes one screen affordable rather than merely longer: the
- *   fleet browser pulls the whole fleet and the playbook mounts two markdown
- *   editors, and a page that mounted them eagerly would cost more than the
- *   spine it replaces. Which are open is `?open=`, so a screen is a thing you
- *   can send somebody.
- *
- * Down the left is the **index** (FEAT-120): the answer stack and the five
- * bands, with what this screen already knows about each. It is not the spine
- * come back — a rail entry is the *same button* as the band's own header, so
- * the body never swaps and `?open=` still names a set — it is the half the
- * disclosures could not do, which is telling a reader what is on the screen
- * without scrolling a chart's height to find out.
- *
- * Nothing here navigates to another view of itself. A tick is the one thing
- * that covers the screen, as an overlay `?tick=` opens and closing clears — so
- * the reader comes back to the scroll position they left.
+ * A tick is the one thing that covers the screen, as an overlay `?tick=` opens
+ * and closing clears — so the reader comes back to the tab they left.
  */
 export function AgentRunScreen({
   slug,
   adapter,
   header,
+  variant = "page",
+  section: paneSection = "now",
+  onSection,
 }: {
   slug: string;
   /** Where this screen's four parameters are read and written. */
@@ -95,17 +83,42 @@ export function AgentRunScreen({
    * Handing it in as a node would mean the page resolving the scope a second
    * time, and the two answers drifting the first time the rule changed.
    */
-  header?: (state: { strategy: StrategyDetail | null }) => React.ReactNode;
+  header?: (state: {
+    strategy: StrategyDetail | null;
+    run: AgentRunRow | null;
+    section: PaneSection;
+  }) => React.ReactNode;
+  /**
+   * `"page"` is the whole window, `"pane"` the same screen beside a
+   * conversation. The layout is one; the pane's tick overlay covers the pane
+   * only, and its tab lives in the pane's address rather than `?open=`.
+   */
+  variant?: "page" | "pane";
+  /** The pane's open tab. Ignored on the page, where `?open=` names it. */
+  section?: PaneSection;
+  /**
+   * Move the pane's tab — with a patch to apply in the same write, for a door
+   * that both selects a run and shows the Runs tab. Ignored on the page.
+   */
+  onSection?: (next: PaneSection, patch?: WorkspaceUrlPatch) => void;
 }) {
+  const isPane = variant === "pane";
   const navigate = useNavigate();
 
   const { url, set: setParams } = adapter;
 
-  const setOpenParam = useCallback(
-    (next: string) => setParams({ open: next || null }),
-    [setParams],
+  // One tab at a time on both hosts; only where it is written differs.
+  const section: PaneSection = isPane ? paneSection : pageSection(url.open);
+  const setSection = useCallback(
+    (next: PaneSection, patch?: WorkspaceUrlPatch) => {
+      if (isPane) {
+        onSection?.(next, patch);
+        return;
+      }
+      setParams({ ...patch, open: openForPaneSection(next) || null });
+    },
+    [isPane, onSection, setParams],
   );
-  const { open, toggle } = useSections(url.open, setOpenParam);
 
   // One `["agent", slug]` and one `["agent-runs", slug]` for the whole screen:
   // the header, the loop bar and the bands all want them, and react-query
@@ -223,69 +236,12 @@ export function AgentRunScreen({
   );
 
   /**
-   * The rail's own two moves: back to the answer stack, and open-and-show.
-   *
-   * The scroller is a ref rather than the window because this screen is a
-   * column with its own overflow — `window.scrollTo` would move nothing.
-   *
-   * Opening scrolls in an effect and not in the click, because at click time
-   * the band is still closed and there is nothing to scroll to: the set moves
-   * first, React mounts the body, and *then* the pending id is spent. A rail
-   * click that *closes* a band scrolls nowhere, which is why the effect checks
-   * the set rather than trusting its own request.
-   *
-   * The request is a ref rather than state, which is the guidance read the
-   * right way round: no render depends on it — it is consumed by a side effect
-   * one render later — and holding it in state would be a set in an effect to
-   * clear it again.
-   */
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const pendingScroll = useRef<SectionId | null>(null);
-
-  useEffect(() => {
-    const id = pendingScroll.current;
-    if (!id) return;
-    pendingScroll.current = null;
-    if (!open.includes(id)) return;
-    scrollToSection(bodyRef.current, id);
-  }, [open]);
-
-  // The same action as the band's own header, reached from the index: one rule
-  // for what a click does, so `?open=` never depends on which of the two the
-  // reader used.
-  const selectSection = useCallback(
-    (id: SectionId) => {
-      toggle(id);
-      pendingScroll.current = id;
-    },
-    [toggle],
-  );
-
-  /**
-   * A run named from inside a band — the Playbook's session and dry-run counts.
-   *
-   * The selection a rail row makes, plus two things a door from further down
-   * the page owes the reader. It opens Runs *beside* the band it was clicked
-   * from, because `?open=` is a set and the old link replaced it, closing the
-   * Playbook under the reader's cursor. And it brings Runs on screen, because
-   * the band draws above the Playbook: opened from there, it grows the page
-   * out of sight and the click looks like it did nothing.
-   *
-   * Scrolls now when Runs is already open — `open` will not change, so the
-   * effect above would never spend the request.
+   * A run named from inside a tab — the Playbook's session and dry-run counts:
+   * the selection a rail row makes, with Runs brought forward to show it.
    */
   const showRun = useCallback(
-    (run: string) => {
-      const runsOpen = open.includes("runs");
-      setParams({
-        strategy: sslug,
-        run,
-        open: serializeSections([...open, "runs"]),
-      });
-      if (runsOpen) scrollToSection(bodyRef.current, "runs");
-      else pendingScroll.current = "runs";
-    },
-    [open, setParams, sslug],
+    (run: string) => setSection("runs", { strategy: sslug, run }),
+    [setSection, sslug],
   );
 
   // The page has already guarded this by the time it mounts the screen — the
@@ -314,17 +270,6 @@ export function AgentRunScreen({
     (agent.strategies ?? []).find((s) => s.slug === sslug) ?? null,
   );
 
-  /**
-   * What the rail says about each section, out of what this screen already has.
-   *
-   * Money and Fleet carry nothing on purpose. Both headline a *fold* of the
-   * whole fleet, which is the query their disclosures exist to defer — and the
-   * cheaper numbers lying around (the run rollup, this run's deployments) are a
-   * different quantity from the one the band prints, which is the exact
-   * confusion FEAT-109 was spent settling.
-   */
-  const lastTick = decisions[decisions.length - 1]?.tick ?? 0;
-
   // The window bounds chats and delegations only; loop runs always ride along
   // (CORR-376). So "there may be more" is a count of the kinds that page, and a
   // strategy the playbook says has sessions but whose runs are not in the
@@ -336,21 +281,145 @@ export function AgentRunScreen({
   const runsOutsideWindow =
     (strategy?.sessions?.length ?? 0) > 0 && scopedRuns.length === 0;
 
-  const railFacts = {
+  // Counts only: a tab has the width of its name and a number, no more. Fleet
+  // carries nothing on purpose — it headlines a fold of the whole fleet, the
+  // query the tab exists to defer.
+  const facts: Record<PaneSection, string | null> = {
+    now: alerts.length > 0 ? String(alerts.length) : null,
     runs: runs.length ? `${runs.length}${hasMoreRuns ? "+" : ""}` : null,
-    detail: deployments.length ? `${deployments.length} deployed` : null,
-    money: null,
+    detail: deployments.length ? String(deployments.length) : null,
     fleet: null,
-    playbook: strategy
-      ? `${Object.keys(strategy.config ?? {}).length} settings`
-      : null,
+    playbook: null,
   };
 
-  const isOpen = (id: SectionId) => open.includes(id);
+  const nowBody = sslug ? (
+    <NowView
+      slug={agent.slug}
+      sslug={sslug}
+      sessionNum={sessionNum}
+      alerts={alerts}
+      decisions={decisions}
+      deployments={deployments}
+      perf={perf}
+      journal={journal}
+      pnlSeries={pnlSeries}
+      onOpenTick={(next) => setParams({ tick: next })}
+      onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
+    />
+  ) : null;
+
+  const bandBody = (id: Exclude<PaneSection, "now">): React.ReactNode => {
+    if (!sslug) return null;
+    switch (id) {
+      case "runs":
+        return (
+          <RunsBand
+            slug={agent.slug}
+            runs={runs}
+            selectedRun={selectedRun}
+            strategyFilter={narrow}
+            onStrategyFilter={(next) => setParams({ strategy: next })}
+            onSelectRun={openRun}
+            onClearRun={() => setParams({ run: null })}
+            hasMore={hasMoreRuns}
+            onShowMore={showOlderRuns}
+            onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
+            onOpenTick={(run, tick) =>
+              setParams({ strategy: run.strategy_slug, run: run.run_id, tick })
+            }
+            onShowNow={() => setSection("now")}
+          />
+        );
+      case "detail":
+        return selectedRun && sessionNum > 0 ? (
+          <RunOverview
+            slug={agent.slug}
+            sslug={sslug}
+            sessionNum={sessionNum}
+            serverName={strategyServer}
+            controllerIds={instance ? [instance.agent_id] : undefined}
+            isLiveSession={
+              selectedRun.status === "running" || selectedRun.status === "paused"
+            }
+            onSelectTick={(next) => setParams({ tick: next })}
+          />
+        ) : (
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+            Pick a loop run in Runs to read what it ran.
+          </p>
+        );
+      case "fleet":
+        /* `/bots`' browser is a two-column layout: it gets its own sideways
+           scroller, as it has on that page, rather than letting a narrow
+           window scroll the whole screen sideways. */
+        return (
+          <div className="flex h-full min-h-0 overflow-x-auto">
+            <AgentFleet
+              slug={agent.slug}
+              sslug={sslug}
+              serverName={strategyServer}
+              run={selectedRun}
+            />
+          </div>
+        );
+      case "playbook":
+        /* What the strategy is *told* — its brief, its learnings and its
+           settings — and nothing this screen already answers. */
+        return strategy ? (
+          <PlaybookView
+            slug={agent.slug}
+            sslug={sslug}
+            strategy={strategy}
+            onDeleted={() => setParams({ strategy: null })}
+            onOpenRun={showRun}
+          />
+        ) : (
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+            Loading this strategy's playbook…
+          </p>
+        );
+    }
+  };
+
+  const tickOverlay = url.tick !== null &&
+    sslug &&
+    selectedRun &&
+    selectedRun.kind === "session" && (
+      // Over the screen rather than instead of it — so closing it returns the
+      // reader to the tab and the run they left. In the pane it covers the
+      // pane only: the conversation beside it stays readable.
+      <div
+        className={`${
+          isPane ? "absolute" : "fixed"
+        } inset-0 z-50 flex flex-col bg-[var(--color-bg)]`}
+      >
+        <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
+          <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+            Tick #{url.tick} · session {selectedRun.number}
+          </span>
+          <button
+            type="button"
+            onClick={() => setParams({ tick: null })}
+            aria-label="Close tick"
+            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <SnapshotDetail
+            slug={agent.slug}
+            sslug={sslug}
+            sessionNum={selectedRun.number}
+            tick={url.tick}
+          />
+        </div>
+      </div>
+    );
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col">
-      {header?.({ strategy })}
+    <div className="relative flex h-full min-h-0 w-full flex-col">
+      {header?.({ strategy, run: selectedRun, section })}
 
       <LoopBar
         slug={agent.slug}
@@ -365,246 +434,114 @@ export function AgentRunScreen({
         onSelectTick={(next) => setParams({ tick: next })}
       />
 
-      <div className="flex min-h-0 flex-1">
-        {sslug && (
-          <SectionRail
-            open={open}
-            facts={railFacts}
-            nowFact={
-              alerts.length > 0
-                ? `${alerts.length} alert${alerts.length > 1 ? "s" : ""}`
-                : lastTick > 0
-                  ? `tick #${lastTick}`
-                  : null
-            }
-            nowAlert={alerts.length > 0}
-            onSelect={selectSection}
-            onTop={() =>
-              bodyRef.current?.scrollTo?.({ top: 0, behavior: "smooth" })
-            }
-          />
-        )}
+      {sslug && (
+        <PaneTabs
+          active={section}
+          facts={facts}
+          nowAlert={alerts.length > 0}
+          wide={!isPane}
+          onSelect={(next) => setSection(next)}
+        />
+      )}
 
-        <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto">
-          {!sslug ? (
-            <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-              This agent has no strategies yet, so there is no loop to look at.
-            </p>
-          ) : (
-            <>
-              <div className="p-4">
-                <NowView
-                  slug={agent.slug}
-                  sslug={sslug}
-                  sessionNum={sessionNum}
-                  alerts={alerts}
-                  decisions={decisions}
-                  deployments={deployments}
-                  perf={perf}
-                  journal={journal}
-                  pnlSeries={pnlSeries}
-                  onOpenTick={(next) => setParams({ tick: next })}
-                  onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
-                />
-              </div>
-
-              <div className="border-t border-[var(--color-border)]">
-                <Disclosure
-                  id="runs"
-                  open={isOpen("runs")}
-                  onToggle={toggle}
-                  flush
-                >
-                  <RunsBand
-                    slug={agent.slug}
-                    runs={runs}
-                    selectedRun={selectedRun}
-                    strategyFilter={narrow}
-                    onStrategyFilter={(next) => setParams({ strategy: next })}
-                    onSelectRun={openRun}
-                    onClearRun={() => setParams({ run: null })}
-                    hasMore={hasMoreRuns}
-                    onShowMore={showOlderRuns}
-                    onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
-                  />
-                </Disclosure>
-
-                <Disclosure id="detail" open={isOpen("detail")} onToggle={toggle}>
-                  {selectedRun && sessionNum > 0 ? (
-                    <RunOverview
-                      slug={agent.slug}
-                      sslug={sslug}
-                      sessionNum={sessionNum}
-                      serverName={strategyServer}
-                      controllerIds={instance ? [instance.agent_id] : undefined}
-                      isLiveSession={
-                        selectedRun.status === "running" ||
-                        selectedRun.status === "paused"
-                      }
-                      onSelectTick={(next) => setParams({ tick: next })}
-                    />
-                  ) : (
-                    <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-                      Pick a loop run above to read what it ran.
-                    </p>
-                  )}
-                </Disclosure>
-
-                <Disclosure id="money" open={isOpen("money")} onToggle={toggle}>
-                  {/* Two numbers, named apart and reconciled (FEAT-109). The
-                      headline is the fleet *fold*, which is a different quantity
-                      from the run rollup in the vitals above — shown alone,
-                      either one is a lie by omission. */}
-                  <MoneyView
-                    slug={agent.slug}
-                    sslug={sslug}
-                    strategy={narrow}
-                    strategies={agent.strategies ?? []}
-                    serverName={strategyServer}
-                  />
-                </Disclosure>
-
-                <Disclosure
-                  id="fleet"
-                  open={isOpen("fleet")}
-                  onToggle={toggle}
-                  flush
-                >
-                  {/* `/bots`' browser is a two-column layout: it gets its own
-                      sideways scroller, as it has on that page, rather than
-                      letting a narrow window scroll the whole screen sideways. */}
-                  <div className="flex h-[70vh] min-h-0 overflow-x-auto">
-                    <AgentFleet
-                      slug={agent.slug}
-                      sslug={sslug}
-                      serverName={strategyServer}
-                      run={selectedRun}
-                    />
-                  </div>
-                </Disclosure>
-
-                <Disclosure id="playbook" open={isOpen("playbook")} onToggle={toggle}>
-                  {/* What the strategy is *told* — its brief, its learnings and
-                      its settings — and nothing this screen already answers. The
-                      workbench used to be here and it is a page: its title, its
-                      controls, its pulse, its ledger and its performance panel
-                      each restated something within two inches of themselves,
-                      while `strategy.md` was behind a button in a modal. */}
-                  {strategy ? (
-                    <PlaybookView
-                      slug={agent.slug}
-                      sslug={sslug}
-                      strategy={strategy}
-                      onDeleted={() => setParams({ strategy: null })}
-                      onOpenRun={showRun}
-                    />
-                  ) : (
-                    <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-                      Loading this strategy's playbook…
-                    </p>
-                  )}
-                </Disclosure>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* One tick, over the screen rather than instead of it — so closing it
-          returns the reader to the scroll position and the run they left. */}
-      {url.tick !== null &&
-        sslug &&
-        selectedRun &&
-        selectedRun.kind === "session" && (
-          <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)]">
-            <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
-              <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-                Tick #{url.tick} · session {selectedRun.number}
-              </span>
-              <button
-                type="button"
-                onClick={() => setParams({ tick: null })}
-                aria-label="Close tick"
-                className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <SnapshotDetail
-                slug={agent.slug}
-                sslug={sslug}
-                sessionNum={selectedRun.number}
-                tick={url.tick}
-              />
-            </div>
+      <div
+        key={section}
+        data-pane-section={section}
+        className={`min-h-0 flex-1 ${
+          // The run rail and the fleet browser bring their own scrollers;
+          // everything else scrolls here.
+          section === "fleet" || section === "runs"
+            ? "flex flex-col overflow-hidden"
+            : "overflow-y-auto"
+        }`}
+      >
+        {!sslug ? (
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
+            This agent has no strategies yet, so there is no loop to look at.
+          </p>
+        ) : section === "now" ? (
+          <div className={isPane ? "p-4" : "mx-auto w-full max-w-6xl p-6"}>
+            {nowBody}
+          </div>
+        ) : section === "runs" || section === "fleet" ? (
+          bandBody(section)
+        ) : (
+          <div className={isPane ? "p-4" : "mx-auto w-full max-w-6xl p-6"}>
+            {bandBody(section)}
           </div>
         )}
+      </div>
+
+      {tickOverlay}
     </div>
   );
 }
 
-/** Bring one band's top to the top of the screen's own scroller. */
-function scrollToSection(body: HTMLElement | null, id: SectionId): void {
-  body
-    ?.querySelector(`[data-section-body="${id}"]`)
-    // Guarded: jsdom has no layout, so it implements no `scrollIntoView`,
-    // and a rail click in a test must not throw for want of a viewport.
-    ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
-}
-
 /**
- * One band of evidence, which renders nothing at all until it is opened.
- *
- * The lazy mount is the whole argument for the disclosure over a section that
- * is simply on the page: `AgentFleet` pulls the entire fleet and
- * `PlaybookView` mounts two markdown editors, so a closed one has to cost
- * what a closed spine entry cost — which is nothing.
+ * The screen's sections, across the top of it — and the body swaps on a click,
+ * because one section at a time is what lets each of them take the room.
  */
-function Disclosure({
-  id,
-  open,
-  onToggle,
-  flush = false,
-  children,
+function PaneTabs({
+  active,
+  facts,
+  nowAlert,
+  wide = false,
+  onSelect,
 }: {
-  id: SectionId;
-  open: boolean;
-  onToggle: (id: SectionId) => void;
-  /** A body that lays itself out edge to edge and brings its own padding. */
-  flush?: boolean;
-  children: React.ReactNode;
+  active: PaneSection;
+  facts: Partial<Record<PaneSection, string | null>>;
+  nowAlert: boolean;
+  /** The page's strip: the same tabs with the room a window has. */
+  wide?: boolean;
+  onSelect: (id: PaneSection) => void;
 }) {
-  const { label, hint, Icon } = SECTION_META[id];
   return (
-    <section
-      id={`section-${id}`}
-      data-section-body={id}
-      className="border-b border-[var(--color-border)]"
+    <nav
+      aria-label="Sections"
+      role="tablist"
+      data-pane-tabs
+      className={`flex shrink-0 items-stretch overflow-x-auto border-b border-[var(--color-border)] [scrollbar-width:none] ${
+        wide ? "gap-2 px-4" : "px-2"
+      }`}
     >
-      <h2>
-        <button
-          type="button"
-          data-section={id}
-          aria-expanded={open}
-          onClick={() => onToggle(id)}
-          className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-        >
-          <ChevronRight
-            className={`h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] transition-transform ${
-              open ? "rotate-90" : ""
+      {PANE_SECTIONS.map((id) => {
+        const { label, Icon } =
+          id === "now" ? { label: "Now", Icon: Activity } : SECTION_META[id];
+        const fact = facts[id];
+        const on = id === active;
+        return (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            data-pane-tab={id}
+            onClick={() => onSelect(id)}
+            title={id === "now" ? "The run: vitals, last decision, what it deployed" : SECTION_META[id].hint}
+            className={`-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-2 font-medium transition-colors ${
+              wide ? "py-2.5 text-sm" : "py-2 text-xs"
+            } ${
+              on
+                ? "border-[var(--color-primary)] text-[var(--color-text)]"
+                : "border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
             }`}
-          />
-          <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
-          <span className="text-xs font-bold uppercase tracking-widest">
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0" />
             {label}
-          </span>
-          <span className="min-w-0 truncate text-[11px] text-[var(--color-text-muted)]">
-            {hint}
-          </span>
-        </button>
-      </h2>
-      {open && <div className={flush ? "" : "px-4 pb-4"}>{children}</div>}
-    </section>
+            {fact && (
+              <span
+                className={`rounded-full px-1.5 py-px font-mono text-[10px] ${
+                  id === "now" && nowAlert
+                    ? "bg-amber-500/15 text-amber-500"
+                    : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                }`}
+              >
+                {fact}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </nav>
   );
 }

@@ -1,15 +1,14 @@
 /**
- * One screen, and the two promises that make it one (FEAT-119).
+ * One screen in two hosts, and the two promises that make it one (FEAT-119).
  *
  * The first is that the reader gets the answer with no click: the vitals, the
- * last decision, the chart and the deployed table are on `/agents/:slug`, and
- * nothing on the page is a link to another view of itself.
+ * last decision, the chart and the deployed table are the Now tab, the one a
+ * bare `/agents/:slug` opens on.
  *
- * The second is that the evidence costs nothing until it is asked for. That is
- * the whole difference between this screen and the longer scroll it could have
- * been: `AgentFleet` pulls the entire fleet and `PlaybookView` mounts two
- * markdown editors, so a closed disclosure has to mount *nothing* — which is
- * what the stubs below can prove and a rendered page cannot.
+ * The second is that the evidence costs nothing until it is asked for:
+ * `AgentFleet` pulls the entire fleet and `PlaybookView` mounts two markdown
+ * editors, so a tab that is not showing has to mount *nothing* — which is what
+ * the stubs below can prove and a rendered page cannot.
  *
  * The bodies are stubbed. Each has its own tests and each fetches its own
  * world; what is under test here is what is on screen, what is mounted, and
@@ -27,7 +26,8 @@ import { MemoryRouter, useLocation, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentDetail, AgentRunRow, StrategyDetail } from "@/lib/api";
-import { AGENT_SECTIONS_KEY } from "@/lib/sessionState";
+
+import type { WorkspaceUrlPatch } from "./workspaceUrl";
 
 const getAgent = vi.fn();
 const getAgentRuns = vi.fn();
@@ -85,16 +85,6 @@ vi.mock("@/components/agent/workspace/NowView", () => ({
         )}
       </div>
     );
-  },
-}));
-/** What the money stub was last handed (CORR-397). */
-let moneyProps: { sslug: string | null; strategy: string | null } | null = null;
-vi.mock("@/components/agent/workspace/MoneyView", () => ({
-  MoneyView: (
-    props: NonNullable<typeof moneyProps> & { serverName?: string },
-  ) => {
-    moneyProps = props;
-    return stub("money")(props);
   },
 }));
 vi.mock("@/components/agent/workspace/AgentFleet", () => ({
@@ -250,10 +240,8 @@ const bodies = () =>
   Array.from(container.querySelectorAll("[data-body]")).map((el) =>
     el.getAttribute("data-body"),
   );
-const section = (id: string) =>
-  container.querySelector<HTMLButtonElement>(`[data-section="${id}"]`)!;
-const rail = (id: string) =>
-  container.querySelector<HTMLButtonElement>(`[data-rail="${id}"]`)!;
+const tab = (id: string) =>
+  container.querySelector<HTMLButtonElement>(`[data-pane-tab="${id}"]`)!;
 const search = () => at.split("?")[1] ?? "";
 
 async function click(el: HTMLElement) {
@@ -269,7 +257,6 @@ beforeEach(() => {
   mounted.length = 0;
   delegationTask = null;
   railProps = null;
-  moneyProps = null;
   localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -292,71 +279,86 @@ afterEach(() => {
 });
 
 describe("what a bare address opens on", () => {
-  it("is the answer stack, with no click and no spine", async () => {
+  it("is the Now tab, with no click and no spine", async () => {
     await render("/");
     expect(bodies()).toEqual(["answers"]);
+    expect(tab("now").getAttribute("aria-selected")).toBe("true");
     // The spine is gone: nothing on this page is a door to another view of it.
     expect(container.querySelector("[data-spine-entry]")).toBeNull();
   });
 
-  it("offers all five disclosures, and mounts none of them", async () => {
+  it("offers the side panel's tabs, and mounts none of their bodies", async () => {
     await render("/");
-    for (const id of ["runs", "detail", "money", "fleet", "playbook"]) {
-      expect(section(id).getAttribute("aria-expanded")).toBe("false");
-    }
-    // The whole argument for a disclosure over a band: the fleet browser's
-    // query does not exist until the reader asks for it.
+    const tabs = [...container.querySelectorAll("[data-pane-tab]")].map((el) =>
+      el.getAttribute("data-pane-tab"),
+    );
+    // Money is gone: it charted the fold Fleet already charts.
+    expect(tabs).toEqual(["now", "runs", "detail", "fleet", "playbook"]);
     expect(mounted).not.toContain("fleet");
     expect(mounted).not.toContain("playbook");
   });
+
+  it("is the panel's layout — no index down the side, no disclosures", async () => {
+    await render("/");
+    expect(container.querySelector("[data-section-rail]")).toBeNull();
+    expect(container.querySelector("[data-section]")).toBeNull();
+  });
 });
 
-describe("the disclosures", () => {
-  it("open in place — the answer stack stays on screen", async () => {
+describe("the page's tabs", () => {
+  it("swap the body — one section at a time, like the panel", async () => {
     await render("/");
-    await click(section("money"));
-    expect(bodies()).toEqual(["answers", "money"]);
+    await click(tab("fleet"));
+    expect(bodies()).toEqual(["fleet"]);
+    expect(tab("fleet").getAttribute("aria-selected")).toBe("true");
   });
 
-  it("write which are open, and reading down the page replaces", async () => {
+  it("write the tab to `?open=`, and Now clears it", async () => {
     await render("/");
-    await click(section("money"));
-    expect(search()).toBe("open=money");
-
-    await click(section("fleet"));
-    expect(new URLSearchParams(search()).get("open")).toBe("money.fleet");
-  });
-
-  it("come off the URL entirely when the last one shuts", async () => {
-    await render("/?open=money");
-    await click(section("money"));
+    await click(tab("fleet"));
+    expect(search()).toBe("open=fleet");
+    await click(tab("playbook"));
+    expect(search()).toBe("open=playbook");
+    await click(tab("now"));
     expect(search()).toBe("");
     expect(bodies()).toEqual(["answers"]);
   });
 
-  it("open on arrival from `?open=`, in the order the screen draws them", async () => {
-    await render("/?open=runs.money");
-    expect(section("runs").getAttribute("aria-expanded")).toBe("true");
-    expect(section("money").getAttribute("aria-expanded")).toBe("true");
-    expect(section("fleet").getAttribute("aria-expanded")).toBe("false");
-    expect(bodies()).toEqual(["answers", "rail", "money"]);
+  it("open on arrival from `?open=`", async () => {
+    await render("/?open=runs");
+    expect(tab("runs").getAttribute("aria-selected")).toBe("true");
+    expect(bodies()).toContain("rail");
   });
 
-  it("come back to what this browser last had open, with no `?open=`", async () => {
-    localStorage.setItem(AGENT_SECTIONS_KEY, JSON.stringify(["fleet"]));
-    await render("/");
-    expect(section("fleet").getAttribute("aria-expanded")).toBe("true");
+  it("land a pre-tabs `?open=` set on its first section", async () => {
+    await render("/?open=playbook.runs");
+    expect(tab("runs").getAttribute("aria-selected")).toBe("true");
   });
 
-  it("let the URL win over what the browser recorded", async () => {
-    localStorage.setItem(AGENT_SECTIONS_KEY, JSON.stringify(["fleet"]));
+  it("land a retired `?open=money` on Now", async () => {
     await render("/?open=money");
-    expect(section("money").getAttribute("aria-expanded")).toBe("true");
-    expect(section("fleet").getAttribute("aria-expanded")).toBe("false");
+    expect(bodies()).toEqual(["answers"]);
+  });
+
+  it("count what the screen already knows, and buy nothing to say it", async () => {
+    await render("/");
+    expect(tab("runs").textContent).toContain("1");
+    // Fleet stays blank on purpose: it headlines a fold of the whole fleet,
+    // which is the query the tab exists to defer.
+    expect(tab("fleet").textContent).toBe("Fleet");
+    expect(mounted).not.toContain("fleet");
+  });
+
+  it("are not drawn when the agent has no strategy", async () => {
+    getAgent.mockResolvedValue({ ...AGENT, strategies: [] });
+    getAgentRuns.mockResolvedValue([]);
+    await render("/");
+    expect(container.querySelector("[data-pane-tabs]")).toBeNull();
+    expect(container.textContent).toContain("no strategies yet");
   });
 });
 
-describe("which server Money and Fleet fold (ARCH-382)", () => {
+describe("which server Fleet folds (ARCH-382)", () => {
   const withServers = (pin: string, own?: string) =>
     ({
       ...AGENT,
@@ -367,7 +369,7 @@ describe("which server Money and Fleet fold (ARCH-382)", () => {
       ],
     }) as unknown as AgentDetail;
   const servers = () =>
-    ["money", "fleet"].map((name) =>
+    ["fleet"].map((name) =>
       container
         .querySelector(`[data-body="${name}"]`)
         ?.getAttribute("data-server"),
@@ -377,42 +379,42 @@ describe("which server Money and Fleet fold (ARCH-382)", () => {
     getAgent.mockResolvedValue(withServers("pin", "own"));
     // The detail never arrives: the summary in the agent query is the answer.
     getStrategy.mockReturnValue(new Promise(() => {}));
-    await render("/?strategy=brl_mm&open=money.fleet");
-    expect(servers()).toEqual(["own", "own"]);
+    await render("/?strategy=brl_mm&open=fleet");
+    expect(servers()).toEqual(["own"]);
   });
 
   it("falls back to the agent's pin when the strategy declares none", async () => {
     getAgent.mockResolvedValue(withServers("pin", ""));
-    await render("/?strategy=brl_mm&open=money.fleet");
-    expect(servers()).toEqual(["pin", "pin"]);
+    await render("/?strategy=brl_mm&open=fleet");
+    expect(servers()).toEqual(["pin"]);
 
     getAgent.mockResolvedValue(withServers("pin"));
     act(() => root.unmount());
     root = createRoot(container);
-    await render("/?strategy=brl_mm&open=money.fleet");
-    expect(servers()).toEqual(["pin", "pin"]);
+    await render("/?strategy=brl_mm&open=fleet");
+    expect(servers()).toEqual(["pin"]);
   });
 });
 
 describe("the tick", () => {
   it("opens over the screen rather than instead of it", async () => {
     await render("/?tick=40");
-    // The stack is still mounted underneath, which is what makes closing the
-    // overlay a return to the same scroll position rather than a re-render.
+    // The tab is still mounted underneath, which is what makes closing the
+    // overlay a return to the same place rather than a re-render.
     expect(bodies()).toEqual(["answers", "tick"]);
   });
 
   it("closes back to the screen and clears `?tick=`", async () => {
-    await render("/?open=money&tick=40");
+    await render("/?open=fleet&tick=40");
     await click(
       container.querySelector<HTMLButtonElement>('[aria-label="Close tick"]')!,
     );
-    expect(bodies()).toEqual(["answers", "money"]);
-    expect(search()).toBe("open=money");
+    expect(bodies()).toEqual(["fleet"]);
+    expect(search()).toBe("open=fleet");
   });
 });
 
-describe("a conversation in the Runs disclosure", () => {
+describe("a conversation in the Runs tab", () => {
   it("says what that conversation deployed, not just where to read it", async () => {
     // The gap FEAT-118 opened: the row said "read it in the chat" and stopped,
     // which left the one question this page exists for unanswered for a quarter
@@ -456,7 +458,7 @@ describe("a conversation in the Runs disclosure", () => {
   });
 });
 
-describe("a delegation in the Runs disclosure (ARCH-398)", () => {
+describe("a delegation in the Runs tab (ARCH-398)", () => {
   const delegation = (status: string) =>
     ({
       id: "abc123",
@@ -498,7 +500,7 @@ describe("a delegation in the Runs disclosure (ARCH-398)", () => {
 
 describe("the loop bar", () => {
   it("moves the scope and drops the run and the tick with it", async () => {
-    await render("/?open=money&strategy=brl_mm&run=s:3&tick=40");
+    await render("/?open=fleet&strategy=brl_mm&run=s:3&tick=40");
 
     const picker = container.querySelector<HTMLSelectElement>("select")!;
     await act(async () => {
@@ -512,8 +514,8 @@ describe("the loop bar", () => {
     // A run of the loop you just left is not a run of the one you picked.
     expect(params.get("run")).toBeNull();
     expect(params.get("tick")).toBeNull();
-    // …and what you had open is still open.
-    expect(params.get("open")).toBe("money");
+    // …and the tab you were on is still showing.
+    expect(params.get("open")).toBe("fleet");
   });
 });
 
@@ -528,109 +530,50 @@ describe("the header slot", () => {
   });
 });
 
-describe("the index down the side (FEAT-120)", () => {
-  it("names the answer stack and all five bands, before any scrolling", async () => {
-    // The gap it fills: the bands sit under a chart and a decision and a
-    // ledger, so what is *on* this screen cost a scroll to find out.
-    await render("/");
-    expect(rail("now")).not.toBeNull();
-    for (const id of ["runs", "detail", "money", "fleet", "playbook"]) {
-      expect(rail(id).getAttribute("aria-expanded")).toBe("false");
-    }
+describe("a loop session in the Runs tab", () => {
+  it("lists its ticks there rather than pointing somewhere else", async () => {
+    getSessionJournal.mockResolvedValue({
+      content: "## Ticks\n- tick#1 | 2026-09-18 14:00 | actions=0 | Held\n",
+    });
+    await render("/?open=runs&run=s:3");
+    expect(tab("runs").getAttribute("aria-selected")).toBe("true");
+    const row = container.querySelector<HTMLButtonElement>('[data-run-tick="1"]')!;
+    expect(row.textContent).toContain("Held");
+
+    // A tick opens over the tab, on that run.
+    await click(row);
+    const params = new URLSearchParams(search());
+    expect(params.get("tick")).toBe("1");
+    expect(params.get("run")).toBe("s:3");
+    expect(params.get("open")).toBe("runs");
+    expect(bodies()).toContain("tick");
   });
 
-  it("carries what the screen already knows, and buys nothing to say it", async () => {
-    await render("/");
-    expect(rail("runs").textContent).toContain("1");
-    // Money and Fleet stay blank on purpose: both headline a fold of the whole
-    // fleet, which is the query their disclosure exists to defer, and the
-    // cheaper numbers to hand are a different quantity (FEAT-109).
-    expect(rail("money").textContent).toBe("Money");
-    expect(rail("fleet").textContent).toBe("Fleet");
-    expect(mounted).not.toContain("fleet");
-  });
-
-  it("is the same button as the band's own header", async () => {
-    await render("/");
-    await click(rail("money"));
-    expect(bodies()).toEqual(["answers", "money"]);
-    expect(search()).toBe("open=money");
-    expect(section("money").getAttribute("aria-expanded")).toBe("true");
-
-    // Including on the way back: one action, two places to reach it, so the
-    // URL never depends on which of the two the reader used.
-    await click(rail("money"));
-    expect(bodies()).toEqual(["answers"]);
-    expect(search()).toBe("");
-  });
-
-  it("keeps `?open=` a set — opening a second band does not close the first", async () => {
-    await render("/?open=money");
-    await click(rail("playbook"));
-    expect(new URLSearchParams(search()).get("open")).toBe("money.playbook");
-    expect(bodies()).toEqual(["answers", "money", "playbook"]);
-  });
-
-  it("marks what is open, so the rail says where the reader is", async () => {
-    await render("/?open=fleet");
-    expect(rail("fleet").getAttribute("aria-expanded")).toBe("true");
-    expect(rail("runs").getAttribute("aria-expanded")).toBe("false");
-    // The band it points at is addressable, which is what the scroll uses.
-    expect(rail("fleet").getAttribute("aria-controls")).toBe("section-fleet");
-    expect(container.querySelector("#section-fleet")).not.toBeNull();
-  });
-
-  it("has nothing to index when the agent has no strategy", async () => {
-    getAgent.mockResolvedValue({ ...AGENT, strategies: [] });
-    getAgentRuns.mockResolvedValue([]);
-    await render("/");
-    expect(container.querySelector("[data-section-rail]")).toBeNull();
-    expect(container.textContent).toContain("no strategies yet");
+  it("stays on Runs when a loop run is picked from the rail", async () => {
+    await render("/?open=runs");
+    await act(async () => {
+      (railProps as unknown as { onSelectRun: (r: AgentRunRow) => void }).onSelectRun(RUN);
+    });
+    await settle();
+    const params = new URLSearchParams(search());
+    expect(params.get("run")).toBe("s:3");
+    expect(params.get("open")).toBe("runs");
   });
 });
 
 describe("a count in the Playbook that names a run", () => {
-  // jsdom has no layout and no `scrollIntoView`, so one is lent for these tests
-  // alone: the scroll is the half of this move a reader would miss without it.
-  let scrolled: Element[];
-  beforeEach(() => {
-    scrolled = [];
-    Element.prototype.scrollIntoView = function (this: Element) {
-      scrolled.push(this);
-    };
-  });
-  afterEach(() => {
-    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
-  });
-
   const count = () =>
     container.querySelector<HTMLButtonElement>("[data-open-run]")!;
-  const scrolledTo = () =>
-    scrolled.map((el) => el.getAttribute("data-section-body"));
 
-  it("opens Runs beside the Playbook, on that run of this strategy", async () => {
+  it("moves to Runs, on that run of this strategy, in one write", async () => {
     await render("/?open=playbook");
     await click(count());
 
     const params = new URLSearchParams(search());
-    // Beside, not instead: the link this replaced wrote `?open=runs` and shut
-    // the Playbook under the reader's cursor.
-    expect(params.get("open")).toBe("runs.playbook");
+    expect(params.get("open")).toBe("runs");
     expect(params.get("run")).toBe("s:3");
     expect(params.get("strategy")).toBe("brl_mm");
-    expect(bodies()).toEqual(["answers", "rail", "playbook"]);
-  });
-
-  it("brings Runs on screen, whether or not it was already open", async () => {
-    await render("/?open=playbook");
-    await click(count());
-    expect(scrolledTo()).toEqual(["runs"]);
-
-    // Runs is open now, so `open` does not move on the second click — the case
-    // a scroll keyed on `open` alone would silently skip.
-    scrolled = [];
-    await click(count());
-    expect(scrolledTo()).toEqual(["runs"]);
+    expect(bodies()).toContain("rail");
   });
 });
 
@@ -731,7 +674,6 @@ describe("a strategy whose runs are behind newer chats (CORR-376)", () => {
 
     expect(container.textContent).not.toContain("This strategy has not run yet.");
     expect(container.textContent).not.toContain("This agent has no runs yet.");
-    expect(container.querySelector("[data-now-older-runs]")).not.toBeNull();
 
     await click(container.querySelector<HTMLButtonElement>("[data-show-older-runs]")!);
     expect(getAgentRuns).toHaveBeenCalledWith("brigado", 200);
@@ -767,14 +709,13 @@ describe("widening the Runs window (CORR-378)", () => {
       started_at: 1_000 + i,
     })) as AgentRunRow[];
 
-  it("keeps the run and the answer stack on screen while the wider page loads", async () => {
+  it("keeps the run selected while the wider page loads", async () => {
     getAgentRuns.mockResolvedValue([RUN, ...chats(100)]);
-    await render("/?open=runs.detail&run=s:3");
+    await render("/?open=runs&run=s:3");
 
     expect(railProps!.hasMore).toBe(true);
     const before = railProps!.selectedKey;
     expect(before).toBe("brl_mm:s:3");
-    expect(bodies()).toContain("detail");
 
     let resolveWide!: (rows: AgentRunRow[]) => void;
     getAgentRuns.mockImplementation(
@@ -791,8 +732,7 @@ describe("widening the Runs window (CORR-378)", () => {
     await settle();
 
     expect(getAgentRuns).toHaveBeenLastCalledWith("brigado", 200);
-    expect(bodies()).toContain("detail");
-    expect(container.textContent).not.toContain("Pick a loop run above");
+    expect(bodies()).toContain("rail");
     expect(container.textContent).not.toContain("This agent has no runs yet.");
     expect(railProps!.selectedKey).toBe(before);
     expect(railProps!.runs).toHaveLength(101);
@@ -809,27 +749,7 @@ describe("widening the Runs window (CORR-378)", () => {
   });
 });
 
-describe("what the narrowing bands are handed (CORR-397)", () => {
-  it("narrows the money fold to nothing for a slug the agent does not own", async () => {
-    await render("/?open=money&strategy=ghost");
-    // The loop bar resolved a real strategy; the fold must not narrow on the
-    // ghost, or it prints a $0.00 rollup for a scope that does not exist.
-    expect(moneyProps?.sslug).toBe("brl_mm");
-    expect(moneyProps?.strategy).toBeNull();
-  });
-
-  it("narrows the money fold to a strategy the agent owns", async () => {
-    await render("/?open=money&strategy=sol_lp");
-    expect(moneyProps?.strategy).toBe("sol_lp");
-    expect(moneyProps?.sslug).toBe("sol_lp");
-  });
-
-  it("keeps a bare address agent-wide", async () => {
-    await render("/?open=money");
-    expect(moneyProps?.strategy).toBeNull();
-    expect(moneyProps?.sslug).toBe("brl_mm");
-  });
-
+describe("what the Runs rail is handed (CORR-397)", () => {
   it("does not filter the Runs rail on a slug the agent does not own", async () => {
     await render("/?open=runs&strategy=ghost");
     expect(mounted).toContain("rail");
@@ -965,5 +885,76 @@ describe("the strategy detail poll (PERF-374)", () => {
 
     await elapse(20_000);
     expect(getStrategy).toHaveBeenCalledTimes(afterStop);
+  });
+});
+
+describe("the side panel's variant", () => {
+  /** The pane: one section at a time, its tab held by the host. */
+  function PaneHost({
+    initial,
+    onMove,
+  }: {
+    initial: string;
+    onMove: (section: string, patch?: WorkspaceUrlPatch) => void;
+  }) {
+    const [params, setParams] = useSearchParams();
+    const adapter = useWorkspaceUrl(params, setParams);
+    return (
+      <AgentRunScreen
+        slug="brigado"
+        adapter={adapter}
+        variant="pane"
+        section={initial as "now"}
+        onSection={onMove}
+      />
+    );
+  }
+
+  async function renderPane(
+    initial: string,
+    onMove: (section: string, patch?: WorkspaceUrlPatch) => void = () => {},
+  ) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/"]}>
+          <QueryClientProvider client={client}>
+            <PaneHost initial={initial} onMove={onMove} />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await settle();
+  }
+
+  it("shows Now and nothing else", async () => {
+    await renderPane("now");
+    expect(bodies()).toEqual(["answers"]);
+    expect(container.querySelector("[data-section-rail]")).toBeNull();
+    expect(container.querySelector("[data-section]")).toBeNull();
+    expect(tab("now").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("mounts only the open tab's body", async () => {
+    await renderPane("detail");
+    expect(bodies()).toEqual(["detail"]);
+    expect(mounted).not.toContain("fleet");
+    expect(mounted).not.toContain("playbook");
+  });
+
+  it("hands a tab click to the host", async () => {
+    const onMove = vi.fn();
+    await renderPane("now", onMove);
+    await click(tab("fleet"));
+    expect(onMove.mock.calls[0][0]).toBe("fleet");
+  });
+
+  it("sends a run named from the Playbook to the Runs tab, in one move", async () => {
+    const onMove = vi.fn();
+    await renderPane("playbook", onMove);
+    await click(container.querySelector<HTMLButtonElement>("[data-open-run]")!);
+    expect(onMove).toHaveBeenCalledWith("runs", { strategy: "brl_mm", run: "s:3" });
   });
 });

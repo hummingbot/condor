@@ -745,8 +745,8 @@ export function AgentChatTab() {
           {pane?.kind === "strategy" && (
             <StrategySheet
               key={`${pane.agentSlug}/${pane.strategySlug}`}
-              slug={pane.agentSlug}
-              sslug={pane.strategySlug}
+              pane={pane}
+              onPane={openPane}
               onClose={() =>
                 openPane({
                   kind: "agent",

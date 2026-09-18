@@ -4,6 +4,7 @@ import {
   Brain,
   CircleDot,
   MessageSquareText,
+  PanelRight,
   Server,
   Trash2,
   Wrench,
@@ -195,8 +196,17 @@ export function WorkspaceHeader({
   isRunning,
   onAskAgent,
   onDelete,
+  backHref = "/",
+  sidePanelHref,
 }: {
   agent: AgentDetail;
+  /**
+   * Where the back arrow goes — the conversation this page was expanded from,
+   * with its side panel back on the section being read here, when there is one.
+   */
+  backHref?: string;
+  /** The conversation with this loop in its side panel: the collapse door. */
+  sidePanelHref?: string;
   /** The strategy in scope, once loaded — what the loop controls act on. */
   strategy: StrategyDetail | null;
   isRunning: boolean;
@@ -211,9 +221,9 @@ export function WorkspaceHeader({
             a whole row on. A link and not a `navigate`, so it can be opened in
             a tab like every other address in here. */}
         <Link
-          to="/"
+          to={backHref}
           className="flex items-center gap-1 transition-colors hover:text-[var(--color-text)]"
-          title="Back to your agents"
+          title={backHref === "/" ? "Back to your agents" : "Back to the chat"}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
         </Link>
@@ -254,6 +264,20 @@ export function WorkspaceHeader({
             defaultContext={effectiveTradingContext(strategy)}
             agentConfig={strategy.config}
           />
+        )}
+        {/* The page's collapse: the same loop, run and section, back in the
+            side panel beside the conversation — the mirror of the panel's own
+            full-screen door. */}
+        {sidePanelHref && (
+          <Link
+            to={sidePanelHref}
+            data-side-panel-link
+            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            title="Show this beside the chat, in the side panel"
+          >
+            <PanelRight className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Side panel</span>
+          </Link>
         )}
         {/* Labelled "Open chat", not "Chat": it lands in the workspace at `/`,
             which is a different surface, and it continues the live conversation

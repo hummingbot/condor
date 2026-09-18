@@ -14,6 +14,7 @@ import {
   AGENT_PARAM,
   TAB_PARAM,
   paneHandoffDropsPanel,
+  paneReturnHref,
   readPane,
   writePane,
   type PaneView,
@@ -233,5 +234,73 @@ describe("whether a hand-off drops the agent panel (CORR-395)", () => {
     expect(drops({ kind: "agent" }, { kind: "agent", slug: "kraken" })).toBe(true);
     // An Execution row's agent is open; a bare agent pane means the conversation's.
     expect(drops({ kind: "agent", slug: "kraken" }, { kind: "agent" })).toBe(true);
+  });
+});
+
+describe("the strategy pane's section, run and tick", () => {
+  const q = (s: string) => new URLSearchParams(s);
+
+  it("round-trips through the URL", () => {
+    const next = writePane(q("?conversation=c1"), {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+      section: "fleet",
+      run: "s:3",
+      tick: 40,
+    });
+    expect(next.get("conversation")).toBe("c1");
+    expect(readPane(next, {})).toEqual({
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+      section: "fleet",
+      run: "s:3",
+      tick: 40,
+    });
+  });
+
+  it("keeps the tab on the same loop and drops it for another", () => {
+    const here = q("?panel=strategy&loop=brigado/brl_mm&sec=fleet");
+    const same = writePane(here, {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+    });
+    expect(same.get("sec")).toBe("fleet");
+    const other = writePane(here, {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "usdt_mm",
+    });
+    expect(other.get("sec")).toBeNull();
+  });
+
+  it("clears its keys on the way out of the strategy pane", () => {
+    const next = writePane(
+      q("?panel=strategy&loop=brigado/brl_mm&sec=runs&run=s:3&tick=4"),
+      { kind: "agent" },
+    );
+    expect(next.get("sec")).toBeNull();
+    expect(next.get("run")).toBeNull();
+    expect(next.get("tick")).toBeNull();
+  });
+
+  it("builds the page's way back into the conversation it came from", () => {
+    expect(
+      paneReturnHref("/?conversation=c1&panel=agent&tab=brain", {
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        section: "playbook",
+        run: "s:1",
+      }),
+    ).toBe("/?conversation=c1&panel=strategy&loop=brigado%2Fbrl_mm&sec=playbook&run=s%3A1");
+    expect(
+      paneReturnHref(undefined, {
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        section: "now",
+      }),
+    ).toBe("/?panel=strategy&loop=brigado%2Fbrl_mm&sec=now");
   });
 });

@@ -23,7 +23,9 @@ import {
   useWorkspaceUrl,
   workspaceHref,
 } from "@/components/agent/workspace/workspaceUrl";
-import { writePane } from "@/components/chat/paneUrl";
+import { type PaneSection } from "@/components/agent/workspace/sections";
+import { paneReturnHref, writePane } from "@/components/chat/paneUrl";
+import type { PaneReturnState } from "@/components/chat/StrategySheet";
 import { api } from "@/lib/api";
 import { agentQuery, agentsQuery, hasRunningLoop } from "@/lib/queryClient";
 
@@ -52,13 +54,24 @@ import { agentQuery, agentsQuery, hasRunningLoop } from "@/lib/queryClient";
 export function AgentWorkspace() {
   const { slug = "" } = useParams<{ slug: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnState = location.state as Partial<PaneReturnState> | null;
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // This route's own search string is the whole of the workspace's grammar.
-  const adapter = useWorkspaceUrl(searchParams, setSearchParams);
+  // Every move on this screen carries the way back along with it: a new history
+  // entry has no `state` of its own, so a run picked here would otherwise
+  // forget which conversation the page was expanded from.
+  const locationState = location.state;
+  const setParamsKeepingReturn = useCallback(
+    (next: URLSearchParams, options?: { replace?: boolean }) =>
+      setSearchParams(next, { ...options, state: locationState }),
+    [setSearchParams, locationState],
+  );
+  const adapter = useWorkspaceUrl(searchParams, setParamsKeepingReturn);
 
   // The header's, and the two guards below — one poll shared with the body (gate: `agentQuery`).
   const { data: agent, isLoading, error } = useQuery(agentQuery(slug));
@@ -155,6 +168,24 @@ export function AgentWorkspace() {
 
   const isRunning = hasRunningLoop(agent);
 
+  /**
+   * The conversation with this loop in its side panel, on the tab the reader
+   * is on here — the page and the panel are one layout, so a tab carries.
+   */
+  const paneHref = (
+    state: Partial<PaneReturnState> | null,
+    sslug: string,
+    runId: string | undefined,
+    section: PaneSection,
+  ) => {
+    return paneReturnHref(state?.returnTo, {
+      agentSlug: slug,
+      strategySlug: sslug,
+      section,
+      run: runId ?? null,
+    });
+  };
+
   return (
     <>
       <AgentRunScreen
@@ -163,10 +194,20 @@ export function AgentWorkspace() {
         /* The loop controls in this header act on the strategy the body
            resolved from the URL, so the body hands it back rather than the
            page picking a scope of its own for the two to disagree about. */
-        header={({ strategy }) => (
+        header={({ strategy, run, section }) => (
           <WorkspaceHeader
             agent={agent}
             strategy={strategy}
+            backHref={
+              returnState?.returnTo && strategy
+                ? paneHref(returnState, strategy.slug, run?.run_id, section)
+                : returnState?.returnTo || "/"
+            }
+            sidePanelHref={
+              strategy
+                ? paneHref(returnState, strategy.slug, run?.run_id, section)
+                : undefined
+            }
             isRunning={isRunning}
             onAskAgent={() => askAgent()}
             onDelete={() => setShowDeleteConfirm(true)}
