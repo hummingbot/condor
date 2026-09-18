@@ -1,4 +1,4 @@
-import { AlertTriangle, FileText } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 
 import { closeSummary } from "@/components/agent/session/closeTypes";
 import type { AgentPerformance } from "@/lib/api";
@@ -10,36 +10,25 @@ import { formatCompactUsd, formatCurrencyPnl, pnlTextClass } from "@/lib/formatt
 // bots has no rows to derive anything from — its executors live inside the bot
 // instance's own database — so deriving the strip from rows made a session that
 // traded $1.2k and lost $1.46 render as one that did nothing at all.
+//
+// A bare row inside the Now card (ARCH-426): the card draws the border and
+// holds the Session report door in its header. The run's status and tick count
+// are not repeated here — the loop bar and the tick spine above already say them.
 
 function Kpi({ label, value, sub, className = "" }: { label: string; value: string; sub?: string; className?: string }) {
   return (
-    <div>
+    // A long sub-label (a close breakdown like `position hold ×454, early stop
+    // ×44806`) is clamped to one line and whole in the tooltip, so it cannot
+    // widen its cell and wrap the row.
+    <div className="min-w-0" title={sub}>
       <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">{label}</span>
       <span className={`font-mono text-sm font-semibold ${className || "text-[var(--color-text)]"}`}>{value}</span>
-      {sub && <span className="block text-[9px] text-[var(--color-text-muted)]/70">{sub}</span>}
+      {sub && <span className="block max-w-[9rem] truncate text-[9px] text-[var(--color-text-muted)]/70">{sub}</span>}
     </div>
   );
 }
 
-export function SessionKpis({
-  perf,
-  summary,
-  hasReport,
-  onOpenReport,
-}: {
-  perf?: AgentPerformance | null;
-  /**
-   * The run's own headline facts — its status and how far it has ticked.
-   *
-   * It carried the last action too, truncated to one line, until the answer
-   * stack put that sentence *whole* six pixels below this strip (FEAT-119).
-   * Optional rather than removed from `ParsedJournal`'s summary, so a caller
-   * can go on handing this the summary it already has.
-   */
-  summary?: { status: string; lastTick: number; lastAction?: string };
-  hasReport?: boolean;
-  onOpenReport?: () => void;
-}) {
+export function SessionKpis({ perf }: { perf?: AgentPerformance | null }) {
   const total = perf?.total_pnl ?? 0;
   const closes = closeSummary(perf);
   const trades = perf?.trade_count ?? 0;
@@ -52,14 +41,6 @@ export function SessionKpis({
   const tradeValue =
     trades > 0 ? String(trades) : closes.total > 0 ? String(closes.total) : volume > 0 ? "—" : "0";
   const tradeSub = trades === 0 && closes.total > 0 ? closes.label : undefined;
-
-  const status = summary?.status || "";
-  const statusClass =
-    status === "ACTIVE" || status === "running"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-      : status === "paused"
-        ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
-        : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]";
 
   return (
     <div className="space-y-2">
@@ -74,15 +55,7 @@ export function SessionKpis({
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
-        {summary && (
-          <div>
-            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${statusClass}`}>
-              {status || "idle"}
-            </span>
-          </div>
-        )}
+      <div data-session-kpis className="flex flex-wrap items-start gap-x-5 gap-y-3">
         <Kpi
           label="Total PnL"
           value={formatCurrencyPnl(total)}
@@ -98,18 +71,6 @@ export function SessionKpis({
         />
         <Kpi label="Closes" value={tradeValue} sub={tradeSub} />
         <Kpi label="Open" value={String(perf?.open_count ?? 0)} />
-        {summary && summary.lastTick > 0 && <Kpi label="Ticks" value={`#${summary.lastTick}`} />}
-        {/* The session's own live report. It has always existed — rebuilt every
-            tick under a stable id — but was only reachable through the routines
-            report grid, where it appeared as a routine nobody had created. */}
-        {hasReport && (
-          <button
-            onClick={onOpenReport}
-            className="ml-auto flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-          >
-            <FileText className="h-3 w-3" /> Session report
-          </button>
-        )}
       </div>
     </div>
   );

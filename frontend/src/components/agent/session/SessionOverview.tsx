@@ -1,48 +1,17 @@
-import { useMemo } from "react";
-
-import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
-import type { AgentPerformance } from "@/lib/api";
-import type { ParsedJournal } from "@/lib/parse-agent";
+import { AgentPnlChart } from "@/components/agent/AgentPnlChart";
 
 // ── Session Overview ──
+//
+// The run's PnL curve, drawn bare: it lives inside the Now card, whose header
+// already names it (ARCH-426). The points come from `sessionPnlPoints`, and
+// the card only asks for this once there are at least two of them.
 
-export function SessionOverview(props: {
-  journal: ParsedJournal;
-  perf?: AgentPerformance | null;
-  pnlSeries?: { timestamp: string; pnl: number }[] | null;
+export function SessionOverview({
+  data,
+  height,
+}: {
+  data: { time: number; value: number }[];
+  height: number;
 }) {
-  const { metrics } = props.journal;
-  const { pnlSeries } = props;
-
-  // Prefer the series derived from the bots' own history: the journal snapshots
-  // are only what the aggregator believed at each tick, so a session that ran
-  // while it could not see its bots has a permanently flat record of zeros.
-  // Fall back to the snapshots for pure executor sessions, which own no bot and
-  // so have no history to derive from.
-  const pnlData = useMemo(() => {
-    if (pnlSeries?.length) {
-      return pnlSeries
-        .filter((p) => p.timestamp)
-        .map((p) => ({
-          time: Math.floor(new Date(p.timestamp).getTime() / 1000),
-          value: p.pnl,
-        }))
-        .sort((a, b) => a.time - b.time);
-    }
-    return metricsToDataPoints(metrics);
-  }, [pnlSeries, metrics]);
-
-  if (pnlData.length <= 1) {
-    return null;
-  }
-
-  return (
-    <div className="space-y-4">
-      <AgentPnlChart
-        data={pnlData}
-        height={400}
-        title={pnlSeries?.length ? "Realized PnL" : "Metrics Timeline"}
-      />
-    </div>
-  );
+  return <AgentPnlChart data={data} height={height} bare />;
 }

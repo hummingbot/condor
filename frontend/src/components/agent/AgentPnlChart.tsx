@@ -13,9 +13,11 @@ interface AgentPnlChartProps {
   data: PnlDataPoint[];
   height?: number;
   title?: string;
+  /** No border or background of its own, for a chart inside another card. */
+  bare?: boolean;
 }
 
-export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps) {
+export function AgentPnlChart({ data, height = 180, title, bare = false }: AgentPnlChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
@@ -174,7 +176,13 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
   // (kept mounted) so the empty→non-empty transition just flows through the data effect.
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+    <div
+      className={
+        bare
+          ? "overflow-hidden"
+          : "rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden"
+      }
+    >
       {title && (
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{title}</p>

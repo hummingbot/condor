@@ -39,7 +39,9 @@ vi.mock("@/components/routines/ReportFrame", () => ({
 // The chart is `lightweight-charts` under a canvas jsdom does not have. What
 // this file asserts about it is whether it was asked for, which the stub says.
 vi.mock("@/components/agent/session/SessionOverview", () => ({
-  SessionOverview: () => <div data-pnl-chart />,
+  SessionOverview: ({ height }: { height: number }) => (
+    <div data-pnl-chart data-height={height} />
+  ),
 }));
 
 declare global {
@@ -195,11 +197,47 @@ describe("the last decision", () => {
   });
 });
 
+/** A bot-history PnL series with `n` points, a minute apart. */
+function series(n: number): { timestamp: string; pnl: number }[] {
+  return Array.from({ length: n }, (_, i) => ({
+    timestamp: new Date(Date.UTC(2026, 8, 3, 20, i)).toISOString(),
+    pnl: i * 2,
+  }));
+}
+
+const card = () => container.querySelector<HTMLElement>("[data-now-money]");
+const reportButton = () =>
+  [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    b.textContent?.includes("Session report"),
+  );
+
 describe("the vitals", () => {
   it("lead the stack when the run has priced money in it", async () => {
     await render({ perf: traded(), journal: summary() });
     expect(text()).toContain("Total PnL");
-    expect(text()).toContain("#14");
+  });
+
+  it("leave the status and the tick count to the loop bar above (ARCH-426)", async () => {
+    await render({ perf: traded(), journal: summary({ status: "ACTIVE", lastTick: 14 }) });
+    const kpis = container.querySelector<HTMLElement>("[data-session-kpis]")!;
+    expect(kpis.textContent).not.toContain("Status");
+    expect(kpis.textContent).not.toContain("ACTIVE");
+    expect(kpis.textContent).not.toContain("Ticks");
+    expect(text()).not.toContain("#14");
+  });
+
+  it("clamp a long close breakdown to one line, whole in the tooltip", async () => {
+    const breakdown = { "CloseType.POSITION_HOLD": 454, "CloseType.EARLY_STOP": 44806 };
+    await render({
+      perf: { ...traded(), trade_count: 0, close_type_counts: breakdown } as AgentPerformance,
+      journal: summary(),
+    });
+    const sub = [...container.querySelectorAll<HTMLElement>("[data-session-kpis] [title]")].find(
+      (el) => el.textContent?.includes("Closes"),
+    )!;
+    expect(sub).toBeDefined();
+    expect(sub.title).toContain("44806");
+    expect(sub.querySelector(".truncate")).not.toBeNull();
   });
 
   it("are absent for a run that never traded, rather than eight zeroes", async () => {
@@ -222,14 +260,121 @@ describe("the vitals", () => {
 });
 
 describe("the realized-PnL chart", () => {
-  it("is on the stack once the run has a journal to draw from", async () => {
-    await render({ journal: summary() });
+  it("is on the stack once the run has two points to draw", async () => {
+    await render({ journal: summary(), pnlSeries: series(2) });
     expect(container.querySelector("[data-pnl-chart]")).not.toBeNull();
   });
 
-  it("is absent for a run with no journal at all", async () => {
-    await render({ journal: null });
+  it("is absent under two points — a dot is not a curve", async () => {
+    await render({ journal: summary(), pnlSeries: series(1) });
     expect(container.querySelector("[data-pnl-chart]")).toBeNull();
+    await render({ journal: summary(), pnlSeries: [] });
+    expect(container.querySelector("[data-pnl-chart]")).toBeNull();
+  });
+
+  it("is absent for a run with no journal at all", async () => {
+    await render({ journal: null, pnlSeries: series(3) });
+    expect(container.querySelector("[data-pnl-chart]")).toBeNull();
+  });
+
+  it("is shorter in the side panel than on the page", async () => {
+    await render({ journal: summary(), pnlSeries: series(3), variant: "pane" });
+    const pane = Number(container.querySelector<HTMLElement>("[data-pnl-chart]")!.dataset.height);
+    await render({ journal: summary(), pnlSeries: series(3), variant: "page" });
+    const page = Number(container.querySelector<HTMLElement>("[data-pnl-chart]")!.dataset.height);
+    expect(page).toBe(400);
+    expect(pane).toBeGreaterThanOrEqual(240);
+    expect(pane).toBeLessThanOrEqual(280);
+  });
+});
+
+describe("the money card (ARCH-426)", () => {
+  const report: ReportSummary = {
+    id: "r1",
+    title: "Session 7 report",
+    filename: "r1.html",
+    created_at: "2026-09-03T20:15:00Z",
+    source_type: "agent",
+    source_name: "brl_mm",
+    tags: [],
+  };
+
+  beforeEach(() => {
+    vi.mocked(api.getSessionReport).mockResolvedValue({ report } as never);
+  });
+
+  afterEach(() => {
+    vi.mocked(api.getSessionReport).mockResolvedValue({ report: null } as never);
+  });
+
+  /** Render and let the report query land, bounded. */
+  async function renderWithReport(props: Partial<Parameters<typeof NowView>[0]>) {
+    await render(props);
+    for (let i = 0; i < 50 && !reportButton(); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+  }
+
+  it("holds the vitals, the report door in its header and the chart, in one border", async () => {
+    await renderWithReport({ perf: traded(), journal: summary(), pnlSeries: series(3) });
+    const money = card()!;
+    expect(money).not.toBeNull();
+    expect(container.querySelectorAll("[data-now-money]")).toHaveLength(1);
+    expect(money.querySelector("header")!.textContent).toContain("Realized PnL");
+    expect(money.querySelector("header")!.contains(reportButton()!)).toBe(true);
+    expect(money.querySelector("[data-session-kpis]")).not.toBeNull();
+    expect(money.querySelector("[data-pnl-chart]")).not.toBeNull();
+    // The door sits in the header, never in the KPI row it used to wrap out of.
+    expect(money.querySelector("[data-session-kpis]")!.contains(reportButton()!)).toBe(false);
+  });
+
+  it("comes before the alerts and the last decision", async () => {
+    await render({
+      perf: traded(),
+      journal: summary(),
+      pnlSeries: series(3),
+      alerts: alertsFor({
+        actions: [{ tick: 4, ok: false, summary: "Upsert controller pmm_1" }],
+        deployments: 1,
+        journalNamesDeploy: false,
+        loop: null,
+        nowSec: 0,
+      }),
+    });
+    const money = card()!;
+    const alerts = container.querySelector("[data-now-alerts]")!;
+    const follows = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(money.compareDocumentPosition(alerts) & follows).toBeTruthy();
+    expect(money.compareDocumentPosition(decisionBlock()) & follows).toBeTruthy();
+  });
+
+  it("shows the vitals and the door alone when there is no chart yet", async () => {
+    await renderWithReport({ perf: traded(), journal: summary(), pnlSeries: series(1) });
+    const money = card()!;
+    expect(money.querySelector("[data-session-kpis]")).not.toBeNull();
+    expect(money.contains(reportButton()!)).toBe(true);
+    expect(money.querySelector("[data-pnl-chart]")).toBeNull();
+  });
+
+  it("shows the chart without vitals for a run with a curve but no priced money", async () => {
+    await render({ perf: null, journal: summary(), pnlSeries: series(3) });
+    const money = card()!;
+    expect(money.querySelector("[data-pnl-chart]")).not.toBeNull();
+    expect(money.querySelector("[data-session-kpis]")).toBeNull();
+  });
+
+  it("keeps a lone report door when there is neither money nor a curve", async () => {
+    await renderWithReport({ perf: null, journal: summary() });
+    expect(card()).toBeNull();
+    expect(reportButton()).toBeDefined();
+  });
+
+  it("is absent altogether when there is nothing to put in it", async () => {
+    await render({ perf: null, journal: summary() });
+    expect(card()).toBeNull();
+    expect(reportButton()).toBeUndefined();
   });
 });
 
