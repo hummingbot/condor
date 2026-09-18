@@ -22,8 +22,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from utils import updater
@@ -244,19 +246,13 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
             "unknown",
         )
 
-    mode = "source" if definition.get("build") else "image"
+    # A ``build:`` key would mean the image is produced here, but no shipped
+    # compose file has one and hummingbot-api is deployed from the published
+    # image, so "source" is a mode the product cannot enter. An operator who
+    # hand-adds a build key is running their own image, which is exactly what
+    # the checkout gate and the locally-built check below already cover.
+    mode = "image"
     image_ref = str(definition.get("image") or "")
-
-    if mode == "source":
-        # Built here: the repo is the version, and there is no registry to ask.
-        return (
-            Facet(
-                kind="image",
-                current=image_ref or "(built from source)",
-                detail=["Built from source; the repo below is the version."],
-            ),
-            mode,
-        )
 
     if not image_ref:
         return (
@@ -303,18 +299,111 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
         )
 
     same = local == remote
+    if same:
+        return (
+            Facet(kind="image", current=_short_digest(local), behind=0),
+            mode,
+        )
+
+    # Different digests are not yet evidence of being behind. `make build` in
+    # hummingbot-api tags `hummingbot/hummingbot-api:latest` -- the *same* tag
+    # the registry publishes -- so the operator's own build lands here looking
+    # exactly like an out-of-date pull, and Condor would offer to overwrite it
+    # with the registry's. Neither the tag nor the presence of a RepoDigest can
+    # tell the two apart (a build gets a RepoDigest too, from the containerd
+    # image store). Asking the registry whether it holds *this* digest can.
+    published = await updater.registry_has_digest(image_ref, local)
+    if published is False:
+        return (
+            Facet(
+                kind="image",
+                current=_short_digest(local),
+                behind=0,
+                detail=[
+                    "Built locally; not comparable to the published tag. "
+                    "Rebuild it yourself to pick up changes."
+                ],
+            ),
+            mode,
+        )
+
     return (
         Facet(
             kind="image",
             current=_short_digest(local),
-            available=None if same else _short_digest(remote),
+            available=_short_digest(remote),
             # An image is behind or it is not; there is no commit count to give.
-            behind=0 if same else 1,
-            up_to_date=same,
-            detail=[] if same else ["A newer image is published under this tag."],
+            behind=1,
+            up_to_date=False,
+            detail=["A newer image is published under this tag."],
         ),
         mode,
     )
+
+
+# hummingbot-api's CI publishes only on merges to the default branch, and only
+# the `latest` and version tags (verified against the registry: `latest`,
+# `1.0.1`, and one stale one-off). There is no per-branch tag, so on any other
+# checkout the published image has nothing to do with the code on disk --
+# offering to pull it means silently replacing the container with the default
+# branch's code. PRs merge straight to the default branch, so there is no second
+# mapping to make: either the checkout is the one the tag is built from, or the
+# operator owns the image.
+_CANONICAL_REMOTES = ("github.com/hummingbot/hummingbot-api",)
+
+
+def _is_canonical_remote(url: str) -> bool:
+    """Whether ``url`` is the repository whose merges publish the tag.
+
+    A fork has a default branch too, usually with the same name, so the branch
+    name alone would claim the published image matches code it has never seen.
+    Normalized loosely on purpose -- ssh, https, with or without ``.git`` -- and
+    conservative: anything unrecognized is treated as not canonical, which
+    skips the image rather than overwriting it.
+    """
+    cleaned = url.strip().removesuffix(".git").replace(":", "/").lower()
+    return any(cleaned.endswith(r) or f"/{r}" in cleaned for r in _CANONICAL_REMOTES)
+
+
+async def image_tracks_this_checkout(repo_dir: str) -> tuple[bool, str]:
+    """Whether the published tag can correspond to this checkout, and why not.
+
+    Four conditions, each of which is a way the branch *name* alone gets it
+    wrong:
+
+    * the remote must be the canonical repository -- a fork's ``main`` is not
+      the ``main`` the tag is built from;
+    * ``HEAD`` must not be detached -- ``--abbrev-ref`` answers the literal
+      string ``HEAD``, which would otherwise read as an ordinary branch name;
+    * the branch must be the remote's default -- read, not hardcoded;
+    * the checkout must not be ahead -- unpushed commits mean the branch is the
+      default one and the code is not.
+
+    Returns ``(True, "")`` when an image update is meaningful, otherwise
+    ``(False, reason)`` with the reason in words an operator can act on.
+    """
+    rc, url = await updater._run_git("remote", "get-url", "origin", repo_dir=repo_dir)
+    if rc != 0 or not url:
+        return False, "this checkout has no origin remote"
+    if not _is_canonical_remote(url):
+        return (
+            False,
+            f"origin is {url.strip()}, not the repository the image is built from",
+        )
+
+    if await updater.is_detached(repo_dir):
+        return False, "HEAD is detached, so it is not on any branch"
+
+    default = await updater.remote_default_branch(repo_dir)
+    branch = await updater.get_current_branch(repo_dir)
+    if default is None:
+        return False, "the remote's default branch could not be determined"
+    if branch != default:
+        return False, f"this checkout is on `{branch}`, not `{default}`"
+
+    if await updater.ahead_count(repo_dir, branch) > 0:
+        return False, f"this checkout has commits that are not on `{default}`"
+    return True, ""
 
 
 async def status(key: str) -> ComponentStatus:
@@ -330,10 +419,30 @@ async def status(key: str) -> ComponentStatus:
             up_to_date=repo.up_to_date,
         )
 
-    repo, (image, mode) = await asyncio.gather(
+    repo, (image, mode), (tracks, why_not) = await asyncio.gather(
         _repo_facet(component.repo_dir),
         _image_facet(component.repo_dir, component.service),
+        image_tracks_this_checkout(component.repo_dir),
     )
+
+    if not tracks:
+        # The comparison is still *correct* -- it is just meaningless here, and
+        # acting on it would replace the operator's container with the default
+        # branch's code. Keep the running digest visible, drop the offer, and
+        # say why. Stated rather than silently skipped: a silent skip is the
+        # same class of defect as the silent pull it replaces.
+        image = Facet(
+            kind="image",
+            current=image.current,
+            behind=0,
+            detail=[
+                f"The container runs the published image, which is built only "
+                f"from the default branch — and {why_not}. Left alone; you own "
+                f"this image."
+            ],
+            error=image.error,
+        )
+
     return ComponentStatus(
         key=component.key,
         name=component.name,
@@ -418,6 +527,35 @@ async def running_executor_count() -> int | None:
 # ── Preflight ──
 
 
+def is_forkable(component_key: str, rel_path: str) -> bool:
+    """Whether a conflicting path can be kept by moving it to the local root.
+
+    Only Condor's shipped agent library. ``agents/<slug>/...`` has a local
+    counterpart that reads shadow per item, so moving an edit there is exactly
+    what the product would have done with it. Anything else -- ``main.py``, a
+    compose file, anything in hummingbot-api -- has no such layer, and "keeping"
+    it by moving it somewhere nothing reads would be a quieter way of losing it
+    than discarding.
+    """
+    if component_key != CONDOR:
+        return False
+    parts = PurePosixPath(rel_path).parts
+    return len(parts) > 2 and parts[0] == "agents" and not parts[1].startswith("_")
+
+
+def _resolutions_for(component_key: str, paths: list[str]) -> list[str]:
+    """The ways out of a conflict, with the non-lossy one offered where it works.
+
+    ``keep-mine`` appears only when every conflicting path is forkable. Offering
+    it on a mixed set would be worse than not offering it: it reads as "keep all
+    of this", and the paths it could not move would be reset anyway.
+    """
+    base = ["discard", "stash", "cancel"]
+    if paths and all(is_forkable(component_key, p) for p in paths):
+        return ["keep-mine", *base]
+    return base
+
+
 def _incoming_unknown(component: Component, branch: str, because: str) -> Block:
     """The block for "we could not work out what this update would bring in".
 
@@ -455,6 +593,30 @@ async def repo_blocks(component: Component) -> list[Block]:
                 message=(
                     f"{component.repo_dir} is not a git checkout, so there is "
                     "nothing to fast-forward."
+                ),
+                resolutions=["cancel"],
+            )
+        ]
+
+    # Before anything reads a branch name: a detached checkout has none, but
+    # ``rev-parse --abbrev-ref HEAD`` answers the literal string ``HEAD``, and
+    # everything downstream then treats that as a branch. ``origin/HEAD``
+    # resolves to the remote's default branch, so the comparison silently
+    # becomes "how far is this commit behind main", nothing reports being
+    # ahead, and ``merge --ff-only origin/HEAD`` succeeds -- fast-forwarding a
+    # detached checkout onto main and leaving it detached, with no message
+    # saying so. Refuse instead, and say which commit it is sitting on.
+    if await updater.is_detached(component.repo_dir):
+        sha = await updater.get_local_commit(component.repo_dir)
+        return [
+            Block(
+                component=component.key,
+                code="detached-head",
+                message=(
+                    f"HEAD is detached at {sha} in {component.repo_dir}. "
+                    "Check out a branch before updating — otherwise the update "
+                    "would fast-forward onto the remote's default branch and "
+                    "leave the checkout detached."
                 ),
                 resolutions=["cancel"],
             )
@@ -517,7 +679,7 @@ async def repo_blocks(component: Component) -> list[Block]:
                     "commits."
                 ),
                 paths=tracked,
-                resolutions=["discard", "stash", "cancel"],
+                resolutions=_resolutions_for(component.key, tracked),
             )
         )
     if untracked:
@@ -530,7 +692,7 @@ async def repo_blocks(component: Component) -> list[Block]:
                     "not in git would be overwritten by the incoming commits."
                 ),
                 paths=untracked,
-                resolutions=["discard", "stash", "cancel"],
+                resolutions=_resolutions_for(component.key, untracked),
             )
         )
     return blocks
@@ -541,19 +703,28 @@ def _steps_for(component_key: str, status_: ComponentStatus) -> list[str]:
     steps: list[str] = []
     if component_key == HUMMINGBOT_API:
         repo = status_.facets.get("repo")
+        image = status_.facets.get("image")
         if repo is not None and not repo.up_to_date and repo.error is None:
-            steps.append("Fast-forward the hummingbot-api checkout")
-        if status_.mode == "source":
-            steps.append("Rebuild the hummingbot-api image from source")
-        else:
-            steps.append("Pull the published hummingbot-api image")
+            # Worth saying what this is *for*: the checkout supplies the shared
+            # files the container reads, so it is fast-forwarded even when the
+            # image is left alone.
+            steps.append("Fast-forward the hummingbot-api checkout (shared files)")
+        if image is not None and image.up_to_date:
+            # Either already current, or an image this checkout does not track.
+            # Nothing to pull, and nothing to restart for.
+            return steps
+        steps.append("Pull the published hummingbot-api image")
         steps.append("Recreate the containers")
         steps.append("Wait for the API to answer")
     else:
+        # Must stay in step with ``run._plan``: the confirm screen and the
+        # progress screen are meant to be the same list.
         steps.append("Fast-forward the Condor checkout")
+        steps.append("Restore any work stashed to clear the way")
         steps.append("Sync dependencies")
         steps.append("Rebuild the dashboard if the update touched it")
-        steps.append("Ask you to relaunch Condor to apply it")
+        steps.append("Check the install over")
+        steps.append("Relaunch Condor to apply it")
     return steps
 
 
@@ -580,6 +751,172 @@ async def _executor_warning() -> Warning | None:
         code="executors-will-be-reaped",
         message=f"Restarting the API container stops its executors. {detail}",
     )
+
+
+_STALE_FORK_CAP = 8
+
+
+# An update can write a rebuilt venv, a fresh node_modules, a new bundle and a
+# pulled image. Running out part-way is the worst input to everything else here,
+# and nothing checked: shutil.disk_usage appeared nowhere in the update path.
+_DISK_FLOOR_GB = 3.0
+
+
+def _locally_overridden(incoming: list[str]) -> list[str]:
+    """:func:`condor.layering.locally_overridden`, but never fatal to a preflight."""
+    from condor.layering import locally_overridden
+
+    try:
+        return locally_overridden(incoming)
+    except OSError:
+        log.debug("Could not check for locally overridden paths", exc_info=True)
+        return []
+
+
+def _incoming_warnings(incoming: list[str]) -> list[Warning]:
+    """Consequences that follow from *which files* an update would write."""
+    out: list[Warning] = []
+    if any(p.startswith("frontend/") for p in incoming):
+        # frontend_needs_build() is consulted inside the run and never in the
+        # preflight, so nothing told the person reading the dashboard that the
+        # page they are on is the thing about to be replaced.
+        out.append(
+            Warning(
+                component=CONDOR,
+                code="frontend-will-rebuild",
+                message=(
+                    "This update rebuilds the dashboard. The new bundle is built "
+                    "alongside the running one and swapped in, so the page you "
+                    "are reading keeps working — reload it once the update "
+                    "finishes to pick up the new one."
+                ),
+            )
+        )
+    overridden = _locally_overridden(incoming)
+    if overridden:
+        # The predictive half. stale_forks() compares a fork against the stock
+        # file on disk, which only moves once the fast-forward has landed -- so
+        # on its own it reports the divergence *after* the update that caused
+        # it. This says so while there is still a decision to make.
+        shown = ", ".join(overridden[:_STALE_FORK_CAP])
+        if len(overridden) > _STALE_FORK_CAP:
+            shown += f", and {len(overridden) - _STALE_FORK_CAP} more"
+        out.append(
+            Warning(
+                component=CONDOR,
+                code="update-changes-overridden-files",
+                message=(
+                    f"This update changes {len(overridden)} shipped "
+                    f"file{'s' if len(overridden) != 1 else ''} that you have "
+                    f"your own version of ({shown}). Your versions will keep "
+                    "being used, so these changes will not reach your agents."
+                ),
+            )
+        )
+    if "condor/migrations.py" in incoming:
+        # startup() migrates this deployment's data on every boot and the moves
+        # are one-way, so restoring old *code* onto migrated *data* leaves
+        # Condor looking for directories that no longer exist. FEAT-115 widened
+        # that to the agent tree, so a rollback now also strands forked
+        # playbooks, skills and mutes.
+        out.append(
+            Warning(
+                component=CONDOR,
+                code="migration-incoming",
+                message=(
+                    "This update migrates stored data, and the moves are "
+                    "one-way. Rolling back to the current commit afterwards "
+                    "will not restore the old layout."
+                ),
+            )
+        )
+    return out
+
+
+def _disk_warning(repo_dir: str) -> Warning | None:
+    """Warn when there is not obviously room for what the update is about to write."""
+    try:
+        usage = shutil.disk_usage(repo_dir)
+    except OSError:
+        log.debug("Could not read free space for %s", repo_dir, exc_info=True)
+        return None
+    free_gb = usage.free / (1024**3)
+    if free_gb >= _DISK_FLOOR_GB:
+        return None
+    return Warning(
+        component=CONDOR,
+        code="low-disk",
+        message=(
+            f"Only {free_gb:.1f} GB free where Condor is installed. An update "
+            f"writes a synced virtualenv, a fresh node_modules and a new "
+            f"dashboard bundle — running out part-way through leaves the "
+            f"install half-built. Free some space first."
+        ),
+    )
+
+
+def _stale_fork_warning() -> Warning | None:
+    """Local versions of shipped files that this install will keep using.
+
+    Non-blocking on purpose. Owning a customization is what FEAT-115 shipped;
+    what never shipped is the notice, so the divergence compounded silently on
+    files carrying trading rules. This is that notice.
+
+    The path list is capped -- an install that has forked thirty playbooks needs
+    a number and a few examples, not thirty lines in a Telegram message.
+    """
+    from condor.layering import all_stale_forks
+
+    try:
+        stale = all_stale_forks()
+    except OSError:
+        log.debug("Could not check for stale forks", exc_info=True)
+        return None
+    if not stale:
+        return None
+
+    moved = [f for f in stale if not f.retired and not f.unprovenanced]
+    shadowing = [f for f in stale if not f.retired and f.unprovenanced]
+    retired = [f for f in stale if f.retired]
+
+    parts: list[str] = []
+    if shadowing:
+        # Separated because the advice differs: a stamped fork was deliberately
+        # taken from a known version, while these never recorded one -- a
+        # routine's .py cannot hold a stamp, and a file the agent created under
+        # a name upstream later shipped never had one to take. Either way the
+        # local copy wins and upstream's is unreachable.
+        shown = ", ".join(f.rel for f in shadowing[:_STALE_FORK_CAP])
+        if len(shadowing) > _STALE_FORK_CAP:
+            shown += f", and {len(shadowing) - _STALE_FORK_CAP} more"
+        parts.append(
+            f"{len(shadowing)} local file{'s' if len(shadowing) != 1 else ''} "
+            f"shadow{'' if len(shadowing) != 1 else 's'} a shipped one of the "
+            f"same name and differ{'' if len(shadowing) != 1 else 's'} from it "
+            f"({shown}). Yours are used; upstream's are not reachable. Rename "
+            "yours if you meant to keep both."
+        )
+    if moved:
+        shown = ", ".join(f.rel for f in moved[:_STALE_FORK_CAP])
+        if len(moved) > _STALE_FORK_CAP:
+            shown += f", and {len(moved) - _STALE_FORK_CAP} more"
+        parts.append(
+            f"You have local versions of {len(moved)} shipped "
+            f"file{'s' if len(moved) != 1 else ''} that upstream has since "
+            f"changed ({shown}). Your versions stay in use, so those changes "
+            "will not reach your agents."
+        )
+    if retired:
+        shown = ", ".join(f.rel for f in retired[:_STALE_FORK_CAP])
+        if len(retired) > _STALE_FORK_CAP:
+            shown += f", and {len(retired) - _STALE_FORK_CAP} more"
+        parts.append(
+            f"{len(retired)} local file{'s' if len(retired) != 1 else ''} "
+            f"no longer exist{'' if len(retired) != 1 else 's'} upstream "
+            f"({shown}) and will keep running. Mute a retired playbook rather "
+            "than deleting it."
+        )
+    return Warning(component=CONDOR, code="stale-forks", message=" ".join(parts))
 
 
 async def preflight(component_keys: list[str]) -> Preflight:
@@ -639,6 +976,23 @@ async def preflight(component_keys: list[str]) -> Preflight:
         if executor_warning is not None:
             warnings.append(executor_warning)
     if CONDOR in selected:
+        condor_status = statuses.get(CONDOR)
+        repo = condor_status.facets.get("repo") if condor_status else None
+        if repo is not None and not repo.up_to_date:
+            # What this update would actually write, rather than a diff against
+            # an empty commit -- ``paths_changed`` answers True for an
+            # unresolvable range by design, so asking it that way would make
+            # both warnings below fire on every update.
+            incoming = await updater.incoming_paths(_table()[CONDOR].repo_dir)
+            for warning in _incoming_warnings(incoming or []):
+                warnings.append(warning)
+        disk_warning = _disk_warning(_table()[CONDOR].repo_dir)
+        if disk_warning is not None:
+            warnings.append(disk_warning)
+
+        stale_warning = _stale_fork_warning()
+        if stale_warning is not None:
+            warnings.append(stale_warning)
         warnings.append(
             Warning(
                 component=CONDOR,

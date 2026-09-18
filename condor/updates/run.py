@@ -25,14 +25,18 @@ on Telegram and watch it finish in the browser.
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import io
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from condor import paths
 from condor.fsutil import atomic_write_json
+from condor.paths import runtime_root
 from condor.updates import components
 from utils import updater
 
@@ -50,6 +54,11 @@ FAILED = "failed"
 PENDING = "pending"
 OK = "ok"
 SKIPPED = "skipped"
+# Ran, did not fail the update, but the operator needs to read the output --
+# a stash that would not pop, a doctor check that came back unhappy. Distinct
+# from OK because "the update succeeded" must not swallow "and here is what is
+# still wrong", and distinct from FAILED because neither aborts the run.
+WARNED = "warned"
 
 # Command output kept per step. Enough to diagnose, far under Telegram's limit.
 OUTPUT_TAIL_CHARS = 2000
@@ -248,6 +257,21 @@ async def _emit(run: Run) -> None:
 _relaunch: dict[str, Any] | None = None
 
 
+def request_relaunch() -> None:
+    """Apply a pending update by restarting Condor in place.
+
+    A one-line pass-through to :func:`utils.updater.request_restart`, and it
+    earns its place: the surfaces are views over this package and do not import
+    ``utils`` directly, so without it the web route would have to reach past the
+    engine to do the one thing the engine exists to coordinate.
+
+    Not an exec. ``request_restart`` raises SIGTERM, ``teardown()`` runs, and
+    ``main()`` execs once the loop is gone -- so persistence is flushed, agent
+    loops record their final state and ACP/MCP children are not orphaned.
+    """
+    updater.request_restart()
+
+
 def relaunch_pending() -> dict[str, Any] | None:
     """What this process is missing, or ``None`` if it is running the update.
 
@@ -303,6 +327,13 @@ async def resolve(component_key: str, action: str) -> tuple[bool, str]:
         ok, message = await updater.discard_paths(component.repo_dir, conflicting)
     elif action == "stash":
         ok, message = await updater.stash_paths(component.repo_dir, conflicting)
+    elif action == "keep-mine":
+        # Re-checked here rather than trusted from the button: the block that
+        # offered this may be minutes old, and moving a path that is not
+        # forkable would put it somewhere nothing reads.
+        if not all(components.is_forkable(component_key, p) for p in conflicting):
+            return False, "Those files cannot be kept this way."
+        ok, message = await updater.move_to_local_root(component.repo_dir, conflicting)
     else:
         return False, f"Unknown resolution: {action}"
 
@@ -324,29 +355,82 @@ def _plan(component_keys: list[str], statuses: dict[str, components.ComponentSta
             continue
         if key == components.HUMMINGBOT_API:
             status = statuses.get(key)
-            mode = status.mode if status else "image"
             steps.append(
                 Step(f"{key}.fast-forward", "Fast-forwarding the hummingbot-api repo")
             )
-            steps.append(
-                Step(
-                    f"{key}.image",
-                    (
-                        "Rebuilding the API image"
-                        if mode == "source"
-                        else "Pulling the API image"
-                    ),
-                )
-            )
-            steps.append(Step(f"{key}.up", "Recreating the containers"))
-            steps.append(Step(f"{key}.health", "Waiting for the API to answer"))
+            # The image steps only exist when the published tag can correspond
+            # to this checkout. Off the default branch the container is the
+            # operator's, so there is nothing to pull and nothing to restart
+            # for -- and a plan that listed them anyway would be promising to do
+            # something the run then skips.
+            image = status.facets.get("image") if status else None
+            if image is None or not image.up_to_date:
+                steps.append(Step(f"{key}.image", "Pulling the API image"))
+                steps.append(Step(f"{key}.up", "Recreating the containers"))
+                steps.append(Step(f"{key}.health", "Waiting for the API to answer"))
         else:
             # No restart step: the run stops with the new code on disk and asks
             # for the relaunch instead (see the module docstring).
             steps.append(Step(f"{key}.fast-forward", "Fast-forwarding Condor"))
+            steps.append(Step(f"{key}.unstash", "Restoring stashed work"))
             steps.append(Step(f"{key}.deps", "Syncing dependencies"))
             steps.append(Step(f"{key}.frontend", "Rebuilding the dashboard"))
+            steps.append(Step(f"{key}.doctor", "Checking the install over"))
     return steps
+
+
+_LOCK_FILENAME = "update.lock"
+# One handle per process. flock conflicts between two descriptors even in the
+# same process, so re-acquiring would have this process refusing itself -- and
+# within a process ``_lock``/``_current`` already answer the question.
+_lock_handle: "io.TextIOWrapper | None" = None
+
+
+def _acquire_run_lock() -> "io.TextIOWrapper | None":
+    """Take an advisory lock for the length of a run, across processes.
+
+    ``_lock`` and ``_current`` guard this process only. A second Condor on the
+    same checkout -- a stray ``make run`` in another pane, which is exactly what
+    someone does when a restart looks stuck -- would fast-forward the same repo
+    concurrently with the first, and neither would know.
+
+    Advisory and best effort: if the lock cannot be taken *because someone holds
+    it*, the caller refuses; if locking is unavailable at all, the update
+    proceeds as before rather than being blocked by the safety net.
+    """
+    path = runtime_root() / _LOCK_FILENAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w")
+    except OSError:
+        log.debug("Could not open the update lock; proceeding unlocked")
+        return None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    except (AttributeError, NameError):  # pragma: no cover - no flock here
+        return handle
+    try:
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+    except OSError:
+        pass
+    return handle
+
+
+def _release_run_lock(handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, AttributeError, NameError):
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
 
 
 async def start(
@@ -366,6 +450,22 @@ async def start(
     async with _lock:
         if _current is not None and _current.live:
             return _current
+
+        global _lock_handle
+        if _lock_handle is None:
+            _lock_handle = _acquire_run_lock()
+            if _lock_handle is None and (runtime_root() / _LOCK_FILENAME).exists():
+                holder = ""
+                try:
+                    holder = (runtime_root() / _LOCK_FILENAME).read_text().strip()
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    "Another Condor process on this checkout is already running "
+                    f"an update{f' (pid {holder})' if holder else ''}. Wait for "
+                    "it to finish rather than running a second one over the "
+                    "same repo."
+                )
 
         selected = [k for k in components.keys() if k in set(component_keys)]
         statuses = {s.key: s for s in await components.check()}
@@ -439,6 +539,10 @@ async def _execute(run: Run, resolutions: dict[str, str]) -> None:
     except Exception as e:  # noqa: BLE001 - an update must never die silently
         log.exception("Update run %s crashed", run.id)
         await _fail(run, f"{type(e).__name__}: {e}")
+    finally:
+        global _lock_handle
+        _release_run_lock(_lock_handle)
+        _lock_handle = None
 
 
 async def _update_hb_api(run: Run) -> bool:
@@ -464,17 +568,9 @@ async def _update_hb_api(run: Run) -> bool:
                 await _fail(run, "The hummingbot-api checkout could not be moved.")
                 return False
 
-    mode = await updater.compose_mode(component.repo_dir, component.service)
     step = await _begin(run, f"{prefix}.image")
     if step is not None:
-        if mode == "source":
-            ok, output = await updater.compose_build(
-                component.repo_dir, component.service
-            )
-        else:
-            ok, output = await updater.compose_pull(
-                component.repo_dir, component.service
-            )
+        ok, output = await updater.compose_pull(component.repo_dir, component.service)
         await _finish(run, step, OK if ok else FAILED, output)
         if not ok:
             await _fail(run, "The API image could not be produced.")
@@ -529,6 +625,19 @@ async def _update_condor(run: Run) -> bool:
             await _fail(run, "Condor could not be fast-forwarded.")
             return False
 
+    # Work parked by the `stash` resolution goes back now that the fast-forward
+    # has landed. Stashing was never meant to be where it ended -- the point of
+    # parking work rather than discarding it is getting it back, and the common
+    # case applies cleanly. A conflicting pop does not fail the update: the
+    # stash is intact either way, and the step says so.
+    step = await _begin(run, f"{prefix}.unstash")
+    if step is not None:
+        popped, output = await updater.stash_pop(component.repo_dir)
+        if "Nothing of ours" in output:
+            await _finish(run, step, SKIPPED, output)
+        else:
+            await _finish(run, step, OK if popped else WARNED, output)
+
     after = await updater.get_local_commit_full(component.repo_dir)
     run.target_commit = after
 
@@ -555,10 +664,21 @@ async def _update_condor(run: Run) -> bool:
             if not ok:
                 await _fail(
                     run,
-                    "Code and deps are updated, but the dashboard would come "
-                    "back on the previous bundle.",
+                    "Code and deps are updated, but the dashboard could not be "
+                    "rebuilt — so it is still serving the bundle it was "
+                    "serving before, which is intact. The build writes to "
+                    "frontend/dist.new and only swaps it in on success.",
                 )
                 return False
+
+    # Check the install over before declaring victory. Read-only, and never
+    # fatal: the code is already on disk, so failing the run on the doctor's
+    # verdict would report a completed update as a failed one. WARNED is the
+    # honest state -- the update did happen, and there is something to read.
+    step = await _begin(run, f"{prefix}.doctor")
+    if step is not None:
+        ok, output = await updater.run_doctor()
+        await _finish(run, step, OK if ok else WARNED, output)
 
     # Everything that can be done without ending the process is done. The one
     # remaining step belongs to a human, so the run is judged here rather than
@@ -620,10 +740,21 @@ async def finalize_pending_run() -> Run | None:
     if not was_restarting:
         run.state = FAILED
         where = f" during {step.label.lower()}" if step is not None else ""
+        done = [s.label.lower() for s in run.steps if s.state == OK]
+        completed = (
+            f" What did finish: {', '.join(done)}." if done else " Nothing finished."
+        )
+        # The old wording described the state of the *disk* accurately and left
+        # out the part that matters now: the process reading this booted on the
+        # partial result. The fast-forward lands before dependencies are synced
+        # and before the dashboard is rebuilt, so this Condor may be running new
+        # code against a stale venv.
         run.error = (
-            f"This update was interrupted{where} — Condor stopped before the "
-            "run finished. Nothing was rolled back; start it again to pick up "
-            "wherever it got to."
+            f"This update was interrupted{where} — Condor stopped before the run "
+            f"finished.{completed} Nothing was rolled back, so Condor is now "
+            "*running* that partial result: new code, possibly with dependencies "
+            "or a dashboard bundle that never caught up. Run the update again "
+            "before anything else."
         )
         if step is not None:
             step.state = FAILED

@@ -20,7 +20,7 @@ The pipeline moved out of the Telegram handler and into :mod:`condor.updates.run
 import asyncio
 import os
 import signal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -227,13 +227,23 @@ def _build_script(**stale):
 
 
 def test_the_build_installs_first_when_the_deps_are_stale():
-    assert "npm ci && npm run build" in _build_script(return_value=True)
+    script = _build_script(return_value=True)
+    assert "npm ci" in script
+    assert script.index("npm ci") < script.index("npm run build")
 
 
 def test_the_build_skips_the_install_when_the_deps_are_current():
     script = _build_script(return_value=False)
     assert "npm ci" not in script
-    assert script.endswith("npm run build")
+    assert "npm run build" in script
+
+
+def test_the_build_never_targets_the_directory_being_served():
+    """Both paths build into the scratch dir and swap; neither empties dist."""
+    for stale in (True, False):
+        script = _build_script(return_value=stale)
+        assert "--outDir dist.new" in script
+        assert script.rstrip().endswith("mv dist.new dist")
 
 
 # ---------------------------------------------------------------------------
@@ -362,3 +372,76 @@ def test_hung_step_is_killed_rather_than_waited_on():
     rc, output = asyncio.run(updater._run_cmd("bash", "-c", "sleep 30", timeout=0.5))
     assert rc == 124
     assert "Timed out" in output
+
+
+# ---------------------------------------------------------------------------
+# A restart is only offered when it can work (C2.1, C2.2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_run_is_not_offered_a_restart():
+    """The button used to sit directly under "fix it before restarting".
+
+    The keyboard's condition was ``run.state == "failed" or
+    relaunch_pending()``, so *any* failure produced a Restart Now -- including
+    one whose own message forbids restarting. Pressing it booted the new code
+    against the old venv.
+    """
+    from handlers.admin import update as update_handler
+
+    run = update_run.Run(
+        id="r1", started=0.0, actor={}, components=["condor"], state="failed"
+    )
+    with patch.object(update_handler.updates, "relaunch_pending", lambda: None):
+        keyboard = update_handler._run_keyboard(run)
+
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Restart Now" not in labels
+    assert labels == ["Back"]
+
+
+def test_a_pending_relaunch_is_still_offered_a_restart():
+    """The condition that was always right is untouched."""
+    from handlers.admin import update as update_handler
+
+    run = update_run.Run(
+        id="r1", started=0.0, actor={}, components=["condor"], state="succeeded"
+    )
+    with patch.object(
+        update_handler.updates, "relaunch_pending", lambda: {"target_commit": "abc1234"}
+    ):
+        keyboard = update_handler._run_keyboard(run)
+
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Restart Now" in labels
+
+
+def test_a_failed_exec_leaves_a_record(tmp_path, monkeypatch):
+    """Otherwise the reason the restart died goes with the tmux pane."""
+    monkeypatch.setenv("CONDOR_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setattr(updater, "set_tmux_remain_on_exit", lambda on: None)
+    monkeypatch.setattr(
+        updater.os, "execv", Mock(side_effect=OSError(8, "Exec format error"))
+    )
+
+    with pytest.raises(OSError):
+        updater.exec_restart()
+
+    record = tmp_path / "restart-failure.log"
+    assert record.exists(), "a failed exec left nothing behind"
+    body = record.read_text()
+    assert "Exec format error" in body
+    assert "exec " in body
+
+
+def test_the_pane_is_kept_alive_across_the_handover(tmp_path, monkeypatch):
+    """A successor that fails to boot must not close the pane with the traceback."""
+    monkeypatch.setenv("CONDOR_RUNTIME_ROOT", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(updater, "set_tmux_remain_on_exit", lambda on: calls.append(on))
+    monkeypatch.setattr(updater.os, "execv", Mock(side_effect=OSError("nope")))
+
+    with pytest.raises(OSError):
+        updater.exec_restart()
+
+    assert calls == [True], "remain-on-exit was not enabled before the exec"

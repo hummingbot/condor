@@ -537,3 +537,48 @@ def test_a_promoted_proposal_lands_in_the_local_library(stock):
         in (agent_home("scout") / "skills" / "recon" / "SKILL.md").read_text()
     )
     assert (stock / "skills" / "recon" / "SKILL.md").read_text().endswith("Look.\n")
+
+
+# ── 4. The fork stamp survives the write that follows the fork ──
+
+
+def test_a_dashboard_style_write_keeps_the_fork_stamp(stock):
+    """The web routes' write must not erase the stamp ``fork_path`` just wrote.
+
+    ``fork_if_stock`` stamps the copy with the digest of the stock file it came
+    from, and the staleness check has nothing to compare without it. The routes
+    write a body the browser round-tripped from a GET of the **stock** file,
+    which carries no stamp — so a plain ``atomic_write_text`` erased it on the
+    very first save, and editing through the dashboard is how these files are
+    normally edited.
+    """
+    from condor.frontmatter import parse_frontmatter
+    from condor.layering import fork_if_stock, write_preserving_stamp
+
+    target = fork_if_stock("scout", "AGENT.md")
+    stamped, _ = parse_frontmatter(target.read_text("utf-8"))
+    assert stamped is not None and FORKED_FROM_KEY in stamped
+    original = stamped[FORKED_FROM_KEY]
+
+    # Exactly what the route hands down: stock's body, with no stamp on it.
+    write_preserving_stamp(
+        target, AGENT_MD.format(name="Scout", desc="shipped", body="My edit.")
+    )
+
+    after, body = parse_frontmatter(target.read_text("utf-8"))
+    assert after is not None, "the write destroyed the frontmatter"
+    assert after[FORKED_FROM_KEY] == original, "the write destroyed the stamp"
+    assert "My edit." in body
+    # And the shipped file is still the shipped file.
+    assert "Ship." in (stock / "AGENT.md").read_text("utf-8")
+
+
+def test_the_digest_ignores_line_endings(tmp_path):
+    """A stamp has to mean the same thing on a CRLF checkout as on an LF one."""
+    from condor.layering import content_digest
+
+    lf = tmp_path / "lf.md"
+    crlf = tmp_path / "crlf.md"
+    lf.write_bytes(b"---\nname: s\n---\n\n# S\nRule.\n")
+    crlf.write_bytes(b"---\r\nname: s\r\n---\r\n\r\n# S\r\nRule.\r\n")
+    assert content_digest(lf) == content_digest(crlf)

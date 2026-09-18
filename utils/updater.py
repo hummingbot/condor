@@ -18,9 +18,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
+import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +78,22 @@ async def _run_cmd(
     return proc.returncode, output
 
 
+# A crashed git leaves .git/index.lock behind and every later subcommand fails
+# on it. The raw error does reach output_tail, but it says "Another git process
+# seems to be running" -- which sends the reader looking for a process that is
+# not there. One line naming the file turns a dead end into a fix.
+_LOCK_HINT = (
+    "\nStale git lock: remove {repo}/.git/index.lock if no git process is "
+    "actually running."
+)
+
+
 async def _run_git(*args: str, repo_dir: str = CONDOR_DIR) -> tuple[int, str]:
     """Run a git command in the given repo and return (returncode, stdout)."""
-    return await _run_cmd("git", *args, cwd=repo_dir, timeout=GIT_TIMEOUT)
+    rc, out = await _run_cmd("git", *args, cwd=repo_dir, timeout=GIT_TIMEOUT)
+    if rc != 0 and "index.lock" in out:
+        out += _LOCK_HINT.format(repo=repo_dir)
+    return rc, out
 
 
 async def get_local_commit(repo_dir: str = CONDOR_DIR) -> str:
@@ -93,9 +109,48 @@ async def get_local_commit_full(repo_dir: str = CONDOR_DIR) -> str:
 
 
 async def get_current_branch(repo_dir: str = CONDOR_DIR) -> str:
-    """Return the current branch name."""
+    """Return the current branch name, or the literal ``HEAD`` when detached.
+
+    ``rev-parse --abbrev-ref`` answers ``HEAD`` for a detached checkout rather
+    than failing, and every caller downstream then treats that string as a
+    branch name. Use :func:`is_detached` to ask the question this cannot
+    answer.
+    """
     _, out = await _run_git("rev-parse", "--abbrev-ref", "HEAD", repo_dir=repo_dir)
     return out
+
+
+async def is_detached(repo_dir: str = CONDOR_DIR) -> bool:
+    """Whether ``HEAD`` points at a commit rather than a branch.
+
+    ``symbolic-ref`` is the only probe that distinguishes the two:
+    ``rev-parse --abbrev-ref HEAD`` returns the *string* ``HEAD`` when detached,
+    which reads as an ordinary branch name everywhere downstream. That is how a
+    detached checkout came to fast-forward onto the remote's default branch --
+    ``ahead_count(repo, "HEAD")`` resolves ``origin/HEAD``, finds nothing ahead,
+    so no ``diverged`` block fires, and ``git merge --ff-only origin/HEAD``
+    quietly succeeds and leaves the checkout detached.
+    """
+    rc, _ = await _run_git("symbolic-ref", "-q", "HEAD", repo_dir=repo_dir)
+    return rc != 0
+
+
+async def remote_default_branch(repo_dir: str = CONDOR_DIR) -> str | None:
+    """The remote's default branch (e.g. ``main``), or ``None`` if unknown.
+
+    Read from ``refs/remotes/origin/HEAD`` rather than hardcoded, so a repo that
+    renames its default branch does not need a code change here. ``None`` when
+    the ref is absent -- a clone made with ``--single-branch``, or one that has
+    never run ``git remote set-head`` -- and callers must treat that as "cannot
+    tell" rather than assuming anything.
+    """
+    rc, out = await _run_git(
+        "symbolic-ref", "-q", "refs/remotes/origin/HEAD", repo_dir=repo_dir
+    )
+    if rc != 0 or not out:
+        return None
+    # refs/remotes/origin/main -> main
+    return out.strip().rsplit("/", 1)[-1] or None
 
 
 async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
@@ -356,12 +411,15 @@ async def discard_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
         )
         if rc != 0:
             return False, f"Could not restore {len(to_checkout)} file(s):\n{out}"
-        messages.append(f"Restored {len(to_checkout)} tracked file(s).")
+        messages.append(
+            f"Discarded your changes to {len(to_checkout)} tracked file(s); "
+            "they are back to the committed version."
+        )
     if to_clean:
         rc, out = await _run_git("clean", "-fd", "--", *to_clean, repo_dir=repo_dir)
         if rc != 0:
             return False, f"Could not remove {len(to_clean)} file(s):\n{out}"
-        messages.append(f"Removed {len(to_clean)} untracked file(s).")
+        messages.append(f"Deleted {len(to_clean)} untracked file(s).")
 
     return True, " ".join(messages) or "Nothing to discard."
 
@@ -387,6 +445,79 @@ async def stash_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
     if ref:
         return True, f"Stashed as stash@{{0}} ({ref}). Restore with: git stash pop"
     return True, out or "Stashed."
+
+
+async def stash_pop(repo_dir: str) -> tuple[bool, str]:
+    """Put back the work ``stash_paths`` parked, if it still applies cleanly.
+
+    Stashing was never meant to be the end of the story -- the whole point of
+    parking work rather than discarding it is getting it back, and a clean pop
+    is the common case once the fast-forward has landed. What the original
+    caution was right about is the *failure*: a conflicting pop leaves a
+    half-merged tree plus a stash entry nobody was told about. So a conflict
+    aborts and says where the work still is, rather than leaving the operator
+    to discover both.
+    """
+    _, listing = await _run_git("stash", "list", repo_dir=repo_dir)
+    if "condor /update" not in listing:
+        return True, "Nothing of ours was stashed."
+
+    rc, out = await _run_git("stash", "pop", repo_dir=repo_dir)
+    if rc != 0:
+        return False, (
+            f"{out}\n\nYour work is still in stash@{{0}} — nothing was lost. "
+            "Resolve it by hand with: git stash pop"
+        )
+    return True, "Restored the work that was stashed before the update."
+
+
+async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool, str]:
+    """Move edited agent files into the gitignored local root, then reset stock.
+
+    The non-lossy exit from a ``dirty-conflict``. FEAT-115 redirects writes made
+    *through the product* into ``.condor/agents``, where they shadow stock per
+    item and no update can touch them -- but a text editor knows nothing about
+    that, and these are markdown files sitting in a git checkout, which is
+    exactly what people open in one. Such an edit blocked the update, and the
+    only one-click way out destroyed it.
+
+    This puts the edit where the product would have put it: the customization
+    survives and keeps being used, the tracked file fast-forwards normally, and
+    the install ends up in the state FEAT-115 supports rather than a dead end.
+    """
+    from condor.paths import local_agents_root
+
+    if not rel_paths:
+        return True, "Nothing to move."
+
+    moved: list[str] = []
+    local_root = local_agents_root()
+    for rel in rel_paths:
+        source = Path(repo_dir) / rel
+        if not source.is_file():
+            continue
+        # ``agents/scout/AGENT.md`` -> ``<local>/scout/AGENT.md``
+        target = local_root / Path(rel).relative_to("agents")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+        except (OSError, ValueError) as exc:
+            return False, f"Could not move {rel}: {exc}"
+        moved.append(rel)
+
+    if not moved:
+        return True, "Nothing to move."
+
+    # The tracked copies go back to HEAD so the fast-forward is unobstructed.
+    rc, out = await _run_git("checkout", "HEAD", "--", *moved, repo_dir=repo_dir)
+    if rc != 0:
+        return False, f"Moved your edits, but could not reset the tracked files:\n{out}"
+
+    return True, (
+        f"Kept your version of {len(moved)} file(s), moved into .condor/agents "
+        "where updates leave them alone. The shipped copies will now "
+        "fast-forward; your versions stay in use."
+    )
 
 
 async def install_dependencies() -> tuple[bool, str]:
@@ -465,6 +596,68 @@ async def npm_deps_stale(old_commit: str = "", new_commit: str = "") -> bool:
     )
 
 
+def _explain_build_failure(rc: int, output: str) -> str:
+    """Turn a build exit code into something the operator can act on.
+
+    Three failures are common, look identical in the raw output, and have
+    different remedies — so each gets named rather than all three arriving as
+    "Frontend build failed".
+    """
+    base = output or "Frontend build failed (no output)"
+    if "__CONDOR_NPM_CI_FAILED__" in base or rc == 90:
+        return (
+            base.replace("__CONDOR_NPM_CI_FAILED__", "").strip()
+            + "\n\n`npm ci` failed, and it removes node_modules before it "
+            "installs — so there is currently no dependency tree and the build "
+            "could not have run. Fix the network or free some disk, then "
+            "`cd frontend && npm ci`. The bundle on disk was not touched."
+        )
+    # 137 is SIGKILL, which for a vite build is almost always the memory
+    # ceiling: WSL2 caps the VM by default and Docker Desktop caps it on macOS.
+    # The process gets no chance to say so, so the output is unhelpfully empty.
+    if rc in (137, -9):
+        return (
+            base + "\n\nThe build was killed (signal 9), which for a bundler is "
+            "almost always the memory limit. On WSL2 raise `memory=` in "
+            "`.wslconfig`; on macOS raise Docker Desktop's memory. The bundle "
+            "on disk was not touched."
+        )
+    if rc == 124:
+        return (
+            base + "\n\nThe build timed out. On a checkout under /mnt/c on WSL2, or "
+            "on Docker Desktop for macOS, this step can legitimately take "
+            "several times longer than it does on Linux. Retrying is safe — "
+            "`npm ci` and the build are both idempotent, and the bundle on "
+            "disk was not touched."
+        )
+    return base
+
+
+async def run_doctor() -> tuple[bool, str]:
+    """Run Condor's own health check and report what it said.
+
+    ``python -m condor.doctor`` already exists, is read-only, and exits non-zero
+    on real failures -- and was wired only into ``make install``. Nothing in the
+    update path ran it, so a broken boot was indistinguishable from a good one
+    until somebody opened the dashboard. The contrast is the sharpest argument
+    for it: the hummingbot-api path gets a health gate whose step is literally
+    "wait for the API to answer", while Condor -- the component actually running
+    the update -- got none.
+
+    Never fatal. It runs after the code is already on disk, so failing the run
+    on its verdict would report a completed update as a failed one.
+    """
+    script = (
+        'export NVM_DIR="$HOME/.nvm"; '
+        '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+        "uv run python -m condor.doctor"
+    )
+    rc, output = await _run_cmd(
+        "bash", "-c", script, cwd=CONDOR_DIR, timeout=DEPS_TIMEOUT
+    )
+    return rc == 0, output or ("Doctor reported no output." if rc == 0 else "")
+
+
 async def build_frontend(
     old_commit: str = "", new_commit: str = ""
 ) -> tuple[bool, str]:
@@ -479,17 +672,35 @@ async def build_frontend(
     if not os.path.isdir(FRONTEND_DIR):
         return True, "No frontend directory; skipped."
 
-    install = "npm ci && " if await npm_deps_stale(old_commit, new_commit) else ""
+    stale = await npm_deps_stale(old_commit, new_commit)
+    # `npm ci` deletes node_modules before it installs, so a registry blip or a
+    # full disk part-way through leaves the install with no dependency tree at
+    # all -- and then the build cannot run either. Say which of the two failed,
+    # because the remedies are different.
+    install = (
+        'npm ci || { echo "__CONDOR_NPM_CI_FAILED__"; exit 90; }; ' if stale else ""
+    )
+    # Build into a scratch directory and swap. vite's defaults are
+    # `outDir: "dist"` with `emptyOutDir: true`, so building in place emptied
+    # the directory uvicorn was serving out of and every request during the
+    # build returned an error -- and a build that then *failed* left the install
+    # with no dashboard at all, while the run reported that the previous bundle
+    # would come back. Exposure is now one rename, and dist.old is a free
+    # instant rollback.
     script = (
         'export NVM_DIR="$HOME/.nvm"; '
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
-        'cd "$1" || exit 1; ' + install + "npm run build"
+        'cd "$1" || exit 1; ' + install + "rm -rf dist.new && "
+        "npm run build -- --outDir dist.new --emptyOutDir && "
+        "rm -rf dist.old && "
+        "{ [ -d dist ] && mv dist dist.old || true; } && "
+        "mv dist.new dist"
     )
     rc, output = await _run_cmd(
         "bash", "-c", script, "bash", FRONTEND_DIR, timeout=FRONTEND_BUILD_TIMEOUT
     )
     if rc != 0:
-        return False, output or "Frontend build failed (no output)"
+        return False, _explain_build_failure(rc, output)
     return True, output
 
 
@@ -521,6 +732,34 @@ def restart_pending() -> bool:
     return _restart_pending
 
 
+def set_tmux_remain_on_exit(on: bool) -> None:
+    """Toggle ``remain-on-exit`` on Condor's own tmux session, best effort.
+
+    The Makefile turns this on for the startup probe and back off once the boot
+    is confirmed, deliberately: a crash three hours later must still take the
+    session down, or ``make status`` would report a dead Condor as running. That
+    leaves an in-process restart with no such protection — the successor's own
+    startup failure closes the pane and takes the traceback with it.
+
+    So the same dance is repeated around the exec: on just before, off again
+    once the new process has got far enough to serve. Silent when there is no
+    tmux, which is the ordinary case for a foreground or containerized run.
+    """
+    session = os.environ.get("CONDOR_TMUX_SESSION", "condor")
+    value = "on" if on else "off"
+    for scope in ("set-option", "set-window-option"):
+        try:
+            result = subprocess.run(
+                ["tmux", scope, "-t", session, "remain-on-exit", value],
+                capture_output=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if result.returncode == 0:
+            return
+
+
 def exec_restart() -> None:
     """Replace this process with a fresh one. Never returns.
 
@@ -537,7 +776,40 @@ def exec_restart() -> None:
             pass
     # sys.argv[0] is usually the relative "main.py"; make sure it still resolves.
     os.chdir(CONDOR_DIR)
-    os.execv(python, [python] + sys.argv)
+    # Keep the pane alive across the handover so the successor's own startup
+    # failure is readable. main() turns it back off once it is serving.
+    set_tmux_remain_on_exit(True)
+    try:
+        os.execv(python, [python] + sys.argv)
+    except OSError:
+        # A failed exec is the one way a restart can end with nothing running
+        # and nothing said. The process image is still this one, but the event
+        # loop is gone and the tmux pane is about to close, so a log line alone
+        # can vanish with it -- hence a file as well, in the runtime root where
+        # the next boot (and the operator) can find it.
+        logger.exception("exec_restart failed; Condor is not coming back")
+        _record_restart_failure()
+        raise
+
+
+def _record_restart_failure() -> None:
+    """Leave the reason a restart died somewhere it will survive the pane."""
+    import traceback
+    from datetime import datetime, timezone
+
+    try:
+        from condor.paths import runtime_root
+
+        path = runtime_root() / "restart-failure.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"{datetime.now(timezone.utc).isoformat()}\n"
+            f"exec {sys.executable} {' '.join(sys.argv)}\n\n"
+            f"{traceback.format_exc()}",
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001 - never mask the original failure
+        logger.debug("Could not write restart-failure.log", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -575,20 +847,6 @@ async def compose_service(repo_dir: str, service: str) -> dict | None:
         return None
     definition = services.get(service)
     return definition if isinstance(definition, dict) else None
-
-
-async def compose_mode(repo_dir: str, service: str) -> str:
-    """How this install produces ``service``: ``source``, ``image`` or ``unknown``.
-
-    A ``build:`` key means the image is built here, so an update is
-    ``compose build``. No ``build:`` key means a published image is pulled, so
-    an update is ``compose pull`` -- and the git checkout, whatever it says,
-    has nothing to do with the version running inside the container.
-    """
-    definition = await compose_service(repo_dir, service)
-    if definition is None:
-        return "unknown"
-    return "source" if definition.get("build") else "image"
 
 
 async def local_image_digest(image_ref: str) -> str | None:
@@ -644,23 +902,70 @@ async def registry_image_digest(image_ref: str) -> str | None:
     return digest if digest.startswith("sha256:") else None
 
 
+async def registry_has_digest(image_ref: str, digest: str) -> bool | None:
+    """Whether the registry holds ``digest`` for ``image_ref``'s repository.
+
+    The only reliable way to tell an operator's own build from a published
+    image. The obvious test -- "a built image has no ``RepoDigests``" -- does
+    **not** work: Docker's containerd image store records a canonical digest for
+    a build as well as for a pull, so a locally built image has a RepoDigest
+    like any other, it simply is not one the registry has ever seen. Measured on
+    29.8.1: pull, then ``docker build`` over the same tag, and RepoDigests is
+    populated both times with different values. ``.Comment`` is no help either
+    (both say ``buildkit.dockerfile.v0``, because the published image was itself
+    built by buildkit in CI).
+
+    Returns ``None`` when the question could not be answered, which callers must
+    keep distinct from ``False`` -- an unreachable registry is not evidence that
+    an image was built locally.
+    """
+    repo = image_ref.split("@", 1)[0].rsplit(":", 1)[0]
+    rc, out = await _run_cmd(
+        "docker",
+        "buildx",
+        "imagetools",
+        "inspect",
+        f"{repo}@{digest}",
+        "--format",
+        "{{.Manifest.Digest}}",
+        timeout=30,
+    )
+    if rc == 0 and (out or "").strip().startswith("sha256:"):
+        return True
+    # "not found" is an answer; anything else is a failure to ask.
+    if "not found" in (out or "").lower():
+        return False
+    return None
+
+
+def _explain_docker_failure(rc: int, output: str, what: str) -> str:
+    """Turn a docker step's exit code into something the operator can act on.
+
+    The 1800s ceiling exists so a hung pull cannot wedge the update forever, but
+    hitting it returned a bare "Timed out after 1800s" and left the operator to
+    guess whether a half-rebuilt stack was safe to touch. It is: ``compose pull``
+    and ``compose up -d`` are both idempotent, so the answer is simply to run the
+    update again.
+    """
+    base = output or f"{what} failed (no output)"
+    if rc == 124:
+        return (
+            base + f"\n\nThe step timed out. `{what}` is idempotent, so re-running "
+            "the update is safe and will pick up wherever it got to. On Docker "
+            "Desktop for macOS, or on WSL2 with the daemon behind a VM, a cold "
+            "pull can legitimately take several times longer than it does on "
+            "Linux."
+        )
+    return base
+
+
 async def compose_pull(repo_dir: str, service: str) -> tuple[bool, str]:
     """Pull the published image for one service."""
     rc, output = await _run_cmd(
         "docker", "compose", "pull", service, cwd=repo_dir, timeout=DOCKER_TIMEOUT
     )
     if rc != 0:
-        return False, output or "docker compose pull failed (no output)"
-    return True, output
-
-
-async def compose_build(repo_dir: str, service: str) -> tuple[bool, str]:
-    """Rebuild one service's image from source."""
-    rc, output = await _run_cmd(
-        "docker", "compose", "build", service, cwd=repo_dir, timeout=DOCKER_TIMEOUT
-    )
-    if rc != 0:
-        return False, output or "docker compose build failed (no output)"
+        return False, _explain_docker_failure(rc, output, "docker compose pull")
     return True, output
 
 
@@ -670,7 +975,7 @@ async def compose_up(repo_dir: str) -> tuple[bool, str]:
         "docker", "compose", "up", "-d", cwd=repo_dir, timeout=DOCKER_TIMEOUT
     )
     if rc != 0:
-        return False, output or "docker compose up failed (no output)"
+        return False, _explain_docker_failure(rc, output, "docker compose up -d")
     return True, output
 
 

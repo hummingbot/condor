@@ -182,8 +182,18 @@ export function UpdatesSettings() {
           onClose={() => setConfirmDiscard(null)}
         >
           <p>
-            These files will be reset to the last commit. The changes cannot be
-            recovered — <strong>Stash</strong> keeps them instead.
+            Your changes to these files will be thrown away and the files reset
+            to the last commit. This cannot be undone.{" "}
+            {confirmDiscard?.resolutions.includes("keep-mine") ? (
+              <>
+                <strong>Keep my version</strong> moves them somewhere updates
+                leave alone; <strong>Stash</strong> parks them in git.
+              </>
+            ) : (
+              <>
+                <strong>Stash</strong> parks them in git instead.
+              </>
+            )}
           </p>
           <ul className="mt-3 max-h-40 space-y-0.5 overflow-y-auto font-mono text-xs">
             {confirmDiscard?.paths.map((p) => <li key={p}>{p}</li>)}
@@ -343,6 +353,19 @@ function ComponentCard({
 }
 
 /** The plan, what it will cost, and anything standing in the way. */
+/**
+ * What each resolution is actually called on screen.
+ *
+ * "keep-mine" reads as jargon and is the one an operator most wants to find, so
+ * it says what it does. The others keep their plain names.
+ */
+const RESOLUTION_LABELS: Record<string, string> = {
+  "keep-mine": "Keep my version",
+  discard: "Discard",
+  stash: "Stash",
+  cancel: "Cancel",
+};
+
 function PreflightView({
   preflight,
   isStarting,
@@ -409,13 +432,16 @@ function PreflightView({
                   key={action}
                   onClick={() => onResolve(block, action)}
                   disabled={isResolving}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors disabled:opacity-50 ${
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
                     action === "discard"
                       ? "bg-[var(--color-red)]/15 text-[var(--color-red)] hover:opacity-80"
-                      : "border border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                      : action === "keep-mine"
+                        ? // The only non-lossy way out, so it leads.
+                          "bg-[var(--color-green)]/15 text-[var(--color-green)] hover:opacity-80"
+                        : "border border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`}
                 >
-                  {action}
+                  {RESOLUTION_LABELS[action] ?? action}
                 </button>
               ))}
             </div>
@@ -491,7 +517,7 @@ function StepRow({ step }: { step: Step }) {
           {step.label}
         </span>
       </div>
-      {step.state === "failed" && step.output_tail && (
+      {(step.state === "failed" || step.state === "warned") && step.output_tail && (
         <details className="mt-1 pl-6">
           <summary className="cursor-pointer text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
             Output
@@ -512,6 +538,8 @@ function StepIcon({ state }: { state: Step["state"] }) {
   if (state === "ok")
     return <CheckCircle2 className={`${cls} text-[var(--color-green)]`} />;
   if (state === "failed") return <XCircle className={`${cls} text-[var(--color-red)]`} />;
+  if (state === "warned")
+    return <AlertTriangle className={`${cls} text-[var(--color-yellow)]`} />;
   if (state === "skipped")
     return <MinusCircle className={`${cls} text-[var(--color-text-muted)]`} />;
   return <Circle className={`${cls} text-[var(--color-text-muted)]`} />;
@@ -556,22 +584,20 @@ function FinishedView({
         )}
       </div>
 
-      {/* The one step the engine deliberately leaves undone. Spelled out here
-          rather than left to the banner alone: this is the screen the person
-          who just pressed Update is looking at. */}
+      {/* The banner above handles the restart itself, including the countdown
+          and the cancel. This says the same thing on the screen the person who
+          just pressed Update is actually looking at, without a second set of
+          controls competing with it. */}
       {relaunch?.required && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 p-3 text-xs leading-relaxed text-[var(--color-text)]">
           <RotateCw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-yellow)]" />
           <span>
             Condor is still running{" "}
-            <span className="font-mono">{relaunch.from_commit}</span>. Relaunch
-            it —{" "}
-            <code className="rounded bg-[var(--color-surface-hover)] px-1 py-0.5 font-mono text-[11px]">
-              make restart
-            </code>{" "}
-            — to come up on{" "}
-            <span className="font-mono">{relaunch.target_commit}</span>. Bots and
-            open positions are untouched.
+            <span className="font-mono">{relaunch.from_commit}</span>. It is
+            restarting to come up on{" "}
+            <span className="font-mono">{relaunch.target_commit}</span> — see the
+            banner at the top of the page, which counts down and can be
+            cancelled. Bots and open positions are untouched.
           </span>
         </div>
       )}
