@@ -788,7 +788,7 @@ class AddCredentialRequest(BaseModel):
     credentials: dict[str, Any]
 
 
-# ── Vaults: the wallet a runner signs with (plan M2) ──
+# ── Vaults: the wallet a creator signs with (plan M2) ──
 
 
 class WalletNonceRequest(BaseModel):
@@ -887,7 +887,7 @@ class VaultPin(BaseModel):
     signature: Optional[str] = None
     scan: Optional[VaultScan] = None
     pending: Optional[dict[str, Any]] = None
-    # The private config is NEVER in a listing: it is served to the runner
+    # The private config is NEVER in a listing: it is served to the creator
     # alone, from GET /vaults/{account}/config.
 
 
@@ -904,9 +904,9 @@ class VaultChainState(BaseModel):
     ghost — see `reconcile`.
     """
 
-    runner: str
+    creator: str
     #: The wallet: where the money is, derived from the vault id by the program.
-    wallet: str
+    treasury: str
     # None while the vault is private, which is most of them and is a finished
     # state rather than an unfinished one. Typed as required strings, these two
     # made the listing fail for exactly the vaults the product is mostly about.
@@ -924,7 +924,7 @@ class VaultChainState(BaseModel):
     migration_fee_pct: int = 0
     creator_trading_fee_pct: int = 0
     migration_fee_option: int = 0
-    # False means no outside holders: the runner may still withdraw.
+    # False means no outside holders: the creator may still withdraw.
     tokenized: bool = False
     state: str  # Running | Paused | WindingDown | Redeemable
     delegate: Optional[str] = None
@@ -945,8 +945,9 @@ class VaultInfo(BaseModel):
     label: str
     server: str
     network: str
-    wallet_address: str
-    runner_address: str
+    #: The treasury: the PDA that holds the money. Pass it as walletAddress to hbapi/Gateway.
+    treasury_address: str
+    creator_address: str
     quote_mint: Optional[str] = None
     delegate: Optional[VaultDelegate] = None
     token: Optional[VaultTokenInfo] = None
@@ -982,7 +983,7 @@ class VaultTokenizeRequest(BaseModel):
     """The terms are in the launch config, not here.
 
     A vault's launch price and its migration fee are config parameters, so the
-    runner builds the config first (`VaultLaunchConfigRequest`) and Condor
+    creator builds the config first (`VaultLaunchConfigRequest`) and Condor
     remembers its address. The program checks every term of it and records the
     ones a holder needs to read.
     """
@@ -995,7 +996,7 @@ class VaultTokenizeRequest(BaseModel):
 
 
 class VaultLaunchConfigRequest(BaseModel):
-    """The vault's own DBC config — the launch terms, which are the runner's to
+    """The vault's own DBC config — the launch terms, which are the creator's to
     choose within the bounds the program enforces.
 
     Every one of these is on the `Vault` account after `tokenize`, so a buyer
@@ -1006,18 +1007,18 @@ class VaultLaunchConfigRequest(BaseModel):
     #: in, what a wind-down converts into, and what a redemption pays. Chosen
     #: here because this config is what fixes it: the program writes it onto the
     #: vault at `tokenize` and it can never change afterwards. A vault has none
-    #: before that, and needs none: a private vault owes nobody, and its runner
+    #: before that, and needs none: a private vault owes nobody, and its creator
     #: takes assets out through the delegate in whatever they are.
     quote_mint: str
     # What the vault is worth per token at the start of the curve, in quote.
-    # Informed by NAV; a runner may strike it above or below.
+    # Informed by NAV; a creator may strike it above or below.
     initial_market_cap: float
     migration_market_cap: float
     #: 20-80. The share of the raise that becomes the vault's capital; the rest
     #: is permanently locked liquidity. This is the split between the strategy
-    #: and the holders' exit depth, which is why it is the runner's to set.
+    #: and the holders' exit depth, which is why it is the creator's to set.
     migration_fee_percentage: Optional[float] = None
-    #: 0-50: the runner's share of trading fees.
+    #: 0-50: the creator's share of trading fees.
     creator_trading_fee_percentage: Optional[float] = None
     #: 0-5: which fixed fee the migrated pool charges.
     migration_fee_option: Optional[int] = None
@@ -1027,7 +1028,7 @@ class VaultLaunchConfigRequest(BaseModel):
 class VaultWithdrawRequest(BaseModel):
     """Take assets out of a *private* vault.
 
-    Not an instruction and not a privilege: the delegate the runner installed
+    Not an instruction and not a privilege: the delegate the creator installed
     can already move anything in the wallet, and this is Condor asking it to.
     Refused once the vault is tokenized, where the only way out is `redeem`.
     """

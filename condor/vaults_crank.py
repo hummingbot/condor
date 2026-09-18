@@ -7,24 +7,24 @@ push, and whether a wind-down needs finishing.
 
 **What the crank is not.** It is not a privileged party. Everything it does is
 something the program already allows: the strategy ticks are signed by a
-delegate the runner installed and can remove, `collect_seed` and
+delegate the creator installed and can remove, `collect_seed` and
 `collect_leftover` are permissionless and pay the caller nothing, and the one
 instruction restricted to Condor — `finalize_wind_down` — is restricted because
 a stranger could otherwise strand a position behind a removed delegate, not
-because Condor is owed anything. A runner who self-hosts runs this same loop
+because Condor is owed anything. A creator who self-hosts runs this same loop
 against their own vault and needs nothing from Condor at all.
 
 **Start checks, every pass.** A vault only ticks when all of these hold, and
 each one has a failure it is there to prevent:
 
-* the chain says `Running` — the runner's pause is not advisory;
+* the chain says `Running` — the creator's pause is not advisory;
 * the stored version, config hash and fee equal the chain's — otherwise Condor
-  would be running parameters the runner did not sign, which is the whole point
+  would be running parameters the creator did not sign, which is the whole point
   of putting a hash on chain;
 * Condor's own scan passed *this version* — a private run policy, not an
   attestation (nothing on chain says Condor reviewed anything);
 * the vault still names the delegate Condor holds — a replaced delegate means
-  the runner has taken the wallet back, and the crank must notice rather than
+  the creator has taken the wallet back, and the crank must notice rather than
   fail transaction by transaction;
 * exactly one live engine per vault — two would double every position.
 
@@ -94,7 +94,7 @@ def check_can_run(record: dict[str, Any], chain: dict[str, Any]) -> None:
             )
 
     # The hash is the commitment. Recomputing it here rather than trusting the
-    # stored one is what makes "nobody can run a vault on parameters its runner
+    # stored one is what makes "nobody can run a vault on parameters its creator
     # did not sign" true of Condor's own operators.
     recomputed = config_hash(pin["config"])
     if recomputed != chain.get("config_hash"):
@@ -188,7 +188,7 @@ class VaultCrank:
             if entry is None:
                 # Someone else's vault on the same chain. Condor reads it and
                 # leaves it alone: it holds no config for it and no delegate on
-                # it, and a vault is nobody's to run but its runner's.
+                # it, and a vault is nobody's to run but its creator's.
                 continue
             user, record = entry
             try:
@@ -329,7 +329,7 @@ class VaultCrank:
 
     # ── engines ───────────────────────────────────────────────────────────────
 
-    async def _ensure_account(self, account: str, wallet: str) -> None:
+    async def _ensure_account(self, account: str, treasury: str) -> None:
         """One hummingbot-api account per vault, bound to that vault's wallet.
 
         Without the binding an account trades as Gateway's *default* wallet —
@@ -352,7 +352,7 @@ class VaultCrank:
         # route (plan M5).
         await client.accounts._post(
             f"/accounts/{name}/gateway-wallet",
-            json={"chain": "solana", "address": wallet},
+            json={"chain": "solana", "address": treasury},
         )
 
     async def _ensure_engine(
@@ -364,7 +364,7 @@ class VaultCrank:
 
         # The account and its wallet binding come first: an engine started
         # against an unbound account trades from the wrong address.
-        await self._ensure_account(account, chain["wallet"])
+        await self._ensure_account(account, chain["treasury"])
 
         from condor.agents.agent import AgentStore
         from condor.agents.engine import TickEngine
@@ -389,14 +389,14 @@ class VaultCrank:
         # trades from is the vault's — never Gateway's default, which is one
         # address for the whole instance and would make two vaults one wallet.
         config = dict(pin["config"])
-        # The vault's server, not the runner's default. Without this the engine
+        # The vault's server, not the creator's default. Without this the engine
         # resolves a server from the user — and a vault on the fork would have
         # its strategy executing through whatever server that user last chose,
         # which is a different hummingbot-api, a different Gateway and a
         # different chain.
         config["server_name"] = self.server
         config["account_name"] = _account_name(account)
-        config["wallet_address"] = chain["wallet"]
+        config["wallet_address"] = chain["treasury"]
         config["vault_account"] = account
         config["execution_mode"] = "loop"
 

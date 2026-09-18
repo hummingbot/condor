@@ -88,7 +88,7 @@ class FakeGateway:
 @pytest.fixture
 def client(monkeypatch):
     upstream = FakeClient()
-    gateway = FakeGateway(upstream, {"account": ACCOUNT, "wallet": WALLET})
+    gateway = FakeGateway(upstream, {"account": ACCOUNT, "treasury": WALLET})
 
     async def fake_gateway(server, network="mainnet-beta"):
         assert server == SERVER
@@ -108,7 +108,7 @@ def client(monkeypatch):
 def test_positions_come_back_tagged_with_the_protocol_that_held_them(client):
     body = client.get(f"/vaults/{ACCOUNT}/lp-positions?server={SERVER}").json()
 
-    assert body["wallet_address"] == WALLET
+    assert body["treasury_address"] == WALLET
     assert [(p["protocol"], p["kind"]) for p in body["positions"]] == [
         ("meteora", "clmm")
     ]

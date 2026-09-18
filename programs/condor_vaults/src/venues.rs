@@ -1,12 +1,12 @@
-//! Where a wallet may go under `execute`, and what it may hand over there.
+//! Where a treasury may go under `execute`, and what it may hand over there.
 //!
 //! The rule is about **recipients**, because that is where every custody
 //! design that looked at anything else failed (plan §1.8): a DEX swap names
 //! its output account as an ordinary account and checks only its mint, so a
-//! wallet that may "only send tokens to pool vaults" can still swap its USDC
+//! treasury that may "only send tokens to pool vaults" can still swap its USDC
 //! into a pool and have the SOL land in whoever's account the caller wrote
 //! down. So instead of asking where value *leaves to*, this asks, for every
-//! account the instruction may write: is it the wallet's, the venue's, or the
+//! account the instruction may write: is it the treasury's, the venue's, or the
 //! caller's own? Anything else is refused before the call is made, and what
 //! the call *created* is checked after it returns.
 //!
@@ -52,10 +52,10 @@ pub struct Before {
     pub fresh: Vec<Pubkey>,
 }
 
-/// Refuse anything the wallet must not do, before it does it.
+/// Refuse anything the treasury must not do, before it does it.
 pub fn check_before(
     program: &Pubkey,
-    wallet: &Pubkey,
+    treasury: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> Result<Before> {
@@ -63,7 +63,7 @@ pub fn check_before(
         || *program == ASSOCIATED_TOKEN
         || *program == system_program::ID
     {
-        check_base_program(program, wallet, accounts, data)?;
+        check_base_program(program, treasury, accounts, data)?;
         return Ok(Before { fresh: Vec::new() });
     }
     require!(is_venue(program), VaultError::ProgramNotAllowed);
@@ -87,17 +87,17 @@ pub fn check_before(
             continue;
         }
         let key = account.key();
-        if key == *wallet {
-            continue; // the wallet itself: rent it pays, lamports it receives
+        if key == *treasury {
+            continue; // the treasury itself: rent it pays, lamports it receives
         }
         if account.is_signer {
             continue; // the caller, spending their own key's lamports
         }
         if let Some(holding) = token::read_token_account(account) {
-            if holding.owner == *wallet || pool_authorities.contains(&holding.owner) {
+            if holding.owner == *treasury || pool_authorities.contains(&holding.owner) {
                 continue;
             }
-            msg!("token account {} is owned by {}, which is neither the wallet nor the venue", key, holding.owner);
+            msg!("token account {} is owned by {}, which is neither the treasury nor the venue", key, holding.owner);
             return Err(VaultError::AccountNotAllowed.into());
         }
         if account.owner == program {
@@ -111,25 +111,25 @@ pub fn check_before(
             fresh.push(key);
             continue;
         }
-        msg!("account {} (owned by {}) is not the wallet's, the venue's, or the caller's", key, account.owner);
+        msg!("account {} (owned by {}) is not the treasury's, the venue's, or the caller's", key, account.owner);
         return Err(VaultError::AccountNotAllowed.into());
     }
     Ok(Before { fresh })
 }
 
-/// Whatever the call created now has an owner. It had better be the wallet.
-pub fn check_after(program: &Pubkey, wallet: &Pubkey, accounts: &[AccountInfo], before: &Before) -> Result<()> {
+/// Whatever the call created now has an owner. It had better be the treasury.
+pub fn check_after(program: &Pubkey, treasury: &Pubkey, accounts: &[AccountInfo], before: &Before) -> Result<()> {
     for key in &before.fresh {
         let Some(account) = accounts.iter().find(|a| a.key() == *key) else { continue };
         if *account.owner == system_program::ID {
             continue; // never created after all
         }
         if let Some(holding) = token::read_token_account(account) {
-            // A new token account — the wallet's ATA for a mint it had not
+            // A new token account — the treasury's ATA for a mint it had not
             // held, or the account that holds a position NFT. Either way, the
-            // wallet's.
-            if holding.owner != *wallet {
-                msg!("new token account {} is owned by {}, not the wallet", key, holding.owner);
+            // treasury's.
+            if holding.owner != *treasury {
+                msg!("new token account {} is owned by {}, not the treasury", key, holding.owner);
                 return Err(VaultError::RecipientNotVault.into());
             }
             continue;
@@ -141,9 +141,9 @@ pub fn check_after(program: &Pubkey, wallet: &Pubkey, accounts: &[AccountInfo], 
                 // record it as the holder of a token account, checked above.
                 let data = account.try_borrow_data()?;
                 let owned_by_wallet =
-                    data.len() >= 72 && Pubkey::new_from_array(data[40..72].try_into().unwrap()) == *wallet;
+                    data.len() >= 72 && Pubkey::new_from_array(data[40..72].try_into().unwrap()) == *treasury;
                 if !owned_by_wallet {
-                    msg!("new DLMM position {} is not owned by the wallet", key);
+                    msg!("new DLMM position {} is not owned by the treasury", key);
                     return Err(VaultError::RecipientNotVault.into());
                 }
             }
@@ -156,18 +156,18 @@ pub fn check_after(program: &Pubkey, wallet: &Pubkey, accounts: &[AccountInfo], 
 }
 
 /// The four programs every venue instruction is made of, admitted for the
-/// handful of things a trading wallet needs from them and nothing else. A
+/// handful of things a trading treasury needs from them and nothing else. A
 /// token transfer is conspicuously absent: under `execute` there is no such
-/// thing as the wallet sending a token to an account, only to a venue.
-fn check_base_program(program: &Pubkey, wallet: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Result<()> {
+/// thing as the treasury sending a token to an account, only to a venue.
+fn check_base_program(program: &Pubkey, treasury: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Result<()> {
     let key_at = |i: usize| -> Result<Pubkey> {
         accounts.get(i).map(|a| a.key()).ok_or_else(|| error!(VaultError::InstructionNotAllowed))
     };
     if *program == ASSOCIATED_TOKEN {
         // Create / CreateIdempotent: [payer, ata, owner, mint, system, token].
-        // The owner is the wallet; the payer is whoever signed.
+        // The owner is the treasury; the payer is whoever signed.
         let create = data.is_empty() || data == [0] || data == [1];
-        require!(create && key_at(2)? == *wallet, VaultError::InstructionNotAllowed);
+        require!(create && key_at(2)? == *treasury, VaultError::InstructionNotAllowed);
         return Ok(());
     }
     if is_token_program(program) {
@@ -175,14 +175,14 @@ fn check_base_program(program: &Pubkey, wallet: &Pubkey, accounts: &[AccountInfo
             Ok(accounts
                 .get(i)
                 .and_then(token::read_token_account)
-                .is_some_and(|t| t.owner == *wallet))
+                .is_some_and(|t| t.owner == *treasury))
         };
         match data.first() {
-            // SyncNative on the wallet's own wrapped-SOL account.
+            // SyncNative on the treasury's own wrapped-SOL account.
             Some(17) => require!(owned_by_wallet(0)?, VaultError::InstructionNotAllowed),
-            // CloseAccount [account, destination, authority]: the wallet's own
-            // account, rent back to the wallet.
-            Some(9) => require!(owned_by_wallet(0)? && key_at(1)? == *wallet, VaultError::InstructionNotAllowed),
+            // CloseAccount [account, destination, authority]: the treasury's own
+            // account, rent back to the treasury.
+            Some(9) => require!(owned_by_wallet(0)? && key_at(1)? == *treasury, VaultError::InstructionNotAllowed),
             _ => return Err(VaultError::InstructionNotAllowed.into()),
         }
         return Ok(());
@@ -190,20 +190,20 @@ fn check_base_program(program: &Pubkey, wallet: &Pubkey, accounts: &[AccountInfo
     // System program.
     let disc = data.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
     match disc {
-        // Transfer [from, to]: only the wallet wrapping SOL into its own
+        // Transfer [from, to]: only the treasury wrapping SOL into its own
         // token account. To a key it is a withdrawal, and refused.
         Some(2) => {
             let to_is_wallets_token_account = accounts
                 .get(1)
                 .and_then(token::read_token_account)
-                .is_some_and(|t| t.owner == *wallet);
-            require!(key_at(0)? == *wallet && to_is_wallets_token_account, VaultError::InstructionNotAllowed);
+                .is_some_and(|t| t.owner == *treasury);
+            require!(key_at(0)? == *treasury && to_is_wallets_token_account, VaultError::InstructionNotAllowed);
         }
-        // CreateAccount [payer, new]: the caller pays. The wallet paying to
+        // CreateAccount [payer, new]: the caller pays. The treasury paying to
         // create an account some other program will own is lamports leaving.
         Some(0) => {
             let payer = accounts.first().ok_or_else(|| error!(VaultError::InstructionNotAllowed))?;
-            require!(payer.is_signer && payer.key() != *wallet, VaultError::InstructionNotAllowed);
+            require!(payer.is_signer && payer.key() != *treasury, VaultError::InstructionNotAllowed);
         }
         _ => return Err(VaultError::InstructionNotAllowed.into()),
     }

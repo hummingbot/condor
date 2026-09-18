@@ -8,7 +8,7 @@
 import type { VaultInfo } from "@/lib/api";
 
 /**
- * Whether anyone but the runner has a claim on what is inside.
+ * Whether anyone but the creator has a claim on what is inside.
  *
  * The single most consequential fact about a vault — it decides whether a
  * withdrawal is routine or impossible — so it is computed in one place. The

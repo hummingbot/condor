@@ -1,11 +1,11 @@
-//! `pin`, `publish_version`, `set_active` — everything the runner
+//! `pin`, `publish_version`, `set_active` — everything the creator
 //! changes about a running vault, and the one place the wind-down's one-wayness
 //! is enforced.
 //!
 //! What goes on chain is a *commitment*, never the parameters: the public agent
 //! folder by commit, and the sha256 of the private config's canonical encoding.
 //! A crank that is handed a config hashes it and compares, so nobody — Condor's
-//! own operators included — can run a vault on parameters its runner did not
+//! own operators included — can run a vault on parameters its creator did not
 //! sign. Nothing here validates `agent_ref` against anything: on-chain
 //! validation of a folder Condor does not control would be a claim Condor
 //! cannot make (plan D17).
@@ -14,12 +14,12 @@ use anchor_lang::prelude::*;
 
 use crate::error::VaultError;
 use crate::state::{
-    AgentRef, Vault, VaultState, VAULT_AUTHORITY_SEED, VAULT_SEED,
+    AgentRef, Vault, VaultState, TREASURY_SEED, VAULT_SEED,
 };
 
 #[derive(Accounts)]
 pub struct Pin<'info> {
-    pub runner: Signer<'info>,
+    pub creator: Signer<'info>,
     // No protocol account: nothing here reads one. Requiring it would have made
     // pinning a strategy — the last instruction of creating a private vault —
     // depend on Condor having initialized its protocol on this chain, which is
@@ -28,7 +28,7 @@ pub struct Pin<'info> {
         mut,
         seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
-        has_one = runner @ VaultError::NotRunner,
+        has_one = creator @ VaultError::NotCreator,
     )]
     pub vault: Account<'info, Vault>,
 }
@@ -36,7 +36,7 @@ pub struct Pin<'info> {
 /// Version 1, and the vault starts running.
 ///
 /// Nothing here mentions a token: a private vault pins and runs a strategy for
-/// its own runner, and most will do so for a while before anyone else is
+/// its own creator, and most will do so for a while before anyone else is
 /// invited in.
 pub fn pin(ctx: Context<Pin>, agent_ref: AgentRef, config_hash: [u8; 32]) -> Result<()> {
     require!(!ctx.accounts.vault.is_pinned(), VaultError::AlreadyPinned);
@@ -53,22 +53,22 @@ pub fn pin(ctx: Context<Pin>, agent_ref: AgentRef, config_hash: [u8; 32]) -> Res
 /// rather than `find_program_address`: the bump is known, and the difference is
 /// a bump-seed search per call.
 fn expected_authority(vault: &Vault) -> Result<Pubkey> {
-    let bump = [vault.authority_bump];
+    let bump = [vault.treasury_bump];
     Pubkey::create_program_address(
-        &[VAULT_AUTHORITY_SEED, vault.id.as_ref(), &bump],
+        &[TREASURY_SEED, vault.id.as_ref(), &bump],
         &crate::ID,
     )
     .map_err(|_| error!(VaultError::PoolCreatorMismatch))
 }
 
 #[derive(Accounts)]
-pub struct RunnerOnly<'info> {
-    pub runner: Signer<'info>,
+pub struct CreatorOnly<'info> {
+    pub creator: Signer<'info>,
     #[account(
         mut,
         seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
-        has_one = runner @ VaultError::NotRunner,
+        has_one = creator @ VaultError::NotCreator,
     )]
     pub vault: Account<'info, Vault>,
 }
@@ -79,7 +79,7 @@ pub struct RunnerOnly<'info> {
 /// guarantee — holders are told the strategy stops and cannot be restarted
 /// under a new name, and this is where that is true rather than promised.
 pub fn publish_version(
-    ctx: Context<RunnerOnly>,
+    ctx: Context<CreatorOnly>,
     agent_ref: AgentRef,
     config_hash: [u8; 32],
 ) -> Result<()> {
@@ -97,7 +97,7 @@ pub fn publish_version(
 
 /// Pause and resume. Open positions stay open — pausing is "take nothing new",
 /// not "close everything"; closing everything is what winding down is for.
-pub fn set_active(ctx: Context<RunnerOnly>, active: bool) -> Result<()> {
+pub fn set_active(ctx: Context<CreatorOnly>, active: bool) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
     require!(vault.is_pinned(), VaultError::NotPinned);
     require!(
@@ -114,6 +114,6 @@ pub fn set_active(ctx: Context<RunnerOnly>, active: bool) -> Result<()> {
 
 /// Re-exported so the wind-down and redeem handlers derive the authority the
 /// same way rather than each writing the seeds out again.
-pub fn authority_of(vault: &Vault) -> Result<Pubkey> {
+pub fn treasury_of(vault: &Vault) -> Result<Pubkey> {
     expected_authority(vault)
 }

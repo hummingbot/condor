@@ -51,7 +51,7 @@ def test_a_healthy_vault_runs():
 
 @pytest.mark.parametrize("state", ["Paused", "WindingDown", "Redeemable"])
 def test_only_running_runs(state):
-    """The runner's pause is not advisory."""
+    """The creator's pause is not advisory."""
     with pytest.raises(StartRefused) as exc:
         check_can_run(record(), chain(state=state))
     assert state in str(exc.value)
@@ -64,7 +64,7 @@ def test_no_delegate_means_nothing_can_sign():
 
 
 def test_a_replaced_delegate_stops_condor_running_it():
-    """The runner installed somebody else's key. That is a revoke, and the
+    """The creator installed somebody else's key. That is a revoke, and the
     crank has to notice it as one rather than fail transaction by transaction."""
     with pytest.raises(StartRefused) as exc:
         check_can_run(record(), chain(delegate="SOMEONE_ELSE"))
@@ -73,7 +73,7 @@ def test_a_replaced_delegate_stops_condor_running_it():
 
 @pytest.mark.parametrize("field,value", [("version", 4), ("config_hash", "ff" * 32)])
 def test_the_chain_wins_any_disagreement(field, value):
-    """Running on a stale copy would mean running parameters the runner did not
+    """Running on a stale copy would mean running parameters the creator did not
     sign — which is the entire reason a hash is on chain."""
     with pytest.raises(StartRefused):
         check_can_run(record(), chain(**{field: value}))
@@ -82,7 +82,7 @@ def test_the_chain_wins_any_disagreement(field, value):
 def test_a_config_that_does_not_hash_to_the_chains_is_refused():
     """The check that makes the commitment mean something against Condor's own
     operators: the stored values are believed only because they hash to what
-    the runner signed."""
+    the creator signed."""
     tampered = record()
     tampered["pin"] = {
         **tampered["pin"],

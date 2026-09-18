@@ -1,18 +1,18 @@
 //! `redeem` — burn the token, take a pro-rata share of what the vault holds.
 //!
 //! Available only once a wind-down has finished, and it pays out of the
-//! **redemption pot**: the wallet's own token account for the quote asset,
+//! **redemption pot**: the treasury's own token account for the quote asset,
 //! which `finalize_wind_down` refused to run until everything else in the
-//! wallet had been converted into it.
+//! treasury had been converted into it.
 //!
-//! The wallet is this program's PDA, so a holder is paid by a program that has
+//! The treasury is this program's PDA, so a holder is paid by a program that has
 //! no way to refuse: no delegate, no administrator, no key stands between the
 //! burn and the payout, in the one phase where a stranger's money is at
 //! stake.
 //!
 //! **The denominator is what is circulating**, which is the mint's supply less
 //! two balances that are not: the tokens in the migrated pool's vault, and the
-//! tokens still in the vault's own treasury. Both are read in the instruction
+//! tokens still in the vault's own retained supply. Both are read in the instruction
 //! that pays, because both move.
 //!
 //! The pool's are excluded because counting them would dilute every holder in
@@ -21,11 +21,11 @@
 //! selling does the reverse; arbitrage keeps the pool price and the redemption
 //! value in step.
 //!
-//! The treasury's are excluded because they were never sold. `issue_bps` is
-//! circulating over max supply at launch, and a runner who issues 30 % is
+//! The retained supply's are excluded because they were never sold. `issue_bps` is
+//! circulating over max supply at launch, and a creator who issues 30 % is
 //! promising the other 70 % is not chasing the same assets — leaving it in the
-//! denominator would make that promise a lie by arithmetic. The treasury is
-//! simply the wallet's own balance of its own token: whether it is sitting
+//! denominator would make that promise a lie by arithmetic. The retained supply is
+//! simply the treasury's own balance of its own token: whether it is sitting
 //! there, half of an LP position, or already sold for quote, the vault holds
 //! the proceeds either way.
 //!
@@ -37,7 +37,7 @@ use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke_signed;
 
 use crate::error::VaultError;
-use crate::state::{Vault, VaultState, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use crate::state::{Vault, VaultState, TREASURY_SEED, VAULT_SEED};
 use crate::token;
 
 #[derive(Accounts)]
@@ -50,12 +50,12 @@ pub struct Redeem<'info> {
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
-    /// CHECK: the wallet — the pot's owner, signing the payout itself.
+    /// CHECK: the treasury — the pot's owner, signing the payout itself.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
 
     /// CHECK: the vault's token mint; the burn changes its supply.
     #[account(mut, address = vault.mint @ VaultError::WrongMint)]
@@ -65,9 +65,9 @@ pub struct Redeem<'info> {
     pub holder_token_account: UncheckedAccount<'info>,
     /// CHECK: the pool's vault for the token, excluded from the denominator.
     pub pool_token_vault: UncheckedAccount<'info>,
-    /// CHECK: the wallet's own account for the token — unsold supply, also
+    /// CHECK: the treasury's own account for the token — unsold supply, also
     /// excluded. Derived from the funds owner in the handler.
-    pub treasury_token_account: UncheckedAccount<'info>,
+    pub retained_token_account: UncheckedAccount<'info>,
     /// CHECK: the redemption pot — the authority PDA's own quote account,
     /// derived in the handler.
     #[account(mut)]
@@ -89,7 +89,7 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
         ctx.accounts.vault.state == VaultState::Redeemable,
         VaultError::NotRedeemable
     );
-    // A private vault that wound down has nothing to redeem *with*: its runner
+    // A private vault that wound down has nothing to redeem *with*: its creator
     // took the assets out with `withdraw`, which is the whole point of it
     // having stayed private.
     require!(ctx.accounts.vault.is_tokenized(), VaultError::NotTokenized);
@@ -114,16 +114,16 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
         ctx.accounts.vault.mint,
         VaultError::WrongMint
     );
-    let treasury = token::require_associated(
-        &ctx.accounts.treasury_token_account.to_account_info(),
-        &ctx.accounts.vault_authority.key(),
+    let retained = token::require_associated(
+        &ctx.accounts.retained_token_account.to_account_info(),
+        &ctx.accounts.treasury.key(),
         &ctx.accounts.vault.mint,
         &ctx.accounts.token_program.key(),
     )?;
 
     let pot = token::require_associated(
         &ctx.accounts.redemption_pot.to_account_info(),
-        &ctx.accounts.vault_authority.key(),
+        &ctx.accounts.treasury.key(),
         &ctx.accounts.vault.quote_mint,
         &ctx.accounts.quote_token_program.key(),
     )?;
@@ -145,7 +145,7 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
     let redeemable_supply = mint
         .supply
         .checked_sub(pool_tokens.amount)
-        .and_then(|s| s.checked_sub(treasury.amount))
+        .and_then(|s| s.checked_sub(retained.amount))
         .ok_or(VaultError::MathOverflow)?;
     require!(redeemable_supply > 0, VaultError::NothingToRedeem);
     require!(amount <= redeemable_supply, VaultError::MathOverflow);
@@ -167,14 +167,14 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
         amount,
     )?;
 
-    // Straight out of the wallet's own quote account, signed by the wallet. One
+    // Straight out of the treasury's own quote account, signed by the treasury. One
     // CPI, to the token program, and nothing that can decline.
-        let seeds = ctx.accounts.vault.authority_seeds();
+        let seeds = ctx.accounts.vault.treasury_seeds();
     let metas: Vec<AccountMeta> = token::transfer_checked_metas(
         &ctx.accounts.redemption_pot.key(),
         &ctx.accounts.quote_mint.key(),
         &ctx.accounts.holder_quote_account.key(),
-        &ctx.accounts.vault_authority.key(),
+        &ctx.accounts.treasury.key(),
     );
     invoke_signed(
         &Instruction {
@@ -186,7 +186,7 @@ pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
             ctx.accounts.redemption_pot.to_account_info(),
             ctx.accounts.quote_mint.to_account_info(),
             ctx.accounts.holder_quote_account.to_account_info(),
-            ctx.accounts.vault_authority.to_account_info(),
+            ctx.accounts.treasury.to_account_info(),
             ctx.accounts.quote_token_program.to_account_info(),
         ],
         &[&seeds],

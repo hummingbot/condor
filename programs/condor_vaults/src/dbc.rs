@@ -13,9 +13,9 @@
 //! * **launches** the pool with its own PDA as creator, so every creator-side
 //!   stream is routed by rule rather than by a key (plan D8);
 //! * **collects the seed** — the migration fee, 80 % of the raise, into the
-//!   wallet — which DBC's own one-time flag makes idempotent, so the call can be
+//!   treasury — which DBC's own one-time flag makes idempotent, so the call can be
 //!   permissionless;
-//! * **claims the runner's income**: curve trading fees, the surplus above the
+//! * **claims the creator's income**: curve trading fees, the surplus above the
 //!   threshold, and the migrated position's fees.
 //!
 //! The vault's *trading* never goes through here: that is the delegate's, out
@@ -200,7 +200,7 @@ pub fn withdraw_migration_fee_data() -> Vec<u8> {
 }
 
 /// `claim_creator_trading_fee(max_base_amount, max_quote_amount)`. Both are set
-/// to u64::MAX: the runner is claiming what is theirs, and a cap here would
+/// to u64::MAX: the creator is claiming what is theirs, and a cap here would
 /// only be a second number to keep in step with the pool's.
 pub fn claim_creator_trading_fee_data() -> Vec<u8> {
     let mut data = Vec::with_capacity(24);
@@ -289,7 +289,7 @@ impl<'a, 'info> DbcAccounts<'a, 'info> {
         )
     }
 
-    /// `creator_withdraw_surplus` — the runner's share of what the final swap
+    /// `creator_withdraw_surplus` — the vault creator's share of what the final swap
     /// paid above the threshold. Same account list, different discriminator.
     pub fn creator_withdraw_surplus(&self) -> (Instruction, Vec<AccountInfo<'info>>) {
         (

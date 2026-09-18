@@ -1,22 +1,22 @@
 //! `create_vault` — a wallet that trades a strategy, owned by this program.
 //!
 //! Two PDAs from one random `id`: the `Vault` record, which is the vault's
-//! public identity, and the wallet — a system account with no data that holds
+//! public identity, and the treasury — a system account with no data that holds
 //! the SOL and owns every token account and position the vault will ever
 //! have. There is no key anywhere that can reach inside either; only the
-//! instructions in this crate, signing with the wallet's seeds.
+//! instructions in this crate, signing with the treasury's seeds.
 //!
 //! **A vault starts private.** It has no mint, and while it has none the only
-//! person with a claim on what is inside is the runner, who may empty it at
+//! person with a claim on what is inside is the creator, who may empty it at
 //! will through `execute_unchecked`. That is not a weaker version of the real
-//! thing — it is the honest description of a wallet running one person's
+//! thing — it is the honest description of a treasury running one person's
 //! strategy with one person's money. Everything that makes a vault trustless
 //! is machinery for protecting *other* people, and it switches on at
 //! `tokenize`, when there start to be some.
 //!
-//! `fund_lamports` funds the wallet in the same breath, because the runner is
-//! already the payer and a wallet with nothing in it is a draft with an extra
-//! step. At least the rent floor for an empty account, or the wallet would
+//! `fund_lamports` funds the treasury in the same breath, because the creator is
+//! already the payer and a treasury with nothing in it is a draft with an extra
+//! step. At least the rent floor for an empty account, or the treasury would
 //! not survive to be funded later.
 
 use anchor_lang::prelude::*;
@@ -24,26 +24,26 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_lang::solana_program::system_instruction;
 
 use crate::error::VaultError;
-use crate::state::{AgentRef, Vault, VaultState, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use crate::state::{AgentRef, Vault, VaultState, TREASURY_SEED, VAULT_SEED};
 
 #[derive(Accounts)]
 #[instruction(id: [u8; 32])]
 pub struct CreateVault<'info> {
-    /// Pays for the `Vault` and whatever it funds the wallet with. Recorded
-    /// as the runner.
+    /// Pays for the `Vault` and whatever it funds the treasury with. Recorded
+    /// as the creator.
     #[account(mut)]
-    pub runner: Signer<'info>,
-    /// CHECK: the wallet. Never signs here; its seeds are what make it this
+    pub creator: Signer<'info>,
+    /// CHECK: the treasury. Never signs here; its seeds are what make it this
     /// vault's and this program's.
     #[account(
         mut,
-        seeds = [VAULT_AUTHORITY_SEED, id.as_ref()],
+        seeds = [TREASURY_SEED, id.as_ref()],
         bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
     #[account(
         init,
-        payer = runner,
+        payer = creator,
         space = 8 + Vault::INIT_SPACE,
         seeds = [VAULT_SEED, id.as_ref()],
         bump,
@@ -57,19 +57,19 @@ pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64)
     require!(fund_lamports >= floor, VaultError::FundingBelowRent);
     invoke(
         &system_instruction::transfer(
-            &ctx.accounts.runner.key(),
-            &ctx.accounts.vault_authority.key(),
+            &ctx.accounts.creator.key(),
+            &ctx.accounts.treasury.key(),
             fund_lamports,
         ),
         &[
-            ctx.accounts.runner.to_account_info(),
-            ctx.accounts.vault_authority.to_account_info(),
+            ctx.accounts.creator.to_account_info(),
+            ctx.accounts.treasury.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
         ],
     )?;
 
     let vault = &mut ctx.accounts.vault;
-    vault.runner = ctx.accounts.runner.key();
+    vault.creator = ctx.accounts.creator.key();
     vault.id = id;
     vault.mint = Pubkey::default();
     vault.dbc_pool = Pubkey::default();
@@ -90,7 +90,7 @@ pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64)
     vault.tokenized_ts = 0;
     vault.wind_down_ts = 0;
     vault.bump = ctx.bumps.vault;
-    vault.authority_bump = ctx.bumps.vault_authority;
+    vault.treasury_bump = ctx.bumps.treasury;
     vault._reserved = [0u8; 64];
     Ok(())
 }

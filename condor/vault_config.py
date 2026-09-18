@@ -1,10 +1,10 @@
 """The canonical encoding of a vault's private config, and its hash.
 
 A vault's parameters are **private, not confidential**: the values live here,
-readable only by their runner, and what goes on chain is `sha256` of their
+readable only by their creator, and what goes on chain is `sha256` of their
 canonical encoding. A crank that is handed a config hashes it and compares
 before it starts, so nobody — Condor's own operators included — can run a vault
-on parameters its runner did not sign.
+on parameters its creator did not sign.
 
 That only works if *every* implementation produces the same bytes. There are
 two: this one and `frontend/src/lib/vault/canonical.ts`, which the browser uses

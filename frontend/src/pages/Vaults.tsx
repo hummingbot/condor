@@ -4,7 +4,7 @@
  *
  * A vault is a wallet that trades a strategy and is owned by a program rather
  * than by a person. Most of them are **private** — no token, no outside
- * holders, the runner deposits and withdraws at will — and that is a finished
+ * holders, the creator deposits and withdraws at will — and that is a finished
  * state, not an unfinished one. Tokenizing is a separate, later, one-way
  * decision, so the list never nags about it.
  *
@@ -13,7 +13,7 @@
  * the local record disagrees with the chain.
  *
  * **A vault is public, so this page is readable without a wallet.** A vault's
- * runner, state, phase and launch terms are on chain for anyone; connecting a
+ * creator, state, phase and launch terms are on chain for anyone; connecting a
  * wallet does not reveal them, it only says which of them are yours. Gating the
  * list behind a connected-and-attached wallet hid chain data behind a local
  * file, and told someone whose browser held a different key that they could not
@@ -172,7 +172,7 @@ export function Vaults() {
   // the list is the one place that distinction is cheap to make. With nothing
   // connected, nothing is mine; the banner above says how to fix that.
   const me = connected?.address ?? null;
-  const mine = (vaults.data ?? []).filter((vault) => vault.runner_address === me);
+  const mine = (vaults.data ?? []).filter((vault) => vault.creator_address === me);
   const shown = tab === "mine" ? mine : (vaults.data ?? []);
 
   const cleanup = useMutation({
@@ -224,7 +224,7 @@ export function Vaults() {
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5">
           <p className="text-[12px] text-[var(--color-text-muted)]">
             Connect a wallet to see which of these are yours. Anyone can read them; only their
-            runner&rsquo;s key can change one.
+            creator&rsquo;s key can change one.
           </p>
           <ConnectWalletButton variant="outline" />
         </div>
@@ -239,7 +239,7 @@ export function Vaults() {
           <p className="mx-auto mt-1 mb-4 max-w-sm text-[12px] text-[var(--color-text-muted)]">
             A new vault starts private: you fund it, it runs your strategy, and you can take the
             money out whenever you like.
-            {!me && " Connect a wallet to make one — a vault's runner is a key, not a login."}
+            {!me && " Connect a wallet to make one — a vault's creator is a key, not a login."}
           </p>
           {me ? (
             <button
@@ -279,7 +279,7 @@ export function Vaults() {
                       was never signed, or it never landed. There is nothing to
                       resume — creating a vault is one signature — so the only
                       thing to offer is forgetting it. */}
-                  {!vault.live && vault.runner_address === me && (
+                  {!vault.live && vault.creator_address === me && (
                     <button
                       type="button"
                       onClick={() => cleanup.mutate(vault.account)}

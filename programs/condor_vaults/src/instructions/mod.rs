@@ -10,7 +10,7 @@ pub mod protocol;
 pub mod redeem;
 pub mod strategy;
 pub mod tokenize;
-pub mod treasury;
+pub mod retained;
 pub mod wind_down;
 
 pub use collect_seed::*;
@@ -22,5 +22,5 @@ pub use protocol::*;
 pub use redeem::*;
 pub use strategy::*;
 pub use tokenize::*;
-pub use treasury::*;
+pub use retained::*;
 pub use wind_down::*;

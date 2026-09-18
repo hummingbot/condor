@@ -6,7 +6,7 @@
 //! its extensions after them, so one set of offsets reads both.
 //!
 //! **Token accounts are derived, never accepted.** Every balance this program
-//! touches belongs to the vault's wallet, and the only way to be sure of
+//! touches belongs to the vault's treasury, and the only way to be sure of
 //! that is to rebuild the address from the owner, the mint and the token
 //! program and compare (plan §1.6). A caller-supplied "vault token account" is
 //! how a redemption pays out of somebody else's balance.
@@ -160,7 +160,7 @@ pub fn transfer_checked_metas(
 
 /// Move tokens between two accounts, signed by the source's owner in the outer
 /// transaction. The PDA-signed counterpart goes through `invoke_signed` with
-/// the wallet's seeds, because only that can produce its signature.
+/// the treasury's seeds, because only that can produce its signature.
 #[allow(clippy::too_many_arguments)]
 pub fn transfer_checked<'info>(
     token_program: &AccountInfo<'info>,

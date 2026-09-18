@@ -19,16 +19,35 @@ from condor.gateway_client import (
 
 SURFPOOL_VERSION = {
     "jsonrpc": "2.0",
-    "result": {"surfnet-version": "1.5.0", "solana-core": "4.1.2", "feature-set": 3345198602},
+    "result": {
+        "surfnet-version": "1.5.0",
+        "solana-core": "4.1.2",
+        "feature-set": 3345198602,
+    },
     "id": 1,
 }
-SURFPOOL_INFO = {"jsonrpc": "2.0", "result": {"context": {"slot": 1}, "value": {}}, "id": 1}
-NODE_VERSION = {"jsonrpc": "2.0", "result": {"solana-core": "2.2.7", "feature-set": 1}, "id": 1}
-METHOD_NOT_FOUND = {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": 1}
+SURFPOOL_INFO = {
+    "jsonrpc": "2.0",
+    "result": {"context": {"slot": 1}, "value": {}},
+    "id": 1,
+}
+NODE_VERSION = {
+    "jsonrpc": "2.0",
+    "result": {"solana-core": "2.2.7", "feature-set": 1},
+    "id": 1,
+}
+METHOD_NOT_FOUND = {
+    "jsonrpc": "2.0",
+    "error": {"code": -32601, "message": "Method not found"},
+    "id": 1,
+}
 QUICKNODE_REFUSES = {
     "jsonrpc": "2.0",
     "id": 1,
-    "error": {"code": -32601, "message": "the method getVersion does not exist/is not available"},
+    "error": {
+        "code": -32601,
+        "message": "the method getVersion does not exist/is not available",
+    },
 }
 
 
@@ -67,7 +86,11 @@ class FakeCM:
 
 def test_surfpool_is_recognised_by_its_version_field():
     info = classify_rpc(SURFPOOL_VERSION, SURFPOOL_INFO)
-    assert info == {"kind": "surfpool", "surfnet_version": "1.5.0", "solana_core": "4.1.2"}
+    assert info == {
+        "kind": "surfpool",
+        "surfnet_version": "1.5.0",
+        "solana_core": "4.1.2",
+    }
 
 
 def test_surfpool_is_recognised_even_if_only_the_cheatcode_answers():
@@ -127,6 +150,12 @@ def test_host_of_never_returns_a_path_or_key():
     # A keyed provider URL: the key is the path. Only the host may leave the server.
     # The key is the path, so the vector carries a made-up one: a real provider
     # URL in a test file is a credential in the repo.
-    assert host_of("https://x.quiknode.pro/0000000000000000000000000000000000000000/") == "x.quiknode.pro"
+    assert (
+        host_of("https://x.quiknode.pro/0000000000000000000000000000000000000000/")
+        == "x.quiknode.pro"
+    )
     assert host_of("http://127.0.0.1:8899") == "127.0.0.1:8899"
-    assert host_of("https://user:secret@rpc.example.com:443/v1?key=abc") == "rpc.example.com:443"
+    assert (
+        host_of("https://user:secret@rpc.example.com:443/v1?key=abc")
+        == "rpc.example.com:443"
+    )

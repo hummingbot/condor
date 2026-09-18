@@ -5,7 +5,7 @@
  * wallet owned by the vault program, which is why they are read here from the
  * chain rather than folded into the accounts table above. Keeping them a
  * separate section is also the honest presentation — money in a tokenized vault
- * is not the runner's any more, and adding it to a personal total would say
+ * is not the creator's any more, and adding it to a personal total would say
  * otherwise.
  */
 import { useQueries, useQuery } from "@tanstack/react-query";
@@ -55,7 +55,7 @@ export function VaultsSection({ server }: { server: string }) {
               <th className="px-3 py-2 font-medium">Phase</th>
               <th className="px-3 py-2 font-medium">State</th>
               <th className="px-3 py-2 text-right font-medium">Assets</th>
-              <th className="px-3 py-2 text-right font-medium">Treasury</th>
+              <th className="px-3 py-2 text-right font-medium">Retained supply</th>
             </tr>
           </thead>
           <tbody>
@@ -90,7 +90,7 @@ export function VaultsSection({ server }: { server: string }) {
                     className="px-3 py-2 text-right font-mono"
                     title="Unsold supply of the vault's own token. Not circulating; it is the inventory an LP position would market-make with."
                   >
-                    {held?.treasury && held.treasury !== "0" ? held.treasury : "—"}
+                    {held?.retained_supply && held.retained_supply !== "0" ? held.retained_supply : "—"}
                   </td>
                 </tr>
               );

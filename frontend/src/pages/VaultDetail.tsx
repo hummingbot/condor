@@ -4,7 +4,7 @@
  * The header carries the two facts a reader needs before anything else — which
  * phase it is in, and what the chain says its state is — because every action
  * below means something different depending on them. While a vault is private
- * its runner moves assets in and out through the delegate they installed; once
+ * its creator moves assets in and out through the delegate they installed; once
  * it is tokenized nobody can, and the only way out is a wind-down followed by
  * holders redeeming.
  *
@@ -37,11 +37,11 @@ import { useWallet } from "@/lib/wallet/context";
 // Summary, Portfolio and Activity are public: a vault is an account on a
 // public chain, and what it is, what it holds and what it has done are the
 // three things anyone looking at one wants. Agent and Token stay behind the
-// gate — the first shows a config only its runner may read, and every control
+// gate — the first shows a config only its creator may read, and every control
 // on the second is a signature.
 const PUBLIC_TABS = ["Summary", "Portfolio", "Activity"] as const;
-const RUNNER_TABS = ["Agent", "Token"] as const;
-type Tab = (typeof PUBLIC_TABS)[number] | (typeof RUNNER_TABS)[number];
+const CREATOR_TABS = ["Agent", "Token"] as const;
+type Tab = (typeof PUBLIC_TABS)[number] | (typeof CREATOR_TABS)[number];
 
 /** What a vault may launch against. Both are what Meteora's own keepers
  *  migrate, and the program's fixed migration threshold is denominated in the
@@ -62,9 +62,9 @@ export function VaultDetail() {
   const { signAndSubmit } = useWallet();
   const { canSign } = useCanSign();
   const [tab, setTab] = useState<Tab>("Summary");
-  // The runner's two tabs are listed for everyone: behind the gate they say
+  // The creator's two tabs are listed for everyone: behind the gate they say
   // whose key is missing, which is more use than a tab that is not there.
-  const tabs: Tab[] = [...PUBLIC_TABS, ...RUNNER_TABS];
+  const tabs: Tab[] = [...PUBLIC_TABS, ...CREATOR_TABS];
   const [error, setError] = useState<string | null>(null);
 
   const vaults = useQuery({
@@ -156,7 +156,7 @@ export function VaultDetail() {
           </p>
         )}
 
-        {/* Every button below is signed by the runner's key, so none of them is
+        {/* Every button below is signed by the creator's key, so none of them is
             offered while the browser cannot produce it. The prompt takes the
             row's place rather than sitting beside disabled buttons: the thing
             to do next is connect, and that is the only control here — a button
@@ -191,7 +191,7 @@ export function VaultDetail() {
           )}
           {/* No "stop for good" on a private vault: a wind-down exists to pay
               holders, and there are none. Pausing stops the strategy, and the
-              assets come out through the delegate whenever the runner likes —
+              assets come out through the delegate whenever the creator likes —
               so an irreversible button offered nothing that Pause and Transfer
               did not already do, at the price of never being able to run this
               vault again. */}
@@ -224,7 +224,7 @@ export function VaultDetail() {
 
       {/* Above the tabs, not inside one: once a vault is redeemable this is
           the only thing anyone comes to the page to do — and it is a signature,
-          so it is the runner's. */}
+          so it is the creator's. */}
       {finished && canSign && (
         <RedeemCard vault={vault} server={server} onAct={act.mutate} pending={act.isPending} />
       )}
@@ -300,7 +300,7 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
       <Card title="Status">
         <dl>
           <Row label="Phase">
-            {tokenized ? "Tokenized — it has holders" : "Private — its runner's money alone"}
+            {tokenized ? "Tokenized — it has holders" : "Private — its creator's money alone"}
           </Row>
           <Row label="State">{chain?.state ?? "—"}</Row>
           <Row label="Strategy version">{chain?.version ? `v${chain.version}` : "—"}</Row>
@@ -311,7 +311,7 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
         <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
           {tokenized
             ? "Other people's money is in here. Nothing leaves but a redemption after a wind-down, and the strategy's config is committed on chain as a hash so a run can prove which one it executed."
-            : "Private is a finished state, not an unfinished one. Its runner can take the money out at any time; tokenizing is the one-way step that ends that."}
+            : "Private is a finished state, not an unfinished one. Its creator can take the money out at any time; tokenizing is the one-way step that ends that."}
         </p>
       </Card>
 
@@ -321,10 +321,10 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
             <CopyAddress address={vault.account} label="Vault account" />
           </Row>
           <Row label="Wallet — fund it by sending here">
-            <CopyAddress address={vault.wallet_address} label="Funds owner" />
+            <CopyAddress address={vault.treasury_address} label="Treasury" />
           </Row>
-          <Row label="Runner — the key that manages it">
-            <CopyAddress address={vault.runner_address} />
+          <Row label="Creator — the key that manages it">
+            <CopyAddress address={vault.creator_address} />
           </Row>
           <Row label="Delegate — the key that signs its trades">
             {chain?.delegate ? (
@@ -345,13 +345,13 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
         </p>
         <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
           While a delegate is installed it can move everything in this wallet. That is what lets it
-          trade, and it is the custody risk for as long as it is there — the runner can replace it
+          trade, and it is the custody risk for as long as it is there — the creator can replace it
           or remove it at any time.
           {!tokenized && (
             <>
               {" "}
               It is also how assets come back out while this vault is private: there is no withdraw
-              instruction, because the delegate the runner installed can already do it.
+              instruction, because the delegate the creator installed can already do it.
             </>
           )}
         </p>
@@ -401,7 +401,7 @@ function when(ts: number | undefined): string {
 /**
  * Taking assets back out of a private vault.
  *
- * Not an instruction: the delegate this vault's runner installed can already
+ * Not an instruction: the delegate this vault's creator installed can already
  * move anything in the wallet, and this asks it to. It disappears at
  * tokenization — not because the key stops being able to, but because from
  * there the assets are other people's too and the only way out is a redemption
@@ -409,7 +409,7 @@ function when(ts: number | undefined): string {
  */
 function WithdrawCard({ vault }: { vault: VaultInfo }) {
   const queryClient = useQueryClient();
-  const [destination, setDestination] = useState(vault.runner_address);
+  const [destination, setDestination] = useState(vault.creator_address);
   const [amount, setAmount] = useState("");
   const [sent, setSent] = useState<string | null>(null);
 
@@ -609,7 +609,7 @@ function TokenTab({
           <Row label="Raise to the strategy — the rest is locked liquidity">
             {chain.migration_fee_pct}%
           </Row>
-          <Row label="Runner's share of trading fees">{chain.creator_trading_fee_pct}%</Row>
+          <Row label="Creator's share of trading fees">{chain.creator_trading_fee_pct}%</Row>
           <Row label="Migrated pool fee">
             {[25, 30, 100, 200, 400, 600][chain.migration_fee_option] ?? "—"} bps
           </Row>
@@ -620,7 +620,7 @@ function TokenTab({
           Neither is better, and it was chosen before anyone could buy.
         </p>
         <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
-          The rest of the supply is the vault&rsquo;s treasury. It is not circulating and does not
+          The rest of the supply is the vault&rsquo;s retained supply. It is not circulating and does not
           dilute a redemption. It reaches the market only through the strategy: an LP position on
           this pool sells it as buyers arrive, and the quote they pay lands in the vault — so
           supply and capital move together, capped by what was never issued.
@@ -680,7 +680,7 @@ function TokenTab({
             </div>
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
               Circulating over max supply. The other {(100 - Number(issuePct) || 0).toFixed(0)}% stays
-              in the vault&rsquo;s treasury — buyers read it as the most they could later be diluted by.
+              in the vault&rsquo;s retained supply — buyers read it as the most they could later be diluted by.
             </p>
           </div>
         </div>
@@ -882,7 +882,7 @@ function Labelled({
 /**
  * Redemption: burn tokens, take the quote asset pro-rata.
  *
- * Shown to anyone once a vault is `Redeemable`, not just its runner — a holder
+ * Shown to anyone once a vault is `Redeemable`, not just its creator — a holder
  * is whoever has the token. The payment comes out of an account the program
  * owns, so nothing in the path can refuse it; this form only asks.
  */
@@ -903,7 +903,7 @@ function RedeemCard({
     <Card title="Redeem">
       <p className="mb-3 text-[12px] text-[var(--color-text-muted)]">
         This vault has wound down. Burning tokens pays out its quote asset in proportion — the
-        treasury and the pool&rsquo;s own balance are not counted, because neither was ever issued.
+        retained supply and the pool&rsquo;s own balance are not counted, because neither was ever issued.
       </p>
       <div className="flex items-center gap-2">
         <input

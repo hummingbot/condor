@@ -10,7 +10,7 @@
  * This exists so the browser can check what it is about to sign. Condor hands
  * back a config and says "this hashes to what the chain carries"; a signer who
  * takes that on trust has given up the only guarantee the design offers, which
- * is that not even Condor can run a vault on parameters its runner did not
+ * is that not even Condor can run a vault on parameters its creator did not
  * sign.
  *
  * The rules, and why each is a rule rather than a preference:

@@ -40,7 +40,9 @@ def test_the_library_is_not_empty():
     assert _shipped_agents()
 
 
-@pytest.mark.parametrize("slug,tools", _shipped_agents(), ids=lambda v: v if isinstance(v, str) else "")
+@pytest.mark.parametrize(
+    "slug,tools", _shipped_agents(), ids=lambda v: v if isinstance(v, str) else ""
+)
 def test_every_named_tool_exists(slug, tools):
     known = _every_tool_name()
     # The list may carry fully-qualified MCP names; the allowlist compares on

@@ -79,8 +79,8 @@ pub fn set_authority(ctx: Context<SetProtocolKey>, key: Pubkey) -> Result<()> {
 }
 
 /// Rotate the crank's key. Existing vaults keep the delegate they have until
-/// their runner installs the new administrator's — the program never moves a
-/// delegate on a runner's behalf.
+/// their creator installs the new administrator's — the program never moves a
+/// delegate on a creator's behalf.
 pub fn set_administrator(ctx: Context<SetProtocolKey>, key: Pubkey) -> Result<()> {
     ctx.accounts.protocol.administrator = key;
     Ok(())

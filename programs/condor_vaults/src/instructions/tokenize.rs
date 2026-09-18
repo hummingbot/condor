@@ -1,6 +1,6 @@
 //! `tokenize` — the vault stops being one person's.
 //!
-//! This is the one-way door. Before it, the runner may withdraw whatever they
+//! This is the one-way door. Before it, the creator may withdraw whatever they
 //! put in; after it, nobody may withdraw anything, ever, and the only way
 //! assets leave is `redeem` after a finished wind-down. Everything the program
 //! does to protect strangers switches on here, because this is where there
@@ -12,7 +12,7 @@
 //! creator is a PDA, and so `collect_seed` can be permissionless and the seed
 //! can never be withdrawn by anyone at all. The curve fees and the surplus are
 //! the creator's too, and `claim_income` is the only door out of them, opening
-//! onto the runner recorded in the `Vault`.
+//! onto the creator recorded in the `Vault`.
 //!
 //! **The config is checked by its terms, not by its address.** A vault prices
 //! its own launch off what it already holds — that is the point of having been
@@ -21,7 +21,7 @@
 //!
 //! What it checks instead is every economic term that binds a holder, and each
 //! is either a bound or a constant (`state::launch_rules` says which, and why).
-//! The bounded ones are the runner's decisions and are **copied onto the
+//! The bounded ones are the creator's decisions and are **copied onto the
 //! `Vault`** here, so a holder reads what this vault chose instead of decoding
 //! a config account:
 //!
@@ -34,8 +34,8 @@
 //! The constants are the 10 SOL threshold Meteora's keepers actually serve, the
 //! migration fee going wholly to the creator, Token-2022 with a fixed supply,
 //! Condor as fee claimer, and the **leftover receiver set to the vault's own
-//! wallet** — which keeps the unissued supply out of the runner's hands and,
-//! because it is the wallet, puts it where the delegate can market-make with it.
+//! treasury** — which keeps the unissued supply out of the creator's hands and,
+//! because it is the treasury, puts it where the delegate can market-make with it.
 //!
 //! `issue_bps` is the share of the fixed supply this sale offers. The rest is
 //! retained by the vault. A buyer reads it as the ceiling on how far they can
@@ -55,29 +55,29 @@ use crate::dbc;
 use crate::error::VaultError;
 use crate::state::{
     Protocol, Vault, BPS_DENOMINATOR, MAX_NAME_LEN, MAX_SYMBOL_LEN, MAX_URI_LEN, PROTOCOL_SEED,
-    VAULT_AUTHORITY_SEED, VAULT_SEED,
+    TREASURY_SEED, VAULT_SEED,
 };
 
 #[derive(Accounts)]
 pub struct Tokenize<'info> {
     /// Pays for the pool, the mint and the vaults DBC creates.
     #[account(mut)]
-    pub runner: Signer<'info>,
+    pub creator: Signer<'info>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
     #[account(
         mut,
         seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
-        has_one = runner @ VaultError::NotRunner,
+        has_one = creator @ VaultError::NotCreator,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the DBC pool creator, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
 
     /// CHECK: this vault's own partner config. Checked term by term in the
     /// handler — see the module docs for why not by address.
@@ -137,23 +137,23 @@ pub fn tokenize(
         &ctx.accounts.config.to_account_info(),
         &ctx.accounts.quote_mint.key(),
         &ctx.accounts.protocol.fee_claimer,
-        &ctx.accounts.vault_authority.key(),
+        &ctx.accounts.treasury.key(),
     )?;
 
-        let seeds = ctx.accounts.vault.authority_seeds();
+        let seeds = ctx.accounts.vault.treasury_seeds();
 
     let ix = Instruction {
         program_id: dbc::DBC_PROGRAM_ID,
         accounts: vec![
             AccountMeta::new_readonly(ctx.accounts.config.key(), false),
             AccountMeta::new_readonly(ctx.accounts.pool_authority.key(), false),
-            AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), true),
+            AccountMeta::new_readonly(ctx.accounts.treasury.key(), true),
             AccountMeta::new(ctx.accounts.base_mint.key(), true),
             AccountMeta::new_readonly(ctx.accounts.quote_mint.key(), false),
             AccountMeta::new(ctx.accounts.pool.key(), false),
             AccountMeta::new(ctx.accounts.base_vault.key(), false),
             AccountMeta::new(ctx.accounts.quote_vault.key(), false),
-            AccountMeta::new(ctx.accounts.runner.key(), true),
+            AccountMeta::new(ctx.accounts.creator.key(), true),
             AccountMeta::new_readonly(ctx.accounts.token_quote_program.key(), false),
             AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
             AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
@@ -167,13 +167,13 @@ pub fn tokenize(
         &[
             ctx.accounts.config.to_account_info(),
             ctx.accounts.pool_authority.to_account_info(),
-            ctx.accounts.vault_authority.to_account_info(),
+            ctx.accounts.treasury.to_account_info(),
             ctx.accounts.base_mint.to_account_info(),
             ctx.accounts.quote_mint.to_account_info(),
             ctx.accounts.pool.to_account_info(),
             ctx.accounts.base_vault.to_account_info(),
             ctx.accounts.quote_vault.to_account_info(),
-            ctx.accounts.runner.to_account_info(),
+            ctx.accounts.creator.to_account_info(),
             ctx.accounts.token_quote_program.to_account_info(),
             ctx.accounts.token_program.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
@@ -216,18 +216,18 @@ fn check_launch_terms(
     config: &AccountInfo,
     quote_mint: &Pubkey,
     fee_claimer: &Pubkey,
-    wallet: &Pubkey,
+    treasury: &Pubkey,
 ) -> Result<LaunchTerms> {
     use crate::state::launch_rules as rules;
     let c = dbc::read_pool_config(config)?;
     require_keys_eq!(c.quote_mint, *quote_mint, VaultError::WrongQuoteMint);
     require_keys_eq!(c.fee_claimer, *fee_claimer, VaultError::LaunchTermsMismatch);
-    // The unissued supply lands in the vault's own wallet — not in the
-    // runner's, where nothing would stop them selling it at once, and not in a
+    // The unissued supply lands in the vault's own treasury — not in the
+    // creator's, where nothing would stop them selling it at once, and not in a
     // pot of its own, where the delegate could never put it to work.
     require_keys_eq!(
         c.leftover_receiver,
-        *wallet,
+        *treasury,
         VaultError::LaunchTermsMismatch
     );
 
@@ -241,7 +241,7 @@ fn check_launch_terms(
         VaultError::LaunchTermsMismatch
     );
 
-    // Bounds: the runner's decisions, recorded on the vault for holders to read.
+    // Bounds: the creator's decisions, recorded on the vault for holders to read.
     require!(
         c.migration_fee_pct >= rules::MIN_MIGRATION_FEE_PCT
             && c.migration_fee_pct <= rules::MAX_MIGRATION_FEE_PCT,

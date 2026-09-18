@@ -1,12 +1,12 @@
 /**
- * Moving one asset between a runner's wallet and their vault, in either
+ * Moving one asset between a creator's wallet and their vault, in either
  * direction.
  *
  * One drawer for both because they are one decision — how much of what, and
  * which way — even though the two directions are not the same mechanism and
  * the copy says so:
  *
- * * **In** is an ordinary transfer the runner's own wallet signs. Gateway
+ * * **In** is an ordinary transfer the creator's own wallet signs. Gateway
  *   builds it so the destination is the vault's wallet rather than typed;
  *   a vault has two addresses that look equally plausible to paste.
  * * **Out** is the *delegate* moving what it can already move. There is no
@@ -16,7 +16,7 @@
  * Which is also why the flip button is not cosmetic: it changes who signs.
  *
  * Only while the vault is private. Once it has holders the money is not the
- * runner's to move and the only way out is a redemption after a wind-down; the
+ * creator's to move and the only way out is a redemption after a wind-down; the
  * caller is responsible for not offering this then.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -72,7 +72,7 @@ export function TransferDrawer({
     mutationFn: async () => {
       if (direction === "out") {
         const result = await api.withdrawFromVault(vault.account, {
-          destination: vault.runner_address,
+          destination: vault.creator_address,
           amount,
           mint: asset.mint,
         });
@@ -95,18 +95,18 @@ export function TransferDrawer({
   const tooMuch = direction === "out" && value > asset.vaultAmount;
   const ready = value > 0 && !tooMuch && !move.isPending && (direction === "out" || !!connected);
 
-  const runnerBox = (
+  const creatorBox = (
     <Party
       label={direction === "in" ? "From" : "To"}
-      name={connected ? "Your wallet" : "The runner's wallet"}
-      address={vault.runner_address}
+      name={connected ? "Your wallet" : "The creator's wallet"}
+      address={vault.creator_address}
     />
   );
   const vaultBox = (
     <Party
       label={direction === "in" ? "To" : "From"}
       name={vault.label || "This vault"}
-      address={vault.wallet_address}
+      address={vault.treasury_address}
       balance={`${fmt(asset.vaultAmount)} ${asset.symbol}`}
       onMax={direction === "out" ? () => setAmount(String(asset.vaultAmount)) : undefined}
     />
@@ -143,7 +143,7 @@ export function TransferDrawer({
           </button>
         </div>
 
-        {direction === "in" ? runnerBox : vaultBox}
+        {direction === "in" ? creatorBox : vaultBox}
 
         <div className="relative my-2 flex justify-center">
           <button
@@ -160,7 +160,7 @@ export function TransferDrawer({
           </button>
         </div>
 
-        {direction === "in" ? vaultBox : runnerBox}
+        {direction === "in" ? vaultBox : creatorBox}
 
         <label className="mt-3 block">
           <span className="text-[11px] text-[var(--color-text-muted)]">Amount</span>

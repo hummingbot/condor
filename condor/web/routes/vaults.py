@@ -1,17 +1,17 @@
 """The Vaults tab's API (plan M4).
 
 Every mutation here returns a **build** — an unsigned transaction for the
-runner's browser — and a separate confirm call records the result once the
+creator's browser — and a separate confirm call records the result once the
 signature is on chain. Condor holds no key, so it cannot pretend a vault
 changed; the only evidence that something happened is a confirmed signature,
 and the store follows the chain rather than leading it.
 
 Two phases, and most of this file is about keeping them straight:
 
-* a **private** vault has no token and no outside holders. Its runner installs
+* a **private** vault has no token and no outside holders. Its creator installs
   a delegate without anybody's co-signature, owes nothing to anyone, and moves
   assets in and out through that delegate — there is no withdraw *instruction*,
-  because the delegate can already do it and the runner controls the delegate.
+  because the delegate can already do it and the creator controls the delegate.
   Condor's part is a place to keep the label and the private config.
 * a **tokenized** vault has holders. Withdrawals stop, the administrator
   co-signs delegate changes, and the numbers on the page stop being one
@@ -62,18 +62,18 @@ async def _gateway(server: str, network: str = "mainnet-beta") -> VaultGateway:
     return await VaultGateway.for_server(get_config_manager(), server, network)
 
 
-def _runner(user: WebUser) -> str:
+def _creator(user: WebUser) -> str:
     """The wallet this user signs with, or a 409 telling them to attach one.
 
-    A vault's runner is a key, not an account: everything the runner may do is
-    checked on chain against `Vault.runner`, so Condor cannot act for a user who
+    A vault's creator is a key, not an account: everything the creator may do is
+    checked on chain against `Vault.creator`, so Condor cannot act for a user who
     has not proved which key is theirs (plan D13).
     """
     record = wallet_store.get_wallet(user.id)
     if record is None:
         raise HTTPException(
             status_code=409,
-            detail="Connect and attach a wallet first — a vault's runner is a key, and Condor holds none",
+            detail="Connect and attach a wallet first — a vault's creator is a key, and Condor holds none",
         )
     return record["address"]
 
@@ -113,8 +113,8 @@ def _to_info(account: str, record: dict[str, Any]) -> VaultInfo:
         label=record.get("label", ""),
         server=record.get("server", ""),
         network=record.get("network", "mainnet-beta"),
-        wallet_address=record.get("wallet_address", ""),
-        runner_address=record.get("runner_address", ""),
+        treasury_address=record.get("treasury_address", ""),
+        creator_address=record.get("creator_address", ""),
         # Written by `tokenize` and read from the chain. A private vault has
         # none, which is why this is the chain's answer and not the record's.
         quote_mint=(record.get("chain") or {}).get("quote_mint"),
@@ -128,8 +128,8 @@ def _to_info(account: str, record: dict[str, Any]) -> VaultInfo:
 
 
 def _public_pin(pin: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """A pin without its config. The values are the runner's; only the hash is
-    anyone else's business, and a listing is read by more than the runner."""
+    """A pin without its config. The values are the creator's; only the hash is
+    anyone else's business, and a listing is read by more than the creator."""
     if not pin:
         return None
     return {k: v for k, v in pin.items() if k != "config"}
@@ -175,8 +175,8 @@ async def _reconcile(
 def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
     """Gateway's camelCase decode, as the store keeps it."""
     return {
-        "runner": chain["runner"],
-        "wallet": chain["wallet"],
+        "creator": chain["creator"],
+        "treasury": chain["treasury"],
         "mint": chain.get("mint"),
         "dbc_pool": chain.get("dbcPool"),
         "config_hash": chain.get("configHash"),
@@ -219,14 +219,14 @@ async def list_vaults(
 ):
     """Every vault on this network, with this user's own filled in.
 
-    A vault is a public account: its runner, its state, its phase and its terms
+    A vault is a public account: its creator, its state, its phase and its terms
     are on chain for anyone to read, and a listing that showed only the ones
     Condor happens to hold a record of would be hiding chain data behind a local
     file. So the chain is the list, and a record adds what only its owner has —
     the label, the pinned strategy, and whether the two disagree.
 
     What a record never adds to somebody else's row is the private config: that
-    is served by `/config`, to its runner alone.
+    is served by `/config`, to its creator alone.
     """
     gw = await _gateway(server)
     records = vault_store.for_server(user.id, server)
@@ -263,8 +263,8 @@ def _chain_only_info(account: str, chain: dict[str, Any], server: str) -> VaultI
         label="",
         server=server,
         network=chain.get("network", "mainnet-beta"),
-        wallet_address=fields["wallet"],
-        runner_address=fields["runner"],
+        treasury_address=fields["treasury"],
+        creator_address=fields["creator"],
         quote_mint=fields.get("quote_mint"),
         delegate=None,
         token=(
@@ -285,7 +285,7 @@ async def create_vault(
     server: str = Query(...),
     user: WebUser = Depends(require_server_access_query),
 ):
-    """A vault, in one signature: the wallet, its delegate, and its strategy.
+    """A vault, in one signature: the treasury, its delegate, and its strategy.
 
     Three instructions in one transaction, because there is no useful moment
     between them — a vault with no delegate cannot trade and a vault with no
@@ -298,7 +298,7 @@ async def create_vault(
     carries the config's hash, and reconcile drops it if the transaction never
     landed.
     """
-    runner = _runner(user)
+    creator = _creator(user)
     try:
         digest = config_hash(req.config)
     except NotCanonical as e:
@@ -315,7 +315,7 @@ async def create_vault(
         gw.build(
             "build-create-vault",
             {
-                "walletAddress": runner,
+                "walletAddress": creator,
                 "fundLamports": str(req.fund_lamports),
                 "agentRef": agent_ref,
                 "configHash": digest,
@@ -329,8 +329,8 @@ async def create_vault(
         server=server,
         network=req.network,
         vault_id=build["id"],
-        wallet_address=build["walletAddress"],
-        runner_address=runner,
+        treasury_address=build["treasury"],
+        creator_address=creator,
         pending={
             "delegate": build["delegate"],
             "agent_ref": agent_ref,
@@ -408,7 +408,7 @@ async def build_install_delegate(
         gw,
         gw.build(
             "build-install-delegate",
-            {"walletAddress": record["runner_address"], "vaultAccount": account},
+            {"walletAddress": record["creator_address"], "vaultAccount": account},
         ),
     )
     vault_store.update(
@@ -472,7 +472,7 @@ async def build_publish(
         gw.build(
             "build-publish",
             {
-                "walletAddress": record["runner_address"],
+                "walletAddress": record["creator_address"],
                 "vaultAccount": account,
                 "agentRef": agent_ref,
                 "configHash": digest,
@@ -544,7 +544,7 @@ async def confirm_published(
 
 @router.get("/{account}/config")
 async def read_config(account: str, user: WebUser = Depends(get_current_user)):
-    """The private config, to its runner alone.
+    """The private config, to its creator alone.
 
     Not in any listing, not in the vault object, not to an admin. Anyone else
     gets the hash, which is what the chain gives them anyway.
@@ -562,11 +562,15 @@ async def read_config(account: str, user: WebUser = Depends(get_current_user)):
 
 # ── running, and the one-way door ─────────────────────────────────────────────
 
-#: The runner-signed builds that are nothing but a forward: this layer checks
+#: The creator-signed builds that are nothing but a forward: this layer checks
 #: who is asking and which vault, and Gateway's schema checks the rest. One
 #: route rather than one per instruction, because a handler whose whole body is
 #: "pass it on" is a handler that will be copied wrong.
-RUNNER_BUILDS = {
+CREATOR_BUILDS = {
+    # Creator-driven trading: a transaction any Gateway `/trading/*/build-*`
+    # route built for the treasury, wrapped into `execute*` for the creator
+    # to sign. Everything a delegate can do, the creator can do by hand.
+    "execute": "build-execute",
     "set-active": "build-set-active",
     "wind-down": "build-wind-down",
     "claim-income": "build-claim-income",
@@ -579,18 +583,18 @@ RUNNER_BUILDS = {
 
 
 @router.post("/{account}/build/{name}", response_model=VaultBuild)
-async def build_for_runner(
+async def build_for_creator(
     account: str,
     name: str,
     body: dict[str, Any] = Body(default=None),
     user: WebUser = Depends(get_current_user),
 ):
-    """One of the runner's plain builds, forwarded.
+    """One of the creator's plain builds, forwarded.
 
     The allowlist is what keeps this from being an open proxy into Gateway: a
     name that is not in it is a 404 here, not a request sent onward.
     """
-    route = RUNNER_BUILDS.get(name)
+    route = CREATOR_BUILDS.get(name)
     if route is None:
         raise HTTPException(status_code=404, detail=f"no such build: {name}")
     return await _simple_build(user, account, route, body or {})
@@ -606,7 +610,7 @@ async def _simple_build(
         gw.build(
             route,
             {
-                "walletAddress": record["runner_address"],
+                "walletAddress": record["creator_address"],
                 "vaultAccount": account,
                 **body,
             },
@@ -630,7 +634,7 @@ async def build_launch_config(
     holds, which is why the program checks a config's *terms* rather than its
     address. The migration fee is the one that matters most: it is the split
     between the strategy's capital and the depth holders exit through, and it
-    is the runner's to choose between 20 and 80.
+    is the creator's to choose between 20 and 80.
 
     Its address is remembered here on confirmation, so the launch form does not
     ask anyone to paste one.
@@ -640,7 +644,7 @@ async def build_launch_config(
         raise HTTPException(status_code=409, detail="this vault is already tokenized")
     gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
     body = {
-        "walletAddress": record["runner_address"],
+        "walletAddress": record["creator_address"],
         "vaultAccount": account,
         # The quote asset is chosen here, not at creation: this config is what
         # fixes it, the program writes it onto the vault at `tokenize`, and it
@@ -727,7 +731,7 @@ async def withdraw(
     """Take assets out of a private vault.
 
     There is no `withdraw` instruction in the program and this is not one: the
-    delegate the runner installed can already move anything in this wallet, and
+    delegate the creator installed can already move anything in this treasury, and
     this asks it to. That is also why it stops at `tokenize` — not because a key
     stops being able to, but because from there the vault's assets are other
     people's too, and the only way they leave is a redemption after a wind-down.
@@ -756,7 +760,7 @@ async def build_redeem(
 ):
     """Burn tokens, take the quote asset pro-rata.
 
-    The only route here that is not the runner's: a holder is anyone with the
+    The only route here that is not the creator's: a holder is anyone with the
     token, so this asks for no record and checks no ownership — Condor may well
     have never heard of this vault. What it needs is an attached wallet, because
     the burn comes out of that wallet's account.
@@ -765,7 +769,7 @@ async def build_redeem(
     nothing in this path — not Condor, not the administrator, not the delegate —
     is able to refuse it. This route only builds the transaction that asks.
     """
-    holder = _runner(user)
+    holder = _creator(user)
     gw = await _gateway(server)
     build = await _upstream(
         gw,
@@ -785,8 +789,8 @@ async def scan(account: str, user: WebUser = Depends(get_current_user)):
     """Condor's own decision about whether it will run this version.
 
     Not an attestation and not on chain (plan D17). It gates what *Condor's*
-    crank starts, and its verdict is shown to the runner so a refusal is not a
-    mystery. A runner who self-hosts is not bound by it at all.
+    crank starts, and its verdict is shown to the creator so a refusal is not a
+    mystery. A creator who self-hosts is not bound by it at all.
     """
     import time
 
@@ -856,7 +860,7 @@ async def delete_draft(account: str, user: WebUser = Depends(get_current_user)):
         )
     if record.get("delegate"):
         raise HTTPException(
-            status_code=409, detail="a delegate is installed on this vault's wallet"
+            status_code=409, detail="a delegate is installed on this vault's treasury"
         )
     vault_store.delete(user.id, account)
     return {"deleted": True}
@@ -871,20 +875,20 @@ async def holdings(
     server: str = Query(...),
     user: WebUser = Depends(require_server_access_query),
 ):
-    """Everything in the vault's wallet, and where its own token trades.
+    """Everything in the vault's treasury, and where its own token trades.
 
     Read straight from the chain through Gateway rather than from any local
     store: a vault's balances move every time its strategy does, and a cached
     copy would be a second answer to a question the chain already answers.
 
-    The wallet comes from the chain too, not from a record, which is what makes
+    The treasury comes from the chain too, not from a record, which is what makes
     this readable for *any* vault on the server rather than only the ones this
     user happens to run. A vault is a public account — the listing already says
     so — and what it holds is the most public thing about it.
 
     The vault's **own token** appears here like any other balance, because that
-    is what it is. After graduation the unsold supply sits in this same wallet,
-    so the runner can market-make their own token — an LP position against its
+    is what it is. After graduation the unsold supply sits in this same treasury,
+    so the creator can market-make their own token — an LP position against its
     own pool, earning fees for the vault and deepening the market its holders
     exit through. `treasury` names that balance separately only because it is
     the one that must be left out of a redemption's denominator.
@@ -892,18 +896,18 @@ async def holdings(
     network = _network_of(user, account, server)
     gw = await _gateway(server, network)
     chain = await _upstream(gw, gw.vault(account))
-    wallet = chain.get("wallet")
-    if not wallet:
+    treasury = chain.get("treasury")
+    if not treasury:
         raise HTTPException(status_code=404, detail=f"no vault {account} on {server}")
-    balances = await _upstream(gw, gw.balances(wallet))
+    balances = await _upstream(gw, gw.balances(treasury))
     return {
         "account": account,
-        "wallet_address": wallet,
+        "treasury_address": treasury,
         "quote_mint": chain.get("quoteMint"),
         "balances": balances.get("balances", balances),
-        # The wallet's own balance of its own token: unsold supply, not
+        # The treasury's own balance of its own token: unsold supply, not
         # circulating, excluded from what a redemption divides by.
-        "treasury": chain.get("treasuryBalance"),
+        "retained_supply": chain.get("retainedSupply"),
         "circulating_supply": chain.get("redeemableSupply"),
         "mint": chain.get("mint"),
         # The migrated pool: what the DEX browser lists and an LP executor trades.
@@ -928,7 +932,7 @@ async def lp_positions(
     server: str = Query(...),
     user: WebUser = Depends(require_server_access_query),
 ):
-    """Every liquidity position the vault's wallet still holds.
+    """Every liquidity position the vault's treasury still holds.
 
     Fanned out across the protocols this Gateway actually reports, rather than
     a list written here: a vault's strategy may LP anywhere, and a hard-coded
@@ -946,8 +950,8 @@ async def lp_positions(
     network = _network_of(user, account, server)
     gw = await _gateway(server, network)
     chain = await _upstream(gw, gw.vault(account))
-    wallet = chain.get("wallet")
-    if not wallet:
+    treasury = chain.get("treasury")
+    if not treasury:
         raise HTTPException(status_code=404, detail=f"no vault {account} on {server}")
 
     client = gw.client
@@ -975,7 +979,7 @@ async def lp_positions(
             if kind not in types:
                 continue
             try:
-                rows = await read(name, network_id, wallet)
+                rows = await read(name, network_id, treasury)
             except Exception as e:
                 detail = _detail(e)
                 bucket = unsupported if _is_unsupported(detail) else errors
@@ -986,14 +990,14 @@ async def lp_positions(
 
     return {
         "account": account,
-        "wallet_address": wallet,
+        "treasury_address": treasury,
         "positions": positions,
         "errors": errors,
         "unsupported": unsupported,
     }
 
 
-#: How Gateway words a protocol that cannot enumerate a wallet's positions at
+#: How Gateway words a protocol that cannot enumerate a treasury's positions at
 #: all. Matched on its sentence rather than on a list of connector names here,
 #: which is the same list this route exists to avoid keeping.
 _UNSUPPORTED = "not supported"

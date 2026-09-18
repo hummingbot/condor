@@ -7,10 +7,10 @@ kept a vault in four places and spent its time reconciling them.
 
 `paths.user_dir(user_id)/vaults.json`, keyed by the Vault PDA address, which
 is the vault's identity everywhere (D4). Per-user because the key in the record
-is the runner's, and the runner is a person.
+is the creator's, and the creator is a person.
 
 **A record is written before the signature and promoted after it.** Creating a
-vault is one transaction — the wallet, the delegate and the strategy together — so
+vault is one transaction — the treasury, the delegate and the strategy together — so
 there is no ladder of steps to resume, only `pending`: what the browser was
 asked to sign. `confirm` promotes it, and only if the chain carries the config's
 hash. Until then the record exists so that a vault signed in a closed tab is
@@ -104,7 +104,7 @@ def iter_all_users() -> Iterable[tuple[str, str, dict[str, Any]]]:
     """``(user_id, account, record)`` for every vault this install knows.
 
     The crank's entry point: it runs per server, not per person, and a vault's
-    runner is not the one who cranks it.
+    creator is not the one who cranks it.
     """
     for user_id in paths.iter_user_ids():
         for account, record in all_vaults(user_id).items():
@@ -112,11 +112,11 @@ def iter_all_users() -> Iterable[tuple[str, str, dict[str, Any]]]:
 
 
 def live_vault_labels(user_id: int | str) -> list[str]:
-    """Vaults that still hold this user's wallet as their runner on chain.
+    """Vaults that still hold this user's wallet as their creator on chain.
 
     What the detach gate asks. A draft with no delegate holds nothing (deleting
     it is a click), and a vault whose chain state is `Redeemable` is finished:
-    holders redeem from the program, which does not consult the runner.
+    holders redeem from the program, which does not consult the creator.
     """
     live = []
     for account, record in all_vaults(user_id).items():
@@ -141,8 +141,8 @@ def create_record(
     server: str,
     network: str,
     vault_id: str,
-    wallet_address: str,
-    runner_address: str,
+    treasury_address: str,
+    creator_address: str,
     pending: dict[str, Any],
 ) -> dict[str, Any]:
     """The record for a vault whose transaction has been built but not signed.
@@ -155,8 +155,8 @@ def create_record(
     """
     for name, value in (
         ("account", account),
-        ("wallet_address", wallet_address),
-        ("runner_address", runner_address),
+        ("treasury_address", treasury_address),
+        ("creator_address", creator_address),
     ):
         if not is_pubkey(value):
             raise ValueError(f"{name} is not a Solana address: {value!r}")
@@ -166,8 +166,8 @@ def create_record(
         "network": network,
         # hex; both PDAs derive from it, and Gateway re-derives the wallet with it
         "vault_id": vault_id,
-        "wallet_address": wallet_address,
-        "runner_address": runner_address,
+        "treasury_address": treasury_address,
+        "creator_address": creator_address,
         "delegate": None,
         # Set by `tokenize`, never by the create flow. None means private.
         "token": None,
@@ -317,7 +317,7 @@ def _drift(pin: dict[str, Any], chain: dict[str, Any]) -> Optional[str]:
     """What the store claims that the chain does not agree with.
 
     A vault does not run while this is set. The private config is served to the
-    runner on the strength of its hash being the chain's, so a mismatch is not a
+    creator on the strength of its hash being the chain's, so a mismatch is not a
     cosmetic difference — it means the config on file is not the one signed.
     """
     mismatches = []

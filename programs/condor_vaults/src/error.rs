@@ -24,8 +24,8 @@ pub enum VaultError {
     NotAuthority,
     #[msg("the signer is not the protocol administrator")]
     NotAdministrator,
-    #[msg("the signer is not this vault's runner")]
-    NotRunner,
+    #[msg("the signer is not this vault's creator")]
+    NotCreator,
     #[msg("the vault has no strategy pinned yet")]
     NotPinned,
     #[msg("the vault is already pinned; publish a new version instead")]
@@ -34,23 +34,23 @@ pub enum VaultError {
     NotTokenized,
     #[msg("the vault is already tokenized")]
     AlreadyTokenized,
-    #[msg("the vault is tokenized: its wallet acts only through `execute`, which cannot move a token to anyone")]
+    #[msg("the vault is tokenized: its treasury acts only through `execute`, which cannot move a token to anyone")]
     NotPrivate,
-    #[msg("the wallet must be funded with at least the rent floor for an empty account, or it would not exist")]
+    #[msg("the treasury must be funded with at least the rent floor for an empty account, or it would not exist")]
     FundingBelowRent,
-    #[msg("the signer is neither this vault's runner nor its delegate")]
-    NotRunnerOrDelegate,
-    #[msg("the vault is not running or paused, so its wallet does not act")]
+    #[msg("the signer is neither this vault's creator nor its delegate")]
+    NotCreatorOrDelegate,
+    #[msg("the vault is not running or paused, so its treasury does not act")]
     VaultNotActive,
-    #[msg("the wallet will not invoke this program")]
+    #[msg("the treasury will not invoke this program")]
     SelfInvoke,
-    #[msg("that program is not a venue the wallet may trade on")]
+    #[msg("that program is not a venue the treasury may trade on")]
     ProgramNotAllowed,
-    #[msg("that instruction is not one the wallet may send to that program")]
+    #[msg("that instruction is not one the treasury may send to that program")]
     InstructionNotAllowed,
-    #[msg("a writable account is neither the wallet's, the venue's, nor the caller's own — see the log for which")]
+    #[msg("a writable account is neither the treasury's, the venue's, nor the caller's own — see the log for which")]
     AccountNotAllowed,
-    #[msg("an account this call created is not owned by the wallet — see the log for which")]
+    #[msg("an account this call created is not owned by the treasury — see the log for which")]
     RecipientNotVault,
     #[msg("the DBC config's terms are not the ones every Condor vault launches with")]
     LaunchTermsMismatch,
@@ -64,9 +64,9 @@ pub enum VaultError {
     NotWindingDown,
     #[msg("the vault is not redeemable yet")]
     NotRedeemable,
-    #[msg("the wind-down is not finished: a position or a balance remains in the wallet")]
+    #[msg("the wind-down is not finished: a position or a balance remains in the treasury")]
     WindDownIncomplete,
-    #[msg("the wallet holds none of the quote asset, so there is nothing for holders to redeem")]
+    #[msg("the treasury holds none of the quote asset, so there is nothing for holders to redeem")]
     RedemptionPotEmpty,
     #[msg("the token account is not the vault's own for this mint")]
     WrongTokenAccount,

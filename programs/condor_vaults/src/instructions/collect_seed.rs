@@ -2,13 +2,13 @@
 //!
 //! When the curve fills, Meteora's keeper migrates the pool and 80 % of the
 //! raise sits in DBC as the *creator's* migration fee. The creator is this
-//! program's PDA, so the fee has exactly one destination: the wallet's own
+//! program's PDA, so the fee has exactly one destination: the treasury's own
 //! associated account for the quote asset. Nobody can send it anywhere else,
 //! which is why anybody may send it — the caller pays the gas and gets
 //! nothing, and DBC's own one-time flag makes a second call a no-op that the
 //! handler refuses before it spends anything (plan §1.4 Phase B).
 //!
-//! That is what "the users fund the wallet trustlessly" means in practice: not
+//! That is what "the users fund the treasury trustlessly" means in practice: not
 //! that Condor delivers the seed promptly, but that Condor's promptness is
 //! irrelevant.
 
@@ -17,8 +17,8 @@ use anchor_lang::solana_program::program::invoke_signed;
 
 use crate::dbc;
 use crate::error::VaultError;
-use crate::instructions::strategy::authority_of;
-use crate::state::{Protocol, Vault, PROTOCOL_SEED, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use crate::instructions::strategy::treasury_of;
+use crate::state::{Protocol, Vault, PROTOCOL_SEED, TREASURY_SEED, VAULT_SEED};
 use crate::token;
 
 #[derive(Accounts)]
@@ -35,10 +35,10 @@ pub struct CollectSeed<'info> {
     pub vault: Account<'info, Vault>,
     /// CHECK: the DBC creator, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
 
     /// CHECK: DBC's signer PDA.
     #[account(address = dbc::DBC_POOL_AUTHORITY)]
@@ -88,24 +88,24 @@ pub fn collect_seed(ctx: Context<CollectSeed>) -> Result<()> {
     );
     require_keys_eq!(
         pool.creator,
-        ctx.accounts.vault_authority.key(),
+        ctx.accounts.treasury.key(),
         VaultError::PoolCreatorMismatch
     );
     require_keys_eq!(
-        authority_of(&ctx.accounts.vault)?,
-        ctx.accounts.vault_authority.key(),
+        treasury_of(&ctx.accounts.vault)?,
+        ctx.accounts.treasury.key(),
         VaultError::PoolCreatorMismatch
     );
 
-    // The seed lands in the wallet's own account, or nowhere.
+    // The seed lands in the treasury's own account, or nowhere.
     token::require_associated(
         &ctx.accounts.token_quote_account.to_account_info(),
-        &ctx.accounts.vault_authority.key(),
+        &ctx.accounts.treasury.key(),
         &ctx.accounts.vault.quote_mint,
         &ctx.accounts.token_quote_program.key(),
     )?;
 
-        let seeds = ctx.accounts.vault.authority_seeds();
+        let seeds = ctx.accounts.vault.treasury_seeds();
 
     let accounts = dbc::DbcAccounts {
         pool_authority: &ctx.accounts.pool_authority,
@@ -114,7 +114,7 @@ pub fn collect_seed(ctx: Context<CollectSeed>) -> Result<()> {
         token_quote_account: &ctx.accounts.token_quote_account,
         quote_vault: &ctx.accounts.quote_vault,
         quote_mint: &ctx.accounts.quote_mint,
-        creator: &ctx.accounts.vault_authority,
+        creator: &ctx.accounts.treasury,
         token_quote_program: &ctx.accounts.token_quote_program,
         event_authority: &ctx.accounts.event_authority,
         program: &ctx.accounts.dbc_program,

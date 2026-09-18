@@ -189,7 +189,7 @@ class VaultGateway:
     A thin, named surface over :class:`GatewayClient` so that the route layer
     reads as vault operations rather than as URL strings, and so there is one
     place to look when Gateway's contract moves. Every ``build_*`` returns an
-    unsigned transaction for the runner's browser; everything else executes
+    unsigned transaction for the creator's browser; everything else executes
     under Gateway's platform key, and each of those is an instruction the
     *program* restricts to that signer (or to anyone at all).
     """

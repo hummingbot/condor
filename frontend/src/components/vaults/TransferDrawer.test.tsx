@@ -1,7 +1,7 @@
 /**
  * The two directions are two mechanisms, and the drawer must not confuse them.
  *
- * Funding a vault is a transaction the runner's own wallet signs. Taking money
+ * Funding a vault is a transaction the creator's own wallet signs. Taking money
  * back out is the *delegate* moving what it can already move, which happens on
  * the server and needs no signature. They look like one control with a flip
  * button between them, which is the point — and exactly why it is worth pinning
@@ -35,8 +35,8 @@ const { TransferDrawer } = await import("./TransferDrawer");
 // lines of chain state the component never touches.
 const VAULT = {
   account: "9NkBz4Cw83zNVdTe6WNTiCtABBcrZC5MTmQxrEKvTQk6",
-  wallet_address: "H1SgKcBnH8VcHhEVrBHQUEt8VLYyJvQbYDfMj7ttRA7U",
-  runner_address: "CqP6b3XgfXamU3V1fgRvCTLN57fsxMUQKBj34mPwnoxH",
+  treasury_address: "H1SgKcBnH8VcHhEVrBHQUEt8VLYyJvQbYDfMj7ttRA7U",
+  creator_address: "CqP6b3XgfXamU3V1fgRvCTLN57fsxMUQKBj34mPwnoxH",
   server: "vaults",
   network: "mainnet-beta",
   label: "Demo vault",
@@ -54,8 +54,8 @@ const signAndSubmit = vi.fn(async () => "sig-from-browser");
 function render() {
   const wallet: WalletState = {
     available: [],
-    connected: { id: "dev", name: "dev:demo", icon: "", address: VAULT.runner_address },
-    attached: VAULT.runner_address,
+    connected: { id: "dev", name: "dev:demo", icon: "", address: VAULT.creator_address },
+    attached: VAULT.creator_address,
     mismatched: false,
     connect: async () => {},
     disconnect: () => {},
@@ -133,7 +133,7 @@ describe("TransferDrawer", () => {
     await act(async () => button("Withdraw SOL")!.click());
 
     expect(withdrawFromVault).toHaveBeenCalledWith(VAULT.account, {
-      destination: VAULT.runner_address,
+      destination: VAULT.creator_address,
       amount: "0.5",
       mint: undefined,
     });
@@ -161,8 +161,8 @@ describe("TransferDrawer", () => {
         <QueryClientProvider client={new QueryClient()}>
           <WalletHarness
             value={{
-              available: [], connected: { id: "d", name: "d", icon: "", address: VAULT.runner_address },
-              attached: VAULT.runner_address, mismatched: false,
+              available: [], connected: { id: "d", name: "d", icon: "", address: VAULT.creator_address },
+              attached: VAULT.creator_address, mismatched: false,
               connect: async () => {}, disconnect: () => {}, attach: async () => {}, detach: async () => {},
               signAndSubmit, signAndSubmitAll: async () => [],
             }}

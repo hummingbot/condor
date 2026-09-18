@@ -2,24 +2,24 @@
 //!
 //! `Protocol` is one per program: who may rotate keys, who cranks, and which
 //! Meteora partner config every vault launches from. `Vault` is one per id,
-//! and its address is `["vault", id]`; its wallet is `["vault_authority", id]`
-//! — so a vault has exactly one wallet and a wallet exactly one vault, with no
+//! and its address is `["vault", id]`; its treasury is `["treasury", id]`
+//! — so a vault has exactly one treasury and a treasury exactly one vault, with no
 //! registry in between (D4).
 
 use anchor_lang::prelude::*;
 
 pub const PROTOCOL_SEED: &[u8] = b"protocol";
 pub const VAULT_SEED: &[u8] = b"vault";
-/// The seeds of the PDA that is the vault's wallet *and* the DBC pool's
+/// The seeds of the PDA that is the vault's treasury *and* the DBC pool's
 /// creator. One address holds both jobs so that every creator-side stream —
 /// the seed, the curve fees, the surplus, the position fees — is routed by a
 /// program rule rather than by somebody's key (plan §1.1).
-pub const VAULT_AUTHORITY_SEED: &[u8] = b"vault_authority";
+pub const TREASURY_SEED: &[u8] = b"treasury";
 
 pub const BPS_DENOMINATOR: u16 = 10_000;
 
 /// The economics every tokenized vault launches with. Checked against the DBC
-/// config the runner passes, rather than against one config *address*: a vault
+/// config the creator passes, rather than against one config *address*: a vault
 /// prices its own launch off its NAV, so each one needs its own config, and the
 /// thing that must not vary is the economics — not which account holds them.
 /// Changing any of these is a program upgrade, which is the right weight for a
@@ -32,7 +32,7 @@ pub mod launch_rules {
     //! address. It checks the terms instead, and each one is either a **bound**
     //! or a **constant**. The difference is not arbitrary:
     //!
-    //! * a term is a **bound** when it is a decision the runner is entitled to
+    //! * a term is a **bound** when it is a decision the creator is entitled to
     //!   make and a buyer is entitled to read. Those are recorded on the `Vault`
     //!   at `tokenize`, so a holder reads what this vault chose rather than
     //!   inferring it from a config account;
@@ -45,7 +45,7 @@ pub mod launch_rules {
     /// permanently locked liquidity. **This is the split between the strategy
     /// and the holders' exit**: at 80 the strategy gets 8 SOL and the pool about
     /// 2; at 20 it is a small strategy behind a deep market. Both are defensible
-    /// and they are not the same product, which is exactly why the runner
+    /// and they are not the same product, which is exactly why the creator
     /// chooses and the number is on chain.
     pub const MIN_MIGRATION_FEE_PCT: u8 = 20;
     pub const MAX_MIGRATION_FEE_PCT: u8 = 80;
@@ -58,8 +58,8 @@ pub mod launch_rules {
     /// another name.
     pub const CREATOR_MIGRATION_FEE_PCT: u8 = 100;
 
-    /// The runner's share of the non-protocol trading fee. Bounded above rather
-    /// than fixed: a runner may take less, and 50 is the most they may take,
+    /// The creator's share of the non-protocol trading fee. Bounded above rather
+    /// than fixed: a creator may take less, and 50 is the most they may take,
     /// because the remainder is what pays for the infrastructure every vault
     /// uses.
     pub const MAX_CREATOR_TRADING_FEE_PCT: u8 = 50;
@@ -134,12 +134,12 @@ pub struct AgentRef {
 /// Where a vault is in its life. **Private is not a state here**: a vault is
 /// private exactly while it has no mint, so the two cannot disagree. A private
 /// vault runs, pauses and winds down like any other — the difference is that
-/// its runner may withdraw from it, because there is nobody else in it.
+/// its creator may withdraw from it, because there is nobody else in it.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum VaultState {
     /// The crank may tick it.
     Running,
-    /// The runner stopped it. Positions stay open; nothing new is taken.
+    /// The creator stopped it. Positions stay open; nothing new is taken.
     Paused,
     /// One-way. Ticks stop, the administrator closes and converts, and the
     /// strategy can never change again.
@@ -163,12 +163,12 @@ pub struct Vault {
     /// the delegate, claims its income, winds down once. While the vault is
     /// private it may also empty it, through `execute_unchecked`; from
     /// `tokenize` on it cannot move a token to anyone.
-    pub runner: Pubkey,
+    pub creator: Pubkey,
     /// The 32 random bytes chosen at creation. Both PDAs derive from them —
     /// `["vault", id]` is this account and the vault's public identity;
-    /// `["vault_authority", id]` is the wallet, a system account with no data
+    /// `["treasury", id]` is the treasury, a system account with no data
     /// that holds the SOL and owns every token account and position. Stored so
-    /// every instruction can re-derive the wallet's signing seeds.
+    /// every instruction can re-derive the treasury's signing seeds.
     pub id: [u8; 32],
     /// Set by `tokenize`; the Token-2022 mint DBC created. Default until then,
     /// and that default *is* what "private" means.
@@ -183,9 +183,9 @@ pub struct Vault {
     /// wind-down converts into and what a redemption pays. All four are the
     /// same asset because they are the same promise to a holder, and it is the
     /// launch config that fixes it — so it is written here at tokenization,
-    /// from the config the runner chose, and never at creation.
+    /// from the config the creator chose, and never at creation.
     ///
-    /// A private vault has none, and needs none: it owes nobody, its runner
+    /// A private vault has none, and needs none: it owes nobody, its creator
     /// takes assets out through the delegate in whatever they are, and
     /// `finalize_wind_down` has nothing to verify. Asking at creation was
     /// asking a question whose answer could not matter until much later and
@@ -193,9 +193,9 @@ pub struct Vault {
     pub quote_mint: Pubkey,
     pub version: u32,
     /// The share of the fixed supply sold in the first sale. The rest is the
-    /// *retained* supply: it lands in the vault, not in the runner's hands, and
+    /// *retained* supply: it lands in the vault, not in the creator's hands, and
     /// can only leave through a later sale. Buyers read it as the ceiling on
-    /// how far the runner could dilute them, so it is on chain beside the
+    /// how far the creator could dilute them, so it is on chain beside the
     /// strategy rather than in a listing.
     pub issue_bps: u16,
     /// The launch terms this vault chose, copied from its DBC config at
@@ -216,10 +216,10 @@ pub struct Vault {
     pub tokenized_ts: i64,
     pub wind_down_ts: i64,
     pub bump: u8,
-    /// The bump of `["vault_authority", id]`. Stored rather than
+    /// The bump of `["treasury", id]`. Stored rather than
     /// found: this program signs as that PDA in most of its instructions, and
     /// `find_program_address` is ~1500 CU each time.
-    pub authority_bump: u8,
+    pub treasury_bump: u8,
     /// So a later field is an instruction, not an account migration.
     pub _reserved: [u8; 64],
 }
@@ -229,10 +229,10 @@ impl Vault {
         self.delegate != Pubkey::default()
     }
 
-    /// Whether anyone but the runner has a claim on what is inside.
+    /// Whether anyone but the creator has a claim on what is inside.
     ///
     /// Everything that separates the two phases hangs off this one question:
-    /// a private vault's wallet acts through `execute_unchecked`, which may do
+    /// a private vault's treasury acts through `execute_unchecked`, which may do
     /// anything; a tokenized one's only through `execute`, which may not move
     /// a token to anyone.
     pub fn is_tokenized(&self) -> bool {
@@ -243,26 +243,26 @@ impl Vault {
         self.version > 0
     }
 
-    /// The seeds this program signs with as the wallet — for every venue it
+    /// The seeds this program signs with as the treasury — for every venue it
     /// trades on and as the DBC pool creator.
-    pub fn authority_seeds(&self) -> [&[u8]; 3] {
+    pub fn treasury_seeds(&self) -> [&[u8]; 3] {
         [
-            VAULT_AUTHORITY_SEED,
+            TREASURY_SEED,
             self.id.as_ref(),
-            std::slice::from_ref(&self.authority_bump),
+            std::slice::from_ref(&self.treasury_bump),
         ]
     }
 
-    /// The wallet's address, derived rather than stored: one fewer field that
+    /// The treasury's address, derived rather than stored: one fewer field that
     /// could disagree with the seeds.
-    pub fn wallet(&self) -> Pubkey {
-        Pubkey::create_program_address(&self.authority_seeds(), &crate::ID)
-            .expect("stored authority bump derives the wallet")
+    pub fn treasury(&self) -> Pubkey {
+        Pubkey::create_program_address(&self.treasury_seeds(), &crate::ID)
+            .expect("stored authority bump derives the treasury")
     }
 
-    /// Whether `key` may act for the wallet.
+    /// Whether `key` may act for the treasury.
     pub fn may_act(&self, key: &Pubkey) -> bool {
-        *key == self.runner || (self.has_delegate() && *key == self.delegate)
+        *key == self.creator || (self.has_delegate() && *key == self.delegate)
     }
 }
 

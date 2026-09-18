@@ -1,38 +1,38 @@
-//! The treasury: the part of the supply that was not sold at launch.
+//! The retained supply: the part of the supply that was not sold at launch.
 //!
 //! `issue_bps` is circulating over max supply at the moment of tokenization.
-//! The remainder is not burned and is not the runner's — DBC's leftover
-//! receiver is the **vault's wallet**, so it lands there alongside its
+//! The remainder is not burned and is not the creator's — DBC's leftover
+//! receiver is the **vault's treasury**, so it lands there alongside its
 //! capital.
 //!
-//! That it lands *in the wallet* rather than in a pot of its own is the whole
-//! design. The treasury is not a special kind of supply waiting to be issued;
+//! That it lands *in the treasury* rather than in a pot of its own is the whole
+//! design. The retained supply is not a special kind of supply waiting to be issued;
 //! it is an asset the vault owns, and the vault's assets live where the
 //! delegate can trade them. So after graduation the vault can market-make its
 //! own token — an LP position against its own pool, earning fees, deepening the
 //! market its holders exit through — with no instruction here at all, because
-//! the executor path already reaches it. A treasury the delegate could not
+//! the executor path already reaches it. A retained supply the delegate could not
 //! touch would have been a pot that could only ever shrink.
 //!
-//! One instruction, because the treasury needs no special way out.
+//! One instruction, because the retained supply needs no special way out.
 //!
 //! `collect_leftover` is permissionless, like `collect_seed`: after migration
-//! DBC still holds the unsold base tokens, and this moves them to the wallet.
+//! DBC still holds the unsold base tokens, and this moves them to the treasury.
 //! Nobody can point it anywhere else, because the destination is written into
 //! the config as the leftover receiver and checked by DBC.
 //!
-//! **There is no `inject`, and there was.** An earlier version let the runner
-//! buy treasury tokens from the vault at the migrated pool's price, so that
+//! **There is no `inject`, and there was.** An earlier version let the creator
+//! buy retained supply tokens from the vault at the migrated pool's price, so that
 //! capital could enter after launch. It is unnecessary: an LP position funded
-//! from the treasury does the same thing better. As the market buys, treasury
+//! from the retained supply does the same thing better. As the market buys, retained supply
 //! supply enters circulation and the quote paid for it lands in the vault —
 //! continuously, at whatever the market is, with the strategy as the
-//! counterparty rather than the runner. That deleted an instruction, a price
-//! oracle question, and a privilege the runner did not need.
+//! counterparty rather than the creator. That deleted an instruction, a price
+//! oracle question, and a privilege the creator did not need.
 //!
-//! Treasury tokens never count as circulating: `redeem` subtracts the wallet's
+//! Retained supply tokens never count as circulating: `redeem` subtracts the treasury's
 //! own balance of the token from its denominator exactly as it subtracts the
-//! pool's. Whichever way they leave the wallet — sold by the delegate or worked
+//! pool's. Whichever way they leave the treasury — sold by the delegate or worked
 //! as half of an LP position — the quote comes back to the vault, so
 //! circulating supply and vault capital move together, and `issue_bps` is still
 //! the ceiling on how far a holder can be diluted.
@@ -43,7 +43,7 @@ use anchor_lang::solana_program::program::invoke;
 
 use crate::dbc;
 use crate::error::VaultError;
-use crate::state::{Vault, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use crate::state::{Vault, TREASURY_SEED, VAULT_SEED};
 use crate::token;
 
 #[derive(Accounts)]
@@ -56,14 +56,14 @@ pub struct CollectLeftover<'info> {
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
-    /// CHECK: the wallet — the leftover receiver DBC pays, which it checks
+    /// CHECK: the treasury — the leftover receiver DBC pays, which it checks
     /// against the config. Not a signer: that is what makes this call
     /// permissionless.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
 
     /// CHECK: DBC's signer PDA.
     #[account(address = dbc::DBC_POOL_AUTHORITY)]
@@ -73,7 +73,7 @@ pub struct CollectLeftover<'info> {
     /// CHECK: this vault's pool.
     #[account(mut, address = vault.dbc_pool @ VaultError::PoolNotDbc)]
     pub virtual_pool: UncheckedAccount<'info>,
-    /// CHECK: the destination — the wallet's own account for the vault token,
+    /// CHECK: the destination — the treasury's own account for the vault token,
     /// derived in the handler.
     #[account(mut)]
     pub token_base_account: UncheckedAccount<'info>,
@@ -109,14 +109,14 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
     );
     token::require_associated(
         &ctx.accounts.token_base_account.to_account_info(),
-        &ctx.accounts.vault_authority.key(),
+        &ctx.accounts.treasury.key(),
         &ctx.accounts.vault.mint,
         &ctx.accounts.token_base_program.key(),
     )?;
 
     // The leftover receiver is a plain account in this instruction, not a
     // signer: DBC pays whoever the config named, and the config named this
-    // wallet at tokenize. So the call needs no signature at all — which is what
+    // treasury at tokenize. So the call needs no signature at all — which is what
     // makes it permissionless.
     let ix = Instruction {
         program_id: dbc::DBC_PROGRAM_ID,
@@ -127,7 +127,7 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
             AccountMeta::new(ctx.accounts.token_base_account.key(), false),
             AccountMeta::new(ctx.accounts.base_vault.key(), false),
             AccountMeta::new_readonly(ctx.accounts.base_mint.key(), false),
-            AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.treasury.key(), false),
             AccountMeta::new_readonly(ctx.accounts.token_base_program.key(), false),
             AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
             AccountMeta::new_readonly(ctx.accounts.dbc_program.key(), false),
@@ -143,7 +143,7 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
             ctx.accounts.token_base_account.to_account_info(),
             ctx.accounts.base_vault.to_account_info(),
             ctx.accounts.base_mint.to_account_info(),
-            ctx.accounts.vault_authority.to_account_info(),
+            ctx.accounts.treasury.to_account_info(),
             ctx.accounts.token_base_program.to_account_info(),
             ctx.accounts.event_authority.to_account_info(),
             ctx.accounts.dbc_program.to_account_info(),

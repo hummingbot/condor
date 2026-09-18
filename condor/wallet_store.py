@@ -2,8 +2,8 @@
 
 Condor never holds a user's key. What it holds is the *claim* that a browser
 wallet belongs to a Condor login, established once by a signature over a
-one-time message and kept here. Everything a runner is allowed to do — read a
-vault's private config, be recorded as its runner, sign its builds — is gated on
+one-time message and kept here. Everything a creator is allowed to do — read a
+vault's private config, be recorded as its creator, sign its builds — is gated on
 that claim.
 
 Two stores, deliberately different in lifetime:
@@ -13,7 +13,7 @@ Two stores, deliberately different in lifetime:
   Losing them on restart costs a user one click.
 * **The attachment** — ``paths.user_dir(user_id)/wallet.json``, one wallet per
   user (D13). Not secret: an address is public. Per-user because the file *is*
-  the answer to "who is this vault's runner", and a shared file is how that
+  the answer to "who is this vault's creator", and a shared file is how that
   answer drifts.
 
 Beside the attachment, in the same file, is the **preferred source** per chain:
@@ -68,7 +68,7 @@ def sign_in_message(address: str, user_id: int, nonce: str, issued_iso: str) -> 
         f"{SIGN_IN_DOMAIN} wants you to sign in with your Solana account:\n"
         f"{address}\n"
         "\n"
-        f"Attach this wallet to Condor account {user_id}. It becomes the runner "
+        f"Attach this wallet to Condor account {user_id}. It becomes the creator "
         "of the vaults you create. Condor never asks for your private key.\n"
         "\n"
         f"Nonce: {nonce}\n"

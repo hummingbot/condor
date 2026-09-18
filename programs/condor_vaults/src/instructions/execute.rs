@@ -1,28 +1,28 @@
-//! `execute_unchecked` and `execute` — the wallet acting.
+//! `execute_unchecked` and `execute` — the treasury acting.
 //!
-//! The vault's wallet is a PDA of this program, so anything it does on chain
+//! The vault's treasury is a PDA of this program, so anything it does on chain
 //! is a CPI this program makes on its behalf. These two instructions are that
 //! CPI, and the difference between them is the whole difference between the
 //! two phases (plan §1.9):
 //!
 //! * **`execute_unchecked`** invokes any program with any accounts. It is what
-//!   a private vault's delegate — or its runner — trades with, and it is also
+//!   a private vault's delegate — or its creator — trades with, and it is also
 //!   how a private vault is emptied: a transfer is an instruction like any
 //!   other. Nothing is checked, because nothing needs to be: the only person
 //!   with a claim on what is inside is the one who created it (§1.3). It
 //!   refuses from `tokenize` onward, and that refusal is the one-way door.
 //! * **`execute`** invokes an allowed venue under `venues::check_before` and
-//!   `check_after`: every account the call may write is the wallet's, the
+//!   `check_after`: every account the call may write is the treasury's, the
 //!   venue's, or the caller's own, and everything the call created belongs to
-//!   the wallet. A swap whose output goes anywhere but the wallet fails; a
-//!   position opened for anyone but the wallet fails; a transfer to a key
+//!   the treasury. A swap whose output goes anywhere but the treasury fails; a
+//!   position opened for anyone but the treasury fails; a transfer to a key
 //!   fails. It is allowed in both phases and is the only thing allowed after
-//!   launch — which is what lets a runner install their *own* key as delegate
+//!   launch — which is what lets a creator install their *own* key as delegate
 //!   on a tokenized vault: what the key may do is decided here, not by whose
 //!   it is.
 //!
 //! The target program and every account it wants come as `remaining_accounts`,
-//! with the writability and signer flags the instruction needs. The wallet
+//! with the writability and signer flags the instruction needs. The treasury
 //! cannot sign the outer transaction, so its signer flag is set here and
 //! supplied by `invoke_signed`.
 
@@ -31,53 +31,53 @@ use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke_signed;
 
 use crate::error::VaultError;
-use crate::state::{Vault, VaultState, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use crate::state::{Vault, VaultState, TREASURY_SEED, VAULT_SEED};
 use crate::venues;
 
 #[derive(Accounts)]
 pub struct Execute<'info> {
-    /// The runner or the delegate.
+    /// The creator or the delegate.
     pub signer: Signer<'info>,
     #[account(
         seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
     )]
     pub vault: Account<'info, Vault>,
-    /// CHECK: the wallet, signing by its seeds. Writable because it pays rent
+    /// CHECK: the treasury, signing by its seeds. Writable because it pays rent
     /// and receives lamports in the ordinary course of trading.
     #[account(
         mut,
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
-    /// CHECK: the program the wallet invokes. Checked executable in the handler.
+    pub treasury: UncheckedAccount<'info>,
+    /// CHECK: the program the treasury invokes. Checked executable in the handler.
     pub target_program: UncheckedAccount<'info>,
     // remaining_accounts: the instruction's accounts, in order.
 }
 
 fn may_act<'info>(ctx: &Context<'info, Execute<'info>>) -> Result<()> {
     let vault = &ctx.accounts.vault;
-    require!(vault.may_act(&ctx.accounts.signer.key()), VaultError::NotRunnerOrDelegate);
+    require!(vault.may_act(&ctx.accounts.signer.key()), VaultError::NotCreatorOrDelegate);
     require!(
         matches!(vault.state, VaultState::Running | VaultState::Paused),
         VaultError::VaultNotActive
     );
     require!(ctx.accounts.target_program.executable, VaultError::ProgramNotAllowed);
-    // Not itself: a wallet that could call `install_delegate` or `tokenize`
-    // as the runner would be a wallet that could rewrite who owns it.
+    // Not itself: a treasury that could call `install_delegate` or `tokenize`
+    // as the creator would be a treasury that could rewrite who owns it.
     require_keys_neq!(ctx.accounts.target_program.key(), crate::ID, VaultError::SelfInvoke);
     Ok(())
 }
 
-fn invoke_as_wallet<'info>(ctx: &Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
-    let wallet = ctx.accounts.vault_authority.key();
+fn invoke_as_treasury<'info>(ctx: &Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
+    let treasury = ctx.accounts.treasury.key();
     let metas: Vec<AccountMeta> = ctx
         .remaining_accounts
         .iter()
         .map(|a| AccountMeta {
             pubkey: a.key(),
-            is_signer: a.is_signer || a.key() == wallet,
+            is_signer: a.is_signer || a.key() == treasury,
             is_writable: a.is_writable,
         })
         .collect();
@@ -87,9 +87,9 @@ fn invoke_as_wallet<'info>(ctx: &Context<'info, Execute<'info>>, data: Vec<u8>) 
         data,
     };
     let mut infos: Vec<AccountInfo<'info>> = ctx.remaining_accounts.to_vec();
-    infos.push(ctx.accounts.vault_authority.to_account_info());
+    infos.push(ctx.accounts.treasury.to_account_info());
     infos.push(ctx.accounts.target_program.to_account_info());
-    let seeds = ctx.accounts.vault.authority_seeds();
+    let seeds = ctx.accounts.vault.treasury_seeds();
     invoke_signed(&ix, &infos, &[&seeds])?;
     Ok(())
 }
@@ -97,14 +97,14 @@ fn invoke_as_wallet<'info>(ctx: &Context<'info, Execute<'info>>, data: Vec<u8>) 
 pub fn execute_unchecked<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
     may_act(&ctx)?;
     require!(!ctx.accounts.vault.is_tokenized(), VaultError::NotPrivate);
-    invoke_as_wallet(&ctx, data)
+    invoke_as_treasury(&ctx, data)
 }
 
 pub fn execute<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
     may_act(&ctx)?;
     let program = ctx.accounts.target_program.key();
-    let wallet = ctx.accounts.vault_authority.key();
-    let before = venues::check_before(&program, &wallet, ctx.remaining_accounts, &data)?;
-    invoke_as_wallet(&ctx, data)?;
-    venues::check_after(&program, &wallet, ctx.remaining_accounts, &before)
+    let treasury = ctx.accounts.treasury.key();
+    let before = venues::check_before(&program, &treasury, ctx.remaining_accounts, &data)?;
+    invoke_as_treasury(&ctx, data)?;
+    venues::check_after(&program, &treasury, ctx.remaining_accounts, &before)
 }

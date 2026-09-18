@@ -77,7 +77,7 @@ export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
   const [tab, setTab] = useState<Tab>("assets");
   const [moving, setMoving] = useState<TransferAsset | null>(null);
   const { canSign } = useCanSign();
-  // Only a private vault's assets are its runner's to move. Once it has
+  // Only a private vault's assets are its creator's to move. Once it has
   // holders the way out is a redemption after a wind-down, and a Transfer
   // button would be offering something the program refuses.
   const movable = canSign && !isTokenized(vault);
@@ -98,7 +98,7 @@ export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
 
   const assets = assetRows(holdings.data?.balances);
   const positions = lp.data?.positions ?? [];
-  const treasury = holdings.data?.treasury;
+  const retainedSupply = holdings.data?.retained_supply;
   // Where this vault's own token trades, once its curve has graduated.
   const pool = vault.chain?.damm_pool ?? holdings.data?.damm_pool ?? null;
 
@@ -107,7 +107,7 @@ export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
         <div>
           <p className="text-[11px] text-[var(--color-text-muted)]">The vault&rsquo;s wallet</p>
-          <CopyAddress address={vault.wallet_address} label="Funds owner" />
+          <CopyAddress address={vault.treasury_address} label="Treasury" />
         </div>
         <nav className="flex gap-1">
           {(
@@ -145,7 +145,7 @@ export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
           rows={assets}
           loading={holdings.isLoading}
           error={holdings.error as Error | null}
-          treasury={treasury}
+          retainedSupply={retainedSupply}
           mint={holdings.data?.mint ?? null}
           onMove={movable ? setMoving : undefined}
           quoteMint={vault.quote_mint}
@@ -191,7 +191,7 @@ function Assets({
   rows,
   loading,
   error,
-  treasury,
+  retainedSupply,
   mint,
   onMove,
   quoteMint,
@@ -199,7 +199,7 @@ function Assets({
   rows: { token: string; amount: number }[];
   loading: boolean;
   error: Error | null;
-  treasury: string | null | undefined;
+  retainedSupply: string | null | undefined;
   mint: string | null;
   /** Absent when this vault's assets are not the viewer's to move. */
   onMove?: (asset: TransferAsset) => void;
@@ -291,9 +291,9 @@ function Assets({
           ))}
         </tbody>
       </table>
-      {treasury && Number(treasury) > 0 && (
+      {retainedSupply && Number(retainedSupply) > 0 && (
         <p className="border-t border-[var(--color-border)] px-4 py-2 text-[11px] text-[var(--color-text-muted)]">
-          {num(treasury)} of its own token is unsold supply — held by the vault, not circulating,
+          {num(retainedSupply)} of its own token is retained supply — held by the vault, not circulating,
           and left out of what a redemption divides by.
         </p>
       )}

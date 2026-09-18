@@ -1,16 +1,16 @@
-"""The browser wallet a runner signs with (plan M2).
+"""The browser wallet a creator signs with (plan M2).
 
 Three jobs, and nothing else belongs here:
 
 * **Attach** — a wallet proves itself once, with a signature over a one-time
-  message, and becomes this user's runner identity (D13). Condor holds no key;
+  message, and becomes this user's creator identity (D13). Condor holds no key;
   the proof is all it keeps.
 * **Sign and submit** — the browser signs what Gateway built, and hands the
   signed bytes back through here rather than to a chain of its own. The browser
   never holds an RPC URL (plan §6): Condor's backend reaches the chain through
   Gateway, and so does every transaction it helps land.
 * **Detach** — refused while the user still runs a vault, because the attached
-  wallet is the vault's runner on chain and forgetting it locally would only
+  wallet is the vault's creator on chain and forgetting it locally would only
   hide that.
 
 Every route here is server-scoped: a signature is submitted through *some*
@@ -132,7 +132,7 @@ async def set_preferred(
 async def detach(user: WebUser = Depends(get_current_user)):
     """Forget the attached wallet — refused while it still runs something.
 
-    The wallet is a vault's runner *on chain*. Detaching would not revoke
+    The wallet is a vault's creator *on chain*. Detaching would not revoke
     anything; it would only cost this user the ability to reach vaults they
     still own. A vault that is `Redeemable`, or a draft with no delegate, holds
     nothing back.

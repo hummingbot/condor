@@ -4,28 +4,28 @@
 //! **A vault has two lives, and the second is optional.**
 //!
 //! It is created as two PDAs of this program from one random id: the `Vault`
-//! record, and a wallet that holds the money and acts only through this
+//! record, and a treasury that holds the money and acts only through this
 //! program's `execute` instructions. At first it is *private*: it has no
-//! mint, and it runs its runner's strategy with its runner's money. Nothing
+//! mint, and it runs its creator's strategy with its creator's money. Nothing
 //! about it needs Condor — no delegate anyone else holds, no registry, no
 //! permission — and there is deliberately no `withdraw` instruction, because
-//! none is needed: `execute_unchecked` lets the runner or their delegate send
-//! anything anywhere. A private vault is a wallet its owner controls, and the
+//! none is needed: `execute_unchecked` lets the creator or their delegate send
+//! anything anywhere. A private vault is a treasury its owner controls, and the
 //! program's job there is to stay out of the way.
 //!
 //! `tokenize` ends it. The vault launches a Token-2022 mint on a Meteora
 //! bonding curve whose **pool creator is the same PDA**, sells `issue_bps` of
-//! the fixed supply, and keeps the rest as a treasury the strategy market-makes
+//! the fixed supply, and keeps the rest as a retained supply the strategy market-makes
 //! with — an LP position on the vault's own pool, single- or double-sided,
 //! which is how unissued supply turns into vault capital as buyers arrive. When
 //! the curve fills, 80 % of what it raised becomes the vault's capital by a rule
 //! nobody can skip (`collect_seed`, permissionless) and 20 % becomes
-//! permanently locked liquidity. The runner can still change the
+//! permanently locked liquidity. The creator can still change the
 //! strategy, pause it, and wind it down once — after which holders redeem the
 //! quote asset pro-rata and nothing trades again.
 //!
 //! Every guarantee this program makes is a guarantee to somebody who is not the
-//! runner. That is why they all start at `tokenize`, and why a private vault
+//! creator. That is why they all start at `tokenize`, and why a private vault
 //! carries almost none of them: there is nobody there to protect.
 //!
 //! What is deliberately *not* here:
@@ -87,7 +87,7 @@ pub mod condor_vaults {
 
     // ── a private vault ─────────────────────────────────────────────────────
 
-    /// The `Vault` record and its wallet, two PDAs from one id, funded.
+    /// The `Vault` record and its treasury, two PDAs from one id, funded.
     pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64) -> Result<()> {
         instructions::create_vault::create_vault(ctx, id, fund_lamports)
     }
@@ -107,15 +107,15 @@ pub mod condor_vaults {
         instructions::strategy::pin(ctx, agent_ref, config_hash)
     }
 
-    /// The wallet invokes any program with any accounts. Private vaults only:
-    /// this is the runner's own money, and it is also how they take it out.
+    /// The treasury invokes any program with any accounts. Private vaults only:
+    /// this is the creator's own money, and it is also how they take it out.
     pub fn execute_unchecked<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
         instructions::execute::execute_unchecked(ctx, data)
     }
 
-    /// The wallet invokes an allowed venue, and every account the call may
-    /// write is the wallet's, the venue's, or the caller's own. The only way a
-    /// tokenized vault's wallet acts.
+    /// The treasury invokes an allowed venue, and every account the call may
+    /// write is the treasury's, the venue's, or the caller's own. The only way a
+    /// tokenized vault's treasury acts.
     pub fn execute<'info>(ctx: Context<'info, Execute<'info>>, data: Vec<u8>) -> Result<()> {
         instructions::execute::execute(ctx, data)
     }
@@ -134,17 +134,17 @@ pub mod condor_vaults {
         instructions::tokenize::tokenize(ctx, name, symbol, uri, issue_bps)
     }
 
-    /// Move the unsold supply from DBC into the vault's wallet, where the
+    /// Move the unsold supply from DBC into the vault's treasury, where the
     /// delegate can put it to work. Anyone.
     pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
-        instructions::treasury::collect_leftover(ctx)
+        instructions::retained::collect_leftover(ctx)
     }
 
     // ── running ─────────────────────────────────────────────────────────────
 
     /// A new version: a new agent pin, a new config hash, or both.
     pub fn publish_version(
-        ctx: Context<RunnerOnly>,
+        ctx: Context<CreatorOnly>,
         agent_ref: AgentRef,
         config_hash: [u8; 32],
     ) -> Result<()> {
@@ -152,33 +152,33 @@ pub mod condor_vaults {
     }
 
     /// Pause and resume.
-    pub fn set_active(ctx: Context<RunnerOnly>, active: bool) -> Result<()> {
+    pub fn set_active(ctx: Context<CreatorOnly>, active: bool) -> Result<()> {
         instructions::strategy::set_active(ctx, active)
     }
 
-    /// The curve's trading fees, or the surplus, into the runner's accounts.
+    /// The curve's trading fees, or the surplus, into the creator's accounts.
     pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<()> {
         instructions::income::claim_income(ctx, source)
     }
 
-    /// The migrated pool's locked position fees, into the runner's accounts.
+    /// The migrated pool's locked position fees, into the creator's accounts.
     pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
         instructions::income::claim_position_fee(ctx)
     }
 
-    /// The seed: 80 % of the raise, into the wallet. Anyone may call it.
+    /// The seed: 80 % of the raise, into the treasury. Anyone may call it.
     pub fn collect_seed(ctx: Context<CollectSeed>) -> Result<()> {
         instructions::collect_seed::collect_seed(ctx)
     }
 
     // ── the exit ────────────────────────────────────────────────────────────
 
-    /// One-way. The runner, or the protocol authority for an abandoned vault.
+    /// One-way. The creator, or the protocol authority for an abandoned vault.
     pub fn wind_down(ctx: Context<WindDown>) -> Result<()> {
         instructions::wind_down::wind_down(ctx)
     }
 
-    /// Administrator-signed. Refuses until the wallet is empty and — for a
+    /// Administrator-signed. Refuses until the treasury is empty and — for a
     /// tokenized vault — the redemption pot is funded; then removes the
     /// delegate.
     pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {

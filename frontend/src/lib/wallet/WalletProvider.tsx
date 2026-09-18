@@ -9,7 +9,7 @@
  * 1. **Which key is this person's.** A wallet connects in the browser and then
  *    *attaches* to the Condor account with one signature over a one-time
  *    message. Connecting is a browser fact; attaching is what makes the key this
- *    user's runner identity, and every vault route checks the second.
+ *    user's creator identity, and every vault route checks the second.
  * 2. **Signing and submitting.** `signAndSubmit` takes what Gateway built, hands
  *    the bytes to the wallet, posts them back to Condor, and waits for the
  *    chain. The *submission* never goes direct: Condor submits through Gateway's

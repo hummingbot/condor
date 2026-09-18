@@ -2364,7 +2364,7 @@ export interface VaultBuild {
 
 /** What the chain says about a vault. Null until the account exists. */
 export interface VaultChainState {
-  runner: string;
+  creator: string;
   /** The wallet: where the money is, derived from the vault id by the program. */
   wallet: string;
   mint: string | null;
@@ -2380,11 +2380,11 @@ export interface VaultChainState {
    * the holders' exit depth. 0 while private.
    */
   migration_fee_pct: number;
-  /** The runner's share of trading fees, at most 50. */
+  /** The creator's share of trading fees, at most 50. */
   creator_trading_fee_pct: number;
   /** Which fixed-fee option the migrated pool charges (0–5). */
   migration_fee_option: number;
-  /** False means no outside holders: the runner may still withdraw. */
+  /** False means no outside holders: the creator may still withdraw. */
   tokenized: boolean;
   state: "Running" | "Paused" | "WindingDown" | "Redeemable";
   delegate: string | null;
@@ -2416,8 +2416,9 @@ export interface VaultInfo {
   label: string;
   server: string;
   network: string;
-  wallet_address: string;
-  runner_address: string;
+  /** The treasury: the PDA that holds the money. */
+  treasury_address: string;
+  creator_address: string;
   quote_mint: string | null;
   delegate: { address: string; granted_at: number } | null;
   token: VaultTokenInfo | null;
@@ -2453,7 +2454,8 @@ export interface VaultLpPosition {
 
 export interface VaultLpPositions {
   account: string;
-  wallet_address: string;
+  /** The treasury: the PDA that holds the money. */
+  treasury_address: string;
   positions: VaultLpPosition[];
   /** Protocols that should have answered and did not, in their own words. */
   errors: string[];
@@ -2467,11 +2469,13 @@ export interface VaultLpPositions {
 
 export interface VaultHoldings {
   account: string;
-  wallet_address: string;
+  /** The treasury: the PDA that holds the money. */
+  treasury_address: string;
   quote_mint: string | null;
   balances: Record<string, number> | { mint: string; amount: string }[];
   /** The wallet's own balance of its own token: unsold supply, not circulating. */
-  treasury: string | null;
+  /** The vault's own token still held by the treasury: unsold, not circulating. */
+  retained_supply: string | null;
   circulating_supply: string | null;
   mint: string | null;
   /** The migrated pool — where the vault's token trades and an executor LPs. */
@@ -3839,13 +3843,13 @@ export const api = {
     }),
 
   /**
-   * The runner's plain builds, by name: `set-active`, `wind-down`,
+   * The creator's plain builds, by name: `set-active`, `wind-down`,
    * `claim-income`. One call rather than one per instruction — the backend
    * checks who is asking and Gateway's schema checks the body.
    */
   buildVaultAction: (
     account: string,
-    // The same names Condor's own allowlist holds (RUNNER_BUILDS): a name
+    // The same names Condor's own allowlist holds (CREATOR_BUILDS): a name
     // that is not one of these is a 404 there, so spelling it here is what
     // keeps a typo a compile error rather than a request.
     name: "set-active" | "wind-down" | "claim-income" | "deposit",
@@ -3859,7 +3863,7 @@ export const api = {
   /**
    * The vault's own DBC config: the terms it launches on. The migration fee is
    * the split between the strategy's capital and the depth holders exit
-   * through, which is why it is the runner's to choose.
+   * through, which is why it is the creator's to choose.
    */
   buildVaultLaunchConfig: (
     account: string,
@@ -3888,7 +3892,7 @@ export const api = {
       { method: "POST", body: JSON.stringify({ signature }) },
     ),
 
-  /** One way. From here the treasury is the only path from supply to capital. */
+  /** One way. From here the retained supply is the only path from supply to capital. */
   buildVaultTokenize: (
     account: string,
     data: { name: string; symbol: string; uri: string; issue_bps: number },
@@ -3899,7 +3903,7 @@ export const api = {
     }),
 
   /**
-   * Take assets out of a *private* vault: the delegate the runner installed
+   * Take assets out of a *private* vault: the delegate the creator installed
    * moving what it can already move. Refused once the vault has holders.
    */
   withdrawFromVault: (
@@ -3913,7 +3917,7 @@ export const api = {
 
   /**
    * Burn tokens, take the quote asset pro-rata. Any holder, not just the
-   * runner — after a wind-down the payment comes out of an account the program
+   * creator — after a wind-down the payment comes out of an account the program
    * owns, and nothing in the path can refuse it.
    */
   buildVaultRedeem: (server: string, account: string, amount: string) =>
@@ -3937,7 +3941,7 @@ export const api = {
       `/api/v1/vaults/${encodeURIComponent(account)}/lp-positions${query({ server })}`,
     ),
 
-  /** The private config, to its runner alone. */
+  /** The private config, to its creator alone. */
   getVaultConfig: (account: string) =>
     apiFetch<{ config: Record<string, unknown>; config_hash: string; version: number }>(
       `/api/v1/vaults/${encodeURIComponent(account)}/config`,

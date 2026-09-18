@@ -56,7 +56,7 @@ export function PhaseBadge({ vault }: { vault: VaultInfo }) {
   if (isTokenized(vault)) {
     return (
       <span
-        title="Tokenized: nobody can withdraw, including the runner. Holders redeem after a wind-down."
+        title="Tokenized: nobody can withdraw, including the creator. Holders redeem after a wind-down."
         className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)]"
       >
         <ShieldCheck className="h-3 w-3" />
@@ -66,7 +66,7 @@ export function PhaseBadge({ vault }: { vault: VaultInfo }) {
   }
   return (
     <span
-      title="Private: no token and no outside holders, so the runner can deposit and withdraw freely."
+      title="Private: no token and no outside holders, so the creator can deposit and withdraw freely."
       className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
     >
       <Lock className="h-3 w-3" />
@@ -112,7 +112,7 @@ export function StateBadge({ vault }: { vault: VaultInfo }) {
 /**
  * The inline form of the gate, for a row of actions rather than a page.
  *
- * The header's Pause and Stop are signed by the runner's key like everything
+ * The header's Pause and Stop are signed by the creator's key like everything
  * else, and they used to render whatever the wallet was doing — so the way you
  * found out was a build, a click, and "connect a wallet first" in red with
  * nothing to click. An action nobody can complete is worse than no action: this
@@ -137,7 +137,7 @@ export function SignerPrompt() {
         this browser is not holding it.
       </>
     ) : (
-      <>A vault&rsquo;s runner is a key. Attach one to act on this vault.</>
+      <>A vault&rsquo;s creator is a key. Attach one to act on this vault.</>
     );
 
   return (
@@ -172,7 +172,7 @@ export function SignerPrompt() {
 /**
  * What to show when there is no attached wallet.
  *
- * A vault's runner is a key, not an account: everything the runner may do is
+ * A vault's creator is a key, not an account: everything the creator may do is
  * checked on chain against it, so Condor genuinely cannot act for someone who
  * has not proved which key is theirs. Saying that is better than a disabled
  * button with no explanation.
@@ -209,7 +209,7 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
           </>
         ) : (
           <>
-            A vault&rsquo;s runner is a key, not a login. Condor never holds one
+            A vault&rsquo;s creator is a key, not a login. Condor never holds one
             — you sign in your own wallet, and the chain checks the signature.
           </>
         )}

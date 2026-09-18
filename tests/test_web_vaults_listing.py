@@ -7,7 +7,7 @@ validation and `GET /vaults` answered 500: the page was broken for exactly the
 vaults the product is mostly about, and only for people who had one.
 
 Also pins that a vault nobody here has a record of still lists. A vault's
-runner, state, phase and launch terms are public, so the chain is the list and a
+creator, state, phase and launch terms are public, so the chain is the list and a
 local record only adds what its owner has.
 """
 
@@ -15,9 +15,9 @@ from condor.web.models import VaultChainState
 from condor.web.routes.vaults import _chain_only_info, _to_info
 
 PRIVATE_CHAIN = {
-    "runner": "2LjWzppfJyTfTJT3gPAvmk6wukYUwi8cv1CuXjBHhfGj",
+    "creator": "2LjWzppfJyTfTJT3gPAvmk6wukYUwi8cv1CuXjBHhfGj",
     "account": "4YfP3qnEiNeof88jsBE3LpeiV8M1VFPBtyZejmhQXaer",
-    "wallet": "3xV8qNoHiNCopjSmdqt83c1Gg5VgZTWd36ENZqWf6Vd6",
+    "treasury": "3xV8qNoHiNCopjSmdqt83c1Gg5VgZTWd36ENZqWf6Vd6",
     "mint": None,
     "dbcPool": None,
     "configHash": "ab" * 32,
@@ -33,8 +33,8 @@ RECORD = {
     "label": "Cover LP",
     "server": "vaults",
     "network": "mainnet-beta",
-    "wallet_address": PRIVATE_CHAIN["wallet"],
-    "runner_address": PRIVATE_CHAIN["runner"],
+    "treasury_address": PRIVATE_CHAIN["treasury"],
+    "creator_address": PRIVATE_CHAIN["creator"],
     "quote_mint": PRIVATE_CHAIN["quoteMint"],
     "delegate": {"address": PRIVATE_CHAIN["delegate"], "granted_at": 1},
     "token": None,
@@ -45,8 +45,8 @@ RECORD = {
 
 def test_a_private_vault_has_no_mint_and_still_validates():
     state = VaultChainState(
-        runner=PRIVATE_CHAIN["runner"],
-        wallet=PRIVATE_CHAIN["wallet"],
+        creator=PRIVATE_CHAIN["creator"],
+        treasury=PRIVATE_CHAIN["treasury"],
         mint=None,
         dbc_pool=None,
         config_hash=PRIVATE_CHAIN["configHash"],
@@ -68,8 +68,8 @@ def test_a_vault_with_no_record_still_lists():
     has it, so the listing has it — with nothing of anyone's private record."""
     row = _chain_only_info(PRIVATE_CHAIN["account"], PRIVATE_CHAIN, "vaults")
     assert row.account == PRIVATE_CHAIN["account"]
-    assert row.runner_address == PRIVATE_CHAIN["runner"]
-    assert row.wallet_address == PRIVATE_CHAIN["wallet"]
+    assert row.creator_address == PRIVATE_CHAIN["creator"]
+    assert row.treasury_address == PRIVATE_CHAIN["treasury"]
     # `live` is true because the account exists: the flag asks whether the
     # create transaction landed, which for a vault read off the chain is
     # already answered.

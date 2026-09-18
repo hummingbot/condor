@@ -1,16 +1,16 @@
-//! `claim_income` and `claim_position_fee` — the runner's money, and only the
-//! runner's.
+//! `claim_income` and `claim_position_fee` — the creator's money, and only the
+//! creator's.
 //!
 //! A vault has two incomes and they never mix (plan §1.5). The *vault's* income
-//! is its strategy's LP fees, and it arrives in the wallet without passing
-//! through here. The *runner's* income is what the token's own
+//! is its strategy's LP fees, and it arrives in the treasury without passing
+//! through here. The *creator's* income is what the token's own
 //! market pays the pool creator: trading fees on the curve, the surplus above
 //! the migration threshold, and — after graduation — the fees on the
 //! permanently locked position the creator holds. All three are the PDA's to
 //! claim, and this file is the only door out of them.
 //!
-//! Every destination is derived from `Vault.runner`. A caller-supplied
-//! destination would make "the creator's fees are the runner's" a convention
+//! Every destination is derived from `Vault.creator`. A caller-supplied
+//! destination would make "the pool creator's fees are the vault creator's" a convention
 //! rather than a rule.
 //!
 //! **Why two instructions and not one.** The plan asks for a single
@@ -28,11 +28,11 @@ use anchor_lang::solana_program::program::invoke_signed;
 
 use crate::dbc;
 use crate::error::VaultError;
-use crate::instructions::strategy::authority_of;
-use crate::state::{Protocol, Vault, PROTOCOL_SEED, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use crate::instructions::strategy::treasury_of;
+use crate::state::{Protocol, Vault, PROTOCOL_SEED, TREASURY_SEED, VAULT_SEED};
 use crate::token;
 
-/// Which of the pool creator's streams to sweep into the runner's accounts.
+/// Which of the pool creator's streams to sweep into the creator's accounts.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IncomeSource {
     /// Trading fees earned while the curve is open, and after graduation the
@@ -46,21 +46,21 @@ pub enum IncomeSource {
 #[derive(Accounts)]
 pub struct ClaimIncome<'info> {
     #[account(mut)]
-    pub runner: Signer<'info>,
+    pub creator: Signer<'info>,
     #[account(seeds = [PROTOCOL_SEED], bump = protocol.bump)]
     pub protocol: Account<'info, Protocol>,
     #[account(
         seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
-        has_one = runner @ VaultError::NotRunner,
+        has_one = creator @ VaultError::NotCreator,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the DBC creator, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
 
     /// CHECK: DBC's signer PDA.
     #[account(address = dbc::DBC_POOL_AUTHORITY)]
@@ -71,10 +71,10 @@ pub struct ClaimIncome<'info> {
     /// CHECK: this vault's pool.
     #[account(mut, address = vault.dbc_pool @ VaultError::PoolNotDbc)]
     pub pool: UncheckedAccount<'info>,
-    /// CHECK: the runner's account for the vault token; derived in the handler.
+    /// CHECK: the creator's account for the vault token; derived in the handler.
     #[account(mut)]
     pub token_base_account: UncheckedAccount<'info>,
-    /// CHECK: the runner's account for the quote asset; derived in the handler.
+    /// CHECK: the creator's account for the quote asset; derived in the handler.
     #[account(mut)]
     pub token_quote_account: UncheckedAccount<'info>,
     /// CHECK: DBC's base vault; checked against the pool.
@@ -110,12 +110,12 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
     );
     require_keys_eq!(
         pool.creator,
-        ctx.accounts.vault_authority.key(),
+        ctx.accounts.treasury.key(),
         VaultError::PoolCreatorMismatch
     );
     require_keys_eq!(
-        authority_of(&ctx.accounts.vault)?,
-        ctx.accounts.vault_authority.key(),
+        treasury_of(&ctx.accounts.vault)?,
+        ctx.accounts.treasury.key(),
         VaultError::PoolCreatorMismatch
     );
     require_keys_eq!(
@@ -129,15 +129,15 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
         VaultError::PoolNotDbc
     );
 
-    // The destinations are the runner's own associated accounts, rebuilt here.
+    // The destinations are the creator's own associated accounts, rebuilt here.
     token::require_associated(
         &ctx.accounts.token_quote_account.to_account_info(),
-        &ctx.accounts.runner.key(),
+        &ctx.accounts.creator.key(),
         &ctx.accounts.vault.quote_mint,
         &ctx.accounts.token_quote_program.key(),
     )?;
 
-        let seeds = ctx.accounts.vault.authority_seeds();
+        let seeds = ctx.accounts.vault.treasury_seeds();
 
     match source {
         IncomeSource::Surplus => {
@@ -148,7 +148,7 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
                 token_quote_account: &ctx.accounts.token_quote_account,
                 quote_vault: &ctx.accounts.quote_vault,
                 quote_mint: &ctx.accounts.quote_mint,
-                creator: &ctx.accounts.vault_authority,
+                creator: &ctx.accounts.treasury,
                 token_quote_program: &ctx.accounts.token_quote_program,
                 event_authority: &ctx.accounts.event_authority,
                 program: &ctx.accounts.dbc_program,
@@ -160,7 +160,7 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
             // The base side can be paid too, so it is derived as well.
             token::require_associated(
                 &ctx.accounts.token_base_account.to_account_info(),
-                &ctx.accounts.runner.key(),
+                &ctx.accounts.creator.key(),
                 &ctx.accounts.vault.mint,
                 &ctx.accounts.token_base_program.key(),
             )?;
@@ -175,7 +175,7 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
                     AccountMeta::new(ctx.accounts.quote_vault.key(), false),
                     AccountMeta::new_readonly(ctx.accounts.base_mint.key(), false),
                     AccountMeta::new_readonly(ctx.accounts.quote_mint.key(), false),
-                    AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), true),
+                    AccountMeta::new_readonly(ctx.accounts.treasury.key(), true),
                     AccountMeta::new_readonly(ctx.accounts.token_base_program.key(), false),
                     AccountMeta::new_readonly(ctx.accounts.token_quote_program.key(), false),
                     AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
@@ -194,7 +194,7 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
                     ctx.accounts.quote_vault.to_account_info(),
                     ctx.accounts.base_mint.to_account_info(),
                     ctx.accounts.quote_mint.to_account_info(),
-                    ctx.accounts.vault_authority.to_account_info(),
+                    ctx.accounts.treasury.to_account_info(),
                     ctx.accounts.token_base_program.to_account_info(),
                     ctx.accounts.token_quote_program.to_account_info(),
                     ctx.accounts.event_authority.to_account_info(),
@@ -210,19 +210,19 @@ pub fn claim_income(ctx: Context<ClaimIncome>, source: IncomeSource) -> Result<(
 #[derive(Accounts)]
 pub struct ClaimPositionFee<'info> {
     #[account(mut)]
-    pub runner: Signer<'info>,
+    pub creator: Signer<'info>,
     #[account(
         seeds = [VAULT_SEED, vault.id.as_ref()],
         bump = vault.bump,
-        has_one = runner @ VaultError::NotRunner,
+        has_one = creator @ VaultError::NotCreator,
     )]
     pub vault: Account<'info, Vault>,
     /// CHECK: the position's owner, signing by CPI.
     #[account(
-        seeds = [VAULT_AUTHORITY_SEED, vault.id.as_ref()],
-        bump = vault.authority_bump,
+        seeds = [TREASURY_SEED, vault.id.as_ref()],
+        bump = vault.treasury_bump,
     )]
-    pub vault_authority: UncheckedAccount<'info>,
+    pub treasury: UncheckedAccount<'info>,
 
     /// CHECK: DAMM v2's signer PDA, a fixed address in its IDL.
     #[account(address = dbc::DAMM_V2_POOL_AUTHORITY)]
@@ -232,10 +232,10 @@ pub struct ClaimPositionFee<'info> {
     /// CHECK: the creator's permanently locked position.
     #[account(mut)]
     pub position: UncheckedAccount<'info>,
-    /// CHECK: the runner's account for the vault token; derived in the handler.
+    /// CHECK: the creator's account for the vault token; derived in the handler.
     #[account(mut)]
     pub token_a_account: UncheckedAccount<'info>,
-    /// CHECK: the runner's account for the quote asset; derived in the handler.
+    /// CHECK: the creator's account for the quote asset; derived in the handler.
     #[account(mut)]
     pub token_b_account: UncheckedAccount<'info>,
     /// CHECK: the pool's vault for token A.
@@ -264,19 +264,19 @@ pub struct ClaimPositionFee<'info> {
 }
 
 /// The migrated pool pays the creator's locked position; the position is the
-/// PDA's, and what it pays is the runner's.
+/// PDA's, and what it pays is the creator's.
 pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
     require_keys_eq!(
-        authority_of(&ctx.accounts.vault)?,
-        ctx.accounts.vault_authority.key(),
+        treasury_of(&ctx.accounts.vault)?,
+        ctx.accounts.treasury.key(),
         VaultError::PoolCreatorMismatch
     );
     // The position NFT is held by the vault's authority — otherwise this is
-    // somebody else's position being claimed into this runner's accounts.
+    // somebody else's position being claimed into this creator's accounts.
     let nft = token::require_token_account(&ctx.accounts.position_nft_account.to_account_info())?;
     require_keys_eq!(
         nft.owner,
-        ctx.accounts.vault_authority.key(),
+        ctx.accounts.treasury.key(),
         VaultError::WrongTokenAccount
     );
     // The pair must be this vault's, in either order; each destination is then
@@ -291,18 +291,18 @@ pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
     );
     token::require_associated(
         &ctx.accounts.token_a_account.to_account_info(),
-        &ctx.accounts.runner.key(),
+        &ctx.accounts.creator.key(),
         &a,
         &ctx.accounts.token_a_program.key(),
     )?;
     token::require_associated(
         &ctx.accounts.token_b_account.to_account_info(),
-        &ctx.accounts.runner.key(),
+        &ctx.accounts.creator.key(),
         &b,
         &ctx.accounts.token_b_program.key(),
     )?;
 
-        let seeds = ctx.accounts.vault.authority_seeds();
+        let seeds = ctx.accounts.vault.treasury_seeds();
 
     let ix = Instruction {
         program_id: dbc::DAMM_V2_PROGRAM_ID,
@@ -317,7 +317,7 @@ pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
             AccountMeta::new_readonly(ctx.accounts.token_a_mint.key(), false),
             AccountMeta::new_readonly(ctx.accounts.token_b_mint.key(), false),
             AccountMeta::new_readonly(ctx.accounts.position_nft_account.key(), false),
-            AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), true),
+            AccountMeta::new_readonly(ctx.accounts.treasury.key(), true),
             AccountMeta::new_readonly(ctx.accounts.token_a_program.key(), false),
             AccountMeta::new_readonly(ctx.accounts.token_b_program.key(), false),
             AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
@@ -338,7 +338,7 @@ pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
             ctx.accounts.token_a_mint.to_account_info(),
             ctx.accounts.token_b_mint.to_account_info(),
             ctx.accounts.position_nft_account.to_account_info(),
-            ctx.accounts.vault_authority.to_account_info(),
+            ctx.accounts.treasury.to_account_info(),
             ctx.accounts.token_a_program.to_account_info(),
             ctx.accounts.token_b_program.to_account_info(),
             ctx.accounts.event_authority.to_account_info(),

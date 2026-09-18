@@ -6,7 +6,7 @@
  * a key on the server: it signs unattended, which is what lets a strategy trade
  * while nobody is watching, and anyone who can reach that server can spend
  * through it. A **browser wallet** is a key in an extension on this machine: it
- * signs only in front of its owner, which is why a vault's runner is one.
+ * signs only in front of its owner, which is why a vault's creator is one.
  *
  * Solana only, because that is the only chain anything here signs for. An
  * Ethereum browser wallet would be an address in a list and nothing else.
@@ -137,7 +137,7 @@ export function BrowserWallets() {
           <p className="mb-2 text-xs text-[var(--color-text-muted)]">
             {connected
               ? "This browser is holding a key. Prove it is yours and Condor will use it as your Solana wallet."
-              : "No browser wallet here yet. A vault's runner is one of these — Condor never holds the key."}
+              : "No browser wallet here yet. A vault's creator is one of these — Condor never holds the key."}
           </p>
           {connected ? (
             <button

@@ -132,7 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(sharing.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
     app.include_router(updates.router, prefix="/api/v1")
-    # Vaults (plan M2/M4): the wallet a runner signs with, and the vaults it
+    # Vaults (plan M2/M4): the wallet a creator signs with, and the vaults it
     # runs. Both are server-scoped — a signature lands on whichever chain the
     # named server's Gateway is pointed at.
     app.include_router(wallet.router, prefix="/api/v1")

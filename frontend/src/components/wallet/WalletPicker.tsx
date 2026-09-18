@@ -81,7 +81,7 @@ export function WalletPicker({
           <div>
             <h2 className="text-lg font-semibold">Connect your wallet</h2>
             <p className="mt-0.5 text-[12px] text-[var(--color-text-muted)]">
-              A vault&rsquo;s runner is a key, not a login. Condor never holds
+              A vault&rsquo;s creator is a key, not a login. Condor never holds
               one.
             </p>
           </div>

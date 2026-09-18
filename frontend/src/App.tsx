@@ -133,7 +133,7 @@ export default function App() {
                   element={<Navigate to="/bots?population=terminated&group=bot" replace />}
                 />
                 <Route path="/routines" element={<Routines />} />
-                {/* A vault's runner is a key, not a login. These three read
+                {/* A vault's creator is a key, not a login. These three read
                     the wallet from the provider `ServerProvider` mounts, which
                     is why it wraps at that level rather than here. */}
                 <Route path="/vaults" element={<Vaults />} />
