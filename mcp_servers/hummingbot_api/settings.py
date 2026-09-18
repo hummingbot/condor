@@ -75,6 +75,13 @@ class Settings(BaseModel):
     #: strategy would open its positions from the operator's wallet while every
     #: surface said it was running the vault.
     default_account: str = Field(default="master_account")
+    #: True when this seat was *given* an account rather than falling back to
+    #: the default. A scoped seat is one account's and only one account's: its
+    #: reads are filtered to that account too, not just its writes. A vault seat
+    #: is scoped, and it matters — an agent that can see the operator's other
+    #: balances will reason about them, and size a position against money the
+    #: vault does not have.
+    account_scoped: bool = Field(default=False)
 
     # Which slice of the tool surface this process registers (FEAT-066). For an
     # ACP-driven seat the mounted surface IS the permission model, so this is a

@@ -195,6 +195,21 @@ async def configure_server(
         )
 
 
+def _scoped_accounts(account_names: list[str] | None) -> list[str] | None:
+    """The accounts a read may see.
+
+    A seat given its own account sees that one; every other seat sees what it
+    asked for, which is every account when it asked for nothing. Without this a
+    vault's agent reads the operator's balances and reasons about them — it is
+    not a permission boundary (hummingbot-api has the same credentials either
+    way) but it is the difference between an agent that knows what the vault
+    holds and one that does not.
+    """
+    if account_names:
+        return account_names
+    return [settings.default_account] if settings.account_scoped else None
+
+
 @handle_errors("get portfolio overview")
 async def get_portfolio_overview(
     account_names: list[str] | None = None,
@@ -236,6 +251,8 @@ async def get_portfolio_overview(
         refresh: If True, refresh balances from exchanges before returning. If False, return cached state (default: True)
     """
     client = await hummingbot_client.get_client()
+
+    account_names = _scoped_accounts(account_names)
 
     # Handle distribution mode separately
     if as_distribution:
@@ -359,7 +376,7 @@ async def search_history(
     result = await history_tools.search_history(
         client=client,
         data_type=data_type,
-        account_names=account_names,
+        account_names=_scoped_accounts(account_names),
         connector_names=connector_names,
         trading_pairs=trading_pairs,
         status=status,
@@ -1288,7 +1305,7 @@ async def list_executors(
     client = await hummingbot_client.get_client()
     result = await executors_tools.list_executors(
         client,
-        account_names=account_names,
+        account_names=_scoped_accounts(account_names),
         connector_names=connector_names,
         trading_pairs=trading_pairs,
         executor_types=executor_types,
@@ -2223,6 +2240,7 @@ def _apply_cli_args():
         settings.server_name = args.server_name
     if args.default_account:
         settings.default_account = args.default_account
+        settings.account_scoped = True
 
 
 async def _run():
