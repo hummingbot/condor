@@ -633,6 +633,31 @@ def _explain_build_failure(rc: int, output: str) -> str:
     return base
 
 
+async def run_doctor() -> tuple[bool, str]:
+    """Run Condor's own health check and report what it said.
+
+    ``python -m condor.doctor`` already exists, is read-only, and exits non-zero
+    on real failures -- and was wired only into ``make install``. Nothing in the
+    update path ran it, so a broken boot was indistinguishable from a good one
+    until somebody opened the dashboard. The contrast is the sharpest argument
+    for it: the hummingbot-api path gets a health gate whose step is literally
+    "wait for the API to answer", while Condor -- the component actually running
+    the update -- got none.
+
+    Never fatal. It runs after the code is already on disk, so failing the run
+    on its verdict would report a completed update as a failed one.
+    """
+    script = (
+        'export NVM_DIR="$HOME/.nvm"; '
+        '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+        "uv run python -m condor.doctor"
+    )
+    rc, output = await _run_cmd(
+        "bash", "-c", script, cwd=CONDOR_DIR, timeout=DEPS_TIMEOUT
+    )
+    return rc == 0, output or ("Doctor reported no output." if rc == 0 else "")
+
+
 async def build_frontend(
     old_commit: str = "", new_commit: str = ""
 ) -> tuple[bool, str]:

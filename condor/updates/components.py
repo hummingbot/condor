@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import PurePosixPath
@@ -751,6 +752,73 @@ async def _executor_warning() -> Warning | None:
 _STALE_FORK_CAP = 8
 
 
+# An update can write a rebuilt venv, a fresh node_modules, a new bundle and a
+# pulled image. Running out part-way is the worst input to everything else here,
+# and nothing checked: shutil.disk_usage appeared nowhere in the update path.
+_DISK_FLOOR_GB = 3.0
+
+
+def _incoming_warnings(incoming: list[str]) -> list[Warning]:
+    """Consequences that follow from *which files* an update would write."""
+    out: list[Warning] = []
+    if any(p.startswith("frontend/") for p in incoming):
+        # frontend_needs_build() is consulted inside the run and never in the
+        # preflight, so nothing told the person reading the dashboard that the
+        # page they are on is the thing about to be replaced.
+        out.append(
+            Warning(
+                component=CONDOR,
+                code="frontend-will-rebuild",
+                message=(
+                    "This update rebuilds the dashboard. The new bundle is built "
+                    "alongside the running one and swapped in, so the page you "
+                    "are reading keeps working — reload it once the update "
+                    "finishes to pick up the new one."
+                ),
+            )
+        )
+    if "condor/migrations.py" in incoming:
+        # startup() migrates this deployment's data on every boot and the moves
+        # are one-way, so restoring old *code* onto migrated *data* leaves
+        # Condor looking for directories that no longer exist. FEAT-115 widened
+        # that to the agent tree, so a rollback now also strands forked
+        # playbooks, skills and mutes.
+        out.append(
+            Warning(
+                component=CONDOR,
+                code="migration-incoming",
+                message=(
+                    "This update migrates stored data, and the moves are "
+                    "one-way. Rolling back to the current commit afterwards "
+                    "will not restore the old layout."
+                ),
+            )
+        )
+    return out
+
+
+def _disk_warning(repo_dir: str) -> Warning | None:
+    """Warn when there is not obviously room for what the update is about to write."""
+    try:
+        usage = shutil.disk_usage(repo_dir)
+    except OSError:
+        log.debug("Could not read free space for %s", repo_dir, exc_info=True)
+        return None
+    free_gb = usage.free / (1024**3)
+    if free_gb >= _DISK_FLOOR_GB:
+        return None
+    return Warning(
+        component=CONDOR,
+        code="low-disk",
+        message=(
+            f"Only {free_gb:.1f} GB free where Condor is installed. An update "
+            f"writes a synced virtualenv, a fresh node_modules and a new "
+            f"dashboard bundle — running out part-way through leaves the "
+            f"install half-built. Free some space first."
+        ),
+    )
+
+
 def _stale_fork_warning() -> Warning | None:
     """Local versions of shipped files that this install will keep using.
 
@@ -858,25 +926,17 @@ async def preflight(component_keys: list[str]) -> Preflight:
         condor_status = statuses.get(CONDOR)
         repo = condor_status.facets.get("repo") if condor_status else None
         if repo is not None and not repo.up_to_date:
-            # frontend_needs_build() is consulted inside the run and never here,
-            # so nothing told the person reading the dashboard that the page
-            # they are on is the one about to be replaced.
-            if await updater.frontend_needs_build(
-                await updater.get_local_commit_full(_table()[CONDOR].repo_dir),
-                "",
-            ):
-                warnings.append(
-                    Warning(
-                        component=CONDOR,
-                        code="frontend-will-rebuild",
-                        message=(
-                            "This update rebuilds the dashboard. The bundle is "
-                            "built alongside the running one and swapped in, so "
-                            "the page you are reading keeps working — but reload "
-                            "it once the update finishes to pick up the new one."
-                        ),
-                    )
-                )
+            # What this update would actually write, rather than a diff against
+            # an empty commit -- ``paths_changed`` answers True for an
+            # unresolvable range by design, so asking it that way would make
+            # both warnings below fire on every update.
+            incoming = await updater.incoming_paths(_table()[CONDOR].repo_dir)
+            for warning in _incoming_warnings(incoming or []):
+                warnings.append(warning)
+        disk_warning = _disk_warning(_table()[CONDOR].repo_dir)
+        if disk_warning is not None:
+            warnings.append(disk_warning)
+
         stale_warning = _stale_fork_warning()
         if stale_warning is not None:
             warnings.append(stale_warning)

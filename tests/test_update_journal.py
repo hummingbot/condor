@@ -331,6 +331,7 @@ def test_the_plan_is_laid_out_before_anything_runs(_a_sibling_api):
         "condor.unstash",
         "condor.deps",
         "condor.frontend",
+        "condor.doctor",
     ]
     assert all(s.state == "pending" for s in steps)
     assert "Pulling" in steps[1].label
@@ -466,7 +467,7 @@ def test_a_condor_update_never_restarts_the_process():
     lives in the helper because every test here depends on it.
     """
     run = _run_condor_update(before=BEFORE, after=AFTER)
-    assert [s.key for s in run.steps][-1] == "condor.frontend"
+    assert [s.key for s in run.steps][-1] == "condor.doctor"
     assert run.target_commit == AFTER
 
 
