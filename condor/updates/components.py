@@ -303,15 +303,43 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
         )
 
     same = local == remote
+    if same:
+        return (
+            Facet(kind="image", current=_short_digest(local), behind=0),
+            mode,
+        )
+
+    # Different digests are not yet evidence of being behind. `make build` in
+    # hummingbot-api tags `hummingbot/hummingbot-api:latest` -- the *same* tag
+    # the registry publishes -- so the operator's own build lands here looking
+    # exactly like an out-of-date pull, and Condor would offer to overwrite it
+    # with the registry's. Neither the tag nor the presence of a RepoDigest can
+    # tell the two apart (a build gets a RepoDigest too, from the containerd
+    # image store). Asking the registry whether it holds *this* digest can.
+    published = await updater.registry_has_digest(image_ref, local)
+    if published is False:
+        return (
+            Facet(
+                kind="image",
+                current=_short_digest(local),
+                behind=0,
+                detail=[
+                    "Built locally; not comparable to the published tag. "
+                    "Rebuild it yourself to pick up changes."
+                ],
+            ),
+            mode,
+        )
+
     return (
         Facet(
             kind="image",
             current=_short_digest(local),
-            available=None if same else _short_digest(remote),
+            available=_short_digest(remote),
             # An image is behind or it is not; there is no commit count to give.
-            behind=0 if same else 1,
-            up_to_date=same,
-            detail=[] if same else ["A newer image is published under this tag."],
+            behind=1,
+            up_to_date=False,
+            detail=["A newer image is published under this tag."],
         ),
         mode,
     )
