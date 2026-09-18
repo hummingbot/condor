@@ -762,6 +762,17 @@ _STALE_FORK_CAP = 8
 _DISK_FLOOR_GB = 3.0
 
 
+def _locally_overridden(incoming: list[str]) -> list[str]:
+    """:func:`condor.layering.locally_overridden`, but never fatal to a preflight."""
+    from condor.layering import locally_overridden
+
+    try:
+        return locally_overridden(incoming)
+    except OSError:
+        log.debug("Could not check for locally overridden paths", exc_info=True)
+        return []
+
+
 def _incoming_warnings(incoming: list[str]) -> list[Warning]:
     """Consequences that follow from *which files* an update would write."""
     out: list[Warning] = []
@@ -778,6 +789,27 @@ def _incoming_warnings(incoming: list[str]) -> list[Warning]:
                     "alongside the running one and swapped in, so the page you "
                     "are reading keeps working — reload it once the update "
                     "finishes to pick up the new one."
+                ),
+            )
+        )
+    overridden = _locally_overridden(incoming)
+    if overridden:
+        # The predictive half. stale_forks() compares a fork against the stock
+        # file on disk, which only moves once the fast-forward has landed -- so
+        # on its own it reports the divergence *after* the update that caused
+        # it. This says so while there is still a decision to make.
+        shown = ", ".join(overridden[:_STALE_FORK_CAP])
+        if len(overridden) > _STALE_FORK_CAP:
+            shown += f", and {len(overridden) - _STALE_FORK_CAP} more"
+        out.append(
+            Warning(
+                component=CONDOR,
+                code="update-changes-overridden-files",
+                message=(
+                    f"This update changes {len(overridden)} shipped "
+                    f"file{'s' if len(overridden) != 1 else ''} that you have "
+                    f"your own version of ({shown}). Your versions will keep "
+                    "being used, so these changes will not reach your agents."
                 ),
             )
         )
@@ -843,10 +875,27 @@ def _stale_fork_warning() -> Warning | None:
     if not stale:
         return None
 
-    moved = [f for f in stale if not f.retired]
+    moved = [f for f in stale if not f.retired and not f.unprovenanced]
+    shadowing = [f for f in stale if not f.retired and f.unprovenanced]
     retired = [f for f in stale if f.retired]
 
     parts: list[str] = []
+    if shadowing:
+        # Separated because the advice differs: a stamped fork was deliberately
+        # taken from a known version, while these never recorded one -- a
+        # routine's .py cannot hold a stamp, and a file the agent created under
+        # a name upstream later shipped never had one to take. Either way the
+        # local copy wins and upstream's is unreachable.
+        shown = ", ".join(f.rel for f in shadowing[:_STALE_FORK_CAP])
+        if len(shadowing) > _STALE_FORK_CAP:
+            shown += f", and {len(shadowing) - _STALE_FORK_CAP} more"
+        parts.append(
+            f"{len(shadowing)} local file{'s' if len(shadowing) != 1 else ''} "
+            f"shadow{'' if len(shadowing) != 1 else 's'} a shipped one of the "
+            f"same name and differ{'' if len(shadowing) != 1 else 's'} from it "
+            f"({shown}). Yours are used; upstream's are not reachable. Rename "
+            "yours if you meant to keep both."
+        )
     if moved:
         shown = ", ".join(f.rel for f in moved[:_STALE_FORK_CAP])
         if len(moved) > _STALE_FORK_CAP:
