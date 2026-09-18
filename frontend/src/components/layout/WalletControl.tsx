@@ -48,18 +48,27 @@ export function WalletControl() {
         type="button"
         onClick={() => (address ? setOpen((v) => !v) : setPicking(true))}
         title={address ? `This browser holds ${address}` : "Connect a wallet"}
-        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+        aria-expanded={address ? open : undefined}
+        aria-haspopup={address ? "menu" : "dialog"}
+        // The server selector's own classes, to the pixel. These two answer the
+        // same kind of question and sit next to each other, so a difference in
+        // height or weight between them reads as a difference in kind.
+        className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm transition-colors hover:bg-[var(--color-surface-hover)]"
       >
         {address ? (
           <>
-            <AddressAvatar address={address} className="h-4 w-4" />
-            <span className="font-mono">{shortAddress(address)}</span>
-            <ChevronDown className="h-3 w-3 opacity-60" />
+            <AddressAvatar address={address} className="h-3.5 w-3.5" />
+            <span className="max-w-[120px] truncate font-mono">{shortAddress(address)}</span>
+            <ChevronDown
+              className={`h-3 w-3 shrink-0 text-[var(--color-text-muted)] transition-transform ${
+                open ? "rotate-180" : ""
+              }`}
+            />
           </>
         ) : (
           <>
-            <Wallet className="h-3.5 w-3.5" />
-            Connect
+            <Wallet className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+            <span>Connect</span>
           </>
         )}
       </button>
