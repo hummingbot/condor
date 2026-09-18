@@ -25,14 +25,18 @@ on Telegram and watch it finish in the browser.
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import io
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from condor import paths
 from condor.fsutil import atomic_write_json
+from condor.paths import runtime_root
 from condor.updates import components
 from utils import updater
 
@@ -371,7 +375,62 @@ def _plan(component_keys: list[str], statuses: dict[str, components.ComponentSta
             steps.append(Step(f"{key}.unstash", "Restoring stashed work"))
             steps.append(Step(f"{key}.deps", "Syncing dependencies"))
             steps.append(Step(f"{key}.frontend", "Rebuilding the dashboard"))
+            steps.append(Step(f"{key}.doctor", "Checking the install over"))
     return steps
+
+
+_LOCK_FILENAME = "update.lock"
+# One handle per process. flock conflicts between two descriptors even in the
+# same process, so re-acquiring would have this process refusing itself -- and
+# within a process ``_lock``/``_current`` already answer the question.
+_lock_handle: "io.TextIOWrapper | None" = None
+
+
+def _acquire_run_lock() -> "io.TextIOWrapper | None":
+    """Take an advisory lock for the length of a run, across processes.
+
+    ``_lock`` and ``_current`` guard this process only. A second Condor on the
+    same checkout -- a stray ``make run`` in another pane, which is exactly what
+    someone does when a restart looks stuck -- would fast-forward the same repo
+    concurrently with the first, and neither would know.
+
+    Advisory and best effort: if the lock cannot be taken *because someone holds
+    it*, the caller refuses; if locking is unavailable at all, the update
+    proceeds as before rather than being blocked by the safety net.
+    """
+    path = runtime_root() / _LOCK_FILENAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w")
+    except OSError:
+        log.debug("Could not open the update lock; proceeding unlocked")
+        return None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    except (AttributeError, NameError):  # pragma: no cover - no flock here
+        return handle
+    try:
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+    except OSError:
+        pass
+    return handle
+
+
+def _release_run_lock(handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, AttributeError, NameError):
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
 
 
 async def start(
@@ -391,6 +450,22 @@ async def start(
     async with _lock:
         if _current is not None and _current.live:
             return _current
+
+        global _lock_handle
+        if _lock_handle is None:
+            _lock_handle = _acquire_run_lock()
+            if _lock_handle is None and (runtime_root() / _LOCK_FILENAME).exists():
+                holder = ""
+                try:
+                    holder = (runtime_root() / _LOCK_FILENAME).read_text().strip()
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    "Another Condor process on this checkout is already running "
+                    f"an update{f' (pid {holder})' if holder else ''}. Wait for "
+                    "it to finish rather than running a second one over the "
+                    "same repo."
+                )
 
         selected = [k for k in components.keys() if k in set(component_keys)]
         statuses = {s.key: s for s in await components.check()}
@@ -464,6 +539,10 @@ async def _execute(run: Run, resolutions: dict[str, str]) -> None:
     except Exception as e:  # noqa: BLE001 - an update must never die silently
         log.exception("Update run %s crashed", run.id)
         await _fail(run, f"{type(e).__name__}: {e}")
+    finally:
+        global _lock_handle
+        _release_run_lock(_lock_handle)
+        _lock_handle = None
 
 
 async def _update_hb_api(run: Run) -> bool:
@@ -592,6 +671,15 @@ async def _update_condor(run: Run) -> bool:
                 )
                 return False
 
+    # Check the install over before declaring victory. Read-only, and never
+    # fatal: the code is already on disk, so failing the run on the doctor's
+    # verdict would report a completed update as a failed one. WARNED is the
+    # honest state -- the update did happen, and there is something to read.
+    step = await _begin(run, f"{prefix}.doctor")
+    if step is not None:
+        ok, output = await updater.run_doctor()
+        await _finish(run, step, OK if ok else WARNED, output)
+
     # Everything that can be done without ending the process is done. The one
     # remaining step belongs to a human, so the run is judged here rather than
     # at the next boot: it succeeded, and it owes a relaunch.
@@ -652,10 +740,21 @@ async def finalize_pending_run() -> Run | None:
     if not was_restarting:
         run.state = FAILED
         where = f" during {step.label.lower()}" if step is not None else ""
+        done = [s.label.lower() for s in run.steps if s.state == OK]
+        completed = (
+            f" What did finish: {', '.join(done)}." if done else " Nothing finished."
+        )
+        # The old wording described the state of the *disk* accurately and left
+        # out the part that matters now: the process reading this booted on the
+        # partial result. The fast-forward lands before dependencies are synced
+        # and before the dashboard is rebuilt, so this Condor may be running new
+        # code against a stale venv.
         run.error = (
-            f"This update was interrupted{where} — Condor stopped before the "
-            "run finished. Nothing was rolled back; start it again to pick up "
-            "wherever it got to."
+            f"This update was interrupted{where} — Condor stopped before the run "
+            f"finished.{completed} Nothing was rolled back, so Condor is now "
+            "*running* that partial result: new code, possibly with dependencies "
+            "or a dashboard bundle that never caught up. Run the update again "
+            "before anything else."
         )
         if step is not None:
             step.state = FAILED
