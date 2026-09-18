@@ -122,3 +122,29 @@ def test_adoption_does_nothing_when_a_bundle_is_already_in_place(tmp_path):
 def test_adoption_is_a_no_op_with_nothing_to_adopt(tmp_path):
     _adopt_orphaned_bundle(tmp_path / "dist")
     assert not (tmp_path / "dist").exists()
+
+
+# ── docker steps get the same treatment (H2, P3) ──
+
+
+def test_a_docker_timeout_says_retrying_is_safe():
+    """1800s exists so a hung pull cannot wedge the update; hitting it said nothing.
+
+    Both compose steps are idempotent, so the honest answer is "run it again" —
+    but the bare "Timed out after 1800s" left the operator guessing whether a
+    half-rebuilt stack was safe to touch.
+    """
+    message = updater._explain_docker_failure(
+        124, "Timed out after 1800s: docker compose pull", "docker compose pull"
+    )
+    assert "idempotent" in message
+    assert "safe" in message
+    # And the platforms where the ceiling is actually reachable.
+    assert "macOS" in message and "WSL2" in message
+
+
+def test_an_ordinary_docker_failure_is_passed_through_unchanged():
+    assert (
+        updater._explain_docker_failure(1, "no such image", "docker compose pull")
+        == "no such image"
+    )
