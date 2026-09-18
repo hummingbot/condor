@@ -25,8 +25,10 @@ import {
   CopyAddress,
   PhaseBadge,
   StateBadge,
+  SignerPrompt,
   WalletGate,
 } from "@/components/vaults/shared";
+import { useCanSign } from "@/hooks/useCanSign";
 import { useServer } from "@/hooks/useServer";
 import { api, type VaultBuild, type VaultInfo } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
@@ -41,6 +43,7 @@ export function VaultDetail() {
   const { server } = useServer();
   const queryClient = useQueryClient();
   const { signAndSubmit } = useWallet();
+  const { canSign } = useCanSign();
   const [tab, setTab] = useState<Tab>("Summary");
   const [error, setError] = useState<string | null>(null);
 
@@ -122,6 +125,14 @@ export function VaultDetail() {
           </p>
         )}
 
+        {/* Every button below is signed by the runner's key, so none of them is
+            offered while the browser cannot produce it. The prompt takes the
+            row's place rather than sitting beside disabled buttons: the thing
+            to do next is connect, and that is the only control here — a button
+            whose only outcome is "connect a wallet first" in red is not one. */}
+        {!canSign && <SignerPrompt />}
+
+        {canSign && (
         <div className="flex flex-wrap gap-2">
           {chain && !windingDown && !finished && (
             <Action
@@ -158,6 +169,7 @@ export function VaultDetail() {
             </Action>
           )}
         </div>
+        )}
 
         {error && (
           <p className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] text-red-600 dark:text-red-400">

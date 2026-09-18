@@ -12,11 +12,18 @@ import { useState } from "react";
 
 import { ConnectWalletButton } from "@/components/wallet/ConnectWalletButton";
 import type { VaultInfo } from "@/lib/api";
+import { useCanSign } from "@/hooks/useCanSign";
 import { useWallet } from "@/lib/wallet/context";
 
 import { isTokenized, shortAddress } from "./format";
 
-export function CopyAddress({ address, label }: { address: string; label?: string }) {
+export function CopyAddress({
+  address,
+  label,
+}: {
+  address: string;
+  label?: string;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -69,9 +76,12 @@ export function PhaseBadge({ vault }: { vault: VaultInfo }) {
 }
 
 const STATE_TONE: Record<string, string> = {
-  Running: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  Paused: "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)]",
-  WindingDown: "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  Running:
+    "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  Paused:
+    "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)]",
+  WindingDown:
+    "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400",
   Redeemable: "border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-400",
 };
 
@@ -100,6 +110,66 @@ export function StateBadge({ vault }: { vault: VaultInfo }) {
 }
 
 /**
+ * The inline form of the gate, for a row of actions rather than a page.
+ *
+ * The header's Pause and Stop are signed by the runner's key like everything
+ * else, and they used to render whatever the wallet was doing — so the way you
+ * found out was a build, a click, and "connect a wallet first" in red with
+ * nothing to click. An action nobody can complete is worse than no action: this
+ * says which key is missing and offers the one button that fixes it.
+ */
+export function SignerPrompt() {
+  const { attached, connected, attach } = useWallet();
+  const { why } = useCanSign();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const message =
+    why === "mismatched" ? (
+      <>
+        This browser holds <CopyAddress address={connected!.address} />, and
+        this account signs as <CopyAddress address={attached!} />. Switch
+        accounts in your wallet to act on this vault.
+      </>
+    ) : why === "not-connected" ? (
+      <>
+        Signing for this vault needs <CopyAddress address={attached!} />, and
+        this browser is not holding it.
+      </>
+    ) : (
+      <>A vault&rsquo;s runner is a key. Attach one to act on this vault.</>
+    );
+
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[12px] text-[var(--color-text-muted)]">{message}</p>
+        {!connected && <ConnectWalletButton label="Connect wallet" />}
+        {connected && !attached && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setError(null);
+              setBusy(true);
+              attach()
+                .catch((e: Error) => setError(e.message))
+                .finally(() => setBusy(false));
+            }}
+            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-60"
+          >
+            {busy ? "Signing…" : `Attach ${shortAddress(connected.address)}`}
+          </button>
+        )}
+      </div>
+      {error && (
+        <p className="mt-1.5 text-[11px] text-[var(--color-red)]">{error}</p>
+      )}
+    </div>
+  );
+}
+
+/**
  * What to show when there is no attached wallet.
  *
  * A vault's runner is a key, not an account: everything the runner may do is
@@ -109,8 +179,9 @@ export function StateBadge({ vault }: { vault: VaultInfo }) {
  */
 export function WalletGate({ children }: { children: React.ReactNode }) {
   const { attached, connected, attach, mismatched } = useWallet();
+  const { canSign } = useCanSign();
 
-  if (attached && connected && !mismatched) return <>{children}</>;
+  if (canSign) return <>{children}</>;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-6 text-center">
@@ -125,19 +196,21 @@ export function WalletGate({ children }: { children: React.ReactNode }) {
       <p className="mx-auto mb-4 max-w-md text-sm text-[var(--color-text-muted)]">
         {mismatched ? (
           <>
-            This browser is connected to <CopyAddress address={connected!.address} />, and this
-            account signs as <CopyAddress address={attached!} />. Only that key can sign what this
-            page builds — switch accounts in your wallet, or detach from the wallet menu.
+            This browser is connected to{" "}
+            <CopyAddress address={connected!.address} />, and this account signs
+            as <CopyAddress address={attached!} />. Only that key can sign what
+            this page builds — switch accounts in your wallet, or detach from
+            the wallet menu.
           </>
         ) : attached ? (
           <>
-            This account signs as <CopyAddress address={attached} />. Connect that wallet to
-            continue.
+            This account signs as <CopyAddress address={attached} />. Connect
+            that wallet to continue.
           </>
         ) : (
           <>
-            A vault&rsquo;s runner is a key, not a login. Condor never holds one — you sign in your
-            own wallet, and the chain checks the signature.
+            A vault&rsquo;s runner is a key, not a login. Condor never holds one
+            — you sign in your own wallet, and the chain checks the signature.
           </>
         )}
       </p>
