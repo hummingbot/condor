@@ -938,13 +938,34 @@ async def registry_has_digest(image_ref: str, digest: str) -> bool | None:
     return None
 
 
+def _explain_docker_failure(rc: int, output: str, what: str) -> str:
+    """Turn a docker step's exit code into something the operator can act on.
+
+    The 1800s ceiling exists so a hung pull cannot wedge the update forever, but
+    hitting it returned a bare "Timed out after 1800s" and left the operator to
+    guess whether a half-rebuilt stack was safe to touch. It is: ``compose pull``
+    and ``compose up -d`` are both idempotent, so the answer is simply to run the
+    update again.
+    """
+    base = output or f"{what} failed (no output)"
+    if rc == 124:
+        return (
+            base + f"\n\nThe step timed out. `{what}` is idempotent, so re-running "
+            "the update is safe and will pick up wherever it got to. On Docker "
+            "Desktop for macOS, or on WSL2 with the daemon behind a VM, a cold "
+            "pull can legitimately take several times longer than it does on "
+            "Linux."
+        )
+    return base
+
+
 async def compose_pull(repo_dir: str, service: str) -> tuple[bool, str]:
     """Pull the published image for one service."""
     rc, output = await _run_cmd(
         "docker", "compose", "pull", service, cwd=repo_dir, timeout=DOCKER_TIMEOUT
     )
     if rc != 0:
-        return False, output or "docker compose pull failed (no output)"
+        return False, _explain_docker_failure(rc, output, "docker compose pull")
     return True, output
 
 
@@ -954,7 +975,7 @@ async def compose_up(repo_dir: str) -> tuple[bool, str]:
         "docker", "compose", "up", "-d", cwd=repo_dir, timeout=DOCKER_TIMEOUT
     )
     if rc != 0:
-        return False, output or "docker compose up failed (no output)"
+        return False, _explain_docker_failure(rc, output, "docker compose up -d")
     return True, output
 
 
