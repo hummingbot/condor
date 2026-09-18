@@ -517,6 +517,43 @@ async def npm_deps_stale(old_commit: str = "", new_commit: str = "") -> bool:
     )
 
 
+def _explain_build_failure(rc: int, output: str) -> str:
+    """Turn a build exit code into something the operator can act on.
+
+    Three failures are common, look identical in the raw output, and have
+    different remedies — so each gets named rather than all three arriving as
+    "Frontend build failed".
+    """
+    base = output or "Frontend build failed (no output)"
+    if "__CONDOR_NPM_CI_FAILED__" in base or rc == 90:
+        return (
+            base.replace("__CONDOR_NPM_CI_FAILED__", "").strip()
+            + "\n\n`npm ci` failed, and it removes node_modules before it "
+            "installs — so there is currently no dependency tree and the build "
+            "could not have run. Fix the network or free some disk, then "
+            "`cd frontend && npm ci`. The bundle on disk was not touched."
+        )
+    # 137 is SIGKILL, which for a vite build is almost always the memory
+    # ceiling: WSL2 caps the VM by default and Docker Desktop caps it on macOS.
+    # The process gets no chance to say so, so the output is unhelpfully empty.
+    if rc in (137, -9):
+        return (
+            base + "\n\nThe build was killed (signal 9), which for a bundler is "
+            "almost always the memory limit. On WSL2 raise `memory=` in "
+            "`.wslconfig`; on macOS raise Docker Desktop's memory. The bundle "
+            "on disk was not touched."
+        )
+    if rc == 124:
+        return (
+            base + "\n\nThe build timed out. On a checkout under /mnt/c on WSL2, or "
+            "on Docker Desktop for macOS, this step can legitimately take "
+            "several times longer than it does on Linux. Retrying is safe — "
+            "`npm ci` and the build are both idempotent, and the bundle on "
+            "disk was not touched."
+        )
+    return base
+
+
 async def build_frontend(
     old_commit: str = "", new_commit: str = ""
 ) -> tuple[bool, str]:
@@ -531,17 +568,35 @@ async def build_frontend(
     if not os.path.isdir(FRONTEND_DIR):
         return True, "No frontend directory; skipped."
 
-    install = "npm ci && " if await npm_deps_stale(old_commit, new_commit) else ""
+    stale = await npm_deps_stale(old_commit, new_commit)
+    # `npm ci` deletes node_modules before it installs, so a registry blip or a
+    # full disk part-way through leaves the install with no dependency tree at
+    # all -- and then the build cannot run either. Say which of the two failed,
+    # because the remedies are different.
+    install = (
+        'npm ci || { echo "__CONDOR_NPM_CI_FAILED__"; exit 90; }; ' if stale else ""
+    )
+    # Build into a scratch directory and swap. vite's defaults are
+    # `outDir: "dist"` with `emptyOutDir: true`, so building in place emptied
+    # the directory uvicorn was serving out of and every request during the
+    # build returned an error -- and a build that then *failed* left the install
+    # with no dashboard at all, while the run reported that the previous bundle
+    # would come back. Exposure is now one rename, and dist.old is a free
+    # instant rollback.
     script = (
         'export NVM_DIR="$HOME/.nvm"; '
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
-        'cd "$1" || exit 1; ' + install + "npm run build"
+        'cd "$1" || exit 1; ' + install + "rm -rf dist.new && "
+        "npm run build -- --outDir dist.new --emptyOutDir && "
+        "rm -rf dist.old && "
+        "{ [ -d dist ] && mv dist dist.old || true; } && "
+        "mv dist.new dist"
     )
     rc, output = await _run_cmd(
         "bash", "-c", script, "bash", FRONTEND_DIR, timeout=FRONTEND_BUILD_TIMEOUT
     )
     if rc != 0:
-        return False, output or "Frontend build failed (no output)"
+        return False, _explain_build_failure(rc, output)
     return True, output
 
 

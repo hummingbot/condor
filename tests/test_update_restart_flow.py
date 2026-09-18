@@ -227,13 +227,23 @@ def _build_script(**stale):
 
 
 def test_the_build_installs_first_when_the_deps_are_stale():
-    assert "npm ci && npm run build" in _build_script(return_value=True)
+    script = _build_script(return_value=True)
+    assert "npm ci" in script
+    assert script.index("npm ci") < script.index("npm run build")
 
 
 def test_the_build_skips_the_install_when_the_deps_are_current():
     script = _build_script(return_value=False)
     assert "npm ci" not in script
-    assert script.endswith("npm run build")
+    assert "npm run build" in script
+
+
+def test_the_build_never_targets_the_directory_being_served():
+    """Both paths build into the scratch dir and swap; neither empties dist."""
+    for stale in (True, False):
+        script = _build_script(return_value=stale)
+        assert "--outDir dist.new" in script
+        assert script.rstrip().endswith("mv dist.new dist")
 
 
 # ---------------------------------------------------------------------------

@@ -226,3 +226,10 @@ frontend/.claude/
 # one's commit — which is how 1529d04 came to carry a message describing work it does not
 # contain. Kept on disk, out of the index.
 GATEWAY_ISSUES.md
+
+# The dashboard is built into dist.new and swapped into place, keeping dist.old
+# as a rollback (see build_frontend). `dist/` above does not match either name,
+# and an unignored scratch directory would make every mid-build tree dirty --
+# which is itself something repo_blocks() can refuse an update over.
+frontend/dist.new/
+frontend/dist.old/

@@ -825,6 +825,28 @@ async def preflight(component_keys: list[str]) -> Preflight:
         if executor_warning is not None:
             warnings.append(executor_warning)
     if CONDOR in selected:
+        condor_status = statuses.get(CONDOR)
+        repo = condor_status.facets.get("repo") if condor_status else None
+        if repo is not None and not repo.up_to_date:
+            # frontend_needs_build() is consulted inside the run and never here,
+            # so nothing told the person reading the dashboard that the page
+            # they are on is the one about to be replaced.
+            if await updater.frontend_needs_build(
+                await updater.get_local_commit_full(_table()[CONDOR].repo_dir),
+                "",
+            ):
+                warnings.append(
+                    Warning(
+                        component=CONDOR,
+                        code="frontend-will-rebuild",
+                        message=(
+                            "This update rebuilds the dashboard. The bundle is "
+                            "built alongside the running one and swapped in, so "
+                            "the page you are reading keeps working — but reload "
+                            "it once the update finishes to pick up the new one."
+                        ),
+                    )
+                )
         stale_warning = _stale_fork_warning()
         if stale_warning is not None:
             warnings.append(stale_warning)
