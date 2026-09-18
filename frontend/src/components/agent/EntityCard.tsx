@@ -195,8 +195,8 @@ function Fact({
  *
  * The card's job is to be scanned in a grid, so the cadence facts are tiles and
  * this is the one thing a tile cannot hold: a sentence. It is the deed — a tool
- * call that ran — and not the model's narration of it; `LoopPulse` in the panel
- * behind the click shows both, plus the strip and the error.
+ * call that ran — and not the model's narration of it; the run screen behind
+ * the click shows both, plus the tick spine and the error.
  */
 function LastDeedLine({ did }: { did: NonNullable<RunningInstance["last_did"]> }) {
   return (

@@ -13,8 +13,6 @@ import type { PerformanceSnapshot } from "@/lib/api";
 import type { ClosedOutcome, PnlChartPoint } from "@/lib/pnl-chart";
 import {
   asControllerSnapshot,
-  cumulativeFees,
-  feesAreKnown,
   resolvePerfSeries,
   scopeInterval,
   scopeKey,
@@ -185,33 +183,6 @@ describe("scopeInterval", () => {
   it("falls to the finest rung for a scope that never said when it started", () => {
     expect(scopeInterval(null, null)).toBe("1m");
     expect(scopeInterval(undefined, undefined)).toBe("1m");
-  });
-});
-
-describe("fees", () => {
-  it("reports fees as unknown when every row says null", () => {
-    // Controllers report null because `PerformanceReport` has no fees field.
-    // Unknown is not zero: folding these with `?? 0` would draw a controller as
-    // having traded for free.
-    const controllerRows = [
-      row({ subject: "controller", cum_fees_quote: null }),
-      row({ subject: "controller", cum_fees_quote: null }),
-    ];
-    expect(feesAreKnown(controllerRows)).toBe(false);
-    expect(cumulativeFees(controllerRows)).toBeNull();
-  });
-
-  it("distinguishes a measured zero from an unmeasured one", () => {
-    expect(cumulativeFees([row({ cum_fees_quote: 0 })])).toBe(0);
-  });
-
-  it("takes each scope's newest running total, not the sum of every dump", () => {
-    const rows = [
-      row({ scope_id: "exec-1", timestamp: new Date(T0).toISOString(), cum_fees_quote: 1 }),
-      row({ scope_id: "exec-1", timestamp: new Date(T0 + MIN).toISOString(), cum_fees_quote: 3 }),
-      row({ scope_id: "exec-2", timestamp: new Date(T0).toISOString(), cum_fees_quote: 5 }),
-    ];
-    expect(cumulativeFees(rows)).toBe(8);
   });
 });
 

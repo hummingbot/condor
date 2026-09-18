@@ -734,7 +734,7 @@ describe("/agents/:slug", () => {
           slug: "sol-lp",
           name: "SOL range keeper",
           status: "active",
-          daily_pnl: 120.5,
+          latest_session_pnl: 120.5,
           total_pnl: 1_430,
           open_positions: 2,
           instances: [{ agent_id: "x", tick_count: 314, agent_key: "claude-fable-5" }],
@@ -743,7 +743,7 @@ describe("/agents/:slug", () => {
           slug: "eth-lp",
           name: "ETH range keeper",
           status: "idle",
-          daily_pnl: -20.5,
+          latest_session_pnl: -20.5,
           total_pnl: -130,
           open_positions: 0,
           instances: [],
@@ -763,7 +763,8 @@ describe("/agents/:slug", () => {
   it("names the running strategies and totals what they made (R1/R4)", () => {
     const line = onScreenLine("/agents/orca-lp-expert");
     expect(line).toContain("running SOL range keeper (tick 314)");
-    expect(line).toContain("daily pnl +$100.00");
+    expect(line).toContain("latest session pnl +$100.00");
+    expect(line).not.toContain("daily pnl");
     expect(line).toContain("total pnl +$1,300.00");
     expect(line).toContain("open positions 2");
   });
@@ -800,7 +801,6 @@ describe("/agents/:slug?strategy= — the workspace scoped to one", () => {
           tick_count: 314,
           agent_key: "claude-fable-5",
           execution_mode: "loop",
-          daily_pnl: 120.5,
           total_pnl: 1_430,
           open_count: 2,
         },
@@ -814,7 +814,7 @@ describe("/agents/:slug?strategy= — the workspace scoped to one", () => {
           slug: "sol-lp",
           name: "SOL range keeper",
           status: "active",
-          daily_pnl: 120.5,
+          latest_session_pnl: 120.5,
           total_pnl: 1_430,
           open_positions: 2,
           instances: [],
@@ -828,7 +828,8 @@ describe("/agents/:slug?strategy= — the workspace scoped to one", () => {
     expect(line).toContain("status active");
     expect(line).toContain("running session 2, tick 314 (loop)");
     expect(line).toContain("model claude-fable-5");
-    expect(line).toContain("daily pnl +$120.50");
+    expect(line).toContain("latest session pnl +$120.50");
+    expect(line).not.toContain("daily pnl");
     expect(line).toContain("total pnl +$1,430.00");
     expect(line).toContain("open positions 2");
     expect(line).toContain("sessions 2");
@@ -1247,11 +1248,11 @@ describe("the block's budget", () => {
       slug: `strategy-${i}`,
       name: `A Rather Long Strategy Name ${i}`,
       status: "active",
-      daily_pnl: 10 * i,
+      latest_session_pnl: 10 * i,
       total_pnl: 100 * i,
       open_positions: i,
       instances: [
-        { agent_id: `x${i}`, session_num: i, tick_count: 300 + i, agent_key: "claude-fable-5", execution_mode: "loop", daily_pnl: 10 * i, total_pnl: 100 * i, open_count: i },
+        { agent_id: `x${i}`, session_num: i, tick_count: 300 + i, agent_key: "claude-fable-5", execution_mode: "loop", total_pnl: 100 * i, open_count: i },
       ],
     }));
     qc.setQueryData(

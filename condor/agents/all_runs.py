@@ -202,19 +202,20 @@ def _conversation_runs(
     it is compared. Without that, Condor's own rail would be empty for exactly
     the conversations it is meant to show.
     """
-    from condor.memory.paths import CHAT_SLUG
     from condor.runtime.conversations import list_conversations
 
     rows: list[dict[str, Any]] = []
     for owner in _conversation_owners(user_id):
         try:
-            metas = list_conversations(owner, limit=limit)  # type: ignore[arg-type]
+            # Filtered before the limit, not after: otherwise the owner's newest
+            # ``limit`` chats with any agent fill the window first (CORR-652).
+            metas = list_conversations(
+                owner, limit=limit, agent_slug=agent_slug  # type: ignore[arg-type]
+            )
         except Exception:  # noqa: BLE001 - one owner's store, not the listing
             log.debug("Could not list conversations for %s", owner, exc_info=True)
             continue
         for meta in metas:
-            if (meta.agent_slug or CHAT_SLUG) != agent_slug:
-                continue
             rows.append(
                 {
                     "run_id": run_id_for(KIND_CONVERSATION, meta.id),
@@ -254,10 +255,15 @@ def list_all_runs(
     """Every run of this agent — loops, experiments, delegations and chats.
 
     Newest first by when the run *started*, which is the axis the rail already
-    prints beside every row ("4h ago"). Capped at ``limit``: each source is
-    asked for at most that many, so the merge can never need more, and the union
-    is truncated to it after the sort. That is the paging — the rail asks for a
-    bigger window when the reader wants one.
+    prints beside every row ("4h ago"). ``limit`` bounds the two unbounded
+    per-user kinds only: delegations and conversations are merged, sorted and
+    cut to it, and that is the paging — the rail asks for a bigger window when
+    the reader wants one. Loop runs (sessions and experiments) are always
+    carried, each strategy's already bounded by ``limit``, so the result may be
+    longer than ``limit``. Cutting the whole union instead let a scheduled
+    consult or a chatty week push every session out of the window, and the
+    workspace then told a strategy that has run that it "has not run yet"
+    (CORR-376).
 
     ``user_id`` scopes the two per-user kinds. A conversation is private, so two
     people looking at the same agent legitimately see different rails; the rail
@@ -268,13 +274,16 @@ def list_all_runs(
     if not cap:
         return []
 
+    def newest_first(r: dict[str, Any]) -> tuple[float, int]:
+        return (r.get("started_at") or 0.0, r.get("number") or 0)
+
+    # Each source is asked for at most ``cap``, so the merge never needs more.
     rows: list[dict[str, Any]] = []
-    rows.extend(_loop_runs(agent_slug, cap))
     rows.extend(_delegation_runs(agent_slug, user_id, cap))
     rows.extend(_conversation_runs(agent_slug, user_id, cap))
+    rows.sort(key=newest_first, reverse=True)
+    del rows[cap:]
 
-    rows.sort(
-        key=lambda r: (r.get("started_at") or 0.0, r.get("number") or 0),
-        reverse=True,
-    )
-    return rows[:cap]
+    rows.extend(_loop_runs(agent_slug, cap))
+    rows.sort(key=newest_first, reverse=True)
+    return rows

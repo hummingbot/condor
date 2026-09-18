@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   actionsByTick,
   beatState,
-  formatDuration,
+  effectiveTradingContext,
   formatRunId,
   hasPricedMoney,
   isLiveRun,
   isLoopRun,
+  liveControllerIds,
   parseRunId,
   runDurationSec,
   runFacts,
@@ -152,13 +153,6 @@ describe("duration", () => {
     expect(runDurationSec(run({ started_at: 0 }), 5_000)).toBeNull();
   });
 
-  it("formats compactly", () => {
-    expect(formatDuration(45)).toBe("45s");
-    expect(formatDuration(720)).toBe("12m");
-    expect(formatDuration(15_120)).toBe("4h12m");
-    expect(formatDuration(90_000)).toBe("1d1h");
-    expect(formatDuration(null)).toBe("");
-  });
 
   it("says ticks alone when there is no duration to say", () => {
     expect(runFacts(run({ tick_count: 20, started_at: 100, ended_at: 15_220 }), 0)).toBe(
@@ -254,5 +248,69 @@ describe("deeds join to ticks", () => {
     expect(byTick.get(1)?.map((r) => r.verb)).toEqual(["a", "c"]);
     expect(byTick.get(3)?.map((r) => r.verb)).toEqual(["b"]);
     expect(byTick.get(2)).toBeUndefined();
+  });
+});
+
+describe("liveControllerIds", () => {
+  type Perf = Parameters<typeof liveControllerIds>[0];
+  const ctl = (bot_name: string, controller_id: string) => ({ bot_name, controller_id });
+  const perf = (bot_names?: string[], controllers?: { bot_name: string; controller_id: string }[]) =>
+    ({ bot_names, controllers }) as Perf;
+
+  it("adds only controllers whose bot is live", () => {
+    const p = perf(["bot-a"], [ctl("bot-a", "c1"), ctl("bot-old", "c2")]);
+    expect(liveControllerIds(p, ["agent.s.1"])).toEqual(["agent.s.1", "c1"]);
+  });
+
+  it("skips a controller with no id even when its bot is live", () => {
+    expect(liveControllerIds(perf(["bot-a"], [ctl("bot-a", ""), ctl("bot-a", "c1")]))).toEqual(["c1"]);
+  });
+
+  it("keeps seed ids first and never duplicates them", () => {
+    const p = perf(["bot-a"], [ctl("bot-a", "c1"), ctl("bot-a", "seed")]);
+    expect(liveControllerIds(p, ["seed", "x"])).toEqual(["seed", "x", "c1"]);
+  });
+
+  it("returns the seed unchanged when there is nothing live to add", () => {
+    expect(liveControllerIds(null, ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(undefined, ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(perf(), ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(perf(undefined, [ctl("bot-a", "c1")]), ["s"])).toEqual(["s"]);
+    expect(liveControllerIds(undefined)).toEqual([]);
+  });
+
+  it("does not mutate the seed", () => {
+    const seed: readonly string[] = Object.freeze(["s"]);
+    const out = liveControllerIds(perf(["bot-a"], [ctl("bot-a", "c1")]), seed);
+    expect(seed).toEqual(["s"]);
+    expect(out).toEqual(["s", "c1"]);
+    expect(out).not.toBe(seed);
+  });
+});
+
+describe("the trading context a strategy starts under (READ-401)", () => {
+  const strat = (config: Record<string, unknown>, default_trading_context = "") => ({
+    config,
+    default_trading_context,
+  });
+
+  it("takes config.yml's context over the default, like the start route", () => {
+    expect(effectiveTradingContext(strat({ trading_context: "from config" }, "the default"))).toBe("from config");
+  });
+
+  it("falls back to the default when the config context is empty, absent or not a string", () => {
+    expect(effectiveTradingContext(strat({ trading_context: "" }, "the default"))).toBe("the default");
+    expect(effectiveTradingContext(strat({}, "the default"))).toBe("the default");
+    expect(effectiveTradingContext(strat({ trading_context: 42 }, "the default"))).toBe("the default");
+    expect(effectiveTradingContext(strat({ trading_context: null }, "the default"))).toBe("the default");
+  });
+
+  it("does not trim: a whitespace-only config context still wins, as it does on the server", () => {
+    expect(effectiveTradingContext(strat({ trading_context: "  " }, "the default"))).toBe("  ");
+  });
+
+  it("is the empty string when neither is set", () => {
+    expect(effectiveTradingContext(strat({}))).toBe("");
+    expect(effectiveTradingContext(strat({ trading_context: "" }, ""))).toBe("");
   });
 });

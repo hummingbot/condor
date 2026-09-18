@@ -11,6 +11,7 @@ doing nothing, or the spine will colour twenty ticks as "did nothing".
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from starlette.routing import Match
 from condor.agents import agent as agent_module
 from condor.agents import sessions_index
 from condor.agents import strategy as strategy_module
+from condor.agents.journal import iter_session_dirs, next_session_number
 from condor.agents.sessions_index import infer_latest_session_status, list_runs
 from condor.runtime.registry_file import BOOT_ID
 from condor.web.routes.agents import router
@@ -251,6 +253,68 @@ def test_a_legacy_trading_sessions_layout_is_listed_once(tmp_path):
     assert next(r for r in rows if r["run_id"] == "s1")["tick_count"] == 7
 
 
+def test_every_enumerator_agrees_on_a_dual_layout_strategy(tmp_path):
+    """Old sessions under ``trading_sessions/``, newer ones under ``sessions/``
+    (where the engine always writes): count, list, runs, ids and the next
+    number must all see the same two sessions (ARCH-663)."""
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, ticks=1, dirname="sessions")
+    _write_session(strategy_dir, 1, ticks=1, dirname="trading_sessions")
+    _write_session(strategy_dir, 2, ticks=1, dirname="trading_sessions")
+
+    sessions = sessions_index.list_sessions(strategy_dir)
+    runs = list_runs(strategy_dir, "brigado.brl_mm")
+    session_ids = [
+        t
+        for t in sessions_index.enumerate_agent_ids("brigado.brl_mm", strategy_dir)
+        if t[2] == "session"
+    ]
+    assert sessions_index.count_sessions(strategy_dir) == 2
+    assert len(sessions) == len(runs) == len(session_ids) == 2
+    assert sorted(s["number"] for s in sessions) == [1, 2]
+    # The next run must not reuse the legacy session_2's number (and agent_id).
+    assert next_session_number(strategy_dir) == 3
+
+
+def test_sessions_are_listed_newest_first_by_number_not_by_name(tmp_path):
+    """``session_10`` sorts before ``session_9`` as a string."""
+    strategy_dir = tmp_path / "brl_mm"
+    for n in range(1, 12):
+        _write_session(strategy_dir, n, snapshots=1 if n == 10 else 0)
+
+    rows = sessions_index.list_sessions(strategy_dir)
+    assert [r["number"] for r in rows] == list(range(11, 0, -1))
+    ten = next(r for r in rows if r["number"] == 10)
+    assert ten["snapshot_count"] == 1
+    assert float(ten["created_at"]) > 0
+
+
+def test_entries_that_are_not_session_directories_are_skipped(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, ticks=1)
+    sessions = strategy_dir / "sessions"
+    (sessions / ".DS_Store").write_text("")
+    (sessions / "notes").mkdir()
+    (sessions / "session_draft").mkdir()
+    (sessions / "session_7").write_text("a file, not a session")
+    # A dirname that exists as a file is not a session directory either.
+    (strategy_dir / "trading_sessions").write_text("")
+
+    assert iter_session_dirs(strategy_dir) == [(1, sessions / "session_1")]
+    assert [r["number"] for r in sessions_index.list_sessions(strategy_dir)] == [1]
+    assert sessions_index.count_sessions(strategy_dir) == 1
+    assert next_session_number(strategy_dir) == 2
+
+
+def test_a_session_without_a_journal_lists_an_empty_created_at(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    (strategy_dir / "sessions" / "session_1").mkdir(parents=True)
+
+    assert sessions_index.list_sessions(strategy_dir) == [
+        {"number": 1, "snapshot_count": 0, "created_at": ""}
+    ]
+
+
 def test_runs_come_back_newest_first(tmp_path):
     strategy_dir = tmp_path / "brl_mm"
     _write_session(strategy_dir, 1, ticks=1)
@@ -427,3 +491,119 @@ def test_the_runs_route_is_not_shadowed_by_the_slug_catch_all():
             assert route.endpoint.__name__ == "list_agent_runs"
             return
     raise AssertionError("no route matched /agents/brigado/runs")
+
+
+# ── CORR-659: a session's start is its config.yml, not its journal's ctime ──
+
+
+def _write_configured_session(strategy_dir: Path, num: int, started: float) -> Path:
+    """A session as the engine creates one: config.yml written once, at start."""
+    d = _write_session(strategy_dir, num, ticks=1)
+    cfg = d / "config.yml"
+    cfg.write_text("bot_name: brl_mm\n")
+    os.utime(cfg, (started, started))
+    return d
+
+
+def _tick(session_dir: Path) -> None:
+    """Rewrite the journal the way record_tick does (temp file + os.replace)."""
+    from condor.fsutil import atomic_write_text
+
+    time.sleep(0.02)
+    atomic_write_text(session_dir / "journal.md", _journal(2))
+
+
+def test_started_at_survives_a_journal_rewrite(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _tick(d)
+
+    assert list_runs(strategy_dir, "brigado.brl_mm")[0]["started_at"] == 1_700_000_000.0
+
+
+def test_runs_keep_their_order_after_a_tick(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    older = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _write_configured_session(strategy_dir, 2, started=1_700_000_100.0)
+    _tick(older)
+
+    rows = list_runs(strategy_dir, "brigado.brl_mm")
+    assert [r["number"] for r in rows] == [2, 1]
+    assert [r["started_at"] for r in rows] == [1_700_000_100.0, 1_700_000_000.0]
+
+
+def test_list_sessions_created_at_is_the_config_start(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _tick(d)
+
+    assert sessions_index.list_sessions(strategy_dir)[0]["created_at"] == str(
+        1_700_000_000.0
+    )
+
+
+def test_a_session_without_config_falls_back_to_its_journal(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_session(strategy_dir, 1, ticks=1)
+
+    started = list_runs(strategy_dir, "brigado.brl_mm")[0]["started_at"]
+    assert started == os.path.getctime(d / "journal.md") > 0
+
+
+def test_attribution_session_start_uses_the_same_definition(tmp_path):
+    from condor.agents.attribution import session_start_epoch
+
+    strategy_dir = tmp_path / "brl_mm"
+    d = _write_configured_session(strategy_dir, 1, started=1_700_000_000.0)
+    _tick(d)
+
+    assert (
+        session_start_epoch(strategy_dir, 1)
+        == sessions_index.session_started_at(d)
+        == 1_700_000_000.0
+    )
+    assert session_start_epoch(strategy_dir, 99) == 0.0
+
+
+# ── Which session is "latest" (CORR-660) ──
+
+
+def test_latest_session_is_the_highest_number_not_the_most_recently_touched(
+    tmp_path,
+):
+    """An unclaim rewrites ``owned_bots.json`` in every session that owned the
+    bot, which bumps an old session dir's mtime; the card must still report the
+    newest run."""
+    from condor.agents.ownership import BotLedger, disown
+
+    strategy_dir = tmp_path / "brl_mm"
+    s1 = _write_session(
+        strategy_dir, 1, ticks=4, status={"state": "stopped", "agent_id": "a.mm_1"}
+    )
+    s2 = _write_session(
+        strategy_dir, 2, ticks=9, status={"state": "interrupted", "agent_id": "a.mm_2"}
+    )
+    # session_2 is the newer run but session_1 is touched last.
+    os.utime(s2, (1000, 1000))
+    BotLedger("ns", s1, enforced=None).adopt("bot_x")
+    disown(strategy_dir, "bot_x")
+    assert s1.stat().st_mtime > s2.stat().st_mtime
+
+    status = infer_latest_session_status(strategy_dir, "a.mm")
+    assert status["session_num"] == 2
+    assert status["status"] == "interrupted"
+    assert status["agent_id"] == "a.mm_2"
+    assert status["tick_count"] == 9
+
+
+def test_latest_session_skips_a_junk_session_dir(tmp_path):
+    strategy_dir = tmp_path / "brl_mm"
+    _write_session(strategy_dir, 1, status={"state": "stopped"})
+    _write_session(strategy_dir, 3, status={"state": "running"})
+    junk = strategy_dir / "sessions" / "session_junk"
+    junk.mkdir()
+    os.utime(junk, (time.time() + 100, time.time() + 100))
+
+    status = infer_latest_session_status(strategy_dir, "brigado.brl_mm")
+    assert status["session_num"] == 3
+    assert status["status"] == "running"

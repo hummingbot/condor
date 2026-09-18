@@ -32,16 +32,6 @@ export const GECKO_TIMEFRAMES: { interval: string; seconds: number }[] = [
   { interval: "1d", seconds: 86400 },
 ];
 
-/** Seconds one candle of `interval` covers; 60 for anything unrecognized. */
-export function geckoIntervalSeconds(interval: string): number {
-  return GECKO_TIMEFRAMES.find((t) => t.interval === interval)?.seconds ?? 60;
-}
-
-/** How far back one request of `interval` candles reaches, in seconds. */
-export function geckoIntervalSpan(interval: string): number {
-  return geckoIntervalSeconds(interval) * GECKO_MAX_CANDLES;
-}
-
 /**
  * The finest GeckoTerminal interval whose 1000 candles still cover `seconds`.
  *

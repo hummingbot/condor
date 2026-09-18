@@ -6,6 +6,7 @@ import {
   Mic,
   Network,
   Server,
+  ServerCog,
   Shield,
   ShieldCheck,
   Sparkles,
@@ -15,6 +16,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { AdminSettings } from "@/components/settings/AdminSettings";
 import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
+import { ApiServerSettings } from "@/components/settings/ApiServerSettings";
 import { CustomProvidersSettings } from "@/components/settings/CustomProvidersSettings";
 import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { NotificationsSettings } from "@/components/settings/NotificationsSettings";
@@ -28,6 +30,7 @@ import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 
 type TabKey =
+  | "api"
   | "gateway"
   | "keys"
   | "servers"
@@ -59,6 +62,7 @@ function buildGroups(server: string | null, isAdmin: boolean): TabGroup[] {
     {
       label: server ? `Server · ${server}` : "Server",
       tabs: [
+        { key: "api", label: "Hummingbot API", icon: ServerCog },
         { key: "gateway", label: "Gateway", icon: Network },
         { key: "keys", label: "Keys and Wallets", icon: KeyRound },
       ],
@@ -183,6 +187,7 @@ export function Settings() {
         <div className="min-w-0 flex-1">
           {/* Tab content */}
           {tab === "servers" && <ServersSettings />}
+          {tab === "api" && <ApiServerSettings />}
           {tab === "gateway" && <GatewaySettings />}
           {tab === "keys" && <ApiKeysSettings />}
           {tab === "llm" && <CustomProvidersSettings />}

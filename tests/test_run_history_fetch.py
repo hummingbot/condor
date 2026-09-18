@@ -19,10 +19,12 @@ moment early is wrong for ever.
 """
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from condor import run_history_store
 from condor.fetchers import run_history as rh
 from condor.run_history_store import RunHistoryStore, reset_run_history_store
 
@@ -33,11 +35,39 @@ def iso(offset_hours: float) -> str:
     return (NOW + timedelta(hours=offset_hours)).isoformat()
 
 
+class _FrozenClock:
+    """The real :mod:`time`, with :func:`time.time` pinned to an instant.
+
+    Every timestamp in this file is an offset from ``NOW``, which is read once
+    at import — but the code under test reads the wall clock: ``is_settled``
+    falls back to ``time.time()`` against ``SETTLE_SEC``, and a live run's span
+    ends at ``time.time()``. Left unpinned, "stopped 36 s ago" becomes "stopped
+    more than ten minutes ago" once the suite has been running for ten minutes,
+    and the run this file says must be served live gets stored instead. So the
+    two modules that read the clock are given ``NOW`` as theirs, and the
+    distance from ``NOW`` to a timestamp is whatever the test wrote, not
+    whatever the run took. Anything but ``time()`` is the real module.
+    """
+
+    def __init__(self, at: float) -> None:
+        self._at = at
+
+    def time(self) -> float:
+        return self._at
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_store(tmp_path, monkeypatch):
-    """A store of this test's own, and no walk shared with the previous test."""
+    """A store of this test's own, a pinned clock, and no walk shared with the
+    previous test."""
     monkeypatch.setenv("CONDOR_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CONDOR_RUN_HISTORY_RETENTION_DAYS", "0")
+    clock = _FrozenClock(NOW.timestamp())
+    monkeypatch.setattr(run_history_store, "time", clock)
+    monkeypatch.setattr(rh, "time", clock)
     reset_run_history_store()
     rh._inflight.clear()
     yield
@@ -337,6 +367,20 @@ def test_a_live_run_is_served_live_and_not_stored():
     client = FakeClient(TWO)
     asyncio.run(_fetch(client, stopped=None))
     assert RunHistoryStore().list_entries() == []
+
+
+def test_eligibility_is_judged_against_the_clock_the_timestamps_were_written_from():
+    """``stopped=-0.01`` above means "36 s ago" for the whole of the suite, not
+    only for the first ten minutes of it.
+
+    ``NOW`` is read once at import and ``is_settled`` reads the wall clock, so
+    without the pin in ``_isolated_store`` the run served live above crosses
+    ``SETTLE_SEC`` and gets stored whenever the suite is slow enough to get
+    here more than ten minutes after collection.
+    """
+    assert run_history_store.time.time() == NOW.timestamp()
+    assert run_history_store.is_settled(iso(-0.01)) is False
+    assert run_history_store.is_settled(iso(-1)) is True
 
 
 def test_concurrent_cold_readers_share_one_walk():

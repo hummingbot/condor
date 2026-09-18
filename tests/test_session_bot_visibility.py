@@ -158,6 +158,45 @@ def test_redeploys_pool_their_close_types_under_the_base():
     }
 
 
+def test_live_names_keep_a_stopped_instance_out_of_the_resolved_book():
+    # CORR-633: the snapshot keeps every instance ever run, so without the filter
+    # the older one's frozen unrealized and controllers read as held now.
+    older = _snap("b-1", "btc", ts="2026-08-06T00:00:00+00:00")
+    older["performance"]["unrealized_pnl_quote"] = 7.0
+    newer = _snap("b-2", "sol", ts="2026-08-07T00:00:00+00:00")
+    newer["performance"]["unrealized_pnl_quote"] = 2.0
+    agg = _aggregate_by_bot([older, newer])
+
+    resolved = resolve_bots(agg, ["b"], live_names={"b-2"})["b"]
+    assert resolved["bot_name"] == "b-2"
+    assert resolved["unrealized_pnl_quote"] == 2.0
+    assert [c["bot_name"] for c in resolved["controllers"]] == ["b-2"]
+    # Nothing live under the base: absent, as for an archived-only base.
+    assert resolve_bots(agg, ["b"], live_names=set()) == {}
+    # None is "unknown": unfiltered, as the two-arg call.
+    assert resolve_bots(agg, ["b"], live_names=None) == resolve_bots(agg, ["b"])
+
+
+def test_a_session_without_windows_keeps_its_stopped_deploys_realized_pnl():
+    # The lifetime path (no ownership window) has no history slice to fall back
+    # on: a stopped deploy's realized PnL must still count, its book must not.
+    client, _ = _perf_for_three_deploys()
+
+    async def _active():
+        return {"data": {"b-20260807-045821": {}}}
+
+    client.get_active_bots_status = _active
+    clear_snapshot_cache()
+    perf = asyncio.run(fetch_agent_performance(client, "agent_1", bot_names=["b"]))
+
+    assert perf.bot_names == ["b-20260807-045821"]
+    assert round(perf.realized_pnl, 2) == -0.76
+    assert perf.volume == 772.0
+    assert perf.close_type_counts == {"CloseType.EARLY_STOP": 2}
+    assert perf.unrealized_pnl == 0.0
+    assert len(perf.controllers) == 3
+
+
 # ── What the session-level aggregate reports ──
 
 

@@ -18,9 +18,22 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    // The status rides along on the Error so a caller can tell apart failures that
+    // read the same as a message but call for different things from the operator —
+    // a 501 from the API-settings routes means "this server is older than this
+    // panel, upgrade it", not "something is broken". `message` is unchanged, so
+    // every existing caller reads exactly what it read before.
+    throw Object.assign(new Error(err.detail || `Request failed: ${res.status}`), {
+      status: res.status,
+    });
   }
   return res.json();
+}
+
+/** The HTTP status of a failed `apiFetch`, when the thrown value carries one. */
+export function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
 }
 
 /**
@@ -758,7 +771,6 @@ export interface RunningInstance {
   status: string;
   agent_key: string;
   tick_count: number;
-  daily_pnl: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
@@ -799,7 +811,8 @@ export interface StrategySummary {
   session_count: number;
   experiment_count: number;
   tick_count: number;
-  daily_pnl: number;
+  /** PnL of the newest session only; `total_pnl` is the rollup across all sessions. */
+  latest_session_pnl: number;
   total_pnl: number;
   total_volume: number;
   open_positions: number;
@@ -883,15 +896,16 @@ export interface AgentSummary {
   session_count: number;
   experiment_count: number;
   tick_count: number;
-  daily_pnl: number;
+  /** PnL of the newest session only; `total_pnl` is the rollup across all sessions. */
+  latest_session_pnl: number;
   total_pnl: number;
   total_volume: number;
   open_positions: number;
   /**
    * The agent's server *pin*, `""` when it follows the ambient one (ARCH-324).
    *
-   * A strategy's own `server_name` overrides it — the rule `AgentWorkspace`
-   * already applies (`strategy?.config?.server_name || agent.server_name`).
+   * A strategy's own `server_name` overrides it — the rule `declaredServerOf`
+   * (workspace/fleet.ts) owns, and both the home and the workspace call.
    */
   server_name?: string;
   instances: RunningInstance[];
@@ -927,6 +941,9 @@ export interface AgentPerformance {
   /** An experiment whose snapshot recorded an error. */
   error?: boolean;
   status: string;
+  /** When the session started, unix seconds (its config.yml mtime). 0 or
+   *  absent = unknown; always 0 for an experiment. */
+  started_at?: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
@@ -1562,6 +1579,94 @@ export interface GatewayWalletGroup {
   default_address?: string;
 }
 
+/**
+ * What a hummingbot-api server runs and how it was deployed (FEAT-121).
+ *
+ * Every field below the versions degrades on its own: a server with no docker.sock,
+ * an unreachable daemon, or a process that cannot find its own container still
+ * reports both versions and the tunables, with `container` null and `pinned` null —
+ * null, not false, because "we could not tell" is not "it is the published image".
+ */
+export interface ApiServerContainer {
+  id: string | null;
+  name: string | null;
+  image: string | null;
+  image_id: string | null;
+  /** Registry digest, null for an image that was built on the box. */
+  digest: string | null;
+  compose_project: string | null;
+  compose_working_dir: string | null;
+  compose_config_files: string | null;
+}
+
+export interface ApiServerInfo {
+  api_version: string;
+  hummingbot_version: string | null;
+  /** The MARKET_DATA_* knobs as the API process resolved them. Read-only. */
+  market_data: Record<string, number>;
+  docker_available: boolean;
+  container: ApiServerContainer | null;
+  pinned: boolean | null;
+  pinned_reason: string | null;
+  override_file: string | null;
+}
+
+/** The client defaults a deploy copies into every new bot. */
+export interface ApiClientConfig {
+  account_name: string;
+  rate_oracle_source: { name: string };
+  global_token: { global_token_name: string; global_token_symbol: string };
+  rate_limits_share_pct: number;
+  /** Which sources this server's bundled hummingbot knows about. */
+  available_sources: string[];
+}
+
+export interface ApiClientConfigUpdate {
+  rate_oracle_source?: string;
+  global_token_name?: string;
+  global_token_symbol?: string;
+  rate_limits_share_pct?: number;
+}
+
+/**
+ * Whether a server can replace its own hummingbot-api container, and what that costs.
+ *
+ * `can_upgrade` is the server's verdict and the only one that matters: it re-runs this
+ * same preflight before it starts, so a second judgement here could only disagree with
+ * the one that actually runs. When it is false, `blocked_reason` says why in the
+ * operator's terms and is meant to be shown verbatim.
+ */
+export interface ApiUpgradePreflight {
+  image_ref: string | null;
+  current_digest: string | null;
+  available_digest: string | null;
+  up_to_date: boolean | null;
+  pinned: boolean | null;
+  pinned_reason: string | null;
+  override_file: string | null;
+  compose: { project: string; working_dir: string; config_files: string[] } | null;
+  /** Closed as SYSTEM_CLEANUP by the restart, and not restored. */
+  running_executors: number | null;
+  /** Separate containers; they keep running. */
+  running_bots: number | null;
+  can_upgrade: boolean;
+  blocked_reason: string | null;
+}
+
+/**
+ * An upgrade run. `restarting` is Condor's own: the server stopped answering, which
+ * during this operation is what success looks like half-way through.
+ */
+export interface ApiUpgradeStatus {
+  run_id: string | null;
+  phase: "idle" | "pulling" | "recreating" | "restarting" | "done" | "failed";
+  detail: string | null;
+  previous_digest?: string | null;
+  new_digest?: string | null;
+  exit_code?: number | null;
+  log_tail: string[];
+}
+
 export interface CredentialInfo {
   connector_name: string;
   connector_type: string;
@@ -1571,14 +1676,6 @@ export interface ConnectorInfo {
   name: string;
   type: string;
   [key: string]: unknown;
-}
-
-export interface ConnectorFieldInfo {
-  key: string;
-  type: string;
-  required: boolean;
-  default?: unknown;
-  description?: string;
 }
 
 // ── Voice Settings ──
@@ -3273,9 +3370,11 @@ export const api = {
   /**
    * Every stretch of work an agent has done, newest first (FEAT-111).
    *
-   * `limit` is the rail's window and not a filter: a chatty install has
-   * hundreds of conversations, and the rail asks for a bigger page rather than
-   * pulling the archive on every five-second poll.
+   * `limit` is the rail's window over chats and delegations, not a filter: a
+   * chatty install has hundreds of conversations, and the rail asks for a
+   * bigger page rather than pulling the archive on every five-second poll.
+   * Loop runs (sessions, experiments) are always carried, so the list can be
+   * longer than `limit` (CORR-376).
    */
   getAgentRuns: async (slug: string, limit?: number): Promise<AgentRunRow[]> => {
     const data = await apiFetch<{ runs: AgentRunRow[] }>(
@@ -3630,6 +3729,48 @@ export const api = {
   getGatewayNetworks: (server: string) =>
     apiFetch<{ networks: GatewayNetworkInfo[] }>(
       `/api/v1/settings/gateway/networks?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiServerInfo: (server: string) =>
+    apiFetch<ApiServerInfo>(
+      `/api/v1/settings/api/info?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiClientConfig: (server: string) =>
+    apiFetch<ApiClientConfig>(
+      `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiUpgradePreflight: (server: string) =>
+    apiFetch<ApiUpgradePreflight>(
+      `/api/v1/settings/api/upgrade/preflight?server=${encodeURIComponent(server)}`,
+    ),
+
+  /**
+   * Start replacing the server's hummingbot-api container. Owner only.
+   *
+   * `acknowledgeExecutorLoss` is consent to every running executor being closed as
+   * SYSTEM_CLEANUP; the server refuses with the reason when it is withheld.
+   */
+  startApiUpgrade: (server: string, acknowledgeExecutorLoss: boolean) =>
+    apiFetch<{ run_id: string; phase: string }>(
+      `/api/v1/settings/api/upgrade?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ acknowledge_executor_loss: acknowledgeExecutorLoss }),
+      },
+    ),
+
+  getApiUpgradeStatus: (server: string) =>
+    apiFetch<ApiUpgradeStatus>(
+      `/api/v1/settings/api/upgrade/status?server=${encodeURIComponent(server)}`,
+    ),
+
+  /** Partial: only the fields present are written, the rest keep their values. */
+  updateApiClientConfig: (server: string, changes: ApiClientConfigUpdate) =>
+    apiFetch<{ success: boolean; message: string; config: ApiClientConfig }>(
+      `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+      { method: "PUT", body: JSON.stringify(changes) },
     ),
 
   getGatewayNetworkConfig: (server: string, networkId: string) =>

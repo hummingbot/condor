@@ -4,6 +4,7 @@ import {
   Brain,
   CircleDot,
   MessageSquareText,
+  PanelRight,
   Server,
   Trash2,
   Wrench,
@@ -12,10 +13,12 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
+import { effectiveTradingContext } from "@/components/agent/lab/runs";
 import { BrainPicker } from "@/components/chat/BrainPicker";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useSessionOptions } from "@/hooks/useChat";
 import { CHAT_SLUG, api, type AgentDetail, type StrategyDetail } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 // ── Server pin ──
 
@@ -42,7 +45,7 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
 
   const pin = useMutation({
     mutationFn: (name: string) => api.updateAgentConfig(slug, { server_name: name }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey }),
   });
 
   const choose = (name: string) => {
@@ -71,6 +74,15 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
       >
         <Server className="h-3 w-3" /> {serverName || "No server pin"}
       </button>
+      {/* The menu has closed and the chip still reads the stored pin, so a
+          refused write (no access to that server, a read-only AGENT.md, a
+          stopped backend) would otherwise look like a click that did not
+          register. Cleared by the next pick, which resets the mutation. */}
+      {pin.isError && (
+        <span role="alert" data-write-error className="text-xs text-red-400">
+          {pin.error.message}
+        </span>
+      )}
 
       {/* Portalled, not `absolute`: this is the last chip in a `flex-wrap` row
           inside a header the workspace scrolls nothing of, so a 220px panel
@@ -138,21 +150,30 @@ function ModelPicker({ slug, agentKey }: { slug: string; agentKey: string }) {
 
   const pick = useMutation({
     mutationFn: (key: string) => api.updateAgentConfig(slug, { agent_key: key }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey }),
   });
 
   return (
-    <BrainPicker
-      agents={agents}
-      customProviders={customProviders}
-      selectedAgentKey={agentKey}
-      onSelect={(sel) => {
-        if (sel.agentKey !== undefined && sel.agentKey !== agentKey) {
-          pick.mutate(sel.agentKey);
-        }
-      }}
-      disabled={pick.isPending}
-    />
+    <>
+      <BrainPicker
+        agents={agents}
+        customProviders={customProviders}
+        selectedAgentKey={agentKey}
+        onSelect={(sel) => {
+          if (sel.agentKey !== undefined && sel.agentKey !== agentKey) {
+            pick.mutate(sel.agentKey);
+          }
+        }}
+        disabled={pick.isPending}
+      />
+      {/* Same reason as the server pin: the picker falls back to the stored
+          model, so the refusal has to be said or it reads as nothing. */}
+      {pick.isError && (
+        <span role="alert" data-write-error className="text-xs text-red-400">
+          {pick.error.message}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -175,8 +196,17 @@ export function WorkspaceHeader({
   isRunning,
   onAskAgent,
   onDelete,
+  backHref = "/",
+  sidePanelHref,
 }: {
   agent: AgentDetail;
+  /**
+   * Where the back arrow goes — the conversation this page was expanded from,
+   * with its side panel back on the section being read here, when there is one.
+   */
+  backHref?: string;
+  /** The conversation with this loop in its side panel: the collapse door. */
+  sidePanelHref?: string;
   /** The strategy in scope, once loaded — what the loop controls act on. */
   strategy: StrategyDetail | null;
   isRunning: boolean;
@@ -191,9 +221,9 @@ export function WorkspaceHeader({
             a whole row on. A link and not a `navigate`, so it can be opened in
             a tab like every other address in here. */}
         <Link
-          to="/"
+          to={backHref}
           className="flex items-center gap-1 transition-colors hover:text-[var(--color-text)]"
-          title="Back to your agents"
+          title={backHref === "/" ? "Back to your agents" : "Back to the chat"}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
         </Link>
@@ -231,13 +261,23 @@ export function WorkspaceHeader({
             slug={agent.slug}
             sslug={strategy.slug}
             status={strategy.status}
-            defaultContext={
-              strategy.default_trading_context ||
-              (strategy.config.trading_context as string) ||
-              ""
-            }
+            defaultContext={effectiveTradingContext(strategy)}
             agentConfig={strategy.config}
           />
+        )}
+        {/* The page's collapse: the same loop, run and section, back in the
+            side panel beside the conversation — the mirror of the panel's own
+            full-screen door. */}
+        {sidePanelHref && (
+          <Link
+            to={sidePanelHref}
+            data-side-panel-link
+            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            title="Show this beside the chat, in the side panel"
+          >
+            <PanelRight className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Side panel</span>
+          </Link>
         )}
         {/* Labelled "Open chat", not "Chat": it lands in the workspace at `/`,
             which is a different surface, and it continues the live conversation

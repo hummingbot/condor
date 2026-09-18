@@ -20,7 +20,6 @@ import {
   groupingForRoot,
   GROUPING_PRESETS,
   parseGrouping,
-  presetOf,
   rootAxis,
   type GroupAxis,
 } from "@/lib/perf-grouping";
@@ -74,12 +73,6 @@ describe("parseGrouping / formatGrouping", () => {
       expect(parseGrouping(formatGrouping(preset.axes))).toEqual([...preset.axes]);
     }
     expect(parseGrouping(formatGrouping([]))).toEqual([]);
-  });
-
-  it("names every preset and nothing else", () => {
-    expect(presetOf(["agent", "bot"])?.key).toBe("owner");
-    expect(presetOf(["pair"])?.key).toBe("pair");
-    expect(presetOf(["pair", "agent"])).toBeNull();
   });
 });
 

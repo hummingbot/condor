@@ -23,8 +23,9 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import asdict
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -35,7 +36,11 @@ from condor.agents.attribution import (
     build_deployments,
     current_owner_bases,
     session_ownership,
+    session_start_epoch,
+    session_windows,
+    window_span,
 )
+from condor.agents.journal import LEARNINGS_TEMPLATE
 from condor.agents.run_records import KIND_CODE
 from condor.agents.sessions_index import (
     count_experiments,
@@ -56,6 +61,9 @@ from condor.web.auth import (
     report_owner_filter,
 )
 from condor.web.models import ReportSummary, WebUser
+
+if TYPE_CHECKING:
+    from condor.agents.performance import AgentPerformance
 
 # ── Simple in-memory TTL cache for performance data ──
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
@@ -124,7 +132,6 @@ class RunningInstance(BaseModel):
     status: str
     agent_key: str = ""
     tick_count: int = 0
-    daily_pnl: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     total_pnl: float = 0.0
@@ -166,7 +173,9 @@ class StrategySummary(BaseModel):
     session_count: int = 0
     experiment_count: int = 0
     tick_count: int = 0
-    daily_pnl: float = 0.0
+    #: PnL of the newest session only; ``total_pnl`` is the rollup across all
+    #: sessions.
+    latest_session_pnl: float = 0.0
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
@@ -192,7 +201,9 @@ class AgentSummary(BaseModel):
     session_count: int = 0
     experiment_count: int = 0
     tick_count: int = 0
-    daily_pnl: float = 0.0
+    #: PnL of the newest session only; ``total_pnl`` is the rollup across all
+    #: sessions.
+    latest_session_pnl: float = 0.0
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
@@ -216,6 +227,10 @@ class AgentPerformanceModel(BaseModel):
     #: An experiment whose snapshot recorded an error (parsed off disk).
     error: bool = False
     status: str = ""
+    #: When a session started, in unix seconds (``session_start_epoch``: its
+    #: config.yml mtime). 0.0 = unknown, and always 0.0 for an experiment. The
+    #: equity curve plots sessions on this, never on a made-up spacing.
+    started_at: float = 0.0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     total_pnl: float = 0.0
@@ -247,6 +262,29 @@ class AgentPerformanceModel(BaseModel):
     controllers: list[dict[str, Any]] = []
     close_type_counts: dict[str, int] = {}
     fees_known: bool = True
+    # Each owned base's (realized, volume, trades, fees) over this session's own
+    # ownership window — what the deployment ledger's bot rows read (CORR-661).
+    base_windows: dict[str, tuple[float, float, float, float]] = {}
+    # Only the tick's executors provider asks for the curve (PERF-639); the routes
+    # serve it from fetch_agent_pnl_series, so this stays null on the wire.
+    pnl_series: list[dict] | None = None
+
+    @classmethod
+    def from_perf(cls, perf: AgentPerformance, **overrides) -> AgentPerformanceModel:
+        """Project an ``AgentPerformance`` onto the wire model by field name.
+
+        The one place dataclass fields map onto this model, so a field added to
+        both reaches every route without being threaded through by hand. The copy
+        is shallow on purpose: ``dataclasses.asdict`` would deep-copy every
+        executor row. ``overrides`` carry what the dataclass does not know (the
+        session number, kind, experiment metadata).
+        """
+        values = {
+            f.name: getattr(perf, f.name)
+            for f in dataclass_fields(perf)
+            if f.name in cls.model_fields
+        }
+        return cls(**{**values, **overrides})
 
 
 class StrategyPerformanceResponse(BaseModel):
@@ -257,6 +295,7 @@ class StrategyPerformanceResponse(BaseModel):
 
 class SessionInfo(BaseModel):
     number: int
+    #: Not read by the dashboard (only api.ts types it); a candidate to drop.
     snapshot_count: int = 0
     created_at: str = ""
 
@@ -504,6 +543,7 @@ class RunRow(BaseModel):
     status: str = ""
     execution_mode: str = ""
     tick_count: int = 0
+    #: Not read by the dashboard (only api.ts types it); a candidate to drop.
     snapshot_count: int = 0
     #: ``journal.md``'s ctime. The file's creation, not the first tick.
     started_at: float | None = None
@@ -750,7 +790,6 @@ class AskRequest(BaseModel):
     task: str
     context: str = ""
     chat_id: int = 0
-    user_id: int | None = None
     server_name: str | None = None
     # Which agent is asking, for the ask's record (FEAT-058). "" is a person
     # asking directly. A label on a record the caller already owns, so there is
@@ -762,7 +801,6 @@ class StartStrategyRequest(BaseModel):
     config: dict[str, Any] = {}
     trading_context: str = ""
     chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
 # ── The delegation budget (ARCH-310) ──
@@ -789,7 +827,6 @@ MIN_DELEGATE_TIMEOUT_S = 900
 class DelegateRequest(BaseModel):
     task: str
     chat_id: int = 0  # Telegram chat for the completion notification
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
     timeout_s: int = DEFAULT_DELEGATE_TIMEOUT_S
     # Canonical key of the session asking for the work (posted by the condor MCP
@@ -804,7 +841,6 @@ class NotifyRequest(BaseModel):
     text: str
     parse_mode: str = "Markdown"
     chat_id: int = 0  # Telegram chat to push to (0 = nothing to push to)
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
     # Canonical key of the session announcing something (posted by the condor
     # MCP server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
     session_key: str = ""
@@ -868,12 +904,34 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
     ``"local"``, so an empty string is a strategy that explicitly declared no
     server — and the caller is expected to say so rather than substitute one.
     """
-    from condor.agents.config import load_agent_config
+    from condor.agents.config import load_full_config
 
     try:
-        return load_agent_config(strategy_dir, default_config).server_name or ""
+        return load_full_config(strategy_dir, default_config).get("server_name") or ""
     except Exception:
         return ""
+
+
+def _gate_pin_change(user: WebUser, new: Any, stored: str) -> None:
+    """Refuse a server pin the caller cannot reach, unless it is already stored.
+
+    One rule for every writer of a server pin that is not a dedicated field —
+    raw AGENT.md, strategy.md front matter, a strategy's config dict — so they
+    answer like ``POST /agents`` and ``PATCH /config`` (SEC-594) instead of
+    storing whatever the body names (SEC-693). An empty pin needs no access, and
+    re-sending the value already on disk is the normal editor round-trip of a
+    file someone else legitimately pinned, so only a *change* is checked.
+    """
+    if new and new != stored:
+        check_server_access(user.id, str(new))
+
+
+def _frontmatter_meta(content: str) -> dict:
+    """The front matter of a markdown body as a dict (``{}`` when it is not one)."""
+    from condor.frontmatter import parse_frontmatter
+
+    meta, _ = parse_frontmatter(content)
+    return meta if isinstance(meta, dict) else {}
 
 
 def _strategy_principal(strategy, user: WebUser) -> int:
@@ -969,6 +1027,9 @@ async def _compute_strategy_performance(
     would hold for 30 seconds and then be handed the money anyway by whoever
     rendered the page first (SEC-334). ``_CLOSED_PERF_CACHE`` needs no such
     split: it is only ever read on the branch that already has a client.
+
+    A render in which any executor fetch failed is returned but not cached, so
+    the next poll re-fetches instead of serving the failed ids' $0 rows for 30s.
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
@@ -998,6 +1059,7 @@ async def _compute_strategy_performance(
     # apply_bot_mode_pnl from the controller history, which handles both fixed and
     # runtime-named (per-session config) bots.
     sessions: list[AgentPerformanceModel] = []
+    fetch_failed = False
     if client and ids:
         from condor.agents.engine import get_all_engines
 
@@ -1040,6 +1102,9 @@ async def _compute_strategy_performance(
                 log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
                 perf_map = {}
                 failed_ids = set(fetch_ids)
+        # A failed id still comes back as an all-zero row (or not at all when
+        # the batch raised); that is an outage, not a result worth caching.
+        fetch_failed = bool(failed_ids)
 
         for agent_id, num, kind in ids:
             perf = perf_map.get(agent_id)
@@ -1059,7 +1124,8 @@ async def _compute_strategy_performance(
             ):
                 _closed_perf_put(agent_id, perf)
             sessions.append(
-                AgentPerformanceModel(
+                AgentPerformanceModel.from_perf(
+                    perf,
                     agent_id=agent_id,
                     session_num=num,
                     kind=kind,
@@ -1073,16 +1139,11 @@ async def _compute_strategy_performance(
                         if kind == "experiment"
                         else False
                     ),
-                    realized_pnl=perf.realized_pnl,
-                    unrealized_pnl=perf.unrealized_pnl,
-                    total_pnl=perf.total_pnl,
-                    volume=perf.volume,
-                    fees=perf.fees,
-                    trade_count=perf.trade_count,
-                    win_rate=perf.win_rate,
-                    open_count=perf.open_count,
-                    closed_count=perf.closed_count,
-                    executors=perf.executors,
+                    started_at=(
+                        session_start_epoch(strategy_dir, num)
+                        if kind == "session"
+                        else 0.0
+                    ),
                 )
             )
 
@@ -1091,9 +1152,9 @@ async def _compute_strategy_performance(
     # fetch can still come back empty — so without this a dry run vanishes from
     # the sessions table on exactly the setup where it is most useful: no server
     # configured, nothing traded, just a simulated tick to read.
-    priced = {s.session_num for s in sessions if s.kind == "experiment"}
+    experiments_with_rows = {s.session_num for s in sessions if s.kind == "experiment"}
     for num, meta in sorted(exp_meta.items(), reverse=True):
-        if num in priced:
+        if num in experiments_with_rows:
             continue
         sessions.append(
             AgentPerformanceModel(
@@ -1113,7 +1174,15 @@ async def _compute_strategy_performance(
     # bot is DISTRIBUTED — not duplicated — the totals below are a plain additive
     # sum of the rows and stay correct for both modes with no double counting.
     if client and real_sessions:
-        await apply_bot_mode_pnl(real_sessions, strategy_dir, default_config, client)
+        # A failed bot snapshot is degraded, not empty: these rows lose their
+        # unrealized PnL and open positions, so the 30s cache below must skip
+        # them exactly as it skips a failed executor fetch ([[CORR-700]]).
+        fetch_failed = (
+            await apply_bot_mode_pnl(
+                real_sessions, strategy_dir, default_config, client
+            )
+            or fetch_failed
+        )
 
     totals = {
         "total_pnl": sum(s.total_pnl for s in real_sessions),
@@ -1126,8 +1195,23 @@ async def _compute_strategy_performance(
     }
 
     result = (sessions, totals)
-    _cache_set(cache_key, result)
+    if not fetch_failed:
+        _cache_set(cache_key, result)
     return result
+
+
+#: The money fields a running instance carries off its session's performance
+#: row; absent a row, ``RunningInstance``'s own defaults apply.
+_INSTANCE_PERF_FIELDS = {
+    "realized_pnl",
+    "unrealized_pnl",
+    "total_pnl",
+    "volume",
+    "fees",
+    "open_count",
+    "closed_count",
+    "win_rate",
+}
 
 
 def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
@@ -1144,15 +1228,13 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         session_num=info["session_num"],
         status=info["status"],
         tick_count=info["tick_count"],
-        daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
-        realized_pnl=p.realized_pnl if p else 0.0,
-        unrealized_pnl=p.unrealized_pnl if p else 0.0,
-        total_pnl=p.total_pnl if p else 0.0,
-        volume=p.volume if p else 0.0,
-        fees=p.fees if p else 0.0,
-        open_count=p.open_count if p else 0,
-        closed_count=p.closed_count if p else 0,
-        win_rate=p.win_rate if p else None,
+        # Absent a performance row, fall back to the engine's ``daily_pnl`` key,
+        # which is the session's skill-data ``total_pnl`` despite its name.
+        **(
+            p.model_dump(include=_INSTANCE_PERF_FIELDS)
+            if p
+            else {"total_pnl": float(info["daily_pnl"])}
+        ),
         server_name=info.get("server_name", ""),
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
@@ -1167,6 +1249,45 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         last_did=read_last_did(engine),
         last_error=info.get("last_error", "") or "",
     )
+
+
+def _strategy_live_state(
+    strategy_dir: Path,
+    run_key: str,
+    engines: list,
+    perf_by_id: dict | None = None,
+) -> tuple[str, str, int, list[RunningInstance]]:
+    """A strategy's headline ``(status, agent_id, tick_count, instances)``.
+
+    The one place the rule lives: the first registered engine (running or
+    paused) wins; with no engine, the latest session on disk; with neither,
+    ``("idle", "", 0)``. Callers pass the engines in so their
+    ``_get_engines_for`` seam stays theirs.
+
+    ``instances`` is only built when ``perf_by_id`` is given: each one costs a
+    journal summary read and an ``actions.jsonl`` tail per engine, which a
+    status-only caller (the brain panel) must not pay — it gets ``[]``.
+    """
+    instances: list[RunningInstance] = []
+    if perf_by_id is not None:
+        instances = [_instance_from_engine(e, perf_by_id) for e in engines]
+
+    if engines:
+        if instances:
+            head = instances[0]
+            return head.status, head.agent_id, head.tick_count, instances
+        info = engines[0].get_info()
+        return info["status"], info["agent_id"], info["tick_count"], instances
+
+    disk_info = infer_latest_session_status(strategy_dir, run_key)
+    if disk_info:
+        return (
+            disk_info["status"],
+            disk_info["agent_id"],
+            disk_info["tick_count"],
+            instances,
+        )
+    return "idle", "", 0, instances
 
 
 async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
@@ -1192,24 +1313,9 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
     engines = _get_engines_for(strategy.agent_slug, strategy.slug)
-    status = "idle"
-    agent_id = ""
-    tick_count = 0
-    instances: list[RunningInstance] = []
-    for engine in engines:
-        inst = _instance_from_engine(engine, perf_by_id)
-        instances.append(inst)
-        if not agent_id:
-            status = inst.status
-            agent_id = inst.agent_id
-            tick_count = inst.tick_count
-
-    if not engines:
-        disk_info = infer_latest_session_status(strategy_dir, run_key)
-        if disk_info:
-            status = disk_info["status"]
-            agent_id = disk_info["agent_id"]
-            tick_count = disk_info["tick_count"]
+    status, agent_id, tick_count, instances = _strategy_live_state(
+        strategy_dir, run_key, engines, perf_by_id
+    )
 
     latest_session_pnl = 0.0
     if sessions_perf:
@@ -1230,7 +1336,7 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
         session_count=count_sessions(strategy_dir),
         experiment_count=count_experiments(strategy_dir),
         tick_count=tick_count,
-        daily_pnl=latest_session_pnl,
+        latest_session_pnl=latest_session_pnl,
         total_pnl=float(totals.get("total_pnl", 0.0)),
         total_volume=float(totals.get("volume", 0.0)),
         open_positions=int(totals.get("open_positions", 0)),
@@ -1293,7 +1399,7 @@ def _aggregate_strategy_perf(strategies: list[StrategySummary]) -> dict[str, Any
         "session_count": sum(s.session_count for s in strategies),
         "experiment_count": sum(s.experiment_count for s in strategies),
         "tick_count": sum(s.tick_count for s in strategies),
-        "daily_pnl": sum(s.daily_pnl for s in strategies),
+        "latest_session_pnl": sum(s.latest_session_pnl for s in strategies),
         "total_pnl": sum(s.total_pnl for s in strategies),
         "total_volume": sum(s.total_volume for s in strategies),
         "open_positions": sum(s.open_positions for s in strategies),
@@ -1497,11 +1603,18 @@ async def list_delegation_history(
 
     # Everything in the registry is a delegation by construction, so any other
     # kind filter simply excludes it rather than needing a field to test.
+    #
+    # The registry is one dict for the whole process, so it is scoped to the
+    # caller here with `list_delegations`' predicate (CORR-688): a stranger's
+    # live task must never reach `records`, where it would take a slot of the
+    # `limit` page and only then be dropped, leaving a short page while more
+    # of the caller's own history sits on disk.
+    see_all = _is_admin(user)
     live = (
         {
             dt.task_id: dt.to_dict()
             for dt in get_all_delegations().values()
-            if agent in (None, dt.agent_slug)
+            if agent in (None, dt.agent_slug) and (see_all or dt.user_id == user.id)
         }
         if kind in ("", KIND_DELEGATE)
         else {}
@@ -1542,12 +1655,14 @@ async def list_delegation_history(
         )
 
     records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
+    # The final guard filters *before* the page is cut, never after (CORR-688):
+    # a row the caller may not see must not count toward `limit`.
+    visible_records = [r for r in records if _can_see_delegation(r, user)]
 
     return {
         "delegations": [
             {k: v for k, v in r.items() if k not in ("result", "error")}
-            for r in records[:limit]
-            if _can_see_delegation(r, user)
+            for r in visible_records[:limit]
         ]
     }
 
@@ -1686,16 +1801,10 @@ def _strategy_cards(slug: str) -> list[StrategyCard]:
     """
     cards: list[StrategyCard] = []
     for strategy in _strategy_store().list(slug):
-        status = "idle"
         engines = _get_engines_for(slug, strategy.slug)
-        if engines:
-            status = engines[0].get_info().get("status", "running")
-        else:
-            disk_info = infer_latest_session_status(
-                strategy.home, _runkey(slug, strategy.slug)
-            )
-            if disk_info:
-                status = disk_info["status"]
+        status, *_ = _strategy_live_state(
+            strategy.home, _runkey(slug, strategy.slug), engines
+        )
         cards.append(
             StrategyCard(
                 slug=strategy.slug,
@@ -1909,6 +2018,7 @@ async def create_agent_skill(
     a panel button should do silently.
     """
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     return _store_result(
         _skill_store_for(agent.slug).create(
             name=req.name,
@@ -1930,6 +2040,7 @@ async def update_agent_skill(
 ):
     """Patch one of the Agent's playbooks, leaving unsent fields alone."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     fields: dict[str, Any] = {}
     for key in ("description", "when_to_use", "body"):
         if getattr(req, key):
@@ -1946,6 +2057,7 @@ async def delete_agent_skill(
 ):
     """Delete one of the Agent's playbooks. Refuses an inherited shared one."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     # `delete` answers `True`, `False` for an unknown slug, or a refusal dict.
     result = _skill_store_for(agent.slug).delete(name)
     if isinstance(result, dict):
@@ -1969,6 +2081,7 @@ async def accept_agent_skill_proposal(
     what lands is an ordinary skill from here on.
     """
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     return _store_result(_proposals().accept(agent.slug))
 
 
@@ -2018,6 +2131,18 @@ async def delete_agent_memory(
     return {"deleted": True}
 
 
+def _create_refusal(exc: ValueError) -> HTTPException:
+    """A store's create refusal as HTTP: 409 for a taken name, 400 otherwise.
+
+    Uncaught, the reserved-name ``ValueError`` reached the browser as a 500,
+    while the delete routes already answer 400 for the same store refusals.
+    """
+    from condor.agents.strategy import AlreadyExistsError
+
+    status = 409 if isinstance(exc, AlreadyExistsError) else 400
+    return HTTPException(status_code=status, detail=str(exc))
+
+
 @router.post("", response_model=AgentSummary)
 async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
@@ -2037,17 +2162,20 @@ async def create_agent(
 
     # Same rule as the Telegram/MCP path: an unspecified model inherits the
     # creator's active one rather than defaulting to a guess.
-    agent = _agent_store().create(
-        name=req.name,
-        description=req.description,
-        instructions=req.instructions,
-        agent_key=req.agent_key or get_active_agent_key(user.id) or "",
-        tools=req.tools,
-        when_to_consult=req.when_to_consult,
-        server_required=req.server_required,
-        server_name=req.server_name,
-        created_by=user.id,
-    )
+    try:
+        agent = _agent_store().create(
+            name=req.name,
+            description=req.description,
+            instructions=req.instructions,
+            agent_key=req.agent_key or get_active_agent_key(user.id) or "",
+            tools=req.tools,
+            when_to_consult=req.when_to_consult,
+            server_required=req.server_required,
+            server_name=req.server_name,
+            created_by=user.id,
+        )
+    except ValueError as exc:
+        raise _create_refusal(exc) from exc
     return AgentSummary(
         slug=agent.slug,
         name=agent.name,
@@ -2063,6 +2191,12 @@ async def update_agent_md(
 ):
     """Update AGENT.md content."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
+    # The front matter carries the server pin, so this raw write is held to the
+    # rule the dedicated create/config routes apply to the same field (SEC-693).
+    _gate_pin_change(
+        user, _frontmatter_meta(req.content).get("server_name"), agent.server_name
+    )
     # Straight past ``AgentStore``, so the stock guard is stated here rather
     # than inherited: a shipped AGENT.md is forked into the local root first and
     # this writes the fork (FEAT-115).
@@ -2153,6 +2287,7 @@ async def set_agent_mute(
     from condor.runtime.toolsets import seat_tools
 
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     if (req.kind or "").strip().lower().rstrip("s") == "tool":
         if req.name not in {row["name"] for row in seat_tools(agent.slug)}:
             raise HTTPException(
@@ -2268,9 +2403,8 @@ async def ask_agent(
     # rule as the push target on /notify (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    # Web callers always act as themselves; the ``user_id`` override is reserved
-    # for trusted internal/MCP callers and must not let a session impersonate
-    # another user's memory/skill scope.
+    # Web callers always act as themselves: a body-supplied user_id must not let
+    # a session impersonate another user's memory/skill scope.
     answer = await run_ask(
         slug=slug,
         user_id=user.id,
@@ -2286,17 +2420,40 @@ async def ask_agent(
 # ── Delegate (fire-and-forget background tasks) ──
 
 
-async def _conversation_for_session(session_key: str) -> str:
-    """Resolve a session key to the conversation currently on that session.
+async def _owned_conversation_for_session(session_key: str, user: WebUser) -> str:
+    """Resolve the caller's own session key to the conversation behind it.
 
-    The resolution itself lives in ``condor.runtime.client`` — routine runs need
-    the same answer (ARCH-089) and a second copy could drift from this one. Kept
-    as a thin local name because the runtime import stays lazy here, as it does
-    for the rest of this module's runtime touchpoints.
+    ``session_key`` is a plain body field, and what it resolves to is where a
+    delegation's completion is resumed or noted -- the session's owner's chat,
+    not the caller's. So the key must be the caller's (SEC-636): a live session
+    recorded under another user is refused with 403, under the same rule
+    ``sessions._require_ownership`` applies (admins pass; everyone else must be
+    the session's recorded ``user_id``). The MCP crossback passes untouched --
+    its JWT is minted for the very user the session is recorded under.
+
+    A missing, malformed or dead key is not an error and resolves to "": that
+    is the truth for a tick- or routine-started agent. The lookup itself is
+    ``condor.runtime.client``'s, as for routine runs (ARCH-089); the import
+    stays lazy like this module's other runtime touchpoints.
     """
+    if not session_key:
+        return ""
     from condor.runtime import client
+    from condor.runtime.keys import SessionKey
 
-    return await client.conversation_for_session(session_key)
+    try:
+        info = await client.get_info(SessionKey.parse(session_key))
+    except Exception:
+        log.debug("Could not resolve session key %r", session_key, exc_info=True)
+        return ""
+    if info is None:
+        return ""
+    if info.user_id is None or info.user_id != user.id:
+        from config_manager import get_config_manager
+
+        if not get_config_manager().is_admin(user.id):
+            raise HTTPException(status_code=403, detail="Not your session")
+    return info.conversation_id
 
 
 @router.post("/{slug}/delegate")
@@ -2347,7 +2504,7 @@ async def delegate_agent(
     # caller's task text) land in someone else's chat (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    conversation_id = await _conversation_for_session(req.session_key)
+    conversation_id = await _owned_conversation_for_session(req.session_key, user)
 
     # Depth 1, structurally. A delegate worker cannot delegate at all
     # (FEAT-032), and a delegation started from *inside* a wake turn is forced
@@ -2362,9 +2519,9 @@ async def delegate_agent(
         )
         on_complete = "notify"
 
-    # Web callers always act as themselves: honoring ``req.user_id`` here would
-    # let any authenticated session run a delegation under another user's memory
-    # scope and server grants.
+    # Web callers always act as themselves: honoring a body-supplied user_id
+    # here would let any authenticated session run a delegation under another
+    # user's memory scope and server grants.
     dt = await start_delegation(
         agent_slug=slug,
         user_id=user.id,
@@ -2397,14 +2554,14 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
     if not req.text:
         raise HTTPException(status_code=400, detail="text is required")
 
-    # The push target must belong to the caller — mirror the ``req.user_id``
-    # rule below for the outbound address, and refuse before any side effect
-    # (SEC-198).
+    # The push target must belong to the caller — mirror the JWT-not-body
+    # user_id rule below for the outbound address, and refuse before any side
+    # effect (SEC-198).
     await _check_chat_access(user.id, req.chat_id)
 
-    # The caller is the JWT, never ``req.user_id``: mirror delegate so an
+    # The caller is the JWT, never a body-supplied user_id: mirror delegate so an
     # authenticated session cannot write into another user's transcript.
-    conversation_id = await _conversation_for_session(req.session_key)
+    conversation_id = await _owned_conversation_for_session(req.session_key, user)
     recorded = False
     if conversation_id:
         try:
@@ -2464,28 +2621,37 @@ async def create_strategy(
 ):
     """Create a new strategy (playbook) under an Agent."""
     _get_agent(slug)
-    strategy = _strategy_store().create(
-        agent_slug=slug,
-        name=req.name,
-        description=req.description,
-        instructions=req.instructions,
-        agent_key=req.agent_key,
-        default_config=req.config,
-        default_trading_context=req.default_trading_context,
-        created_by=user.id,
-    )
+    # A new strategy has no stored pin, so any non-empty one is checked (SEC-693).
+    _gate_pin_change(user, (req.config or {}).get("server_name"), "")
+    try:
+        strategy = _strategy_store().create(
+            agent_slug=slug,
+            name=req.name,
+            description=req.description,
+            instructions=req.instructions,
+            agent_key=req.agent_key,
+            default_config=req.config,
+            default_trading_context=req.default_trading_context,
+            created_by=user.id,
+        )
+    except ValueError as exc:
+        # Refused before anything is written, so the existing playbook's
+        # strategy.md and config.yml below are never touched (CORR-635).
+        raise _create_refusal(exc) from exc
 
     if req.config:
-        from condor.agents.config import AgentConfig, save_agent_config
+        from condor.agents.config import load_full_config, save_full_config
 
-        save_agent_config(strategy.home, AgentConfig.from_dict(req.config))
+        # The full pair keeps strategy-specific keys (trading_pair, venues, ...)
+        # that AgentConfig does not model, while still validating and
+        # defaulting the core fields (ARCH-670).
+        save_full_config(strategy.home, load_full_config(strategy.home, req.config))
 
     learnings_path = strategy.home / "learnings.md"
     if not learnings_path.exists():
-        atomic_write_text(
-            learnings_path,
-            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n",
-        )
+        # The journal owns this template: append_learning keys on its section
+        # headers, so seeding any other layout leaves dead sections (READ-680).
+        atomic_write_text(learnings_path, LEARNINGS_TEMPLATE)
 
     return StrategySummary(
         slug=strategy.slug,
@@ -2544,21 +2710,10 @@ async def get_strategy(
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
     engines = _get_engines_for(slug, sslug)
-    status = "idle"
-    agent_id = ""
-    instances = []
-    for engine in engines:
-        inst = _instance_from_engine(engine, perf_by_id)
-        instances.append(inst)
-        if not agent_id:
-            status = inst.status
-            agent_id = inst.agent_id
-
-    if not engines:
-        disk_info = infer_latest_session_status(strategy_dir, run_key)
-        if disk_info:
-            status = disk_info["status"]
-            agent_id = disk_info["agent_id"]
+    # StrategyDetail carries no tick_count; the instances do.
+    status, agent_id, _ticks, instances = _strategy_live_state(
+        strategy_dir, run_key, engines, perf_by_id
+    )
 
     return StrategyDetail(
         slug=sslug,
@@ -2586,6 +2741,15 @@ async def update_strategy_md(
 ):
     """Update strategy.md content."""
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
+    # ``default_config`` in the front matter carries the strategy's server pin;
+    # compared against the same field of the file being replaced (SEC-693).
+    new_defaults = _frontmatter_meta(req.content).get("default_config")
+    _gate_pin_change(
+        user,
+        new_defaults.get("server_name") if isinstance(new_defaults, dict) else None,
+        (strategy.default_config or {}).get("server_name") or "",
+    )
     # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here.
     target = fork_if_stock(slug, "strategies", strategy.slug, "strategy.md")
     atomic_write_text(target, req.content)
@@ -2601,9 +2765,15 @@ async def update_strategy_config(
 ):
     """Update a strategy's runtime config."""
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
     from condor.agents.config import load_full_config, save_full_config
 
     config_dict = load_full_config(strategy.home, strategy.default_config)
+    _gate_pin_change(
+        user,
+        req.config.get("server_name"),
+        _strategy_server(strategy.home, strategy.default_config),
+    )
     config_dict.update(req.config)
     save_full_config(strategy.home, config_dict)
     return {"updated": True, "config": config_dict}
@@ -2690,61 +2860,43 @@ async def get_session_executors(
             "deployments": [],
         }
     # Bot-mode: the session operates named bots whose executors live in the bot
-    # container, not the agent_id-keyed table. Merge the live positions of every
-    # base this session CURRENTLY owns — the same last-owner-by-`since` rule
-    # apply_bot_mode_pnl uses, so the two views never disagree. A session that
-    # handed its bot over shows only its own direct executors; the live open book
-    # belongs to whoever operates the bot now.
+    # container, not the agent_id-keyed table. Every base it ever owned is sliced
+    # to the window it held that base over — cut at its release and at the next
+    # owner's takeover by the same tiling apply_bot_mode_pnl uses — so the detail
+    # reports exactly the session's row in the strategy list, a finished session
+    # included. Only a base whose window is still open (this session CURRENTLY
+    # owns it) brings the live open book; a session that handed its bot over
+    # keeps its realized slice and nothing that belongs to the next operator.
     session_nums = [
         n
         for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.home)
         if k == "session"
     ]
+    windows = session_windows(
+        strategy.home, strategy.default_config, session_nums, session_num
+    )
     bot_names = current_owner_bases(
         strategy.home, strategy.default_config, session_nums, session_num
     )
-    # Slice the bot to this session's window for the same reason the rollup does:
-    # merging the lifetime aggregate here made the session detail disagree with
-    # the session's own row in the strategy list.
     owned = session_ownership(strategy.home, strategy.default_config, session_num)
-    since = min((b.since for b in owned if b.since > 0), default=0.0)
-    perf = await fetch_agent_performance(
-        client, agent_id, bot_names=bot_names, since=since
+    perf = await fetch_agent_performance(client, agent_id, windows=windows)
+    # close_type_counts is base-lifetime, not window-sliced: the payload counts
+    # closes per controller with no timestamp to slice on. Equal to the session's
+    # own closes whenever the session deployed the bases it owns (the normal
+    # case); a superset when it adopted a base another session had traded.
+    # The UI labels it as the bots' breakdown for exactly that reason.
+    model = AgentPerformanceModel.from_perf(
+        perf, agent_id=agent_id, session_num=session_num
     )
-    model = AgentPerformanceModel(
-        agent_id=agent_id,
-        session_num=session_num,
-        realized_pnl=perf.realized_pnl,
-        unrealized_pnl=perf.unrealized_pnl,
-        total_pnl=perf.total_pnl,
-        volume=perf.volume,
-        fees=perf.fees,
-        trade_count=perf.trade_count,
-        win_rate=perf.win_rate,
-        open_count=perf.open_count,
-        closed_count=perf.closed_count,
-        executors=perf.executors,
-        bot_names=perf.bot_names,
-        bot_instances=perf.bot_instances,
-        unresolved_bases=perf.unresolved_bases,
-        controllers=perf.controllers,
-        # Base-lifetime, not window-sliced: the payload counts closes per
-        # controller with no timestamp to slice on. Equal to the session's own
-        # closes whenever the session deployed the bases it owns (the normal
-        # case); a superset when it adopted a base another session had traded.
-        # The UI labels it as the bots' breakdown for exactly that reason.
-        close_type_counts=perf.close_type_counts,
-        fees_known=perf.fees_known,
-    )
-    # The equity curve, sliced from the same ownership window as the figures
+    # The equity curve, sliced from the same ownership windows as the figures
     # above. The journal's per-tick snapshots are only what the aggregator
     # believed at the time, so a session that ran while it was blind to its bots
     # has a permanently flat record; this is derived and therefore self-correcting.
-    # A bot released mid-window stops the curve where the session stopped owning.
-    released = max((b.until for b in owned if b.until > 0), default=0.0)
+    # A session that let go of every base stops the curve where it last held one.
+    since, until = window_span(windows)
     try:
         pnl_series = await fetch_agent_pnl_series(
-            client, bot_names or [b.base for b in owned], since, until=released
+            client, list(windows), since, until=until
         )
     except Exception as e:
         log.warning("pnl series for %s failed: %s", agent_id, e)
@@ -2866,8 +3018,8 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
-    # Web callers always act as themselves (mirror delegate): honoring
-    # ``req.user_id`` would let any authenticated session start the engine
+    # Web callers always act as themselves (mirror delegate): honoring a
+    # body-supplied user_id would let any authenticated session start the engine
     # under another user's memory scope and accessible-servers fallback.
     new_engine = TickEngine(
         agent=agent,
@@ -2940,6 +3092,89 @@ def _authorized_engines_for(slug: str, sslug: str, user: WebUser) -> list:
     ]
 
 
+def _require_no_foreign_live_run(slug: str, sslug: str, user: WebUser) -> None:
+    """Refuse a write into a strategy someone else's loop is running (SEC-638).
+
+    Definitions are shared (SEC-617), but a live loop re-reads its learnings,
+    scratch state, skills and mutes every tick and trades on its owner's
+    credentials, so an edit there is an instruction to *that owner's* run — the
+    outcome SEC-251 gates the lifecycle verbs against. Every registered engine
+    counts, paused included: a paused loop resumes with the same inputs. The
+    403 admits nothing new, since the strategy page already shows the run. No
+    supervisor (tests, a bare import) means no loop, so the write goes through.
+    """
+    try:
+        engines = _get_engines_for(slug, sslug)
+    except Exception:  # noqa: BLE001 - no supervisor is no live run
+        return
+    if any(not _owns_engine(e, user) for e in engines) and not _is_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Another user's loop is running this strategy — stop it first",
+        )
+
+
+def _require_no_foreign_live_run_for_agent(slug: str, user: WebUser) -> None:
+    """The same refusal for an agent-level input every strategy's loop reads."""
+    for strategy in _strategy_store().list(slug):
+        _require_no_foreign_live_run(slug, strategy.slug, user)
+
+
+def _target_engines(
+    slug: str,
+    sslug: str,
+    agent_id: str | None,
+    user: WebUser,
+    *,
+    running_only: bool = False,
+) -> list:
+    """The engines a lifecycle verb acts on, or the one not-found 404.
+
+    Named ``agent_id``: that engine alone (403 if it is someone else's, see
+    ``_authorized_engine``). No ``agent_id``: every engine of this strategy the
+    caller may act on, since the dashboard never names an instance and a
+    strategy can run several at once. ``running_only`` drops engines whose tick
+    task has finished; a paused engine still counts as running.
+    """
+    if agent_id:
+        engines = [_authorized_engine(agent_id, user)]
+    else:
+        engines = _authorized_engines_for(slug, sslug, user)
+    if running_only:
+        engines = [e for e in engines if e.is_running]
+    if not engines:
+        raise HTTPException(status_code=404, detail="No running strategy found")
+    return engines
+
+
+async def _wind_down_all(engines: list, verb: str, action) -> None:
+    """Run ``action(engine)`` on every engine at once, then 500 if any raised.
+
+    Instances are independent, so one engine's wind-down (a tick cancel, an ACP
+    reap, a whole emergency winddown) must neither wait behind another's nor be
+    skipped because an earlier one raised. Every failure is logged with its
+    agent_id before the route reports it.
+    """
+    results = await asyncio.gather(
+        *(action(engine) for engine in engines), return_exceptions=True
+    )
+    failed = 0
+    for engine, result in zip(engines, results):
+        if isinstance(result, BaseException):
+            failed += 1
+            log.error(
+                "Failed to %s agent %s",
+                verb,
+                getattr(engine, "agent_id", "?"),
+                exc_info=result,
+            )
+    if failed:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{failed} of {len(engines)} instances failed to {verb}",
+        )
+
+
 @router.post("/{slug}/strategies/{sslug}/stop")
 async def stop_strategy(
     slug: str,
@@ -2948,14 +3183,8 @@ async def stop_strategy(
     user: WebUser = Depends(get_current_user),
 ):
     """Stop a running strategy. If agent_id given, stop that instance; else all."""
-    if agent_id:
-        await _authorized_engine(agent_id, user).stop()
-    else:
-        engines = _authorized_engines_for(slug, sslug, user)
-        if not engines:
-            raise HTTPException(status_code=404, detail="No running strategy found")
-        for engine in engines:
-            await engine.stop()
+    engines = _target_engines(slug, sslug, agent_id, user)
+    await _wind_down_all(engines, "stop", lambda e: e.stop())
     return {"stopped": True}
 
 
@@ -2972,15 +3201,12 @@ async def shutdown_strategy(
     given, only that instance is wound down; otherwise every running instance of
     this strategy is.
     """
-    reason = "manual emergency stop"
-    if agent_id:
-        await _authorized_engine(agent_id, user)._run_shutdown(reason=reason)
-    else:
-        engines = _authorized_engines_for(slug, sslug, user)
-        if not engines:
-            raise HTTPException(status_code=404, detail="No running strategy found")
-        for engine in engines:
-            await engine._run_shutdown(reason=reason)
+    engines = _target_engines(slug, sslug, agent_id, user)
+    await _wind_down_all(
+        engines,
+        "shut down",
+        lambda e: e._run_shutdown(reason="manual emergency stop"),
+    )
     return {"shutdown": True}
 
 
@@ -2991,21 +3217,9 @@ async def pause_strategy(
     agent_id: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Pause a running strategy."""
-    if agent_id:
-        engine = _authorized_engine(agent_id, user)
-        if not engine.is_running:
-            raise HTTPException(
-                status_code=404, detail=f"Agent '{agent_id}' not found or not running"
-            )
+    """Pause a running strategy. If agent_id given, pause that instance; else all."""
+    for engine in _target_engines(slug, sslug, agent_id, user, running_only=True):
         engine.pause()
-    else:
-        engines = [
-            e for e in _authorized_engines_for(slug, sslug, user) if e.is_running
-        ]
-        if not engines:
-            raise HTTPException(status_code=404, detail="No running strategy found")
-        engines[0].pause()
     return {"paused": True}
 
 
@@ -3016,14 +3230,9 @@ async def resume_strategy(
     agent_id: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Resume a paused strategy."""
-    if agent_id:
-        _authorized_engine(agent_id, user).resume()
-    else:
-        engines = _authorized_engines_for(slug, sslug, user)
-        if not engines:
-            raise HTTPException(status_code=404, detail="No strategy found")
-        engines[0].resume()
+    """Resume a paused strategy. If agent_id given, resume that instance; else all."""
+    for engine in _target_engines(slug, sslug, agent_id, user):
+        engine.resume()
     return {"resumed": True}
 
 
@@ -3059,6 +3268,7 @@ async def set_restart_on_boot(
     from condor.runtime.loops import get_supervisor
 
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
 
     config = load_full_config(strategy.home, strategy.default_config)
     config["restart_on_boot"] = req.enabled
@@ -3159,6 +3369,7 @@ async def claim_bot(
     back-fill actually report the run's history.
     """
     from condor.agents.config import load_full_config
+    from condor.agents.journal import iter_session_dirs
     from condor.agents.ownership import (
         BotLedger,
         bot_namespace,
@@ -3177,11 +3388,11 @@ async def claim_bot(
     if req.session_num:
         session_dir = sessions_root / f"session_{req.session_num}"
     else:
-        candidates = sorted(
-            (d for d in sessions_root.glob("session_*") if d.is_dir()),
-            key=lambda d: d.stat().st_mtime,
-        )
-        session_dir = candidates[-1] if candidates else None
+        # The highest-numbered session, as the strategy card reports it — not
+        # the dir with the newest mtime, which any ledger write (an unclaim
+        # rewrites every session's owned_bots.json) moves onto an old session.
+        sessions = iter_session_dirs(strategy.home)
+        session_dir = sessions[-1][1] if sessions else None
     if session_dir is None or not session_dir.is_dir():
         raise HTTPException(
             status_code=404,
@@ -3286,6 +3497,7 @@ async def update_learnings(
 ):
     """Update a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
     # The third raw write, and the one with no fork question to ask: learnings
     # are this install's output, so ``home`` is local by construction and there
     # is no shipped counterpart to shadow.
@@ -3305,10 +3517,10 @@ async def get_strategy_state(
     slug: str, sslug: str, user: WebUser = Depends(get_current_user)
 ):
     """Every live key in this strategy's namespace."""
-    from condor.runtime.state import list_state, namespace_for_session
+    from condor.runtime.state import list_state, namespace_for_strategy
 
     _get_strategy(slug, sslug)  # 404s if it does not exist
-    return {"state": list_state(namespace_for_session(f"{slug}.{sslug}"))}
+    return {"state": list_state(namespace_for_strategy(slug, sslug))}
 
 
 @router.post("/{slug}/strategies/{sslug}/state")
@@ -3319,10 +3531,11 @@ async def set_strategy_state(
     user: WebUser = Depends(get_current_user),
 ):
     """Set or clear one key. The namespace is derived, never caller-supplied."""
-    from condor.runtime.state import clear_state, namespace_for_session, set_state
+    from condor.runtime.state import clear_state, namespace_for_strategy, set_state
 
     _get_strategy(slug, sslug)
-    namespace = namespace_for_session(f"{slug}.{sslug}")
+    _require_no_foreign_live_run(slug, sslug, user)
+    namespace = namespace_for_strategy(slug, sslug)
 
     if req.clear:
         return {"cleared": clear_state(namespace, req.key)}
@@ -3363,16 +3576,26 @@ async def list_agent_runs(
     putting it here would either make the rail slow or make it lie. A run's PnL
     is read in the run overview, from the strategy's ``/performance`` query.
 
-    ``limit`` is the rail's window, not a filter: a chatty install has hundreds
-    of conversations and the rail asks for a bigger page when the reader wants
-    one. The two per-user kinds are scoped to the caller, because a conversation
+    ``limit`` is the rail's window over delegations and conversations, not a
+    filter: a chatty install has hundreds of conversations and the rail asks
+    for a bigger page when the reader wants one. Loop runs are always carried,
+    however many newer chats there are, so the response can hold more than
+    ``limit`` rows. The two per-user kinds are scoped to the caller, because a conversation
     is private — so two people legitimately see different rails for one agent,
     and the rail says so rather than letting it read as data loss.
     """
     from condor.agents.all_runs import list_all_runs
 
     _get_agent(slug)
-    rows = list_all_runs(slug, user.id, limit=max(1, min(limit, MAX_RUN_LIMIT)))
+    # In a worker thread, not on the loop (PERF-650): three disk walks (every
+    # session of every strategy, the delegation records, the conversation
+    # metas) on a 5s poll, and this loop is also uvicorn's, the Telegram
+    # poller's and the chat WebSocket's. Same shape as list_delegation_history
+    # (PERF-293). The agent lookup above stays inline so an unknown slug 404s
+    # before any listing runs.
+    rows = await asyncio.to_thread(
+        list_all_runs, slug, user.id, limit=max(1, min(limit, MAX_RUN_LIMIT))
+    )
     return RunsResponse(runs=[RunRow(**row) for row in rows])
 
 
@@ -3456,16 +3679,13 @@ async def get_session_report(
     _get_strategy(slug, sslug)
     from condor.reports import list_reports
 
-    run_key = _runkey(slug, sslug)
-    source = f"{run_key}/session_{session_num}"
     reports, _total = list_reports(
         source_type="routine",
-        search=run_key,
-        limit=100,
+        source_name=f"{_runkey(slug, sslug)}/session_{session_num}",
+        limit=1,
         owner_id=report_owner_filter(user),
     )
-    matched = [r for r in reports if r.get("source_name", "") == source]
-    return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
+    return {"report": ReportSummary(**reports[0]).model_dump() if reports else None}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/actions")
@@ -3595,16 +3815,13 @@ async def get_strategy_reports(
     _get_strategy(slug, sslug)  # validate exists
     from condor.reports import list_reports
 
-    run_key = _runkey(slug, sslug)
-    prefix = f"{run_key}/"
-    reports, _total = list_reports(
+    reports, total = list_reports(
         source_type="routine",
-        search=run_key,
+        source_prefix=f"{_runkey(slug, sslug)}/",
         limit=limit,
         owner_id=report_owner_filter(user),
     )
-    matched = [r for r in reports if r.get("source_name", "").startswith(prefix)]
     return {
-        "reports": [ReportSummary(**r).model_dump() for r in matched],
-        "total": len(matched),
+        "reports": [ReportSummary(**r).model_dump() for r in reports],
+        "total": total,
     }

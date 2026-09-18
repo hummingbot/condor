@@ -13,15 +13,23 @@ out must cost the agent its drift block, not its positions block.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import asdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from condor import venue_drift
+from condor.fetchers.executors import describe_executor_error
 from condor.fetchers.positions import fetch_positions
 from condor.fetchers.tracked_positions import fetch_tracked_positions
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
+
+log = logging.getLogger(__name__)
 
 #: Separators a controller tag may put between a session's ``agent_id`` and a
 #: suffix. Matching on the bare prefix would let ``brigado.mm_1`` claim
@@ -64,21 +72,34 @@ class DriftProvider(BaseProvider):
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
     ) -> ProviderResult:
         # Unscoped on purpose: the venue answers for the whole account, so the
         # tracked side must too or every sibling controller's position would
         # read as an orphan. The agent's own involvement is an annotation on the
         # account's drift, never a filter of it.
-        tracked = await fetch_tracked_positions(client, strict=True)
-
-        try:
-            venue = await fetch_positions(client, strict=True)
-        except Exception as exc:
+        #
+        # The two reads are independent, so they go out together. A failed
+        # tracked read still fails the provider (the registry records it); only
+        # a failed venue read degrades to "unanswered".
+        tracked, venue = await asyncio.gather(
+            fetch_tracked_positions(client, strict=True),
+            fetch_positions(client, strict=True),
+            return_exceptions=True,
+        )
+        if isinstance(tracked, BaseException):
+            raise tracked
+        if isinstance(venue, Exception):
             # An unreachable venue is not a flat venue. ``strict=True`` is how
             # the fetcher already draws that line; refusing to swallow it here
-            # is what keeps "unanswered" out of "agreed".
-            report = venue_drift.check(tracked, None, reason=str(exc)[:120])
+            # is what keeps "unanswered" out of "agreed". The reason reaches the
+            # prompt and snapshot, so it is the sanitized message (the raw one
+            # carries the backend URL) — clipped, as an API detail can be long.
+            log.warning("drift provider venue fetch failed", exc_info=venue)
+            _, message = describe_executor_error(venue)
+            report = venue_drift.check(tracked, None, reason=message[:120])
+        elif isinstance(venue, BaseException):
+            raise venue
         else:
             report = venue_drift.check(tracked, venue)
 

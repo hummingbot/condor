@@ -18,6 +18,12 @@ import {
   pnlTextClass,
 } from "@/lib/formatters";
 
+// A bot row's figures are the run's slice of that bot's history; a controller's
+// are lifetime (the history is per instance, never per controller), so the two
+// levels must not be read as the same basis (CORR-661).
+const FIGURE_BASIS_HINT =
+  "Bot rows: this run's slice of the bot's history. Controller rows: the controller's lifetime figure.";
+
 /**
  * What this run put into the world (FEAT-100).
  *
@@ -79,8 +85,18 @@ export function DeploymentLedger({
                 <th className="px-2 py-1.5 font-bold">Created at</th>
                 <th className="px-2 py-1.5 font-bold">Since</th>
                 <th className="px-2 py-1.5 font-bold">Live</th>
-                <th className="px-2 py-1.5 text-right font-bold">PnL</th>
-                <th className="px-2 py-1.5 text-right font-bold">Volume</th>
+                <th
+                  className="px-2 py-1.5 text-right font-bold"
+                  title={FIGURE_BASIS_HINT}
+                >
+                  PnL
+                </th>
+                <th
+                  className="px-2 py-1.5 text-right font-bold"
+                  title={FIGURE_BASIS_HINT}
+                >
+                  Volume
+                </th>
                 <th className="px-2 py-1.5" />
               </tr>
             </thead>

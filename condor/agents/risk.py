@@ -1,8 +1,30 @@
 """Risk engine -- pre-tick validation and guardrails.
 
-Enforces position limits, daily loss caps, drawdown limits, executor counts,
-and LLM cost caps.  Also provides a permission callback that auto-approves
-safe tool calls and blocks dangerous ones that violate risk limits.
+``RiskLimits`` carries six limits (the last four are disabled at -1):
+
+- ``max_position_size_quote`` -- the quote a create, bot deploy/update or
+  signing DEX call may put at stake;
+- ``max_open_executors`` -- how many executors may be open before a create;
+- ``max_drawdown_pct`` -- soft drawdown: breaching it pauses the tick;
+- ``shutdown_drawdown_pct`` -- hard drawdown: breaching it winds the session
+  down (see :mod:`condor.agents.shutdown`);
+- ``max_drift_quote`` -- book drift against the venue beyond which the book is
+  untrusted and new exposure is refused;
+- ``max_leverage`` -- the most leverage a create may ask for or an account may
+  be set to.
+
+``RiskEngine.get_state`` applies the two drawdown limits before a tick (the
+engine pauses or shuts down on its verdict), and the engine's venue check marks
+the book untrusted on drift; ``check_executor_action``, ``check_bot_action``,
+``check_dex_action`` and ``check_leverage_action`` apply the rest, and the book
+verdict, to individual tool calls.
+
+``auto_approve_with_risk_check`` builds the permission callback that runs those
+checks, auto-approves safe calls, and adds refusals of its own: an executor
+create must carry this session's ``controller_id``, ``stop_executor`` may only
+stop this session's executors, ``manage_bots`` mutations stay inside the bot
+ledger's namespace, dry-run mode refuses every mutation, shutdown mode lets
+only the brakes through, and ``place_order`` is always refused.
 """
 
 from __future__ import annotations
@@ -22,6 +44,7 @@ from condor.runtime.danger import (
     LEVERAGED_EXECUTOR_TOOLS,
     dry_run_refusal,
     is_dangerous_tool_call,
+    shutdown_refusal,
     tool_call_input,
     tool_call_name,
 )
@@ -79,6 +102,10 @@ class RiskState:
     book_trusted: bool = True
     drift_quote: float | None = None  # None = nothing priced, never 0.0
     drift_reason: str = ""
+    # The limits these metrics are judged against, carried so ``to_dict`` can
+    # show them to the agent. A bare ``RiskState()`` reports ``RiskLimits``'
+    # own defaults; ``RiskEngine.get_state`` passes the engine's limits.
+    limits: RiskLimits = field(default_factory=RiskLimits)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,26 +120,12 @@ class RiskState:
             "drift_quote": self.drift_quote,
             "drift_reason": self.drift_reason,
             # Include limits for prompt display
-            "max_position_size": (
-                self._limits.max_position_size_quote
-                if hasattr(self, "_limits")
-                else 500
-            ),
-            "max_open_executors": (
-                self._limits.max_open_executors if hasattr(self, "_limits") else 5
-            ),
-            "max_drawdown_pct": (
-                self._limits.max_drawdown_pct if hasattr(self, "_limits") else -1
-            ),
-            "shutdown_drawdown_pct": (
-                self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1
-            ),
-            "max_drift_quote": (
-                self._limits.max_drift_quote if hasattr(self, "_limits") else -1
-            ),
-            "max_leverage": (
-                self._limits.max_leverage if hasattr(self, "_limits") else -1
-            ),
+            "max_position_size": self.limits.max_position_size_quote,
+            "max_open_executors": self.limits.max_open_executors,
+            "max_drawdown_pct": self.limits.max_drawdown_pct,
+            "shutdown_drawdown_pct": self.limits.shutdown_drawdown_pct,
+            "max_drift_quote": self.limits.max_drift_quote,
+            "max_leverage": self.limits.max_leverage,
         }
 
 
@@ -148,6 +161,30 @@ def _dex_call_label(tool_name: str, input_data: dict[str, Any]) -> str:
     return input_data.get("action", "") or tool_name
 
 
+def _finite_number(value: Any, name: str, *, positive: bool = False) -> float:
+    """``value`` as a finite float, or ``ValueError`` naming ``name``.
+
+    The one parser behind every figure the gate values (leverage, executor
+    amounts, ``manage_amm`` fields, reference prices), so a malformed input is
+    refused the same way and with the same reason whichever field carried it.
+    ``bool`` is refused rather than read as 1 or 0. ``positive`` rejects zero
+    too; otherwise only negatives are refused. Empty-value policy and string
+    trimming belong to the caller.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number, got {value!r}") from exc
+    if not math.isfinite(number) or (number <= 0 if positive else number < 0):
+        raise ValueError(
+            f"{name} must be a {'positive' if positive else 'non-negative'} "
+            f"finite number, got {value!r}"
+        )
+    return number
+
+
 def _requested_leverage(input_data: dict[str, Any]) -> float | None:
     """The leverage a call asks for, or ``None`` when it names none.
 
@@ -159,17 +196,9 @@ def _requested_leverage(input_data: dict[str, Any]) -> float | None:
     value = input_data.get("leverage")
     if value is None or value == "":
         return None
-    if isinstance(value, bool):
-        raise ValueError(f"got {value!r}")
     if isinstance(value, str):
         value = value.strip().removesuffix("x").removesuffix("X")
-    try:
-        leverage = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"got {value!r}") from exc
-    if not math.isfinite(leverage) or leverage <= 0:
-        raise ValueError(f"got {value!r}")
-    return leverage
+    return _finite_number(value, "leverage", positive=True)
 
 
 #: Signing actions that return capital instead of committing it. Allowed even
@@ -185,6 +214,35 @@ RISK_REDUCING_DEX_ACTIONS = frozenset({"remove_liquidity", "close", "collect_fee
 EXPOSURE_ADDING_BOT_ACTIONS = frozenset(
     {"deploy", "start_controllers", "update_config"}
 )
+
+
+#: The bot actions an emergency winddown may still take: the brakes.
+SHUTDOWN_BOT_ACTIONS = frozenset({"stop_bot", "stop_controllers"})
+
+
+def _shutdown_refusal(tool_name: str, input_data: dict[str, Any]) -> str:
+    """Why a dangerous call is refused during an emergency winddown, or "".
+
+    Called only for calls :func:`is_dangerous_tool_call` already flagged. What
+    passes is what reduces exposure — ``stop_executor``, a bot stop, and the
+    Gateway actions that return capital — and each still meets the ownership
+    checks the gate runs after this. Everything else is refused.
+    """
+    action = input_data.get("action", "")
+    action = action if isinstance(action, str) else ""
+    if tool_name == "stop_executor":
+        return ""
+    if tool_name == "manage_bots" and action in SHUTDOWN_BOT_ACTIONS:
+        return ""
+    if (
+        tool_name in _SIGNING_DEX_ACTIONS or tool_name in ALWAYS_SIGNING_DEX_TOOLS
+    ) and action in RISK_REDUCING_DEX_ACTIONS:
+        return ""
+    label = f"{tool_name}({action})" if action else tool_name
+    return (
+        f"{label} is not a winddown action — this session is shutting down after "
+        "a kill switch, so only stops and liquidity removals are allowed"
+    )
 
 
 def _book_refusal(current_state: "RiskState | None") -> tuple[bool, str] | None:
@@ -203,24 +261,30 @@ def _book_refusal(current_state: "RiskState | None") -> tuple[bool, str] | None:
 
 
 class RiskEngine:
-    """Evaluates risk state and can block snapshots or individual tool calls."""
+    """Evaluates risk state and individual tool calls against ``RiskLimits``.
+
+    Its state can pause a tick (soft drawdown) or escalate to a winddown (hard
+    drawdown); its ``check_*`` methods refuse individual tool calls.
+    """
 
     def __init__(self, limits: RiskLimits | None = None):
         self.limits = limits or RiskLimits()
 
     def get_state(self, tracker: Any) -> RiskState:
-        """Compute current risk metrics from tracker data."""
-        state = RiskState()
-        state._limits = self.limits
+        """Compute current risk metrics from tracker data.
+
+        The tracker only supplies ``get_drawdown_pct``. Exposure and the open
+        executor count come from the live executors provider, which the engine
+        sets on the returned state itself.
+        """
+        state = RiskState(limits=self.limits)
 
         try:
-            state.total_exposure = tracker.get_total_exposure()
-            state.executor_count = tracker.get_open_executor_count()
             state.drawdown_pct = tracker.get_drawdown_pct()
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
-            # against zeroed exposure/count. A blocked state makes the engine
+            # against a zeroed drawdown. A blocked state makes the engine
             # pause the tick and notify instead of trading blind.
             state.is_blocked = True
             state.block_reason = f"risk state unavailable: {exc}"
@@ -394,22 +458,43 @@ class RiskEngine:
                 return refusal
 
         if action == "deploy":
-            cap = input_data.get("max_global_drawdown_quote")
-            if not cap:
+            # Parsed like every other figure the gate values (SEC-632): a NaN
+            # cap is truthy but never fires on the backend, and a zero cap is
+            # never installed, so both are refused rather than approved.
+            try:
+                cap = _quote_amount(
+                    input_data.get("max_global_drawdown_quote"),
+                    "max_global_drawdown_quote",
+                )
+            except ValueError as exc:
+                return False, f"manage_bots {action}: {exc}"
+            if cap <= 0:
                 return False, (
                     "Bot deploy must declare max_global_drawdown_quote "
                     f"(≤ ${self.limits.max_position_size_quote:.2f}) so the "
                     "platform kill switch bounds the loss"
                 )
-            if float(cap) > self.limits.max_position_size_quote:
+            if cap > self.limits.max_position_size_quote:
                 return False, (
-                    f"max_global_drawdown_quote ${float(cap):.2f} exceeds "
+                    f"max_global_drawdown_quote ${cap:.2f} exceeds "
                     f"position limit ${self.limits.max_position_size_quote:.2f}"
                 )
         elif action == "update_config":
-            amount = float(
-                (input_data.get("config_data") or {}).get("total_amount_quote", 0) or 0
-            )
+            # A stringified config_data is a common model slip; its amount can't
+            # be read, so it is refused rather than raised out of the permission
+            # callback (which would skip RefusalLog) or passed as "no amount".
+            config_data = input_data.get("config_data") or {}
+            if not isinstance(config_data, dict):
+                return False, (
+                    f"manage_bots {action}: config_data must be an object, "
+                    f"got {type(config_data).__name__}"
+                )
+            try:
+                amount = _quote_amount(
+                    config_data.get("total_amount_quote"), "total_amount_quote"
+                )
+            except ValueError as exc:
+                return False, f"manage_bots {action}: {exc}"
             if amount > self.limits.max_position_size_quote:
                 return False, (
                     f"update_config total_amount_quote ${amount:.2f} exceeds "
@@ -722,6 +807,17 @@ def auto_approve_with_risk_check(
                     level=logging.INFO,
                 )
 
+            # Shutdown mode: the LLM cleanup pass after a kill switch (SEC-631).
+            # Only the brakes get through, and they then go on to the same
+            # ownership checks a tick's brakes do below; every other dangerous
+            # call opens, grows or re-prices exposure at the one moment a limit
+            # has just been breached. An allowlist, so a dangerous call this
+            # branch has not heard of is refused rather than approved.
+            if execution_mode == "shutdown":
+                refusal = _shutdown_refusal(tool_name, input_data)
+                if refusal:
+                    return deny(tool_name, refusal)
+
             # For executor creates, run risk check. The name is the classification
             # since FEAT-062 — `stop_executor` is dangerous too, but it reduces
             # exposure and so is confirmed without being risk-checked.
@@ -861,19 +957,36 @@ def auto_approve_with_risk_check(
         # and a routine is ordinary tick work, so gating either by name would
         # put a confirmation in front of every candle read. But both run
         # arbitrary Python holding the unrestricted API client, which makes them
-        # the ways to mutate the world for real from inside a dry run: every
-        # *named* write above is refused there, `await client.gateway.start(...)`
-        # inside a snippet was not (SEC-616), and neither was writing that same
-        # line into a routine and running it (SEC-626).
+        # the ways to mutate the world for real from inside a *constrained*
+        # session: every *named* write above is refused there, `await
+        # client.gateway.start(...)` inside a snippet was not (SEC-616), and
+        # neither was writing that same line into a routine and running it
+        # (SEC-626).
+        #
+        # Both constrained modes reach this line, because both had the same hole
+        # and for the same reason: the branches above only ever see calls
+        # `is_dangerous_tool_call` flagged, and these two tools are deliberately
+        # not flagged, so a shutdown pass could still run a snippet or a routine
+        # after a kill switch fired and re-open the exposure the winddown had
+        # just closed (SEC-697). What each mode forbids differs — a dry run
+        # forbids mutation, a winddown forbids exposure and so still lets the
+        # brake through — which is why they are two policies and not one.
         #
         # Which calls those are is `danger.py`'s policy and not this gate's, so
         # a third such tool never has to reach this file. Reads on both tools —
         # past runs, the routine list, a routine's source — change nothing and
-        # stay free.
+        # stay free in both modes.
         if execution_mode == "dry_run":
             refusal = dry_run_refusal(tool_call)
             if refusal:
                 return deny(tool_call_name(tool_call), refusal, level=logging.INFO)
+        elif execution_mode == "shutdown":
+            # Kept at WARNING, unlike a dry run's: there every mutation is
+            # refused and twenty warnings a tick is not a signal, whereas a
+            # cleanup pass reaching for arbitrary Python is one.
+            refusal = shutdown_refusal(tool_call)
+            if refusal:
+                return deny(tool_call_name(tool_call), refusal)
 
         # Auto-approve everything else
         for opt in options:
@@ -900,13 +1013,7 @@ def _quote_amount(value: Any, name: str) -> float:
         return 0.0
     if isinstance(value, str):
         value = value.strip().removeprefix("$")
-    try:
-        amount = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a number, got {value!r}") from exc
-    if not math.isfinite(amount) or amount < 0:
-        raise ValueError(f"{name} must be a non-negative finite number")
-    return amount
+    return _finite_number(value, name)
 
 
 def _is_quote_denominated(value: Any) -> bool:
@@ -974,12 +1081,7 @@ async def _planned_amount_quote(
                 input_data.get("connector_name", ""),
                 input_data.get("trading_pair", ""),
             )
-            if price is None:
-                raise ValueError("reference price is unavailable")
-            price = float(price)
-            if not math.isfinite(price) or price <= 0:
-                raise ValueError("reference price must be a positive finite number")
-            amount = quote + base * price
+            amount = quote + base * _positive_price(price)
         else:
             amount = quote
     else:
@@ -1001,26 +1103,14 @@ def _amm_field(value: Any, name: str, default: float | None = None) -> float:
         if default is None:
             raise ValueError(f"{name} is required to price this call")
         return default
-    try:
-        amount = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a number, got {value!r}") from exc
-    if not math.isfinite(amount) or amount < 0:
-        raise ValueError(f"{name} must be a non-negative finite number")
-    return amount
+    return _finite_number(value, name)
 
 
 def _positive_price(value: Any) -> float:
     """A reference price, or ``ValueError`` if it cannot bound anything."""
     if value is None or value == "":
         raise ValueError("reference price is unavailable")
-    try:
-        price = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"reference price must be a number, got {value!r}") from exc
-    if not math.isfinite(price) or price <= 0:
-        raise ValueError("reference price must be a positive finite number")
-    return price
+    return _finite_number(value, "reference price", positive=True)
 
 
 async def _amm_base_price(input_data: dict[str, Any], client: Any) -> float:

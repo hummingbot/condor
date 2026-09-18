@@ -1,15 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, FileText, MessageSquareQuote } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import {
-  SessionKpis,
-  SessionOverview,
-} from "@/components/agent/AgentSessionContent";
 import { DeploymentLedger } from "@/components/agent/lab/DeploymentLedger";
 import { hasPricedMoney } from "@/components/agent/lab/runs";
+import { SessionKpis } from "@/components/agent/session/SessionKpis";
+import { SessionOverview } from "@/components/agent/session/SessionOverview";
+import { sessionPnlPoints } from "@/components/agent/session/pnlPoints";
+import { OutsideWindow } from "@/components/agent/workspace/OutsideWindow";
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { api, type AgentPerformance } from "@/lib/api";
@@ -18,16 +18,16 @@ import type { Decision, ParsedJournal } from "@/lib/parse-agent";
 /**
  * What this run is and what it did, with nothing to click first (FEAT-119).
  *
- * Five facets of one run — its vitals, what wants a person, what it last
- * decided, what it has earned and what it put into the world — read top to
- * bottom. They were split across two views (Now and the run overview) only
+ * Four blocks of one run — its money (the vitals, the report door and the
+ * PnL curve, one card since ARCH-426), what wants a person, what it last
+ * decided and what it put into the world — read top to bottom. They were split across two views (Now and the run overview) only
  * because a spine needed entries, and the split cost three bands twice over:
  * the deployment ledger, the canvas, and the last action, printed truncated to
  * one line in the vitals strip and whole six pixels below it. Merging them is
  * net-subtractive, which is the test for whether a consolidation is real.
  *
  * It still fetches almost nothing of its own. The vitals, the journal, the
- * chart's series and the ledger all come off `useWorkspaceAlerts`' three
+ * chart's series and the ledger all come off `useRunReading`'s three
  * responses, which the tick spine and the detail bands were reading anyway; the
  * one query in here is the run's own report, which used to hang off the strip
  * in the overview and travels with it.
@@ -43,6 +43,8 @@ export function NowView({
   journal,
   pnlSeries,
   onOpenTick,
+  onShowOlderRuns,
+  variant = "page",
 }: {
   slug: string;
   sslug: string;
@@ -54,11 +56,22 @@ export function NowView({
   deployments: React.ComponentProps<typeof DeploymentLedger>["rows"];
   /** What the run's records are worth, for the vitals strip. */
   perf: AgentPerformance | null;
-  /** The run's journal, for the strip's status and the chart's fallback. */
+  /** The run's journal, for the chart's fallback series. */
   journal: ParsedJournal | null;
   pnlSeries?: { timestamp: string; pnl: number }[] | null;
   /** An alert, or the decision's own tick badge, is an address into a tick. */
   onOpenTick: (tick: number) => void;
+  /**
+   * Set when the strategy has sessions but none is in the loaded runs window
+   * (CORR-376): the empty state then says so and widens the window, rather
+   * than claiming the strategy never ran.
+   */
+  onShowOlderRuns?: () => void;
+  /**
+   * Where the run screen is drawn. In the chat's side panel the report covers
+   * the pane only, as the tick overlay does, so the conversation stays visible.
+   */
+  variant?: "page" | "pane";
 }) {
   const [showReport, setShowReport] = useState(false);
   const last = decisions[decisions.length - 1] ?? null;
@@ -70,31 +83,63 @@ export function NowView({
   });
   const report = reportData?.report ?? null;
 
+  const priced = hasPricedMoney(perf);
+  const metrics = journal?.metrics;
+  const points = useMemo(
+    () => (metrics ? sessionPnlPoints(metrics, pnlSeries) : []),
+    [metrics, pnlSeries],
+  );
+  // Under two points there is no curve, only a dot — the honest answer for a
+  // run one tick old is no chart at all.
+  const hasChart = points.length > 1;
+
+  // The session's own live report. It has always existed — rebuilt every tick
+  // under a stable id — but was only reachable through the routines report
+  // grid, where it appeared as a routine nobody had created.
+  const reportDoor = report && (
+    <button
+      type="button"
+      onClick={() => setShowReport(true)}
+      className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium normal-case tracking-normal text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+    >
+      <FileText className="h-3 w-3" /> Session report
+    </button>
+  );
+
   return (
     <div className="space-y-4">
-      {/* ① The run's vitals. The strip appears only when there is priced money
-          to put in it: a run that never traded reporting eight `+$0.00` tiles
-          is the absence of a fact printed as a fact. */}
-      {hasPricedMoney(perf) ? (
-        <SessionKpis
-          perf={perf}
-          summary={journal?.summary}
-          hasReport={!!report}
-          onOpenReport={() => setShowReport(true)}
-        />
+      {/* ① The run's money, in one card (ARCH-426): the report door in its
+          header, the vitals, then the curve. The vitals appear only when there
+          is priced money to put in them — a run that never traded reporting
+          seven `+$0.00` tiles is the absence of a fact printed as a fact — and
+          the curve only from two points up. */}
+      {priced || hasChart ? (
+        <section
+          data-now-money
+          className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
+        >
+          <header className="flex items-center justify-between gap-3 px-4 pt-3 pb-2">
+            <h3 className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+              {hasChart && !pnlSeries?.length ? "PnL timeline" : "Realized PnL"}
+            </h3>
+            {reportDoor}
+          </header>
+          {priced && (
+            <div className="px-4 pb-3">
+              <SessionKpis perf={perf} />
+            </div>
+          )}
+          {hasChart && (
+            <div data-now-chart className="border-t border-[var(--color-border)]">
+              <SessionOverview data={points} height={variant === "pane" ? 260 : 400} />
+            </div>
+          )}
+        </section>
       ) : (
-        report && (
-          // The strip is where the report lives, so a run with no money to put
-          // in a strip would otherwise lose the only door to its own report.
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={() => setShowReport(true)}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-            >
-              <FileText className="h-3 w-3" /> Session report
-            </button>
-          </div>
+        reportDoor && (
+          // The card is where the report lives, so a run with no money to put
+          // in one would otherwise lose the only door to its own report.
+          <div className="flex justify-end">{reportDoor}</div>
         )
       )}
 
@@ -154,6 +199,8 @@ export function NowView({
               </span>
             )}
           </>
+        ) : sessionNum === 0 && onShowOlderRuns ? (
+          <OutsideWindow onShowOlderRuns={onShowOlderRuns} />
         ) : (
           <p className="text-xs text-[var(--color-text-muted)]">
             {sessionNum > 0
@@ -163,14 +210,7 @@ export function NowView({
         )}
       </div>
 
-      {/* ④ What it has earned over the run. `SessionOverview` is the chart and
-          nothing else, and it draws nothing at all under two points — which is
-          the honest answer for a run one tick old. */}
-      {journal && (
-        <SessionOverview journal={journal} perf={perf} pnlSeries={pnlSeries} />
-      )}
-
-      {/* ⑤ What it put into the world (FEAT-100), read from the same response
+      {/* ④ What it put into the world (FEAT-100), read from the same response
           the vitals fold — so the two can never disagree. */}
       <DeploymentLedger
         rows={deployments}
@@ -179,7 +219,14 @@ export function NowView({
       />
 
       {showReport && report && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-4">
+        // `absolute` in the pane resolves against the run screen's `relative`
+        // root, the same frame the tick overlay covers (CORR-422).
+        <div
+          data-now-report
+          className={`${
+            variant === "pane" ? "absolute" : "fixed"
+          } inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-4`}
+        >
           <ReportViewer
             report={report}
             reports={[report]}

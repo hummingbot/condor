@@ -42,16 +42,21 @@ A caller that picks the wrong one is wrong in a visible direction: writing
 through a plural is a type error, reading through a singular silently loses the
 stock library.
 
-Pure filesystem logic with **no** MCP/Telegram deps and no ``yaml``, so it runs
-from the main process (prompt injection) and from the MCP subprocess (the
-tools) alike.
+Pure filesystem logic with **no** MCP/Telegram deps and no module-level
+``yaml`` (:func:`read_layered_file` imports the frontmatter parser lazily), so
+it runs from the main process (prompt injection) and from the MCP subprocess
+(the tools) alike.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from pathlib import Path
 
-from condor.paths import local_agents_root, stock_agents_root
+from condor.paths import UnsafeIdError, local_agents_root, stock_agents_root
+
+log = logging.getLogger(__name__)
 
 # The default agent: the one answering when no specialist is bound. It is a
 # normal agent directory like any other — what makes it default is that a falsy
@@ -67,6 +72,31 @@ def _is_agent_dir(path: Path) -> bool:
     return path.is_dir() and not path.name.startswith("_") and path.name != "strategies"
 
 
+def safe_slug(value: str) -> str:
+    """``value`` as exactly one path segment under an agents root, or refuse.
+
+    Agent and strategy slugs reach the resolvers below straight from MCP tool
+    arguments, so a ``../../agents/<slug>`` would otherwise resolve the shipped
+    tree *through the local layer* and every copy-on-write guard (which compares
+    the local path to the stock one) would take it for a local file.
+
+    Not :func:`condor.paths.safe_id`: :func:`condor.frontmatter.slugify` keeps
+    unicode ``\\w`` ("Ñandú Bot" -> ``ñandú_bot``), which that ASCII regex
+    refuses. The rule here is only what makes a value one segment: non-empty, no
+    ``/``, ``\\`` or NUL, not ``.``, and no ``..`` anywhere (the same stance
+    ``safe_id`` takes). Raises :class:`condor.paths.UnsafeIdError`.
+    """
+    text = str(value)
+    if (
+        not text
+        or text == "."
+        or ".." in text
+        or any(ch in text for ch in ("/", "\\", "\0"))
+    ):
+        raise UnsafeIdError(f"Invalid agent path segment {text!r}")
+    return text
+
+
 def agent_home(agent_slug: str | None = None) -> Path:
     """The **writable** home of an agent: ``<local>/<slug>``.
 
@@ -75,13 +105,15 @@ def agent_home(agent_slug: str | None = None) -> Path:
     down from stock. A falsy slug resolves the default agent (Condor).
 
     Use :func:`agent_home_layers` to *read* something that may still be stock.
+    Raises :class:`condor.paths.UnsafeIdError` for a slug that is not one
+    path segment (:func:`safe_slug`).
     """
-    return local_agents_root() / (agent_slug or CHAT_SLUG)
+    return local_agents_root() / safe_slug(agent_slug or CHAT_SLUG)
 
 
 def stock_agent_home(agent_slug: str | None = None) -> Path:
     """The shipped home of an agent: ``<stock>/<slug>``. Never written at runtime."""
-    return stock_agents_root() / (agent_slug or CHAT_SLUG)
+    return stock_agents_root() / safe_slug(agent_slug or CHAT_SLUG)
 
 
 def agent_home_layers(agent_slug: str | None = None) -> tuple[Path, Path]:
@@ -96,7 +128,12 @@ def resolve_agent_file(agent_slug: str | None, *rel: str) -> Path | None:
     live". Per *item*, deliberately: an install that forked ``AGENT.md`` must
     still receive upstream's new ``skills/<slug>/``, so the fork can never be
     the whole directory.
+
+    Every ``rel`` part must be one segment too (:func:`safe_slug`), so a
+    strategy slug or skill name cannot climb out of the home either.
     """
+    for part in rel:
+        safe_slug(part)
     for home in agent_home_layers(agent_slug):
         candidate = home.joinpath(*rel)
         if candidate.exists():
@@ -133,6 +170,89 @@ def defaults_layers() -> tuple[Path, Path]:
         local_agents_root() / DEFAULTS_DIRNAME,
         stock_agents_root() / DEFAULTS_DIRNAME,
     )
+
+
+# Pairs already warned about, so a shadow costs one line and not one per tick.
+_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_once_if_shadowed(local: Path, stock: Path) -> None:
+    """Say it out loud when a local policy file silently overrides a shipped one.
+
+    A policy file (``core_rules.md``, ``reflect.md``, ``shutdown.md``) is a
+    *single file*, so a local copy forks the whole contract — the failure mode
+    :func:`resolve_agent_file` avoids one level down by resolving per item. An
+    operator who then edits the tracked file gets no error, no warning and no
+    effect (ARCH-612). One warning per pair turns that silent no-op into a line
+    in the log.
+    """
+    key = (str(local), str(stock))
+    if key in _SHADOWED_RULEBOOKS_WARNED:
+        return
+    try:
+        if not stock.is_file():
+            return  # nothing shipped to shadow: a purely local file is fine
+        if stock.read_text(encoding="utf-8") == local.read_text(encoding="utf-8"):
+            return  # a copy, not a fork
+    except OSError:
+        return
+    _SHADOWED_RULEBOOKS_WARNED.add(key)
+    log.warning(
+        "%s shadows %s and the two differ: edits to the shipped file have no "
+        "effect. Delete the local copy to fall back to it.",
+        local,
+        stock,
+    )
+
+
+def read_layered_file(
+    filename: str,
+    agent_slug: str | None = None,
+    *,
+    within: Sequence[str] = (),
+    skip_empty_body: bool = False,
+) -> tuple[dict, str] | None:
+    """The first readable layered ``filename`` as ``(frontmatter, stripped body)``.
+
+    The one resolver for an agent's single-file policies (``reflect.md``,
+    ``core_rules.md``, ``shutdown.md``). Levels, most specific first:
+    ``<home>/<*within>/<filename>`` when ``within`` is given (a strategy passes
+    ``("strategies", <slug>)``), then ``<home>/<filename>``, then
+    ``_defaults/<filename>`` — each consulted in both roots, local before stock.
+    When a local file wins over a shipped sibling that differs, the shadow is
+    warned about once (:func:`_warn_once_if_shadowed`).
+
+    ``skip_empty_body`` lets a prose-only policy fall through a file with no
+    body; a policy whose frontmatter *is* the policy (``shutdown.md``) leaves it
+    off so a frontmatter-only file still wins its level. An unreadable or
+    unparsable file is logged and skipped — a broken policy is never a crash.
+    Returns ``None`` when nothing on disk qualifies.
+    """
+    from condor.frontmatter import parse_frontmatter
+
+    local_home, stock_home = agent_home_layers(agent_slug)
+    levels: list[tuple[Path, Path]] = []
+    if within:
+        levels.append((local_home.joinpath(*within), stock_home.joinpath(*within)))
+    levels.append((local_home, stock_home))
+    levels.append(defaults_layers())
+
+    for local_dir, stock_dir in levels:
+        local, stock = local_dir / filename, stock_dir / filename
+        for path in (local, stock):
+            try:
+                if not path.is_file():
+                    continue
+                meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+                body = body.strip()
+                if skip_empty_body and not body:
+                    continue
+                if path == local:
+                    _warn_once_if_shadowed(local, stock)
+                return meta or {}, body
+            except Exception:  # noqa: BLE001 - an unreadable policy is not a crash
+                log.warning("Could not read %s", path, exc_info=True)
+    return None
 
 
 def shared_skills_root() -> Path:

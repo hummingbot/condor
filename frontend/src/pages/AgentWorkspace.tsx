@@ -14,17 +14,20 @@ import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { AgentRunScreen } from "@/components/agent/workspace/AgentRunScreen";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
-import {
-  OPEN_PARAM,
-  sectionForView,
-} from "@/components/agent/workspace/sections";
+import { sectionForView } from "@/components/agent/workspace/sections";
 import {
   runsRedirect,
   strategyRedirect,
 } from "@/components/agent/workspace/views";
-import { useWorkspaceUrl } from "@/components/agent/workspace/workspaceUrl";
-import { writePane } from "@/components/chat/paneUrl";
+import {
+  useWorkspaceUrl,
+  workspaceHref,
+} from "@/components/agent/workspace/workspaceUrl";
+import { type PaneSection } from "@/components/agent/workspace/sections";
+import { paneReturnHref, writePane } from "@/components/chat/paneUrl";
+import type { PaneReturnState } from "@/components/chat/StrategySheet";
 import { api } from "@/lib/api";
+import { agentQuery, agentsQuery, hasRunningLoop } from "@/lib/queryClient";
 
 /**
  * One agent, one screen, one route (FEAT-103).
@@ -51,42 +54,32 @@ import { api } from "@/lib/api";
 export function AgentWorkspace() {
   const { slug = "" } = useParams<{ slug: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const returnState = location.state as Partial<PaneReturnState> | null;
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // This route's own search string is the whole of the workspace's grammar.
-  const adapter = useWorkspaceUrl(searchParams, setSearchParams);
+  // Every move on this screen carries the way back along with it: a new history
+  // entry has no `state` of its own, so a run picked here would otherwise
+  // forget which conversation the page was expanded from.
+  const locationState = location.state;
+  const setParamsKeepingReturn = useCallback(
+    (next: URLSearchParams, options?: { replace?: boolean }) =>
+      setSearchParams(next, { ...options, state: locationState }),
+    [setSearchParams, locationState],
+  );
+  const adapter = useWorkspaceUrl(searchParams, setParamsKeepingReturn);
 
-  // The header's, and the two guards below. The same `["agent", slug]` the body
-  // reads, so react-query serves both from one poll rather than two — and on
-  // the same gate, because sharing a key means sharing the shortest interval
-  // declared on it (PERF-343). Only a live loop can move the "Live" badge or
-  // the delete guard; the strategy controls invalidate this key when they
-  // start one, so the gate re-arms without a reload.
-  const {
-    data: agent,
-    isLoading,
-    error,
-  } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug,
-    // The page resolves this key before it renders the screen, so the
-    // screen's observer mounts a tick later onto data react-query would
-    // otherwise call stale and re-fetch — one open, two requests. A cadence's
-    // worth of freshness makes the second mount reuse the first read; the
-    // interval below refetches on its own timer regardless.
-    staleTime: 5000,
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
-  });
+  // The header's, and the two guards below — one poll shared with the body (gate: `agentQuery`).
+  const { data: agent, isLoading, error } = useQuery(agentQuery(slug));
 
   const deleteAgentMutation = useMutation({
     mutationFn: () => api.deleteAgent(slug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: agentsQuery().queryKey });
       navigate("/");
     },
   });
@@ -136,15 +129,10 @@ export function AgentWorkspace() {
       });
       return <Navigate to={`/?${pane}`} replace />;
     }
-    const params = new URLSearchParams(searchParams);
-    params.delete("view");
-    params.delete("tab");
     const section = sectionForView(legacyView);
-    if (section) params.set(OPEN_PARAM, section);
-    const query = params.toString();
     return (
       <Navigate
-        to={`/agents/${encodeURIComponent(slug)}${query ? `?${query}` : ""}`}
+        to={workspaceHref(slug, section ? { open: section } : {}, searchParams)}
         replace
       />
     );
@@ -178,7 +166,25 @@ export function AgentWorkspace() {
     );
   }
 
-  const isRunning = (agent.strategies || []).some((st) => st.status === "running");
+  const isRunning = hasRunningLoop(agent);
+
+  /**
+   * The conversation with this loop in its side panel, on the tab the reader
+   * is on here — the page and the panel are one layout, so a tab carries.
+   */
+  const paneHref = (
+    state: Partial<PaneReturnState> | null,
+    sslug: string,
+    runId: string | undefined,
+    section: PaneSection,
+  ) => {
+    return paneReturnHref(state?.returnTo, {
+      agentSlug: slug,
+      strategySlug: sslug,
+      section,
+      run: runId ?? null,
+    });
+  };
 
   return (
     <>
@@ -188,10 +194,20 @@ export function AgentWorkspace() {
         /* The loop controls in this header act on the strategy the body
            resolved from the URL, so the body hands it back rather than the
            page picking a scope of its own for the two to disagree about. */
-        header={({ strategy }) => (
+        header={({ strategy, run, section }) => (
           <WorkspaceHeader
             agent={agent}
             strategy={strategy}
+            backHref={
+              returnState?.returnTo && strategy
+                ? paneHref(returnState, strategy.slug, run?.run_id, section)
+                : returnState?.returnTo || "/"
+            }
+            sidePanelHref={
+              strategy
+                ? paneHref(returnState, strategy.slug, run?.run_id, section)
+                : undefined
+            }
             isRunning={isRunning}
             onAskAgent={() => askAgent()}
             onDelete={() => setShowDeleteConfirm(true)}

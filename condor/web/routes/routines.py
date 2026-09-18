@@ -402,9 +402,11 @@ async def get_routine_reports(
     # SEC-593: scope to the caller before matching. The routine name is a free
     # string anyone may spell, so this listing is only as private as its owner
     # filter — the same one ``GET /reports`` applies.
+    # Exact source_name match (full prefixed or base name), applied in the store
+    # before the page is sliced so no match is lost past ``limit`` (ARCH-692).
     reports, total = list_reports(
-        search=base_name, limit=limit, owner_id=report_owner_filter(user)
+        source_name=(routine_name, base_name),
+        limit=limit,
+        owner_id=report_owner_filter(user),
     )
-    # Filter to exact source_name match (full prefixed or base name)
-    exact = [r for r in reports if r.get("source_name") in (routine_name, base_name)]
-    return {"reports": exact, "total": len(exact)}
+    return {"reports": reports, "total": total}

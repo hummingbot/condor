@@ -63,6 +63,14 @@ MAX_QUEUE_AGE_S = 14 * 24 * 3600
 OP_SHARE = "share"
 OP_UNSHARE = "unshare"
 
+# What :func:`post` returns, instead of ``False``, when a 4xx came from
+# something in front of the collector rather than the collector itself. Such a
+# block is usually about one URL (a WAF rule on one path), not the whole
+# collector, so :func:`flush` holds back only that record's conversation and
+# lets every other one keep flowing (CORR-628). ``False`` still means a failure
+# every record would hit, and still stops the flush.
+BLOCKED = "blocked"
+
 # Every read-modify-write of the queue file runs under this lock. "Read it,
 # decide, write it back" is not safe on its own here: there are two genuine
 # producers — the sweep's worker thread and the web routes on the event loop —
@@ -463,8 +471,14 @@ async def _collector_refused(response) -> bool:
     return isinstance(body, dict) and isinstance(body.get("error"), str)
 
 
-async def post(record: dict) -> bool:
+async def post(record: dict) -> bool | str:
     """Deliver one queued request.
+
+    Returns ``True`` when the record is done with (delivered or terminally
+    refused), ``False`` when it failed in a way every record would (transport
+    error, 429, 5xx), and :data:`BLOCKED` when a 4xx came from something that is
+    not the collector. :data:`BLOCKED` is truthy, so callers compare against it
+    before treating the result as a bool.
 
     A 4xx other than 429 is *terminal*, but only when the collector is the one
     that said it: re-posting a permanently-rejected record forever would keep it
@@ -514,7 +528,7 @@ async def post(record: dict) -> bool:
                         response.status,
                         record.get("op") or "?",
                     )
-                    return False
+                    return BLOCKED
                 if record.get("op") == OP_UNSHARE:
                     # A refused revocation is not a dropped share. The delete
                     # token lives nowhere else once ``unshare`` cleared it from
@@ -582,12 +596,14 @@ def _share_vetoed() -> bool:
 STALL_WARN_AFTER_S = 6 * 3600
 
 
-def _warn_if_stuck(record: dict, behind: int) -> None:
+def _warn_if_stuck(record: dict, behind: int, *, blocked: bool = False) -> None:
     """Say so when the record that stalled the flush has been stalling it for days.
 
-    :func:`flush` preserves order, so a record that never posts holds back every
-    record behind it — which is the right behaviour for an outage and a silent
-    failure for anything else. The queue's own age cap eventually retires a
+    :func:`flush` preserves order, so a record that never posts holds back the
+    records behind it — which is the right behaviour for an outage and a silent
+    failure for anything else. ``blocked`` means only this record's own
+    conversation is held (``behind`` then counts that conversation's records),
+    so the log does not claim the whole queue is wedged when it is not. The queue's own age cap eventually retires a
     stuck *share*, but a queued unshare is exempt from it and would wait
     forever, so the only thing that ever surfaced a wedged queue was somebody
     reading the file.
@@ -597,6 +613,16 @@ def _warn_if_stuck(record: dict, behind: int) -> None:
     except (TypeError, ValueError):
         return
     if waiting < STALL_WARN_AFTER_S:
+        return
+    if blocked:
+        log.warning(
+            "Sharing has not delivered a %s queued %.1fh ago; it is blocked in "
+            "front of the collector and %d record(s) for the same conversation "
+            "are waiting behind it (other conversations still flow)",
+            record.get("op") or "?",
+            waiting / 3600,
+            behind,
+        )
         return
     log.warning(
         "Sharing has not delivered a %s queued %.1fh ago; %d record(s) are "
@@ -610,8 +636,15 @@ def _warn_if_stuck(record: dict, behind: int) -> None:
 async def flush() -> tuple[int, int]:
     """Try every queued request in order. Returns ``(delivered, still queued)``.
 
-    Order is preserved and a failure does not skip ahead: a share and the
-    unshare that revokes it must not be able to arrive out of order.
+    Order is preserved **per ``share_id``**: a share and the unshare that
+    revokes it must not be able to arrive out of order, and that is the only
+    ordering this queue needs. So only a failure that would hit every record
+    (``post`` returning ``False``: transport error, 429, 5xx) stops the flush.
+    A record blocked in front of the collector (:data:`BLOCKED`, e.g. a WAF 403
+    on one path) holds back only the later records of its own ``share_id``;
+    every other conversation keeps being delivered (CORR-628). A blocked record
+    with no ``share_id`` (queued before the field existed) cannot have its pair
+    identified, so it stops the flush like an outage would.
 
     Consent is a *send*-time gate as well as a creation-time one. A share the
     install is no longer allowed to make is dropped here rather than held: the
@@ -664,7 +697,8 @@ async def flush() -> tuple[int, int]:
 
         delivered: set[str] = set()
         vetoed: set[str] = set()
-        stalled = False
+        stalled_all = False
+        blocked: set[str] = set()
         for i, record in enumerate(records):
             if record.get("op") == OP_SHARE and _share_vetoed():
                 # Checked ahead of the stall: a share this install is forbidden
@@ -672,12 +706,28 @@ async def flush() -> tuple[int, int]:
                 # the queue could not reach the collector.
                 vetoed.add(record["id"])
                 continue
-            if stalled:
+            if stalled_all:
                 continue  # keep order once something has stalled
-            if await post(record):
+            share_id = str(record.get("share_id") or "")
+            if share_id in blocked:
+                continue  # keep this conversation's order behind its block
+            result = await post(record)
+            if result == BLOCKED:
+                if share_id:
+                    blocked.add(share_id)
+                    behind = sum(
+                        1
+                        for r in records[i + 1 :]
+                        if str(r.get("share_id") or "") == share_id
+                    )
+                    _warn_if_stuck(record, behind, blocked=True)
+                else:
+                    stalled_all = True
+                    _warn_if_stuck(record, len(records) - i - 1)
+            elif result:
                 delivered.add(record["id"])
             else:
-                stalled = True
+                stalled_all = True
                 _warn_if_stuck(record, len(records) - i - 1)
 
         if vetoed:

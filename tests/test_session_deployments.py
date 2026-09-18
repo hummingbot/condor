@@ -10,26 +10,27 @@ snapshot's ``status``, and that an unjoinable tick is blank rather than guessed.
 from condor.agents.actions import AgentAction
 from condor.agents.attribution import build_deployments
 from condor.agents.ownership import OwnedBot
+from condor.agents.performance import AgentPerformance
 
 AGENT_ID = "brigado.brl_mm_3"
 
 
-class _Perf:
-    """The fields of ``AgentPerformance`` the ledger reads, and nothing else."""
+def _Perf(
+    *, bot_names=(), bot_instances=(), controllers=(), executors=(), base_windows=None
+):
+    """An ``AgentPerformance`` carrying only what the ledger reads.
 
-    def __init__(self, *, bot_names=(), bot_instances=(), controllers=(), executors=()):
-        self.bot_names = list(bot_names)
-        self.bot_instances = list(bot_instances)
-        self.controllers = list(controllers)
-        self.executors = list(executors)
-        # The rest of the aggregate, so the same double serves the route test.
-        self.realized_pnl = self.unrealized_pnl = self.total_pnl = 0.0
-        self.volume = self.fees = 0.0
-        self.trade_count = self.open_count = self.closed_count = 0
-        self.win_rate = None
-        self.unresolved_bases = []
-        self.close_type_counts = {}
-        self.fees_known = True
+    The real dataclass, not a look-alike: the session route projects it onto
+    the wire model by dataclass field (``AgentPerformanceModel.from_perf``).
+    """
+    return AgentPerformance(
+        agent_id=AGENT_ID,
+        bot_names=list(bot_names),
+        bot_instances=list(bot_instances),
+        controllers=list(controllers),
+        executors=list(executors),
+        base_windows=dict(base_windows or {}),
+    )
 
 
 def _controller(bot_name, cid, pnl=0.0, volume=0.0, status="running"):
@@ -111,6 +112,80 @@ def test_the_bot_row_folds_its_controllers_money():
     bot = _by_kind(_deployed_run(), "bot")[0]
     assert round(bot.pnl, 4) == 0.04
     assert bot.volume == 205.0
+
+
+# ── A bot row reports the run's slice, not the bot's lifetime (CORR-661) ──
+
+
+def test_bot_row_pnl_matches_the_sliced_kpi():
+    """An adopted bot: lifetime realized 100, this run's slice 60, open book 7.
+
+    The KPI strip reads 67; the ledger row beneath it must too, not 107.
+    """
+    inst = "ns-bot-20260701-000000"
+    c1 = {
+        **_controller(inst, "c1", pnl=70.0, volume=6000.0),
+        "unrealized_pnl_quote": 4.0,
+    }
+    c2 = {
+        **_controller(inst, "c2", pnl=30.0, volume=3000.0),
+        "unrealized_pnl_quote": 3.0,
+    }
+    perf = _Perf(
+        bot_names=[inst],
+        bot_instances=[inst],
+        controllers=[c1, c2],
+        base_windows={"ns-bot": (60.0, 5000.0, 3, 5.0)},
+    )
+
+    held = [OwnedBot(base="ns-bot", origin="adopted", since=2000.0, last_seen=9e9)]
+    bot = _by_kind(build_deployments(held, ["ns-bot"], perf, [], AGENT_ID), "bot")[0]
+    assert bot.live is True
+    assert bot.pnl == 67.0
+    assert bot.volume == 5000.0
+
+    released = [
+        OwnedBot(
+            base="ns-bot",
+            origin="adopted",
+            since=2000.0,
+            last_seen=3000.0,
+            until=3000.0,
+        )
+    ]
+    bot = _by_kind(build_deployments(released, [], perf, [], AGENT_ID), "bot")[0]
+    assert bot.live is False
+    # The open book belongs to whoever holds the bot now.
+    assert bot.pnl == 60.0
+    assert bot.volume == 5000.0
+
+    # Controller rows stay lifetime: the history is per instance, not controller.
+    assert [
+        c.pnl
+        for c in _by_kind(
+            build_deployments(held, ["ns-bot"], perf, [], AGENT_ID), "controller"
+        )
+    ] == [74.0, 33.0]
+
+
+def test_a_stopped_bot_row_carries_its_sliced_window():
+    """No live snapshot, so no controllers — but the KPI counts what it realized."""
+    owned = [
+        OwnedBot(
+            base="old-bot",
+            origin="deployed",
+            since=1000.0,
+            last_seen=4000.0,
+            until=4000.0,
+        )
+    ]
+    perf = _Perf(
+        bot_instances=["old-bot-20260701-000000"],
+        base_windows={"old-bot": (12.5, 800.0, 2, 0.4)},
+    )
+    bot = _by_kind(build_deployments(owned, [], perf, [], AGENT_ID), "bot")[0]
+    assert bot.pnl == 12.5
+    assert bot.volume == 800.0
 
 
 def test_a_controller_inherits_its_bots_window_and_tick():

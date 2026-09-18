@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Collection
-from pathlib import Path
 from typing import Any
 
-from condor.frontmatter import parse_frontmatter
+from condor.memory import paths as _paths
 from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
+from .config import is_experiment_mode
+from .journal import render_risk_lines
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -386,43 +387,16 @@ CORE_RULES_FILENAME = "core_rules.md"
 # the same block whether it is ticking or answering a chat.
 CORE_RULES_HEADER = "[CORE RULES — apply to every session]"
 
-# Pairs already warned about, so a shadow costs one line and not one per tick.
-_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
-
-
-def _warn_once_if_shadowed(local: Path, stock: Path) -> None:
-    """Say it out loud when a local rulebook silently overrides a shipped one.
-
-    The rulebook is a *single file*, so a local copy forks the whole
-    behavioural contract — the failure mode :func:`resolve_agent_file` avoids
-    one level down by resolving per item. An operator who then edits the
-    tracked file gets no error, no warning and no effect (ARCH-612). One
-    warning per pair turns that silent no-op into a line in the log.
-    """
-    key = (str(local), str(stock))
-    if key in _SHADOWED_RULEBOOKS_WARNED:
-        return
-    try:
-        if not stock.is_file():
-            return  # nothing shipped to shadow: a purely local rulebook is fine
-        if stock.read_text(encoding="utf-8") == local.read_text(encoding="utf-8"):
-            return  # a copy, not a fork
-    except OSError:
-        return
-    _SHADOWED_RULEBOOKS_WARNED.add(key)
-    log.warning(
-        "%s shadows %s and the two differ: edits to the shipped file have no "
-        "effect. Delete the local copy to fall back to it.",
-        local,
-        stock,
-    )
+# The shadow warning lives with the shared resolver; re-bound here (the same
+# set object) because callers and tests clear it by this name.
+_SHADOWED_RULEBOOKS_WARNED = _paths._SHADOWED_RULEBOOKS_WARNED
 
 
 def load_core_rules(agent_slug: str | None = None) -> str:
     """The shared behavioural rules for this agent: its own, else the default.
 
-    Resolved exactly like :func:`condor.agents.reflection.load_policy` —
-    ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
+    Resolved by :func:`condor.memory.paths.read_layered_file`, the resolver
+    ``reflect.md`` and ``shutdown.md`` share — ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
     both roots (local before stock), so an install that dropped its own house
     rules in shadows the shipped ones without losing them. A falsy slug reads
     only the default, which is what the chat seat wants.
@@ -431,30 +405,13 @@ def load_core_rules(agent_slug: str | None = None) -> str:
     the next tick. Returns ``""`` when nothing is on disk or the file is
     unreadable — a missing rulebook must never be what breaks a tick. When a
     local layer wins over a shipped file that differs,
-    :func:`_warn_once_if_shadowed` says so rather than letting the fork be
+    :func:`condor.memory.paths._warn_once_if_shadowed` says so rather than letting the fork be
     silent.
     """
-    from condor.memory.paths import agent_home_layers, defaults_layers
-
-    layers = (agent_home_layers(agent_slug), defaults_layers())
-    for local_home, stock_home in layers:
-        local, stock = (
-            local_home / CORE_RULES_FILENAME,
-            stock_home / CORE_RULES_FILENAME,
-        )
-        for path in (local, stock):
-            try:
-                if not path.is_file():
-                    continue
-                _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-                body = body.strip()
-                if body:
-                    if path == local:
-                        _warn_once_if_shadowed(local, stock)
-                    return body
-            except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
-                log.warning("Could not read %s", path, exc_info=True)
-    return ""
+    found = _paths.read_layered_file(
+        CORE_RULES_FILENAME, agent_slug, skip_empty_body=True
+    )
+    return found[1] if found else ""
 
 
 def core_rules_section(agent_slug: str | None = None) -> str:
@@ -493,9 +450,7 @@ def build_tick_prompt(
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
-    # Experiments (dry_run + run_once) keep no journal — the tick is captured as a
-    # dry-run snapshot instead. Mirrors TickEngine.is_experiment in engine.py.
-    is_experiment = execution_mode in ("dry_run", "run_once")
+    is_experiment = is_experiment_mode(execution_mode)
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
@@ -633,33 +588,7 @@ def build_tick_prompt(
         sections.append(_build_controller_mode_section(bot_name, ledger))
 
     # Risk state
-    rs = risk_state
-    max_dd = rs.get("max_drawdown_pct", -1)
-    dd_display = (
-        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-        if max_dd >= 0
-        else "disabled"
-    )
-    risk_lines = [
-        "[RISK STATE]",
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
-        f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
-        f"Drawdown: {dd_display}",
-    ]
-    # Only when one is set: a leverage limit is off by default ([[SEC-558]]),
-    # and a line reading "disabled" invites the agent to go looking for the
-    # ceiling. When it IS set, it has to be here — a limit the agent is not
-    # told about is a limit it will trip, and every create it makes on a perp
-    # has to declare a leverage at or under it.
-    max_leverage = rs.get("max_leverage", -1)
-    if max_leverage >= 0:
-        risk_lines.append(
-            f"Max Leverage: {max_leverage:g}x "
-            "(declare `leverage` on every create; omitting it is refused)"
-        )
-    risk_lines.append(
-        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}"
-    )
+    risk_lines = ["[RISK STATE]", *render_risk_lines(risk_state, bullet="")]
     sections.append("\n".join(risk_lines))
 
     # What the gate refused last tick, and why. The permission response the model

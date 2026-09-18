@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import { AccountDock } from "@/components/chat/AccountDock";
 import {
   DESK_PARAM,
@@ -22,6 +23,7 @@ import {
   rememberKnowledgeTab,
 } from "@/components/agent/knowledgeTabs";
 import { AgentPanel } from "@/components/chat/AgentPanel";
+import { AgentWiring } from "@/components/chat/AgentWiring";
 import {
   BrainPicker,
   type BrainSelection,
@@ -40,6 +42,7 @@ import {
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StrategySheet } from "@/components/chat/StrategySheet";
+import { usePaneGuard } from "@/components/chat/usePaneGuard";
 import { ShareChatButton } from "@/components/chat/ShareChatButton";
 import { WorkspaceRail } from "@/components/chat/WorkspaceRail";
 import {
@@ -54,12 +57,19 @@ import { webSessionKey } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
-import { normalizeAgentSlug } from "@/lib/agentSlug";
+import { normalizeAgentSlug, slotFor } from "@/lib/agentSlug";
+import {
+  pickFor,
+  sessionAgentKey,
+  type PendingPick,
+} from "@/lib/sessionAgentKey";
+import { agentsQuery } from "@/lib/queryClient";
 import {
   api,
   CHAT_SLUG,
   type AgentSummary,
   type ConversationMeta,
+  type Delegation,
 } from "@/lib/api";
 
 /** Openers offered when nothing is bound, and when something is. */
@@ -97,6 +107,14 @@ const AGENT_STARTERS: Starter[] = [
 type TalkIntent = "focus" | "fresh";
 
 /**
+ * The delegation list before the first poll lands, one identity: a `?? []`
+ * fallback is a fresh array per render, which would break `ContextDock`'s memo
+ * on every stream flush (PERF-394). Once loaded, react-query's structural
+ * sharing keeps the array stable between polls.
+ */
+const NO_DELEGATIONS: Delegation[] = [];
+
+/**
  * The chat workspace — what `/` opens on.
  *
  * A rail of who you can talk to and what you already said, a conversation
@@ -128,8 +146,12 @@ export function AgentChatTab() {
    * the only model control on this screen, so what it says has to be what the
    * next `start_session` carries — otherwise the pick is silently dropped.
    * `null` means "never touched it", which is what falls back to `defaultAgent`.
+   *
+   * Scoped to the agent the hero or panel was showing when it was picked, and
+   * only ever sent to a spawn with that agent (`sessionAgentKey`) — a bare key
+   * rode every later spawn and rewrote each specialist's AGENT.md model.
    */
-  const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
+  const [pendingPick, setPendingPick] = useState<PendingPick>(null);
   /**
    * What is in the pane — read from `?panel=`, so Escape and browser Back both
    * close it and a panel can be sent to someone (FEAT-103).
@@ -142,7 +164,12 @@ export function AgentChatTab() {
   const [libraryFocus, setLibraryFocus] = useState<LibraryFocus>({});
   const pane: PaneView = readPane(searchParams, libraryFocus);
 
-  const openPane = (next: PaneView) => {
+  /**
+   * Put `next` in the pane, unguarded — every caller goes through `openPane`
+   * below, which asks first when this would drop an agent panel's unsaved
+   * editor (CORR-395).
+   */
+  const applyPane = (next: PaneView) => {
     if (next?.kind === "routines") setLibraryFocus(next.focus);
     // The agent panel comes back on the section it was left on: which one that
     // is survives the close in this browser, because closing the pane takes the
@@ -177,13 +204,8 @@ export function AgentChatTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Same keys and intervals the fleet tab uses, so react-query dedupes rather
-  // than polling `/agents` twice.
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents"],
-    queryFn: api.getAgents,
-    refetchInterval: 10000,
-  });
+  // The shared roster: key and cadence live in `agentsQuery`.
+  const { data: agents = [] } = useQuery(agentsQuery());
   const { data: delegationData } = useQuery({
     queryKey: ["delegations"],
     queryFn: api.getDelegations,
@@ -247,13 +269,8 @@ export function AgentChatTab() {
         // not an answer — taking the *first* match sent "Open chat" back to the
         // oldest thread with that agent while the bubble on the page it came
         // from was showing another, and the two surfaces told the user
-        // different stories about which conversation they were in. Same rule as
-        // `adoptableSlot` in `ChatBubble`, deliberately.
-        const mine = slotsRef.current.filter(
-          (s) => (s.info.agent_slug || "") === slug,
-        );
-        const live =
-          mine.find((s) => s.info.slot_id === activeRef.current) ?? mine.at(-1);
+        // different stories about which conversation they were in.
+        const live = slotFor(slotsRef.current, slug, activeRef.current);
         if (live) {
           chat.setActiveSlotId(live.info.slot_id);
           if (opts?.text || opts?.files?.length)
@@ -266,7 +283,7 @@ export function AgentChatTab() {
         // needs a model named. Volunteering `defaultAgent` here is what used to
         // claim an override the user never made, so a bound Agent ran on
         // Condor's model instead of its own.
-        pendingAgentKey ?? (slug ? "" : defaultAgent),
+        sessionAgentKey(pendingPick, slug, defaultAgent),
         server || undefined,
         slug || undefined,
       );
@@ -282,7 +299,7 @@ export function AgentChatTab() {
       chat.setActiveSlotId,
       chat.startSession,
       defaultAgent,
-      pendingAgentKey,
+      pendingPick,
       server,
     ],
   );
@@ -401,9 +418,61 @@ export function AgentChatTab() {
    * "the agent I am talking to".
    */
   const openSlug = (pane?.kind === "agent" && pane.slug) || panelSlug;
+  /**
+   * Every door out of the agent panel — its own close, the rail's tile, a desk
+   * tile, the routine library, a strategy card, an Execution row naming another
+   * agent — is a call to this, so this is where an unsaved editor is asked
+   * about (CORR-395).
+   */
+  const paneGuard = usePaneGuard({ pane, panelSlug, apply: applyPane });
+  const openPane = paneGuard.openPane;
   const openAgent = agents.find((a) => a.slug === openSlug);
 
-  const runningTasks = (delegationData?.delegations ?? []).filter(
+  /**
+   * The agent panel's handlers, each under one identity while its inputs hold
+   * (PERF-393).
+   *
+   * `AgentKnowledge` is `memo`'d, and inline arrows here were new on every
+   * 50 ms stream flush, so the panel re-parsed the whole AGENT.md through
+   * ReactMarkdown twenty times a second while an answer streamed beside it.
+   * `openPane` and `talkTo` are stable and the rest are strings. Not keyed on
+   * `pane`: `readPane` builds a fresh object every render, so the section
+   * change rebuilds the agent pane from its scalar slug instead.
+   */
+  const paneSlug = pane?.kind === "agent" ? pane.slug : undefined;
+  const onPanelTabChange = useCallback(
+    (t: KnowledgeTabId) =>
+      openPane({
+        kind: "agent",
+        ...(paneSlug ? { slug: paneSlug } : {}),
+        tab: t,
+      }),
+    [openPane, paneSlug],
+  );
+  // The pane's routine house is the one FEAT-077 built; the panel hands it
+  // over rather than growing a second one.
+  const onPanelOpenRoutine = useCallback(
+    (name: string) => openPane({ kind: "routines", focus: { source: name } }),
+    [openPane],
+  );
+  // And a strategy card to the workbench sheet, which never went anywhere —
+  // FEAT-117 only stopped the panel from opening it.
+  const onPanelOpenStrategy = useCallback(
+    (sslug: string) =>
+      openPane({ kind: "strategy", agentSlug: openSlug, strategySlug: sslug }),
+    [openPane, openSlug],
+  );
+  // A revision is its own thread: `fresh`, not `focus`, so the request does not
+  // land under whatever unrelated thing this agent was last asked. The
+  // workspace itself stays put — the detail page has to navigate for this, the
+  // chat does not.
+  const onPanelAskAgent = useCallback(
+    (text: string) => talkTo(openSlug, { intent: "fresh", text }),
+    [talkTo, openSlug],
+  );
+
+  const delegations = delegationData?.delegations ?? NO_DELEGATIONS;
+  const runningTasks = delegations.filter(
     (d) => d.status === "running",
   ).length;
 
@@ -434,11 +503,34 @@ export function AgentChatTab() {
   });
   const conversationId = activeSlot?.info.conversation_id || "";
   const context = useContextPanels({
-    delegations: delegationData?.delegations ?? [],
+    delegations,
     conversationId,
     agentSlug: activeSlot?.info.agent_slug || "",
     libraryOpen: pane?.kind === "routines",
   });
+  // The dock is memoised (PERF-394), so what it is handed must hold across a
+  // stream flush. `activeSlot` is a new object on every flush, so the run
+  // context is keyed on the scalars it reads, never on the slot itself.
+  const runSlotId = activeSlot?.info.slot_id;
+  const runSlotServer = activeSlot?.info.server_name;
+  const runAgentSlug = activeSlot?.info.agent_slug;
+  const runUserId = user?.id;
+  const runContext = useMemo(
+    () =>
+      runSlotId !== undefined && runUserId !== undefined
+        ? {
+            serverName: runSlotServer || server || "",
+            sessionKey: webSessionKey(runUserId, runSlotId),
+            agentSlug: runAgentSlug || undefined,
+          }
+        : undefined,
+    [runSlotId, runSlotServer, runAgentSlug, runUserId, server],
+  );
+  const onLibraryChange = useCallback(
+    (focus: LibraryFocus | null) =>
+      openPane(focus ? { kind: "routines", focus } : null),
+    [openPane],
+  );
   return (
     <WorkspacePaneProvider>
       <div className="flex h-full min-h-0">
@@ -474,11 +566,14 @@ export function AgentChatTab() {
               split exists at all (see `WorkspacePane`), so below it this is the
               plain `min-w-0` column it has always been. */}
           <div className="flex min-w-0 flex-1 flex-col xl:min-w-[360px]">
-            {/* Which sessions are live, and the one door into whoever is
-                answering. Nothing else: the agent is named by its own tab and
-                again by the panel the button opens — a chip here repeating
-                both, plus the model and the server, was the same agent said
-                three times across one row. */}
+            {/* Which sessions are live: the rail toggle (narrow screens only)
+                and the session tabs. Nothing else, and no door to the agent
+                panel — that is the `WorkspaceRail` Agent tile (also reachable
+                from an Execution row and from closing a strategy sheet, all via
+                `openPane({ kind: "agent" })`). The agent is named by its own
+                tab and again by that panel — a chip here repeating both, plus
+                the model and the server, was the same agent said three times
+                across one row. */}
             <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
               <button
                 onClick={() => setRailOpen((v) => !v)}
@@ -561,7 +656,10 @@ export function AgentChatTab() {
                   modelOptions={modelOptions}
                   customProviders={customProviders}
                   agentBindings={agentBindings}
-                  selectedKey={pendingAgentKey ?? defaultAgent}
+                  selectedKey={
+                    pickFor(pendingPick, normalizeAgentSlug(heroAgent?.slug)) ??
+                    defaultAgent
+                  }
                   onAsk={(text, files) =>
                     talkTo(heroAgent?.slug || "", { text, files })
                   }
@@ -570,71 +668,75 @@ export function AgentChatTab() {
                   // the user highlighted.
                   onPickBrain={(sel) => {
                     if (sel.agentKey !== undefined)
-                      setPendingAgentKey(sel.agentKey);
+                      setPendingPick({
+                        slug: normalizeAgentSlug(heroAgent?.slug),
+                        key: sel.agentKey,
+                      });
                   }}
                 />
               }
             />
           </div>
 
-          {/* What a dock row or the header button opened, beside the
-              conversation rather than on top of it — so the agent that produced
-              the report is still there to ask about it. */}
+          {/* Whatever has claimed the pane — the agent panel, a strategy
+              sheet, the desk, the routine library — beside the conversation
+              rather than on top of it, so the agent that produced the report is
+              still there to ask about it. The doors are the `WorkspaceRail`
+              tiles at the far edge (plus an Execution row in the desk and a
+              pasted `?panel=`); the bar above the transcript carries none. */}
           <WorkspacePaneOutlet />
 
           {pane?.kind === "agent" && (
             <AgentPanel
+              // Keyed on whose panel it is: an Execution row re-slugging the
+              // pane must remount the sections, or the previous agent's open
+              // editor carries over, seeded with the next agent's text.
+              key={openSlug}
               slug={openSlug}
               name={openAgent?.name || "Condor"}
               // What the conversation runs on, in the panel's own bar — the
               // first thing waiting on the other side of the click.
-              slot={activeSlot}
-              pendingAgentKey={pendingAgentKey ?? defaultAgent}
-              ambientServer={server || ""}
-              agents={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              isStreaming={isActiveStreaming}
+              wiring={
+                <AgentWiring
+                  slot={activeSlot}
+                  pendingAgentKey={
+                    pickFor(pendingPick, normalizeAgentSlug(openSlug)) ??
+                    defaultAgent
+                  }
+                  ambientServer={server || ""}
+                  agents={modelOptions}
+                  customProviders={customProviders}
+                  agentBindings={agentBindings}
+                  isStreaming={isActiveStreaming}
+                  // With a session this moves the conversation; without one
+                  // it is the model the next `start_session` carries, which
+                  // is the same field the hero's picker sets.
+                  onSelectBrain={(sel) => {
+                    if (activeSlot) switchBrain(sel);
+                    else if (sel.agentKey !== undefined)
+                      setPendingPick({
+                        slug: normalizeAgentSlug(openSlug),
+                        key: sel.agentKey,
+                      });
+                  }}
+                  onSelectServer={(name) => {
+                    if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+                  }}
+                />
+              }
               // Which section is open lives on the home's query string
               // (FEAT-118), so Back steps through the seven and a pane open on
               // Tools can be sent to somebody.
               tab={pane.tab}
-              onTabChange={(t) => openPane({ ...pane, tab: t })}
-              // With a session this moves the conversation; without one it is
-              // the model the next `start_session` carries, which is the same
-              // field the hero's picker sets.
-              onSelectBrain={(sel) => {
-                if (activeSlot) switchBrain(sel);
-                else if (sel.agentKey !== undefined)
-                  setPendingAgentKey(sel.agentKey);
-              }}
-              onSelectServer={(name) => {
-                if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-              }}
-              // The pane's routine house is the one FEAT-077 built; the panel
-              // hands it over rather than growing a second one.
-              onOpenRoutine={(name) =>
-                openPane({ kind: "routines", focus: { source: name } })
-              }
-              // And a strategy card to the workbench sheet, which never went
-              // anywhere — FEAT-117 only stopped the panel from opening it.
-              onOpenStrategy={(sslug) =>
-                openPane({
-                  kind: "strategy",
-                  agentSlug: openSlug,
-                  strategySlug: sslug,
-                })
-              }
-              // A revision is its own thread: `fresh`, not `focus`, so the
-              // request does not land under whatever unrelated thing this
-              // agent was last asked. The workspace itself stays put — the
-              // detail page has to navigate for this, the chat does not.
-              onAskAgent={(text) =>
-                talkTo(openSlug, { intent: "fresh", text })
-              }
+              onTabChange={onPanelTabChange}
+              onOpenRoutine={onPanelOpenRoutine}
+              onOpenStrategy={onPanelOpenStrategy}
+              onAskAgent={onPanelAskAgent}
+              onDirtyChange={paneGuard.onPanelDirtyChange}
               onClose={() => openPane(null)}
             />
           )}
+          {paneGuard.dialog}
 
           {/* One of the agent's loops, on its own — opened by a strategy card
               in the panel, or from a pasted `?panel=strategy&loop=`. It
@@ -643,14 +745,16 @@ export function AgentChatTab() {
           {pane?.kind === "strategy" && (
             <StrategySheet
               key={`${pane.agentSlug}/${pane.strategySlug}`}
-              slug={pane.agentSlug}
-              sslug={pane.strategySlug}
+              pane={pane}
+              onPane={openPane}
               onClose={() =>
                 openPane({
                   kind: "agent",
                   // Back to the agent this sheet was opened from, which is not
                   // necessarily the conversation's since FEAT-114.
-                  ...(pane.agentSlug === panelSlug ? {} : { slug: pane.agentSlug }),
+                  ...(pane.agentSlug === panelSlug
+                    ? {}
+                    : { slug: pane.agentSlug }),
                 })
               }
             />
@@ -680,26 +784,16 @@ export function AgentChatTab() {
 
           <ContextDock
             panels={context}
-            delegations={delegationData?.delegations ?? []}
+            delegations={delegations}
             conversationId={activeSlot?.info.conversation_id || ""}
             agentSlug={activeSlot?.info.agent_slug || ""}
             agentName={boundAgent?.name}
             // A routine launched from the dock's library is this
             // conversation's: it runs on the server the chat is talking to,
             // reports back into it, and is filed under whoever is answering.
-            runContext={
-              activeSlot && user
-                ? {
-                    serverName: activeSlot.info.server_name || server || "",
-                    sessionKey: webSessionKey(user.id, activeSlot.info.slot_id),
-                    agentSlug: activeSlot.info.agent_slug || undefined,
-                  }
-                : undefined
-            }
+            runContext={runContext}
             library={pane?.kind === "routines" ? pane.focus : null}
-            onLibraryChange={(focus) =>
-              openPane(focus ? { kind: "routines", focus } : null)
-            }
+            onLibraryChange={onLibraryChange}
           />
         </div>
 

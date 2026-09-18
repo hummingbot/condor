@@ -6,6 +6,7 @@ is a mandate the agent cannot argue with: creates, deploys and signing DEX calls
 are refused while every exposure-reducing call is left alone.
 """
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -52,8 +53,6 @@ def test_the_verdict_reaches_the_prompt():
     engine = RiskEngine(RiskLimits(max_drift_quote=50.0))
     state = engine.get_state(
         SimpleNamespace(
-            get_total_exposure=lambda: 0.0,
-            get_open_executor_count=lambda: 0,
             get_drawdown_pct=lambda: 0.0,
         )
     )
@@ -62,6 +61,32 @@ def test_the_verdict_reaches_the_prompt():
     assert d["drift_quote"] is None
     assert d["drift_reason"] == ""
     assert d["max_drift_quote"] == 50.0
+
+
+def test_a_bare_state_reports_the_risk_limits_defaults():
+    """[[ARCH-675]]: limits are a real field; no literals re-state RiskLimits."""
+    defaults = RiskLimits()
+    d = RiskState().to_dict()
+    assert d["max_position_size"] == defaults.max_position_size_quote
+    assert d["max_open_executors"] == defaults.max_open_executors
+    assert d["max_drawdown_pct"] == defaults.max_drawdown_pct
+    assert d["shutdown_drawdown_pct"] == defaults.shutdown_drawdown_pct
+    assert d["max_drift_quote"] == defaults.max_drift_quote
+    assert d["max_leverage"] == defaults.max_leverage
+
+
+def test_get_state_carries_the_engine_limit_values_as_a_field():
+    limits = RiskLimits(max_position_size_quote=123.0, max_leverage=3.0)
+    engine = RiskEngine(limits)
+    state = engine.get_state(
+        SimpleNamespace(
+            get_drawdown_pct=lambda: 0.0,
+        )
+    )
+    assert "limits" in {f.name for f in dataclasses.fields(RiskState)}
+    assert state.limits is limits
+    assert state.to_dict()["max_position_size"] == 123.0
+    assert state.to_dict()["max_leverage"] == 3.0
 
 
 # ── Enabled and breached: creates refused ──

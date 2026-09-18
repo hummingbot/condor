@@ -141,7 +141,7 @@ describe("renderViewBlock", () => {
       {
         label: "Bot detail",
         subject: 'bot "backpack-mm-3" (id 42)',
-        onScreen: { PNL: "$-412.30", controllers: 3, "active executors": 12 },
+        onScreen: { PNL: "-$412.30", controllers: 3, "active executors": 12 },
       },
     ];
     const block = renderViewBlock(facts, "/bots/42");
@@ -149,7 +149,7 @@ describe("renderViewBlock", () => {
     expect(block).toContain("Screen: Bot detail");
     expect(block).toContain('About: bot "backpack-mm-3" (id 42)');
     expect(block).toContain(
-      "On screen: PNL $-412.30 · controllers 3 · active executors 12",
+      "On screen: PNL -$412.30 · controllers 3 · active executors 12",
     );
     expect(block).toContain("URL: /bots/42");
   });

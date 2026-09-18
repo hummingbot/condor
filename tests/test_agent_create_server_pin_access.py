@@ -102,5 +102,152 @@ def test_create_and_patch_config_enforce_the_same_rule_on_the_same_field(env):
         ).status_code
         == 403
     )
-    # The foreign pin never reached storage through either door.
+    # The raw AGENT.md route is a third door to the same field (SEC-693).
+    assert (
+        client.put(
+            "/agents/existing",
+            json={"content": f"---\nname: Existing\nserver_name: {THEIRS}\n---\n"},
+        ).status_code
+        == 403
+    )
+    # The foreign pin never reached storage through any door.
     assert AgentStore().get("existing").server_name in (None, "")
+
+
+# ── SEC-693: the raw-markdown and strategy-config writers of the same pin ──
+
+
+def _agent_md(server_name: str | None) -> str:
+    pin = f"server_name: {server_name}\n" if server_name is not None else ""
+    return f"---\nname: Existing\ndescription: d\n{pin}---\n\nBody.\n"
+
+
+def test_put_agent_md_naming_a_foreign_server_is_refused_and_writes_nothing(env):
+    agent = AgentStore().create(name="Existing", description="d")
+    before = (agent.home / "AGENT.md").read_bytes()
+
+    res = _client().put("/agents/existing", json={"content": _agent_md(THEIRS)})
+
+    assert res.status_code == 403
+    assert (agent.home / "AGENT.md").read_bytes() == before
+    assert AgentStore().get("existing").server_name in (None, "")
+
+
+@pytest.mark.parametrize("pin", [MINE, None, ""])
+def test_put_agent_md_with_own_or_no_pin_writes(env, pin):
+    AgentStore().create(name="Existing", description="d")
+
+    res = _client().put("/agents/existing", json={"content": _agent_md(pin)})
+
+    assert res.status_code == 200
+    assert AgentStore().get("existing").server_name == (pin or "")
+
+
+def test_put_agent_md_resending_the_stored_foreign_pin_is_a_round_trip(env):
+    """Re-saving a file someone else legitimately pinned must not 403."""
+    AgentStore().create(name="Existing", description="d", server_name=THEIRS)
+
+    res = _client().put("/agents/existing", json={"content": _agent_md(THEIRS)})
+
+    assert res.status_code == 200
+    assert AgentStore().get("existing").server_name == THEIRS
+
+
+def _existing_agent(env):
+    AgentStore().create(name="Existing", description="d")
+    return env / "existing" / "strategies"
+
+
+def test_create_strategy_with_a_foreign_server_is_refused_and_creates_nothing(env):
+    strategies = _existing_agent(env)
+
+    res = _client().post(
+        "/agents/existing/strategies",
+        json={"name": "Grid", "config": {"server_name": THEIRS}},
+    )
+
+    assert res.status_code == 403
+    assert not (strategies / "grid").exists()
+
+
+@pytest.mark.parametrize("config", [{"server_name": MINE}, {}])
+def test_create_strategy_with_own_or_no_pin_works(env, config):
+    strategies = _existing_agent(env)
+
+    res = _client().post(
+        "/agents/existing/strategies", json={"name": "Grid", "config": config}
+    )
+
+    assert res.status_code == 200
+    assert (strategies / "grid" / "strategy.md").exists()
+
+
+def _strategy(env, server_name: str | None = None):
+    from condor.agents.strategy import StrategyStore
+
+    _existing_agent(env)
+    defaults = {"server_name": server_name} if server_name else {}
+    return StrategyStore().create(
+        agent_slug="existing", name="Grid", default_config=defaults
+    )
+
+
+def test_update_strategy_config_with_a_foreign_server_is_refused(env):
+    strategy = _strategy(env)
+    config_yml = strategy.home / "config.yml"
+    before = config_yml.read_bytes() if config_yml.exists() else None
+
+    res = _client().put(
+        "/agents/existing/strategies/grid/config",
+        json={"config": {"server_name": THEIRS}},
+    )
+
+    assert res.status_code == 403
+    assert (config_yml.read_bytes() if config_yml.exists() else None) == before
+
+
+@pytest.mark.parametrize("stored,sent", [(THEIRS, THEIRS), (None, MINE)])
+def test_update_strategy_config_with_stored_or_own_pin_works(env, stored, sent):
+    strategy = _strategy(env, stored)
+
+    res = _client().put(
+        "/agents/existing/strategies/grid/config",
+        json={"config": {"server_name": sent}},
+    )
+
+    assert res.status_code == 200
+    assert routes._strategy_server(strategy.home, strategy.default_config) == sent
+
+
+def _strategy_md(server_name: str) -> str:
+    return (
+        "---\nname: Grid\ndefault_config:\n"
+        f"  server_name: {server_name}\n---\n\nPlaybook.\n"
+    )
+
+
+def test_put_strategy_md_naming_a_foreign_server_is_refused(env):
+    strategy = _strategy(env)
+    md = strategy.home / "strategy.md"
+    before = md.read_bytes()
+
+    res = _client().put(
+        "/agents/existing/strategies/grid", json={"content": _strategy_md(THEIRS)}
+    )
+
+    assert res.status_code == 403
+    assert md.read_bytes() == before
+
+
+@pytest.mark.parametrize("stored,sent", [(THEIRS, THEIRS), (None, MINE)])
+def test_put_strategy_md_with_stored_or_own_pin_writes(env, stored, sent):
+    from condor.agents.strategy import StrategyStore
+
+    _strategy(env, stored)
+
+    res = _client().put(
+        "/agents/existing/strategies/grid", json={"content": _strategy_md(sent)}
+    )
+
+    assert res.status_code == 200
+    assert StrategyStore().get("existing", "grid").default_config["server_name"] == sent

@@ -10,12 +10,16 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from condor.agents.attribution import (
+    OwnershipWindow,
     apply_bot_mode_pnl,
     current_owner_bases,
+    ownership_windows,
     session_ownership,
+    session_windows,
 )
 from condor.web.routes.agents import AgentPerformanceModel
 
@@ -68,14 +72,26 @@ def _session(num: int) -> AgentPerformanceModel:
 class _FakeClient:
     """Serves controller snapshots + per-instance cumulative history."""
 
-    def __init__(self, snapshots: list[dict], history: dict[str, list[dict]]):
+    def __init__(
+        self,
+        snapshots: list[dict],
+        history: dict[str, list[dict]],
+        active: list[str] | None = None,
+    ):
         self._snapshots = snapshots
         self._history = history
+        # What the orchestrator runs now; by default every snapshot bot is live.
+        self._active = (
+            [s["bot_name"] for s in snapshots] if active is None else list(active)
+        )
         self.history_calls: list[str] = []
         self.bot_orchestration = self
 
     async def get_latest_controller_performance(self):
         return self._snapshots
+
+    async def get_active_bots_status(self):
+        return {"data": {name: {} for name in self._active}}
 
     async def get_controller_performance_history(self, bot_name, interval, limit):
         self.history_calls.append(bot_name)
@@ -364,7 +380,9 @@ def test_session_detail_and_rollup_report_the_same_trade_count(monkeypatch, tmp_
 
     client.executors = SimpleNamespace(search_executors=_no_executors)
     detail = asyncio.run(
-        fetch_agent_performance(client, "a_1", bot_names=["ns-bot"], since=_epoch(T0))
+        fetch_agent_performance(
+            client, "a_1", windows={"ns-bot": OwnershipWindow(_epoch(T0))}
+        )
     )
 
     rollup = next(s for s in _rollup(monkeypatch, tmp_path, client)[0])
@@ -736,10 +754,9 @@ def test_rollup_and_agent_view_agree_on_an_adopted_bot():
         agent_client = _FakeClient(snapshots=snapshots, history=history)
         agent_client.executors = SimpleNamespace(search_executors=_no_executors)
         owned = session_ownership(tmp_path, None, 1)
-        since = min(b.since for b in owned)
         detail = asyncio.run(
             fetch_agent_performance(
-                agent_client, "a_1", bot_names=[b.base for b in owned], since=since
+                agent_client, "a_1", windows=ownership_windows(owned)
             )
         )
 
@@ -750,6 +767,9 @@ def test_rollup_and_agent_view_agree_on_an_adopted_bot():
         assert s1.trade_count == detail.trade_count == 3
         assert s1.unrealized_pnl == detail.unrealized_pnl == 7.0
         assert s1.fees_known and detail.fees_known
+        # The per-bot slice the totals were folded from stays on the result, so
+        # the deployment ledger's bot row reads the same figure (CORR-661).
+        assert detail.base_windows == {"ns-bot": (60.0, 5000.0, 3, 5.0)}
 
 
 def _both_surfaces(tmp_path: Path, history: dict, snapshots: list[dict]):
@@ -776,11 +796,8 @@ def _both_surfaces(tmp_path: Path, history: dict, snapshots: list[dict]):
     agent_client = _FakeClient(snapshots=snapshots, history=history)
     agent_client.executors = SimpleNamespace(search_executors=_no_executors)
     owned = session_ownership(tmp_path, None, 1)
-    since = min(b.since for b in owned)
     detail = asyncio.run(
-        fetch_agent_performance(
-            agent_client, "a_1", bot_names=[b.base for b in owned], since=since
-        )
+        fetch_agent_performance(agent_client, "a_1", windows=ownership_windows(owned))
     )
     return s1, detail
 
@@ -845,3 +862,680 @@ def test_no_fees_anywhere_still_reads_as_unknown_on_both_surfaces(tmp_path):
     assert s1.fees == detail.fees == 0.0
     assert s1.fees_known is detail.fees_known is False
     assert s1.volume == detail.volume == 5000.0
+
+
+class _SnapshotDownClient(_FakeClient):
+    """The whole-server snapshot errors while the archived listing still works."""
+
+    def __init__(self, history: dict[str, list[dict]], archived: list[str]):
+        super().__init__(snapshots=[], history=history)
+        self.snapshot_calls = 0
+        paths = [f"bots/archived/{n}/data/{n}.sqlite" for n in archived]
+
+        async def _list_databases():
+            return paths
+
+        from types import SimpleNamespace
+
+        self.archived_bots = SimpleNamespace(list_databases=_list_databases)
+
+    async def get_latest_controller_performance(self):
+        self.snapshot_calls += 1
+        raise RuntimeError("controller-performance/latest timed out")
+
+
+def test_rollup_still_attributes_archived_pnl_when_the_live_snapshot_fails():
+    """A snapshot outage must not zero the rollup while the session detail survives.
+
+    Both surfaces start from ``fetch_bot_universe``, whose policy is one: a
+    failed snapshot degrades to an empty live set, and a stopped bot's realized
+    PnL still resolves through the archived listing — on the strategy rollup
+    (``apply_bot_mode_pnl``) exactly as on the agent's own view.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from condor.agents.performance import fetch_agent_performance
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_history_cache,
+        clear_snapshot_cache,
+    )
+
+    def _clear():
+        clear_snapshot_cache()
+        clear_archived_cache()
+        clear_history_cache()
+
+    _clear()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            sd1 = _write_session(tmp_path, 1)
+            _write_ledger(sd1, {"ns-bot": _epoch(T2)})
+
+            inst = "ns-bot-20260701-000000"
+            history = {
+                inst: [
+                    _hist_row(T0, 0.0, cum_volume=0.0, cum_fees=0.0),
+                    _hist_row(T2, 40.0, cum_volume=4000.0, cum_fees=4.0),
+                    _hist_row(T3, 100.0, cum_volume=9000.0, cum_fees=9.0),
+                ]
+            }
+
+            rollup_client = _SnapshotDownClient(history, archived=[inst])
+            s1 = _session(1)
+            asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, rollup_client))
+            assert rollup_client.snapshot_calls == 1
+
+            async def _no_executors(**_kw):
+                return []
+
+            agent_client = _SnapshotDownClient(history, archived=[inst])
+            agent_client.executors = SimpleNamespace(search_executors=_no_executors)
+            owned = session_ownership(tmp_path, None, 1)
+            detail = asyncio.run(
+                fetch_agent_performance(
+                    agent_client, "a_1", windows=ownership_windows(owned)
+                )
+            )
+
+            # The stopped bot's post-takeover slice, not a silent $0.
+            assert s1.realized_pnl == detail.realized_pnl == 60.0
+            assert s1.volume == detail.volume == 5000.0
+            assert s1.fees == detail.fees == 5.0
+    finally:
+        _clear()
+
+
+def test_bot_universe_degrades_a_failed_snapshot_to_an_empty_live_set():
+    """The shared prelude never raises on a snapshot outage and keeps the archive."""
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_snapshot_cache,
+        fetch_bot_universe,
+    )
+
+    clear_snapshot_cache()
+    clear_archived_cache()
+    try:
+        client = _SnapshotDownClient({}, archived=["b-2", "a-1"])
+        assert asyncio.run(fetch_bot_universe(client)) == ({}, ["a-1", "b-2"])
+
+        healthy = _FakeClient(
+            snapshots=[_snap("live-bot", T3, realized=5.0)], history={}
+        )
+        live, archived = asyncio.run(fetch_bot_universe(healthy))
+        assert set(live) == {"live-bot"} and archived == []
+    finally:
+        clear_snapshot_cache()
+        clear_archived_cache()
+
+
+def test_bot_universe_checked_reports_whether_the_snapshot_failed():
+    """CORR-700: the degrade is invisible to attribution but visible to a cache.
+
+    ``fetch_bot_universe`` answers ``{}`` for both a failed snapshot and a server
+    with no bots, which is right for rendering and wrong for deciding whether the
+    render is worth storing — so the checked variant carries the one bit that
+    tells them apart.
+    """
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_snapshot_cache,
+        fetch_bot_universe_checked,
+    )
+
+    clear_snapshot_cache()
+    clear_archived_cache()
+    try:
+        down = _SnapshotDownClient({}, archived=["a-1"])
+        assert asyncio.run(fetch_bot_universe_checked(down)) == ({}, ["a-1"], True)
+
+        # An empty but healthy server is not degraded.
+        empty = _FakeClient(snapshots=[], history={})
+        assert asyncio.run(fetch_bot_universe_checked(empty)) == ({}, [], False)
+
+        healthy = _FakeClient(
+            snapshots=[_snap("live-bot", T3, realized=5.0)], history={}
+        )
+        live, archived, degraded = asyncio.run(fetch_bot_universe_checked(healthy))
+        assert set(live) == {"live-bot"} and archived == [] and degraded is False
+    finally:
+        clear_snapshot_cache()
+        clear_archived_cache()
+
+
+# ── PERF-681: the snapshot and the archived listing are fetched together ──
+
+
+class _GatedUniverseClient(_FakeClient):
+    """The snapshot only returns once the archived listing has been requested.
+
+    No ``base_url``, so neither cache nor SingleFlight is involved: a prelude that
+    awaits the snapshot before starting the archived listing deadlocks here.
+    """
+
+    def __init__(self, history, archived, snapshot_fails=False):
+        super().__init__(snapshots=[], history=history)
+        self._listed = asyncio.Event()
+        self._snapshot_fails = snapshot_fails
+        paths = [f"bots/archived/{n}/data/{n}.sqlite" for n in archived]
+
+        async def _list_databases():
+            self._listed.set()
+            return paths
+
+        from types import SimpleNamespace
+
+        self.archived_bots = SimpleNamespace(list_databases=_list_databases)
+
+    async def get_latest_controller_performance(self):
+        await self._listed.wait()
+        if self._snapshot_fails:
+            raise RuntimeError("controller-performance/latest timed out")
+        return self._snapshots
+
+
+@pytest.mark.parametrize("snapshot_fails", [False, True])
+def test_bot_universe_fetches_snapshot_and_archive_concurrently(
+    tmp_path, snapshot_fails
+):
+    """All three attribution sites complete against the gated fake, same figures."""
+    from condor.agents.performance import (
+        fetch_agent_performance_batch,
+        fetch_agent_pnl_series,
+    )
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_history_cache,
+        clear_live_names_cache,
+        clear_snapshot_cache,
+        fetch_bot_universe,
+    )
+
+    def _clear():
+        clear_snapshot_cache()
+        clear_archived_cache()
+        clear_history_cache()
+        clear_live_names_cache()
+
+    inst = "ns-bot-20260701-000000"
+    history = {
+        inst: [
+            _hist_row(T0, 0.0),
+            _hist_row(T2, 40.0, cum_volume=4000.0),
+            _hist_row(T3, 100.0, cum_volume=9000.0),
+        ]
+    }
+
+    def _client():
+        return _GatedUniverseClient(history, [inst], snapshot_fails=snapshot_fails)
+
+    async def _bounded(coro):
+        return await asyncio.wait_for(coro, 5.0)
+
+    _clear()
+    try:
+        assert asyncio.run(_bounded(fetch_bot_universe(_client()))) == ({}, [inst])
+
+        sd1 = _write_session(tmp_path, 1)
+        _write_ledger(sd1, {"ns-bot": _epoch(T2)})
+        s1 = _session(1)
+        asyncio.run(_bounded(apply_bot_mode_pnl([s1], tmp_path, None, _client())))
+        assert s1.realized_pnl == 60.0
+
+        series = asyncio.run(
+            _bounded(fetch_agent_pnl_series(_client(), ["ns-bot"], _epoch(T2)))
+        )
+        assert series and series[-1]["pnl"] == 60.0
+
+        batch = asyncio.run(
+            _bounded(
+                fetch_agent_performance_batch(
+                    _executorless(_client()),
+                    ["a_1"],
+                    bot_names={"a_1": ["ns-bot"]},
+                    windows={"a_1": {"ns-bot": OwnershipWindow(_epoch(T2))}},
+                )
+            )
+        )
+        assert batch["a_1"].realized_pnl == 60.0
+    finally:
+        _clear()
+
+
+# ── ARCH-690: one AgentPerformance -> AgentPerformanceModel projection ──
+
+
+def _every_field_perf():
+    from condor.agents.performance import AgentPerformance
+
+    return AgentPerformance(
+        agent_id="demo.s_3",
+        realized_pnl=1.5,
+        unrealized_pnl=-0.25,
+        total_pnl=1.25,
+        volume=900.0,
+        fees=0.75,
+        trade_count=4,
+        win_rate=0.5,
+        open_count=1,
+        closed_count=3,
+        executors=[{"id": "ex1", "custom_info": {"k": 1}}],
+        bot_names=["bot-a"],
+        bot_instances=["bot-a-1", "bot-a-2"],
+        controllers=[{"id": "ctrl-1"}],
+        close_type_counts={"CloseType.TAKE_PROFIT": 2},
+        fees_known=False,
+        unresolved_bases=["gone-bot"],
+        base_windows={"bot-a": (1.5, 900.0, 3.0, 0.75)},
+        pnl_series=[{"timestamp": "2026-07-01T00:00:00+00:00", "pnl": 1.5}],
+    )
+
+
+def test_from_perf_carries_every_dataclass_field():
+    from dataclasses import fields
+
+    from condor.agents.performance import AgentPerformance
+
+    p = _every_field_perf()
+    # Guard the fixture itself: every field must differ from its default, or a
+    # dropped field would still compare equal.
+    default = AgentPerformance(agent_id="other")
+    for f in fields(p):
+        assert getattr(p, f.name) != getattr(default, f.name), f.name
+
+    dumped = AgentPerformanceModel.from_perf(p, agent_id=p.agent_id).model_dump()
+    shared = [f.name for f in fields(p) if f.name in AgentPerformanceModel.model_fields]
+    assert len(shared) == len(fields(p))  # the model covers the whole dataclass
+    for name in shared:
+        assert dumped[name] == getattr(p, name), name
+    assert "bot_name" not in dumped
+
+    assert AgentPerformanceModel.from_perf(p, session_num=7).session_num == 7
+    model = AgentPerformanceModel.from_perf(
+        p, agent_id="override", kind="experiment", error=True
+    )
+    assert (model.agent_id, model.kind, model.error) == ("override", "experiment", True)
+
+
+def test_instance_from_engine_takes_money_fields_off_the_perf_row(monkeypatch):
+    import condor.agents.fleet_map as fleet_map
+    from condor.web.routes.agents import _instance_from_engine
+
+    monkeypatch.setattr(fleet_map, "read_last_action", lambda journal: "")
+    monkeypatch.setattr(fleet_map, "read_last_did", lambda engine: None)
+
+    class _Engine:
+        journal = None
+
+        def get_info(self):
+            return {
+                "agent_id": "demo.s_3",
+                "session_num": 3,
+                "status": "running",
+                "tick_count": 9,
+                "daily_pnl": 42.0,
+            }
+
+    row = AgentPerformanceModel.from_perf(_every_field_perf(), session_num=3)
+    inst = _instance_from_engine(_Engine(), {"demo.s_3": row})
+    assert not hasattr(inst, "daily_pnl")
+    for name in (
+        "realized_pnl",
+        "unrealized_pnl",
+        "total_pnl",
+        "volume",
+        "fees",
+        "open_count",
+        "closed_count",
+        "win_rate",
+    ):
+        assert getattr(inst, name) == getattr(row, name), name
+
+    bare = _instance_from_engine(_Engine(), {})
+    assert bare.total_pnl == 42.0
+    assert (bare.realized_pnl, bare.open_count) == (0.0, 0)
+    assert bare.win_rate is None
+
+
+# ── ARCH-662: the ownership window is the unit both surfaces slice over ──
+
+
+def _executorless(client: "_FakeClient") -> "_FakeClient":
+    """The agent-side fetch also walks agent_id-tagged executors; these have none."""
+    from types import SimpleNamespace
+
+    async def _no_executors(**_kw):
+        return []
+
+    client.executors = SimpleNamespace(search_executors=_no_executors)
+    return client
+
+
+def _released_fixture(tmp_path: Path) -> tuple[list[dict], dict]:
+    """test_released_session_stops_accruing_a_surviving_bot's session and bot."""
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)}, until={"ns-bot": _epoch(T2)})
+    inst = "ns-bot-20260701-000000"
+    position = {
+        "trading_pair": "BTC-USD",
+        "connector_name": "hyperliquid",
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 100.0,
+        "unrealized_pnl_quote": 7.0,
+    }
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0, positions=[position])]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)]}
+    return snapshots, history
+
+
+def test_session_detail_stops_accruing_after_release(tmp_path):
+    """A finished session's detail reports its rollup row, not $0 and not $100."""
+    from condor.agents.performance import fetch_agent_performance
+
+    snapshots, history = _released_fixture(tmp_path)
+
+    windows = session_windows(tmp_path, None, [1], 1)
+    assert windows == {"ns-bot": OwnershipWindow(_epoch(T0), _epoch(T2))}
+    detail = asyncio.run(
+        fetch_agent_performance(
+            _executorless(_FakeClient(snapshots, history)), "a_1", windows=windows
+        )
+    )
+
+    s1 = _session(1)
+    asyncio.run(
+        apply_bot_mode_pnl([s1], tmp_path, None, _FakeClient(snapshots, history))
+    )
+
+    assert detail.realized_pnl == s1.realized_pnl == 40.0
+    assert detail.unrealized_pnl == s1.unrealized_pnl == 0.0
+    assert detail.open_count == s1.open_count == 0
+    assert detail.executors == []  # the open rows belong to nobody now
+
+
+def test_session_detail_route_prices_a_released_session(monkeypatch, tmp_path):
+    """The route itself: KPI and curve both stop at the release instant."""
+    from condor.web.routes import agents as mod
+
+    snapshots, history = _released_fixture(tmp_path)
+    client = _executorless(_FakeClient(snapshots, history))
+
+    async def _fake_client(*_a, **_kw):
+        return client, "srv"
+
+    monkeypatch.setattr(
+        mod,
+        "_get_strategy",
+        lambda slug, sslug: type("S", (), {"home": tmp_path, "default_config": {}})(),
+    )
+    monkeypatch.setattr(mod, "_get_client_for_strategy", _fake_client)
+    monkeypatch.setattr(mod, "_strategy_principal", lambda *_a: None)
+    monkeypatch.setattr(
+        mod,
+        "enumerate_agent_ids",
+        lambda run_key, home: [(f"{run_key}_1", 1, "session")],
+    )
+
+    out = asyncio.run(mod.get_session_executors("ns", "st", 1, user=object()))
+
+    perf = out["performance"]
+    assert perf["realized_pnl"] == 40.0
+    assert perf["unrealized_pnl"] == 0.0 and perf["open_count"] == 0
+    assert out["pnl_series"][-1]["pnl"] == 40.0
+    # The deployment row is still not live: the gate for display is unchanged.
+    assert [r["live"] for r in out["deployments"] if r["kind"] == "bot"] == [False]
+
+
+def test_two_bases_adopted_at_different_instants_are_sliced_per_base(tmp_path):
+    """One scalar ``since`` credited ns-b with PnL from before its own takeover."""
+    from condor.agents.performance import fetch_agent_performance
+
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-a": _epoch(T0), "ns-b": _epoch(T2)})
+    a_inst, b_inst = "ns-a-20260701-000000", "ns-b-20260701-000000"
+    snapshots = [_snap(a_inst, T3, realized=10.0), _snap(b_inst, T3, realized=100.0)]
+    history = {
+        a_inst: [_hist_row(T0, 0.0), _hist_row(T3, 10.0)],
+        b_inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)],
+    }
+
+    s1 = _session(1)
+    asyncio.run(
+        apply_bot_mode_pnl([s1], tmp_path, None, _FakeClient(snapshots, history))
+    )
+    detail = asyncio.run(
+        fetch_agent_performance(
+            _executorless(_FakeClient(snapshots, history)),
+            "a_1",
+            windows=ownership_windows(session_ownership(tmp_path, None, 1)),
+        )
+    )
+
+    # ns-a over [T0, now) = 10, ns-b over [T2, now) = 60.
+    assert detail.realized_pnl == s1.realized_pnl == 70.0
+
+
+def test_session_detail_stops_at_the_next_owners_takeover(tmp_path):
+    """Session 1's ledger never saw session 2 adopt; the tiling cuts it anyway."""
+    from condor.agents.performance import fetch_agent_performance
+
+    _write_ledger(_write_session(tmp_path, 1), {"ns-bot": _epoch(T0)})
+    _write_ledger(_write_session(tmp_path, 2), {"ns-bot": _epoch(T2)})
+    inst = "ns-bot-20260701-000000"
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0)]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)]}
+
+    w1 = session_windows(tmp_path, None, [1, 2], 1)
+    w2 = session_windows(tmp_path, None, [1, 2], 2)
+    assert w1 == {"ns-bot": OwnershipWindow(_epoch(T0), _epoch(T2))}
+    assert w2 == {"ns-bot": OwnershipWindow(_epoch(T2))}
+    # The open window and the current-owner gate are one rule.
+    assert current_owner_bases(tmp_path, None, [1, 2], 1) == []
+    assert current_owner_bases(tmp_path, None, [1, 2], 2) == ["ns-bot"]
+
+    s1, s2 = _session(1), _session(2)
+    asyncio.run(
+        apply_bot_mode_pnl([s1, s2], tmp_path, None, _FakeClient(snapshots, history))
+    )
+    d1, d2 = (
+        asyncio.run(
+            fetch_agent_performance(
+                _executorless(_FakeClient(snapshots, history)), f"a_{n}", windows=w
+            )
+        )
+        for n, w in ((1, w1), (2, w2))
+    )
+
+    assert d1.realized_pnl == s1.realized_pnl == 40.0
+    assert d1.unrealized_pnl == s1.unrealized_pnl == 0.0
+    assert d2.realized_pnl == s2.realized_pnl == 60.0
+    assert d2.unrealized_pnl == s2.unrealized_pnl == 7.0
+
+
+def test_ownership_windows_close_at_release_or_handover_whichever_first():
+    from condor.agents.ownership import OwnedBot
+
+    owned = [
+        OwnedBot(base="held", origin="deployed", since=10.0, last_seen=10.0),
+        OwnedBot(
+            base="released", origin="adopted", since=10.0, last_seen=10.0, until=50.0
+        ),
+        OwnedBot(
+            base="taken", origin="deployed", since=20.0, last_seen=20.0, until=90.0
+        ),
+    ]
+    windows = ownership_windows(owned, handovers={"taken": 40.0, "held": 0.0})
+
+    assert windows == {
+        "held": OwnershipWindow(10.0, 0.0),
+        "released": OwnershipWindow(10.0, 50.0),
+        "taken": OwnershipWindow(20.0, 40.0),
+    }
+    assert windows["held"].is_open and not windows["taken"].is_open
+    assert windows["held"].bounds(99.0) == (10.0, 99.0)
+
+
+def test_window_span_runs_to_now_while_any_window_is_open():
+    from condor.agents.attribution import window_span
+
+    closed = {"a": OwnershipWindow(30.0, 40.0), "b": OwnershipWindow(10.0, 60.0)}
+    assert window_span(closed) == (10.0, 60.0)
+    assert window_span({**closed, "c": OwnershipWindow(50.0)}) == (10.0, 0.0)
+    assert window_span({}) == (0.0, 0.0)
+
+
+def test_executors_provider_slices_each_owned_base_to_its_own_window(monkeypatch):
+    """The tick carries the ledger unflattened, never ``min(since)``."""
+    from condor.agents.ownership import OwnedBot
+    from condor.agents.performance import AgentPerformance
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    captured: dict = {}
+
+    async def _fake(client, agent_id, bot_names=None, windows=None, **_kw):
+        captured.update(bot_names=bot_names, windows=windows)
+        return AgentPerformance(agent_id=agent_id)
+
+    monkeypatch.setattr("condor.agents.performance.fetch_agent_performance", _fake)
+    owned = [
+        OwnedBot(base="ns-a", origin="deployed", since=100.0, last_seen=1.0),
+        OwnedBot(base="ns-b", origin="adopted", since=300.0, last_seen=1.0),
+    ]
+    asyncio.run(
+        ExecutorsProvider().execute(
+            object(), {}, agent_id="a_1", bot_names=["ns-a", "ns-b"], owned=owned
+        )
+    )
+
+    assert captured["windows"] == {
+        "ns-a": OwnershipWindow(100.0),
+        "ns-b": OwnershipWindow(300.0),
+    }
+
+
+def test_merge_stopped_bot_perf_alias_is_gone():
+    import condor.agents.performance as perf_mod
+
+    assert not hasattr(perf_mod, "_merge_stopped_bot_perf")
+
+
+# ── CORR-633: a stopped bot's final snapshot is not the live book ──
+
+
+def _stopped_bot_fixture(tmp_path: Path):
+    """A session still owning ``ns-bot`` (never released) whose instance stopped."""
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)})
+    inst = "ns-bot-20260701-000000"
+    position = {
+        "trading_pair": "BTC-USD",
+        "connector_name": "hyperliquid",
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 100.0,
+        "unrealized_pnl_quote": 7.0,
+    }
+    snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0, positions=[position])]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0)]}
+    return inst, snapshots, history
+
+
+def _run_both(tmp_path: Path, make_client):
+    from condor.agents.performance import fetch_agent_performance
+
+    s1 = _session(1)
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, make_client()))
+    detail = asyncio.run(
+        fetch_agent_performance(
+            _executorless(make_client()),
+            "a_1",
+            windows=session_windows(tmp_path, None, [1], 1),
+        )
+    )
+    return s1, detail
+
+
+def test_a_stopped_bots_final_snapshot_is_not_the_live_book(tmp_path):
+    inst, snapshots, history = _stopped_bot_fixture(tmp_path)
+
+    s1, detail = _run_both(tmp_path, lambda: _FakeClient(snapshots, history, active=[]))
+
+    for surface in (s1, detail):
+        assert surface.realized_pnl == 100.0  # still realized, from the history
+        assert surface.unrealized_pnl == 0.0  # the frozen mark is nobody's
+        assert surface.open_count == 0
+        assert surface.executors == []
+    assert inst in detail.bot_instances
+    assert inst not in detail.bot_names
+    # The deploy stays listed for the report, marked with no open book.
+    assert [c["bot_name"] for c in detail.controllers] == [inst]
+    assert detail.controllers[0]["unrealized_pnl_quote"] == 0.0
+    assert detail.controllers[0]["positions_summary"] == []
+
+
+class _NoListingClient(_FakeClient):
+    """A backend (or double) whose active-bots listing raises."""
+
+    async def get_active_bots_status(self):
+        raise RuntimeError("listing down")
+
+
+class _ErrorListingClient(_FakeClient):
+    async def get_active_bots_status(self):
+        return {"status": "error", "message": "boom"}
+
+
+@pytest.mark.parametrize("client_cls", [_NoListingClient, _ErrorListingClient])
+def test_an_unknown_liveness_keeps_todays_attribution(tmp_path, client_cls):
+    """No listing means 'unknown', never 'nothing is live'."""
+    _inst, snapshots, history = _stopped_bot_fixture(tmp_path)
+
+    s1, detail = _run_both(tmp_path, lambda: client_cls(snapshots, history))
+
+    assert s1.unrealized_pnl == detail.unrealized_pnl == 7.0
+    assert s1.open_count == detail.open_count == 1
+
+
+def test_a_client_without_the_listing_is_unknown_liveness():
+    from condor.fetchers.bot_performance import fetch_live_instance_names
+
+    class _Bare:
+        bot_orchestration = object()
+
+    assert asyncio.run(fetch_live_instance_names(_Bare())) is None
+
+
+def test_live_names_are_cached_per_server_but_a_failure_is_not():
+    from condor.fetchers.bot_performance import (
+        clear_live_names_cache,
+        fetch_live_instance_names,
+    )
+
+    class _Counting:
+        base_url = "http://corr633"
+
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+            self.bot_orchestration = self
+
+        async def get_active_bots_status(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("down")
+            return {"status": "success", "data": {"b-1": {"status": "running"}}}
+
+    clear_live_names_cache()
+    try:
+        client = _Counting()
+        assert asyncio.run(fetch_live_instance_names(client)) is None
+        client.fail = False
+        assert asyncio.run(fetch_live_instance_names(client)) == {"b-1"}
+        assert asyncio.run(fetch_live_instance_names(client)) == {"b-1"}
+        assert client.calls == 2  # the failure was retried, the success cached
+    finally:
+        clear_live_names_cache()

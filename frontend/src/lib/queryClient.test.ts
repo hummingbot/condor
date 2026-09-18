@@ -17,12 +17,19 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { venuesQueryKey } from "@/components/market/useVenues";
+import { api, type AgentDetail } from "@/lib/api";
 import {
+  AGENT_REFETCH_MS,
+  AGENT_STALE_MS,
+  AGENTS_REFETCH_MS,
+  agentQuery,
+  agentsQuery,
   CONTROLLER_PERF_ROOTS,
   controllerPerfHistoryAllQuery,
   controllerPerfHistoryQuery,
   credentialsQuery,
   executorsQuery,
+  hasRunningLoop,
   invalidateCredentialQueries,
   invalidateServerScopedQueries,
   parseControllerPerfHistoryKey,
@@ -427,5 +434,100 @@ describe("controller performance-history keys", () => {
       parseControllerPerfHistoryKey(["controller-perf-history", PREVIOUS, CTRL, START, INTERVAL]),
     ).toBeNull();
     expect(parseControllerPerfHistoryKey(executorsQuery(PREVIOUS).queryKey)).toBeNull();
+  });
+});
+
+/**
+ * Pins the one declaration of `["agent", slug]` (ARCH-380).
+ *
+ * react-query drives a shared key at the shortest interval any observer
+ * declares, so a copy of this query that loses the running-loop gate silently
+ * re-opens the 5s poll of the most expensive read on the workspace (PERF-343).
+ * Every observer now spreads `agentQuery`; this checks the gate it carries.
+ */
+describe("agentQuery / hasRunningLoop", () => {
+  const withStatuses = (...statuses: string[]) =>
+    ({
+      strategies: statuses.map((status, i) => ({ slug: `s${i}`, name: `S${i}`, status })),
+    }) as unknown as AgentDetail;
+
+  type GateArg = Parameters<ReturnType<typeof agentQuery>["refetchInterval"]>[0];
+  const gate = (data: AgentDetail | undefined) =>
+    agentQuery("x").refetchInterval({ state: { data } } as unknown as GateArg);
+
+  it("builds the ['agent', slug] key", () => {
+    expect(agentQuery("x").queryKey).toEqual(["agent", "x"]);
+  });
+
+  it("polls every 5s only while some strategy is running", () => {
+    expect(AGENT_REFETCH_MS).toBe(5000);
+    expect(gate(withStatuses("stopped", "running"))).toBe(5000);
+    expect(gate(withStatuses("stopped", "paused"))).toBe(false);
+    expect(gate(withStatuses())).toBe(false);
+    expect(gate(undefined)).toBe(false);
+  });
+
+  it("declares its own staleTime and stays disabled without a slug", () => {
+    expect(agentQuery("x").staleTime).toBe(AGENT_STALE_MS);
+    expect(agentQuery("x").enabled).toBe(true);
+    expect(agentQuery("").enabled).toBe(false);
+  });
+
+  it("hasRunningLoop is false for a missing agent", () => {
+    expect(hasRunningLoop(undefined)).toBe(false);
+    expect(hasRunningLoop(withStatuses("running"))).toBe(true);
+  });
+});
+
+/**
+ * Pins the one declaration of `["agents"]` (ARCH-414).
+ *
+ * Four surfaces used to hand-copy this query at 10s, 10s, none and 30s; since
+ * a shared key polls at the shortest interval any observer declares, whichever
+ * literal was mounted set everyone's cadence. The key value itself is shared
+ * contract (`pageFacts` reads it from the cache), so it must not move.
+ */
+describe("agentsQuery", () => {
+  let observerClient: QueryClient;
+  const unsubscribers: Array<() => void> = [];
+
+  beforeEach(() => {
+    observerClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  });
+
+  afterEach(() => {
+    unsubscribers.splice(0).forEach((u) => u());
+    observerClient.clear();
+    vi.restoreAllMocks();
+  });
+
+  const observe = (opts?: { enabled?: boolean }) => {
+    const observer = new QueryObserver(observerClient, agentsQuery(opts));
+    unsubscribers.push(observer.subscribe(() => {}));
+    return observer;
+  };
+
+  it("keeps the ['agents'] key and the one shared cadence", () => {
+    expect(agentsQuery().queryKey).toEqual(["agents"]);
+    expect(agentsQuery().refetchInterval).toBe(AGENTS_REFETCH_MS);
+    expect(agentsQuery({ enabled: false }).refetchInterval).toBe(AGENTS_REFETCH_MS);
+    expect(AGENTS_REFETCH_MS).toBe(10_000);
+  });
+
+  it("two observers share one request", async () => {
+    const getAgents = vi.spyOn(api, "getAgents").mockResolvedValue([]);
+    observe();
+    observe();
+    await vi.waitFor(() =>
+      expect(observerClient.getQueryState(["agents"])?.status).toBe("success"),
+    );
+    expect(getAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it("a disabled observer never fetches", async () => {
+    const getAgents = vi.spyOn(api, "getAgents").mockResolvedValue([]);
+    observe({ enabled: false });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(getAgents).not.toHaveBeenCalled();
   });
 });

@@ -9,9 +9,7 @@ from .agent import Agent, AgentStore
 from .config import (
     AgentConfig,
     RiskLimitsConfig,
-    load_agent_config,
     load_full_config,
-    save_agent_config,
     save_full_config,
 )
 from .engine import TickEngine
@@ -24,9 +22,7 @@ __all__ = [
     "AgentStore",
     "AgentConfig",
     "RiskLimitsConfig",
-    "load_agent_config",
     "load_full_config",
-    "save_agent_config",
     "save_full_config",
     "TickEngine",
     "JournalManager",

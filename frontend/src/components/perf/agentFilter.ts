@@ -20,6 +20,7 @@ import type { DeploymentRow } from "@/lib/api";
 import {
   inNamespace,
   ownerRowLabel,
+  splitRunKey,
   stripDeploySuffix,
   type DeedIndex,
   type FleetOwner,
@@ -270,8 +271,6 @@ export function runChipLabel(sessionNum: number): string {
  */
 export function runOwner(scopeId: string): { slug: string; sslug: string } | null {
   if (!scopeId.startsWith("agent:")) return null;
-  const key = scopeId.slice(6);
-  const dot = key.indexOf(".");
-  if (dot <= 0 || dot === key.length - 1) return null;
-  return { slug: key.slice(0, dot), sslug: key.slice(dot + 1) };
+  const { agent, strategy } = splitRunKey(scopeId.slice(6));
+  return agent && strategy ? { slug: agent, sslug: strategy } : null;
 }

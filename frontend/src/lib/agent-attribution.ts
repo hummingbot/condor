@@ -139,44 +139,6 @@ export function inNamespace(name: string, ns: string): boolean {
   return name === ns || name.startsWith(`${ns}-`);
 }
 
-/**
- * The run key of the strategy that owns this bot, or `""` for none.
- *
- * Longest namespace first. The `-` delimiter already makes the rule
- * unambiguous, so this can only matter if a slug convention ever changes; it
- * costs one sort of a handful of owners and mirrors `partition_instances`
- * (`condor/fetchers/bot_performance.py`), which orders the same way for the
- * same reason.
- *
- * The declared fallback matches by the *same* rule rather than by equality,
- * because that is what the runtime does (`BotLedger.owns` calls `in_namespace`
- * on each declared name): a legacy base and its tagged siblings are one bot's
- * family, and crediting only the base would strand its instances.
- */
-export function agentOfBot(owners: FleetOwner[], botName: string): string {
-  // The name-only half of `attributionOf` below, which owns the rule: passing no
-  // deed index leaves exactly the two enforced rules, which is what this asks.
-  return attributionOf(owners, null, botName).runKey;
-}
-
-/**
- * The run key of the strategy whose session tagged this executor, or `""`.
- *
- * A standalone executor an agent created carries its session's `agent_id`
- * (`"{runKey}_{N}"`) as its `controller_id` — `create_*_executor` is refused
- * otherwise, so there is no untagged agent executor and no guessing to do here.
- * A controller's `controller_id` is a config id and matches nothing, which is
- * right: a controller is attributed through its *bot*.
- */
-export function agentOfControllerId(owners: FleetOwner[], controllerId: string): string {
-  const id = (controllerId || "").trim();
-  if (!id) return "";
-  for (const owner of owners) {
-    if (owner.agentIds.includes(id)) return owner.runKey;
-  }
-  return "";
-}
-
 // ── Whose trading is this, when no name proves it (FEAT-106) ──
 
 /**
@@ -267,9 +229,9 @@ export type Attributor = (botName: string, controllerId?: string) => Attribution
  * **The answers are identical, not merely equivalent.** The comparator, the
  * array it sorts and the sort's stability are the same, so `byLength` is the
  * same order the per-record sort produced; and the id map is filled in owner
- * order keeping the first writer, which is the owner the linear scan in
- * {@link agentOfControllerId} returned. The rule order — namespace, declared,
- * controller-id tag, deed chain — is unchanged.
+ * order keeping the first writer, so a tag two owners both list goes to the
+ * earlier owner. The rule order — namespace, declared, controller-id tag, deed
+ * chain — is unchanged.
  */
 export function attributionIndex(
   owners: FleetOwner[],
@@ -320,8 +282,9 @@ export function attributionIndex(
  * bot's deploy chain (see {@link deployNameChain}), and a chain is two names long
  * on every bot that was deployed once.
  *
- * One record, one index: a caller with a loop wants {@link attributionIndex}
- * instead, which is where the rule now lives.
+ * A single-record convenience only: it builds a whole index per call, so any
+ * caller that folds over records — a `for`, `map` or `filter` body — takes
+ * {@link attributionIndex} once above the loop instead (PERF-331, PERF-409).
  */
 export function attributionOf(
   owners: FleetOwner[],
@@ -400,8 +363,18 @@ export function isPseudoRunKey(runKey: string): boolean {
  * without the fleet map in hand: the node id already carries the answer.
  */
 export function runKeyLabel(runKey: string): string {
-  const dot = runKey.indexOf(".");
-  return dot < 0 ? runKey : `${runKey.slice(0, dot)} / ${runKey.slice(dot + 1)}`;
+  const { agent, strategy } = splitRunKey(runKey);
+  return strategy ? `${agent} / ${strategy}` : runKey;
+}
+
+/**
+ * An owner's display names: `"Brigado / BRL MM"`, each half falling back to
+ * its slug when the map carries no name. The one spelling of that format —
+ * `ownerTitle` looks the owner up and returns this, and a caller already
+ * holding the `FleetOwner` calls it directly.
+ */
+export function ownerDisplayName(owner: FleetOwner): string {
+  return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
 }
 
 /**
@@ -414,7 +387,7 @@ export function runKeyLabel(runKey: string): string {
 export function ownerTitle(owners: readonly FleetOwner[], runKey: string): string {
   const owner = ownerOf(owners, runKey);
   if (!owner) return runKeyLabel(runKey);
-  return `${owner.agentName || owner.agentSlug} / ${owner.strategyName || owner.strategySlug}`;
+  return ownerDisplayName(owner);
 }
 
 /**

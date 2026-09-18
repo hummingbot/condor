@@ -17,13 +17,10 @@ import { useChat, useSessionOptions } from "@/hooks/useChat";
 import type { ChatSlot } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
 import { useStarters } from "@/hooks/useStarters";
-import {
-  bubbleAgentSlug,
-  isAgentPage,
-  normalizeAgentSlug,
-} from "@/lib/agentSlug";
-import { api, CHAT_SLUG } from "@/lib/api";
+import { bubbleAgentSlug, isAgentPage, slotFor } from "@/lib/agentSlug";
+import { CHAT_SLUG } from "@/lib/api";
 import { routeFacts } from "@/lib/pageFacts";
+import { agentsQuery } from "@/lib/queryClient";
 import { BUBBLE_OPEN_KEY } from "@/lib/sessionState";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 
@@ -51,7 +48,7 @@ import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 export function ChatBubble() {
   const chat = useChat();
   const { server } = useServer();
-  const { pathname, search } = useLocation();
+  const { pathname, search, state: locationState } = useLocation();
   const navigate = useNavigate();
 
   const [open, setOpen] = useState<boolean>(() => {
@@ -70,14 +67,9 @@ export function ChatBubble() {
   const [seen, setSeen] = useState<Record<string, number>>({});
 
   // Everything below is only needed with the panel open, so the fetch is
-  // gated — and carries no refetchInterval: the workspace's own query key, so
-  // react-query dedupes when both are mounted.
+  // gated. Key and cadence: `agentsQuery`.
   const { defaultAgent, agents: modelOptions } = useSessionOptions(open);
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents"],
-    queryFn: api.getAgents,
-    enabled: open,
-  });
+  const { data: agents = [] } = useQuery(agentsQuery({ enabled: open }));
 
   const slug = bubbleAgentSlug(pathname);
   const storedId = slotBySlug[slug];
@@ -185,7 +177,10 @@ export function ChatBubble() {
     // Hijacking `activeSlotId` is right here: it is the gesture that asks
     // for the conversation to become the workspace's.
     if (slot && slotId) chat.setActiveSlotId(slotId);
-    navigate("/");
+    // A page expanded out of the chat's side panel knows the way back to it
+    // (`PaneReturnState`), so the panel comes back open on what was showing.
+    const returnTo = (locationState as { returnTo?: unknown } | null)?.returnTo;
+    navigate(typeof returnTo === "string" && returnTo.startsWith("/") ? returnTo : "/");
   };
 
   return (
@@ -277,10 +272,6 @@ export function ChatBubble() {
  * is append-ordered by `startSession` / `resumeConversation`, so the newest
  * conversation with this agent is the one the user was most recently in.
  *
- * The slot's own binding is normalized because a conversation resumed from a
- * record written before the slugs were reconciled can still carry the
- * registry's spelling.
- *
  * Read-only with respect to the workspace: the caller must not focus what it
  * adopts. `startSession(..., { focus: false })` and `permissionFor` being a
  * selector exist precisely so a second surface can drive a slot it did not
@@ -298,12 +289,7 @@ function adoptableSlot(
   activeSlotId: string | null,
 ): ChatSlot | null {
   if (!isAgentPage(pathname)) return null;
-  const mine = slots.filter(
-    (s) => normalizeAgentSlug(s.info.agent_slug) === slug,
-  );
-  return (
-    mine.find((s) => s.info.slot_id === activeSlotId) ?? mine.at(-1) ?? null
-  );
+  return slotFor(slots, slug, activeSlotId);
 }
 
 /**

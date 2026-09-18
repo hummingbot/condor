@@ -93,3 +93,15 @@ def test_the_walk_asks_for_no_hardcoded_page_size():
     asyncio.run(fetch_agent_performance_batch(client, ["agent-1"]))
 
     assert client.limits == [EXECUTORS_PAGE_SIZE]
+
+
+def test_walk_uses_the_fetchers_response_shape_extractor():
+    """ARCH-683: the response-shape rule for ``search_executors`` lives only in
+    ``condor.fetchers.executors``; the agents side must not keep a private copy."""
+    import condor.agents.performance as performance
+    import condor.fetchers.executors as fetchers_executors
+
+    assert not hasattr(performance, "_extract_executors_list")
+    assert (
+        performance.extract_executors_list is fetchers_executors.extract_executors_list
+    )

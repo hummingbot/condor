@@ -21,7 +21,9 @@ local server is a normal state (the user simply isn't running it), reported as
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -68,6 +70,14 @@ _BARE_INSTALL = {
     "claude-agent-acp": "npm install -g @agentclientprotocol/claude-agent-acp",
 }
 
+# The package behind ``claude-agent-acp`` and the oldest release verified to bill
+# Claude correctly. Its predecessor, @zed-industries/claude-agent-acp, still
+# launches but is deprecated and frozen at 0.23: the Claude CLI it bundles bills
+# Sonnet 4.6 at Opus rates (every conversation cost read 5/3 too high) and it
+# knows no model newer than the 4.6 family.
+CLAUDE_BRIDGE_PACKAGE = "@agentclientprotocol/claude-agent-acp"
+CLAUDE_BRIDGE_MIN_VERSION = (0, 79, 0)
+
 _START_COMMANDS = {
     "ollama": "start it with `ollama serve`",
     "lmstudio": "start LM Studio and enable its local server",
@@ -94,6 +104,7 @@ class Readiness:
     state: str  # READY | UNVERIFIED | MISSING
     detail: str  # human sentence; when not READY it names the fix
     models: list[str] = field(default_factory=list)  # local server models; [] elsewhere
+    upgrade: str = ""  # shell line that brings an outdated bridge current; "" if none
 
     @property
     def usable(self) -> bool:
@@ -187,6 +198,72 @@ def install_command(cmd: str) -> str:
     return f"install `{cmd.split()[0] if parts else cmd}` and put it on PATH"
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(p) for p in version.split("-")[0].split(".")[:3])
+    except ValueError:
+        return (0,)
+
+
+def _global_npm_package(command: str) -> tuple[str, str, str] | None:
+    """``(name, version, npm)`` of the global npm package providing ``command``.
+
+    ``npm`` is the npm of the prefix that package lives in, not whichever npm is
+    first on PATH: a machine with two Node installs (Homebrew plus an nvm or a
+    tool-bundled one) otherwise upgrades a copy nothing launches. ``None`` when
+    the command is absent or was not installed by npm.
+    """
+    exe = shutil.which(command)
+    if not exe:
+        return None
+    for parent in Path(os.path.realpath(exe)).parents:
+        manifest = parent / "package.json"
+        if not manifest.is_file():
+            continue
+        try:
+            data = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            return None
+        name = data.get("name")
+        if not name:
+            continue
+        # <prefix>/lib/node_modules/[@scope/]<name>
+        roots = [p for p in parent.parents if p.name == "node_modules"]
+        npm = roots[0].parent.parent / "bin" / "npm" if roots else None
+        if npm is None or not npm.exists():
+            npm = shutil.which("npm")
+        if not npm:
+            return None
+        return name, str(data.get("version", "")), str(npm)
+    return None
+
+
+def outdated_bridge(cmd: str) -> dict | None:
+    """``{installed, fix}`` when the bridge behind ``cmd`` needs upgrading, else None.
+
+    Only the Claude bridge is checked. ``fix`` is one shell line: the deprecated
+    package has to be uninstalled first, since both packages own the same
+    ``claude-agent-acp`` bin and npm refuses to overwrite another package's link.
+    """
+    parts = cmd.split()
+    if not parts or parts[0] != "claude-agent-acp":
+        return None
+    found = _global_npm_package(parts[0])
+    if found is None:
+        return None
+    name, version, npm = found
+    if (
+        name == CLAUDE_BRIDGE_PACKAGE
+        and _version_tuple(version) >= CLAUDE_BRIDGE_MIN_VERSION
+    ):
+        return None
+    steps = []
+    if name != CLAUDE_BRIDGE_PACKAGE:
+        steps.append(shlex.join([npm, "uninstall", "-g", name]))
+    steps.append(shlex.join([npm, "install", "-g", f"{CLAUDE_BRIDGE_PACKAGE}@latest"]))
+    return {"installed": f"{name} {version}".strip(), "fix": " && ".join(steps)}
+
+
 def acp_bridges() -> list[dict]:
     """ACP CLI bridges: whether each is installed, and whether it is logged in.
 
@@ -211,6 +288,7 @@ def acp_bridges() -> list[dict]:
                 "command": cmd,
                 "available": available,
                 "logged_in": acp_login_state(base) if available else None,
+                "outdated": outdated_bridge(cmd) if available else None,
             }
         )
     return out
@@ -247,6 +325,15 @@ def _bridge_readiness(entry: dict) -> Readiness:
     base, cmd = entry["agent_key"], entry["command"]
     if not entry["available"]:
         return Readiness(MISSING, f"not installed — {install_command(cmd)}")
+    outdated = entry.get("outdated")
+    if outdated:
+        # Launchable, so never MISSING — but not READY either: it runs a stale
+        # CLI that misprices and cannot pick current models.
+        return Readiness(
+            UNVERIFIED,
+            f"outdated ({outdated['installed']}) — {outdated['fix']}",
+            upgrade=outdated["fix"],
+        )
     login = _LOGIN_COMMANDS.get(base, cmd)
     if entry.get("logged_in") is True:
         return Readiness(READY, "installed and logged in")

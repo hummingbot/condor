@@ -1,0 +1,126 @@
+import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+
+import { isLiveRun } from "@/components/agent/lab/runs";
+import {
+  alertsFor,
+  journalNamesDeploy,
+  type WorkspaceAlert,
+} from "@/components/agent/workspace/views";
+import {
+  api,
+  type AgentPerformance,
+  type AgentRunRow,
+  type DeploymentRow,
+} from "@/lib/api";
+import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-agent";
+
+/**
+ * One run's whole reading: its journal, actions and session-executors responses
+ * are read once here and handed out as alerts, decisions, journal, deployments,
+ * perf, pnlSeries and sessionNum.
+ *
+ * Still three queries and still the tick spine's and the detail bands' own, key
+ * for key, so react-query hands every caller the same cache entries and the
+ * whole screen makes one round of requests.
+ *
+ * The journal's and the action log's polling is set here, once, for the same
+ * reason (CORR-369): react-query polls a shared key at the shortest interval
+ * among its observers, so this declaration refreshes the spine and the Runs
+ * tab's ticks too — which is why neither declares one. Gated on
+ * a live run, so a finished run costs no polls at all; without it the last
+ * decision, the failed-action alert and the spine froze at page open while the
+ * countdown kept moving.
+ */
+export function useRunReading({
+  slug,
+  sslug,
+  run,
+}: {
+  slug: string;
+  sslug: string | null;
+  run: AgentRunRow | null;
+}): {
+  alerts: WorkspaceAlert[];
+  /** The run's decisions, newest last — the journal's own order. */
+  decisions: Decision[];
+  /** The whole journal, for the bands that want its metrics and its summary. */
+  journal: ParsedJournal | null;
+  deployments: DeploymentRow[];
+  /** What the run's records are worth — the vitals strip's own numbers. */
+  perf: AgentPerformance | null;
+  /** Realized PnL over the run, derived from the bots' own history. */
+  pnlSeries: { timestamp: string; pnl: number }[] | null;
+  /** 0 when the scope has no session run, which is what gates every query. */
+  sessionNum: number;
+} {
+  const sessionNum = run && run.kind === "session" && sslug ? run.number : 0;
+  const enabled = !!sslug && sessionNum > 0;
+  const liveInterval = run && isLiveRun(run) ? LIVE_RUN_REFETCH_MS : false;
+
+  const { data: journalData } = useQuery({
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "journal"],
+    queryFn: () => api.getSessionJournal(slug, sslug!, sessionNum),
+    enabled,
+    refetchInterval: liveInterval,
+  });
+
+  const { data: actionsData } = useQuery({
+    queryKey: ["session-actions", slug, sslug, sessionNum],
+    queryFn: () => api.getSessionActions(slug, sslug!, sessionNum),
+    enabled,
+    refetchInterval: liveInterval,
+  });
+
+  const { data: perfData } = useQuery({
+    queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
+    queryFn: () => api.getStrategySessionExecutors(slug, sslug!, sessionNum),
+    enabled,
+    // Gated on the run, not on the live engine: the strategy's engine may be
+    // running a different session than the one on screen (PERF-384).
+    refetchInterval: liveInterval,
+  });
+
+  // Hoisted rather than reached through in the dependency list: the compiler
+  // infers the whole `journalData` as the dependency and refuses to preserve a
+  // memo whose declared one is narrower.
+  const journalContent = journalData?.content;
+  const journal = useMemo(
+    () => (journalContent ? parseJournal(journalContent) : null),
+    [journalContent],
+  );
+  const decisions = journal?.decisions ?? EMPTY_DECISIONS;
+
+  const actions = actionsData?.actions;
+  const deployments = perfData?.deployments;
+  const alerts = useMemo(
+    () =>
+      alertsFor({
+        actions: actions ?? [],
+        deployments: (deployments ?? []).length,
+        journalNamesDeploy: journalNamesDeploy(decisions),
+        // No overdue alert here (READ-424): the loop bar above the tabs already
+        // counts a late tick in amber, and never unmounts. Fleet rows, which
+        // have no loop bar, still raise it through `fleetAlerts`.
+        loop: null,
+        nowSec: 0,
+      }),
+    [actions, deployments, decisions],
+  );
+
+  return {
+    alerts,
+    decisions,
+    journal,
+    deployments: deployments ?? [],
+    perf: perfData?.performance ?? null,
+    pnlSeries: perfData?.pnl_series ?? null,
+    sessionNum,
+  };
+}
+
+/** How often a live run's journal and action log are re-read — the vitals' own cadence. */
+const LIVE_RUN_REFETCH_MS = 10_000;
+
+/** One frozen empty list, so "no journal yet" is a stable identity. */
+const EMPTY_DECISIONS: Decision[] = [];

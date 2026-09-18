@@ -393,3 +393,56 @@ def test_the_marker_does_not_eat_a_slot_in_the_agents_recent_decisions(
     recent = journal.get_recent_decisions(count=3).splitlines()
     assert len(recent) == 3
     assert all(l.startswith("- **#") for l in recent)
+
+
+# --- snapshot file retention (CORR-651) ------------------------------------
+
+
+def _save_snapshot(journal: JournalManager, tick: int) -> None:
+    journal.save_full_snapshot(
+        tick=tick,
+        timestamp="2026-09-17 00:00",
+        system_prompt="prompt",
+        response_text="response",
+        tool_calls=[],
+        executors_data="",
+        risk_state={},
+        duration=0.1,
+    )
+
+
+def _snapshot_ticks(journal: JournalManager) -> list[int]:
+    return sorted(
+        int(f.stem.split("_", 1)[1])
+        for f in journal._snapshots_dir.glob("snapshot_*.md")
+        if f.stem.split("_", 1)[1].isdigit()
+    )
+
+
+def test_snapshot_retention_drops_the_oldest_tick_not_the_lexicographically_smallest(
+    journal, monkeypatch
+):
+    """snapshot_{tick}.md is unpadded: snapshot_10 sorts before snapshot_9."""
+    monkeypatch.setattr(journal_mod, "MAX_SNAPSHOTS", 5)
+    for t in range(1, 14):
+        _save_snapshot(journal, t)
+
+    assert _snapshot_ticks(journal) == [9, 10, 11, 12, 13]
+
+
+def test_a_stray_snapshot_named_file_is_neither_counted_nor_removed(
+    journal, monkeypatch
+):
+    monkeypatch.setattr(journal_mod, "MAX_SNAPSHOTS", 3)
+    journal._snapshots_dir.mkdir(parents=True, exist_ok=True)
+    stray = journal._snapshots_dir / "snapshot_notes.md"
+    stray.write_text("hand-written notes")
+
+    for t in range(1, 4):
+        _save_snapshot(journal, t)
+    assert _snapshot_ticks(journal) == [1, 2, 3]  # the stray took no slot
+
+    for t in range(4, 7):
+        _save_snapshot(journal, t)
+    assert _snapshot_ticks(journal) == [4, 5, 6]
+    assert stray.read_text() == "hand-written notes"

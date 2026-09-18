@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from condor.agents.attribution import OwnershipWindow
 from condor.agents.config import AgentConfig, load_full_config
 from condor.agents.performance import (
     AgentPerformance,
@@ -392,11 +393,11 @@ def test_merge_is_disjoint_addition():
     # Without bot_name: executor-only behavior.
     base = asyncio.run(fetch_agent_performance(client, agent_id))
     assert base.realized_pnl == 4.0
-    assert base.bot_name == ""
+    assert base.bot_names == []
 
     # With bot_name "river": adds river's 7/7/1500 on top, no double count.
     merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["river"]))
-    assert merged.bot_name == "river"
+    assert merged.bot_names == ["river"]
     assert merged.realized_pnl == 4.0 + 7.0
     assert merged.unrealized_pnl == 7.0
     assert merged.total_pnl == merged.realized_pnl + merged.unrealized_pnl
@@ -429,7 +430,7 @@ def test_merge_appends_bot_positions_as_rows():
     # base name resolves suffix-tolerantly to the deployed instance
     merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["dn-mm"]))
     # bot_name reflects the resolved deployed instance, not just the base
-    assert merged.bot_name == "dn-mm-20260724-1"
+    assert merged.bot_names == ["dn-mm-20260724-1"]
     assert len(merged.executors) == 1
     assert merged.executors[0]["pair"] == "XYZ:CL-USD"
     assert merged.open_count == 1
@@ -522,7 +523,7 @@ def test_no_snapshot_leaves_executor_totals_unchanged():
     no_bot = asyncio.run(fetch_agent_performance(client, agent_id))
     # bot_name set but no matching snapshot → totals identical to executor-only.
     ghost = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["ghost"]))
-    assert ghost.bot_name == "ghost"
+    assert ghost.bot_names == ["ghost"]
     assert ghost.unrealized_pnl == no_bot.unrealized_pnl == 2.0
     assert ghost.total_pnl == no_bot.total_pnl
     assert ghost.controllers == []
@@ -532,10 +533,18 @@ def test_batch_merges_only_named_agents():
     a1, a2 = "river.scalp_1", "plain.scalp_1"
     client = _FakeClient(rows_by_id={})
     out = asyncio.run(fetch_agent_performance_batch(client, [a1, a2], {a1: ["river"]}))
-    assert out[a1].bot_name == "river"
+    assert out[a1].bot_names == ["river"]
     assert out[a1].realized_pnl == 7.0
-    assert out[a2].bot_name == ""  # not named → untouched, executor-only
+    assert out[a2].bot_names == []  # not named → untouched, executor-only
     assert out[a2].realized_pnl == 0.0
+
+
+def test_agent_performance_has_no_single_bot_shims():
+    # READ-685: the single-bot wire is gone (FEAT-018); every reader uses the
+    # ``bot_names`` list, and the wire model projects fields via from_perf.
+    perf = AgentPerformance(agent_id="a.s_1", bot_names=["river"])
+    assert not hasattr(perf, "bot_name")
+    assert not hasattr(perf, "to_dict")
 
 
 # ── Config field ──
@@ -774,10 +783,10 @@ def _capture_provider_fetch(monkeypatch) -> dict:
 
     captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_names=None, since=0.0):
+    async def _fake_fetch(client, agent_id, bot_names=None, windows=None, **_kw):
         captured["agent_id"] = agent_id
         captured["bot_names"] = bot_names
-        captured["since"] = since
+        captured["windows"] = windows
         return _AP(agent_id=agent_id, bot_names=list(bot_names or []))
 
     monkeypatch.setattr(
@@ -802,7 +811,7 @@ def test_executors_provider_falls_back_to_config_bot_name(monkeypatch):
     assert captured == {
         "agent_id": "river.scalp_1",
         "bot_names": ["river"],
-        "since": 0.0,  # no ledger → no takeover instant → unsliced, as before
+        "windows": {},  # no ledger → no takeover instant → unsliced, as before
     }
 
 
@@ -962,7 +971,7 @@ def test_adopted_bot_pnl_is_sliced_to_the_sessions_window():
 
     perf = asyncio.run(
         fetch_agent_performance(
-            client, "ns.strat_2", bot_names=["ns-bot"], since=took_over
+            client, "ns.strat_2", windows={"ns-bot": OwnershipWindow(took_over)}
         )
     )
 
@@ -1356,8 +1365,8 @@ def test_a_stopped_bots_realized_pnl_reaches_the_agent():
         fetch_agent_performance(
             client,
             "directional_trader.ema_trend_loop_1",
-            bot_names=["ema_trend_loop"],
-            since=1786052340.0,  # 2026-08-06 21:39 UTC, the session's first tick
+            # 2026-08-06 21:39 UTC, the session's first tick
+            windows={"ema_trend_loop": OwnershipWindow(1786052340.0)},
         )
     )
 
@@ -1396,7 +1405,9 @@ def test_a_base_with_no_instance_anywhere_is_flagged_not_zeroed():
 
     perf = asyncio.run(
         fetch_agent_performance(
-            client, "agent.strat_1", bot_names=["vanished_bot"], since=1786052340.0
+            client,
+            "agent.strat_1",
+            windows={"vanished_bot": OwnershipWindow(1786052340.0)},
         )
     )
 
@@ -1480,6 +1491,63 @@ def test_pnl_series_is_continuous_across_a_redeploy():
     assert pnls == [0.0, -0.3053, -0.3053, -0.7688]
     # And it ends where the KPI does.
     assert pnls[-1] == pytest.approx(-0.3053 + -0.4635, abs=1e-4)
+
+
+def test_pnl_series_from_histories_matches_the_network_fetch():
+    """PERF-639: the pure merge over fetched histories IS the standalone curve."""
+    from condor.agents.performance import (
+        fetch_agent_pnl_series,
+        pnl_series_from_histories,
+    )
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        fetch_archived_instances,
+        fetch_base_histories,
+    )
+
+    clear_archived_cache()
+    since, end = 1786052340.0, 1786200000.0
+    history = {
+        "loop-20260806-213931": [
+            _hist_row("2026-08-06T22:00:00+00:00", "btc", 0.0, 193.0),
+            _hist_row("2026-08-06T22:45:00+00:00", "btc", -0.3053, 386.19),
+        ],
+        "loop-20260807-022130": [
+            _hist_row("2026-08-07T02:22:00+00:00", "btc", 0.0, 193.05),
+            _hist_row("2026-08-07T03:27:00+00:00", "btc", -0.4635, 385.84),
+        ],
+    }
+
+    class _Archived:
+        async def list_databases(self):
+            return [f"{n}.sqlite" for n in history]
+
+    class _Orch:
+        async def get_latest_controller_performance(self, bot_name=None):
+            return {"data": []}
+
+        async def get_controller_performance_history(self, bot_name, **kw):
+            return {"data": history.get(bot_name, [])}
+
+    client = SimpleNamespace(
+        base_url="", bot_orchestration=_Orch(), archived_bots=_Archived()
+    )
+
+    async def _both():
+        archived = await fetch_archived_instances(client)
+        histories = await fetch_base_histories(
+            client, {}, ["loop"], since, end, extra_names=archived
+        )
+        return (
+            pnl_series_from_histories(histories, since, end),
+            await fetch_agent_pnl_series(client, ["loop"], since, until=end),
+        )
+
+    derived, fetched = asyncio.run(_both())
+
+    assert [round(p["pnl"], 4) for p in derived] == [0.0, -0.3053, -0.3053, -0.7688]
+    assert derived == fetched
+    assert pnl_series_from_histories({}, since, end) == []
 
 
 def test_pnl_series_is_empty_without_an_owned_bot():

@@ -7,8 +7,12 @@ sibling's drift is its own.
 """
 
 import asyncio
+import logging
 
+import aiohttp
 import pytest
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 from condor.agents.providers import ProviderRegistry, get_provider, list_core_providers
 from condor.agents.providers.drift import DriftProvider, owned_controller_ids
@@ -113,18 +117,41 @@ def test_a_mismatch_reaches_the_summary_and_the_worst_quote():
 # ── A venue that does not answer ──
 
 
-def test_a_venue_exception_yields_unanswered_and_not_a_crash():
-    client = _Client(tracked=[_held()], venue_raises=RuntimeError("connection reset"))
-    result = _run(client)
+def _http_error(status=500, message="Internal Server Error"):
+    """What the hummingbot client raises: ``str()`` carries the backend URL."""
+    url = URL("http://10.0.0.5:8000/x")
+    info = aiohttp.RequestInfo(url, "GET", CIMultiDictProxy(CIMultiDict()), url)
+    return aiohttp.ClientResponseError(info, (), status=status, message=message)
+
+
+def test_a_venue_exception_yields_unanswered_and_not_a_crash(caplog):
+    client = _Client(tracked=[_held()], venue_raises=_http_error())
+    with caplog.at_level(logging.WARNING, logger="condor.agents.providers.drift"):
+        result = _run(client)
     assert result.data["trusted"] is False
-    assert "connection reset" in result.data["reason"]
+    assert result.data["reason"] == "Internal Server Error"
     assert [r["verdict"] for r in result.data["report"]["rows"]] == ["unanswered"]
     assert "DID NOT ANSWER" in result.summary
+    assert "10.0.0.5" not in result.summary
+    # The URL is kept out of the prompt, not lost: it reaches the server log.
+    records = [r for r in caplog.records if r.name == "condor.agents.providers.drift"]
+    assert len(records) == 1
+    assert "10.0.0.5" in logging.Formatter().formatException(records[0].exc_info)
+
+
+def test_an_unreachable_venue_reason_is_the_generic_line():
+    client = _Client(
+        tracked=[_held()],
+        venue_raises=aiohttp.ClientConnectionError("connection reset"),
+    )
+    result = _run(client)
+    assert result.data["reason"] == "the trading API is unreachable"
 
 
 def test_the_unanswered_reason_is_clipped():
-    client = _Client(tracked=[], venue_raises=RuntimeError("x" * 400))
+    client = _Client(tracked=[], venue_raises=_http_error(422, "x" * 400))
     result = _run(client)
+    assert result.data["reason"].startswith("x")
     assert len(result.data["reason"]) <= 120
 
 
@@ -137,6 +164,108 @@ def test_a_failing_tracked_fetch_degrades_through_the_registry():
     results = asyncio.run(ProviderRegistry().run_core_providers(client, {}))
     assert results["drift"].summary == "(provider drift failed)"
     assert results["drift"].data == {}
+
+
+def test_run_core_providers_is_the_registrys_only_runner():
+    """READ-684: no by-name runner that would call ``execute`` without the agent scope."""
+    runners = [n for n in vars(ProviderRegistry) if n.startswith("run_")]
+    assert runners == ["run_core_providers"]
+
+
+# ── PERF-640: independent reads go out together ──
+
+
+class _GatedProvider:
+    """A core provider that finishes only once all three have started."""
+
+    is_core = True
+
+    def __init__(self, name, started, all_started, raises=None):
+        self.name = name
+        self.started = started
+        self.all_started = all_started
+        self.raises = raises
+
+    async def execute(self, client, config, **kwargs):
+        from condor.agents.providers.base import ProviderResult
+
+        self.started.append(self.name)
+        if len(self.started) == 3:
+            self.all_started.set()
+        await self.all_started.wait()
+        if self.raises:
+            raise self.raises
+        return ProviderResult(name=self.name, data={"ok": True}, summary=self.name)
+
+
+def test_core_providers_run_concurrently(monkeypatch):
+    """A serial loop would wait forever on the first provider's gate."""
+    import condor.agents.providers as providers
+
+    async def scenario():
+        started: list[str] = []
+        gate = asyncio.Event()
+        fakes = [
+            _GatedProvider("executors", started, gate),
+            _GatedProvider("positions", started, gate, raises=RuntimeError("boom")),
+            _GatedProvider("drift", started, gate),
+        ]
+        monkeypatch.setattr(providers, "list_core_providers", lambda: fakes)
+        return await asyncio.wait_for(
+            ProviderRegistry().run_core_providers(object(), {}), timeout=2
+        )
+
+    results = asyncio.run(scenario())
+    # One entry per provider, in registration order, a failure isolated to its own.
+    assert list(results) == ["executors", "positions", "drift"]
+    assert results["executors"].data == {"ok": True}
+    assert results["positions"].summary == "(provider positions failed)"
+    assert results["positions"].data == {}
+    assert results["drift"].data == {"ok": True}
+
+
+class _GatedClient(_Client):
+    """Both drift reads block until the other one has been sent."""
+
+    def __init__(self):
+        super().__init__(tracked=[_held()], venue=[_venue_row()])
+        self.gate = asyncio.Event()
+        self.entered = 0
+        for api, method in (
+            (self.executors, "get_positions_summary"),
+            (self.trading, "get_positions"),
+        ):
+            setattr(api, method, self._gated(getattr(api, method)))
+
+    def _gated(self, call):
+        async def wrapper(*args, **kwargs):
+            self.entered += 1
+            if self.entered == 2:
+                self.gate.set()
+            await self.gate.wait()
+            return await call(*args, **kwargs)
+
+        return wrapper
+
+
+def test_the_drift_reads_run_concurrently():
+    async def scenario():
+        client = _GatedClient()
+        return await asyncio.wait_for(
+            DriftProvider().execute(client, {}, agent_id="brigado.mm_1"), timeout=2
+        )
+
+    result = asyncio.run(scenario())
+    assert result.data["trusted"] is True
+    assert result.data["drifting"] == 0
+
+
+def test_a_failing_tracked_fetch_raises_even_when_the_venue_also_fails():
+    client = _Client(
+        tracked_raises=RuntimeError("book down"), venue_raises=_http_error()
+    )
+    with pytest.raises(RuntimeError, match="book down"):
+        _run(client)
 
 
 # ── "Yours": the annotation, never a filter ──
@@ -188,3 +317,49 @@ def test_an_agent_with_no_rows_of_its_own_gets_no_gate_signal():
     assert result.data["mine"] == []
     assert result.data["worst_quote"] is None
     assert result.data["drifting"] == 1
+
+
+def test_run_core_providers_narrows_to_the_named_providers(monkeypatch):
+    """PERF-641: the winddown asks for ``executors`` alone, with the full scope."""
+    import condor.agents.providers as providers
+    from condor.agents.providers.base import ProviderResult
+
+    seen: list[tuple[str, dict]] = []
+
+    class _Recording:
+        is_core = True
+
+        def __init__(self, name):
+            self.name = name
+
+        async def execute(self, client, config, **kwargs):
+            seen.append((self.name, kwargs))
+            return ProviderResult(name=self.name, data={}, summary=self.name)
+
+    fakes = [_Recording(n) for n in ("executors", "positions", "drift")]
+    monkeypatch.setattr(providers, "list_core_providers", lambda: fakes)
+
+    results = asyncio.run(
+        ProviderRegistry().run_core_providers(
+            object(),
+            {},
+            agent_id="acme.s_1",
+            bot_names=["bot_a"],
+            owned=["rec"],
+            names=("executors",),
+        )
+    )
+    assert list(results) == ["executors"]
+    assert seen == [
+        (
+            "executors",
+            {"agent_id": "acme.s_1", "bot_names": ["bot_a"], "owned": ["rec"]},
+        )
+    ]
+
+    seen.clear()
+    assert list(asyncio.run(ProviderRegistry().run_core_providers(object(), {}))) == [
+        "executors",
+        "positions",
+        "drift",
+    ]

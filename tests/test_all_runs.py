@@ -294,6 +294,110 @@ def test_hundreds_of_conversations_page_rather_than_all_arriving(tmp_path):
     assert len(list_all_runs("brigado", USER, limit=200)) == 150
 
 
+def test_a_specialists_older_conversations_are_not_hidden_by_newer_condor_chats(
+    tmp_path,
+):
+    """The agent filter runs before the window, not after it (CORR-652).
+
+    Condor is the default binding, so on a chatty install the owner's newest
+    hundred chats are all with Condor; a specialist's rail must still find its
+    own older ones rather than reporting none.
+    """
+    import os
+
+    base = 1_800_000_000
+    brigado = []
+    for i in range(5):
+        d = _write_conversation(USER, f"b-{i}", agent_slug="brigado")
+        os.utime(d / "meta.json", (base + i, base + i))
+        brigado.append(f"b-{i}")
+    for i in range(120):
+        d = _write_conversation(USER, f"u-{i:03d}", agent_slug="")
+        os.utime(d / "meta.json", (base + 100 + i, base + 100 + i))
+
+    specialist = list_all_runs("brigado", USER, limit=100)
+    assert sorted(r["id"] for r in specialist) == brigado
+
+    condor = list_all_runs("condor", USER, limit=100)
+    assert len(condor) == 100
+    assert not {r["id"] for r in condor} & set(brigado)
+
+
+def test_a_session_is_not_pushed_out_of_the_window_by_newer_chats_and_delegations(
+    tmp_path,
+):
+    """Only the two per-user kinds page; loop runs always ride along (CORR-376).
+
+    150 conversations *and* 150 delegations, every one newer than the session:
+    cutting the union to ``limit`` (or to ``limit`` plus the loop rows) drops the
+    session, and the workspace then says a strategy that ran "has not run yet".
+    """
+    import os
+
+    base = 1_800_000_000.0
+    sdir = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    session = _write_session(sdir, 1, ticks=2)
+    (session / "config.yml").write_text("{}\n")
+    os.utime(session / "config.yml", (base, base))
+
+    stamps: dict[str, float] = {}
+    for i in range(150):
+        at = base + 10 + 2 * i
+        born = datetime.fromtimestamp(at, timezone.utc)
+        d = _write_conversation(USER, f"c-{i:03d}", agent_slug="brigado", created=born)
+        os.utime(d / "meta.json", (at, at))
+        stamps[f"c:c-{i:03d}"] = at
+    for i in range(150):
+        at = base + 11 + 2 * i
+        d = _write_delegation(USER, f"d-{i:03d}", agent_slug="brigado", started=at)
+        os.utime(d / "status.json", (at, at))
+        stamps[f"d:d-{i:03d}"] = at
+
+    rows = list_all_runs("brigado", USER, limit=25)
+
+    assert "s:1" in [r["run_id"] for r in rows]
+    paged = [
+        r["run_id"] for r in rows if r["kind"] not in (KIND_SESSION, KIND_EXPERIMENT)
+    ]
+    newest = sorted(stamps, key=stamps.__getitem__, reverse=True)[:25]
+    assert paged == newest
+    # Still one time-ordered list, with the old session at the bottom.
+    assert rows[-1]["run_id"] == "s:1"
+    ordered = [r["started_at"] or 0.0 for r in rows]
+    assert ordered == sorted(ordered, reverse=True)
+
+
+def test_a_zero_window_is_still_empty_even_with_loop_runs(tmp_path):
+    sdir = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    _write_session(sdir, 1)
+    _write_conversation(USER, "c-1", agent_slug="brigado")
+
+    assert list_all_runs("brigado", USER, limit=0) == []
+
+
+def test_an_unreadable_strategy_contributes_no_rows(tmp_path, monkeypatch):
+    from condor.agents import sessions_index
+
+    bad = _write_strategy(tmp_path, "brigado", "broken", "Broken")
+    _write_session(bad, 1)
+    good = _write_strategy(tmp_path, "brigado", "brl_mm", "BRL MM")
+    _write_session(good, 2)
+    _write_conversation(USER, "c-1", agent_slug="brigado")
+
+    real = sessions_index.list_runs
+
+    def flaky(home, run_key):
+        if run_key.endswith(".broken"):
+            raise OSError("unreadable")
+        return real(home, run_key)
+
+    monkeypatch.setattr(sessions_index, "list_runs", flaky)
+
+    rows = list_all_runs("brigado", USER, limit=25)
+    assert sorted(r["run_id"] for r in rows) == ["c:c-1", "s:2"]
+    assert {r["strategy_slug"] for r in rows if r["kind"] == KIND_SESSION} == {"brl_mm"}
+
+
 # ── The route ──
 
 
@@ -355,6 +459,47 @@ def test_the_route_bounds_what_a_caller_can_ask_for(monkeypatch, tmp_path):
     _call_route(limit=10_000)
     _call_route(limit=0)
     assert seen == [10, MAX_RUN_LIMIT, 1]
+
+
+def test_the_route_lists_off_the_event_loop(monkeypatch, tmp_path):
+    """PERF-650: the disk walk runs in a worker thread, not on the loop."""
+    import threading
+
+    import condor.agents.all_runs as all_runs_module
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
+    _write_agent(tmp_path, "brigado", "Brigado")
+
+    threads: list[threading.Thread] = []
+
+    def recording(slug, user_id, *, limit):
+        threads.append(threading.current_thread())
+        return []
+
+    monkeypatch.setattr(all_runs_module, "list_all_runs", recording)
+
+    assert _call_route().runs == []
+    assert len(threads) == 1
+    assert threads[0] is not threading.main_thread()
+
+
+def test_an_unknown_agent_404s_before_any_listing(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    import condor.agents.all_runs as all_runs_module
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "agents"))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        all_runs_module,
+        "list_all_runs",
+        lambda slug, user_id, *, limit: calls.append(slug) or [],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        _call_route(slug="nobody_here")
+    assert exc.value.status_code == 404
+    assert calls == []
 
 
 def test_a_conversation_of_another_person_is_not_in_this_rail(monkeypatch, tmp_path):

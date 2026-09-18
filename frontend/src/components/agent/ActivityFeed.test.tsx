@@ -268,6 +268,14 @@ describe("code runs are work too", () => {
     expect(row.querySelector("[data-tool-count]")).toBeNull();
   });
 
+  it("reads a non-integer second the way the sheet it opens does", async () => {
+    // ARCH-404: this used to round to "2s" while CodeRunSheet printed "1.5s".
+    ROWS = [codeRun({ started_at: NOW - 12, ended_at: NOW - 12 + 1.5 })];
+    await render({ agent: "scout" });
+
+    expect(rows()[0].querySelector("[data-code-duration]")!.textContent).toBe("1.5s");
+  });
+
   it("keeps a timeout apart from an error", async () => {
     ROWS = [
       codeRun({ task_id: "c", status: "timeout" }),

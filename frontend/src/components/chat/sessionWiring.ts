@@ -3,11 +3,9 @@ import type { ChatSlot } from "@/hooks/useChatSocket";
 /**
  * What a conversation is wired to, and why a switch is refused.
  *
- * Its own module because three components now ask the same question about the
- * same session — the header button, the dock's agent card and the panel — and
- * two of them are in different files. A component file that also exports plain
- * values cannot be hot-reloaded on its own, and "what is this chat wired to"
- * is not a component.
+ * Its own module, apart from `AgentWiring` (its one caller), because "what is
+ * this chat wired to" is not a component, and a component file that also
+ * exports plain values cannot be hot-reloaded on its own.
  */
 
 /** Why a control is dead: both switches respawn the session underneath. */

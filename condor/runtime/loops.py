@@ -173,14 +173,21 @@ class LoopSupervisor:
         resume and ``restart_on_boot`` fired only after a crash, which is the
         opposite of what the flag reads like. Overwrite that with SUSPENDED:
         the process ended this run, and the next one settles it.
+
+        An engine already in an emergency winddown (risk kill-switch or manual
+        /shutdown) is not cancelled: its ``stop()`` waits for the winddown to
+        finish, bounded by the LLM cleanup timeout (``resolve_tick_timeout``,
+        default 10 min), and returns False. That run was ended by the winddown,
+        which recorded STOPPED itself, so it is not overwritten with SUSPENDED.
         """
         for engine in list(self._engines.values()):
             try:
-                await engine.stop()
+                stopped = await engine.stop()
             except Exception:
                 log.exception("Error stopping engine %s", engine.agent_id)
             else:
-                self.record(engine, LoopState.SUSPENDED)
+                if stopped:
+                    self.record(engine, LoopState.SUSPENDED)
 
     # ── Boot reconciliation ──
 
@@ -305,7 +312,7 @@ class LoopSupervisor:
         died holding it) and False for one that process wound down on its way
         out — the difference between a loss to report and a restart to honour.
         """
-        from condor.agents.sessions_index import SESSION_DIRNAMES
+        from condor.agents.sessions_index import iter_session_dirs
         from condor.paths import local_agents_root
 
         root = Path(agents_root) if agents_root is not None else local_agents_root()
@@ -319,20 +326,14 @@ class LoopSupervisor:
             if not strategies.is_dir():
                 continue
             for strategy_dir in sorted(p for p in strategies.iterdir() if p.is_dir()):
-                for dirname in SESSION_DIRNAMES:
-                    sessions = strategy_dir / dirname
-                    if not sessions.is_dir():
+                for _, session_dir in iter_session_dirs(strategy_dir):
+                    status = read_status(session_dir)
+                    if not status:
                         continue
-                    for session_dir in sorted(sessions.iterdir()):
-                        if not session_dir.is_dir():
-                            continue
-                        status = read_status(session_dir)
-                        if not status:
-                            continue
-                        if is_stale(status):
-                            yield session_dir, status, True
-                        elif is_suspended(status):
-                            yield session_dir, status, False
+                    if is_stale(status):
+                        yield session_dir, status, True
+                    elif is_suspended(status):
+                        yield session_dir, status, False
 
     def _mark_interrupted(
         self, session_dir: Path, status: dict, run: InterruptedRun

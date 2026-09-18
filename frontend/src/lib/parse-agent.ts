@@ -24,20 +24,6 @@ export interface TickEntry {
   summary: string;
 }
 
-export interface ExecutorEntry {
-  id: string;
-  type: string;
-  connector: string;
-  pair: string;
-  side: string;
-  amount: number;
-  created: string;
-  status: string;
-  pnl: number;
-  volume: number;
-  stopped?: string;
-}
-
 export interface MetricEntry {
   timestamp: string;
   pnl: number;
@@ -59,7 +45,6 @@ export interface ParsedJournal {
    */
   decisionsArchived: string;
   ticks: TickEntry[];
-  executors: ExecutorEntry[];
   metrics: MetricEntry[];
 }
 
@@ -78,8 +63,6 @@ export interface SnapshotStats {
 export interface ParsedSnapshot {
   tick: number;
   timestamp: string;
-  model: string;
-  executionMode: string;
   systemPrompt: string;
   systemPromptLength: number;
   executorState: string;
@@ -122,9 +105,8 @@ export function parseJournal(content: string): ParsedJournal {
   const decisions = parseDecisions(decisionsSection);
   const decisionsArchived = parseArchiveMarker(decisionsSection);
   const ticks = parseTicks(getSection(content, "Ticks"));
-  const executors = parseExecutors(getSection(content, "Executors"));
   const metrics = parseMetrics(getSection(content, "Snapshots"));
-  return { summary, decisions, decisionsArchived, ticks, executors, metrics };
+  return { summary, decisions, decisionsArchived, ticks, metrics };
 }
 
 function parseSummary(text: string): JournalSummary {
@@ -239,45 +221,6 @@ function parseTicks(text: string): TickEntry[] {
   return results;
 }
 
-function parseExecutors(text: string): ExecutorEntry[] {
-  const results: ExecutorEntry[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("- executor=")) continue;
-    const entry: Record<string, string> = {};
-    for (const part of line.slice(2).split(" | ")) {
-      if (part.includes("=")) {
-        const eqIdx = part.indexOf("=");
-        entry[part.slice(0, eqIdx).trim()] = part.slice(eqIdx + 1).trim();
-      } else {
-        // "connector pair side" segment
-        const tokens = part.trim().split(/\s+/);
-        if (tokens.length >= 3) {
-          entry.connector = tokens[0];
-          entry.pair = tokens[1];
-          entry.side = tokens[2];
-        } else if (tokens.length === 2) {
-          entry.connector = tokens[0];
-          entry.pair = tokens[1];
-        }
-      }
-    }
-    results.push({
-      id: entry.executor || "",
-      type: entry.type || "",
-      connector: entry.connector || "",
-      pair: entry.pair || "",
-      side: entry.side || "",
-      amount: parseFloat((entry.amount || "0").replace("$", "")),
-      created: entry.created || "",
-      status: entry.status || "",
-      pnl: parseFloat(entry.pnl || "0"),
-      volume: parseFloat(entry.volume || "0"),
-      stopped: entry.stopped,
-    });
-  }
-  return results;
-}
-
 function parseMetrics(text: string): MetricEntry[] {
   const results: MetricEntry[] = [];
   for (const line of text.split("\n")) {
@@ -308,8 +251,6 @@ export function parseSnapshot(content: string): ParsedSnapshot {
   const result: ParsedSnapshot = {
     tick: 0,
     timestamp: "",
-    model: "",
-    executionMode: "",
     systemPrompt: "",
     systemPromptLength: 0,
     executorState: "",
@@ -325,12 +266,6 @@ export function parseSnapshot(content: string): ParsedSnapshot {
     result.tick = parseInt(headerMatch[1]);
     result.timestamp = headerMatch[2].trim();
   }
-
-  // Experiment snapshots carry "Mode:" / "Model:" lines under the header.
-  const modeMatch = content.match(/^Mode:\s*(\S+)/m);
-  if (modeMatch) result.executionMode = modeMatch[1];
-  const modelMatch = content.match(/^Model:\s*(\S+)/m);
-  if (modelMatch) result.model = modelMatch[1];
 
   // System prompt - inside <details> block
   const promptLenMatch = content.match(/System Prompt \((\d+) chars\)/);

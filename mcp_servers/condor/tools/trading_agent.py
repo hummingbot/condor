@@ -77,16 +77,19 @@ def _manage_strategy(
 
         if AgentStore().get(agent_slug) is None:
             return {"error": f"Agent '{agent_slug}' not found"}
-        strategy = store.create(
-            agent_slug=agent_slug,
-            name=name,
-            description=description or "",
-            agent_key=agent_key,
-            instructions=instructions,
-            skills=skills,
-            default_config=config,
-            created_by=settings.user_id,
-        )
+        try:
+            strategy = store.create(
+                agent_slug=agent_slug,
+                name=name,
+                description=description or "",
+                agent_key=agent_key,
+                instructions=instructions,
+                skills=skills,
+                default_config=config,
+                created_by=settings.user_id,
+            )
+        except ValueError as exc:  # taken or reserved name (CORR-635)
+            return {"error": str(exc)}
         return {"created": True, "strategy_id": strategy.key, "name": strategy.name}
 
     elif action == "update_strategy":
@@ -217,6 +220,49 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
+def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
+    """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
+
+    An Agent's server pin decides which account its tools trade on, so every
+    writer of that field answers the same way: ``POST /agents`` and ``PATCH
+    /config`` gate it (SEC-594), a raw ``AGENT.md`` write gates it (SEC-693),
+    and this tool — the third door onto the same field, and the one the web
+    routes' own docstring names as performing "the same write" — did not.
+
+    Credentials never actually leaked, because every site that turns a stored
+    name into a client re-checks reach (``config_manager.may_use_stored_server``
+    at each of its five call sites). What leaked was the *label*: an Agent
+    pinned over MCP to a server the caller cannot reach reports that name
+    verbatim in ``AgentSummary`` and in the chat header's
+    ``SessionBinding.server_name``, so the UI names a foreign account as the one
+    at risk — exactly the mislabel SEC-594 and SEC-693 were shipped to prevent.
+
+    The predicate is ``may_use_stored_server`` rather than the web layer's
+    ``check_server_access``: the two apply the same TRADER floor to the same
+    ``has_server_access``, but the web one lives in ``condor/web/auth.py`` and
+    signals by raising ``HTTPException``, which this layer cannot import (it
+    sits below the web app) and could not answer with anyway — an MCP tool
+    reports refusal as ``{"error": ...}``, the shape ``manage_servers`` already
+    uses for this exact sentence. ``may_use_stored_server`` is the boolean
+    sibling that ARCH-587 gave the callers below the web layer, and it also
+    checks existence, so an admin — for whom ``has_server_access`` answers True
+    on any string at all (SEC-164) — cannot pin an Agent to a name that
+    resolves to no server.
+
+    An empty pin needs no access, and re-sending the value already stored is
+    the ordinary round-trip of a pin someone else legitimately set, so only a
+    *change* is checked — the same two exemptions ``_gate_pin_change`` makes.
+    """
+    if not new or new == stored:
+        return None
+
+    from config_manager import get_config_manager, may_use_stored_server
+
+    if not may_use_stored_server(get_config_manager(), settings.user_id, new):
+        return {"error": f"No access to server '{new}'"}
+    return None
+
+
 def _manage_agent(
     action: str,
     agent_slug: str | None,
@@ -237,22 +283,30 @@ def _manage_agent(
     if action == "create_agent":
         if not name:
             return {"error": "name is required to create an agent"}
+        # Creating an Agent already pinned to an unreachable server is the edit
+        # that is refused below, so it is refused here too.
+        refusal = _refuse_unreachable_pin(server_name, "")
+        if refusal:
+            return refusal
         # Default to the model the creator is actually running. Guessing here
         # produces agents pinned to a backend the user never configured — the
         # coordinator has no way to know which models are reachable, so an
         # invented agent_key is a coin flip that only surfaces on the first run.
         resolved_key = agent_key or _creator_agent_key()
-        agent = store.create(
-            name=name,
-            description=description or "",
-            instructions=instructions or "",
-            agent_key=resolved_key,
-            tools=tools,
-            when_to_consult=when_to_consult or "",
-            server_required=True if server_required is None else server_required,
-            server_name=server_name or "",
-            created_by=settings.user_id,
-        )
+        try:
+            agent = store.create(
+                name=name,
+                description=description or "",
+                instructions=instructions or "",
+                agent_key=resolved_key,
+                tools=tools,
+                when_to_consult=when_to_consult or "",
+                server_required=True if server_required is None else server_required,
+                server_name=server_name or "",
+                created_by=settings.user_id,
+            )
+        except ValueError as exc:  # taken or reserved name (CORR-635)
+            return {"error": str(exc)}
         return {
             "created": True,
             "agent_slug": agent.slug,
@@ -287,6 +341,11 @@ def _manage_agent(
         a = store.get(agent_slug)
         if not a:
             return {"error": f"Agent '{agent_slug}' not found"}
+        # Ahead of every assignment, so a refused pin leaves the record whole
+        # rather than persisting the fields that happened to be listed first.
+        refusal = _refuse_unreachable_pin(server_name, a.server_name)
+        if refusal:
+            return refusal
         if name:
             a.name = name
         if description is not None:
@@ -402,7 +461,6 @@ async def _agent_lifecycle(
                     "config": config_dict,
                     "trading_context": trading_context,
                     "chat_id": settings.chat_id,
-                    "user_id": settings.user_id,
                 },
             )
 
@@ -463,27 +521,20 @@ def _resolve_experiment_file(agent_id: str):
     (path | None, num | None); num is set even when the file isn't on disk yet
     so callers can distinguish "experiment in progress" from "not an experiment".
     """
-    from condor.agents.journal import resolve_agent_dirs
+    from condor.agents.sessions_index import (
+        find_experiment_file,
+        parse_agent_id,
+        strategy_dir_for_run_key,
+    )
 
-    last_sep = agent_id.rfind("_")
-    if last_sep == -1:
+    parsed = parse_agent_id(agent_id)
+    if parsed is None or parsed[2] != "experiment":
         return None, None
-    num_part = agent_id[last_sep + 1 :]
-    if not num_part.startswith("e"):
-        return None, None
-    try:
-        num = int(num_part[1:])
-    except ValueError:
-        return None, None
-
-    _, base_dir = resolve_agent_dirs(agent_id)
-    if base_dir is None:
+    run_key, num, _ = parsed
+    base_dir = strategy_dir_for_run_key(run_key)
+    if base_dir is None or not base_dir.is_dir():
         return None, num
-    for dirname in ("dry_runs", "experiments"):
-        path = base_dir / dirname / f"experiment_{num}.md"
-        if path.exists():
-            return path, num
-    return None, num
+    return find_experiment_file(base_dir, num), num
 
 
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
@@ -534,6 +585,24 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
         return {"content": jm.read_recent(max_entries=max_entries)}
 
 
+def _may_feed_run(engine) -> bool:
+    """Whether this seat may write what ``engine`` reads back each tick (SEC-638).
+
+    The tick's own MCP subprocess runs as the engine's owner, so the loop's
+    writes pass; a foreign chat session's agent is refused unless its user is
+    an admin. An unowned restored loop (``user_id == 0``) is left as it was.
+    """
+    owner = getattr(engine, "user_id", 0) or 0
+    if not owner or owner == settings.user_id:
+        return True
+    try:
+        from config_manager import get_config_manager
+
+        return bool(get_config_manager().is_admin(settings.user_id))
+    except Exception:  # noqa: BLE001 - no config is not a licence to write
+        return False
+
+
 def journal_write(
     agent_id: str,
     entry_type: str,
@@ -573,6 +642,10 @@ def journal_write(
             return {
                 "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
             }
+        # Every entry type is read back by the loop: learnings, state and the
+        # canvas directly, actions as the prompt's recent decisions.
+        if not _may_feed_run(engine):
+            return {"error": "Not your agent"}
         session_dir = engine.session_dir
         agent_dir = engine.strategy.home
     else:

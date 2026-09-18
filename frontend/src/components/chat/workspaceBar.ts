@@ -20,6 +20,3 @@
  */
 export const WORKSPACE_BAR =
   "flex h-10 shrink-0 items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]";
-
-/** The bar's height on its own, for anything that has to reserve the space. */
-export const WORKSPACE_BAR_H = "h-10";
