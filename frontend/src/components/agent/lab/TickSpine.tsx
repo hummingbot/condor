@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import {
   BEAT_TITLES,
@@ -21,6 +21,11 @@ import { parseJournal } from "@/lib/parse-agent";
  * fourth state is the one that matters: a run written before the action log
  * existed has no record of what any tick did, and is drawn grey with a tooltip
  * that says so — never hollow, which would claim every tick did nothing.
+ *
+ * `bare` is how the run screen draws it (ARCH-425): one line beside the
+ * section tabs rather than a row of its own, so it brings no border or padding
+ * and never wraps — a long session scrolls sideways instead, and opens on its
+ * newest beat, which is the one a reader came for.
  */
 const BEAT_CLASS: Record<BeatState, string> = {
   failed: "bg-[var(--color-red)]",
@@ -36,6 +41,7 @@ export function TickSpine({
   hasActionsLog,
   selectedTick,
   onSelectTick,
+  bare = false,
 }: {
   slug: string;
   sslug: string;
@@ -45,6 +51,8 @@ export function TickSpine({
   /** The tick in the URL, or `null` for the run overview. */
   selectedTick: number | null;
   onSelectTick: (tick: number | null) => void;
+  /** Embedded in a row that owns the border: one scrolling line, no chrome. */
+  bare?: boolean;
 }) {
   const { data: journalData } = useQuery({
     queryKey: ["strategy", slug, sslug, "session", sessionNum, "journal"],
@@ -73,11 +81,22 @@ export function TickSpine({
     [actionsData?.actions],
   );
 
+  // Opens on the newest beat, and follows new ones as a live run writes them —
+  // but only while the reader is already at the end: someone who scrolled back
+  // to an old tick is reading it, and a beat arriving is no reason to yank them.
+  const stripRef = useRef<HTMLDivElement>(null);
+  const atEnd = useRef(true);
+  const beatCount = ticks.length;
+  useEffect(() => {
+    const el = stripRef.current;
+    if (bare && el && atEnd.current) el.scrollLeft = el.scrollWidth;
+  }, [bare, beatCount]);
+
   if (ticks.length === 0) {
     return (
       <p
         data-spine-empty
-        className="px-4 py-2 text-[11px] text-[var(--color-text-muted)]"
+        className={`${bare ? "py-2" : "px-4 py-2"} text-[11px] text-[var(--color-text-muted)]`}
       >
         No ticks recorded for this run.
       </p>
@@ -86,14 +105,31 @@ export function TickSpine({
 
   return (
     <div
+      ref={stripRef}
       data-testid="tick-spine"
-      className="flex flex-wrap items-center gap-1 border-b border-[var(--color-border)]/60 px-4 py-2"
+      onScroll={
+        bare
+          ? (e) => {
+              const el = e.currentTarget;
+              atEnd.current =
+                el.scrollLeft + el.clientWidth >= el.scrollWidth - 4;
+            }
+          : undefined
+      }
+      className={`flex items-center gap-1 ${
+        // The vertical padding is room for the selected beat's ring, which an
+        // `overflow-x-auto` box would otherwise clip (its overflow-y goes auto
+        // too); the horizontal is the same room for the first and last beat.
+        bare
+          ? "min-w-0 flex-nowrap overflow-x-auto px-1 py-2 [scrollbar-width:thin]"
+          : "flex-wrap border-b border-[var(--color-border)]/60 px-4 py-2"
+      }`}
     >
       <button
         type="button"
         data-spine-overview
         onClick={() => onSelectTick(null)}
-        className={`mr-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+        className={`mr-1 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${
           selectedTick === null
             ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
             : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
@@ -123,7 +159,7 @@ export function TickSpine({
             data-beat-state={state}
             title={`#${entry.tick} — ${title}`}
             onClick={() => onSelectTick(entry.tick)}
-            className={`h-5 w-2 rounded-sm transition-all hover:scale-y-110 ${BEAT_CLASS[state]} ${
+            className={`h-5 w-2 shrink-0 rounded-sm transition-all hover:scale-y-110 ${BEAT_CLASS[state]} ${
               selectedTick === entry.tick
                 ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
                 : ""
@@ -132,7 +168,7 @@ export function TickSpine({
         );
       })}
       {!hasActionsLog && (
-        <span className="ml-2 text-[10px] text-[var(--color-text-muted)]/70">
+        <span className="ml-2 shrink-0 whitespace-nowrap text-[10px] text-[var(--color-text-muted)]/70">
           no action log for this run
         </span>
       )}

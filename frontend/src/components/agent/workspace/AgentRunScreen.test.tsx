@@ -997,4 +997,86 @@ describe("the side panel's variant", () => {
     await click(container.querySelector<HTMLButtonElement>("[data-open-run]")!);
     expect(onMove).toHaveBeenCalledWith("runs", { strategy: "brl_mm", run: "s:3" });
   });
+
+  it("puts the spine and the tabs on one row, as the page does (ARCH-425)", async () => {
+    getSessionJournal.mockResolvedValue({ content: ticksJournal(3) });
+    await renderPane("now");
+    expectOneNavRow();
+  });
+});
+
+/** A session journal of `n` ticks, in the shape `parseJournal` reads. */
+function ticksJournal(n: number): string {
+  const lines = Array.from(
+    { length: n },
+    (_, i) => `- tick#${i + 1} | 2026-09-18 10:00 | actions=0 | held`,
+  );
+  return `# Journal\n\n## Ticks\n\n${lines.join("\n")}\n`;
+}
+
+/** The spine and the tabs are siblings in one row, and only the row draws a border. */
+function expectOneNavRow() {
+  const spine = container.querySelector<HTMLElement>('[data-testid="tick-spine"]');
+  const tabs = container.querySelector<HTMLElement>("[data-pane-tabs]");
+  expect(spine).not.toBeNull();
+  expect(tabs).not.toBeNull();
+  const row = tabs!.parentElement!;
+  expect(row.hasAttribute("data-run-nav")).toBe(true);
+  expect(row.contains(spine)).toBe(true);
+  expect(spine!.closest("[data-run-nav]")).toBe(row);
+  expect(row.className).toContain("border-b");
+  expect(tabs!.className).not.toContain("border-b");
+  expect(spine!.className).not.toContain("border-b");
+}
+
+describe("the spine and the tabs share one row (ARCH-425)", () => {
+  const beat = (n: number) =>
+    container.querySelector<HTMLButtonElement>(`[data-beat="${n}"]`)!;
+
+  it("with a session selected, draws them in one row under one border", async () => {
+    getSessionJournal.mockResolvedValue({ content: ticksJournal(2) });
+    await render("/");
+    expectOneNavRow();
+  });
+
+  it("scrolls a 300-tick spine sideways and keeps every tab clickable", async () => {
+    getSessionJournal.mockResolvedValue({ content: ticksJournal(300) });
+    await render("/");
+
+    expect(container.querySelectorAll("[data-beat]")).toHaveLength(300);
+    const spine = container.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+    expect(spine.className).toContain("overflow-x-auto");
+    expect(spine.className).toContain("flex-nowrap");
+    expectOneNavRow();
+
+    await click(tab("fleet"));
+    expect(tab("fleet").getAttribute("aria-selected")).toBe("true");
+    expect(bodies()).toEqual(["fleet"]);
+  });
+
+  it("keeps a beat an address, and the RUN button the way back", async () => {
+    getSessionJournal.mockResolvedValue({ content: ticksJournal(300) });
+    await render("/");
+
+    await click(beat(150));
+    expect(new URLSearchParams(search()).get("tick")).toBe("150");
+    expect(beat(150).className).toContain("ring-2");
+    expect(beat(149).className).not.toContain("ring-2");
+
+    await click(container.querySelector<HTMLButtonElement>("[data-spine-overview]")!);
+    expect(new URLSearchParams(search()).get("tick")).toBeNull();
+    expect(beat(150).className).not.toContain("ring-2");
+  });
+
+  it("with no session run, the row holds the tabs alone", async () => {
+    getAgentRuns.mockResolvedValue([]);
+    await render("/");
+
+    const tabs = container.querySelector<HTMLElement>("[data-pane-tabs]")!;
+    expect(container.querySelector('[data-testid="tick-spine"]')).toBeNull();
+    expect(container.querySelector("[data-spine-empty]")).toBeNull();
+    expect(tabs.parentElement!.hasAttribute("data-run-nav")).toBe(true);
+    expect(tabs.parentElement!.children).toHaveLength(1);
+    expect(tabs.className).toContain("ml-auto");
+  });
 });
