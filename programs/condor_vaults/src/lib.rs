@@ -91,13 +91,8 @@ pub mod condor_vaults {
     /// The Swig, rooted at this program's PDA, and the `Vault` record. The
     /// quote asset is chosen here: it is the unit of account from the first
     /// deposit, long before there is a token.
-    pub fn create_vault(
-        ctx: Context<CreateVault>,
-        id: [u8; 32],
-        quote_mint: Pubkey,
-        fund_lamports: u64,
-    ) -> Result<()> {
-        instructions::create_vault::create_vault(ctx, id, quote_mint, fund_lamports)
+    pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64) -> Result<()> {
+        instructions::create_vault::create_vault(ctx, id, fund_lamports)
     }
 
     /// Install the delegate that trades. The administrator co-signs only once
@@ -111,9 +106,8 @@ pub mod condor_vaults {
         ctx: Context<Pin>,
         agent_ref: AgentRef,
         config_hash: [u8; 32],
-        fee_bps: u16,
     ) -> Result<()> {
-        instructions::strategy::pin(ctx, agent_ref, config_hash, fee_bps)
+        instructions::strategy::pin(ctx, agent_ref, config_hash)
     }
 
     // ── tokenizing ──────────────────────────────────────────────────────────
@@ -145,11 +139,6 @@ pub mod condor_vaults {
         config_hash: [u8; 32],
     ) -> Result<()> {
         instructions::strategy::publish_version(ctx, agent_ref, config_hash)
-    }
-
-    /// The share of realised LP fees the sweep burns.
-    pub fn set_fee(ctx: Context<RunnerOnly>, fee_bps: u16) -> Result<()> {
-        instructions::strategy::set_fee(ctx, fee_bps)
     }
 
     /// Pause and resume.

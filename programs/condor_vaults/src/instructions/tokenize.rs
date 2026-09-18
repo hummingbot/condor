@@ -192,6 +192,12 @@ pub fn tokenize(
     let vault = &mut ctx.accounts.vault;
     vault.mint = ctx.accounts.base_mint.key();
     vault.dbc_pool = ctx.accounts.pool.key();
+    // The quote asset, fixed here and only here. `check_launch_terms` has
+    // already required it to be the one the partner config names, so this is
+    // the asset the curve sells for, the one the migrated DAMM v2 pool quotes
+    // in, and therefore the one a wind-down converts into and a redemption
+    // pays. One decision, made once, at the moment it starts to matter.
+    vault.quote_mint = ctx.accounts.quote_mint.key();
     vault.issue_bps = issue_bps;
     vault.migration_fee_pct = terms.migration_fee_pct;
     vault.creator_trading_fee_pct = terms.creator_trading_fee_pct;

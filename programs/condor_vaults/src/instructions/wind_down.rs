@@ -1,7 +1,7 @@
 //! `wind_down` and `finalize_wind_down` — the only exit, and it is one-way.
 //!
 //! `wind_down` stops the strategy for good: from that moment `publish_version`,
-//! `set_fee` and `set_active` all refuse, so a vault cannot be wound down and
+//! `set_active` all refuse, so a vault cannot be wound down and
 //! then quietly restarted under a new strategy. The runner calls it; so may the
 //! protocol authority, for a vault whose runner has vanished, with no notice
 //! period — a forced liquidation into the quote asset is not a theft, and a
@@ -10,6 +10,13 @@
 //! Between the two calls the administrator does the work off chain: close every
 //! position, sweep the fees that come out of them like any others, swap every
 //! non-quote balance to `quote_mint` at Gateway-quoted slippage.
+//!
+//! **Only a tokenized vault winds down.** The whole ceremony exists to pay
+//! holders: convert to the quote asset the launch chose, move it where the
+//! program can pay out of, stop the strategy for good. A private vault has no
+//! holders, no quote asset and nothing to convert — its runner empties it
+//! through the delegate whenever they like, which needs no instruction and no
+//! permission. `wind_down` refuses one.
 //!
 //! `finalize_wind_down` is **administrator-signed**, and that is a deliberate
 //! narrowing of an otherwise permissionless design (plan §1.6). The check it
@@ -63,6 +70,14 @@ pub struct WindDown<'info> {
 }
 
 pub fn wind_down(ctx: Context<WindDown>) -> Result<()> {
+    // Only a tokenized vault winds down, because a wind-down exists to pay
+    // holders: it converts everything into the quote asset the launch chose and
+    // moves it into a pot the program pays redemptions from. A private vault
+    // has no holders, no quote asset and nothing to convert — its runner takes
+    // the assets out through the delegate, which they can do at any time and
+    // without asking the program. Letting one "stop for good" was offering a
+    // ceremony that did nothing except make the strategy unchangeable.
+    require!(ctx.accounts.vault.is_tokenized(), VaultError::NotTokenized);
     let signer = ctx.accounts.signer.key();
     require!(
         signer == ctx.accounts.vault.runner
@@ -156,6 +171,9 @@ pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {
 
     // The quote must already be out of the Swig and in the pot. Verified, not
     // performed: this program cannot move it, because Swig will not sign by CPI.
+    //
+    // A vault only reaches `WindingDown` by being tokenized, so the quote asset
+    // is always there to check against.
     let quote_token_program = ctx.accounts.quote_token_program.key();
     let wallet_quote = token::require_associated(
         &ctx.accounts.wallet_quote_account.to_account_info(),
@@ -173,13 +191,8 @@ pub fn finalize_wind_down(ctx: Context<FinalizeWindDown>) -> Result<()> {
         &quote_mint,
         &quote_token_program,
     )?;
-    // A tokenized vault owes its holders something, so the pot has to hold it.
-    // A private one owes nobody: its runner has already taken the assets out
-    // through the delegate, and an empty pot is the correct end state.
-    require!(
-        !ctx.accounts.vault.is_tokenized() || pot.amount > 0,
-        VaultError::RedemptionPotEmpty
-    );
+    // Holders are owed something, so the pot has to hold it.
+    require!(pot.amount > 0, VaultError::RedemptionPotEmpty);
 
     // Remove the delegate: nothing trades from here on, and the only movement
     // left is `redeem`.

@@ -115,7 +115,9 @@ def _to_info(account: str, record: dict[str, Any]) -> VaultInfo:
         network=record.get("network", "mainnet-beta"),
         wallet_address=record.get("wallet_address", ""),
         runner_address=record.get("runner_address", ""),
-        quote_mint=record.get("quote_mint"),
+        # Written by `tokenize` and read from the chain. A private vault has
+        # none, which is why this is the chain's answer and not the record's.
+        quote_mint=(record.get("chain") or {}).get("quote_mint"),
         delegate=record.get("delegate"),
         token=record.get("token"),
         pin=_public_pin(record.get("pin")),
@@ -181,7 +183,6 @@ def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
         "config_hash": chain.get("configHash"),
         "quote_mint": chain.get("quoteMint"),
         "version": chain.get("version", 0),
-        "fee_bps": chain.get("feeBps", 0),
         "issue_bps": chain.get("issueBps", 0),
         # The launch terms this vault chose. `migration_fee_pct` is the split
         # between the strategy's capital and the holders' exit depth, which is
@@ -316,11 +317,9 @@ async def create_vault(
             "build-create-vault",
             {
                 "walletAddress": runner,
-                "quoteMint": req.quote_mint,
                 "fundLamports": str(req.fund_lamports),
                 "agentRef": agent_ref,
                 "configHash": digest,
-                "feeBps": req.fee_bps,
             },
         ),
     )
@@ -333,13 +332,11 @@ async def create_vault(
         swig_id=build["swigId"],
         wallet_address=build["walletAddress"],
         runner_address=runner,
-        quote_mint=req.quote_mint,
         pending={
             "delegate": build["delegate"],
             "agent_ref": agent_ref,
             "config": req.config,
             "config_hash": digest,
-            "fee_bps": req.fee_bps,
         },
     )
     logger.info("user %s built vault %s on %s", user.id, build["swigAccount"], server)
@@ -373,7 +370,6 @@ async def confirm_created(
             "agent_ref": pending["agent_ref"],
             "version": chain.get("version", 1),
             "config_hash": chain.get("configHash"),
-            "fee_bps": chain.get("feeBps", pending["fee_bps"]),
             "config": pending["config"],
             "scan": None,
         },
@@ -537,7 +533,6 @@ async def confirm_published(
         "agent_ref": pending["agent_ref"],
         "version": chain.get("version", 1),
         "config_hash": chain.get("configHash"),
-        "fee_bps": chain.get("feeBps", 0),
         "config": pending["config"],
         "signature": req.signature,
         # A new version is a new thing to check: the old verdict was about the
@@ -573,7 +568,6 @@ async def read_config(account: str, user: WebUser = Depends(get_current_user)):
 #: route rather than one per instruction, because a handler whose whole body is
 #: "pass it on" is a handler that will be copied wrong.
 RUNNER_BUILDS = {
-    "set-fee": "build-set-fee",
     "set-active": "build-set-active",
     "wind-down": "build-wind-down",
     "claim-income": "build-claim-income",
@@ -645,6 +639,10 @@ async def build_launch_config(
     body = {
         "walletAddress": record["runner_address"],
         "swigAccount": account,
+        # The quote asset is chosen here, not at creation: this config is what
+        # fixes it, the program writes it onto the vault at `tokenize`, and it
+        # can never change afterwards.
+        "quoteMint": req.quote_mint,
         "initialMarketCap": req.initial_market_cap,
         "migrationMarketCap": req.migration_market_cap,
     }

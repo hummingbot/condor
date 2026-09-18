@@ -38,7 +38,7 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from condor import vault_store, vault_sweep
+from condor import vault_store
 from condor.gateway_client import VaultGateway
 from condor.vault_config import config_hash
 
@@ -86,7 +86,6 @@ def check_can_run(record: dict[str, Any], chain: dict[str, Any]) -> None:
     for key, label in (
         ("version", "version"),
         ("config_hash", "config hash"),
-        ("fee_bps", "fee"),
     ):
         stored, on_chain = pin.get(key), chain.get(key)
         if stored is not None and on_chain is not None and stored != on_chain:
@@ -241,64 +240,6 @@ class VaultCrank:
         self._last_refusal.pop(account, None)
         await self._ensure_engine(account, user, record, chain)
         await self._top_up_delegate(gw, account, chain)
-        await self._sweep(gw, account, chain)
-
-    async def _sweep(self, gw: VaultGateway, account: str, chain: dict) -> None:
-        """Accrue every closed LP position's fee share, and spend it when due.
-
-        **Polled, not hooked.** The plan called for a callback on executor
-        termination in the engine; polling is better here, for two reasons that
-        only became clear once the ledger existed. A hook fires once, so a
-        Condor restart between the close and the callback loses that executor's
-        share forever — while the ledger is keyed by executor id, which makes
-        re-reading the same terminated executor free. And a hook would put
-        knowledge of vaults inside the agent engine, which has no other reason
-        to know they exist.
-        """
-        if not chain.get("tokenized"):
-            # A private vault has no token to buy. Fees simply stay in it,
-            # which is the whole difference between the two phases.
-            return
-        try:
-            executors = await self._terminated_lp_executors(account)
-        except Exception as e:
-            log.debug("vault %s: could not read executors (%s)", account, e)
-            return
-
-        fee_bps = int(chain.get("fee_bps") or 0)
-        for executor in executors:
-            info = executor.get("custom_info") or {}
-            fees = float(info.get("fees_earned_quote") or 0)
-            if fees <= 0:
-                continue
-            vault_sweep.record_close(account, str(executor.get("id")), fees, fee_bps)
-
-        lamports = vault_sweep.due(account)
-        if not lamports:
-            return
-        vault_sweep.take_pending(account, lamports)
-        await sweep_once(gw, account, chain, lamports)
-
-    async def _terminated_lp_executors(self, account: str) -> list[dict]:
-        """The LP executors this vault has finished with.
-
-        Only LP: the sweep reads `fees_earned_quote`, which is a fee an LP
-        position earned. A directional executor's profit is not a fee and
-        sweeping it would be a different product (plan §7).
-        """
-        from condor.fetchers.executors import fetch_all_executors, get_executor_type
-        from config_manager import get_config_manager
-
-        client = await get_config_manager().get_client(self.server)
-        rows = await fetch_all_executors(
-            client, max_items=200, account_name=_account_name(account)
-        )
-        return [
-            row
-            for row in rows
-            if get_executor_type(row) == "lp_executor"
-            and not row.get("is_active", True)
-        ]
 
     async def _collect(self, gw: VaultGateway, account: str, chain: dict) -> None:
         """Push the two permissionless post-migration calls, if they are due.
@@ -547,74 +488,6 @@ def _config_manager():
     from config_manager import get_config_manager
 
     return get_config_manager()
-
-
-# ── the sweep hook ────────────────────────────────────────────────────────────
-
-
-async def sweep_once(
-    gw: VaultGateway, vault_account: str, chain: dict[str, Any], lamports: int
-) -> None:
-    """Buy the vault's token with `lamports` of quote, then burn what arrives.
-
-    Two transactions rather than one, and that is safe here for a reason worth
-    stating: tokens bought but not yet burned sit in the vault's own wallet,
-    which is treasury — already excluded from the circulating supply `redeem`
-    divides by. A burn that never lands is therefore a deferred burn, not a
-    loss, and the next sweep clears it.
-    """
-    mint = chain.get("mint")
-    funds_owner = chain.get("fundsOwner") or chain.get("funds_owner")
-    quote_mint = chain.get("quoteMint") or chain.get("quote_mint")
-    if not (mint and funds_owner and quote_mint):
-        log.warning("vault %s: cannot sweep, it is not tokenized", vault_account)
-        return
-
-    amount = lamports / 1_000_000_000
-    buy = gw.buy_on_market if chain.get("dammPool") else gw.buy_on_curve
-    try:
-        result = await buy(funds_owner, mint, quote_mint, amount)
-    except Exception as e:
-        # The migration gap is the common case: the curve has filled and the
-        # pool has not landed yet, so neither venue will trade. Waiting is
-        # correct — the accrual is already recorded and the next pass retries.
-        log.warning(
-            "vault %s: sweep buy of %s SOL failed (%s)", vault_account, amount, e
-        )
-        return
-
-    signature = result.get("signature", "")
-    bought = result.get("amountOut") or result.get("totalOutputSwapped") or 0
-    vault_sweep.record_sweep(vault_account, signature, lamports, str(bought))
-    log.info("vault %s: bought %s of %s (%s)", vault_account, bought, mint, signature)
-
-    await burn_treasury_purchase(gw, vault_account, bought)
-
-
-async def burn_treasury_purchase(
-    gw: VaultGateway, vault_account: str, bought: Any
-) -> None:
-    """Burn what the sweep just bought, out of the wallet that bought it.
-
-    The amount is what this pass bought and never the wallet's whole balance:
-    the rest of it is treasury — unsold supply, which nobody has paid for and
-    which a burn would simply destroy.
-    """
-    try:
-        amount = float(bought)
-    except (TypeError, ValueError):
-        return
-    if amount <= 0:
-        return
-    try:
-        await gw.burn(vault_account, amount)
-    except Exception as e:
-        log.warning(
-            "vault %s: bought but did not burn (%s). The tokens are in the vault's "
-            "treasury, out of circulation, and the next sweep will burn them.",
-            vault_account,
-            e,
-        )
 
 
 # ── the process-wide set of cranks ────────────────────────────────────────────

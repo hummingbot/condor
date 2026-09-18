@@ -277,22 +277,6 @@ class VaultGateway:
             body["mint"] = mint
         return await self.client.post(f"{self.BASE}/withdraw", body)
 
-    async def burn(self, swig_account: str, amount: float) -> dict:
-        """Burn some of the vault's own token, out of the wallet that holds it.
-
-        The amount is in UI units and the wire format is Gateway's problem —
-        which is the point: Condor decides how much a sweep burns, and nothing
-        here writes an instruction.
-        """
-        return await self.client.post(
-            f"{self.BASE}/burn",
-            {
-                "network": self.network,
-                "swigAccount": swig_account,
-                "amount": str(amount),
-            },
-        )
-
     async def fund_delegate(self, swig_account: str, lamports: int) -> dict:
         """Move SOL from the vault's wallet to its delegate, so it can pay for gas."""
         return await self.client.post(
@@ -301,55 +285,5 @@ class VaultGateway:
                 "network": self.network,
                 "swigAccount": swig_account,
                 "lamports": str(lamports),
-            },
-        )
-
-    async def buy_on_curve(
-        self,
-        wallet_address: str,
-        base_token: str,
-        quote_token: str,
-        amount: float,
-        slippage_pct: float = 1.0,
-    ) -> dict:
-        """Buy the vault's token on its bonding curve, as the vault's wallet."""
-        return await self.client.post(
-            "/trading/launch/execute-swap",
-            {
-                "chainNetwork": f"solana/{self.network}",
-                "connector": "meteora",
-                "walletAddress": wallet_address,
-                "baseToken": base_token,
-                "quoteToken": quote_token,
-                "amount": amount,
-                "side": "BUY",
-                "slippagePct": slippage_pct,
-            },
-        )
-
-    async def buy_on_market(
-        self,
-        wallet_address: str,
-        base_token: str,
-        quote_token: str,
-        amount: float,
-        slippage_pct: float = 1.0,
-    ) -> dict:
-        """Buy the vault's token wherever it trades after graduation.
-
-        Through the router rather than the migrated pool directly: after
-        graduation the token is simply a token, and a sweep should pay the best
-        price available rather than the one pool Condor happens to know about.
-        """
-        return await self.client.post(
-            "/trading/router/execute-swap",
-            {
-                "chainNetwork": f"solana/{self.network}",
-                "walletAddress": wallet_address,
-                "baseToken": base_token,
-                "quoteToken": quote_token,
-                "amount": amount,
-                "side": "BUY",
-                "slippagePct": slippage_pct,
             },
         )

@@ -26,7 +26,6 @@ def record(**overrides):
         "pin": {
             "version": 3,
             "config_hash": HASH,
-            "fee_bps": 5000,
             "config": CONFIG,
             "scan": {"passed": True, "findings": [], "at": 0},
         },
@@ -41,7 +40,6 @@ def chain(**overrides):
         "delegate": "DELEGATE1",
         "version": 3,
         "config_hash": HASH,
-        "fee_bps": 5000,
     }
     base.update(overrides)
     return base
@@ -73,7 +71,7 @@ def test_a_replaced_delegate_stops_condor_running_it():
     assert "someone else" in str(exc.value)
 
 
-@pytest.mark.parametrize("field,value", [("version", 4), ("fee_bps", 1000)])
+@pytest.mark.parametrize("field,value", [("version", 4), ("config_hash", "ff" * 32)])
 def test_the_chain_wins_any_disagreement(field, value):
     """Running on a stale copy would mean running parameters the runner did not
     sign — which is the entire reason a hash is on chain."""
@@ -134,9 +132,9 @@ def test_each_vault_gets_its_own_account_name():
 
 
 def test_camel_case_from_gateway_reads_as_snake():
-    assert _snake({"swigAccount": "A", "feeBps": 1, "state": "Running"}) == {
+    assert _snake({"swigAccount": "A", "issueBps": 1, "state": "Running"}) == {
         "swig_account": "A",
-        "fee_bps": 1,
+        "issue_bps": 1,
         "state": "Running",
     }
 

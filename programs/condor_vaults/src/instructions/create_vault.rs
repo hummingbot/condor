@@ -65,12 +65,7 @@ pub struct CreateVault<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn create_vault(
-    ctx: Context<CreateVault>,
-    id: [u8; 32],
-    quote_mint: Pubkey,
-    fund_lamports: u64,
-) -> Result<()> {
+pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64) -> Result<()> {
     let (expected_swig, swig_bump) = swig::swig_pda(&id);
     require_keys_eq!(
         ctx.accounts.swig_account.key(),
@@ -119,9 +114,10 @@ pub fn create_vault(
     vault.dbc_pool = Pubkey::default();
     vault.agent_ref = AgentRef::default();
     vault.config_hash = [0u8; 32];
-    vault.quote_mint = quote_mint;
+    // No quote asset yet: `tokenize` writes it from the launch config, which
+    // is where it is chosen and what the migrated pool will quote in.
+    vault.quote_mint = Pubkey::default();
     vault.version = 0;
-    vault.fee_bps = 0;
     vault.issue_bps = 0;
     vault.migration_fee_pct = 0;
     vault.creator_trading_fee_pct = 0;

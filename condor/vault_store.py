@@ -143,7 +143,6 @@ def create_record(
     swig_id: str,
     wallet_address: str,
     runner_address: str,
-    quote_mint: str,
     pending: dict[str, Any],
 ) -> dict[str, Any]:
     """The record for a vault whose transaction has been built but not signed.
@@ -169,7 +168,6 @@ def create_record(
         "wallet_address": wallet_address,
         "runner_address": runner_address,
         "delegate": None,
-        "quote_mint": quote_mint,
         # Set by `tokenize`, never by the create flow. None means private.
         "token": None,
         "pin": None,
@@ -325,7 +323,6 @@ def _drift(pin: dict[str, Any], chain: dict[str, Any]) -> Optional[str]:
     for key, label in (
         ("version", "version"),
         ("config_hash", "config hash"),
-        ("fee_bps", "fee"),
     ):
         want, got = pin.get(key), chain.get(key)
         if want is not None and got is not None and want != got:

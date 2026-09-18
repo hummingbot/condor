@@ -43,6 +43,15 @@ const PUBLIC_TABS = ["Summary", "Portfolio", "Activity"] as const;
 const RUNNER_TABS = ["Agent", "Token"] as const;
 type Tab = (typeof PUBLIC_TABS)[number] | (typeof RUNNER_TABS)[number];
 
+/** What a vault may launch against. Both are what Meteora's own keepers
+ *  migrate, and the program's fixed migration threshold is denominated in the
+ *  quote asset — so this is a short list on purpose, not a token picker. */
+const WSOL = "So11111111111111111111111111111111111111112";
+const QUOTE_ASSETS = [
+  { symbol: "SOL", mint: WSOL },
+  { symbol: "USDC", mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+];
+
 const pct = (bps: number | undefined) =>
   bps === undefined ? "—" : `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%`;
 
@@ -180,16 +189,12 @@ export function VaultDetail() {
               Wind down
             </Action>
           )}
-          {!tokenized && !windingDown && !finished && (
-            <Action
-              onClick={() => act.mutate({ build: () => api.buildVaultAction(account, "wind-down") })}
-              pending={act.isPending}
-              tone="danger"
-              confirm="Stops the strategy for good. Your assets stay yours — move them out with your delegate."
-            >
-              Stop for good
-            </Action>
-          )}
+          {/* No "stop for good" on a private vault: a wind-down exists to pay
+              holders, and there are none. Pausing stops the strategy, and the
+              assets come out through the delegate whenever the runner likes —
+              so an irreversible button offered nothing that Pause and Transfer
+              did not already do, at the price of never being able to run this
+              vault again. */}
         </div>
         )}
 
@@ -369,7 +374,6 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
               <CopyAddress address={chain.damm_pool} />
             </Row>
           )}
-          <Row label="Manager fee on profits">{pct(chain?.fee_bps)}</Row>
           <Row label="Issued to the manager">{pct(chain?.issue_bps)}</Row>
           <Row label="Raise kept as capital">
             {chain?.migration_fee_pct ? `${chain.migration_fee_pct}%` : "—"}
@@ -493,7 +497,6 @@ function StrategyTab({
           <Row label="Config hash — what the chain carries">
             <span className="font-mono text-[11px]">{chain?.config_hash?.slice(0, 16)}…</span>
           </Row>
-          <Row label="Burn share">{pct(chain?.fee_bps ?? 0)}</Row>
         </dl>
       </Card>
 
@@ -603,7 +606,6 @@ function TokenTab({
             {chain.dbc_pool ? <CopyAddress address={chain.dbc_pool} /> : "—"}
           </Row>
           <Row label="Issued at launch — circulating over max supply">{pct(chain.issue_bps)}</Row>
-          <Row label="Burn share of realised fees">{pct(chain.fee_bps)}</Row>
           <Row label="Raise to the strategy — the rest is locked liquidity">
             {chain.migration_fee_pct}%
           </Row>
@@ -739,6 +741,11 @@ function LaunchConfigCard({
   onAct: Act;
   pending: boolean;
 }) {
+  // The quote asset is chosen here because this config is what fixes it: the
+  // program writes it onto the vault at tokenize and it never changes after.
+  // wSOL by default, since that is what Meteora's keepers migrate on the
+  // threshold the program requires.
+  const [quoteMint, setQuoteMint] = useState(WSOL);
   const [initialCap, setInitialCap] = useState("10");
   const [migrationCap, setMigrationCap] = useState("100");
   const [migrationFee, setMigrationFee] = useState("50");
@@ -756,7 +763,23 @@ function LaunchConfigCard({
         what it allows.
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Labelled label="Start value" hint="What the vault is worth per token at the start of the curve, in SOL. Its NAV is what this is priced against — you may strike it above or below.">
+        <Labelled
+          label="Quote asset"
+          hint="What the token sells for. It becomes the migrated pool's quote asset, what a wind-down converts into, and what a redemption pays — and it cannot be changed after launch."
+        >
+          <select
+            value={quoteMint}
+            onChange={(e) => setQuoteMint(e.target.value)}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-[13px]"
+          >
+            {QUOTE_ASSETS.map((asset) => (
+              <option key={asset.mint} value={asset.mint}>
+                {asset.symbol}
+              </option>
+            ))}
+          </select>
+        </Labelled>
+        <Labelled label="Start value" hint="What the vault is worth per token at the start of the curve, in the quote asset. Its NAV is what this is priced against — you may strike it above or below.">
           <input
             value={initialCap}
             onChange={(e) => setInitialCap(e.target.value)}
@@ -764,7 +787,7 @@ function LaunchConfigCard({
             className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
           />
         </Labelled>
-        <Labelled label="End value" hint="Where the curve fills, in SOL. Must exceed the start.">
+        <Labelled label="End value" hint="Where the curve fills, in the quote asset. Must exceed the start.">
           <input
             value={migrationCap}
             onChange={(e) => setMigrationCap(e.target.value)}
@@ -820,6 +843,7 @@ function LaunchConfigCard({
           onAct({
             build: () =>
               api.buildVaultLaunchConfig(vault.account, {
+                quote_mint: quoteMint,
                 initial_market_cap: Number(initialCap),
                 migration_market_cap: Number(migrationCap),
                 migration_fee_percentage: Number(migrationFee),

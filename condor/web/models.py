@@ -884,7 +884,6 @@ class VaultPin(BaseModel):
     agent_ref: dict[str, Any]
     version: int = 0
     config_hash: Optional[str] = None
-    fee_bps: int = 0
     signature: Optional[str] = None
     scan: Optional[VaultScan] = None
     pending: Optional[dict[str, Any]] = None
@@ -916,7 +915,6 @@ class VaultChainState(BaseModel):
     config_hash: str
     quote_mint: Optional[str] = None
     version: int = 0
-    fee_bps: int = 0
     # Circulating over max supply at launch; 0 while the vault is private.
     issue_bps: int = 0
     # The launch terms this vault chose, recorded by the program at tokenize.
@@ -972,15 +970,12 @@ class CreateVaultRequest(BaseModel):
     """
 
     label: str
-    quote_mint: str
     fund_lamports: int = 0
     network: str = "mainnet-beta"
     agent_slug: str
     strategy_slug: str
     # The private config. Condor keeps it; the chain keeps its hash.
     config: dict[str, Any]
-    # The share of realised LP fees the sweep burns.
-    fee_bps: int = 5000
 
 
 class VaultTokenizeRequest(BaseModel):
@@ -1007,6 +1002,13 @@ class VaultLaunchConfigRequest(BaseModel):
     reads what was chosen before they can buy.
     """
 
+    #: What the token is sold for — and therefore what the migrated pool quotes
+    #: in, what a wind-down converts into, and what a redemption pays. Chosen
+    #: here because this config is what fixes it: the program writes it onto the
+    #: vault at `tokenize` and it can never change afterwards. A vault has none
+    #: before that, and needs none: a private vault owes nobody, and its runner
+    #: takes assets out through the delegate in whatever they are.
+    quote_mint: str
     # What the vault is worth per token at the start of the curve, in quote.
     # Informed by NAV; a runner may strike it above or below.
     initial_market_cap: float
@@ -1051,11 +1053,6 @@ class VaultPublishRequest(BaseModel):
     agent_slug: Optional[str] = None
     strategy_slug: Optional[str] = None
     config: dict[str, Any]
-    fee_bps: Optional[int] = None
-
-
-class VaultFeeRequest(BaseModel):
-    fee_bps: int
 
 
 class VaultActiveRequest(BaseModel):

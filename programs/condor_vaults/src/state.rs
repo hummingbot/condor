@@ -173,15 +173,20 @@ pub struct Vault {
     /// sha256 of the canonical encoding of the private config. The values are
     /// never on chain: this is the commitment a run checks them against.
     pub config_hash: [u8; 32],
-    /// The unit of account: what the runner funds it with, what it winds down
-    /// into, what it redeems in, and what its NAV is quoted in. Chosen at
-    /// creation, because a private vault needs one long before it has a token.
+    /// The unit of account, and **default until `tokenize`**: what the curve
+    /// sells the token for, what the migrated DAMM v2 pool quotes in, what a
+    /// wind-down converts into and what a redemption pays. All four are the
+    /// same asset because they are the same promise to a holder, and it is the
+    /// launch config that fixes it — so it is written here at tokenization,
+    /// from the config the runner chose, and never at creation.
+    ///
+    /// A private vault has none, and needs none: it owes nobody, its runner
+    /// takes assets out through the delegate in whatever they are, and
+    /// `finalize_wind_down` has nothing to verify. Asking at creation was
+    /// asking a question whose answer could not matter until much later and
+    /// could not be changed once it did.
     pub quote_mint: Pubkey,
     pub version: u32,
-    /// The share of realised LP fees the sweep spends buying and burning the
-    /// token. The holders' entire running return. Idle while private: there is
-    /// no token to buy.
-    pub fee_bps: u16,
     /// The share of the fixed supply sold in the first sale. The rest is the
     /// *retained* supply: it lands in the vault, not in the runner's hands, and
     /// can only leave through a later sale. Buyers read it as the ceiling on

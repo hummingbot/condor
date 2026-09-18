@@ -2372,7 +2372,6 @@ export interface VaultChainState {
   config_hash: string | null;
   quote_mint: string | null;
   version: number;
-  fee_bps: number;
   /** Circulating over max supply at launch; 0 while private. */
   issue_bps: number;
   /**
@@ -3788,13 +3787,11 @@ export const api = {
     server: string,
     data: {
       label: string;
-      quote_mint: string;
       fund_lamports: number;
       network?: string;
       agent_slug: string;
       strategy_slug: string;
       config: Record<string, unknown>;
-      fee_bps?: number;
     },
   ) =>
     apiFetch<{ account: string; build: VaultBuild }>(`/api/v1/vaults${query({ server })}`, {
@@ -3842,7 +3839,7 @@ export const api = {
     }),
 
   /**
-   * The runner's plain builds, by name: `set-fee`, `set-active`, `wind-down`,
+   * The runner's plain builds, by name: `set-active`, `wind-down`,
    * `claim-income`. One call rather than one per instruction — the backend
    * checks who is asking and Gateway's schema checks the body.
    */
@@ -3851,7 +3848,7 @@ export const api = {
     // The same names Condor's own allowlist holds (RUNNER_BUILDS): a name
     // that is not one of these is a 404 there, so spelling it here is what
     // keeps a typo a compile error rather than a request.
-    name: "set-fee" | "set-active" | "wind-down" | "claim-income" | "deposit",
+    name: "set-active" | "wind-down" | "claim-income" | "deposit",
     body?: Record<string, unknown>,
   ) =>
     apiFetch<VaultBuild>(
@@ -3867,6 +3864,11 @@ export const api = {
   buildVaultLaunchConfig: (
     account: string,
     data: {
+      /** What the token sells for, and so what the migrated pool quotes in,
+       *  what a wind-down converts into and what a redemption pays. Fixed by
+       *  this config and written onto the vault at tokenize; a vault has none
+       *  before that and never changes it after. */
+      quote_mint: string;
       initial_market_cap: number;
       migration_market_cap: number;
       migration_fee_percentage?: number;

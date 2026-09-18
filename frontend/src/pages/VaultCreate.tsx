@@ -25,7 +25,6 @@ import { api } from "@/lib/api";
 import { useWallet } from "@/lib/wallet/context";
 
 /** Wrapped SOL: the quote asset every Condor vault starts with. */
-const WSOL = "So11111111111111111111111111111111111111112";
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
 export function VaultCreate() {
@@ -38,7 +37,6 @@ export function VaultCreate() {
   const [fundSol, setFundSol] = useState("0");
   const [agentSlug, setAgentSlug] = useState("");
   const [strategySlug, setStrategySlug] = useState("");
-  const [feePct, setFeePct] = useState("50");
   const [configText, setConfigText] = useState('{\n  "pair": "SOL-USDC"\n}');
   const [error, setError] = useState<string | null>(null);
 
@@ -62,12 +60,10 @@ export function VaultCreate() {
       }
       const created = await api.createVault(server, {
         label: label.trim() || "Untitled vault",
-        quote_mint: WSOL,
         fund_lamports: fund,
         agent_slug: agentSlug,
         strategy_slug: strategySlug,
         config,
-        fee_bps: Math.round(Number(feePct) * 100),
       });
       const signature = await signAndSubmit(server, created.build);
       // The confirm is what promotes the config from staged to stored, and it
@@ -150,21 +146,6 @@ export function VaultCreate() {
               />
             </Field>
           </div>
-
-          <Field
-            label="Burn share"
-            hint="The share of realised LP fees that buys and burns the token, once there is one. Idle while the vault is private."
-          >
-            <div className="flex items-center gap-2">
-              <input
-                value={feePct}
-                onChange={(e) => setFeePct(e.target.value)}
-                inputMode="decimal"
-                className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
-              />
-              <span className="text-[12px] text-[var(--color-text-muted)]">%</span>
-            </div>
-          </Field>
 
           <Field
             label="Config"

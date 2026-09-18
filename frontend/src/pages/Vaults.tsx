@@ -130,8 +130,6 @@ function VaultCard({ vault }: { vault: VaultInfo }) {
         )}
         {isTokenized(vault) && chain && (
           <>
-            <dt title="The share of realised LP fees that buys and burns the token">Burn</dt>
-            <dd className="text-right font-mono text-[var(--color-text)]">{feePct(chain.fee_bps)}</dd>
             <dt title="Circulating over max supply at launch">Issued</dt>
             <dd className="text-right font-mono text-[var(--color-text)]">
               {feePct(chain.issue_bps)}

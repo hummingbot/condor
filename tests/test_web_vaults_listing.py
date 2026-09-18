@@ -23,7 +23,6 @@ PRIVATE_CHAIN = {
     "configHash": "ab" * 32,
     "quoteMint": "So11111111111111111111111111111111111111112",
     "version": 1,
-    "feeBps": 5000,
     "state": "Running",
     "delegate": "BSiYJDBLDSxuCTBx4caLLtNoFzcyt6HHpwx5ukvizzeT",
     "createdTs": 1789696000,
@@ -39,7 +38,7 @@ RECORD = {
     "quote_mint": PRIVATE_CHAIN["quoteMint"],
     "delegate": {"address": PRIVATE_CHAIN["delegate"], "granted_at": 1},
     "token": None,
-    "pin": {"config_hash": "ab" * 32, "version": 1, "fee_bps": 5000, "config": {}},
+    "pin": {"config_hash": "ab" * 32, "version": 1, "config": {}},
     "created_at": 1789696000,
 }
 

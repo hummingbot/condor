@@ -1,4 +1,4 @@
-//! `pin`, `publish_version`, `set_fee`, `set_active` — everything the runner
+//! `pin`, `publish_version`, `set_active` — everything the runner
 //! changes about a running vault, and the one place the wind-down's one-wayness
 //! is enforced.
 //!
@@ -14,7 +14,7 @@ use anchor_lang::prelude::*;
 
 use crate::error::VaultError;
 use crate::state::{
-    AgentRef, Vault, VaultState, BPS_DENOMINATOR, VAULT_AUTHORITY_SEED, VAULT_SEED,
+    AgentRef, Vault, VaultState, VAULT_AUTHORITY_SEED, VAULT_SEED,
 };
 use crate::swig;
 
@@ -38,21 +38,13 @@ pub struct Pin<'info> {
 ///
 /// Nothing here mentions a token: a private vault pins and runs a strategy for
 /// its own runner, and most will do so for a while before anyone else is
-/// invited in. `fee_bps` is recorded now and simply has nothing to buy until
-/// `tokenize`.
-pub fn pin(
-    ctx: Context<Pin>,
-    agent_ref: AgentRef,
-    config_hash: [u8; 32],
-    fee_bps: u16,
-) -> Result<()> {
+/// invited in.
+pub fn pin(ctx: Context<Pin>, agent_ref: AgentRef, config_hash: [u8; 32]) -> Result<()> {
     require!(!ctx.accounts.vault.is_pinned(), VaultError::AlreadyPinned);
-    require!(fee_bps <= BPS_DENOMINATOR, VaultError::BpsOutOfRange);
 
     let vault = &mut ctx.accounts.vault;
     vault.agent_ref = agent_ref;
     vault.config_hash = config_hash;
-    vault.fee_bps = fee_bps;
     vault.version = 1;
     vault.state = VaultState::Running;
     Ok(())
@@ -101,20 +93,6 @@ pub fn publish_version(
     vault.version = vault.version.checked_add(1).ok_or(VaultError::VersionOverflow)?;
     vault.agent_ref = agent_ref;
     vault.config_hash = config_hash;
-    Ok(())
-}
-
-/// The share of realised LP fees the sweep burns. Holders read it; the tick
-/// reads it from chain rather than from Condor's copy.
-pub fn set_fee(ctx: Context<RunnerOnly>, fee_bps: u16) -> Result<()> {
-    require!(fee_bps <= BPS_DENOMINATOR, VaultError::BpsOutOfRange);
-    let vault = &mut ctx.accounts.vault;
-    require!(vault.is_pinned(), VaultError::NotPinned);
-    require!(
-        vault.state.accepts_strategy_changes(),
-        VaultError::WindingDown
-    );
-    vault.fee_bps = fee_bps;
     Ok(())
 }
 
