@@ -21,7 +21,6 @@ from ._shared import (
     clear_executors_state,
     describe_executor_error,
     format_executor_pnl,
-    format_executor_status_line,
     get_executor_fees,
     get_executor_pnl,
     get_executor_type,

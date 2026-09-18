@@ -32,7 +32,6 @@ from condor.web.models import (
     AddServerRequest,
     ApiClientConfigUpdateRequest,
     ApiUpgradeRequest,
-    CredentialInfo,
     GatewayNetworkUpdateRequest,
     GatewayPullRequest,
     GatewayStartRequest,

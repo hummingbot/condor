@@ -1678,14 +1678,6 @@ export interface ConnectorInfo {
   [key: string]: unknown;
 }
 
-export interface ConnectorFieldInfo {
-  key: string;
-  type: string;
-  required: boolean;
-  default?: unknown;
-  description?: string;
-}
-
 // ── Voice Settings ──
 
 export interface VoicePrefs {

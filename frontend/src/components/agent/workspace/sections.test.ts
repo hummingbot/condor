@@ -20,7 +20,6 @@ import {
   pageSection,
   parseSections,
   sectionForView,
-  serializeSections,
 } from "./sections";
 
 describe("parseSections", () => {
@@ -54,19 +53,6 @@ describe("parseSections", () => {
     expect(parseSections(undefined)).toBeNull();
     expect(parseSections("")).toEqual([]);
     expect(parseSections("   ")).toEqual([]);
-  });
-});
-
-describe("serializeSections", () => {
-  it("round-trips through the parser", () => {
-    expect(parseSections(serializeSections(["fleet", "runs"]))).toEqual([
-      "runs",
-      "fleet",
-    ]);
-  });
-
-  it("writes an empty string for nothing open, which clears the key", () => {
-    expect(serializeSections([])).toBe("");
   });
 });
 

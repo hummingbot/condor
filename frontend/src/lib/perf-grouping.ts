@@ -103,12 +103,6 @@ export const GROUPING_PRESETS: readonly GroupingPreset[] = [
   },
 ];
 
-/** Which preset a grouping is, or `null` for one nobody offers a button for. */
-export function presetOf(grouping: readonly GroupAxis[]): GroupingPreset | null {
-  const wanted = formatGrouping(grouping);
-  return GROUPING_PRESETS.find((preset) => formatGrouping(preset.axes) === wanted) ?? null;
-}
-
 /**
  * Whether an axis tells anything in this population apart.
  *

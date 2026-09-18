@@ -22,14 +22,6 @@ import {
   type WorkspaceUrl,
 } from "@/components/agent/workspace/views";
 
-/** The four keys the screen spends. */
-export const WORKSPACE_PARAMS = [
-  "strategy",
-  "run",
-  "tick",
-  OPEN_PARAM,
-] as const;
-
 /**
  * The two words the retired `?view=` grammar spelled a section with.
  *

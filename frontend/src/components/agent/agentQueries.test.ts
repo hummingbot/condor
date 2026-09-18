@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   invalidateLifecycle,
-  invalidateOwnership,
   invalidateStrategyCatalog,
 } from "@/components/agent/agentQueries";
 
@@ -16,14 +15,12 @@ function fakeClient() {
 }
 
 describe("agent invalidation sets", () => {
-  it("invalidateLifecycle re-reads the strategy, the agent detail and the rollup", () => {
+  it("invalidateLifecycle re-reads the strategy and the agent detail", () => {
     const { client, keys } = fakeClient();
     invalidateLifecycle(client, "brigado", "brl_mm");
     expect(keys()).toEqual([
       { queryKey: ["strategy", "brigado", "brl_mm"] },
       { queryKey: ["agent", "brigado"] },
-      // A stopped strategy's rollup stops polling (PERF-375).
-      { queryKey: ["strategy-performance", "brigado", "brl_mm"] },
     ]);
   });
 
@@ -33,16 +30,6 @@ describe("agent invalidation sets", () => {
     expect(keys()).toEqual([
       { queryKey: ["agent", "brigado"] },
       { queryKey: ["agent-brain", "brigado"] },
-    ]);
-  });
-
-  it("invalidateOwnership re-reads the fleet map, the strategy and the agent", () => {
-    const { client, keys } = fakeClient();
-    invalidateOwnership(client, "brigado", "brl_mm");
-    expect(keys()).toEqual([
-      { queryKey: ["fleet-map"] },
-      { queryKey: ["strategy", "brigado", "brl_mm"] },
-      { queryKey: ["agent", "brigado"] },
     ]);
   });
 });

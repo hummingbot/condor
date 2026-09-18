@@ -13,11 +13,9 @@ import { parseJournal } from "@/lib/parse-agent";
 /**
  * The run's ticks, as its navigation.
  *
- * This is `LoopPulse`'s beat strip promoted from a header ornament to the spine
- * of the page: a tick number *is* a snapshot's name, so a row of beats is the
- * whole history of a run and the fastest way into any moment of it. `LoopPulse`
- * itself stays on the strategy workbench, where it reports the loop running
- * *now*; this one reports a run that may have ended weeks ago.
+ * A row of beats as the spine of the page: a tick number *is* a snapshot's
+ * name, so a row of beats is the whole history of a run and the fastest way
+ * into any moment of it — including a run that may have ended weeks ago.
  *
  * The colour rule lives in `lab/runs.ts` so it is testable without a DOM. Its
  * fourth state is the one that matters: a run written before the action log

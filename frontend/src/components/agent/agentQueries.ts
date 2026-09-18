@@ -20,10 +20,6 @@ import { agentQuery } from "@/lib/queryClient";
  * the delete guard — and what re-arms the gated `["agent", slug]` poll
  * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
  * over a loop that had just started, with nothing left to reopen it.
- *
- * The third key is the strategy's run rollup (`PerformancePanel`). A rollup
- * polled only while the strategy runs (PERF-375) would otherwise keep the
- * number it had before the stop.
  */
 export function invalidateLifecycle(
   queryClient: QueryClient,
@@ -32,7 +28,6 @@ export function invalidateLifecycle(
 ) {
   queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
   queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
-  queryClient.invalidateQueries({ queryKey: ["strategy-performance", slug, sslug] });
 }
 
 /**
@@ -48,20 +43,4 @@ export function invalidateStrategyCatalog(
 ) {
   queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
   queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
-}
-
-/**
- * What claiming or unclaiming a bot for a strategy just made stale.
- *
- * The ownership ledger decides the fleet map, the strategy's money and the
- * tree, so all three readers are re-read.
- */
-export function invalidateOwnership(
-  queryClient: QueryClient,
-  slug: string,
-  sslug: string,
-) {
-  queryClient.invalidateQueries({ queryKey: ["fleet-map"] });
-  queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
-  queryClient.invalidateQueries({ queryKey: agentQuery(slug).queryKey });
 }

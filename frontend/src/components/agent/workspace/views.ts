@@ -211,8 +211,8 @@ export function journalNamesDeploy(
  *    and had six of its writes rejected left two indistinguishable rows.
  * 2. **It says it deployed and the ledger is empty.** Either the ownership
  *    claim failed or the narrative is wrong, and both are worth a person.
- * 3. **The tick is late.** The rule `LoopPulse` already draws in amber, said
- *    once more where somebody reading anything else will see it.
+ * 3. **The tick is late.** The rule the loop bar's countdown draws in amber,
+ *    said once more where somebody reading anything else will see it.
  *
  * `nowSec` is a parameter and not a `Date.now()` inside, for the reason every
  * clock in this codebase is: an alert that appears on its own is not testable,

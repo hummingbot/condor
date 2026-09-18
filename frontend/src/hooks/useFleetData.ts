@@ -109,9 +109,8 @@ export function useFleetData(
      *
      * On by default, because both pages that fold a whole fleet also chart it.
      * A host that only wants the *fold* — the execution dock
-     * (`components/chat/DockExecution.tsx`), the workspace's Money view and a
-     * strategy's `DeployedFleet` (PERF-373), which fold the running population
-     * and draw nothing — would otherwise pay a paged request per controller per
+     * (`components/chat/DockExecution.tsx`, PERF-373), which folds the running
+     * population and draws nothing — would otherwise pay a paged request per controller per
      * server for a series it never reads. Every other query is left exactly as it was, under the same
      * keys, so a host that turns the walk off still shares its fleet with the
      * pages that do chart it.

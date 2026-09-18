@@ -42,11 +42,6 @@ function ordered(ids: readonly unknown[]): SectionId[] {
   return SECTIONS.filter((id) => ids.includes(id));
 }
 
-/** `["runs","fleet"]` → `"runs.fleet"`; `""` for none, which clears the key. */
-export function serializeSections(ids: readonly SectionId[]): string {
-  return ordered(ids).join(".");
-}
-
 /**
  * Where a retired `?view=` lands now.
  *

@@ -1,9 +1,9 @@
 /**
  * Each shared agent component lives in a file named for it (READ-407).
  *
- * `AgentOverviewTab.tsx` held `MarkdownEditor`, `InstanceCard` and
- * `PerformancePanel` long after its `OverviewTab` was removed, so a reader
- * looking for any of the three had no file name to follow.
+ * `AgentOverviewTab.tsx` held `MarkdownEditor` (and two components since
+ * deleted) long after its `OverviewTab` was removed, so a reader looking for
+ * it had no file name to follow.
  */
 
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ describe("agent component module layout (READ-407)", () => {
     expect(Object.keys(agentModules).filter((p) => p.includes("AgentOverviewTab"))).toEqual([]);
   });
 
-  it.each(["MarkdownEditor", "InstanceCard", "PerformancePanel"])("exports %s from %s.tsx", async (name) => {
+  it.each(["MarkdownEditor"])("exports %s from %s.tsx", async (name) => {
     const load = agentModules[`./${name}.tsx`];
     expect(load).toBeDefined();
     const mod = (await load()) as Record<string, unknown>;

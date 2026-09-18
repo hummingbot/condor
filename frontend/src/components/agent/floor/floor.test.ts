@@ -6,19 +6,12 @@
  * arithmetic it needed did not go with it, because it was never about the page.
  * What is pinned here is that a breakdown is a *slice of the same spine* and so
  * sums to the same fold; that {@link sumTotals} is a rule and not a spread,
- * because three of its fields are not additive; and that the spine readers
- * `floor.ts` and `scopeOwners` share read the spine `reconcile` folded.
+ * because three of its fields are not additive.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { groupSpine, sumTotals } from "@/components/agent/floor/floor";
-import {
-  spineExposure,
-  spineKeys,
-  spineLastClose,
-} from "@/components/agent/workspace/fleet";
-import { reconcile } from "@/components/agent/workspace/reconcile";
 import type { ControllerInfo } from "@/lib/api";
 import type { ConvertQuote, PerfLeaf } from "@/lib/perf-tree";
 import { foldLeaves } from "@/lib/perf-tree";
@@ -60,9 +53,6 @@ function leaf(over: Partial<PerfLeaf> = {}): PerfLeaf {
     ...over,
   };
 }
-
-/** A deed index whose ledger opened an hour ago, so `agentBucket` can judge. */
-const DEEDS = { bots: {}, since: (NOW - 7_200_000) / 1000 } as never;
 
 function position(amount: number, price: number, side = "buy") {
   return { amount, entry_price: price, side };
@@ -142,42 +132,5 @@ describe("sumTotals is a rule, not a spread", () => {
     const one = foldLeaves([leaf({ returnPct: 12 })], cv, NOW);
     expect(one.returnPct).toBe(12);
     expect(sumTotals([one, one]).returnPct).toBeUndefined();
-  });
-});
-
-describe("the spine readers over a reconciled spine", () => {
-  it("carries the spine's derived readings out of the one fold", () => {
-    const leaves = [
-      leaf({
-        agent: "alpha.mm",
-        how: "namespace",
-        bot: "bot-x",
-        controllerId: "c9",
-        net: 3,
-        positions: [position(2, 50, "SELL")],
-      }),
-      leaf({
-        agent: "alpha.mm",
-        how: "namespace",
-        running: false,
-        endedAt: NOW - 60_000,
-      }),
-    ];
-    const r = reconcile({
-      leaves,
-      deeds: DEEDS,
-      owners: [],
-      convert: cv,
-      now: NOW,
-      slug: "alpha",
-      strategy: null,
-      attributed: null,
-    });
-
-    expect(spineKeys(r.spine)).toContain("bot-x:c9");
-    expect(spineExposure(r.spine, cv)).toBeCloseTo(-100, 9);
-    expect(spineLastClose(r.spine)).toBe(NOW - 60_000);
-    expect(r.spine.filter((l) => l.running)).toHaveLength(1);
-    expect(r.totals.net).toBe(3);
   });
 });
