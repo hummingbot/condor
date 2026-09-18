@@ -12,9 +12,9 @@ pub enum VaultError {
     PoolCreatorMismatch,
     #[msg("the pool's base mint is not this vault's mint")]
     PoolMintMismatch,
-    #[msg("the pool has not migrated yet, so there is no seed to collect")]
-    PoolNotMigrated,
-    #[msg("the creator's migration fee has already been collected")]
+    #[msg("the pool has not graduated yet, so there is no seed to collect")]
+    PoolNotGraduated,
+    #[msg("the seed has already been collected")]
     SeedAlreadyCollected,
     #[msg("version counter overflow")]
     VersionOverflow,
@@ -54,8 +54,8 @@ pub enum VaultError {
     RecipientNotVault,
     #[msg("the DBC config's terms are not the ones every Condor vault launches with")]
     LaunchTermsMismatch,
-    #[msg("the migration fee must be between 20% and 80%: it is the split between the vault's capital and its holders' exit liquidity")]
-    MigrationFeeOutOfRange,
+    #[msg("the locked liquidity must be between 20% and 80%: it is the split between the holders' exit depth and the vault's capital")]
+    LockedLiquidityOutOfRange,
     #[msg("the config is not the one this vault's pool was launched from")]
     PoolConfigMismatchForPool,
     #[msg("the vault is winding down; its strategy can no longer change")]

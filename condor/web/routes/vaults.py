@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import logging
 import secrets
+
+import aiohttp
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -143,6 +145,12 @@ async def _reconcile(
     A vault Gateway lists but Condor has no record of is *not* added here: this
     store is per-user and a listing is not proof of whose it is. What the chain
     corrects is Condor's own rows.
+
+    A record missing from the listing is **asked about directly** before it is
+    dropped. The listing is one call through a proxy, and an answer that is
+    empty or short looks exactly like a chain with no vaults on it — so
+    believing it cost a real vault its record once. Only a direct read that
+    comes back 404 is absence (plan §4).
     """
     try:
         on_chain = {v["account"]: v for v in await gw.list_vaults()}
@@ -155,21 +163,35 @@ async def _reconcile(
     reconciled: dict[str, Any] = {}
     for account, record in records.items():
         chain = on_chain.get(account)
-        updated, changed = vault_store.reconcile_record(
-            dict(record),
-            swig=(
-                vault_store.ABSENT
-                if chain is None and vault_store.is_live(record)
-                else None
-            ),
-            vault=_chain_fields(chain) if chain else vault_store.ABSENT,
+        answer = (
+            _chain_fields(chain) if chain else await _absent_or_unknown(gw, account)
         )
+        updated, changed = vault_store.reconcile_record(dict(record), chain=answer)
         if changed:
             reconciled[account] = updated
         records[account] = updated
     if reconciled:
         vault_store.apply_reconcile(user_id, reconciled)
     return {k: v for k, v in records.items() if not v.get(vault_store.GONE)}
+
+
+async def _absent_or_unknown(gw: VaultGateway, account: str) -> Any:
+    """Ask the chain about one account: its fields, ABSENT, or ``None``.
+
+    ``None`` is "could not tell" and changes nothing. Anything other than a 404
+    is could-not-tell, including a proxy error and a timeout: "I did not hear"
+    must never be recorded as "it is gone".
+    """
+    try:
+        return _chain_fields(await gw.vault(account))
+    except aiohttp.ClientResponseError as e:
+        if e.status == 404:
+            return vault_store.ABSENT
+        logger.warning("vault %s could not be read: %s", account, e)
+        return None
+    except Exception as e:
+        logger.warning("vault %s could not be read: %s", account, e)
+        return None
 
 
 def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
@@ -183,12 +205,12 @@ def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
         "quote_mint": chain.get("quoteMint"),
         "version": chain.get("version", 0),
         "issue_bps": chain.get("issueBps", 0),
-        # The launch terms this vault chose. `migration_fee_pct` is the split
-        # between the strategy's capital and the holders' exit depth, which is
+        # The launch terms this vault chose. `locked_liquidity_pct` is the split
+        # between the holders' exit depth and the strategy's capital, which is
         # the number that most changes what the vault is.
-        "migration_fee_pct": chain.get("migrationFeePct", 0),
+        "locked_liquidity_pct": chain.get("lockedLiquidityPct", 0),
         "creator_trading_fee_pct": chain.get("creatorTradingFeePct", 0),
-        "migration_fee_option": chain.get("migrationFeeOption", 0),
+        "pool_fee_option": chain.get("poolFeeOption", 0),
         "tokenized": bool(chain.get("tokenized")),
         "state": chain.get("state"),
         "delegate": chain.get("delegate"),
@@ -197,7 +219,7 @@ def _chain_fields(chain: dict[str, Any]) -> dict[str, Any]:
         "wind_down_ts": chain.get("windDownTs", 0),
         # Where the token trades once the curve graduated. Derived by Gateway
         # from terms the program already fixes, so nobody has to be told which
-        # fee config a vault migrated into.
+        # fee config a vault graduated into.
         "damm_pool": chain.get("dammPool"),
     }
 
@@ -632,8 +654,8 @@ async def build_launch_config(
 
     One per vault, because a vault prices its launch off the assets it already
     holds, which is why the program checks a config's *terms* rather than its
-    address. The migration fee is the one that matters most: it is the split
-    between the strategy's capital and the depth holders exit through, and it
+    address. The locked liquidity is the one that matters most: it is the split
+    between the depth holders exit through and the strategy's capital, and it
     is the creator's to choose between 20 and 80.
 
     Its address is remembered here on confirmation, so the launch form does not
@@ -651,12 +673,12 @@ async def build_launch_config(
         # can never change afterwards.
         "quoteMint": req.quote_mint,
         "initialMarketCap": req.initial_market_cap,
-        "migrationMarketCap": req.migration_market_cap,
+        "graduationMarketCap": req.graduation_market_cap,
     }
     for key, value in (
-        ("migrationFeePercentage", req.migration_fee_percentage),
+        ("lockedLiquidityPct", req.locked_liquidity_pct),
         ("creatorTradingFeePercentage", req.creator_trading_fee_percentage),
-        ("migrationFeeOption", req.migration_fee_option),
+        ("poolFeeOption", req.pool_fee_option),
         ("baseFeeBps", req.base_fee_bps),
     ):
         if value is not None:
@@ -910,7 +932,7 @@ async def holdings(
         "retained_supply": chain.get("retainedSupply"),
         "circulating_supply": chain.get("redeemableSupply"),
         "mint": chain.get("mint"),
-        # The migrated pool: what the DEX browser lists and an LP executor trades.
+        # The graduated pool: what the DEX browser lists and an LP executor trades.
         "damm_pool": chain.get("dammPool"),
     }
 

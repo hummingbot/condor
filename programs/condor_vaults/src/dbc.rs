@@ -43,7 +43,8 @@ pub const IX_CLAIM_POSITION_FEE: [u8; 8] = [180, 38, 154, 17, 133, 33, 162, 211]
 pub const IX_WITHDRAW_LEFTOVER: [u8; 8] = [20, 198, 202, 237, 235, 243, 183, 66];
 
 /// `withdraw_migration_fee`'s one argument: whose share is being taken.
-/// 0 = the partner's, 1 = the creator's. The vault's seed is the creator's.
+/// 0 = the partner's (the protocol's graduation fee), 1 = the creator's (the
+/// vault's seed).
 pub const MIGRATION_FEE_FLAG_CREATOR: u8 = 1;
 
 // ── VirtualPool ──────────────────────────────────────────────────────────────

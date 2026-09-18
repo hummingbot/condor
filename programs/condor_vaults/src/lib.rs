@@ -161,7 +161,7 @@ pub mod condor_vaults {
         instructions::income::claim_income(ctx, source)
     }
 
-    /// The migrated pool's locked position fees, into the creator's accounts.
+    /// The graduated pool's locked position fees, into the creator's accounts.
     pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
         instructions::income::claim_position_fee(ctx)
     }

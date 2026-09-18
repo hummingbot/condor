@@ -280,34 +280,32 @@ GONE = "_gone"
 def reconcile_record(
     record: dict[str, Any],
     *,
-    swig: Any,
-    vault: Any,
+    chain: Any,
 ) -> tuple[dict[str, Any], bool]:
-    """Fold the chain's answers into one record. Returns ``(record, changed)``.
+    """Fold the chain's answer into one record. Returns ``(record, changed)``.
 
-    Each argument is the account's decoded content, :data:`ABSENT`, or ``None``
-    for "could not tell". Only :data:`ABSENT` moves anything.
+    ``chain`` is the vault's decoded content, :data:`ABSENT`, or ``None`` for
+    "could not tell". Only :data:`ABSENT` moves anything: a record is dropped
+    when the chain has *said* the account is not there, never because an answer
+    failed to arrive.
     """
     changed = False
 
-    # Both accounts are written by the same transaction, so either one being
-    # absent means the same thing: it never landed, or the chain it landed on is
-    # gone. There is no half-created vault to roll back to any more.
-    if swig is ABSENT or vault is ABSENT:
+    if chain is ABSENT:
         record[GONE] = True
         return record, True
 
-    if isinstance(vault, dict):
-        if record.get("chain") != vault:
-            record["chain"] = vault
+    if isinstance(chain, dict):
+        if record.get("chain") != chain:
+            record["chain"] = chain
             changed = True
         # The record claims a pin; the chain is the arbiter of its numbers.
         pin = record.get("pin")
         if pin:
-            record["drift"] = _drift(pin, vault)
+            record["drift"] = _drift(pin, chain)
         # The chain is the arbiter of whether it is still private.
-        if vault.get("mint") and not record.get("token"):
-            record["token"] = {"mint": vault["mint"], "dbc_pool": vault.get("dbc_pool")}
+        if chain.get("mint") and not record.get("token"):
+            record["token"] = {"mint": chain["mint"], "dbc_pool": chain.get("dbc_pool")}
             changed = True
 
     return record, changed

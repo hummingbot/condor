@@ -76,13 +76,13 @@ pub fn create_vault(ctx: Context<CreateVault>, id: [u8; 32], fund_lamports: u64)
     vault.agent_ref = AgentRef::default();
     vault.config_hash = [0u8; 32];
     // No quote asset yet: `tokenize` writes it from the launch config, which
-    // is where it is chosen and what the migrated pool will quote in.
+    // is where it is chosen and what the graduated pool will quote in.
     vault.quote_mint = Pubkey::default();
     vault.version = 0;
     vault.issue_bps = 0;
-    vault.migration_fee_pct = 0;
+    vault.locked_liquidity_pct = 0;
     vault.creator_trading_fee_pct = 0;
-    vault.migration_fee_option = 0;
+    vault.pool_fee_option = 0;
     // Nothing runs until a strategy is pinned; `pin` is what starts it.
     vault.state = VaultState::Paused;
     vault.delegate = Pubkey::default();

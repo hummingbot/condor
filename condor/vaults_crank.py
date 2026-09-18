@@ -222,7 +222,7 @@ class VaultCrank:
             await self._stop_engine(account)
             return
 
-        # A migrated pool has two things waiting for a push, and both are
+        # A graduated pool has two things waiting for a push, and both are
         # permissionless: the seed (80% of the raise) and the unsold supply.
         # Condor pays the gas because it is there, not because it must be.
         if chain.get("tokenized"):
@@ -242,16 +242,22 @@ class VaultCrank:
         await self._top_up_delegate(gw, account, chain)
 
     async def _collect(self, gw: VaultGateway, account: str, chain: dict) -> None:
-        """Push the two permissionless post-migration calls, if they are due.
+        """Push the post-graduation collections, if they are due.
 
-        Both refuse on chain when there is nothing to do — DBC keeps a one-time
-        flag for each — so this does not need to know whether it has already
-        run; it needs only to not treat a refusal as an error.
+        The seed and the leftover are permissionless; the protocol's graduation fee is
+        its own, signed by the platform key. All three refuse on
+        chain when there is nothing to do — DBC keeps a one-time flag for each
+        — so this does not need to know whether it has already run; it needs
+        only to not treat a refusal as an error.
         """
         pool_config = chain.get("dbc_config") or chain.get("config")
         if not pool_config:
             return
-        for route in ("collect-seed", "collect-leftover"):
+        for route in (
+            "collect-seed",
+            "collect-leftover",
+            "claim-protocol-graduation-fee",
+        ):
             try:
                 result = await gw.execute(
                     route, {"vaultAccount": account, "dbcConfig": pool_config}

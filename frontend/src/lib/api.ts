@@ -2379,11 +2379,12 @@ export interface VaultChainState {
    * permanently locked liquidity, so this is the split between the strategy and
    * the holders' exit depth. 0 while private.
    */
-  migration_fee_pct: number;
+  /** Share of the raise permanently locked as liquidity, 20–80; the rest, less the 2 % protocol graduation fee, is capital. */
+  locked_liquidity_pct: number;
   /** The creator's share of trading fees, at most 50. */
   creator_trading_fee_pct: number;
-  /** Which fixed-fee option the migrated pool charges (0–5). */
-  migration_fee_option: number;
+  /** Which fixed-fee option the graduated pool charges (0–5). */
+  pool_fee_option: number;
   /** False means no outside holders: the creator may still withdraw. */
   tokenized: boolean;
   state: "Running" | "Paused" | "WindingDown" | "Redeemable";
@@ -2478,7 +2479,7 @@ export interface VaultHoldings {
   retained_supply: string | null;
   circulating_supply: string | null;
   mint: string | null;
-  /** The migrated pool — where the vault's token trades and an executor LPs. */
+  /** The graduated pool — where the vault's token trades and an executor LPs. */
   damm_pool: string | null;
 }
 
@@ -3861,23 +3862,23 @@ export const api = {
     ),
 
   /**
-   * The vault's own DBC config: the terms it launches on. The migration fee is
+   * The vault's own DBC config: the terms it launches on. The locked liquidity is
    * the split between the strategy's capital and the depth holders exit
    * through, which is why it is the creator's to choose.
    */
   buildVaultLaunchConfig: (
     account: string,
     data: {
-      /** What the token sells for, and so what the migrated pool quotes in,
+      /** What the token sells for, and so what the graduated pool quotes in,
        *  what a wind-down converts into and what a redemption pays. Fixed by
        *  this config and written onto the vault at tokenize; a vault has none
        *  before that and never changes it after. */
       quote_mint: string;
       initial_market_cap: number;
-      migration_market_cap: number;
-      migration_fee_percentage?: number;
+      graduation_market_cap: number;
+      locked_liquidity_pct?: number;
       creator_trading_fee_percentage?: number;
-      migration_fee_option?: number;
+      pool_fee_option?: number;
       base_fee_bps?: number;
     },
   ) =>

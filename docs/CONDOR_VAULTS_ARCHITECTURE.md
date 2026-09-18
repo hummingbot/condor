@@ -37,7 +37,7 @@ Plus one per program:
 
 | PDA | Seeds | What it is |
 |---|---|---|
-| `Protocol` | `["protocol"]` | `authority` (rotates keys, may wind down an abandoned vault), `administrator` (the crank's key), `fee_claimer` (where Meteora pays the protocol fee), `dbc_config` (an informational default). |
+| `Protocol` | `["protocol"]` | `authority` (rotates keys, may wind down an abandoned vault), `administrator` (the crank's key), `fee_claimer` (where Meteora pays the protocol's trading-fee share and the 2 % protocol graduation fee), `dbc_config` (an informational default). |
 
 There is no key that can reach inside either vault account. The treasury signs
 only through `invoke_signed` inside the program's own instructions.
@@ -182,7 +182,7 @@ address.** A vault prices its own launch off assets it already holds, so each
 one creates its own DBC config (`build-launch-config` in Gateway). The config
 fixes the **quote asset** — SOL or USDC — which is written onto the `Vault`
 as `quote_mint` *at tokenize*, never at creation: it is what the curve sells
-for, what the migrated DAMM v2 pool quotes in, what a wind-down converts into
+for, what the graduated DAMM v2 pool quotes in, what a wind-down converts into
 and what a redemption pays. A private vault has none and needs none.
 
 Each economic term is a **bound** (the creator's decision, copied onto the
@@ -190,22 +190,28 @@ Each economic term is a **bound** (the creator's decision, copied onto the
 
 | Term | Kind | Rule |
 |---|---|---|
-| `migration_fee_pct` | bound | 20–80. The share of the raise that becomes the vault's capital; the rest is permanently locked liquidity. This is the split between the strategy and the holders' exit depth. |
+| `locked_liquidity_pct` | bound | 20–80. The share of the raise permanently locked as liquidity in the graduated pool; the rest, less the protocol's graduation fee, is the vault's capital. This is the split between the holders' exit depth and the strategy. (DBC stores the complement as its `migration_fee_percentage`; `tokenize` converts.) |
 | `creator_trading_fee_pct` | bound | ≤ 50 |
-| `migration_fee_option` | bound | one of Meteora's fixed-fee options (customizable option excluded) |
-| pool creator's share of migration fee | constant | 100 % — the pool creator is the vault's own treasury, so nothing routes to the partner |
-| migration threshold | constant | 10 wSOL-equivalent, the one Meteora's keepers migrate automatically |
+| `pool_fee_option` | bound | the graduated pool's fee tier: one of Meteora's fixed options (customizable option excluded) |
+| **`protocol_graduation_fee_pct`** | constant | **2 %** of the unlocked raise — i.e. of the vault's capital — held by DBC for `Protocol.fee_claimer` as the partner's share, claimed once after graduation (`claim-protocol-graduation-fee`). The one platform fee a holder pays, and it is on chain rather than on a pricing page |
+| pool creator's share of the unlocked raise | constant | the other 98 % — the pool creator is the vault's own treasury, so it becomes capital nobody can withdraw |
+| graduation threshold | constant | 10 wSOL-equivalent, the one Meteora's keepers graduate (their word: migrate) automatically |
 | token type / supply | constant | Token-2022, fixed |
 | fee claimer | constant | `Protocol.fee_claimer` |
 | leftover receiver | constant | the vault's treasury |
 | `issue_bps` | argument | share of supply sold; the rest is retained supply — the ceiling on later dilution |
 
-### 6.1 After the curve fills
+### 6.1 After the curve fills (graduation)
 
-* **`collect_seed`** (permissionless): the pool creator's migration fee — the
-  vault's capital — moves from DBC into the treasury's quote ATA. The pool
+* **`collect_seed`** (permissionless): the pool creator's 98 % of the unlocked
+  raise — the vault's capital — moves from DBC into the treasury's quote ATA. The pool
   creator is the treasury PDA, so the destination is fixed and anybody may trigger it; Condor's
   promptness is irrelevant.
+* **Protocol graduation fee** (platform-signed, Gateway `claim-protocol-graduation-fee`): the
+  other 2 % goes from DBC to `Protocol.fee_claimer`. Not a vault-program
+  instruction — DBC pays its partner directly — which is also why it cannot be
+  made larger without a program upgrade: `tokenize` refuses a config whose
+  split is not 98 / 2.
 * **`collect_leftover`** (permissionless): the unsold supply moves into the
   treasury. It is the **retained supply**, and it lives in the treasury on purpose: the
   strategy can market-make the vault's own token — an LP position against its
@@ -213,8 +219,8 @@ Each economic term is a **bound** (the creator's decision, copied onto the
   buys. There is no `inject`; it was built and removed because this does the
   same job at market price with the strategy as counterparty.
 * **`claim_income` / `claim_position_fee`**: the *creator's* income — curve
-  trading fees, the surplus above the threshold, and the locked migrated
-  position's fees, all of which Meteora pays to the pool creator (the treasury).
+  trading fees, the surplus above the threshold, and the graduated pool's
+  locked position fees, all of which Meteora pays to the pool creator (the treasury).
   Every destination is derived from `Vault.creator`; these are the only doors
   out of the pool creator's streams. The *vault's* income (LP
   fees from the strategy) arrives in the treasury directly.
@@ -309,7 +315,7 @@ surfpool / Solana ◄── Gateway signs: creator builds are returned unsigned;
 * **Crank** (`vaults_crank.py`, per server): reads every vault from Gateway,
   keeps an hbapi account per vault treasury, starts or stops the strategy engine
   as state demands, tops up the delegate's gas from the treasury, calls the
-  permissionless collectors after migration, and attempts
+  permissionless collectors after graduation, and attempts
   `finalize_wind_down` on winding-down vaults each pass.
 
 ### 8.3 Frontend (`frontend/`)
@@ -359,8 +365,8 @@ conversion is not permissionless — see the plan for the open question).
 | `execute_unchecked(data)` | creator or delegate | private, Running / Paused | treasury invokes anything |
 | `execute(data)` | creator or delegate | Running / Paused | treasury invokes a venue under the recipient rule |
 | `tokenize(name, symbol, uri, issue_bps)` | creator | private | DBC launch, treasury as creator; writes quote and terms |
-| `collect_seed` | anyone | migrated | creator's migration fee → treasury |
-| `collect_leftover` | anyone | migrated | unsold supply → treasury |
+| `collect_seed` | anyone | graduated | pool creator's 98 % of the unlocked raise → treasury |
+| `collect_leftover` | anyone | graduated | retained supply → treasury |
 | `claim_income(source)`, `claim_position_fee` | creator | tokenized | creator streams → creator |
 | `wind_down` | creator, or protocol authority | tokenized, Running / Paused | one-way stop |
 | `finalize_wind_down` | administrator | WindingDown | checks conversion, clears delegate, Redeemable |
@@ -371,7 +377,7 @@ Error groups worth knowing when reading logs: `NotPrivate` (an
 `InstructionNotAllowed` / `AccountNotAllowed` / `RecipientNotVault` (the four
 refusals of `execute`), `SelfInvoke`, `WindDownIncomplete` /
 `RedemptionPotEmpty` (finalize too early), `LaunchTermsMismatch` /
-`MigrationFeeOutOfRange` (a config outside `launch_rules`).
+`LockedLiquidityOutOfRange` (a config outside `launch_rules`).
 
 ## 11. Where it stands
 
@@ -383,6 +389,26 @@ swap pair through `execute` behaving as §5 says.
 
 Not yet exercised against the rewritten program: the tokenized half —
 `tokenize` → `execute`-only trading → `collect_seed` / `collect_leftover` →
-`wind_down` → conversion → `finalize_wind_down` → `redeem`. Open design
-items: routers under `execute`, a permissionless wind-down conversion with
-price bounds, and the multisig handover of the upgrade authority.
+`wind_down` → conversion → `finalize_wind_down` → `redeem`.
+
+**Two gaps that block tokenizing at all**, found by building a real launch
+config on the fork and reading the account back:
+
+* **The graduation threshold cannot be set.** `launch_rules` requires the DBC
+  config's `migration_quote_threshold` to equal exactly 10 SOL, but the SDK
+  *derives* that number from the market caps and the supply split — a config
+  built for caps 50 → 100 came back with 52.24 SOL. So no config this builder
+  produces passes `tokenize`, except by coincidence. Choosing the caps freely
+  and fixing the threshold are mutually exclusive; one of the two has to give.
+* **The 20–80 locked-liquidity range is not launchable.** Only 50, and only at
+  some cap ratios, survives DBC's curve construction; 20, 30, 70 and 80 all
+  fail on-chain with `InvalidTokenSupply`. Probably related: the builder passes
+  `leftover: 0` while the comment beside it says the unsold remainder is the
+  retained supply, so `issue_bps` (written by `tokenize`) and the config's
+  `leftover` are two independent numbers describing one quantity, with nothing
+  reconciling them.
+
+Open design items: routers under `execute`, a permissionless wind-down
+conversion with price bounds, and the multisig handover of the upgrade
+authority. A security review of the program is under way; its findings live in
+`CONDOR_VAULTS_SECURITY_REVIEW.md` and are not yet reflected above.

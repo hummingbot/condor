@@ -918,12 +918,13 @@ class VaultChainState(BaseModel):
     # Circulating over max supply at launch; 0 while the vault is private.
     issue_bps: int = 0
     # The launch terms this vault chose, recorded by the program at tokenize.
-    # `migration_fee_pct` is the split between the strategy's capital (this
-    # share of the raise) and the holders' exit depth (the rest, permanently
-    # locked). 20-80, and the single number that most changes what a vault is.
-    migration_fee_pct: int = 0
+    # `locked_liquidity_pct` is the share of the raise permanently locked as
+    # liquidity — the holders' exit depth; the rest, less the 2 % protocol
+    # graduation fee, is the strategy's capital. 20-80, and the single number
+    # that most changes what a vault is.
+    locked_liquidity_pct: int = 0
     creator_trading_fee_pct: int = 0
-    migration_fee_option: int = 0
+    pool_fee_option: int = 0
     # False means no outside holders: the creator may still withdraw.
     tokenized: bool = False
     state: str  # Running | Paused | WindingDown | Redeemable
@@ -982,7 +983,7 @@ class CreateVaultRequest(BaseModel):
 class VaultTokenizeRequest(BaseModel):
     """The terms are in the launch config, not here.
 
-    A vault's launch price and its migration fee are config parameters, so the
+    A vault's launch price and its locked liquidity are config parameters, so the
     creator builds the config first (`VaultLaunchConfigRequest`) and Condor
     remembers its address. The program checks every term of it and records the
     ones a holder needs to read.
@@ -1003,7 +1004,7 @@ class VaultLaunchConfigRequest(BaseModel):
     reads what was chosen before they can buy.
     """
 
-    #: What the token is sold for — and therefore what the migrated pool quotes
+    #: What the token is sold for — and therefore what the graduated pool quotes
     #: in, what a wind-down converts into, and what a redemption pays. Chosen
     #: here because this config is what fixes it: the program writes it onto the
     #: vault at `tokenize` and it can never change afterwards. A vault has none
@@ -1013,15 +1014,16 @@ class VaultLaunchConfigRequest(BaseModel):
     # What the vault is worth per token at the start of the curve, in quote.
     # Informed by NAV; a creator may strike it above or below.
     initial_market_cap: float
-    migration_market_cap: float
-    #: 20-80. The share of the raise that becomes the vault's capital; the rest
-    #: is permanently locked liquidity. This is the split between the strategy
-    #: and the holders' exit depth, which is why it is the creator's to set.
-    migration_fee_percentage: Optional[float] = None
+    graduation_market_cap: float
+    #: 20-80. The share of the raise permanently locked as liquidity in the
+    #: graduated pool; the rest, less the protocol's graduation fee, is the
+    #: vault's capital. This is the split between the holders' exit depth and
+    #: the strategy, which is why it is the creator's to set.
+    locked_liquidity_pct: Optional[float] = None
     #: 0-50: the creator's share of trading fees.
     creator_trading_fee_percentage: Optional[float] = None
-    #: 0-5: which fixed fee the migrated pool charges.
-    migration_fee_option: Optional[int] = None
+    #: 0-5: which fixed fee the graduated pool charges.
+    pool_fee_option: Optional[int] = None
     base_fee_bps: Optional[int] = None
 
 

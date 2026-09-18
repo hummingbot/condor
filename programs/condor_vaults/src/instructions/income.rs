@@ -5,7 +5,7 @@
 //! is its strategy's LP fees, and it arrives in the treasury without passing
 //! through here. The *creator's* income is what the token's own
 //! market pays the pool creator: trading fees on the curve, the surplus above
-//! the migration threshold, and — after graduation — the fees on the
+//! the graduation threshold, and — after graduation — the fees on the
 //! permanently locked position the creator holds. All three are the PDA's to
 //! claim, and this file is the only door out of them.
 //!
@@ -15,7 +15,7 @@
 //!
 //! **Why two instructions and not one.** The plan asks for a single
 //! `claim_income`. The curve fee and the surplus are two DBC calls over one
-//! account set, so they share this one. The migrated position's fees are a
+//! account set, so they share this one. The graduated pool position's fees are a
 //! call into a *different program* — Meteora's DAMM v2 — over an account set
 //! with nothing in common: a position, a position NFT account, a second pool.
 //! One instruction covering both would be a 25-account struct, most of it
@@ -36,10 +36,10 @@ use crate::token;
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IncomeSource {
     /// Trading fees earned while the curve is open, and after graduation the
-    /// creator's share on the migrated pool.
+    /// creator's share on the graduated pool.
     CurveFee,
     /// The part of the final swap that took the reserve past the threshold.
-    /// Claimable once, after migration.
+    /// Claimable once, after graduation.
     Surplus,
 }
 
@@ -227,7 +227,7 @@ pub struct ClaimPositionFee<'info> {
     /// CHECK: DAMM v2's signer PDA, a fixed address in its IDL.
     #[account(address = dbc::DAMM_V2_POOL_AUTHORITY)]
     pub pool_authority: UncheckedAccount<'info>,
-    /// CHECK: the migrated DAMM v2 pool.
+    /// CHECK: the graduated DAMM v2 pool.
     pub pool: UncheckedAccount<'info>,
     /// CHECK: the creator's permanently locked position.
     #[account(mut)]
@@ -263,7 +263,7 @@ pub struct ClaimPositionFee<'info> {
     pub damm_program: UncheckedAccount<'info>,
 }
 
-/// The migrated pool pays the creator's locked position; the position is the
+/// The graduated pool pays the creator's locked position; the position is the
 /// PDA's, and what it pays is the creator's.
 pub fn claim_position_fee(ctx: Context<ClaimPositionFee>) -> Result<()> {
     require_keys_eq!(

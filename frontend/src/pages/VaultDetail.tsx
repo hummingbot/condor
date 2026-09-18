@@ -44,7 +44,7 @@ const CREATOR_TABS = ["Agent", "Token"] as const;
 type Tab = (typeof PUBLIC_TABS)[number] | (typeof CREATOR_TABS)[number];
 
 /** What a vault may launch against. Both are what Meteora's own keepers
- *  migrate, and the program's fixed migration threshold is denominated in the
+ *  migrate, and the program's fixed graduation threshold is denominated in the
  *  quote asset — so this is a short list on purpose, not a token picker. */
 const WSOL = "So11111111111111111111111111111111111111112";
 const QUOTE_ASSETS = [
@@ -375,8 +375,8 @@ function SummaryTab({ vault }: { vault: VaultInfo }) {
             </Row>
           )}
           <Row label="Issued to the manager">{pct(chain?.issue_bps)}</Row>
-          <Row label="Raise kept as capital">
-            {chain?.migration_fee_pct ? `${chain.migration_fee_pct}%` : "—"}
+          <Row label="Raise locked as liquidity">
+            {chain?.locked_liquidity_pct ? `${chain.locked_liquidity_pct}%` : "—"}
           </Row>
           <Row label="Creator's cut of trading fees">
             {chain?.creator_trading_fee_pct ? `${chain.creator_trading_fee_pct}%` : "—"}
@@ -606,12 +606,12 @@ function TokenTab({
             {chain.dbc_pool ? <CopyAddress address={chain.dbc_pool} /> : "—"}
           </Row>
           <Row label="Issued at launch — circulating over max supply">{pct(chain.issue_bps)}</Row>
-          <Row label="Raise to the strategy — the rest is locked liquidity">
-            {chain.migration_fee_pct}%
+          <Row label="Locked as liquidity — the rest, less the 2% protocol fee, is capital">
+            {chain.locked_liquidity_pct}%
           </Row>
           <Row label="Creator's share of trading fees">{chain.creator_trading_fee_pct}%</Row>
-          <Row label="Migrated pool fee">
-            {[25, 30, 100, 200, 400, 600][chain.migration_fee_option] ?? "—"} bps
+          <Row label="Pool fee after graduation">
+            {[25, 30, 100, 200, 400, 600][chain.pool_fee_option] ?? "—"} bps
           </Row>
         </dl>
         <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
@@ -727,7 +727,7 @@ function TokenTab({
  *
  * A vault prices its launch off the assets it already holds, so each one needs
  * its own Meteora config — which is why the program checks a config's *terms*
- * rather than its address. The migration fee is the decision here: it is the
+ * rather than its address. The locked liquidity is the decision here: it is the
  * split between the strategy's capital and the depth holders exit through, and
  * a high one and a low one are different products rather than a right and a
  * wrong answer.
@@ -743,16 +743,16 @@ function LaunchConfigCard({
 }) {
   // The quote asset is chosen here because this config is what fixes it: the
   // program writes it onto the vault at tokenize and it never changes after.
-  // wSOL by default, since that is what Meteora's keepers migrate on the
+  // wSOL by default, since that is what Meteora's keepers graduate on the
   // threshold the program requires.
   const [quoteMint, setQuoteMint] = useState(WSOL);
   const [initialCap, setInitialCap] = useState("10");
-  const [migrationCap, setMigrationCap] = useState("100");
-  const [migrationFee, setMigrationFee] = useState("50");
+  const [graduationCap, setGraduationCap] = useState("100");
+  const [lockedLiquidity, setLockedLiquidity] = useState("50");
   const [creatorFee, setCreatorFee] = useState("50");
   const [poolFee, setPoolFee] = useState("2");
 
-  const fee = Number(migrationFee);
+  const fee = Number(lockedLiquidity);
   const outOfBounds = !Number.isFinite(fee) || fee < 20 || fee > 80;
 
   return (
@@ -765,7 +765,7 @@ function LaunchConfigCard({
       <div className="grid gap-3 sm:grid-cols-2">
         <Labelled
           label="Quote asset"
-          hint="What the token sells for. It becomes the migrated pool's quote asset, what a wind-down converts into, and what a redemption pays — and it cannot be changed after launch."
+          hint="What the token sells for. It becomes the graduated pool's quote asset, what a wind-down converts into, and what a redemption pays — and it cannot be changed after launch."
         >
           <select
             value={quoteMint}
@@ -789,20 +789,20 @@ function LaunchConfigCard({
         </Labelled>
         <Labelled label="End value" hint="Where the curve fills, in the quote asset. Must exceed the start.">
           <input
-            value={migrationCap}
-            onChange={(e) => setMigrationCap(e.target.value)}
+            value={graduationCap}
+            onChange={(e) => setGraduationCap(e.target.value)}
             inputMode="decimal"
             className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
           />
         </Labelled>
         <Labelled
-          label="Raise to the strategy"
-          hint="20–80%. The rest becomes permanently locked liquidity — the depth your holders sell into. High means a large strategy behind a thin market; low is the reverse."
+          label="Locked as liquidity"
+          hint="20–80%. Permanently locked in the graduated pool — the depth your holders sell into. The rest, less the 2% protocol graduation fee, is the strategy's capital. High means a deep market behind a small strategy; low is the reverse."
         >
           <div className="flex items-center gap-2">
             <input
-              value={migrationFee}
-              onChange={(e) => setMigrationFee(e.target.value)}
+              value={lockedLiquidity}
+              onChange={(e) => setLockedLiquidity(e.target.value)}
               inputMode="decimal"
               className={`w-24 rounded-md border bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px] ${
                 outOfBounds ? "border-red-500/60" : "border-[var(--color-border)]"
@@ -822,7 +822,7 @@ function LaunchConfigCard({
             <span className="text-[12px] text-[var(--color-text-muted)]">%</span>
           </div>
         </Labelled>
-        <Labelled label="Migrated pool fee" hint="What the pool charges after graduation.">
+        <Labelled label="Pool fee after graduation" hint="What the graduated pool charges.">
           <select
             value={poolFee}
             onChange={(e) => setPoolFee(e.target.value)}
@@ -845,10 +845,10 @@ function LaunchConfigCard({
               api.buildVaultLaunchConfig(vault.account, {
                 quote_mint: quoteMint,
                 initial_market_cap: Number(initialCap),
-                migration_market_cap: Number(migrationCap),
-                migration_fee_percentage: Number(migrationFee),
+                graduation_market_cap: Number(graduationCap),
+                locked_liquidity_pct: Number(lockedLiquidity),
                 creator_trading_fee_percentage: Number(creatorFee),
-                migration_fee_option: Number(poolFee),
+                pool_fee_option: Number(poolFee),
               }),
             // Condor remembers the address so the launch form never asks for it.
             confirm: (signature) => api.confirmVaultLaunchConfig(vault.account, signature),

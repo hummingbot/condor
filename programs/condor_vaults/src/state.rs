@@ -41,22 +41,30 @@ pub mod launch_rules {
     //!   else. Those are changed by a program upgrade, which is the right weight
     //!   for a rule that binds every holder of every vault.
 
-    /// How much of the raise becomes the vault's capital, the rest becoming
-    /// permanently locked liquidity. **This is the split between the strategy
-    /// and the holders' exit**: at 80 the strategy gets 8 SOL and the pool about
-    /// 2; at 20 it is a small strategy behind a deep market. Both are defensible
-    /// and they are not the same product, which is exactly why the creator
-    /// chooses and the number is on chain.
-    pub const MIN_MIGRATION_FEE_PCT: u8 = 20;
-    pub const MAX_MIGRATION_FEE_PCT: u8 = 80;
+    /// How much of the raise is permanently locked as liquidity in the
+    /// graduated pool. The rest — less the protocol's graduation fee — is the
+    /// vault's capital. **This is the split between the holders' exit and the
+    /// strategy**: at 20 the pool gets about 2 SOL and the strategy 8; at 80 it
+    /// is a small strategy behind a deep market. Both are defensible and they
+    /// are not the same product, which is exactly why the creator chooses and
+    /// the number is on chain. (DBC stores the complement, as its
+    /// `migration_fee_percentage`; `tokenize` converts.)
+    pub const MIN_LOCKED_LIQUIDITY_PCT: u8 = 20;
+    pub const MAX_LOCKED_LIQUIDITY_PCT: u8 = 80;
     /// What the form offers. Not enforced — it is a starting point, not a rule.
-    pub const DEFAULT_MIGRATION_FEE_PCT: u8 = 50;
+    pub const DEFAULT_LOCKED_LIQUIDITY_PCT: u8 = 50;
 
-    /// **Constant.** All of the migration fee is the creator's, and the creator
-    /// is the vault's own PDA. Anything less would route part of the seed to the
-    /// partner — Condor — which is holders' capital paying a platform fee under
-    /// another name.
-    pub const CREATOR_MIGRATION_FEE_PCT: u8 = 100;
+    /// **Constant.** The protocol's graduation fee: the share of the unlocked
+    /// raise — the vault's capital — that DBC holds for `Protocol.fee_claimer`
+    /// rather than for the pool creator (DBC calls it the partner's share of
+    /// the migration fee). It is the one platform fee a holder pays, taken
+    /// once, at graduation, and it lives here rather than on a pricing page so
+    /// that a buyer on the curve can read it before they buy.
+    pub const PROTOCOL_GRADUATION_FEE_PCT: u8 = 2;
+    /// The rest is the pool creator's, and the pool creator is the vault's own
+    /// treasury: 98 % of the unlocked raise becomes capital nobody can
+    /// withdraw. DBC's `creator_migration_fee_percentage`.
+    pub const CREATOR_GRADUATION_SHARE_PCT: u8 = 100 - PROTOCOL_GRADUATION_FEE_PCT;
 
     /// The creator's share of the non-protocol trading fee. Bounded above rather
     /// than fixed: a creator may take less, and 50 is the most they may take,
@@ -64,25 +72,25 @@ pub mod launch_rules {
     /// uses.
     pub const MAX_CREATOR_TRADING_FEE_PCT: u8 = 50;
 
-    /// What the migrated pool charges, as a `MigrationFeeOption`. The allowed
+    /// What the graduated pool charges, as DBC's `MigrationFeeOption`. The allowed
     /// set is Meteora's fixed-fee options; the customizable one (6) is excluded
     /// because on that path the fee lives in a field nothing here enforces, so
     /// a vault taking it would be promising a number it could change.
-    pub const MIGRATION_FEE_OPTION_25_BPS: u8 = 0;
-    pub const MIGRATION_FEE_OPTION_30_BPS: u8 = 1;
-    pub const MIGRATION_FEE_OPTION_100_BPS: u8 = 2;
-    pub const MIGRATION_FEE_OPTION_200_BPS: u8 = 3;
-    pub const MIGRATION_FEE_OPTION_400_BPS: u8 = 4;
-    pub const MIGRATION_FEE_OPTION_600_BPS: u8 = 5;
-    pub const MAX_MIGRATION_FEE_OPTION: u8 = MIGRATION_FEE_OPTION_600_BPS;
+    pub const POOL_FEE_OPTION_25_BPS: u8 = 0;
+    pub const POOL_FEE_OPTION_30_BPS: u8 = 1;
+    pub const POOL_FEE_OPTION_100_BPS: u8 = 2;
+    pub const POOL_FEE_OPTION_200_BPS: u8 = 3;
+    pub const POOL_FEE_OPTION_400_BPS: u8 = 4;
+    pub const POOL_FEE_OPTION_600_BPS: u8 = 5;
+    pub const MAX_POOL_FEE_OPTION: u8 = POOL_FEE_OPTION_600_BPS;
     /// What the form offers: the same 100 bps the curve charged.
-    pub const DEFAULT_MIGRATION_FEE_OPTION: u8 = MIGRATION_FEE_OPTION_100_BPS;
+    pub const DEFAULT_POOL_FEE_OPTION: u8 = POOL_FEE_OPTION_100_BPS;
 
     /// **Constant, and load-bearing.** Ten wrapped SOL is the one threshold
-    /// Meteora's mainnet keepers migrate automatically. At any other number the
+    /// Meteora's mainnet keepers graduate (their word: migrate) automatically. At any other number the
     /// curve fills and nothing happens until somebody notices — which is a
     /// vault's capital sitting in a dead pool.
-    pub const MIGRATION_QUOTE_THRESHOLD: u64 = 10_000_000_000;
+    pub const GRADUATION_QUOTE_THRESHOLD: u64 = 10_000_000_000;
 
     /// **Constant.** `TokenType::Token2022`, and a fixed supply: `issue_bps`
     /// means nothing against a mint that can print more.
@@ -179,7 +187,7 @@ pub struct Vault {
     /// never on chain: this is the commitment a run checks them against.
     pub config_hash: [u8; 32],
     /// The unit of account, and **default until `tokenize`**: what the curve
-    /// sells the token for, what the migrated DAMM v2 pool quotes in, what a
+    /// sells the token for, what the graduated DAMM v2 pool quotes in, what a
     /// wind-down converts into and what a redemption pays. All four are the
     /// same asset because they are the same promise to a holder, and it is the
     /// launch config that fixes it — so it is written here at tokenization,
@@ -203,11 +211,12 @@ pub struct Vault {
     /// account. All three are bounded by `launch_rules`; all three are 0 while
     /// the vault is private.
     ///
-    /// `migration_fee_pct` is the one that changes what the product *is*: it is
-    /// the split between the strategy's capital and the holders' exit depth.
-    pub migration_fee_pct: u8,
+    /// `locked_liquidity_pct` is the one that changes what the product *is*: it
+    /// is the split between the holders' exit depth and the strategy's capital.
+    pub locked_liquidity_pct: u8,
     pub creator_trading_fee_pct: u8,
-    pub migration_fee_option: u8,
+    /// The graduated pool's fee tier, as DBC's `MigrationFeeOption` index.
+    pub pool_fee_option: u8,
     pub state: VaultState,
     /// The installed delegate, or the default key for none.
     pub delegate: Pubkey,
@@ -270,45 +279,47 @@ impl Vault {
 mod tests {
     use super::launch_rules as rules;
 
-    /// The migration fee is the split between the vault's capital and the
-    /// holders' exit depth, so both ends of the range have to be launchable —
+    /// The locked liquidity is the split between the holders' exit depth and
+    /// the vault's capital, so both ends of the range have to be launchable —
     /// they are two different products, not a good value and a bad one.
     #[test]
-    fn the_migration_fee_range_is_a_real_range() {
-        assert!(rules::MIN_MIGRATION_FEE_PCT < rules::DEFAULT_MIGRATION_FEE_PCT);
-        assert!(rules::DEFAULT_MIGRATION_FEE_PCT < rules::MAX_MIGRATION_FEE_PCT);
-        assert_eq!(rules::MIN_MIGRATION_FEE_PCT, 20);
-        assert_eq!(rules::MAX_MIGRATION_FEE_PCT, 80);
+    fn the_locked_liquidity_range_is_a_real_range() {
+        assert!(rules::MIN_LOCKED_LIQUIDITY_PCT < rules::DEFAULT_LOCKED_LIQUIDITY_PCT);
+        assert!(rules::DEFAULT_LOCKED_LIQUIDITY_PCT < rules::MAX_LOCKED_LIQUIDITY_PCT);
+        assert_eq!(rules::MIN_LOCKED_LIQUIDITY_PCT, 20);
+        assert_eq!(rules::MAX_LOCKED_LIQUIDITY_PCT, 80);
     }
 
-    /// At the SDK's cap a migration fee would leave no liquidity at all, which
-    /// is a token nobody can sell. The ceiling here is well inside it.
+    /// The floor keeps a market: below it a token nobody can sell. The ceiling
+    /// keeps a strategy: above it there is nothing left to run.
     #[test]
-    fn the_migration_fee_always_leaves_a_market() {
-        assert!(rules::MAX_MIGRATION_FEE_PCT <= 80);
-        let locked = 100 - rules::MAX_MIGRATION_FEE_PCT;
-        assert!(locked >= 20, "at least a fifth of the raise stays as liquidity");
+    fn every_launch_has_both_a_market_and_a_strategy() {
+        assert!(rules::MIN_LOCKED_LIQUIDITY_PCT >= 20, "at least a fifth of the raise stays as liquidity");
+        assert!(100 - rules::MAX_LOCKED_LIQUIDITY_PCT >= 20, "at least a fifth of the raise becomes capital");
     }
 
-    /// The customizable option (6) is excluded: on that path the migrated pool's
+    /// The customizable option (6) is excluded: on that path the graduated pool's
     /// fee lives in a field nothing checks, so a vault taking it would be
     /// promising a number it could later change.
     #[test]
     fn the_customizable_fee_option_is_not_allowed() {
-        assert_eq!(rules::MAX_MIGRATION_FEE_OPTION, 5);
-        assert!(rules::DEFAULT_MIGRATION_FEE_OPTION <= rules::MAX_MIGRATION_FEE_OPTION);
+        assert_eq!(rules::MAX_POOL_FEE_OPTION, 5);
+        assert!(rules::DEFAULT_POOL_FEE_OPTION <= rules::MAX_POOL_FEE_OPTION);
     }
 
-    /// The whole migration fee is the creator's, and the creator is the vault's
-    /// own PDA. Anything less routes holders' capital to the partner.
+    /// Two percent of the unlocked raise is the protocol's, once, at
+    /// graduation; the rest is the treasury's. The two shares are the whole of
+    /// it, so no part can go unclaimed or to a third party.
     #[test]
-    fn the_seed_is_not_shared_with_the_partner() {
-        assert_eq!(rules::CREATOR_MIGRATION_FEE_PCT, 100);
+    fn the_protocol_takes_two_percent_at_graduation() {
+        assert_eq!(rules::PROTOCOL_GRADUATION_FEE_PCT, 2);
+        assert_eq!(rules::CREATOR_GRADUATION_SHARE_PCT, 98);
+        assert_eq!(rules::PROTOCOL_GRADUATION_FEE_PCT + rules::CREATOR_GRADUATION_SHARE_PCT, 100);
     }
 
-    /// Ten wrapped SOL is the one threshold Meteora's keepers migrate for us.
+    /// Ten wrapped SOL is the one threshold Meteora's keepers graduate for us.
     #[test]
     fn the_threshold_is_the_one_meteora_serves() {
-        assert_eq!(rules::MIGRATION_QUOTE_THRESHOLD, 10_000_000_000);
+        assert_eq!(rules::GRADUATION_QUOTE_THRESHOLD, 10_000_000_000);
     }
 }

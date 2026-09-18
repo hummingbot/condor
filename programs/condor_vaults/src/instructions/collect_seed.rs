@@ -1,7 +1,7 @@
 //! `collect_seed` — permissionless, and that is the point.
 //!
-//! When the curve fills, Meteora's keeper migrates the pool and 80 % of the
-//! raise sits in DBC as the *creator's* migration fee. The creator is this
+//! When the curve fills, Meteora's keeper graduates the pool and the unlocked
+//! share of the raise sits in DBC as the pool *creator's* fee. The creator is this
 //! program's PDA, so the fee has exactly one destination: the treasury's own
 //! associated account for the quote asset. Nobody can send it anywhere else,
 //! which is why anybody may send it — the caller pays the gas and gets
@@ -76,7 +76,7 @@ pub fn collect_seed(ctx: Context<CollectSeed>) -> Result<()> {
         ctx.accounts.config.key(),
         VaultError::PoolConfigMismatchForPool
     );
-    require!(pool.is_migrated, VaultError::PoolNotMigrated);
+    require!(pool.is_migrated, VaultError::PoolNotGraduated);
     require!(
         !pool.creator_migration_fee_withdrawn(),
         VaultError::SeedAlreadyCollected

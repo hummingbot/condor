@@ -11,7 +11,7 @@
 //! stake.
 //!
 //! **The denominator is what is circulating**, which is the mint's supply less
-//! two balances that are not: the tokens in the migrated pool's vault, and the
+//! two balances that are not: the tokens in the graduated pool's vault, and the
 //! tokens still in the vault's own retained supply. Both are read in the instruction
 //! that pays, because both move.
 //!

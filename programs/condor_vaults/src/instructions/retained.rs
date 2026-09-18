@@ -16,13 +16,13 @@
 //!
 //! One instruction, because the retained supply needs no special way out.
 //!
-//! `collect_leftover` is permissionless, like `collect_seed`: after migration
+//! `collect_leftover` is permissionless, like `collect_seed`: after graduation
 //! DBC still holds the unsold base tokens, and this moves them to the treasury.
 //! Nobody can point it anywhere else, because the destination is written into
 //! the config as the leftover receiver and checked by DBC.
 //!
 //! **There is no `inject`, and there was.** An earlier version let the creator
-//! buy retained supply tokens from the vault at the migrated pool's price, so that
+//! buy retained supply tokens from the vault at the graduated pool's price, so that
 //! capital could enter after launch. It is unnecessary: an LP position funded
 //! from the retained supply does the same thing better. As the market buys, retained supply
 //! supply enters circulation and the quote paid for it lands in the vault —
@@ -101,7 +101,7 @@ pub fn collect_leftover(ctx: Context<CollectLeftover>) -> Result<()> {
         ctx.accounts.config.key(),
         VaultError::PoolConfigMismatchForPool
     );
-    require!(pool.is_migrated, VaultError::PoolNotMigrated);
+    require!(pool.is_migrated, VaultError::PoolNotGraduated);
     require_keys_eq!(
         pool.base_vault,
         ctx.accounts.base_vault.key(),

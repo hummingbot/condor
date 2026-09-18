@@ -8,7 +8,7 @@
 //!
 //! One CPI into Meteora's DBC, with **this program's PDA as the pool creator**.
 //! That single choice is what makes the economics rules rather than promises:
-//! the migration fee — 80 % of the raise — is the creator's to withdraw, the
+//! the unlocked share of the raise — the seed — is the pool creator's to withdraw, the
 //! creator is a PDA, and so `collect_seed` can be permissionless and the seed
 //! can never be withdrawn by anyone at all. The curve fees and the surplus are
 //! the creator's too, and `claim_income` is the only door out of them, opening
@@ -25,14 +25,15 @@
 //! `Vault`** here, so a holder reads what this vault chose instead of decoding
 //! a config account:
 //!
-//! * `migration_fee_pct`, 20–80 — the split between the strategy's capital and
-//!   the holders' exit depth, and the number that most changes what the vault
-//!   is;
+//! * `locked_liquidity_pct`, 20–80 — the split between the holders' exit depth
+//!   and the strategy's capital, and the number that most changes what the
+//!   vault is;
 //! * `creator_trading_fee_pct`, at most 50;
-//! * `migration_fee_option`, any of Meteora's fixed-fee options.
+//! * `pool_fee_option`, any of Meteora's fixed-fee options for the graduated pool.
 //!
 //! The constants are the 10 SOL threshold Meteora's keepers actually serve, the
-//! migration fee going wholly to the creator, Token-2022 with a fixed supply,
+//! unlocked raise split 98 % to the treasury and 2 % to the protocol
+//! (`PROTOCOL_GRADUATION_FEE_PCT`), Token-2022 with a fixed supply,
 //! Condor as fee claimer, and the **leftover receiver set to the vault's own
 //! treasury** — which keeps the unissued supply out of the creator's hands and,
 //! because it is the treasury, puts it where the delegate can market-make with it.
@@ -188,23 +189,23 @@ pub fn tokenize(
     vault.dbc_pool = ctx.accounts.pool.key();
     // The quote asset, fixed here and only here. `check_launch_terms` has
     // already required it to be the one the partner config names, so this is
-    // the asset the curve sells for, the one the migrated DAMM v2 pool quotes
+    // the asset the curve sells for, the one the graduated DAMM v2 pool quotes
     // in, and therefore the one a wind-down converts into and a redemption
     // pays. One decision, made once, at the moment it starts to matter.
     vault.quote_mint = ctx.accounts.quote_mint.key();
     vault.issue_bps = issue_bps;
-    vault.migration_fee_pct = terms.migration_fee_pct;
+    vault.locked_liquidity_pct = terms.locked_liquidity_pct;
     vault.creator_trading_fee_pct = terms.creator_trading_fee_pct;
-    vault.migration_fee_option = terms.migration_fee_option;
+    vault.pool_fee_option = terms.pool_fee_option;
     vault.tokenized_ts = Clock::get()?.unix_timestamp;
     Ok(())
 }
 
 /// The terms a vault chose, once they have been checked.
 pub struct LaunchTerms {
-    pub migration_fee_pct: u8,
+    pub locked_liquidity_pct: u8,
     pub creator_trading_fee_pct: u8,
-    pub migration_fee_option: u8,
+    pub pool_fee_option: u8,
 }
 
 /// Every term of the partner config that binds a holder.
@@ -236,29 +237,32 @@ fn check_launch_terms(
         c.migration_option == dbc::MIGRATION_OPTION_DAMM_V2
             && c.token_type == rules::TOKEN_TYPE_TOKEN_2022
             && c.fixed_token_supply
-            && c.creator_migration_fee_pct == rules::CREATOR_MIGRATION_FEE_PCT
-            && c.migration_quote_threshold == rules::MIGRATION_QUOTE_THRESHOLD,
+            && c.creator_migration_fee_pct == rules::CREATOR_GRADUATION_SHARE_PCT
+            && c.migration_quote_threshold == rules::GRADUATION_QUOTE_THRESHOLD,
         VaultError::LaunchTermsMismatch
     );
 
     // Bounds: the creator's decisions, recorded on the vault for holders to read.
+    // DBC stores the share that becomes a fee — the creator's and the
+    // partner's — and locks the rest. Our number is the locked rest.
+    let locked_liquidity_pct = 100u8.saturating_sub(c.migration_fee_pct);
     require!(
-        c.migration_fee_pct >= rules::MIN_MIGRATION_FEE_PCT
-            && c.migration_fee_pct <= rules::MAX_MIGRATION_FEE_PCT,
-        VaultError::MigrationFeeOutOfRange
+        locked_liquidity_pct >= rules::MIN_LOCKED_LIQUIDITY_PCT
+            && locked_liquidity_pct <= rules::MAX_LOCKED_LIQUIDITY_PCT,
+        VaultError::LockedLiquidityOutOfRange
     );
     require!(
         c.creator_trading_fee_pct <= rules::MAX_CREATOR_TRADING_FEE_PCT,
         VaultError::LaunchTermsMismatch
     );
     require!(
-        c.migration_fee_option <= rules::MAX_MIGRATION_FEE_OPTION,
+        c.migration_fee_option <= rules::MAX_POOL_FEE_OPTION,
         VaultError::LaunchTermsMismatch
     );
 
     Ok(LaunchTerms {
-        migration_fee_pct: c.migration_fee_pct,
+        locked_liquidity_pct,
         creator_trading_fee_pct: c.creator_trading_fee_pct,
-        migration_fee_option: c.migration_fee_option,
+        pool_fee_option: c.migration_fee_option,
     })
 }
