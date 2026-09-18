@@ -577,6 +577,11 @@ RUNNER_BUILDS = {
     "set-active": "build-set-active",
     "wind-down": "build-wind-down",
     "claim-income": "build-claim-income",
+    # Funding the vault. Not a program instruction — a vault has no say in who
+    # sends it money — but it belongs here because the *destination* is derived
+    # from the vault rather than typed, and a vault has two addresses that look
+    # equally plausible to paste.
+    "deposit": "build-deposit",
 }
 
 

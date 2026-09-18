@@ -18,11 +18,14 @@
  * that would be one group with everything in it.
  */
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Coins, Droplets, ExternalLink } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Coins, Droplets, ExternalLink, Plus } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { isTokenized } from "@/components/vaults/format";
 import { CopyAddress } from "@/components/vaults/shared";
+import { TransferDrawer, type TransferAsset } from "@/components/vaults/TransferDrawer";
+import { useCanSign } from "@/hooks/useCanSign";
 import { api, type VaultInfo, type VaultLpPosition } from "@/lib/api";
 
 /** The Gateway network the DEX workspace addresses Solana pools by. */
@@ -50,6 +53,10 @@ const num = (value: string | number | undefined, max = 6): string => {
 
 const short = (value: string) => `${value.slice(0, 4)}…${value.slice(-4)}`;
 
+/** Native SOL's mint. A vault quoted in it is funded with the chain's own
+ *  money, which the deposit route takes as "no mint at all". */
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+
 /** A position's pair, however its protocol names it. Mints are unreadable, so
  *  a `trading_pair` is preferred and a mint is truncated rather than shown
  *  whole — the copyable address is beside it either way. */
@@ -68,6 +75,12 @@ function pairLabel(position: VaultLpPosition): string {
 
 export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
   const [tab, setTab] = useState<Tab>("assets");
+  const [moving, setMoving] = useState<TransferAsset | null>(null);
+  const { canSign } = useCanSign();
+  // Only a private vault's assets are its runner's to move. Once it has
+  // holders the way out is a redemption after a wind-down, and a Transfer
+  // button would be offering something the program refuses.
+  const movable = canSign && !isTokenized(vault);
 
   const holdings = useQuery({
     queryKey: ["vault-holdings", vault.server, vault.account],
@@ -134,6 +147,8 @@ export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
           error={holdings.error as Error | null}
           treasury={treasury}
           mint={holdings.data?.mint ?? null}
+          onMove={movable ? setMoving : undefined}
+          quoteMint={vault.quote_mint}
         />
       ) : (
         <Positions
@@ -141,6 +156,15 @@ export function VaultPortfolio({ vault }: { vault: VaultInfo }) {
           loading={lp.isLoading}
           error={lp.error as Error | null}
           errors={lp.data?.errors ?? []}
+        />
+      )}
+
+      {moving && (
+        <TransferDrawer
+          key={moving.mint ?? moving.symbol}
+          vault={vault}
+          asset={moving}
+          onClose={() => setMoving(null)}
         />
       )}
 
@@ -169,16 +193,52 @@ function Assets({
   error,
   treasury,
   mint,
+  onMove,
+  quoteMint,
 }: {
   rows: { token: string; amount: number }[];
   loading: boolean;
   error: Error | null;
   treasury: string | null | undefined;
   mint: string | null;
+  /** Absent when this vault's assets are not the viewer's to move. */
+  onMove?: (asset: TransferAsset) => void;
+  quoteMint: string | null;
 }) {
   if (loading) return <Note>Reading the chain…</Note>;
   if (error) return <Problem>{error.message}</Problem>;
-  if (rows.length === 0) return <Note>This wallet holds nothing yet. Send assets to it to fund the strategy.</Note>;
+
+  // An empty vault is the ordinary first state, not a failure: a vault is
+  // created before it is funded. So it says what to do rather than reporting
+  // a zero, and offers the one action that changes it.
+  if (rows.length === 0) {
+    return (
+      <div className="px-4 py-8 text-center">
+        <Coins className="mx-auto mb-3 h-7 w-7 text-[var(--color-text-muted)]" />
+        <p className="text-[13px] font-medium">This vault is empty</p>
+        <p className="mx-auto mt-1 mb-3 max-w-xs text-[12px] text-[var(--color-text-muted)]">
+          It holds nothing yet. Fund it and its strategy has something to trade — you can take it
+          back out at any time while the vault is private.
+        </p>
+        {onMove && (
+          <button
+            type="button"
+            onClick={() =>
+              onMove({
+                symbol: quoteMint && quoteMint !== SOL_MINT ? "the quote asset" : "SOL",
+                mint: quoteMint && quoteMint !== SOL_MINT ? quoteMint : undefined,
+                vaultAmount: 0,
+              })
+            }
+            className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Fund this vault
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <>
@@ -187,6 +247,7 @@ function Assets({
           <tr className="text-[11px] text-[var(--color-text-muted)]">
             <th className="px-4 py-2 text-left font-medium">Token</th>
             <th className="px-4 py-2 text-right font-medium">Amount</th>
+            {onMove && <th className="w-10 px-4 py-2" />}
           </tr>
         </thead>
         <tbody>
@@ -205,6 +266,27 @@ function Assets({
                 )}
               </td>
               <td className="px-4 py-2 text-right font-mono">{num(row.amount)}</td>
+              {onMove && (
+                <td className="px-4 py-2 text-right">
+                  <button
+                    type="button"
+                    title={`Move ${row.token} in or out`}
+                    onClick={() =>
+                      onMove({
+                        symbol: row.token.length > 12 ? short(row.token) : row.token,
+                        // Gateway reads the holdings back by symbol for SOL and
+                        // by mint for everything else; "SOL" here means the
+                        // chain's own money, which takes no mint.
+                        mint: row.token === "SOL" ? undefined : row.token,
+                        vaultAmount: row.amount,
+                      })
+                    }
+                    className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+                  >
+                    <ArrowLeftRight className="h-3.5 w-3.5" />
+                  </button>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

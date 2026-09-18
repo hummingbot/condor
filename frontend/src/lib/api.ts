@@ -3848,7 +3848,10 @@ export const api = {
    */
   buildVaultAction: (
     account: string,
-    name: "set-fee" | "set-active" | "wind-down" | "claim-income",
+    // The same names Condor's own allowlist holds (RUNNER_BUILDS): a name
+    // that is not one of these is a 404 there, so spelling it here is what
+    // keeps a typo a compile error rather than a request.
+    name: "set-fee" | "set-active" | "wind-down" | "claim-income" | "deposit",
     body?: Record<string, unknown>,
   ) =>
     apiFetch<VaultBuild>(
