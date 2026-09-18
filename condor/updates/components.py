@@ -460,6 +460,30 @@ async def repo_blocks(component: Component) -> list[Block]:
             )
         ]
 
+    # Before anything reads a branch name: a detached checkout has none, but
+    # ``rev-parse --abbrev-ref HEAD`` answers the literal string ``HEAD``, and
+    # everything downstream then treats that as a branch. ``origin/HEAD``
+    # resolves to the remote's default branch, so the comparison silently
+    # becomes "how far is this commit behind main", nothing reports being
+    # ahead, and ``merge --ff-only origin/HEAD`` succeeds -- fast-forwarding a
+    # detached checkout onto main and leaving it detached, with no message
+    # saying so. Refuse instead, and say which commit it is sitting on.
+    if await updater.is_detached(component.repo_dir):
+        sha = await updater.get_local_commit(component.repo_dir)
+        return [
+            Block(
+                component=component.key,
+                code="detached-head",
+                message=(
+                    f"HEAD is detached at {sha} in {component.repo_dir}. "
+                    "Check out a branch before updating — otherwise the update "
+                    "would fast-forward onto the remote's default branch and "
+                    "leave the checkout detached."
+                ),
+                resolutions=["cancel"],
+            )
+        ]
+
     branch = await updater.get_current_branch(component.repo_dir)
 
     # Fetch first, always. The incoming set is only meaningful against an

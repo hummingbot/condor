@@ -45,6 +45,7 @@ def _blocks(
     with patch.multiple(
         "utils.updater",
         is_git_repo=AsyncMock(return_value=is_repo),
+        is_detached=AsyncMock(return_value=False),
         fetch=AsyncMock(return_value=(fetched, "" if fetched else "no such remote")),
         get_current_branch=AsyncMock(return_value="main"),
         ahead_count=AsyncMock(return_value=ahead),
@@ -60,6 +61,7 @@ def test_the_blockers_are_computed_against_a_freshly_fetched_origin():
     with patch.multiple(
         "utils.updater",
         is_git_repo=AsyncMock(return_value=True),
+        is_detached=AsyncMock(return_value=False),
         fetch=fetch,
         get_current_branch=AsyncMock(return_value="main"),
         ahead_count=AsyncMock(return_value=0),
