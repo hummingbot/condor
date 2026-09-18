@@ -305,6 +305,7 @@ export function AgentRunScreen({
       pnlSeries={pnlSeries}
       onOpenTick={(next) => setParams({ tick: next })}
       onShowOlderRuns={runsOutsideWindow ? showOlderRuns : undefined}
+      variant={variant}
     />
   ) : null;
 

@@ -19,7 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentPerformance } from "@/lib/api";
+import { api, type AgentPerformance, type ReportSummary } from "@/lib/api";
 import type { Decision, ParsedJournal } from "@/lib/parse-agent";
 import { NowView } from "./NowView";
 import { alertsFor } from "./views";
@@ -30,10 +30,10 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-// The report viewer reaches the theme through `window.matchMedia`, which jsdom
-// does not have. It is the strip's own door and is pinned where it is built.
-vi.mock("@/components/routines/ReportViewer", () => ({
-  ReportViewer: () => <div data-report />,
+// The report's frame reaches the theme through `window.matchMedia`, which jsdom
+// does not have. The viewer around it is real: its way out is pinned below.
+vi.mock("@/components/routines/ReportFrame", () => ({
+  ReportFrame: () => <div data-report />,
 }));
 
 // The chart is `lightweight-charts` under a canvas jsdom does not have. What
@@ -255,5 +255,70 @@ describe("a strategy whose runs are outside the loaded window (CORR-376)", () =>
     await render({ sessionNum: 0 });
     expect(text()).toContain("This strategy has not run yet.");
     expect(container.querySelector("[data-show-older-runs]")).toBeNull();
+  });
+});
+
+describe("the session report (CORR-422)", () => {
+  const report: ReportSummary = {
+    id: "r1",
+    title: "Session 7 report",
+    filename: "r1.html",
+    created_at: "2026-09-03T20:15:00Z",
+    source_type: "agent",
+    source_name: "brl_mm",
+    tags: [],
+  };
+
+  beforeEach(() => {
+    vi.mocked(api.getSessionReport).mockResolvedValue({ report } as never);
+  });
+
+  afterEach(() => {
+    vi.mocked(api.getSessionReport).mockResolvedValue({ report: null } as never);
+  });
+
+  /** Render, wait for the report query to land, and open the report. */
+  async function openReport(props: Partial<Parameters<typeof NowView>[0]> = {}) {
+    await render(props);
+    let door: HTMLButtonElement | undefined;
+    for (let i = 0; i < 50 && !door; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      door = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (b) => b.textContent?.includes("Session report"),
+      );
+    }
+    expect(door).toBeDefined();
+    await act(async () => door!.click());
+    expect(container.querySelector("[data-now-report]")).not.toBeNull();
+  }
+
+  it("has a way back to Now, and taking it closes the report", async () => {
+    await openReport();
+    const back = container.querySelector<HTMLButtonElement>("[data-report-close]");
+    expect(back).not.toBeNull();
+    await act(async () => back!.click());
+    expect(container.querySelector("[data-now-report]")).toBeNull();
+    expect(container.querySelector("[data-report]")).toBeNull();
+  });
+
+  it("closes on Escape", async () => {
+    await openReport();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    expect(container.querySelector("[data-now-report]")).toBeNull();
+  });
+
+  it("covers the pane only in the side panel, and the window on the page", async () => {
+    await openReport({ variant: "pane" });
+    const pane = container.querySelector<HTMLElement>("[data-now-report]")!;
+    expect(pane.className).toContain("absolute");
+    expect(pane.className).not.toContain("fixed");
+
+    await openReport({ variant: "page" });
+    const page = container.querySelector<HTMLElement>("[data-now-report]")!;
+    expect(page.className).toContain("fixed");
   });
 });

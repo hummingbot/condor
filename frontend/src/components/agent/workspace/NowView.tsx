@@ -43,6 +43,7 @@ export function NowView({
   pnlSeries,
   onOpenTick,
   onShowOlderRuns,
+  variant = "page",
 }: {
   slug: string;
   sslug: string;
@@ -65,6 +66,11 @@ export function NowView({
    * than claiming the strategy never ran.
    */
   onShowOlderRuns?: () => void;
+  /**
+   * Where the run screen is drawn. In the chat's side panel the report covers
+   * the pane only, as the tick overlay does, so the conversation stays visible.
+   */
+  variant?: "page" | "pane";
 }) {
   const [showReport, setShowReport] = useState(false);
   const last = decisions[decisions.length - 1] ?? null;
@@ -187,7 +193,14 @@ export function NowView({
       />
 
       {showReport && report && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-4">
+        // `absolute` in the pane resolves against the run screen's `relative`
+        // root, the same frame the tick overlay covers (CORR-422).
+        <div
+          data-now-report
+          className={`${
+            variant === "pane" ? "absolute" : "fixed"
+          } inset-0 z-50 flex flex-col bg-[var(--color-bg)] p-4`}
+        >
           <ReportViewer
             report={report}
             reports={[report]}
