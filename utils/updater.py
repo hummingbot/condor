@@ -696,6 +696,42 @@ async def registry_image_digest(image_ref: str) -> str | None:
     return digest if digest.startswith("sha256:") else None
 
 
+async def registry_has_digest(image_ref: str, digest: str) -> bool | None:
+    """Whether the registry holds ``digest`` for ``image_ref``'s repository.
+
+    The only reliable way to tell an operator's own build from a published
+    image. The obvious test -- "a built image has no ``RepoDigests``" -- does
+    **not** work: Docker's containerd image store records a canonical digest for
+    a build as well as for a pull, so a locally built image has a RepoDigest
+    like any other, it simply is not one the registry has ever seen. Measured on
+    29.8.1: pull, then ``docker build`` over the same tag, and RepoDigests is
+    populated both times with different values. ``.Comment`` is no help either
+    (both say ``buildkit.dockerfile.v0``, because the published image was itself
+    built by buildkit in CI).
+
+    Returns ``None`` when the question could not be answered, which callers must
+    keep distinct from ``False`` -- an unreachable registry is not evidence that
+    an image was built locally.
+    """
+    repo = image_ref.split("@", 1)[0].rsplit(":", 1)[0]
+    rc, out = await _run_cmd(
+        "docker",
+        "buildx",
+        "imagetools",
+        "inspect",
+        f"{repo}@{digest}",
+        "--format",
+        "{{.Manifest.Digest}}",
+        timeout=30,
+    )
+    if rc == 0 and (out or "").strip().startswith("sha256:"):
+        return True
+    # "not found" is an answer; anything else is a failure to ask.
+    if "not found" in (out or "").lower():
+        return False
+    return None
+
+
 async def compose_pull(repo_dir: str, service: str) -> tuple[bool, str]:
     """Pull the published image for one service."""
     rc, output = await _run_cmd(
