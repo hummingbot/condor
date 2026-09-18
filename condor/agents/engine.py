@@ -1065,6 +1065,7 @@ class TickEngine:
             self.user_id,
             self.chat_id,
             server_name=self.config.get("server_name"),
+            account_name=self.config.get("account_name"),
             agent_slug=self.agent.slug,
             tick=True,
         )

@@ -129,7 +129,11 @@ class VaultCrank:
         self.network = network
         self.interval_s = interval_s
         self._task: Optional[asyncio.Task] = None
-        self._engines: dict[str, Any] = {}
+        # Which agent run is this vault's, by agent id. The engines themselves
+        # live in the loop supervisor, which every engine registers with on
+        # start — a second registry here would be a second answer to "what is
+        # running", and the one that leaks.
+        self._agent_ids: dict[str, str] = {}
         # One log line per reason per vault, rather than one per pass: a vault
         # that is paused for a week should not write 20,000 identical lines.
         self._last_refusal: dict[str, str] = {}
@@ -150,7 +154,7 @@ class VaultCrank:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        for account in list(self._engines):
+        for account in list(self._agent_ids):
             await self._stop_engine(account)
         log.info("vault crank stopped for %s", self.server)
 
@@ -170,32 +174,43 @@ class VaultCrank:
         gw = await VaultGateway.for_server(_config_manager(), self.server, self.network)
 
         on_chain = {v["swigAccount"]: v for v in await gw.list_vaults()}
+        # Keyed by account, carrying the user whose store it came from: the
+        # engine needs that user to get an API client, and deriving it from the
+        # store the record was read out of beats writing it into the record,
+        # where it could disagree with the directory it lives in.
         records = {
-            account: record
-            for _user, account, record in vault_store.iter_all_users()
+            account: (user, record)
+            for user, account, record in vault_store.iter_all_users()
             if record.get("server") == self.server
         }
 
         for account, chain in on_chain.items():
-            record = records.get(account)
-            if record is None:
+            entry = records.get(account)
+            if entry is None:
                 # Someone else's vault on the same chain. Condor reads it and
                 # leaves it alone: it holds no config for it and no delegate on
                 # it, and a vault is nobody's to run but its runner's.
                 continue
+            user, record = entry
             try:
-                await self._tend(gw, account, record, _snake(chain))
+                await self._tend(gw, account, user, record, _snake(chain))
             except Exception:
                 log.exception("vault %s could not be tended", account)
 
         # An engine whose vault has gone (a re-forked chain, a deleted record)
         # has nothing left to trade for.
-        for account in list(self._engines):
+        for account in list(self._agent_ids):
             if account not in on_chain:
                 await self._stop_engine(account)
 
+    def engine_for(self, account: str):
+        """This vault's running engine, or None — read from the supervisor,
+        which is where every engine registers itself on start."""
+        agent_id = self._agent_ids.get(account)
+        return _supervisor().get(agent_id) if agent_id else None
+
     async def _tend(
-        self, gw: VaultGateway, account: str, record: dict, chain: dict
+        self, gw: VaultGateway, account: str, user: str, record: dict, chain: dict
     ) -> None:
         state = chain.get("state")
 
@@ -224,7 +239,7 @@ class VaultCrank:
             return
 
         self._last_refusal.pop(account, None)
-        await self._ensure_engine(account, record, chain)
+        await self._ensure_engine(account, user, record, chain)
         await self._top_up_delegate(gw, account, chain)
         await self._sweep(gw, account, chain)
 
@@ -389,10 +404,42 @@ class VaultCrank:
 
     # ── engines ───────────────────────────────────────────────────────────────
 
-    async def _ensure_engine(self, account: str, record: dict, chain: dict) -> None:
-        existing = self._engines.get(account)
+    async def _ensure_account(self, account: str, funds_owner: str) -> None:
+        """One hummingbot-api account per vault, bound to that vault's wallet.
+
+        Without the binding an account trades as Gateway's *default* wallet —
+        one address for the whole instance — so two vaults running at once
+        would be one wallet on chain and neither position would belong to the
+        vault that opened it. Both calls are idempotent: creating an account
+        that exists is an error this swallows, and binding an address that is
+        already bound writes the same file.
+        """
+        name = _account_name(account)
+        client = await _config_manager().get_client(self.server)
+        try:
+            await client.accounts.add_account(name)
+            log.info("vault %s: created hummingbot-api account %s", account, name)
+        except Exception as e:
+            # Already there, which is the usual case after the first pass.
+            log.debug("vault %s: account %s not created (%s)", account, name, e)
+        # `_post` rather than a named method: the pinned client has no
+        # per-account binding call yet — it gains one in the same PR as the
+        # route (plan M5).
+        await client.accounts._post(
+            f"/accounts/{name}/gateway-wallet",
+            json={"chain": "solana", "address": funds_owner},
+        )
+
+    async def _ensure_engine(
+        self, account: str, user: str, record: dict, chain: dict
+    ) -> None:
+        existing = self.engine_for(account)
         if existing is not None and getattr(existing, "_running", False):
             return
+
+        # The account and its wallet binding come first: an engine started
+        # against an unbound account trades from the wrong address.
+        await self._ensure_account(account, chain["funds_owner"])
 
         from condor.agents.agent import AgentStore
         from condor.agents.engine import TickEngine
@@ -417,6 +464,12 @@ class VaultCrank:
         # trades from is the vault's — never Gateway's default, which is one
         # address for the whole instance and would make two vaults one wallet.
         config = dict(pin["config"])
+        # The vault's server, not the runner's default. Without this the engine
+        # resolves a server from the user — and a vault on the fork would have
+        # its strategy executing through whatever server that user last chose,
+        # which is a different hummingbot-api, a different Gateway and a
+        # different chain.
+        config["server_name"] = self.server
         config["account_name"] = _account_name(account)
         config["wallet_address"] = chain["funds_owner"]
         config["vault_account"] = account
@@ -427,10 +480,10 @@ class VaultCrank:
             strategy=strategy,
             config=config,
             chat_id=0,
-            user_id=int(record.get("user_id") or 0),
+            user_id=int(user),
         )
         await engine.start()
-        self._engines[account] = engine
+        self._agent_ids[account] = engine.agent_id
         log.info(
             "vault %s running %s/%s v%s",
             account,
@@ -440,7 +493,8 @@ class VaultCrank:
         )
 
     async def _stop_engine(self, account: str) -> None:
-        engine = self._engines.pop(account, None)
+        agent_id = self._agent_ids.pop(account, None)
+        engine = _supervisor().get(agent_id) if agent_id else None
         if engine is None:
             return
         try:
@@ -450,6 +504,13 @@ class VaultCrank:
             # restarts kill engines, and the record outlives them.
             log.debug("vault %s engine was already gone", account, exc_info=True)
         log.info("vault %s stopped", account)
+
+
+def _supervisor():
+    """The one registry of running engines (``condor.runtime.loops``)."""
+    from condor.runtime.loops import get_supervisor
+
+    return get_supervisor()
 
 
 def _account_name(swig_account: str) -> str:

@@ -16,6 +16,7 @@ dangerous by name and everything here except ``stop_executor`` is safe by name.
 import logging
 from typing import Any
 
+from mcp_servers.hummingbot_api.settings import settings
 from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
 from mcp_servers.hummingbot_api.formatters.executors import (
     format_executor_detail,
@@ -328,7 +329,7 @@ async def list_positions_held(
     """Positions held, in summary or for one connector/pair."""
     try:
         if connector_name and trading_pair:
-            account = account_name or "master_account"
+            account = account_name or settings.default_account
             result = await client.executors.get_position_held(
                 connector_name=connector_name,
                 trading_pair=trading_pair,
@@ -404,7 +405,7 @@ async def clear_position_held(
     controller_id: str | None = None,
 ) -> dict[str, Any]:
     """Clear a position that was closed outside the bot."""
-    account = account_name or "master_account"
+    account = account_name or settings.default_account
     try:
         result = await client.executors.clear_position_held(
             connector_name=connector_name,

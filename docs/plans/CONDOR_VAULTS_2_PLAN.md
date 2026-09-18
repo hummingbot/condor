@@ -776,8 +776,21 @@ It also pushes the two permissionless post-migration calls (`collect_seed`,
 `collect_leftover`), tops the delegate up from the wallet when its SOL falls
 below a floor — a delegate that cannot pay for gas looks, from every surface,
 like the strategy failing — and drives a `WindingDown` vault to
-`finalize_wind_down`. Engines are started with the vault's own hbapi account and
-`wallet_address` = the funds owner; Gateway's default wallet is never touched.
+`finalize_wind_down`.
+
+**Four things bind a run to its vault, and each was found missing by running
+one.** The crank creates the vault's hummingbot-api account and binds it to the
+vault's wallet; it pins the engine to the vault's *server*, not the runner's
+default; it hands the engine the user whose store the record came from; and the
+agent's tool seat is started on the vault's account rather than
+`master_account`. Any one of them missing and the strategy trades — plausibly,
+and from the wrong wallet or the wrong chain, with every surface still saying it
+is running the vault. The delegate is funded at creation for the same reason in
+reverse: the top-up is signed *by the delegate*, so a delegate born with nothing
+can never be given anything.
+
+The crank keeps no registry of its own: engines register with the loop
+supervisor, and it holds only which agent id belongs to which vault.
 
 **Sweep** (`condor/vault_sweep.py`). On each pass the crank reads the vault's
 terminated LP executors and accrues `fee_bps` of each one's
@@ -911,6 +924,7 @@ All revisions 2026-09-17, in one design session.
 | 24 | **One Gateway, by construction.** Condor's direct Gateway client is gone: every call goes through the server's hummingbot-api passthrough, and the `gateway_url` setting with its per-server URL is deleted. Found by looking: on the working stack hbapi reported a Gateway container on `:15888` while trading through `:15889`, and the new chain badge sat beside that status row saying something true about a different Gateway | "why have condor talking to a 2nd gateway?" — and the answer is that avoiding hbapi endpoints justified not adding twenty vault routes upstream, not keeping a second address. Forcing them to agree is simpler than detecting when they do not |
 | 25 | **Creating a vault is one signature.** `create_vault`, `install_delegate` and `pin` in one transaction; the stage ladder, the three confirm routes, `build-pin` and the resumable stepper are deleted, and a record whose transaction never landed is discarded rather than resumed | there is no useful moment between the three, and every piece of resume machinery existed only to survive a closed tab between them |
 | 26 | **The two promises with no button.** `build-launch-config` and `build-redeem` reach the product: the Token tab builds the vault's own launch terms (the 20-80 raise split among them) instead of asking for a pasted config address, and a Redeem card appears above the tabs once a vault is `Redeemable`, for any holder rather than the runner alone. The runner's plain builds collapse into one allowlisted route, which also picks up `claim-income` | both were built on chain and in Gateway and reachable from neither; a page that cannot redeem is a program whose central promise nobody can call |
+| 29 | **Ran the cover LP agent on a private vault, which found the run bound to almost nothing.** The delegate was born with no SOL and its top-up is signed by the delegate, so it could never be funded — the create transaction now seeds it. The engine was handed user 0, then the runner's *default server*, so a vault on the fork ran its strategy against a different hummingbot-api, a different Gateway and a different chain. The vault's hbapi account was named but never created or bound. And the agent's tool seat defaulted to `master_account`, so an LP executor would have opened from the operator's wallet — `account_name or "master_account"` was a hardcoded fallback in the MCP tools, now the seat's own account. The crank's second engine registry went to the loop supervisor, caught by the repo's own guard test the moment the file was tracked | every one of these is invisible to reading: the vault runs, the logs say so, and the money is somewhere else |
 | 28 | **Created a vault on the fork, which found four things reading never would**: `decodeVault` read camelCase from a snake_case IDL, so every vault read was broken; `dammPool` was in the response schema and computed nowhere, so the listing 500'd and the DEX Vaults tab could never have shown a row; one undecodable account took the whole listing down; and `pin`, `install_delegate` and `wind_down` all required a protocol account a private vault has no use for (D34). One signature now lands a vault with two roles on its Swig, `version 1`, `Running`, and its funding inside | "verify by running it and checking the numbers, not by reading the grep" |
 | 27 | **Condor stopped encoding Solana instructions**: the burn and the delegate top-up became Gateway routes, deleting PDA derivation, an ed25519 on-curve test, ATA derivation and two instruction encoders from Python (D33) | a second implementation of a wire format, in another language, in the path that spends a holder's assets |
 

@@ -286,6 +286,7 @@ def _hummingbot_mcp_args(
     server_name: str,
     profile: str = "full",
     muted_tools: Sequence[str] = (),
+    account_name: str | None = None,
 ) -> list[str]:
     """Build CLI args for the hummingbot MCP subprocess.
 
@@ -309,6 +310,7 @@ def _hummingbot_mcp_args(
             "--profile",
             profile,
         ]
+        + (["--default-account", account_name] if account_name else [])
         + _muted_tool_args(muted_tools)
         + _bot_id_args()
     )
@@ -324,6 +326,7 @@ def build_mcp_servers_for_session(
     ask_target: bool = False,
     tick: bool = False,
     session_key: str = "",
+    account_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -352,6 +355,12 @@ def build_mcp_servers_for_session(
 
     ``tick`` marks the unattended loop seat, which mounts the narrowest tool
     profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
+
+    ``account_name`` is the hummingbot-api account this seat trades through
+    unless a tool is told otherwise. A vault passes its own, which is the
+    account bound to the vault's wallet; without it the seat would default to
+    ``master_account`` and trade the operator's wallet while believing it was
+    running the vault.
 
     ``session_key`` is the chat seat's canonical key, and only a chat has one:
     an ask target, a delegate worker and a tick run for nobody's conversation and
@@ -473,7 +482,9 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": _hummingbot_mcp_args(server, server_name, profile, muted_tools),
+        "args": _hummingbot_mcp_args(
+            server, server_name, profile, muted_tools, account_name
+        ),
         "env": _env_entries(
             HUMMINGBOT_API_USERNAME=server["username"],
             HUMMINGBOT_API_PASSWORD=server["password"],

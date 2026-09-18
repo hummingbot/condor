@@ -24,6 +24,7 @@ a live API server. See ``mcp_servers/TOOL_STYLE.md``.
 import logging
 from typing import Any
 
+from mcp_servers.hummingbot_api.settings import settings
 from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
 from mcp_servers.hummingbot_api.hummingbot_client import trading_rules_cache
 
@@ -252,7 +253,7 @@ async def create_executor(
     server-side — the hand-written field validation the mega-tool needed
     (``validate_executor_config``) existed only because the config was an opaque dict.
     """
-    account = account_name or "master_account"
+    account = account_name or settings.default_account
     tag = controller_id or "main"
 
     merged_config = executor_preferences.merge_with_defaults(executor_type, config)

@@ -2210,12 +2210,19 @@ def _apply_cli_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
     parser.add_argument("--server-name")
+    # Which hummingbot-api account this seat trades through when a tool is not
+    # told one. It matters most for a vault: the vault's account is the one
+    # bound to the vault's own wallet, so a seat left on `master_account` would
+    # trade the operator's wallet while believing it was running the vault.
+    parser.add_argument("--default-account")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
     if args.server_name:
         settings.server_name = args.server_name
+    if args.default_account:
+        settings.default_account = args.default_account
 
 
 async def _run():

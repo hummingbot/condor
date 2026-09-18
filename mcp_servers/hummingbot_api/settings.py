@@ -69,6 +69,11 @@ class Settings(BaseModel):
     api_username: str = Field(default="admin")
     api_password: str = Field(default="admin")
     server_name: str = Field(default="default")
+    #: Which hummingbot-api account this seat trades through when a tool is not
+    #: told one. `--default-account` sets it, and a vault seat passes the
+    #: account bound to that vault's own wallet: left on the default, a vault's
+    #: strategy would open its positions from the operator's wallet while every
+    #: surface said it was running the vault.
     default_account: str = Field(default="master_account")
 
     # Which slice of the tool surface this process registers (FEAT-066). For an
