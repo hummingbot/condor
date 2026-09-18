@@ -50,13 +50,23 @@ FORKED_AT_KEY = "forked_at"
 
 
 def content_digest(path: Path) -> str:
-    """``sha256:<12>`` of a file's bytes — short enough to read in a log line.
+    """``sha256:<12>`` of a file's content, with line endings normalized.
 
     Twelve hex characters is the same order of collision resistance a git short
     hash gives, against a corpus of a few hundred markdown files. It identifies
     *which* upstream revision was forked; it is not a security claim.
+
+    Newlines are normalized to LF before hashing, because the stamp has to mean
+    the same thing on every platform. Hashing raw bytes made the digest depend
+    on the checkout's line endings — the same file gave sha256:6d9b716cc24c on
+    an LF checkout and sha256:ee60f3851972 on a CRLF one — so a ``forked_from``
+    written on one host compared as *changed* on another, and every fork looked
+    stale for a reason that had nothing to do with upstream. ``.gitattributes``
+    now keeps the tracked tree LF; this makes the comparison correct even where
+    it does not, such as a local root carried between machines.
     """
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    raw = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    digest = hashlib.sha256(raw).hexdigest()
     return f"sha256:{digest[:12]}"
 
 
