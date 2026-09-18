@@ -335,7 +335,7 @@ powers are bounded by needing the runner's signature for an install and the
 | D4 | The Swig wallet *is* the vault: one record, `Vault` PDA seeded by the Swig | One account per piece to reconcile; no slug, no runner registry. |
 | D5 | **One create flow, one signature**: the Swig, its delegate and the strategy pin are three instructions in one transaction; no standalone agent wallet | There is no useful moment between them — a vault with no delegate cannot trade and one with no strategy has nothing to trade. Three signatures needed a stage ladder, three confirm routes and a resumable stepper to survive a closed tab, which was machinery for a problem that only existed because there were three. Superseded the draft-and-continue design; a record whose transaction never landed is now discarded, not resumed. |
 | D23 | **A vault is private until it is tokenized, and tokenizing is one way** | Most vaults never need a token. While one has no outside holders, locking its runner out of their own capital makes nothing safer and makes the product unusable for its commonest case. Every guarantee the program makes is a guarantee to somebody who is not the runner, so all of them start where such people do. |
-| D24 | **There is no `withdraw` instruction at all** | While a vault is private its runner already controls the delegate, which can move anything in the wallet at top level; an instruction would have been a second way to do what one key already does. Once tokenized there is no path out but `redeem` — and the seed's untouchability is that absence, not a check inside something. |
+| D24 | **There is no `withdraw` instruction at all** — but there *is* a withdraw route, and it is the delegate | While a vault is private its runner already controls the delegate, which can move anything in the wallet at top level; an instruction would have been a second way to do what one key already does. The route (`vaults/withdraw`, refused once tokenized) is what makes that true in the product rather than only on the chain: a private vault nobody can take money out of is not the design, it is a missing button, and a live run is what found it missing. Once tokenized there is no path out but `redeem` — and the seed's untouchability is that absence, not a check inside something. |
 | D25 | The launch config is checked by its **terms**, not its address | A vault prices its launch off the assets it already holds, so each needs its own config and there is no address to recognise. Checking the terms is stricter, and it puts the economics on chain where a holder can read them. |
 | D26 | `issue_bps` on chain: circulating over max supply at launch | It is the ceiling on how far a holder can later be diluted, so it is committed before anyone buys rather than described in a listing. |
 | D32 | **The wind-down sweeps into a program-owned pot, and `redeem` pays from there** | Forced by the D3 gate: Swig refuses CPI on every execution path, so the program cannot pay out of the Swig however it is written. `ProgramExec` (Swig's supported pattern for program-authorised signing) was the alternative and was rejected — it verifies only that *an* instruction of ours ran, not what the paired Swig sign then does, so a permissionless `redeem` could be paired with a sign that drains the wallet; closing that would need us to parse Swig's wire format in the hot path. The sweep is simpler and ends stronger: after finalize the pot is program-owned, so redemption needs no Swig, no delegate and no administrator. Proven end to end on the fork. |
@@ -648,6 +648,7 @@ POST vaults/build-install-delegate {walletAddress, swigAccount}                 
 POST vaults/build-redeem           {walletAddress, swigAccount, amount}               → build (holder)
 POST vaults/collect-seed | collect-leftover | migrate                                 → execute (platform key pays)
 POST vaults/sweep-to-pot           {swigAccount}                                      → execute (the delegate, at top level — Swig will not sign by CPI)
+POST vaults/withdraw               {swigAccount, destination, amount, mint?}          → execute (the delegate): a PRIVATE vault's runner taking assets out. Refused once tokenized
 POST vaults/burn                   {swigAccount, amount}                              → execute (the delegate): what a sweep burns
 POST vaults/fund-delegate          {swigAccount, lamports}                            → execute (the delegate): gas for the key that signs
 POST vaults/finalize-wind-down     {swigAccount}                                      → execute (platform key)
@@ -701,6 +702,7 @@ POST   /vaults/{acct}/build-install-delegate        replacing the administrator;
 POST   /vaults/{acct}/build-launch-config           the launch terms; → /launch-config-created,
                                                     which remembers the address so nothing asks for it
 POST   /vaults/{acct}/build-tokenize                {name, symbol, uri, issue_bps}
+POST   /vaults/{acct}/withdraw                      {destination, amount, mint?} — private only
 POST   /vaults/{acct}/build-redeem?server=          {amount} — any holder, no record needed
 GET    /vaults/{acct}/holdings                      what the wallet holds, plus where its token trades
 POST   /vaults/{acct}/scan                          → {passed, findings, at}   (Condor's run gate; stored per vault+version)
@@ -825,10 +827,10 @@ Three properties, each the reason for a specific line of code:
 - header: phase and state, and the runner's actions — Pause / Resume, and either
   Stop for good (private) or Wind down (tokenized, one confirmation: "holders
   redeem what the vault holds")
-- **Summary**: holdings read from the chain, the wallet to fund, and the
-  installed delegate and what it can do. No Withdraw: while a vault is private
-  its runner moves assets with that delegate, and once it is tokenized nothing
-  can (D24)
+- **Summary**: holdings read from the chain, the wallet to fund, the installed
+  delegate and what it can do, and — while private — **Withdraw**. There is no
+  withdraw *instruction* (D24); the card asks the delegate to move what the
+  delegate can already move, and it disappears at `tokenize`
 - once `Redeemable`, a **Redeem** card above the tabs, for any holder rather
   than the runner alone
 - **Strategy**: agent, strategy, version, config hash, the config itself

@@ -271,7 +271,70 @@ function SummaryTab({ vault }: { vault: VaultInfo; onAct: Act; pending: boolean 
         </p>
       </Card>
 
+      {!tokenized && <WithdrawCard vault={vault} />}
     </>
+  );
+}
+
+/**
+ * Taking assets back out of a private vault.
+ *
+ * Not an instruction: the delegate this vault's runner installed can already
+ * move anything in the wallet, and this asks it to. It disappears at
+ * tokenization — not because the key stops being able to, but because from
+ * there the assets are other people's too and the only way out is a redemption
+ * after a wind-down.
+ */
+function WithdrawCard({ vault }: { vault: VaultInfo }) {
+  const queryClient = useQueryClient();
+  const [destination, setDestination] = useState(vault.runner_address);
+  const [amount, setAmount] = useState("");
+  const [sent, setSent] = useState<string | null>(null);
+
+  const send = useMutation({
+    mutationFn: () =>
+      api.withdrawFromVault(vault.account, { destination: destination.trim(), amount }),
+    onSuccess: (result) => {
+      setSent(result.signature);
+      setAmount("");
+      queryClient.invalidateQueries({ queryKey: ["vault-holdings", vault.account] });
+    },
+  });
+
+  return (
+    <Card title="Withdraw">
+      <p className="mb-3 text-[12px] text-[var(--color-text-muted)]">
+        This vault is private: the money in it is yours and you can take it out whenever you like.
+        Once you launch a token you cannot, and neither can anyone else.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          inputMode="decimal"
+          placeholder="0.0"
+          className="w-28 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-right font-mono text-[13px]"
+        />
+        <span className="text-[12px] text-[var(--color-text-muted)]">SOL to</span>
+        <input
+          value={destination}
+          onChange={(e) => setDestination(e.target.value)}
+          spellCheck={false}
+          className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12px]"
+        />
+        <Action pending={send.isPending} disabled={!amount || !destination} onClick={() => send.mutate()}>
+          Withdraw
+        </Action>
+      </div>
+      {send.error && (
+        <p className="mt-2 text-[11px] text-[var(--color-red)]">{(send.error as Error).message}</p>
+      )}
+      {sent && (
+        <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+          Sent — <span className="font-mono">{sent.slice(0, 16)}…</span>
+        </p>
+      )}
+    </Card>
   );
 }
 

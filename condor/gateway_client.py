@@ -217,6 +217,20 @@ class VaultGateway:
     # delegate. What each of these decides is an amount; what none of them
     # decides is how to say it on the chain.
 
+    async def withdraw(
+        self, swig_account: str, destination: str, amount: str, mint: Optional[str] = None
+    ) -> dict:
+        """Move assets out of a private vault, signed by its delegate."""
+        body = {
+            "network": self.network,
+            "swigAccount": swig_account,
+            "destination": destination,
+            "amount": amount,
+        }
+        if mint:
+            body["mint"] = mint
+        return await self.client.post(f"{self.BASE}/withdraw", body)
+
     async def burn(self, swig_account: str, amount: float) -> dict:
         """Burn some of the vault's own token, out of the wallet that holds it.
 

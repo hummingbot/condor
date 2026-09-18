@@ -996,6 +996,21 @@ class VaultLaunchConfigRequest(BaseModel):
     base_fee_bps: Optional[int] = None
 
 
+class VaultWithdrawRequest(BaseModel):
+    """Take assets out of a *private* vault.
+
+    Not an instruction and not a privilege: the delegate the runner installed
+    can already move anything in the wallet, and this is Condor asking it to.
+    Refused once the vault is tokenized, where the only way out is `redeem`.
+    """
+
+    destination: str
+    # UI units, as a string: a float does not survive a round trip.
+    amount: str
+    # Omitted means SOL.
+    mint: Optional[str] = None
+
+
 class VaultLabelRequest(BaseModel):
     label: str
 

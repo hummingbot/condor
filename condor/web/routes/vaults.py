@@ -45,6 +45,7 @@ from condor.web.models import (
     VaultScanResponse,
     VaultStageRequest,
     VaultTokenizeRequest,
+    VaultWithdrawRequest,
     WebUser,
 )
 from config_manager import get_config_manager
@@ -654,6 +655,30 @@ async def build_tokenize(
             "uri": req.uri,
             "issueBps": req.issue_bps,
         },
+    )
+
+
+@router.post("/{account}/withdraw")
+async def withdraw(
+    account: str, req: VaultWithdrawRequest, user: WebUser = Depends(get_current_user)
+):
+    """Take assets out of a private vault.
+
+    There is no `withdraw` instruction in the program and this is not one: the
+    delegate the runner installed can already move anything in this wallet, and
+    this asks it to. That is also why it stops at `tokenize` — not because a key
+    stops being able to, but because from there the vault's assets are other
+    people's too, and the only way they leave is a redemption after a wind-down.
+    """
+    record = _require(user, account)
+    if record.get("token"):
+        raise HTTPException(
+            status_code=409,
+            detail="this vault has holders — nothing leaves it but a redemption after a wind-down",
+        )
+    gw = await _gateway(record["server"], record.get("network", "mainnet-beta"))
+    return await _upstream(
+        gw, gw.withdraw(account, req.destination, req.amount, req.mint)
     )
 
 

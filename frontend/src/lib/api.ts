@@ -3840,6 +3840,19 @@ export const api = {
     }),
 
   /**
+   * Take assets out of a *private* vault: the delegate the runner installed
+   * moving what it can already move. Refused once the vault has holders.
+   */
+  withdrawFromVault: (
+    account: string,
+    data: { destination: string; amount: string; mint?: string },
+  ) =>
+    apiFetch<{ signature: string | null; amount: string }>(
+      `/api/v1/vaults/${encodeURIComponent(account)}/withdraw`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  /**
    * Burn tokens, take the quote asset pro-rata. Any holder, not just the
    * runner — after a wind-down the payment comes out of an account the program
    * owns, and nothing in the path can refuse it.
