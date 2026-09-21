@@ -769,13 +769,23 @@ class JournalManager:
         return "\n".join(lines[-count:])
 
     def _cleanup_old_snapshots(self) -> None:
-        """Remove oldest snapshots if over MAX_SNAPSHOTS."""
+        """Remove the oldest snapshots, by tick, if over MAX_SNAPSHOTS.
+
+        Sorted by the tick in the name, not by the name: lexically ``snapshot_100.md``
+        sorts before ``snapshot_2.md``, so the old sort kept ticks 2-9 and deleted
+        151-158 once the count crossed a digit boundary (#235). A file whose name does
+        not carry a tick is not a snapshot of ours and is left alone.
+        """
         if not self._snapshots_dir.exists():
             return
-        files = sorted(self._snapshots_dir.glob("snapshot_*.md"))
-        if len(files) > MAX_SNAPSHOTS:
-            for f in files[: len(files) - MAX_SNAPSHOTS]:
-                f.unlink()
+        by_tick = []
+        for f in self._snapshots_dir.glob("snapshot_*.md"):
+            m = re.fullmatch(r"snapshot_(\d+)\.md", f.name)
+            if m:
+                by_tick.append((int(m.group(1)), f))
+        by_tick.sort()
+        for _tick, f in by_tick[: max(0, len(by_tick) - MAX_SNAPSHOTS)]:
+            f.unlink()
 
     # ------------------------------------------------------------------
     # Legacy run support (reads from runs/ dir)
