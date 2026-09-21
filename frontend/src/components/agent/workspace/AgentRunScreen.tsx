@@ -424,20 +424,27 @@ export function AgentRunScreen({
       />
 
       {/* The screen's navigation, on one row under one border (ARCH-425): the
-          run's ticks on the left, the sections on the right. Each used to take
-          a full-width row of its own and fill a fraction of it. The spine
-          scrolls sideways rather than wrap, so a long session never pushes the
-          tabs off the row; only when the row is too narrow for a useful strip
-          beside the tabs (~420px) does the spine get a line of its own above
-          them. A dry run is a single tick in one file and has no spine, and the
-          tabs then sit alone, to the right. */}
+          sections on the left, the run's ticks on the right (ARCH-428). Each
+          used to take a full-width row of its own and fill a fraction of it.
+          The spine scrolls sideways rather than wrap, so a long session never
+          pushes the tabs off the row; only when the row is too narrow for a
+          useful strip beside the tabs (~420px) does the spine get a line of
+          its own below them. A dry run is a single tick in one file and has
+          no spine, and the tabs then sit alone, to the left. */}
       {sslug && (
         <div
           data-run-nav
           className="flex shrink-0 flex-wrap items-stretch border-b border-[var(--color-border)]"
         >
+          <PaneTabs
+            active={section}
+            facts={facts}
+            nowAlert={alerts.length > 0}
+            wide={!isPane}
+            onSelect={(next) => setSection(next)}
+          />
           {selectedRun && selectedRun.kind === "session" && (
-            <div className="flex min-w-0 flex-[1_1_8rem] items-center pl-3">
+            <div className="ml-auto flex min-w-0 shrink items-center pl-3">
               <TickSpine
                 // Per run, so a newly selected run opens on its newest beat.
                 key={selectedRun.run_id}
@@ -451,13 +458,6 @@ export function AgentRunScreen({
               />
             </div>
           )}
-          <PaneTabs
-            active={section}
-            facts={facts}
-            nowAlert={alerts.length > 0}
-            wide={!isPane}
-            onSelect={(next) => setSection(next)}
-          />
         </div>
       )}
 
@@ -520,7 +520,7 @@ function PaneTabs({
       // No border of its own: the row it shares with the spine draws it.
       // `max-w-full` lets it scroll its tabs once it is alone on a line
       // narrower than they are, where `shrink-0` alone would overflow the row.
-      className={`ml-auto flex max-w-full shrink-0 items-stretch overflow-x-auto [scrollbar-width:none] ${
+      className={`flex max-w-full shrink-0 items-stretch overflow-x-auto [scrollbar-width:none] ${
         wide ? "gap-2 px-4" : "px-2"
       }`}
     >

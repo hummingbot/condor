@@ -1047,6 +1047,13 @@ function expectOneNavRow() {
   expect(row.className).toContain("border-b");
   expect(tabs!.className).not.toContain("border-b");
   expect(spine!.className).not.toContain("border-b");
+  // ARCH-428: tabs (primary nav) read first, the spine (per-run detail) after.
+  const children = Array.from(row.children);
+  const tabsIndex = children.indexOf(tabs!);
+  const spineWrapperIndex = children.findIndex((child) => child.contains(spine));
+  expect(tabsIndex).toBeGreaterThanOrEqual(0);
+  expect(spineWrapperIndex).toBeGreaterThanOrEqual(0);
+  expect(tabsIndex).toBeLessThan(spineWrapperIndex);
 }
 
 describe("the spine and the tabs share one row (ARCH-425)", () => {
@@ -1097,6 +1104,6 @@ describe("the spine and the tabs share one row (ARCH-425)", () => {
     expect(container.querySelector("[data-spine-empty]")).toBeNull();
     expect(tabs.parentElement!.hasAttribute("data-run-nav")).toBe(true);
     expect(tabs.parentElement!.children).toHaveLength(1);
-    expect(tabs.className).toContain("ml-auto");
+    expect(tabs.className).not.toContain("ml-auto");
   });
 });
