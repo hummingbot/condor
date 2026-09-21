@@ -22,7 +22,12 @@ import {
 } from "@/components/chat/executionTree";
 import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
-import { loopSummaryLabel, useLiveLoops, type LiveFleetOwner } from "@/hooks/useLiveLoops";
+import {
+  groupLoopsByAgent,
+  loopSummaryLabel,
+  useLiveLoops,
+  type LiveFleetOwner,
+} from "@/hooks/useLiveLoops";
 import { useSeconds } from "@/hooks/useSeconds";
 import { controllerKey } from "@/lib/controller-identity";
 import {
@@ -185,15 +190,7 @@ export function DockExecution({
   // one strategy, so this is how a second concurrent loop stops being
   // invisible in this panel.
   const { loops } = useLiveLoops();
-  const loopsByAgent = useMemo(() => {
-    const map = new Map<string, LiveFleetOwner[]>();
-    for (const loop of loops) {
-      const existing = map.get(loop.agentSlug);
-      if (existing) existing.push(loop);
-      else map.set(loop.agentSlug, [loop]);
-    }
-    return map;
-  }, [loops]);
+  const loopsByAgent = useMemo(() => groupLoopsByAgent(loops), [loops]);
 
   // A clock only while something is looping: the countdown is the one thing in
   // this panel that moves on its own, and an interval running under a fleet

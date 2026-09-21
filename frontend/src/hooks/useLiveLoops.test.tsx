@@ -19,6 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FleetOwner, LiveLoop } from "@/lib/agent-attribution";
+import type { AgentSummary } from "@/lib/api";
 
 const getFleetMap = vi.fn();
 
@@ -26,7 +27,9 @@ vi.mock("@/lib/api", () => ({
   api: { getFleetMap: () => getFleetMap() },
 }));
 
-const { useLiveLoops } = await import("./useLiveLoops");
+const { useLiveLoops, groupLoopsByAgent, loopStats } = await import(
+  "./useLiveLoops"
+);
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -151,5 +154,89 @@ describe("useLiveLoops", () => {
     ]);
 
     expect(seen()).toEqual(["brigado/a", "brigado/z"]);
+  });
+});
+
+describe("groupLoopsByAgent", () => {
+  it("folds loops under their agent, preserving each agent's own order", () => {
+    const one = owner({ agentSlug: "brigado", strategySlug: "brl_mm", live: live() });
+    const two = owner({ agentSlug: "brigado", strategySlug: "grid", live: live() });
+    const three = owner({ agentSlug: "vega", strategySlug: "momentum", live: live() });
+
+    const groups = groupLoopsByAgent([one, two, three] as never);
+
+    expect([...groups.keys()]).toEqual(["brigado", "vega"]);
+    expect(groups.get("brigado")).toEqual([one, two]);
+    expect(groups.get("vega")).toEqual([three]);
+  });
+});
+
+describe("loopStats", () => {
+  function agentSummary(over: Partial<AgentSummary> = {}): AgentSummary {
+    return {
+      slug: "brigado",
+      name: "Brigado",
+      description: "",
+      when_to_consult: "",
+      agent_key: "",
+      strategy_count: 1,
+      strategies: [
+        {
+          slug: "brl_mm",
+          name: "BRL MM",
+          description: "",
+          status: "running",
+          agent_id: "brigado.brl_mm",
+          session_count: 3,
+          experiment_count: 1,
+          tick_count: 40,
+          latest_session_pnl: 12.5,
+          total_pnl: 30,
+          total_volume: 1000,
+          open_positions: 0,
+          instances: [],
+        },
+      ],
+      status: "running",
+      session_count: 3,
+      experiment_count: 1,
+      tick_count: 40,
+      latest_session_pnl: 12.5,
+      total_pnl: 30,
+      total_volume: 1000,
+      open_positions: 0,
+      instances: [],
+      ...over,
+    };
+  }
+
+  it("resolves latest PnL, session count and experiment count when the join hits", () => {
+    const loop = owner({
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+      live: live(),
+    }) as never;
+
+    expect(loopStats(loop, [agentSummary()])).toEqual({
+      latestSessionPnl: 12.5,
+      sessionCount: 3,
+      experimentCount: 1,
+    });
+  });
+
+  it("is null, not a throw, when the agent or strategy is not in the roster", () => {
+    const loop = owner({
+      agentSlug: "vega",
+      strategySlug: "momentum",
+      live: live(),
+    }) as never;
+
+    expect(loopStats(loop, [agentSummary()])).toBeNull();
+    expect(
+      loopStats(
+        owner({ agentSlug: "brigado", strategySlug: "unknown", live: live() }) as never,
+        [agentSummary()],
+      ),
+    ).toBeNull();
   });
 });

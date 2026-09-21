@@ -776,6 +776,7 @@ export function AgentChatTab() {
             <LoopsPanel
               loops={loops}
               isLoading={loopsLoading}
+              agents={agents}
               onOpenLoop={(agentSlug, strategySlug) =>
                 openPane({ kind: "strategy", agentSlug, strategySlug })
               }

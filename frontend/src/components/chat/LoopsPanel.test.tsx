@@ -1,12 +1,13 @@
 /**
- * The Loops panel's own rows (FEAT-123): what each one says, and where a
- * click on it goes.
+ * The Loops panel's own cards (FEAT-125): what each one says, how they group,
+ * and where a click on one goes.
  *
  * The panel is a pure reader of the props `useLiveLoops` already filtered and
- * sorted — its own hook has that test — so what is pinned here is the empty
- * state, that every row says agent, strategy, session, tick and a countdown
- * whose wording matches an overdue tick against an upcoming one, and that a
- * click hands back exactly the row's own slugs.
+ * sorted — its own hook has that test, plus `groupLoopsByAgent`/`loopStats`'s.
+ * What is pinned here is the empty state, the grouping (a heading only with
+ * 2+ agents), a card's populated facts, the roster-join-miss degrade, a
+ * failed last action, an overdue tick, and that a click hands back exactly
+ * the card's own slugs.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -18,6 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LiveFleetOwner } from "@/hooks/useLiveLoops";
+import type { AgentSummary } from "@/lib/api";
 import type { LiveLoop } from "@/lib/agent-attribution";
 
 import { LoopsPanel } from "./LoopsPanel";
@@ -58,6 +60,44 @@ function owner(over: Partial<LiveFleetOwner> = {}): LiveFleetOwner {
   };
 }
 
+function agentSummary(over: Partial<AgentSummary> = {}): AgentSummary {
+  return {
+    slug: "brigado",
+    name: "Brigado",
+    description: "",
+    when_to_consult: "",
+    agent_key: "",
+    strategy_count: 1,
+    strategies: [
+      {
+        slug: "brl_mm",
+        name: "BRL MM",
+        description: "",
+        status: "running",
+        agent_id: "brigado.brl_mm",
+        session_count: 5,
+        experiment_count: 2,
+        tick_count: 12,
+        latest_session_pnl: 42.5,
+        total_pnl: 100,
+        total_volume: 1000,
+        open_positions: 0,
+        instances: [],
+      },
+    ],
+    status: "running",
+    session_count: 5,
+    experiment_count: 2,
+    tick_count: 12,
+    latest_session_pnl: 42.5,
+    total_pnl: 100,
+    total_volume: 1000,
+    open_positions: 0,
+    instances: [],
+    ...over,
+  };
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -67,6 +107,7 @@ async function render(props: Partial<Parameters<typeof LoopsPanel>[0]> = {}) {
       <LoopsPanel
         loops={[]}
         isLoading={false}
+        agents={[]}
         onOpenLoop={() => {}}
         onClose={() => {}}
         {...props}
@@ -77,8 +118,10 @@ async function render(props: Partial<Parameters<typeof LoopsPanel>[0]> = {}) {
 
 const panel = () =>
   container.querySelector<HTMLElement>('[data-testid="loops-panel"]')!;
-const rows = () =>
+const cards = () =>
   [...container.querySelectorAll<HTMLButtonElement>("[data-loop-row]")];
+const groupHeadings = () =>
+  [...container.querySelectorAll<HTMLElement>("[data-loop-group]")];
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -104,7 +147,25 @@ describe("LoopsPanel", () => {
     expect(panel().textContent).toContain("Loading");
   });
 
-  it("renders one row per loop with agent, strategy, session and tick", async () => {
+  it("renders one card per loop, under no heading, for a single agent", async () => {
+    await render({
+      loops: [
+        owner({ strategySlug: "brl_mm", strategyName: "BRL MM" }),
+        owner({
+          strategySlug: "grid",
+          strategyName: "Grid",
+          live: live({ status: "paused", sessionNum: 2, tickCount: 5 }),
+        }),
+      ],
+    });
+
+    expect(cards()).toHaveLength(2);
+    expect(groupHeadings()).toHaveLength(0);
+    expect(cards()[0].textContent).toContain("Brigado");
+    expect(cards()[0].textContent).toContain("BRL MM");
+  });
+
+  it("groups by agent, with a heading per agent, when 2+ agents are live", async () => {
     await render({
       loops: [
         owner({ agentSlug: "brigado", agentName: "Brigado" }),
@@ -113,41 +174,86 @@ describe("LoopsPanel", () => {
           agentName: "Vega",
           strategySlug: "momentum",
           strategyName: "Momentum",
-          live: live({ status: "paused", sessionNum: 2, tickCount: 5 }),
+          live: live({ status: "paused" }),
         }),
       ],
     });
 
-    expect(rows()).toHaveLength(2);
-    const [first, second] = rows();
-    expect(first.textContent).toContain("Brigado");
-    expect(first.textContent).toContain("BRL MM");
-    expect(first.textContent).toContain("session 4");
-    expect(first.textContent).toContain("tick 12");
-    expect(second.textContent).toContain("Vega");
-    expect(second.textContent).toContain("session 2");
-    expect(second.textContent).toContain("tick 5");
+    expect(groupHeadings()).toHaveLength(2);
+    expect(groupHeadings()[0].textContent).toContain("Brigado");
+    expect(groupHeadings()[1].textContent).toContain("Vega");
+    expect(cards()).toHaveLength(2);
   });
 
-  it("shows an upcoming countdown for a tick not yet due", async () => {
+  it("shows the tick facts, and the PnL badge, when the roster join hits", async () => {
+    await render({
+      loops: [owner()],
+      agents: [agentSummary()],
+    });
+
+    const card = cards()[0];
+    expect(card.textContent).toContain("+$42.50");
+    expect(card.textContent).toContain("12");
+    expect(card.textContent).toContain("5");
+    expect(card.textContent).toContain("2 dry");
+  });
+
+  it("degrades — no PnL, a session label instead of a run count — when the join misses", async () => {
+    await render({
+      loops: [owner({ live: live({ sessionNum: 7 }) })],
+      agents: [],
+    });
+
+    const card = cards()[0];
+    expect(card.querySelector("[data-loop-pnl]")).toBeNull();
+    expect(card.textContent).toContain("Session 7");
+  });
+
+  it("does not throw when a loop's strategy is missing from an agent that does exist", async () => {
+    await render({
+      loops: [owner({ agentSlug: "brigado", strategySlug: "unknown_strategy" })],
+      agents: [agentSummary()],
+    });
+
+    expect(cards()).toHaveLength(1);
+    expect(cards()[0].querySelector("[data-loop-pnl]")).toBeNull();
+  });
+
+  it("shows a failed last action amber, with a failed suffix", async () => {
     await render({
       loops: [
-        owner({ live: live({ lastTickAt: NOW_SEC, frequencySec: 30 }) }),
+        owner({
+          live: live({
+            lastDid: {
+              tick: 9,
+              at: NOW_SEC,
+              tool: "create_lp_executor",
+              verb: "create_lp_executor",
+              summary: "Create grid executor on SOL-USDC",
+              ok: false,
+              error: "insufficient balance",
+            },
+          }),
+        }),
       ],
     });
-    expect(rows()[0].textContent).toMatch(/next in/);
+
+    const deed = cards()[0].querySelector("span[title='Create grid executor on SOL-USDC']")!;
+    expect(deed.textContent).toContain("failed");
+    expect(deed.className).toContain("text-amber-500");
   });
 
-  it("shows an overdue countdown for a tick past its cadence", async () => {
+  it("shows an amber, overdue next-tick tile past its cadence", async () => {
     await render({
-      loops: [
-        owner({ live: live({ lastTickAt: NOW_SEC - 90, frequencySec: 30 }) }),
-      ],
+      loops: [owner({ live: live({ lastTickAt: NOW_SEC - 90, frequencySec: 30 }) })],
     });
-    expect(rows()[0].textContent).toMatch(/overdue/);
+
+    const overdue = cards()[0].querySelector("span.text-amber-400")!;
+    expect(overdue).not.toBeNull();
+    expect(overdue.textContent).toMatch(/overdue/);
   });
 
-  it("calls onOpenLoop with the row's own slugs, exactly once", async () => {
+  it("calls onOpenLoop with the card's own slugs, exactly once", async () => {
     const onOpenLoop = vi.fn();
     await render({
       loops: [
@@ -158,7 +264,7 @@ describe("LoopsPanel", () => {
     });
 
     await act(async () => {
-      rows()[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      cards()[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(onOpenLoop).toHaveBeenCalledTimes(1);

@@ -3,6 +3,7 @@ import { useMemo } from "react";
 
 import { tickCountdownLabel } from "@/components/agent/workspace/fleet";
 import { api } from "@/lib/api";
+import type { AgentSummary } from "@/lib/api";
 import type { FleetOwner, LiveLoop } from "@/lib/agent-attribution";
 import { formatRelativeTime } from "@/lib/formatters";
 
@@ -42,6 +43,46 @@ export function sortLoops(a: LiveFleetOwner, b: LiveFleetOwner): number {
     a.agentName.localeCompare(b.agentName) ||
     a.strategyName.localeCompare(b.strategyName)
   );
+}
+
+/**
+ * Every live loop, folded by the agent that owns it — the fold `DockExecution`
+ * and `LoopsPanel` both need to draw one group per agent rather than a flat
+ * list (FEAT-125), extracted here so it is written once.
+ */
+export function groupLoopsByAgent(
+  loops: LiveFleetOwner[],
+): Map<string, LiveFleetOwner[]> {
+  const map = new Map<string, LiveFleetOwner[]>();
+  for (const loop of loops) {
+    const existing = map.get(loop.agentSlug);
+    if (existing) existing.push(loop);
+    else map.set(loop.agentSlug, [loop]);
+  }
+  return map;
+}
+
+export interface LoopCardStats {
+  latestSessionPnl: number;
+  sessionCount: number;
+  experimentCount: number;
+}
+
+/** `null` when the two 5s polls have not agreed yet — the card degrades, it does not guess. */
+export function loopStats(
+  loop: LiveFleetOwner,
+  agents: AgentSummary[],
+): LoopCardStats | null {
+  const strategy = agents
+    .find((a) => a.slug === loop.agentSlug)
+    ?.strategies.find((s) => s.slug === loop.strategySlug);
+  return strategy
+    ? {
+        latestSessionPnl: strategy.latest_session_pnl,
+        sessionCount: strategy.session_count,
+        experimentCount: strategy.experiment_count,
+      }
+    : null;
 }
 
 /**
