@@ -692,12 +692,30 @@ async def connector_config_map(
     client = await _get_client(cm, server)
     try:
         config_map = await client.connectors.get_config_map(name)
-        return {"config_map": config_map}
+        return {"config_map": _config_map_fields(config_map)}
     except Exception as e:
         logger.exception(
             "Failed to fetch config map for connector '%s' on '%s'", name, server
         )
         raise upstream_error("Failed to fetch connector config map", e)
+
+
+def _config_map_fields(config_map) -> dict:
+    """The connector's credential fields keyed by name, whatever shape the API sent.
+
+    Current hummingbot-api servers describe each field ({name: {type, required,
+    prompt}}); older ones return a bare list of field names. The dashboard walks
+    the keys to build the form, so a list came through as fields "0" and "1" and
+    the save failed with "has no attribute '0'" (#225). A list becomes required
+    string fields under their own names.
+    """
+    if isinstance(config_map, list):
+        return {
+            str(field): {"type": "string", "required": True}
+            for field in config_map
+            if isinstance(field, str) and field
+        }
+    return config_map
 
 
 @router.post("/credentials")
