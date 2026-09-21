@@ -64,11 +64,16 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * belongs to what (see `WorkspaceSheet`'s `taken`). So the strategy *replaces*
  * the panel and closing it puts the panel back — which is why it carries the
  * agent slug it was opened from.
+ *
+ * `loops` (FEAT-123) carries nothing: it lists every strategy with a live tick
+ * loop across every agent, which is a fact about the fleet rather than about
+ * the pane, so there is no extra parameter to round-trip.
  */
 export type PaneView =
   | { kind: "agent"; slug?: string; tab?: KnowledgeTabId }
   | { kind: "desk" }
   | { kind: "routines"; focus: LibraryFocus }
+  | { kind: "loops" }
   | {
       kind: "strategy";
       agentSlug: string;
@@ -144,6 +149,8 @@ export function readPane(
     }
     case "desk":
       return { kind: "desk" };
+    case "loops":
+      return { kind: "loops" };
     case "routines":
       return { kind: "routines", focus: libraryFocus };
     case "strategy": {

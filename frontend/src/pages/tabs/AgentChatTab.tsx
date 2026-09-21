@@ -5,6 +5,7 @@ import {
   ClipboardList,
   PanelLeftClose,
   PanelLeftOpen,
+  Repeat,
   ShieldAlert,
   Wallet,
 } from "lucide-react";
@@ -40,6 +41,7 @@ import {
   type PaneView,
 } from "@/components/chat/paneUrl";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
+import { LoopsPanel } from "@/components/chat/LoopsPanel";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StrategySheet } from "@/components/chat/StrategySheet";
 import { usePaneGuard } from "@/components/chat/usePaneGuard";
@@ -54,6 +56,7 @@ import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { webSessionKey } from "@/hooks/useChatSocket";
+import { useLiveLoops } from "@/hooks/useLiveLoops";
 import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
@@ -508,6 +511,11 @@ export function AgentChatTab() {
     agentSlug: activeSlot?.info.agent_slug || "",
     libraryOpen: pane?.kind === "routines",
   });
+  // Fed to the rail's own tile and the panel it opens (FEAT-123) — mounted here
+  // rather than inside the panel, so the badge count is live while it is
+  // closed. Same `["fleet-map"]` key `useFleetData` polls, so a reader with any
+  // fleet surface open shares the cache instead of doubling the poll.
+  const { loops, isLoading: loopsLoading } = useLiveLoops();
   // The dock is memoised (PERF-394), so what it is handed must hold across a
   // stream flush. `activeSlot` is a new object on every flush, so the run
   // context is keyed on the scalars it reads, never on the slot itself.
@@ -760,6 +768,21 @@ export function AgentChatTab() {
             />
           )}
 
+          {/* Every live loop, across every agent — the rail's "Loops" tile
+              (FEAT-123). A row's click is the same hand-off a strategy card in
+              the agent panel already makes, generalised to whichever agent
+              owns that row. */}
+          {pane?.kind === "loops" && (
+            <LoopsPanel
+              loops={loops}
+              isLoading={loopsLoading}
+              onOpenLoop={(agentSlug, strategySlug) =>
+                openPane({ kind: "strategy", agentSlug, strategySlug })
+              }
+              onClose={() => openPane(null)}
+            />
+          )}
+
           {/* The desk this conversation trades on — the pane's other big
               occupant (FEAT-094, revised): a sheet like the agent panel above,
               at the same split, so the two cannot be on screen together and
@@ -851,6 +874,28 @@ export function AgentChatTab() {
                         ? null
                         : { kind: "agent" },
                     ),
+                },
+              ],
+            },
+            /* Every agent's live loops, not just this conversation's (FEAT-123)
+               — a different question from "what agent am I talking to", so its
+               own ruled-off group directly under Agent rather than a second
+               item folded into it. */
+            {
+              id: "loops",
+              items: [
+                {
+                  id: "loops",
+                  label: "Loops",
+                  Icon: Repeat,
+                  hint:
+                    loops.length > 0
+                      ? `${loops.length} loop${loops.length === 1 ? "" : "s"} running or paused`
+                      : "Nothing looping right now",
+                  active: pane?.kind === "loops",
+                  count: loops.length,
+                  onToggle: () =>
+                    openPane(pane?.kind === "loops" ? null : { kind: "loops" }),
                 },
               ],
             },

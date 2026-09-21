@@ -28,6 +28,7 @@ describe("reading the pane off the URL", () => {
   it("opens the panel the URL names", () => {
     expect(readPane(q("?panel=agent"), {})).toEqual({ kind: "agent" });
     expect(readPane(q("?panel=desk"), {})).toEqual({ kind: "desk" });
+    expect(readPane(q("?panel=loops"), {})).toEqual({ kind: "loops" });
   });
 
   it("reads whose agent panel it is, and defaults to the conversation's", () => {
@@ -94,6 +95,7 @@ describe("writing the pane into the URL", () => {
   it("round-trips every panel", () => {
     expect(round({ kind: "agent" })).toEqual({ kind: "agent" });
     expect(round({ kind: "desk" })).toEqual({ kind: "desk" });
+    expect(round({ kind: "loops" })).toEqual({ kind: "loops" });
     expect(
       round({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" }),
     ).toEqual({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" });
