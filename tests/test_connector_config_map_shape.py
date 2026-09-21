@@ -8,7 +8,6 @@ answered "has no attribute '0'". The route normalises the list; an object
 passes through untouched.
 """
 
-import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
