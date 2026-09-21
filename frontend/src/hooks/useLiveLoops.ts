@@ -1,11 +1,35 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
+import { tickCountdownLabel } from "@/components/agent/workspace/fleet";
 import { api } from "@/lib/api";
 import type { FleetOwner, LiveLoop } from "@/lib/agent-attribution";
+import { formatRelativeTime } from "@/lib/formatters";
 
 /** A `FleetOwner` whose loop is actually going — `live` narrowed off `null`. */
 export type LiveFleetOwner = FleetOwner & { live: LiveLoop };
+
+/**
+ * The loop's whole detail line: session, tick, cadence and last tick — the one
+ * wording every surface that reports a loop's facts has to share (FEAT-124),
+ * because a reader who sees the same loop in two places must not be told two
+ * different things about it. `LoopsPanel` and `DockExecution`'s `AgentRow`
+ * both call this rather than each wording it themselves.
+ */
+export function loopSummaryLabel(live: LiveLoop, nowMs: number): string {
+  const facts = [`session ${live.sessionNum}`, `tick ${live.tickCount}`];
+  if (live.status === "running") {
+    facts.push(
+      live.lastTickAt <= 0
+        ? "first tick pending"
+        : tickCountdownLabel(live.lastTickAt + live.frequencySec - nowMs / 1000),
+    );
+  }
+  const summary = facts.join(" · ");
+  return live.lastTickAt > 0
+    ? `${summary} · last tick ${formatRelativeTime(live.lastTickAt)}`
+    : summary;
+}
 
 /**
  * Running before paused, then agent name, then strategy name — a stable order

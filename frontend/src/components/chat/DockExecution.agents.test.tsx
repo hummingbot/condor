@@ -108,7 +108,7 @@ function executor(over: Partial<ExecutorInfo> = {}): ExecutorInfo {
   };
 }
 
-function owner(slug: string, sslug: string) {
+function owner(slug: string, sslug: string, over: Record<string, unknown> = {}) {
   return {
     runKey: `${slug}.${sslug}`,
     agentSlug: slug,
@@ -119,6 +119,23 @@ function owner(slug: string, sslug: string) {
     declaredBots: [],
     agentIds: [],
     live: null,
+    ...over,
+  };
+}
+
+/** A `fleet-map` `LiveLoop` — the fact a live owner carries (FEAT-124). */
+function liveLoop(over: Record<string, unknown> = {}) {
+  return {
+    agentId: "a1",
+    sessionNum: 1,
+    status: "running",
+    tickCount: 1,
+    lastTickAt: NOW / 1000 - 10,
+    frequencySec: 60,
+    lastAction: "",
+    lastDid: null,
+    lastError: "",
+    ...over,
   };
 }
 
@@ -313,6 +330,48 @@ describe("the agent rows", () => {
 
     await click(agentRow("quiet.brl_mm").querySelector("[data-agent-open]")!);
     expect(navigate).toHaveBeenCalledWith("/agents/quiet");
+  });
+});
+
+describe("an agent with more than one live loop (FEAT-124)", () => {
+  it("renders a detail sub-line per loop, each with its own tick count", async () => {
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner("brigado", "brl_mm", { live: liveLoop({ status: "running", tickCount: 41 }) }),
+        owner("brigado", "grid", {
+          strategyName: "Grid",
+          live: liveLoop({ status: "paused", tickCount: 7 }),
+        }),
+        owner("quiet", "brl_mm"),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+
+    await render();
+
+    const row = agentRow("brigado.brl_mm");
+    const loops = row.querySelectorAll("[data-agent-loop]");
+    expect(loops).toHaveLength(2);
+    expect(loops[0].textContent).toContain("tick 41");
+    expect(loops[1].textContent).toContain("tick 7");
+    // Superseded, not duplicated: the single countdown/decision line is gone.
+    expect(row.querySelector("[data-agent-due]")).toBeNull();
+  });
+
+  it("leaves a single-loop agent's row exactly as it was", async () => {
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner("brigado", "brl_mm", { live: liveLoop() }),
+        owner("quiet", "brl_mm"),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+
+    await render();
+
+    const row = agentRow("brigado.brl_mm");
+    expect(row.querySelectorAll("[data-agent-loop]")).toHaveLength(0);
+    expect(row.querySelector("[data-agent-due]")).not.toBeNull();
   });
 });
 

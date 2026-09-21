@@ -1,9 +1,6 @@
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
-import { tickCountdownLabel } from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
-import type { LiveFleetOwner } from "@/hooks/useLiveLoops";
-import type { LiveLoop } from "@/lib/agent-attribution";
-import { formatRelativeTime } from "@/lib/formatters";
+import { loopSummaryLabel, type LiveFleetOwner } from "@/hooks/useLiveLoops";
 
 /**
  * Every loop, from every agent, one click from the rail (FEAT-123).
@@ -59,19 +56,6 @@ export function LoopsPanel({
   );
 }
 
-/** The middle line: session, tick, and the cadence — `loopFacts`' wording. */
-function loopFacts(live: LiveLoop, nowMs: number): string {
-  const facts = [`session ${live.sessionNum}`, `tick ${live.tickCount}`];
-  if (live.status === "running") {
-    facts.push(
-      live.lastTickAt <= 0
-        ? "first tick pending"
-        : tickCountdownLabel(live.lastTickAt + live.frequencySec - nowMs / 1000),
-    );
-  }
-  return facts.join(" · ");
-}
-
 function LoopRow({
   owner,
   nowMs,
@@ -105,9 +89,7 @@ function LoopRow({
         </span>
       </div>
       <div className="pl-3 font-mono text-[10px] text-[var(--color-text-muted)]">
-        {loopFacts(live, nowMs)}
-        {live.lastTickAt > 0 &&
-          ` · last tick ${formatRelativeTime(live.lastTickAt)}`}
+        {loopSummaryLabel(live, nowMs)}
       </div>
     </button>
   );

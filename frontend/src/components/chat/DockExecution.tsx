@@ -22,6 +22,7 @@ import {
 } from "@/components/chat/executionTree";
 import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
+import { loopSummaryLabel, useLiveLoops, type LiveFleetOwner } from "@/hooks/useLiveLoops";
 import { useSeconds } from "@/hooks/useSeconds";
 import { controllerKey } from "@/lib/controller-identity";
 import {
@@ -73,6 +74,9 @@ const FIXED_PX = COLUMNS.reduce((sum, c) => sum + (c.width ?? 0), 0);
 /** Below this the controller column stops being readable and the table scrolls. */
 const MIN_LABEL_PX = 120;
 export const TABLE_MIN_PX = FIXED_PX + MIN_LABEL_PX;
+
+/** Held still, so an agent with no second loop is not a new array every render. */
+const EMPTY_LOOPS: LiveFleetOwner[] = [];
 
 /**
  * How many characters of a bot name a group header keeps.
@@ -174,6 +178,22 @@ export function DockExecution({
   // The shared roster (key and cadence: `agentsQuery`), so the agent rows'
   // liveness arrives with a request nobody made for them.
   const { data: agents = [] } = useQuery(agentsQuery());
+
+  // Every live loop, from `fleet-map` (FEAT-124) — under the shared query key
+  // `useFleetData` (below) already polls, so this costs nothing new. Unlike
+  // `fleetRows`' `scopeStrategy`, `fleet-map` does not collapse an agent to
+  // one strategy, so this is how a second concurrent loop stops being
+  // invisible in this panel.
+  const { loops } = useLiveLoops();
+  const loopsByAgent = useMemo(() => {
+    const map = new Map<string, LiveFleetOwner[]>();
+    for (const loop of loops) {
+      const existing = map.get(loop.agentSlug);
+      if (existing) existing.push(loop);
+      else map.set(loop.agentSlug, [loop]);
+    }
+    return map;
+  }, [loops]);
 
   // A clock only while something is looping: the countdown is the one thing in
   // this panel that moves on its own, and an interval running under a fleet
@@ -440,6 +460,7 @@ export function DockExecution({
                   <AgentRow
                     row={row}
                     live={row.agent ? live.get(row.agent.slug) ?? null : null}
+                    loops={row.agent ? loopsByAgent.get(row.agent.slug) ?? EMPTY_LOOPS : EMPTY_LOOPS}
                     nowSec={nowSec}
                     symbol={currencySymbol}
                     open={open.has(row.id)}
@@ -542,10 +563,17 @@ function Twisty({
  * scope, and ARCH-324's rule is that there is one of it. The liveness beside it
  * — the dot, the last decision, the next tick — is the run's, from `fleetRows`,
  * because none of the three is a fact about trading records at all.
+ *
+ * When `loops` holds more than one entry (FEAT-124: `fleet-map` does not
+ * collapse an agent to a single strategy the way `fleetRows`' `scopeStrategy`
+ * does), that single countdown/decision line is superseded by one sub-line per
+ * live loop, worded through `loopSummaryLabel` — the same formatter
+ * `LoopsPanel` reads, so the two surfaces cannot disagree about the same fact.
  */
 function AgentRow({
   row,
   live,
+  loops,
   nowSec,
   symbol,
   open,
@@ -555,6 +583,8 @@ function AgentRow({
   row: ExecutionRow;
   /** The agent's own run, or `null` for an owner nothing claims. */
   live: FleetRow | null;
+  /** Every loop `fleet-map` reports for this agent — length <= 1 changes nothing on screen. */
+  loops: LiveFleetOwner[];
   nowSec: number;
   symbol: string;
   open: boolean;
@@ -628,35 +658,56 @@ function AgentRow({
           </button>
         </div>
 
-        {live && (
-          <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
-            {due !== null && (
-              <span
-                data-agent-due
-                className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+        {loops.length > 1 ? (
+          <div className="flex flex-col gap-0.5 pl-[18px]">
+            {loops.map((loop) => (
+              <div
+                key={`${loop.agentSlug}/${loop.strategySlug}`}
+                data-agent-loop={`${loop.agentSlug}/${loop.strategySlug}`}
+                className="flex items-baseline gap-1.5 text-[10px] text-[var(--color-text-muted)]"
               >
-                {tickCountdownLabel(due)}
-              </span>
-            )}
-            {live.lastDid ? (
-              <Link
-                to={decisionHref(live)}
-                data-agent-decision
-                title="Read the whole tick this came from"
-                className={`min-w-0 truncate transition-colors hover:underline ${
-                  live.lastDid.ok ? "" : "text-[var(--color-red)]"
-                }`}
-              >
-                {live.lastDid.summary}
-              </Link>
-            ) : (
-              live.lastSaid && (
-                <span data-agent-decision className="min-w-0 truncate">
-                  {live.lastSaid}
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
+                    loop.live.status === "running" ? "bg-emerald-400" : "bg-amber-400"
+                  }`}
+                />
+                <span className="min-w-0 truncate font-mono">
+                  {loop.strategyName} · {loopSummaryLabel(loop.live, nowSec * 1000)}
                 </span>
-              )
-            )}
+              </div>
+            ))}
           </div>
+        ) : (
+          live && (
+            <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
+              {due !== null && (
+                <span
+                  data-agent-due
+                  className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+                >
+                  {tickCountdownLabel(due)}
+                </span>
+              )}
+              {live.lastDid ? (
+                <Link
+                  to={decisionHref(live)}
+                  data-agent-decision
+                  title="Read the whole tick this came from"
+                  className={`min-w-0 truncate transition-colors hover:underline ${
+                    live.lastDid.ok ? "" : "text-[var(--color-red)]"
+                  }`}
+                >
+                  {live.lastDid.summary}
+                </Link>
+              ) : (
+                live.lastSaid && (
+                  <span data-agent-decision className="min-w-0 truncate">
+                    {live.lastSaid}
+                  </span>
+                )
+              )}
+            </div>
+          )
         )}
       </td>
       {total(row.totals.volume, "volume traded", false)}
