@@ -5,9 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import {
   decisionHref,
-  declaredServerOf,
   fleetRows,
-  rowHref,
   dueInSec,
   tickCountdownLabel,
   type FleetRow,
@@ -136,8 +134,8 @@ function clipBotName(name: string): string {
  *
  * **The trade-off is one server.** The panel reads `dockServer` — the chat
  * slot's, falling back to the ambient one — and the sheet's bar names it. An
- * agent trading somewhere else is named in a line at the foot rather than
- * shown as a zero.
+ * agent trading somewhere else has no row here at all: this desk answers for
+ * its own server only.
  *
  * **Running is the kill switch, not `status`.** The `/bots` payload hardcodes
  * `"running"` for every controller it reports; what actually stops one is
@@ -305,31 +303,6 @@ export function DockExecution({
     () => [...live.values()].filter((row) => row.live?.status === "running").length,
     [live],
   );
-
-  /**
-   * The agents that trade somewhere else — named, not shown as a zero.
-   *
-   * The desk is one server, deliberately, and an agent whose declared server is
-   * not this one has no records here to fold. A row of dashes would read as *it
-   * made nothing*; a line saying where it does trade is the honest version of
-   * the same fact, and it links out to the page that can answer.
-   */
-  const elsewhere = useMemo(() => {
-    const here = new Set(
-      rows.flatMap((row) => (row.agent ? [row.agent.slug] : [])),
-    );
-    return agents
-      .filter((agent) => !here.has(agent.slug) && (agent.strategies ?? []).length > 0)
-      .map((agent) => {
-        const row = live.get(agent.slug);
-        const declared = declaredServerOf(agent, row?.strategy ?? null);
-        return { row, declared };
-      })
-      .filter(
-        (entry): entry is { row: FleetRow; declared: string } =>
-          !!entry.row && !!entry.declared && entry.declared !== server,
-      );
-  }, [agents, rows, live, server]);
 
   const footer = (
     <button
@@ -506,24 +479,6 @@ export function DockExecution({
             {unattached} executor{unattached === 1 ? "" : "s"}
           </span>
         </button>
-      )}
-
-      {elsewhere.length > 0 && (
-        <div
-          data-execution-elsewhere
-          className="border-t border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-text-muted)]"
-        >
-          {elsewhere.map(({ row, declared }) => (
-            <Link
-              key={row.slug}
-              to={rowHref(row)}
-              title={`${row.name} trades on ${declared}, which this desk is not reading`}
-              className="block truncate transition-colors hover:text-[var(--color-text)]"
-            >
-              {row.name} · trades on {declared}
-            </Link>
-          ))}
-        </div>
       )}
 
       {footer}

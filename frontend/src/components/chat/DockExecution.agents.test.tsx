@@ -435,29 +435,4 @@ describe("what no agent owns", () => {
     expect(controllerRows()).toHaveLength(2);
     expect(counts()).toContain("2 controllers");
   });
-
-  it("names an agent trading on another server instead of showing it a zero", async () => {
-    getAgents.mockResolvedValue([
-      agent("brigado", "Brigado"),
-      agent("elsewhere", "Elsewhere", {
-        strategies: [
-          {
-            slug: "brl_mm",
-            name: "BRL MM",
-            session_count: 1,
-            server_name: "other_box",
-            instances: [],
-          },
-        ],
-      }),
-    ]);
-
-    await render();
-
-    const note = container.querySelector("[data-execution-elsewhere]")!;
-    expect(note.textContent).toContain("Elsewhere");
-    expect(note.textContent).toContain("trades on other_box");
-    // And it is not given a row of dashes among the agents that trade here.
-    expect(agentRows().some((r) => r.textContent?.includes("Elsewhere"))).toBe(false);
-  });
 });
