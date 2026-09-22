@@ -345,6 +345,23 @@ def _redact_network_config(value):
     return value
 
 
+def _gateway_is_not_running(exc: Exception) -> bool:
+    """Is this the API saying that server has no Gateway, rather than a failure?
+
+    A Condor with several API servers reads the Gateway-backed panels for
+    whichever server is selected, and a server without Gateway answers
+    ``503 Gateway service is not available``. That is a configuration, not a
+    fault: /gateway/status already reports it as ``running: false`` without a
+    word in the log, while these two logged a full traceback at ERROR on every
+    switch (#215). Only a 503 that names Gateway counts - any other 503 is the
+    API itself being unavailable and stays an error.
+    """
+    if getattr(exc, "status", None) != 503:
+        return False
+    message = getattr(exc, "message", None)
+    return isinstance(message, str) and "gateway" in message.lower()
+
+
 @router.get("/gateway/networks")
 async def gateway_networks(
     server: str = Query(...),
@@ -357,8 +374,11 @@ async def gateway_networks(
         networks = (
             result.get("networks", result) if isinstance(result, dict) else result
         )
-        return {"networks": networks}
+        return {"networks": networks, "gateway_available": True}
     except Exception as e:
+        if _gateway_is_not_running(e):
+            logger.info("Gateway is not running on '%s'; no networks to list", server)
+            return {"networks": [], "gateway_available": False}
         logger.exception("Failed to list gateway networks from '%s'", server)
         raise upstream_error("Failed to list gateway networks", e)
 
@@ -425,8 +445,11 @@ async def gateway_wallets(
     client = await _get_client(cm, server)
     try:
         wallets = await client.accounts.list_gateway_wallets()
-        return {"wallets": wallets}
+        return {"wallets": wallets, "gateway_available": True}
     except Exception as e:
+        if _gateway_is_not_running(e):
+            logger.info("Gateway is not running on '%s'; no wallets to list", server)
+            return {"wallets": [], "gateway_available": False}
         logger.exception("Failed to list gateway wallets from '%s'", server)
         raise upstream_error("Failed to list gateway wallets", e)
 
