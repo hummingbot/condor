@@ -94,9 +94,9 @@ export function loopStats(
  *
  * `fleet-map` is deliberately unscoped — `LoopsPanel`'s global view needs every
  * server — so this is how a surface that promises *one* server (`DockExecution`,
- * and the desk's own Loops section) narrows it back down, the same rule
- * `elsewhere` already applies to a whole agent in `DockExecution`. Extracted so
- * the two panels cannot drift into filtering it two different ways.
+ * and the desk's own Loops section) narrows it back down: a strategy with no
+ * declared server follows the ambient one instead of being excluded. Extracted
+ * so the two panels cannot drift into filtering it two different ways.
  */
 export function loopsOnServer(
   loops: LiveFleetOwner[],
