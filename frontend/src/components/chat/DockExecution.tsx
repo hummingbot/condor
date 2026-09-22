@@ -189,8 +189,27 @@ export function DockExecution({
   // `fleetRows`' `scopeStrategy`, `fleet-map` does not collapse an agent to
   // one strategy, so this is how a second concurrent loop stops being
   // invisible in this panel.
+  //
+  // `fleet-map` is deliberately unscoped — `LoopsPanel` reads the same hook to
+  // show every server — so this panel narrows it back down itself (CORR-429),
+  // the same rule `elsewhere` below already applies to whole agents:
+  // `declaredServerOf` on the loop's own strategy, joined against `agents`
+  // since `FleetOwner` carries no server of its own. A loop with no declared
+  // server follows the ambient one and always stays.
   const { loops } = useLiveLoops();
-  const loopsByAgent = useMemo(() => groupLoopsByAgent(loops), [loops]);
+  const loopsHere = useMemo(
+    () =>
+      loops.filter((loop) => {
+        const agent = agents.find((a) => a.slug === loop.agentSlug);
+        if (!agent) return true;
+        const strategy =
+          (agent.strategies ?? []).find((s) => s.slug === loop.strategySlug) ?? null;
+        const declared = declaredServerOf(agent, strategy);
+        return !declared || declared === server;
+      }),
+    [loops, agents, server],
+  );
+  const loopsByAgent = useMemo(() => groupLoopsByAgent(loopsHere), [loopsHere]);
 
   // A clock only while something is looping: the countdown is the one thing in
   // this panel that moves on its own, and an interval running under a fleet
@@ -580,7 +599,7 @@ function AgentRow({
   row: ExecutionRow;
   /** The agent's own run, or `null` for an owner nothing claims. */
   live: FleetRow | null;
-  /** Every loop `fleet-map` reports for this agent — length <= 1 changes nothing on screen. */
+  /** Every loop `fleet-map` reports for this agent on this server — length <= 1 changes nothing on screen. */
   loops: LiveFleetOwner[];
   nowSec: number;
   symbol: string;

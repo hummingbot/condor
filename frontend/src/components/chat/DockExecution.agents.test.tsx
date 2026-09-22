@@ -373,6 +373,50 @@ describe("an agent with more than one live loop (FEAT-124)", () => {
     expect(row.querySelectorAll("[data-agent-loop]")).toHaveLength(0);
     expect(row.querySelector("[data-agent-due]")).not.toBeNull();
   });
+
+  it("drops a loop whose strategy is declared on another server (CORR-429)", async () => {
+    // Two loops stay on `SERVER` — enough to keep the per-loop sub-lines
+    // rendering (`loops.length > 1`) — and a third is declared on `other_box`.
+    // A row with exactly one surviving loop falls back to the single-loop
+    // display instead, which is covered by the test above.
+    getAgents.mockResolvedValue([
+      agent("brigado", "Brigado", {
+        strategies: [
+          { slug: "brl_mm", name: "BRL MM", session_count: 2, server_name: SERVER, instances: [] },
+          { slug: "grid", name: "Grid", session_count: 1, server_name: SERVER, instances: [] },
+          { slug: "extra", name: "Extra", session_count: 1, server_name: "other_box", instances: [] },
+        ],
+      }),
+      agent("quiet", "Quiet"),
+    ]);
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner("brigado", "brl_mm", { live: liveLoop({ status: "running", tickCount: 41 }) }),
+        owner("brigado", "grid", {
+          strategyName: "Grid",
+          live: liveLoop({ status: "running", tickCount: 55 }),
+        }),
+        owner("brigado", "extra", {
+          strategyName: "Extra",
+          live: liveLoop({ status: "running", tickCount: 99 }),
+        }),
+        owner("quiet", "brl_mm"),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+
+    await render();
+
+    const row = agentRow("brigado.brl_mm");
+    const loops = row.querySelectorAll("[data-agent-loop]");
+    // All three render today (before the fix): this panel is `SERVER`'s own,
+    // and `extra`'s loop is declared on `other_box` — the same rule
+    // `elsewhere` already applies to a whole agent, here applied per loop.
+    expect(loops).toHaveLength(2);
+    expect(row.textContent).toContain("tick 41");
+    expect(row.textContent).toContain("tick 55");
+    expect(row.textContent).not.toContain("tick 99");
+  });
 });
 
 describe("what no agent owns", () => {
