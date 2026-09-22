@@ -71,6 +71,28 @@ def test_mixed_quotes_are_converted_before_the_bot_total():
     assert agg["b"]["realized_pnl_quote"] == 110
 
 
+def test_unresolved_quote_is_excluded_not_multiplied_by_one():
+    agg = bp._aggregate_by_bot(
+        [
+            _snap("b", "brl", "BTC-BRL", 100, 50, 1000, fees=5),
+            _snap("b", "eur", "BTC-EUR", 10, 5, 200, fees=1),
+        ]
+    )
+    # EUR has no rate in RATES (only BRL, USDT resolved) — must not fold in at
+    # face value as if EUR == USD (CORR-703).
+    usd = bp.restate_universe_in_usd(agg, RATES)["b"]
+    assert usd["realized_pnl_quote"] == 100 * BRL
+    assert usd["unrealized_pnl_quote"] == 50 * BRL
+    assert usd["global_pnl_quote"] == 150 * BRL
+    assert usd["volume_traded"] == 1000 * BRL
+    assert usd["cum_fees_quote"] == 5 * BRL
+    eur_ctrl = next(c for c in usd["controllers"] if c["quote"] == "EUR")
+    assert eur_ctrl["usd_converted"] is False
+    # Face value left untouched, not multiplied by an implicit 1.0.
+    assert eur_ctrl["realized_pnl_quote"] == 10
+    assert eur_ctrl["volume_traded"] == 200
+
+
 def test_a_flat_controller_takes_its_siblings_quote():
     agg = bp._aggregate_by_bot(
         [

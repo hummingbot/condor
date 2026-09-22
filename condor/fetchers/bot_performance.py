@@ -663,8 +663,14 @@ def restate_universe_in_usd(
 
     Returns new dicts — the snapshot aggregate is a shared cache entry. A
     controller with no pair of its own (flat right now) takes its bot's other
-    controllers' quote; one with no resolvable rate stays at face value. A bot
-    with no controller breakdown is passed through untouched.
+    controllers' quote. ``rates`` only ever holds a quote it actually resolved
+    (:func:`condor.quote_conversion.resolve_usd_rates` never inserts a key for
+    one it could not price), so a quote absent from it is excluded from the
+    bot's USD totals and flagged ``usd_converted: False`` on its own row
+    instead of being folded in at face value as if it were already USD
+    (CORR-703) — mirroring the ``converted`` convention in
+    :mod:`condor.quote_conversion`. A bot with no controller breakdown is
+    passed through untouched.
 
     ``positions_summary`` stays in quote on purpose: it only feeds the per-pair
     display rows (:func:`bot_executor_rows`), which the dashboard converts by
@@ -680,8 +686,19 @@ def restate_universe_in_usd(
         totals = dict.fromkeys(_CONTROLLER_MONEY, 0.0)
         restated = []
         for ctrl in controllers:
-            rate = rates.get(ctrl.get("quote") or sibling, 1.0)
+            quote = ctrl.get("quote") or sibling
             row = dict(ctrl)
+            if quote and quote not in rates:
+                logger.warning(
+                    "No USD rate for quote %s (bot %s); excluding controller "
+                    "from USD totals",
+                    quote,
+                    name,
+                )
+                row["usd_converted"] = False
+                restated.append(row)
+                continue
+            rate = rates.get(quote, 1.0)
             for key in _CONTROLLER_MONEY:
                 row[key] = float(ctrl.get(key, 0) or 0) * rate
                 totals[key] += row[key]
