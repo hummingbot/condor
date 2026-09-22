@@ -84,7 +84,7 @@ Size by `base_pct` with `capital_per_slot` at price `P`:
 - **Meteora** (price = SOL-per-memecoin, small e.g. `0.00105`): memecoin is ABOVE `P` → `upper=P×(1+W·base_pct/100)`, `lower=P×(1−W·(100−base_pct)/100)`.
 - **Orca / Raydium** (price = memecoin-per-SOL, large e.g. `1654`, `24.5M` — inverted): memecoin is BELOW `P` → `lower=P×(1−W·base_pct/100)`, `upper=P×(1+W·(100−base_pct)/100)`.
 
-**GUARDRAIL: always verify `lower_price < current_price < upper_price`.** If the bounds don't bracket `P` (both below it = you applied the Meteora formula to an inverted Orca/Raydium price), the open FAILS simulation — recompute with the right orientation. Match the magnitude of `current_price` from `get_pool_info`.
+**GUARDRAIL: the band must sit on the side of `P` that `side` mandates** — `side=1` entirely below (`upper < P`), `side=2` entirely above (`lower > P`), `side=3` bracketing (`lower < P < upper`). Bounds on the wrong side (e.g. `side=3` with both below it = you applied the Meteora formula to an inverted Orca/Raydium price) — the open FAILS simulation, recompute. Match the magnitude of `current_price` from `get_pool_info`.
 
 **MANDATORY WIDTH CLAMP — compute this before every open, both venues. Width in *percent* is meaningless on its own; only the granularity count matters.**
 - **Meteora:** `bins = ln(Pu/Pl) / ln(1 + bin_step/10000)` → must be **< 69**.
