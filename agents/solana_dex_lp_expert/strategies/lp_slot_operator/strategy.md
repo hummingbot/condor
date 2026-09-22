@@ -86,11 +86,24 @@ Size by `base_pct` with `capital_per_slot` at price `P`:
 
 **GUARDRAIL: always verify `lower_price < current_price < upper_price`.** If the bounds don't bracket `P` (both below it = you applied the Meteora formula to an inverted Orca/Raydium price), the open FAILS simulation — recompute with the right orientation. Match the magnitude of `current_price` from `get_pool_info`.
 
-**MANDATORY WIDTH CLAMP — compute this before every open, both venues. Width in *percent* is meaningless on its own; only the granularity count matters.**
-- **Meteora:** `bins = ln(Pu/Pl) / ln(1 + bin_step/10000)` → must be **< 69**.
-- **Orca / Raydium:** `spacings = ln(Pu/Pl) / (ln(1.0001) × tick_spacing)` → must be **≤ 120**.
+**MANDATORY GRANULARITY CLAMP — compute `W_max` before every open, both venues. Width in *percent* is meaningless on its own; only the bin/spacing count decides whether the open lands. `W_max` is the half-width that fits one unit UNDER the cap, so it always opens — it is a CEILING on the width, not a follow-up check.**
 
-Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never assume, it varies pool to pool and it is what decides the cap. If the count exceeds the limit, **shrink `W` until it fits** (keep `P` bracketed and the `base_pct` split intact), then open.
+Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never assume, it varies pool to pool. Then require `ln(upper/lower) ≤ ln((1+W_max)/(1−W_max))`, shrinking the bounds proportionally (keeping `P` bracketed and the `base_pct` split intact) if over. The `ln` form holds for the asymmetric `base_pct` placement too — `W_max` is the *symmetric-equivalent* half-width:
+
+- **Meteora** — `bins = ln(upper/lower) / ln(1+bin_step/10000)` must be **< 69**; table at **68**:
+
+| `bin_step` | 1 | 2 | 4 | 5 | 10 | 16 | 20 | 25 | 50 | 80 | 100 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **`W_max`** | 0.34% | 0.68% | 1.36% | 1.70% | 3.40% | 5.43% | 6.78% | 8.47% | 16.80% | 26.45% | 32.60% |
+
+- **Orca / Raydium** — `spacings = ln(upper/lower) / (ln(1.0001) × tick_spacing)` must be **≤ 120**; table at **120**:
+
+| `tick_spacing` | 1 | 2 | 4 | 8 | 10 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|---|---|
+| **`W_max`** | 0.60% | 1.20% | 2.40% | 4.80% | 5.99% | 9.57% | 18.97% | 36.62% |
+
+- **Off-table granularity — one line, never guess:** `r = (1+bin_step/10000)**68` (Meteora) or `r = 1.0001**(120×tick_spacing)` (Orca/Raydium) → `W_max = (r−1)/(r+1)`.
+- **A "4% floor" is NOT a floor when `W_max < 4%`** (Meteora `bin_step ≤ 10`): a fine-grained pool physically cannot hold a 4% band — narrow to `W_max` and open, or skip the pool.
 
 > Why this matters — two Orca opens at the **identical 20.8% width** landed on opposite sides purely because of `tick_spacing`:
 > `tick_spacing=16` → 118 spacings → **opened fine**; `tick_spacing=8` → 237 spacings → **SIMULATION_FAILED** (`/connectors/orca/clmm/open-position`, no funds moved, slot left empty).
