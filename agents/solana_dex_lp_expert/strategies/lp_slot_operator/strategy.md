@@ -80,17 +80,23 @@ Size by `base_pct` with `capital_per_slot` at price `P`:
 
 **Open LP** (MINT pair): `create_lp_executor(connector_name="solana-mainnet-beta", lp_provider="<venue>/clmm", swap_provider="jupiter/router", trading_pair=<MintPair>, pool_address=<Pool>, lower_price=<Pl>, upper_price=<Pu>, side=<1|2|3>, base_amount=<b>, quote_amount=<q>, keep_position=false, extra_params={"strategyType":0})`.
 
-**Range bounds:** pick total width `W` from `range_width_pct`/OHLCV vol, then place `P` **asymmetrically by `base_pct`** so even (Spot) liquidity gives the target split — the **memecoin side gets `base_pct%` of `W`**, the SOL side `(100−base_pct)%`. **The memecoin side FLIPS by venue price convention:**
-- **Meteora** (price = SOL-per-memecoin, small e.g. `0.00105`): memecoin is ABOVE `P` → `upper=P×(1+W·base_pct/100)`, `lower=P×(1−W·(100−base_pct)/100)`.
-- **Orca / Raydium** (price = memecoin-per-SOL, large e.g. `1654`, `24.5M` — inverted): memecoin is BELOW `P` → `lower=P×(1−W·base_pct/100)`, `upper=P×(1+W·(100−base_pct)/100)`.
+**Range bounds:** pick total width `W` from `range_width_pct`/OHLCV vol, then place the band **on the side of `P` that `side` mandates** — the construction differs for RANGE vs one-sided. **Never use the RANGE formulas at `base_pct` 0 or 100**: the collapsed side then lands on `P` itself and fails the strict inequalities below.
 
-**GUARDRAIL: always verify `lower_price < current_price < upper_price`.** If the bounds don't bracket `P` (both below it = you applied the Meteora formula to an inverted Orca/Raydium price), the open FAILS simulation — recompute with the right orientation. Match the magnitude of `current_price` from `get_pool_info`.
+- **`0<base_pct<100` (side=3, RANGE):** both sides exist; place `P` **asymmetrically by `base_pct`** so even (Spot) liquidity gives the target split — the **memecoin side gets `base_pct%` of `W`**, the SOL side `(100−base_pct)%`. **The memecoin side FLIPS by venue price convention:**
+  - **Meteora** (price = SOL-per-memecoin, small e.g. `0.00105`): memecoin is ABOVE `P` → `upper=P×(1+W·base_pct/100)`, `lower=P×(1−W·(100−base_pct)/100)`.
+  - **Orca / Raydium** (price = memecoin-per-SOL, large e.g. `1654`, `24.5M` — inverted): memecoin is BELOW `P` → `lower=P×(1−W·base_pct/100)`, `upper=P×(1+W·(100−base_pct)/100)`.
+- **`base_pct=0` (side=1, BUY):** quote-only, **entirely below `P`**, **venue-independent** — `upper=P×(1−ε)`, `lower=upper×(1−W)`. No venue flip: with one side at 0% there is no split to orient.
+- **`base_pct=100` (side=2, SELL):** base-only, **entirely above `P`**, **venue-independent** — `lower=P×(1+ε)`, `upper=lower×(1+W)`. No venue flip.
+
+`ε` is one bin/tick step (the smallest offset the venue resolves) — just enough that the near bound does **not** sit on `P`.
+
+**GUARDRAIL: the band must sit on the side of `P` that `side` mandates** — `side=1` entirely below (`upper < P`), `side=2` entirely above (`lower > P`), `side=3` bracketing (`lower < P < upper`). Bounds on the wrong side (e.g. `side=3` with both below it = you applied the Meteora formula to an inverted Orca/Raydium price) — the open FAILS simulation, recompute. Match the magnitude of `current_price` from `get_pool_info`.
 
 **MANDATORY WIDTH CLAMP — compute this before every open, both venues. Width in *percent* is meaningless on its own; only the granularity count matters.**
 - **Meteora:** `bins = ln(Pu/Pl) / ln(1 + bin_step/10000)` → must be **< 69**.
 - **Orca / Raydium:** `spacings = ln(Pu/Pl) / (ln(1.0001) × tick_spacing)` → must be **≤ 120**.
 
-Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never assume, it varies pool to pool and it is what decides the cap. If the count exceeds the limit, **shrink `W` until it fits** (keep `P` bracketed and the `base_pct` split intact), then open.
+Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never assume, it varies pool to pool and it is what decides the cap. If the count exceeds the limit, **shrink `W` until it fits while preserving the side** — hold `P` bracketed **only for `side=3`**; for `side=1` keep the whole band below (`upper<P`), for `side=2` the whole band above (`lower>P`) — keep the `base_pct` split intact on RANGE, then open.
 
 > Why this matters — two Orca opens at the **identical 20.8% width** landed on opposite sides purely because of `tick_spacing`:
 > `tick_spacing=16` → 118 spacings → **opened fine**; `tick_spacing=8` → 237 spacings → **SIMULATION_FAILED** (`/connectors/orca/clmm/open-position`, no funds moved, slot left empty).
