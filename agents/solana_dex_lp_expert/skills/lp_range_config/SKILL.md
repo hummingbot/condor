@@ -33,22 +33,22 @@ Turn a chosen pool + `capital_per_slot` (in `quote_asset`) + `base_pct` into a v
 
    `ln(upper/lower) ≤ ln((1+W_max)/(1−W_max))`
 
-   and shrink the bounds proportionally if over, keeping `P` bracketed and the `base_pct` split intact. The `ln` form is valid for the asymmetric `base_pct` placement above — `W_max` is the *symmetric-equivalent* half-width. `W_max` fits **one unit under** the hard cap, so it always opens.
+   and shrink the bounds proportionally about `P` if over — the band **stays on its side of `P`**: BUY entirely below, SELL entirely above, RANGE bracketing it. A one-sided band is never widened or shifted across `P`, and the `base_pct` split stays intact. The `ln` form is valid for the asymmetric `base_pct` placement above — `W_max` is the *symmetric-equivalent* half-width. `W_max` is computed **one unit under** the hard cap, so it always opens.
 
-   - **Meteora** — `bins = ln(upper/lower) / ln(1+bin_step/10000)` must be **< 69**; table computed at **68**:
+   - **Meteora** — `bins = ln(upper/lower) / ln(1+bin_step/10000)` must be **< 69**; table computed at **68 bins**, one bin under the cap:
 
 | `bin_step` | 1 | 2 | 4 | 5 | 10 | 16 | 20 | 25 | 50 | 80 | 100 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **`W_max`** | 0.34% | 0.68% | 1.36% | 1.70% | 3.40% | 5.43% | 6.78% | 8.47% | 16.80% | 26.45% | 32.60% |
 
-   - **Orca / Raydium** — `spacings = ln(upper/lower) / (ln(1.0001) × tick_spacing)` must be **≤ 120**; table computed at **120**:
+   - **Orca / Raydium** — `spacings = ln(upper/lower) / (ln(1.0001) × tick_spacing)` must be **≤ 120**; table computed at **119 spacings**, one spacing under the cap. The values are exact ceilings: read them as written, never round the last decimal up, or the clamp lands back on the cap:
 
 | `tick_spacing` | 1 | 2 | 4 | 8 | 10 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|---|---|
-| **`W_max`** | 0.60% | 1.20% | 2.40% | 4.80% | 5.99% | 9.57% | 18.97% | 36.62% |
+| **`W_max`** | 0.595% | 1.190% | 2.379% | 4.756% | 5.943% | 9.491% | 18.812% | 36.339% |
 
-   - **Off-table granularity — solve it in one line, never guess a percent:** `r = (1+bin_step/10000)**68` (Meteora) or `r = 1.0001**(120×tick_spacing)` (Orca/Raydium), then `W_max = (r−1)/(r+1)`.
-   - **A "4% floor" is NOT a floor when `W_max < 4%`** (Meteora `bin_step ≤ 10`, Orca `tick_spacing ≤ 8` at a 20% target): such a pool physically cannot hold that band — narrow to `W_max` and open, or skip the pool. Widening past `W_max` fails the open.
+   - **Off-table granularity — solve it in one line, never guess a percent:** `r = (1+bin_step/10000)**68` (Meteora) or `r = 1.0001**(119×tick_spacing)` (Orca/Raydium), then `W_max = (r−1)/(r+1)`.
+   - **A "4% floor" is NOT a floor when `W_max < 4%`** (Meteora `bin_step ≤ 10`, Orca/Raydium `tick_spacing ≤ 4` at a 20% target): such a pool physically cannot hold that band — narrow to `W_max` and open, or skip the pool. Widening past `W_max` fails the open.
 4. Meteora only: `extra_params={"strategyType":0}` (0=Spot uniform, 1=Curve concentrated, 2=Bid-Ask). Default Spot.
 
 ## Validate before create
