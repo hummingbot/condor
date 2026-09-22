@@ -41,7 +41,7 @@ Turn a chosen pool + `capital_per_slot` (in `quote_asset`) + `base_pct` into a v
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **`W_max`** | 0.34% | 0.68% | 1.36% | 1.70% | 3.40% | 5.43% | 6.78% | 8.47% | 16.80% | 26.45% | 32.60% |
 
-   - **Orca / Raydium** — `spacings = ln(upper/lower) / (ln(1.0001) × tick_spacing)` must be **≤ 120**; table computed at **119 spacings**, one spacing under the cap. The values are exact ceilings: read them as written, never round the last decimal up, or the clamp lands back on the cap:
+   - **Orca / Raydium** — `spacings = ln(upper/lower) / (ln(1.0001) × tick_spacing)` must be **≤ 120**; table computed at **119 spacings**, one spacing under the cap, so a band at `W_max` still opens with a spacing to spare. Values are rounded to four significant figures — read them as written:
 
 | `tick_spacing` | 1 | 2 | 4 | 8 | 10 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|---|---|
