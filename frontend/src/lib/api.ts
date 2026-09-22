@@ -3648,7 +3648,9 @@ export const api = {
     ),
 
   getGatewayWallets: (server: string) =>
-    apiFetch<{ wallets: GatewayWalletGroup[] }>(
+    // gateway_available is false when that server runs no Gateway at all, which the
+    // route reports as an empty list rather than an error (#215).
+    apiFetch<{ wallets: GatewayWalletGroup[]; gateway_available?: boolean }>(
       `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
     ),
 
