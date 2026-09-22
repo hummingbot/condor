@@ -24,7 +24,7 @@ Turn a chosen pool + `capital_per_slot` (in `quote_asset`) + `base_pct` into a v
 - Always `keep_position=false` → exit swaps back to `quote_asset` so PnL/TP/SL are in quote terms.
 
 ## Bounds — width, then CLAMP to the venue's granularity
-1. Half-width `w`: if `range_width_pct` set, use it; if `auto`, derive from OHLCV — e.g. `w ≈ k · ATR%` over `ranking_window` (k≈1–2). Tighter = denser fees but exits range sooner.
+1. Half-width `w` (total width `W = 2w`): if `range_width_pct` set, use it; if `auto`, derive from OHLCV — e.g. `w ≈ k · ATR%` over `ranking_window` (k≈1–2). Tighter = denser fees but exits range sooner.
 2. Provisional bounds:
    - RANGE (β middle): **place `P` asymmetrically, NOT centred.** Even (Spot)
      liquidity spreads uniformly across the range, so a centred range delivers a
@@ -34,8 +34,8 @@ Turn a chosen pool + `capital_per_slot` (in `quote_asset`) + `base_pct` into a v
      this out per venue and is the authority on it; follow it rather than
      reasoning from scratch here (LP-9: this skill used to say "centered", which
      silently ignored `base_pct`).
-   - BUY (β=0): `upper=P·(1−ε)`, `lower=P·(1−ε−2w)` (range below P).
-   - SELL (β=100): `lower=P·(1+ε)`, `upper=P·(1+ε+2w)` (range above P).
+   - BUY (β=0): `upper=P·(1−ε)`, `lower=upper·(1−W)` (range below P).
+   - SELL (β=100): `lower=P·(1+ε)`, `upper=lower·(1+W)` (range above P).
 3. **CLAMP — `W_max` is a CEILING on the width, derived from the pool's granularity, and it BINDS.** Width in *percent* is meaningless on its own; only the bin/spacing count decides whether the open lands. Read `bin_step` (Meteora) / `tick_spacing` (Orca, Raydium) from `get_pool_info` **per pool** — never assume. Then require:
 
    `ln(upper/lower) ≤ ln((1+W_max)/(1−W_max))`

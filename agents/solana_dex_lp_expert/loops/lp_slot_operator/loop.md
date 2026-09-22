@@ -97,15 +97,21 @@ Size by `base_pct` with `capital_per_slot` at price `P`:
 
 **Both limit prices are mandatory — never omit them.** They are the only thing managing the slot when this loop is not. Without them a position "sits out of range indefinitely on the unprotected side": stopping the loop used to leave real on-chain liquidity with no exit at all, waiting for a tick that was never coming (LP-7). They fire once price crosses them while the position is OUT_OF_RANGE, which **can happen inside your `out_of_range_max_sec` grace window and while this loop is still running** — a fast move straight through the limit closes the slot without waiting for the grace period to elapse. That is the trade: `autonomous_exit_margin_pct` is how far out of range you are willing to drift before the executor acts on its own, so widen it if you want the grace window to decide more often, and narrow it if you would rather be out early. What you cannot choose is having neither.
 
-**Range bounds:** pick total width `W` from `range_width_pct`/OHLCV vol, then place `P` **asymmetrically by `base_pct`** so even (Spot) liquidity gives the target split — the **memecoin side gets `base_pct%` of `W`**, the SOL side `(100−base_pct)%`. **The memecoin side FLIPS by venue price convention:**
-- **Meteora** (price = SOL-per-memecoin, small e.g. `0.00105`): memecoin is ABOVE `P` → `upper=P×(1+W·base_pct/100)`, `lower=P×(1−W·(100−base_pct)/100)`.
-- **Orca / Raydium** (price = memecoin-per-SOL, large e.g. `1654`, `24.5M` — inverted): memecoin is BELOW `P` → `lower=P×(1−W·base_pct/100)`, `upper=P×(1+W·(100−base_pct)/100)`.
+**Range bounds:** pick total width `W` from `range_width_pct`/OHLCV vol, then place the band **on the side of `P` that `side` mandates** — the construction differs for RANGE vs one-sided. **Never use the RANGE formulas at `base_pct` 0 or 100**: the collapsed side then lands on `P` itself and fails the strict inequalities below.
+
+- **`0<base_pct<100` (side=3, RANGE):** both sides exist; place `P` **asymmetrically by `base_pct`** so even (Spot) liquidity gives the target split — the **memecoin side gets `base_pct%` of `W`**, the SOL side `(100−base_pct)%`. **The memecoin side FLIPS by venue price convention:**
+  - **Meteora** (price = SOL-per-memecoin, small e.g. `0.00105`): memecoin is ABOVE `P` → `upper=P×(1+W·base_pct/100)`, `lower=P×(1−W·(100−base_pct)/100)`.
+  - **Orca / Raydium** (price = memecoin-per-SOL, large e.g. `1654`, `24.5M` — inverted): memecoin is BELOW `P` → `lower=P×(1−W·base_pct/100)`, `upper=P×(1+W·(100−base_pct)/100)`.
+- **`base_pct=0` (side=1, BUY):** quote-only, **entirely below `P`**, **venue-independent** — `upper=P×(1−ε)`, `lower=upper×(1−W)`. No venue flip: with one side at 0% there is no split to orient.
+- **`base_pct=100` (side=2, SELL):** base-only, **entirely above `P`**, **venue-independent** — `lower=P×(1+ε)`, `upper=lower×(1+W)`. No venue flip.
+
+`ε` is one bin/tick step (the smallest offset the venue resolves) — just enough that the near bound does **not** sit on `P`.
 
 **GUARDRAIL: the band must sit on the side of `P` that `side` mandates** — `side=1` entirely below (`upper < P`), `side=2` entirely above (`lower > P`), `side=3` bracketing (`lower < P < upper`). Bounds on the wrong side (e.g. `side=3` with both below it = you applied the Meteora formula to an inverted Orca/Raydium price) — the open FAILS simulation, recompute. Match the magnitude of `current_price` from `get_pool_info`.
 
 **MANDATORY GRANULARITY CLAMP — compute `W_max` before every open, both venues. Width in *percent* is meaningless on its own; only the bin/spacing count decides whether the open lands. `W_max` is the half-width that fits one unit UNDER the cap, so it always opens — it is a CEILING on the width, not a follow-up check.**
 
-Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never assume, it varies pool to pool. Then require `ln(upper/lower) ≤ ln((1+W_max)/(1−W_max))`, shrinking the bounds proportionally if over — the band **stays on its side of `P`** (BUY entirely below, SELL entirely above, RANGE bracketing it), never widened or shifted across `P`, with the `base_pct` split intact. The `ln` form holds for the asymmetric `base_pct` placement too — `W_max` is the *symmetric-equivalent* half-width:
+Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never assume, it varies pool to pool. Then require `ln(upper/lower) ≤ ln((1+W_max)/(1−W_max))`, shrinking the bounds proportionally if over — the band **keeps the side of `P` its `side` mandates**: hold `P` bracketed **only for `side=3`**; for `side=1` keep the whole band below (`upper<P`), for `side=2` the whole band above (`lower>P`) — never widened or shifted across `P`, with the `base_pct` split intact on RANGE. The `ln` form holds for the asymmetric `base_pct` placement too — `W_max` is the *symmetric-equivalent* half-width:
 
 - **Meteora** — `bins = ln(upper/lower) / ln(1+bin_step/10000)` must be **< 69**; table at **68 bins**, one bin under the cap:
 
@@ -120,7 +126,7 @@ Pull `bin_step` / `tick_spacing` from `get_pool_info` **per pool** — never ass
 | **`W_max`** | 0.595% | 1.190% | 2.379% | 4.756% | 5.943% | 9.491% | 18.812% | 36.339% |
 
 - **Off-table granularity — one line, never guess:** `r = (1+bin_step/10000)**68` (Meteora) or `r = 1.0001**(119×tick_spacing)` (Orca/Raydium) → `W_max = (r−1)/(r+1)`.
-- **A "4% floor" is NOT a floor when `W_max < 4%`** (Meteora `bin_step ≤ 10`): a fine-grained pool physically cannot hold a 4% band — narrow to `W_max` and open, or skip the pool.
+- **A "4% floor" is NOT a floor when `W_max < 4%`** (Meteora `bin_step ≤ 10`, Orca/Raydium `tick_spacing ≤ 4` at a 20% target): a fine-grained pool physically cannot hold a 4% band — narrow to `W_max` and open, or skip the pool.
 
 > Why this matters — two Orca opens at the **identical 20.8% width** landed on opposite sides purely because of `tick_spacing`:
 > `tick_spacing=16` → 118 spacings → **opened fine**; `tick_spacing=8` → 237 spacings → **SIMULATION_FAILED** (`/connectors/orca/clmm/open-position`, no funds moved, slot left empty).
