@@ -25,6 +25,7 @@ import { useFleetData } from "@/hooks/useFleetData";
 import {
   groupLoopsByAgent,
   loopSummaryLabel,
+  loopsOnServer,
   useLiveLoops,
   type LiveFleetOwner,
 } from "@/hooks/useLiveLoops";
@@ -190,23 +191,13 @@ export function DockExecution({
   // one strategy, so this is how a second concurrent loop stops being
   // invisible in this panel.
   //
-  // `fleet-map` is deliberately unscoped — `LoopsPanel` reads the same hook to
-  // show every server — so this panel narrows it back down itself (CORR-429),
-  // the same rule `elsewhere` below already applies to whole agents:
-  // `declaredServerOf` on the loop's own strategy, joined against `agents`
-  // since `FleetOwner` carries no server of its own. A loop with no declared
-  // server follows the ambient one and always stays.
+  // `fleet-map` is deliberately unscoped — `LoopsPanel`'s global view needs
+  // every server — so this panel narrows it back down through `loopsOnServer`
+  // (CORR-429). A loop with no declared server follows the ambient one and
+  // always stays.
   const { loops } = useLiveLoops();
   const loopsHere = useMemo(
-    () =>
-      loops.filter((loop) => {
-        const agent = agents.find((a) => a.slug === loop.agentSlug);
-        if (!agent) return true;
-        const strategy =
-          (agent.strategies ?? []).find((s) => s.slug === loop.strategySlug) ?? null;
-        const declared = declaredServerOf(agent, strategy);
-        return !declared || declared === server;
-      }),
+    () => loopsOnServer(loops, agents, server),
     [loops, agents, server],
   );
   const loopsByAgent = useMemo(() => groupLoopsByAgent(loopsHere), [loopsHere]);

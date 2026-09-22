@@ -39,11 +39,6 @@ export function LoopsPanel({
   onOpenLoop: (agentSlug: string, strategySlug: string) => void;
   onClose: () => void;
 }) {
-  // Alive only while a loop is actually running: a panel showing only paused
-  // loops, or none at all, costs no interval (`useSeconds`'s own contract).
-  const nowMs = useSeconds(loops.some((o) => o.live.status === "running"));
-  const groups = groupLoopsByAgent(loops);
-
   return (
     <WorkspaceSheet
       title="Loops"
@@ -55,47 +50,81 @@ export function LoopsPanel({
         data-testid="loops-panel"
         className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3"
       >
-        {loops.length === 0 ? (
-          <p className="text-[11px] text-[var(--color-text-muted)]">
-            {isLoading ? "Loading…" : "Nothing looping right now"}
-          </p>
-        ) : (
-          [...groups.entries()].map(([agentSlug, group]) => (
-            <div key={agentSlug} className="flex flex-col gap-2">
-              {/* Only when more than one agent has a live loop — the
-                  single-agent case renders its card(s) directly, with no
-                  heading standing in for a group of one. */}
-              {groups.size > 1 && (
-                <div
-                  data-loop-group={agentSlug}
-                  className="flex items-center gap-1.5"
-                >
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      group.some((o) => o.live.status === "running")
-                        ? "bg-emerald-400"
-                        : "bg-amber-400"
-                    }`}
-                  />
-                  <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                    {group[0].agentName}
-                  </span>
-                </div>
-              )}
-              {group.map((owner) => (
-                <LoopCard
-                  key={`${owner.agentSlug}/${owner.strategySlug}`}
-                  owner={owner}
-                  stats={loopStats(owner, agents)}
-                  nowMs={nowMs}
-                  onOpen={() => onOpenLoop(owner.agentSlug, owner.strategySlug)}
-                />
-              ))}
-            </div>
-          ))
-        )}
+        <LoopCardGrid loops={loops} isLoading={isLoading} agents={agents} onOpenLoop={onOpenLoop} />
       </div>
     </WorkspaceSheet>
+  );
+}
+
+/**
+ * The grouped cards themselves, with no sheet around them (FEAT-1xx).
+ *
+ * Split out of `LoopsPanel` so the desk's own Loops section — a `DockSection`
+ * beside Portfolio and Execution, not a fourth kind of overlay — can draw the
+ * exact same cards over its own (server-scoped) loops rather than a second
+ * copy of this markup drifting from the global view's.
+ */
+export function LoopCardGrid({
+  loops,
+  isLoading,
+  agents,
+  onOpenLoop,
+  emptyLabel = "Nothing looping right now",
+}: {
+  loops: LiveFleetOwner[];
+  isLoading: boolean;
+  agents: AgentSummary[];
+  onOpenLoop: (agentSlug: string, strategySlug: string) => void;
+  /** What to say when there is nothing to show — the desk's own section says
+   * whose server that is; the global panel says nothing more than the fact. */
+  emptyLabel?: string;
+}) {
+  // Alive only while a loop is actually running: a panel showing only paused
+  // loops, or none at all, costs no interval (`useSeconds`'s own contract).
+  const nowMs = useSeconds(loops.some((o) => o.live.status === "running"));
+  const groups = groupLoopsByAgent(loops);
+
+  if (loops.length === 0) {
+    return (
+      <p className="text-[11px] text-[var(--color-text-muted)]">
+        {isLoading ? "Loading…" : emptyLabel}
+      </p>
+    );
+  }
+
+  return (
+    <>
+      {[...groups.entries()].map(([agentSlug, group]) => (
+        <div key={agentSlug} className="flex flex-col gap-2">
+          {/* Only when more than one agent has a live loop — the
+              single-agent case renders its card(s) directly, with no
+              heading standing in for a group of one. */}
+          {groups.size > 1 && (
+            <div data-loop-group={agentSlug} className="flex items-center gap-1.5">
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  group.some((o) => o.live.status === "running")
+                    ? "bg-emerald-400"
+                    : "bg-amber-400"
+                }`}
+              />
+              <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                {group[0].agentName}
+              </span>
+            </div>
+          )}
+          {group.map((owner) => (
+            <LoopCard
+              key={`${owner.agentSlug}/${owner.strategySlug}`}
+              owner={owner}
+              stats={loopStats(owner, agents)}
+              nowMs={nowMs}
+              onOpen={() => onOpenLoop(owner.agentSlug, owner.strategySlug)}
+            />
+          ))}
+        </div>
+      ))}
+    </>
   );
 }
 

@@ -27,9 +27,8 @@ vi.mock("@/lib/api", () => ({
   api: { getFleetMap: () => getFleetMap() },
 }));
 
-const { useLiveLoops, groupLoopsByAgent, loopStats } = await import(
-  "./useLiveLoops"
-);
+const { useLiveLoops, groupLoopsByAgent, loopStats, loopsOnServer } =
+  await import("./useLiveLoops");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -238,5 +237,74 @@ describe("loopStats", () => {
         [agentSummary()],
       ),
     ).toBeNull();
+  });
+
+  /** One agent, pinned to `server`, with two strategies — the second overrides
+   * the pin with its own `server_name`, the shape `declaredServerOf` reads. */
+  function agentWithStrategies(
+    server: string,
+    strategies: { slug: string; server_name?: string }[],
+  ): AgentSummary {
+    const base = agentSummary().strategies[0];
+    return {
+      ...agentSummary(),
+      slug: "brigado",
+      server_name: server,
+      strategies: strategies.map((s) => ({ ...base, ...s })),
+    };
+  }
+
+  describe("loopsOnServer", () => {
+    it("passes every loop through with no server to scope to", () => {
+      const loops = [
+        owner({ agentSlug: "brigado", strategySlug: "brl_mm", live: live() }),
+      ] as never[];
+
+      expect(loopsOnServer(loops, [], null)).toBe(loops);
+    });
+
+    it("keeps a loop with no agent in the roster — the roster join missed, not a fact about its server", () => {
+      const loop = owner({
+        agentSlug: "ghost",
+        strategySlug: "brl_mm",
+        live: live(),
+      }) as never;
+
+      expect(loopsOnServer([loop], [], "brigado_2")).toEqual([loop]);
+    });
+
+    it("drops a loop declared on another server, keeps the one declared here (CORR-429)", () => {
+      const here = owner({
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        live: live(),
+      }) as never;
+      const elsewhere = owner({
+        agentSlug: "brigado",
+        strategySlug: "grid",
+        live: live(),
+      }) as never;
+      const agents = [
+        agentWithStrategies("brigado_2", [
+          { slug: "brl_mm" },
+          { slug: "grid", server_name: "other_box" },
+        ]),
+      ];
+
+      expect(loopsOnServer([here, elsewhere], agents, "brigado_2")).toEqual([
+        here,
+      ]);
+    });
+
+    it("keeps a loop whose strategy declares no server at all", () => {
+      const loop = owner({
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        live: live(),
+      }) as never;
+      const agents = [agentWithStrategies("", [{ slug: "brl_mm" }])];
+
+      expect(loopsOnServer([loop], agents, "brigado_2")).toEqual([loop]);
+    });
   });
 });

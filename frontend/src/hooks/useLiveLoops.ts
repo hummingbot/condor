@@ -1,7 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { tickCountdownLabel } from "@/components/agent/workspace/fleet";
+import {
+  declaredServerOf,
+  tickCountdownLabel,
+} from "@/components/agent/workspace/fleet";
 import { api } from "@/lib/api";
 import type { AgentSummary } from "@/lib/api";
 import type { FleetOwner, LiveLoop } from "@/lib/agent-attribution";
@@ -83,6 +86,32 @@ export function loopStats(
         experimentCount: strategy.experiment_count,
       }
     : null;
+}
+
+/**
+ * Every loop from {@link useLiveLoops} whose strategy is declared on `server`
+ * — or has no declared server at all, which follows the ambient one (CORR-429).
+ *
+ * `fleet-map` is deliberately unscoped — `LoopsPanel`'s global view needs every
+ * server — so this is how a surface that promises *one* server (`DockExecution`,
+ * and the desk's own Loops section) narrows it back down, the same rule
+ * `elsewhere` already applies to a whole agent in `DockExecution`. Extracted so
+ * the two panels cannot drift into filtering it two different ways.
+ */
+export function loopsOnServer(
+  loops: LiveFleetOwner[],
+  agents: AgentSummary[],
+  server: string | null,
+): LiveFleetOwner[] {
+  if (!server) return loops;
+  return loops.filter((loop) => {
+    const agent = agents.find((a) => a.slug === loop.agentSlug);
+    if (!agent) return true;
+    const strategy =
+      (agent.strategies ?? []).find((s) => s.slug === loop.strategySlug) ?? null;
+    const declared = declaredServerOf(agent, strategy);
+    return !declared || declared === server;
+  });
 }
 
 /**

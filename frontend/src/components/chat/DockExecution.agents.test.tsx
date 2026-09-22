@@ -409,9 +409,8 @@ describe("an agent with more than one live loop (FEAT-124)", () => {
 
     const row = agentRow("brigado.brl_mm");
     const loops = row.querySelectorAll("[data-agent-loop]");
-    // All three render today (before the fix): this panel is `SERVER`'s own,
-    // and `extra`'s loop is declared on `other_box` — the same rule
-    // `elsewhere` already applies to a whole agent, here applied per loop.
+    // Only the two loops declared on `SERVER` render: this panel is
+    // `SERVER`'s own, and `extra`'s loop is declared on `other_box`.
     expect(loops).toHaveLength(2);
     expect(row.textContent).toContain("tick 41");
     expect(row.textContent).toContain("tick 55");

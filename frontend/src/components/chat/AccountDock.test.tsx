@@ -26,13 +26,17 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { LiveFleetOwner } from "@/hooks/useLiveLoops";
+import type { LiveLoop } from "@/lib/agent-attribution";
 import { ACCOUNT_DOCK_KEY, DESK_SPLIT_KEY } from "@/lib/sessionState";
 
-/** Every call the two panels can make; none of them may fire while closed. */
+/** Every call the three panels can make; none of them may fire while closed. */
 const getPortfolio = vi.fn();
 const getPortfolioHistory = vi.fn();
 const getBots = vi.fn();
 const getExecutors = vi.fn();
+const getFleetMap = vi.fn();
+const getAgents = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -46,8 +50,11 @@ vi.mock("@/lib/api", () => ({
       executors: (await getExecutors(...a)) ?? [],
       next_cursor: null,
     }),
-    getFleetMap: () => Promise.resolve({ owners: [], deeds: { bots: {}, since: 0 } }),
-    getAgents: () => Promise.resolve([]),
+    // The Loops section reads through `useLiveLoops` and the shared agent
+    // roster (FEAT-1xx) — both empty by default, below, so a test that never
+    // touches Loops sees exactly the "nothing looping" shell it always did.
+    getFleetMap: (...a: unknown[]) => getFleetMap(...a),
+    getAgents: (...a: unknown[]) => getAgents(...a),
     getRates: () => Promise.resolve({ rates: {} }),
   },
 }));
@@ -119,9 +126,30 @@ let qc: QueryClient;
  * it is on screen, the pane does, and that is what makes it exclusive with the
  * agent panel without either one knowing about the other.
  */
-function Desk({ server }: { server: string | null }) {
+function Desk({
+  server,
+  loopsCount,
+  onOpenLoop,
+}: {
+  server: string | null;
+  /**
+   * How many loops this server has, standing in for `AgentChatTab`'s own
+   * `loopsOnServer(...).length` (FEAT-1xx) — `undefined` leaves the Loops
+   * section exactly as unaware of the fleet as Portfolio and Execution are.
+   */
+  loopsCount?: number;
+  onOpenLoop?: (agentSlug: string, strategySlug: string) => void;
+}) {
   const [open, setOpen] = useState(deskWasOpen);
-  const account = useAccountPanels({ server, open, onOpenChange: setOpen });
+  const account = useAccountPanels({
+    server,
+    open,
+    onOpenChange: setOpen,
+    loopsActivity:
+      loopsCount === undefined
+        ? undefined
+        : { count: loopsCount, isLoading: false },
+  });
   return (
     <WorkspacePaneProvider>
       <div className="flex">
@@ -134,6 +162,7 @@ function Desk({ server }: { server: string | null }) {
         shown={account.shown}
         onToggle={account.toggle}
         onClose={account.close}
+        onOpenLoop={onOpenLoop}
       />
       {/* The agent panel, reduced to the only thing it does to the desk: take
           the pane. The union in `AgentChatTab` is what makes this one line. */}
@@ -142,13 +171,18 @@ function Desk({ server }: { server: string | null }) {
   );
 }
 
-async function render(server: string | null = "brigado_2", warm = false) {
+async function render(
+  server: string | null = "brigado_2",
+  warm = false,
+  loopsCount?: number,
+  onOpenLoop?: (agentSlug: string, strategySlug: string) => void,
+) {
   await act(async () => {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={qc}>
           {warm && server && <PortfolioPageQuery server={server} />}
-          <Desk server={server} />
+          <Desk server={server} loopsCount={loopsCount} onOpenLoop={onOpenLoop} />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -205,6 +239,8 @@ beforeEach(() => {
     total_volume: 0,
   });
   getExecutors.mockResolvedValue([]);
+  getFleetMap.mockResolvedValue({ owners: [], deeds: { bots: {}, since: 0 } });
+  getAgents.mockResolvedValue([]);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -424,5 +460,176 @@ describe("the account dock", () => {
     expect(getPortfolio).not.toHaveBeenCalled();
     // Still recorded: the panel comes back when a server does.
     expect(localStorage.getItem(ACCOUNT_DOCK_KEY)).toBe('["portfolio"]');
+  });
+});
+
+describe("the desk's Loops section (FEAT-1xx)", () => {
+  function live(over: Partial<LiveLoop> = {}): LiveLoop {
+    return {
+      agentId: "a1",
+      sessionNum: 1,
+      status: "running",
+      tickCount: 3,
+      lastTickAt: 0,
+      frequencySec: 30,
+      lastAction: "",
+      lastDid: null,
+      lastError: "",
+      ...over,
+    };
+  }
+
+  function owner(over: Partial<LiveFleetOwner> = {}): LiveFleetOwner {
+    return {
+      runKey: "brigado.brl_mm",
+      agentSlug: "brigado",
+      agentName: "Brigado",
+      strategySlug: "brl_mm",
+      strategyName: "BRL MM",
+      namespace: "brigado-brl_mm",
+      declaredBots: [],
+      agentIds: [],
+      live: live(),
+      ...over,
+    };
+  }
+
+  it("sits as a third tab beside Portfolio and Execution, sharing the panel evenly", async () => {
+    await render();
+
+    await click(tab("Portfolio"));
+    await click(tab("Execution"));
+    await click(tab("Loops"));
+
+    expect(tab("Loops").getAttribute("aria-pressed")).toBe("true");
+    // Three open sections, not the two-way drag: the seam only knows how to
+    // divide Portfolio and Execution, so a third pane falls back to the even
+    // split every `DockSection` gets when nobody hands it a `share`.
+    const open = [...column()!.querySelectorAll("div.flex-1.basis-0")];
+    expect(open).toHaveLength(3);
+    expect(open.every((el) => (el as HTMLElement).style.flexGrow === "")).toBe(
+      true,
+    );
+    expect(column()!.querySelector('[role="separator"]')).toBeNull();
+  });
+
+  it("opens expanded the first time the desk shows a server that is already looping", async () => {
+    await render("brigado_2", false, 2);
+
+    // Nobody has touched Loops yet — opening any other tab is what puts the
+    // desk on screen for the first time, and that is the moment its default
+    // is decided.
+    await click(tab("Portfolio"));
+    expect(tab("Loops").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("leaves Loops closed by default when this server has nothing looping", async () => {
+    await render("brigado_2", false, 0);
+
+    await click(tab("Portfolio"));
+    expect(tab("Loops").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("carries the same badge the old standalone tile showed", async () => {
+    await render("brigado_2", false, 3);
+
+    expect(tab("Loops").textContent).toContain("3");
+  });
+
+  it("does not decide a default before the fleet data has settled", async () => {
+    // `getFleetMap` never resolves in this test — the loop the desk would
+    // have opened on cannot yet be told from a quiet server, so the default
+    // must wait rather than guess closed.
+    getFleetMap.mockReturnValue(new Promise(() => {}));
+    await render("brigado_2");
+
+    await click(tab("Portfolio"));
+    expect(tab("Loops").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("reads the fleet's own loops, narrowed to this server, and opens the one clicked", async () => {
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner({ agentSlug: "brigado", strategySlug: "brl_mm" }),
+        owner({
+          agentSlug: "brigado",
+          strategySlug: "elsewhere",
+          strategyName: "Elsewhere",
+        }),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+    getAgents.mockResolvedValue([
+      {
+        slug: "brigado",
+        name: "Brigado",
+        description: "",
+        when_to_consult: "",
+        agent_key: "",
+        strategy_count: 2,
+        server_name: "brigado_2",
+        strategies: [
+          {
+            slug: "brl_mm",
+            name: "BRL MM",
+            description: "",
+            status: "running",
+            agent_id: "brigado.brl_mm",
+            session_count: 1,
+            experiment_count: 0,
+            tick_count: 3,
+            latest_session_pnl: 0,
+            total_pnl: 0,
+            total_volume: 0,
+            open_positions: 0,
+            instances: [],
+          },
+          {
+            slug: "elsewhere",
+            name: "Elsewhere",
+            description: "",
+            status: "running",
+            agent_id: "brigado.elsewhere",
+            session_count: 1,
+            experiment_count: 0,
+            tick_count: 3,
+            latest_session_pnl: 0,
+            total_pnl: 0,
+            total_volume: 0,
+            open_positions: 0,
+            // Declared on another server (CORR-429): this section's whole
+            // contract is one server, the same as its Portfolio/Execution
+            // siblings, so this loop must not show up here.
+            server_name: "other_box",
+            instances: [],
+          },
+        ],
+        status: "running",
+        session_count: 1,
+        experiment_count: 0,
+        tick_count: 3,
+        latest_session_pnl: 0,
+        total_pnl: 0,
+        total_volume: 0,
+        open_positions: 0,
+        instances: [],
+      },
+    ]);
+    const onOpenLoop = vi.fn();
+
+    await render("brigado_2", false, undefined, onOpenLoop);
+    await click(tab("Loops"));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const cards = [
+      ...column()!.querySelectorAll<HTMLButtonElement>("[data-loop-row]"),
+    ];
+    expect(cards).toHaveLength(1);
+    expect(cards[0].textContent).toContain("BRL MM");
+
+    await click(cards[0]);
+    expect(onOpenLoop).toHaveBeenCalledWith("brigado", "brl_mm");
   });
 });

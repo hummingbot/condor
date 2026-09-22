@@ -5,7 +5,6 @@ import {
   ClipboardList,
   PanelLeftClose,
   PanelLeftOpen,
-  Repeat,
   ShieldAlert,
   Wallet,
 } from "lucide-react";
@@ -56,7 +55,7 @@ import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { webSessionKey } from "@/hooks/useChatSocket";
-import { useLiveLoops } from "@/hooks/useLiveLoops";
+import { loopsOnServer, useLiveLoops } from "@/hooks/useLiveLoops";
 import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 import { useStarters } from "@/hooks/useStarters";
@@ -486,9 +485,19 @@ export function AgentChatTab() {
    * pinned to one server must not show another's balance under a chat about it.
    */
   const dockServer = activeSlot?.info.server_name || server || null;
+  // Every strategy with a live tick loop, from `fleet-map` (FEAT-123) — read
+  // here, ahead of the desk, so both the desk's own Loops section (scoped to
+  // `dockServer`) and its rail tile's badge can be handed a number without
+  // either one polling twice. Same `["fleet-map"]` key `useFleetData` already
+  // holds, so a reader with any fleet surface open shares the poll.
+  const { loops, isLoading: loopsLoading } = useLiveLoops();
+  const loopsHere = useMemo(
+    () => loopsOnServer(loops, agents, dockServer),
+    [loops, agents, dockServer],
+  );
   // Which panels are open lives here rather than in the docks, because the
   // tiles that open them sit on one workspace rail with the agent's. Both docks
-  // answer the same way (`useAccountPanels` / `useContextPanels`), so all five
+  // answer the same way (`useAccountPanels` / `useContextPanels`), so all six
   // tiles behave identically: a click opens or closes the named panel, and a
   // dock with nothing open is not a column at all.
   //
@@ -503,6 +512,7 @@ export function AgentChatTab() {
     // this browser happened to have recorded (FEAT-114).
     desk: searchParams.get(DESK_PARAM),
     onOpenChange: (open) => openPane(open ? { kind: "desk" } : null),
+    loopsActivity: { count: loopsHere.length, isLoading: loopsLoading },
   });
   const conversationId = activeSlot?.info.conversation_id || "";
   const context = useContextPanels({
@@ -511,11 +521,6 @@ export function AgentChatTab() {
     agentSlug: activeSlot?.info.agent_slug || "",
     libraryOpen: pane?.kind === "routines",
   });
-  // Fed to the rail's own tile and the panel it opens (FEAT-123) — mounted here
-  // rather than inside the panel, so the badge count is live while it is
-  // closed. Same `["fleet-map"]` key `useFleetData` polls, so a reader with any
-  // fleet surface open shares the cache instead of doubling the poll.
-  const { loops, isLoading: loopsLoading } = useLiveLoops();
   // The dock is memoised (PERF-394), so what it is handed must hold across a
   // stream flush. `activeSlot` is a new object on every flush, so the run
   // context is keyed on the scalars it reads, never on the slot itself.
@@ -768,10 +773,13 @@ export function AgentChatTab() {
             />
           )}
 
-          {/* Every live loop, across every agent — the rail's "Loops" tile
-              (FEAT-123). A row's click is the same hand-off a strategy card in
-              the agent panel already makes, generalised to whichever agent
-              owns that row. */}
+          {/* Every live loop, across every agent — every server, not just this
+              chat's. The rail's own "Loops" tile stopped opening this
+              (FEAT-1xx): a fleet's own loops now read as a section of its
+              own desk, at the desk's width, rather than a second overlay
+              stacked on top of one already open. This global cross-server
+              view is kept reachable at `?panel=loops` for whoever still has
+              it bookmarked; nothing in this screen links to it anymore. */}
           {pane?.kind === "loops" && (
             <LoopsPanel
               loops={loops}
@@ -804,6 +812,11 @@ export function AgentChatTab() {
             // (FEAT-114). The desk hands the pane over exactly as the rail's
             // agent tile does, so the two cannot be on screen at once.
             onOpenAgent={(slug) => openPane({ kind: "agent", slug })}
+            // A Loops card names a loop; this is the same hand-off
+            // `LoopsPanel`'s own cards make (FEAT-1xx).
+            onOpenLoop={(agentSlug, strategySlug) =>
+              openPane({ kind: "strategy", agentSlug, strategySlug })
+            }
           />
 
           <ContextDock
@@ -832,10 +845,11 @@ export function AgentChatTab() {
             The agent leads it: what you are talking to is the first thing you
             change about a conversation, and it lived alone in the top bar as
             a lozenge competing with the tabs for the same row. Below it, ruled
-            off, the desk's two tiles and then the conversation's two — three
-            groups because they follow three different selectors, and a rule
-            rather than a caption because in a 64 px strip the words cost more
-            than the separation they were explaining (see `WorkspaceRail`).
+            off, the desk's tiles (Portfolio, Execution and Loops, FEAT-1xx)
+            and then the conversation's two — three groups because they follow
+            three different selectors, and a rule rather than a caption because
+            in a 64 px strip the words cost more than the separation they were
+            explaining (see `WorkspaceRail`).
 
             ## Why it is outside the row it belongs to
 
@@ -878,28 +892,11 @@ export function AgentChatTab() {
                 },
               ],
             },
-            /* Every agent's live loops, not just this conversation's (FEAT-123)
-               — a different question from "what agent am I talking to", so its
-               own ruled-off group directly under Agent rather than a second
-               item folded into it. */
-            {
-              id: "loops",
-              items: [
-                {
-                  id: "loops",
-                  label: "Loops",
-                  Icon: Repeat,
-                  hint:
-                    loops.length > 0
-                      ? `${loops.length} loop${loops.length === 1 ? "" : "s"} running or paused`
-                      : "Nothing looping right now",
-                  active: pane?.kind === "loops",
-                  count: loops.length,
-                  onToggle: () =>
-                    openPane(pane?.kind === "loops" ? null : { kind: "loops" }),
-                },
-              ],
-            },
+            // Portfolio, Execution and now Loops (FEAT-1xx) — one group, one
+            // selector (the server), so the tile that used to open a global
+            // "every agent" Loops sheet of its own is gone: `account.railItems`
+            // already carries a Loops tile scoped to this server, with the
+            // same badge the old one showed, right beside the other two.
             { id: "desk", items: account.railItems },
             /* Tasks and Routines, and no Deployed: the conversation's ledger
                went with FEAT-118, and FEAT-119 gives it a home on the run
