@@ -933,6 +933,15 @@ class JournalManager:
         text = text.replace(old_line, new_line)
         self._write_journal(text)
 
+    def list_executors(self) -> list[dict[str, Any]]:
+        """The session's Executors ledger rows, in file order.
+
+        Public because the tick engine is this ledger's writer: it keeps the
+        rows mirroring the live book, which means reading the current ones back
+        to *update* them rather than tracking them a second time.
+        """
+        return list(self._parse_executors())
+
     # ------------------------------------------------------------------
     # Metric snapshots (inline in journal)
     # ------------------------------------------------------------------

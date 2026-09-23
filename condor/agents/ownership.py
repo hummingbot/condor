@@ -78,6 +78,35 @@ def strip_deploy_suffix(name: str) -> str:
         base = shorter
 
 
+def strip_session_suffix(agent_id: str) -> str:
+    """``{agent}.{strategy}_12`` / ``_e3`` -> ``{agent}.{strategy}``.
+
+    The counterpart of :func:`strip_deploy_suffix` for agent ids: an id names one
+    *session* of a strategy, and everything before the session number is what
+    every session of that strategy shares.
+    """
+    agent_id = agent_id or ""
+    last = agent_id.rfind("_")
+    return agent_id[:last] if last != -1 else agent_id
+
+
+def same_strategy_family(agent_id: str, controller_id: str) -> bool:
+    """True when ``controller_id`` names a session of this agent's strategy.
+
+    Includes this session itself. An executor is tagged with the session that
+    *opened* it, so a band an earlier session of the same strategy opened still
+    belongs to the strategy's live session -- which is what lets a restarted (or
+    adopting) session see the band it inherited at all. Attribution by exact
+    session id cannot: it reported a session running three live bands as
+    carrying two, and the risk gate sized its limits against that wrong book.
+    """
+    prefix = strip_session_suffix(agent_id)
+    cid = (controller_id or "").strip()
+    if not prefix or not cid:
+        return False
+    return cid.startswith(prefix + "_")
+
+
 def resolve_bot_name(
     config: dict[str, Any], agent_slug: str, strategy_slug: str
 ) -> str:
