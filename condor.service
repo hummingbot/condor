@@ -1,0 +1,36 @@
+# This is the literal unit installed at /etc/systemd/system/condor.service on
+# this deployment — User, WorkingDirectory, HOME and the uv path below are
+# this host's, not a template. The repo has no installer that creates them;
+# copying this file to another checkout/user/host needs those four values
+# edited by hand first, or systemd will fail to start the service.
+[Unit]
+Description=Condor trading bot (Telegram + web dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claudecode
+Group=claudecode
+WorkingDirectory=/opt/trading/dev/condor-deploy/condor
+Environment=HOME=/home/claudecode
+
+# main.py needs Node/npm on PATH for the claude-agent-acp ACP bridge (the
+# actual cause of the ConnectionResetError / "Failed to start session" bug —
+# see 2026-08-18 investigation). nvm doesn't expose a static PATH entry, so
+# source nvm.sh at start instead of hardcoding a node version that will go
+# stale on the next `nvm install`.
+ExecStart=/bin/bash -lc 'export NVM_DIR=$HOME/.nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; exec /home/claudecode/.local/bin/uv run python main.py'
+
+# Running as a system unit (not a --user unit) means the bot no longer
+# depends on a login session for claudecode staying alive — it survives
+# logout/session cleanup on its own, without needing `loginctl enable-linger`.
+Restart=on-failure
+RestartSec=5
+
+# Keep dry-run/trading state out of stray coredumps; app logs go to journald.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
