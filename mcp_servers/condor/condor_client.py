@@ -24,11 +24,19 @@ async def call_main_api(
     """
     from condor.runtime.timeouts import TIMEOUTS
     from condor.web.auth import create_jwt
-    from utils.config import WEB_PORT
+    from utils.config import WEB_HOST, WEB_PORT
 
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
-    url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
+    # WEB_HOST (utils.config.resolve_web_host) is 127.0.0.1 in local mode,
+    # 0.0.0.0 in Telegram mode without Tailscale, or this node's own tailnet
+    # address in Telegram mode with Tailscale on -- and with Tailscale on, the
+    # server binds *only* that tailnet address, never loopback. A same-host
+    # subprocess still reaches it fine over that address, so connect to
+    # whatever the server actually bound rather than assuming loopback; 0.0.0.0
+    # isn't a connectable destination, so that one case still targets loopback.
+    connect_host = "127.0.0.1" if WEB_HOST == "0.0.0.0" else WEB_HOST
+    url = f"http://{connect_host}:{WEB_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}
 
