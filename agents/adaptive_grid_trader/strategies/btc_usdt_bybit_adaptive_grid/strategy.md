@@ -203,7 +203,7 @@ stop keep_position=False; verify flat on exchange; retry bounded; alert if anyth
 liquidation_guard skill; $40 trade budget; per_level ≥ 10; leverage 3x; liq price must sit beyond the (conservative, 2D-buffered) `limit_price`.
 
 ### 7. Deploy grid_executor
-- total_amount_quote **40**, min_order **10**, max_open_orders **4**, activation_bounds 0.002
+- total_amount_quote **40**, min_order_amount_quote **10**, max_open_orders **4**, activation_bounds 0.002
 - range per conservative-widening formula above (lifetime_hours 10-12, limit ≤ price − 2D)
 - TP ≥ 0.001, keep_position false, controller_id = session agent_id (no stop_loss arg — `create_grid_executor` has none; the loss cap is `limit_price` + `keep_position=False`, from step 6)
 - **leverage: 3** (must be included explicitly in the executor config — never the 5x default)
