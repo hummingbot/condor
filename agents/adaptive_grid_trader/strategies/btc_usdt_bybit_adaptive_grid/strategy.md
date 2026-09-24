@@ -11,12 +11,12 @@ default_config:
   total_amount_quote: 50
   execution_mode: loop
   reserve_pct: 20
-  max_leverage: 3
   max_loss_pct: 8
   min_order_size: 10
   allowed_profiles:
     - LONG
   risk_limits:
+    max_leverage: 3
     max_position_size_quote: 150
     max_open_executors: 1
 default_trading_context: 'Live production Bybit funds — prioritize capital preservation
@@ -55,7 +55,7 @@ Follow the **Agent brain** exactly. This file is envelope + tick checklist only.
 - activation_bounds: 0.002
 - time_limit: 43200s
 - max levels ≈ floor(40/10) = **4**
-- stop_loss (triple_barrier, % of filled position PnL): **0.08** — matched to max_loss_pct, tighter than the 0.10 used on the other two pilots
+- no stop_loss parameter exists on `create_grid_executor` — risk is capped by `limit_price` + `keep_position=False` instead (see max_loss_pct above), not a triple-barrier percentage
 - profit-take threshold: 2% of trade budget = **$0.80**
 
 ### Conservative widening (per trading context)
@@ -143,14 +143,14 @@ A grid that reaches meaningful unrealized profit should lock it in rather than r
 ### 1. Baseline (if missing or >24h)
 ```
 manage_routines(action="run", name="baseline_7d",
-  strategy_id="adaptive_grid_trader.btc_usdt_bybit_adaptive_grid",
+  agent="adaptive_grid_trader",
   config={"trading_pair":"BTC-USDT","connector_name":"bybit_perpetual"})
 ```
 
 ### 2. Hourly MTF
 ```
 manage_routines(action="run", name="hourly_mtf_check",
-  strategy_id="adaptive_grid_trader.btc_usdt_bybit_adaptive_grid",
+  agent="adaptive_grid_trader",
   config={"trading_pair":"BTC-USDT","connector_name":"bybit_perpetual",
           "lifetime_hours":<10-12, top of band>,"baseline_atr":<from_1>})
 ```
@@ -158,7 +158,7 @@ Ignore PROFILE=HOLD as first-entry veto. Hourly never blocks the first LONG entr
 
 ### 3. Live state
 ```
-manage_executors(action="search", connector_names=["bybit_perpetual"],
+list_executors(connector_names=["bybit_perpetual"],
   trading_pairs=["BTC-USDT"], executor_types=["grid_executor"], status="RUNNING")
 get_portfolio_overview(connector_names=["bybit_perpetual"],
   include_perp_positions=True, include_balances=True,
@@ -168,19 +168,18 @@ get_portfolio_overview(connector_names=["bybit_perpetual"],
 
 ### 3a. Orphan cleanup (before any deploy)
 If step 3 shows **active orders on BTC-USDT** but **no running executor owns them**, they are stale leftovers.
-1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `manage_executors` search.
-2. Any order whose `client_order_id` does not belong to a running executor → cancel it:
+1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `list_executors`.
+2. Any order whose `client_order_id` belongs to an executor that is still running → stop that executor (stopping it cancels the orders it owns):
    ```
-   manage_executors(action="cancel_order", connector_name="bybit_perpetual",
-     trading_pair="BTC-USDT", order_id="<orphan_order_id>")
+   stop_executor(executor_id="<owning_executor_id>")
    ```
-3. If cancel fails, retry once. If still stuck, journal the orphan and **HOLD** — this is real capital; do not deploy over an unresolved orphan on this pilot. Alert if orphan blocks balance or persists beyond the retry.
+3. If the stop fails, retry once. If an order can't be traced to a running executor at all, or the stop still fails, journal the orphan and **HOLD** — this is real capital; do not deploy over an unresolved orphan on this pilot. Alert if orphan blocks balance or persists beyond the retry.
 4. Verify orders are gone before proceeding to deploy.
 
 ### 3b. Account menu (first entry / flat re-entry)
 ```
 manage_routines(action="run", name="position_mode_check",
-  strategy_id="adaptive_grid_trader",
+  agent="adaptive_grid_trader",
   config={"connector_name":"bybit_perpetual","account_name":"master_account"})
 ```
 Branch only on **`mode: HEDGE|ONEWAY`** + **`two_sided_allowed`**. `mode_read: SHRUG` if present = already defaulted to ONEWAY — journal it, no branching.
@@ -188,9 +187,9 @@ Envelope already restricts this pilot to **LONG only** — even if the account r
 
 ### 4. Decide
 **Priority order for running grids (check top-down, first match wins):**
-1. **Stale?** filled_amount unchanged 3+ ticks → teardown + redeploy if LONG still supported (see Stale Grid Detection)
-2. **Profit threshold?** net_pnl_quote ≥ 2% of trade budget ($0.80) → teardown + realize + redeploy if LONG still supported (see Profit-Taking Rule)
-3. **PnL signal?** rules 1/2 from PnL modifier → teardown to flat (never reverse to SHORT)
+1. **PnL signal?** rules 1/2 from PnL modifier → teardown to flat (never reverse to SHORT) — checked first, so a protective exit can never be bypassed by a stale grid redeploying through it
+2. **Stale?** filled_amount unchanged 3+ ticks → teardown + redeploy if LONG still supported (see Stale Grid Detection)
+3. **Profit threshold?** net_pnl_quote ≥ 2% of trade budget ($0.80) → teardown + realize + redeploy if LONG still supported (see Profit-Taking Rule)
 4. **Standard Layer 2:** keep if LONG still supported; teardown to flat if both 4h+1d turn BEARISH + age ≥3h
 
 **Flat entry (no running grid):**
@@ -206,7 +205,7 @@ liquidation_guard skill; $40 trade budget; per_level ≥ 10; leverage 3x; liq pr
 ### 7. Deploy grid_executor
 - total_amount_quote **40**, min_order **10**, max_open_orders **4**, activation_bounds 0.002
 - range per conservative-widening formula above (lifetime_hours 10-12, limit ≤ price − 2D)
-- TP ≥ 0.001, stop_loss **0.08**, keep_position false, controller_id = session agent_id
+- TP ≥ 0.001, keep_position false, controller_id = session agent_id (no stop_loss arg — `create_grid_executor` has none; the loss cap is `limit_price` + `keep_position=False`, from step 6)
 - **leverage: 3** (must be included explicitly in the executor config — never the 5x default)
 - BTC-USDT, LONG side only
 
@@ -216,7 +215,7 @@ entry_path, mode (HEDGE|ONEWAY), mode_read if any, two_sided_allowed (informatio
 ## Constraints
 - First entry baseline-driven; hourly never vetoes first entry
 - SHORT and TWO_SIDED are permanently off this pilot's menu regardless of account mode — any "flip" signal degrades to teardown-to-flat
-- stop_loss 0.08 = 8% of **filled** position PnL, not of budget — tighter in dollars early in the grid's life. No trailing_stop.
+- No stop_loss parameter on `create_grid_executor` — the 8% ($4) loss cap is enforced entirely through `limit_price` (conservative, 2D-buffered per the widening formula) + `keep_position=False`, never a triple-barrier percentage. No trailing_stop.
 - max_loss_pct 8% ($4) and liq guard are hard gates — never raise budget or relax leverage/limit_price to force a grid to fit
 - Fee-clear spacing/TP
 - Live production funds: when any check is ambiguous or a retry is exhausted, default to HOLD/flat and alert rather than proceeding
