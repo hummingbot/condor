@@ -45,7 +45,7 @@ def test_session_rows_carry_their_real_start_and_experiments_carry_zero(
     monkeypatch.setattr(loops_module.get_supervisor(), "_engines", {})
 
     async def _fake_get_client(strategy_dir, default_config, principal):
-        return _FakeClient(), "srv"
+        return _FakeClient(), "srv", ""
 
     monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _fake_get_client)
 
@@ -61,7 +61,7 @@ def test_session_rows_carry_their_real_start_and_experiments_carry_zero(
         "# Experiment #1\nMode: dry_run\n\n## Agent Response\n\nok\n"
     )
 
-    sessions, _ = asyncio.run(
+    sessions, _, _ = asyncio.run(
         agents_routes._compute_strategy_performance(RUN_KEY, tmp_path, None, 1)
     )
 

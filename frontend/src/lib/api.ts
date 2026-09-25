@@ -802,6 +802,16 @@ export interface RunningInstance {
   last_error: string;
 }
 
+/**
+ * Why a strategy's figures could not be read, or `""` when they could
+ * (CORR-706). Without it, all three render as a session that traded nothing:
+ * - `no_server` — its config names no server
+ * - `no_access` — the caller may not use the server it names (SEC-334)
+ * - `unreachable` — the server is offline or its credentials failed
+ * Optional on the wire so an older backend reads as `""`.
+ */
+export type StrategyUnavailable = "" | "no_server" | "no_access" | "unreachable";
+
 export interface StrategySummary {
   slug: string;
   name: string;
@@ -826,6 +836,8 @@ export interface StrategySummary {
    * than folding the wrong fleet.
    */
   server_name?: string;
+  /** Why the figures above are zero when it is not "nothing traded". */
+  unavailable?: StrategyUnavailable;
   instances: RunningInstance[];
 }
 
@@ -1326,6 +1338,8 @@ export interface StrategyDetail {
   sessions: SessionInfo[];
   experiments: ExperimentInfo[];
   instances: RunningInstance[];
+  /** Same meaning as `StrategySummary.unavailable`. */
+  unavailable?: StrategyUnavailable;
 }
 
 export interface SnapshotSummary {
@@ -3270,6 +3284,8 @@ export const api = {
       /** What this run put into the world (FEAT-100). Empty for a run that
        *  deployed nothing, and for a session whose server is unreachable. */
       deployments?: DeploymentRow[];
+      /** Why `executors` is empty when it is not "traded nothing" (CORR-706). */
+      unavailable?: StrategyUnavailable;
     }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),

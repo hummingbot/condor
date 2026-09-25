@@ -77,7 +77,7 @@ def test_strategy_summary_splits_latest_session_from_the_rollup(tmp_path, monkey
     ]
 
     async def _fake_perf(run_key, strategy_dir, default_config, principal):
-        return rows, {"total_pnl": 36.0, "volume": 0.0, "open_positions": 0}
+        return rows, {"total_pnl": 36.0, "volume": 0.0, "open_positions": 0}, ""
 
     monkeypatch.setattr(routes, "_compute_strategy_performance", _fake_perf)
     monkeypatch.setattr(routes, "_strategy_principal", lambda s, u: USER.id)

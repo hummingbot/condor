@@ -52,12 +52,15 @@ def strategy_dir(tmp_path, monkeypatch):
 
 
 def _compute(d):
-    return asyncio.run(agents_routes._compute_strategy_performance(RUN_KEY, d, None, 1))
+    sessions, totals, _unavailable = asyncio.run(
+        agents_routes._compute_strategy_performance(RUN_KEY, d, None, 1)
+    )
+    return sessions, totals
 
 
 def test_a_dry_run_is_listed_with_no_backend_at_all(strategy_dir, monkeypatch):
     async def _no_client(strategy_dir, default_config, principal):
-        return None, ""
+        return None, "", "no_server"
 
     monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _no_client)
 
@@ -75,7 +78,7 @@ def test_a_dry_run_never_reaches_the_money_totals(strategy_dir, monkeypatch):
     """Listed, counted, and still not folded into PnL."""
 
     async def _no_client(strategy_dir, default_config, principal):
-        return None, ""
+        return None, "", "no_server"
 
     monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _no_client)
     (strategy_dir / "sessions" / "session_1").mkdir(parents=True)
@@ -92,7 +95,7 @@ def test_a_dry_run_never_reaches_the_money_totals(strategy_dir, monkeypatch):
 
 def test_an_errored_dry_run_says_so(strategy_dir, monkeypatch):
     async def _no_client(strategy_dir, default_config, principal):
-        return None, ""
+        return None, "", "no_server"
 
     monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _no_client)
     (strategy_dir / "dry_runs" / "experiment_2.md").write_text(

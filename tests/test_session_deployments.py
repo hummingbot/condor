@@ -356,11 +356,17 @@ def test_a_session_with_no_server_still_answers_with_every_field(tmp_path, monke
     )
 
     async def _no_client(*a, **kw):
-        return None, None
+        return None, None, "no_server"
 
     monkeypatch.setattr(agents_route, "_get_client_for_strategy", _no_client)
     out = asyncio.run(agents_route.get_session_executors("ag", "st", 1, user=_User()))
-    assert set(out) == {"executors", "performance", "pnl_series", "deployments"}
+    assert set(out) == {
+        "executors",
+        "performance",
+        "pnl_series",
+        "deployments",
+        "unavailable",
+    }
     assert out["deployments"] == []
 
 
@@ -412,7 +418,7 @@ def test_the_endpoint_serves_the_ledger_the_session_recorded(tmp_path, monkeypat
     )
 
     async def _client(*a, **kw):
-        return object(), None
+        return object(), None, ""
 
     async def _perf(*a, **kw):
         return _Perf(

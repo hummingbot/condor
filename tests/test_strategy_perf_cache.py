@@ -75,7 +75,7 @@ def perf_env(tmp_path, monkeypatch):
 
     def use_client(client):
         async def _fake_get_client(strategy_dir, default_config, principal):
-            return client, "srv"
+            return client, "srv", ""
 
         monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _fake_get_client)
 
@@ -83,9 +83,10 @@ def perf_env(tmp_path, monkeypatch):
 
 
 def _compute(strategy_dir):
-    return asyncio.run(
+    sessions, totals, _unavailable = asyncio.run(
         agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
     )
+    return sessions, totals
 
 
 def test_closed_sessions_fetched_once_only_active_refetched(perf_env):

@@ -25,7 +25,7 @@ from collections import OrderedDict
 from dataclasses import asdict
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -164,6 +164,15 @@ class RunningInstance(BaseModel):
     last_error: str = ""
 
 
+#: Why a strategy's money could not be read, or ``""`` when it could (CORR-706).
+#: ``no_server`` — its config names no server; ``no_access`` — the principal may
+#: not use the server it names (SEC-334); ``unreachable`` — building the client
+#: failed (server offline, bad credentials). Without it all three rendered as a
+#: session that traded nothing. The reason is all a refused caller gets: never
+#: the creator, never a figure.
+Unavailable = Literal["", "no_server", "no_access", "unreachable"]
+
+
 class StrategySummary(BaseModel):
     slug: str
     name: str
@@ -183,6 +192,9 @@ class StrategySummary(BaseModel):
     #: it declared none. Carried so a reader can *fold* those records and not
     #: only read the rollup computed from them (ARCH-324).
     server_name: str = ""
+    #: Why the figures above are zero when it is not "nothing traded" — see
+    #: ``Unavailable``. Empty on the normal, priced payload (CORR-706).
+    unavailable: Unavailable = ""
     instances: list[RunningInstance] = []
 
 
@@ -511,6 +523,8 @@ class StrategyDetail(BaseModel):
     sessions: list[SessionInfo] = []
     experiments: list[ExperimentInfo] = []
     instances: list[RunningInstance] = []
+    #: Same meaning as ``StrategySummary.unavailable`` (CORR-706).
+    unavailable: Unavailable = ""
 
 
 class SnapshotSummary(BaseModel):
@@ -981,36 +995,46 @@ def _may_use_strategy_server(server_name: str, principal: int) -> bool:
     return may_use_stored_server(get_config_manager(), principal, server_name)
 
 
+class StrategyClient(NamedTuple):
+    """What ``_get_client_for_strategy`` resolved: a client, or why there is none."""
+
+    client: Any
+    server_name: str
+    unavailable: Unavailable = ""
+
+
 async def _get_client_for_strategy(
     strategy_dir: Path, default_config: dict | None, principal: int
-):
+) -> StrategyClient:
     """Resolve a Hummingbot API client for a strategy, based on its config.yml.
 
     The single choke point where a strategy's stored server name becomes an
     authenticated client, and therefore where the name is checked against
     ``principal`` (SEC-334). Refusal is the state this module already renders —
-    no client, no money — not an error: a strategy the caller cannot price is
-    listed exactly like one whose server is offline or was never configured.
+    no client, no money — not an error. What it no longer does is look like the
+    other two ways of having no client: ``unavailable`` says which of them it
+    was (CORR-706), so an empty session and a withheld one are told apart. The
+    reason carries nothing about the strategy's owner or its figures.
     """
     from config_manager import get_config_manager
 
     server_name = _strategy_server(strategy_dir, default_config)
     if not server_name:
-        return None, ""
+        return StrategyClient(None, "", "no_server")
     if not _may_use_strategy_server(server_name, principal):
         log.warning(
             "strategy: %s cannot reach server %s; serving it unpriced",
             principal,
             server_name,
         )
-        return None, server_name
+        return StrategyClient(None, server_name, "no_access")
     cm = get_config_manager()
     try:
         client = await cm.get_client(server_name)
     except Exception as e:
         log.warning("get_client(%s) failed: %s", server_name, e)
-        return None, server_name
-    return client, server_name
+        return StrategyClient(None, server_name, "unreachable")
+    return StrategyClient(client, server_name)
 
 
 # ── Session-ownership PnL attribution ──
@@ -1024,7 +1048,10 @@ async def _get_client_for_strategy(
 async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None, principal: int
 ):
-    """Return list of AgentPerformanceModel plus rolled-up totals.
+    """Return list of AgentPerformanceModel, rolled-up totals and why unpriced.
+
+    The third item is ``_get_client_for_strategy``'s ``unavailable`` reason,
+    cached with the figures it explains so the two cannot disagree (CORR-706).
 
     The assembled rollup is cached ~30s (``_PERF_CACHE``); underneath, closed
     sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
@@ -1050,7 +1077,7 @@ async def _compute_strategy_performance(
         return cached
 
     ids = enumerate_agent_ids(run_key, strategy_dir)
-    client, _server = await _get_client_for_strategy(
+    client, _server, unavailable = await _get_client_for_strategy(
         strategy_dir, default_config, principal
     )
 
@@ -1202,7 +1229,7 @@ async def _compute_strategy_performance(
         "trade_count": float(sum(s.trade_count for s in real_sessions)),
     }
 
-    result = (sessions, totals)
+    result = (sessions, totals, unavailable)
     if not fetch_failed:
         _cache_set(cache_key, result)
     return result
@@ -1309,7 +1336,7 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
     strategy_dir = strategy.home
 
     try:
-        sessions_perf, totals = await _compute_strategy_performance(
+        sessions_perf, totals, unavailable = await _compute_strategy_performance(
             run_key,
             strategy_dir,
             strategy.default_config,
@@ -1317,7 +1344,7 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
         )
     except Exception as e:
         log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
-        sessions_perf, totals = [], {}
+        sessions_perf, totals, unavailable = [], {}, ""
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
     engines = _get_engines_for(strategy.agent_slug, strategy.slug)
@@ -1349,6 +1376,7 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
         total_volume=float(totals.get("volume", 0.0)),
         open_positions=int(totals.get("open_positions", 0)),
         server_name=_strategy_server(strategy_dir, strategy.default_config),
+        unavailable=unavailable,
         instances=instances,
     )
 
@@ -2706,7 +2734,7 @@ async def get_strategy(
     learnings = learnings_path.read_text() if learnings_path.exists() else ""
 
     try:
-        sessions_perf, _totals = await _compute_strategy_performance(
+        sessions_perf, _totals, unavailable = await _compute_strategy_performance(
             run_key,
             strategy_dir,
             strategy.default_config,
@@ -2714,7 +2742,7 @@ async def get_strategy(
         )
     except Exception as e:
         log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
-        sessions_perf = []
+        sessions_perf, unavailable = [], ""
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
     engines = _get_engines_for(slug, sslug)
@@ -2737,6 +2765,7 @@ async def get_strategy(
         sessions=[SessionInfo(**s) for s in list_sessions(strategy_dir)],
         experiments=[ExperimentInfo(**e) for e in list_experiments(strategy_dir)],
         instances=instances,
+        unavailable=unavailable,
     )
 
 
@@ -2828,7 +2857,7 @@ async def get_strategy_performance(
     """Return per-session performance and roll-up totals for a strategy."""
     strategy = _get_strategy(slug, sslug)
     run_key = _runkey(slug, sslug)
-    sessions, totals = await _compute_strategy_performance(
+    sessions, totals, _unavailable = await _compute_strategy_performance(
         run_key,
         strategy.home,
         strategy.default_config,
@@ -2855,10 +2884,12 @@ async def get_session_executors(
 
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
-    client, _server = await _get_client_for_strategy(
+    client, _server, unavailable = await _get_client_for_strategy(
         strategy.home, strategy.default_config, _strategy_principal(strategy, user)
     )
     if client is None:
+        # Still no money on any branch; ``unavailable`` only says which of the
+        # three no-client states this is, so it is not read as "traded nothing".
         return {
             "executors": [],
             "performance": AgentPerformanceModel(
@@ -2866,6 +2897,7 @@ async def get_session_executors(
             ).model_dump(),
             "pnl_series": [],
             "deployments": [],
+            "unavailable": unavailable,
         }
     # Bot-mode: the session operates named bots whose executors live in the bot
     # container, not the agent_id-keyed table. Every base it ever owned is sliced
@@ -2927,6 +2959,7 @@ async def get_session_executors(
         "performance": model.model_dump(),
         "pnl_series": pnl_series,
         "deployments": [d.model_dump() for d in deployments],
+        "unavailable": "",
     }
 
 
