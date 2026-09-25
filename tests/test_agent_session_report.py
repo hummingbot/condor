@@ -354,8 +354,7 @@ def test_a_live_session_publishes_one_report_the_strategy_page_finds(
     _silent_tick(engine, monkeypatch)
 
     # Exactly what condor/web/routes/agents.py:get_strategy_reports does.
-    reports, _ = rep.list_reports(source_type="routine", search="brigado.grid")
-    matched = [r for r in reports if r["source_name"].startswith("brigado.grid/")]
+    matched, _ = rep.list_reports(source_type="routine", source_prefix="brigado.grid/")
 
     assert len(matched) == 1
     assert matched[0]["source_name"] == f"brigado.grid/session_{engine.session_num}"
@@ -403,3 +402,204 @@ def test_attribution_flags_a_bot_the_aggregator_cannot_see():
 def test_attribution_is_silent_for_a_pure_executor_session():
     """No bots, nothing missing — the agent_id tag is the whole story."""
     assert _blocks({})._sections == []
+
+
+def test_a_deploy_missing_from_bot_names_reads_stopped():
+    """CORR-633: State follows the live instance names, not the snapshot row."""
+
+    class _B:
+        rows: list = []
+
+        def section(self, *a, **k):
+            pass
+
+        def table(self, rows):
+            self.rows = rows
+
+    b = _B()
+    SessionReport._controllers(
+        b,
+        {
+            "bot_names": ["b-20260807-045821"],
+            "controllers": [
+                {"bot_name": "b-20260806-213931", "controller_id": "btc"},
+                {"bot_name": "b-20260807-045821", "controller_id": "sol"},
+            ],
+        },
+    )
+    assert [(r["Deploy"], r["State"]) for r in b.rows] == [
+        ("b-20260806-213931", "stopped"),
+        ("b-20260807-045821", "running"),
+    ]
+
+
+# ── PERF-639: the report's curve comes from the tick-start history walk ──
+
+
+class _RecordingReport:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def update(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def _drive_tick(engine, monkeypatch, client, providers):
+    monkeypatch.setattr(engine, "_get_client", _async(client))
+    monkeypatch.setattr(engine, "_adopt_running_bots", _async(None))
+    monkeypatch.setattr(engine, "_create_client", _async(_FakeACP()))
+    monkeypatch.setattr(engine, "_notify", _async(None))
+    monkeypatch.setattr(engine, "_collect_stream", lambda *a, **k: _empty_stream())
+    monkeypatch.setattr(engine.provider_registry, "run_core_providers", providers)
+    report = _RecordingReport()
+    engine._session_report = report
+
+    async def _run():
+        await asyncio.wait_for(engine._tick(), timeout=10)
+
+    asyncio.run(_run())
+    return report
+
+
+def test_tick_report_reuses_the_provider_series(tmp_path, monkeypatch):
+    from condor.agents import performance
+    from condor.agents.providers.base import ProviderResult
+
+    engine = _engine(tmp_path, monkeypatch, {"execution_mode": "loop"})
+    engine.ledger.adopt("brigado-grid", now=1_780_000_000.0)
+    series = [{"timestamp": "2026-08-06T22:00:00+00:00", "pnl": 1.5, "volume": 9.0}]
+
+    async def _never(*_a, **_kw):
+        raise AssertionError("the report must not re-walk the histories")
+
+    monkeypatch.setattr(performance, "fetch_agent_pnl_series", _never)
+    providers = _async(
+        {
+            "executors": ProviderResult(
+                name="executors",
+                data={"executors": [], "total_pnl": 1.5, "pnl_series": series},
+                summary="",
+            )
+        }
+    )
+
+    report = _drive_tick(engine, monkeypatch, object(), providers)
+
+    assert len(report.calls) == 1
+    assert report.calls[0]["pnl_series"] is series
+
+
+def test_a_tick_without_a_carried_series_falls_back_to_the_fetch(tmp_path, monkeypatch):
+    """Provider data without a series (``{}`` here) still gets a curve; no bot, []."""
+    from condor.agents import performance
+
+    engine = _engine(tmp_path, monkeypatch, {"execution_mode": "loop"})
+    fetched = [{"timestamp": "2026-08-06T22:00:00+00:00", "pnl": -2.0, "volume": 1}]
+    calls: list[tuple] = []
+
+    async def _fetch(client, bases, since, until=0.0):
+        calls.append((bases, since, until))
+        return fetched
+
+    monkeypatch.setattr(performance, "fetch_agent_pnl_series", _fetch)
+
+    # Executor-only: nothing owned, no fetch, an empty curve.
+    report = _drive_tick(engine, monkeypatch, object(), _async({}))
+    assert report.calls[0]["pnl_series"] == [] and calls == []
+
+    engine.ledger.adopt("brigado-grid", now=1_780_000_000.0)
+    report = _drive_tick(engine, monkeypatch, object(), _async({}))
+    assert report.calls[0]["pnl_series"] == fetched
+    assert calls == [(["brigado-grid"], 1_780_000_000.0, 0.0)]
+
+
+class _CountingClient:
+    """Controller snapshot + history, counting every call a tick makes.
+
+    ``base_url`` is empty, so no fetcher cache can hide a second walk.
+    """
+
+    base_url = ""
+
+    def __init__(self, instance: str, rows: list[dict]):
+        self._instance = instance
+        self._rows = rows
+        self.latest_calls = 0
+        self.history_calls: list[str] = []
+        self.bot_orchestration = self
+        self.archived_bots = self
+        self.executors = self
+
+    async def search_executors(self, **_kw):
+        return []
+
+    async def list_databases(self):
+        return []
+
+    async def get_active_bots_status(self):
+        return {"data": {self._instance: {}}}
+
+    async def get_latest_controller_performance(self, *_a, **_kw):
+        self.latest_calls += 1
+        return [
+            {
+                "bot_name": self._instance,
+                "controller_id": "c1",
+                "timestamp": "2026-08-07T00:00:00+00:00",
+                "status": "RUNNING",
+                "performance": {
+                    "realized_pnl_quote": -0.5,
+                    "unrealized_pnl_quote": 0.0,
+                    "volume_traded": 300.0,
+                    "positions_summary": [],
+                },
+            }
+        ]
+
+    async def get_controller_performance_history(self, bot_name, **_kw):
+        self.history_calls.append(bot_name)
+        return {"data": self._rows if bot_name == self._instance else []}
+
+
+def test_a_controller_tick_walks_each_instance_history_once(tmp_path, monkeypatch):
+    from condor.agents import performance
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_history_cache,
+        clear_live_names_cache,
+    )
+
+    for clear in (clear_archived_cache, clear_history_cache, clear_live_names_cache):
+        clear()
+    engine = _engine(tmp_path, monkeypatch, {"execution_mode": "loop"})
+    engine.ledger.adopt("brigado-grid", now=1_786_000_000.0)  # 2026-08-06 ~20:26Z
+    instance = "brigado-grid-20260806-210000"
+    rows = [
+        {
+            "timestamp": ts,
+            "controller_id": "c1",
+            "performance": {"realized_pnl_quote": pnl, "volume_traded": vol},
+        }
+        for ts, pnl, vol in [
+            ("2026-08-06T22:00:00+00:00", 0.0, 100.0),
+            ("2026-08-06T23:00:00+00:00", -0.25, 200.0),
+            ("2026-08-07T00:00:00+00:00", -0.5, 300.0),
+        ]
+    ]
+    client = _CountingClient(instance, rows)
+    real = engine.provider_registry.run_core_providers
+
+    async def _executors_only(*args, **kwargs):
+        return await real(*args, **kwargs, names=("executors",))
+
+    report = _drive_tick(engine, monkeypatch, client, _executors_only)
+
+    assert client.history_calls == [instance]
+    assert client.latest_calls == 1
+    series = report.calls[0]["pnl_series"]
+    assert [p["pnl"] for p in series] == [0.0, -0.25, -0.5]
+    # Identical to what the standalone fetch would have drawn.
+    standalone = asyncio.run(
+        performance.fetch_agent_pnl_series(client, ["brigado-grid"], 1_786_000_000.0)
+    )
+    assert series == standalone

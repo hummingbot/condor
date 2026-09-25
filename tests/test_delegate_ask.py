@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from condor import paths
 from condor.agents import agent_run as agent_run_module
 from condor.agents import delegate as delegate_module
 from condor.agents.delegation_history import list_history
@@ -130,6 +131,106 @@ def test_a_failing_ask_records_the_error_and_still_raises(monkeypatch):
     assert record["status"] == "error"
     assert record["error"] == "backend on fire"
     # Recording an error must not swallow it -- the raise above is the assertion.
+
+
+def _real_engine(monkeypatch, events):
+    """Leave the engine real; fake only the ACP client, toolset and prompt."""
+    from condor.acp import client as acp_client_module
+
+    class _StreamClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def prompt_stream(self, text):
+            for event in events:
+                yield event
+
+    agents_root = paths.local_agents_root()
+    (agents_root / "scout").mkdir(parents=True, exist_ok=True)
+    (agents_root / "scout" / "AGENT.md").write_text(
+        "---\nname: scout\nwhen_to_consult: always\n---\n\nBody.\n"
+    )
+    monkeypatch.setattr(
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "condor.runtime.context.build_agent_context", lambda *a, **k: "prompt"
+    )
+    monkeypatch.setattr(acp_client_module, "ACPClient", _StreamClient)
+
+
+def test_an_ask_whose_session_errors_raises(monkeypatch):
+    """CORR-643: a PromptDone('error') is a failed ask, not the error text as answer."""
+    from condor.acp.client import PromptDone, TextChunk
+
+    _real_engine(
+        monkeypatch,
+        [TextChunk(text="(error: boom)"), PromptDone(stop_reason="error")],
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(
+            agent_run_module.run_ask(
+                slug="scout",
+                user_id=7,
+                chat_id=42,
+                server_name=None,
+                task="what is the funding on HYPE right now",
+            )
+        )
+
+    message = str(exc.value)
+    assert "error" in message
+    assert "(error: boom)" in message
+    record = _only_record()
+    assert record["status"] == "error"
+    assert "(error: boom)" in record["error"]
+
+
+@pytest.mark.parametrize("reason", ["disconnected", "timeout"])
+def test_a_dead_session_is_never_returned_as_an_answer(monkeypatch, reason):
+    from condor.acp.client import PromptDone
+
+    _real_engine(monkeypatch, [PromptDone(stop_reason=reason)])
+
+    with pytest.raises(RuntimeError, match=f"agent session ended: {reason}$"):
+        asyncio.run(
+            agent_run_module.run_agent_to_completion(
+                slug="scout", user_id=7, chat_id=42, server_name=None, task="t"
+            )
+        )
+
+
+@pytest.mark.parametrize("with_sink", [False, True])
+def test_a_finished_turn_still_returns_its_text(monkeypatch, with_sink):
+    """Regression guard: end_turn returns the text, and the sink sees PromptDone."""
+    from condor.acp.client import PromptDone, TextChunk
+
+    done = PromptDone(stop_reason="end_turn")
+    _real_engine(monkeypatch, [TextChunk(text="answer"), done])
+    seen: list = []
+
+    answer = asyncio.run(
+        agent_run_module.run_agent_to_completion(
+            slug="scout",
+            user_id=7,
+            chat_id=42,
+            server_name=None,
+            task="t",
+            event_sink=seen.append if with_sink else None,
+        )
+    )
+
+    assert answer == "answer"
+    if with_sink:
+        assert seen[-1] is done
+        assert isinstance(seen[0], TextChunk)
 
 
 def test_a_cancelled_ask_records_stopped_and_still_cancels(monkeypatch):

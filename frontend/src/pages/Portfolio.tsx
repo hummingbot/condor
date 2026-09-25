@@ -30,7 +30,7 @@ import {
   type PortfolioHistoryResponse,
 } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, isExecutorActive } from "@/lib/formatters";
-import { EXECUTORS_REFETCH_MS, executorsQuery } from "@/lib/queryClient";
+import { agentsQuery, EXECUTORS_REFETCH_MS, executorsQuery } from "@/lib/queryClient";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
@@ -142,7 +142,7 @@ function DashboardStrip({
   currencySymbol: string;
 }) {
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
-  const agentPnl = agents.reduce((s, a) => s + (a.daily_pnl ?? 0), 0);
+  const agentPnl = agents.reduce((s, a) => s + (a.latest_session_pnl ?? 0), 0);
   const agentSessions = agents.reduce((s, a) => s + (a.session_count ?? 0), 0);
 
   const btnClass = "flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] w-full";
@@ -826,12 +826,7 @@ export function Portfolio() {
     // old numbers with the new period.
   });
 
-  const { data: agents } = useQuery({
-    queryKey: ["agents"],
-    queryFn: () => api.getAgents(),
-    refetchInterval: 30000,
-    placeholderData: keepPreviousData,
-  });
+  const { data: agents } = useQuery(agentsQuery());
 
   const { data: periodHistory } = useQuery({
     queryKey: ["portfolio-history", server, period],

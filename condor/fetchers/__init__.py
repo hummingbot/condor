@@ -41,6 +41,9 @@ Rules:
           ``clear_snapshot_cache()``.
         * ``bot_performance._archived_cache`` — the archived-database listing,
           ``_ARCHIVED_TTL`` 60s, ``clear_archived_cache()``.
+        * ``bot_performance._live_names_cache`` — the running instance names
+          (``fetch_live_instance_names``), ``_SNAPSHOT_TTL`` 5s, never caching a
+          failure, ``clear_live_names_cache()``.
         * ``bot_performance._history_cache`` — per-instance history pages,
           ``_HISTORY_TTL`` 20s, LRU-capped at ``_HISTORY_CACHE_MAX`` (256),
           in-flight coalesced, ``clear_history_cache()``.

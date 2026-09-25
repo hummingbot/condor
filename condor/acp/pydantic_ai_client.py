@@ -411,6 +411,7 @@ class PydanticAIClient:
             list[str] | None
         ) = None,  # restrict the agent to these tool names
         system_prompt: str = "",
+        env_keys_allowed: bool = True,
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
@@ -418,6 +419,11 @@ class PydanticAIClient:
         self.extra_env = extra_env
         self.base_url = base_url
         self.api_key = api_key
+        # False when ``base_url`` is a caller-chosen URL (a loop's
+        # ``model_base_url``): the install's OPENROUTER_API_KEY /
+        # CUSTOM_LLM_API_KEY must never ride along to it — only a key the
+        # caller passed in ``api_key`` does (SEC-630).
+        self.env_keys_allowed = env_keys_allowed
         # Who the model is told it is, delivered at system level as pydantic-ai
         # ``instructions``. The twin of ACPClient's ``_meta.systemPrompt.append``
         # (client.py): without it a bound Agent answers as the host instead of
@@ -514,7 +520,10 @@ class PydanticAIClient:
                     "OpenRouter requires an explicit model id, e.g. "
                     "'openrouter:openai/gpt-4o' or 'openrouter:anthropic/claude-sonnet-4-5'."
                 )
-            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not self.env_keys_allowed:
+                api_key = "not-needed"
+            else:
+                api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
                 raise RuntimeError(
                     "OPENROUTER_API_KEY is not set. Add it to your .env to use openrouter:* models."
@@ -547,9 +556,10 @@ class PydanticAIClient:
                     "Settings → AI Providers on the web dashboard), or set "
                     "CUSTOM_LLM_BASE_URL."
                 )
-            api_key = (
-                self.api_key or os.environ.get("CUSTOM_LLM_API_KEY") or "not-needed"
+            env_key = (
+                os.environ.get("CUSTOM_LLM_API_KEY") if self.env_keys_allowed else None
             )
+            api_key = self.api_key or env_key or "not-needed"
             openai_client = AsyncOpenAI(
                 base_url=base_url,
                 api_key=api_key,

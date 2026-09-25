@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
 
 
 @dataclass
@@ -25,13 +28,16 @@ class BaseProvider:
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
     ) -> ProviderResult:
         """Gather this provider's slice of core data.
 
-        ``since`` is the instant the session took its bots over, for providers
-        that must report only what this session produced rather than a bot's
-        whole lifetime.
+        ``owned`` is the session's ownership ledger (one record per base, with
+        its takeover and release instants), for providers that must report only
+        what this session produced rather than a bot's whole lifetime. Turn it
+        into per-base windows with
+        :func:`condor.agents.attribution.ownership_windows`; never flatten it to
+        one instant.
 
         ``bot_names`` are the bases the running session owns (from its ownership
         ledger); ``None`` means "not supplied" and providers that care fall back

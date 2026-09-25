@@ -285,26 +285,6 @@ export async function connectHyperliquid(opts: {
 }
 
 /**
- * The expiry Hyperliquid actually recorded for `agentAddress`, as epoch-ms — `null` if the agent has
- * no expiry, `undefined` if it isn't approved (or already pruned). `extraAgents` is unauthenticated;
- * use it to check what lifetime a connection really got.
- */
-export async function getHyperliquidAgentExpiry(
-  userAddress: string,
-  agentAddress: string,
-): Promise<number | null | undefined> {
-  const res = await fetch(HL_INFO_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "extraAgents", user: userAddress }),
-  });
-  if (!res.ok) throw new Error(`Hyperliquid agent lookup failed (HTTP ${res.status}).`);
-  const agents = (await res.json()) as { address: string; name: string; validUntil: number | null }[];
-  return (agents || []).find((a) => a.address.toLowerCase() === agentAddress.toLowerCase())
-    ?.validUntil;
-}
-
-/**
  * Credential payloads for hummingbot-api, keyed by connector name. The same agent
  * key authorises both the perpetual and spot connectors.
  */

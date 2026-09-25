@@ -141,35 +141,6 @@ export function scopeInterval(
   return pickSamplingInterval(span);
 }
 
-/** Whether a row set says anything about fees, as opposed to saying zero. */
-export function feesAreKnown(rows: readonly PerformanceSnapshot[]): boolean {
-  return rows.some((row) => row.cum_fees_quote !== null && row.cum_fees_quote !== undefined);
-}
-
-/**
- * Cumulative fees over a row set, or `null` when nothing measured them.
- *
- * Controllers report `cum_fees_quote: null` — their `PerformanceReport`
- * genuinely has no fees field — and `null` is not zero. A caller that folded
- * these with `?? 0` would draw a controller as having traded for free, which is
- * a stronger claim than the data makes, so the absence propagates instead.
- */
-export function cumulativeFees(rows: readonly PerformanceSnapshot[]): number | null {
-  if (!feesAreKnown(rows)) return null;
-  // The newest row per scope carries that scope's running total; summing every
-  // row would count each dump again.
-  const newest = new Map<string, PerformanceSnapshot>();
-  for (const row of rows) {
-    if (row.cum_fees_quote === null || row.cum_fees_quote === undefined) continue;
-    const key = scopeKey(row);
-    const seen = newest.get(key);
-    if (!seen || Date.parse(row.timestamp) >= Date.parse(seen.timestamp)) newest.set(key, row);
-  }
-  let total = 0;
-  for (const row of newest.values()) total += row.cum_fees_quote ?? 0;
-  return total;
-}
-
 /** Which of the three sources actually drew the series. */
 export type PerfSeriesSource =
   /** Upstream `/performance/history` rows — the real sampled curve. */

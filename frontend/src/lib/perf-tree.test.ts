@@ -16,7 +16,6 @@ import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "./api";
 import {
   AUTO_OPEN_KINDS,
   UNATTACHED_BOT,
-  agentNodeId,
   agentOfNodeId,
   ancestorChain,
   autoOpenIds,
@@ -690,7 +689,7 @@ describe("buildTree, grouping by agent", () => {
       RUN_KEY,
     );
     expect(botNodeId(standalone)).toBeNull();
-    expect(agentNodeId(standalone)).toBe(`agent:${RUN_KEY}`);
+    expect(standalone.agent).toBe(RUN_KEY);
 
     const tree = buildTree([standalone], "All", { grouping: ["agent", "bot"] });
     expect(tree.children.map((c) => c.id)).toEqual([`agent:${RUN_KEY}`]);
@@ -706,7 +705,7 @@ describe("buildTree, grouping by agent", () => {
   // still the better answer and skips the bucket entirely (the case above).
   it("puts an executor that belongs to nobody in the group, inside its owner bucket", () => {
     const manual = leafFromExecutor(executor({ id: "manual", controller_id: "main" }));
-    expect(agentNodeId(manual)).toBeNull();
+    expect(manual.agent).toBeFalsy();
     const tree = buildTree([manual], "All", { grouping: ["agent", "bot"] });
     const bucket = `agent:${BEFORE_LEDGER}`;
     expect(tree.children.map((c) => c.id)).toEqual([bucket]);

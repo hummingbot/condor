@@ -89,6 +89,32 @@ async def resolve_usd_rates(server: str, quotes: set[str]) -> QuoteRates:
     return QuoteRates(rates, converted)
 
 
+async def resolve_client_usd_rates(client: Any, quotes: set[str]) -> QuoteRates:
+    """:func:`resolve_usd_rates` for a caller that holds a client, not a server name.
+
+    The bot-performance fetchers only ever see the client. Stablecoin quotes
+    resolve without a server at all; any other quote on a client that matches no
+    configured server stays at face value with ``converted=False``.
+    """
+    wanted = {q.strip().upper() for q in quotes if q and q.strip()}
+    stable = {q: 1.0 for q in wanted if q in USD_QUOTES}
+    if wanted <= set(stable):
+        return QuoteRates(stable, True)
+    try:
+        from config_manager import get_config_manager
+
+        server = get_config_manager().server_name_for_client(client)
+    except Exception as e:
+        logger.debug("No server for client %r: %s", client, e)
+        server = None
+    if not server:
+        logger.warning(
+            "No server to price %s in USD", sorted(set(wanted) - set(stable))
+        )
+        return QuoteRates(stable, False)
+    return await resolve_usd_rates(server, wanted)
+
+
 def convert_trades_to_usd(trades: list[dict], rates: QuoteRates) -> int:
     """Restate trade prices and quote-denominated fees in USD, in place.
 

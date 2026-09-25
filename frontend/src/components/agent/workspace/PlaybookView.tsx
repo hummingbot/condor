@@ -15,9 +15,10 @@ import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { MarkdownEditor } from "@/components/agent/MarkdownEditor";
+import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { formatRunId } from "@/components/agent/lab/runs";
+import { effectiveTradingContext, formatRunId } from "@/components/agent/lab/runs";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { countdown } from "@/lib/agent-attribution";
@@ -28,16 +29,14 @@ import { formatCurrency } from "@/lib/formatters";
  * The Playbook disclosure's body: what the strategy is *told*, not what it did.
  *
  * This band used to host the whole `StrategyWorkbench` — which is a page, and
- * was written to be one. On the chat's pane it still is the right thing, and it
- * is unchanged there. On this screen it was the same page a second time: its
+ * was written to be one. On this screen it was the same page a second time: its
  * `<h1>` repeated the header two inches above, its `AgentControls` repeated the
  * header's Pause/Stop, its `LoopPulse` repeated the loop bar's cadence and
  * countdown, its `DeployedFleet` repeated the answer stack's ledger — under a
  * *different* count, since the two fold differently — and its `PerformancePanel`
- * repeated the vitals strip, which is the very duplication `MoneyView` removed
- * from the Money band for the same reason. Meanwhile the one thing the band is
- * named for, `strategy.md`, was not on screen at all: it was behind a button,
- * in a modal, over a page that was already a copy of the page behind it.
+ * repeated the vitals strip. Meanwhile the one thing the band is named for,
+ * `strategy.md`, was not on screen at all: it was behind a button, in a modal,
+ * over a page that was already a copy of the page behind it.
  *
  * So this is the band cut to its own promise — *the strategy's playbook, its
  * config and what it has learned* — and to the two doors that exist nowhere
@@ -73,8 +72,7 @@ export function PlaybookView({
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
+      invalidateStrategyCatalog(queryClient, slug);
       onDeleted();
     },
   });
@@ -96,7 +94,9 @@ export function PlaybookView({
     : 0;
 
   return (
-    <div className="space-y-4 pt-3">
+    // A container, so the two documents and the settings lay themselves out by
+    // the width this band actually has — the page, or the chat's side panel.
+    <div className="@container space-y-4 pt-3">
       {/* ① What it is for, and the two doors that are only here. The name is
           deliberately absent: the loop bar names the strategy in scope and the
           header names the agent, and a third copy is the duplication this band
@@ -189,7 +189,7 @@ export function PlaybookView({
       {/* ② The two documents, side by side at width. They are the same kind of
           thing read two ways — what a session is told, and what sessions have
           written back — so they are one row rather than one above the other. */}
-      <div className="grid items-start gap-4 lg:grid-cols-2">
+      <div className="grid items-start gap-4 @3xl:grid-cols-2">
         <DocCard
           title="Playbook"
           file="strategy.md"
@@ -342,7 +342,9 @@ function DocCard({
           />
         ) : content.trim() ? (
           <div className="chat-markdown max-h-[420px] overflow-y-auto text-sm leading-relaxed text-[var(--color-text)]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {withoutFrontMatter(content)}
+            </ReactMarkdown>
           </div>
         ) : (
           <div className="flex items-start gap-2 rounded-md border border-dashed border-[var(--color-border)] p-3 text-xs leading-relaxed text-[var(--color-text-muted)]">
@@ -375,11 +377,20 @@ function seconds(v: unknown, none = "none"): string {
   return countdown(n);
 }
 
-/** A limit where a negative is "no limit", which is how the engine reads it. */
-function limit(v: unknown, fmt: (n: number) => string): Row["value"] | null {
+/**
+ * A limit, parsed once: a negative is "no limit", which is how the engine reads
+ * it, and the row is `off` exactly when it says so. `unset` overrides which
+ * numbers mean switched off (max ticks: `0` is the default and unlimited too).
+ */
+function limitRow(
+  label: string,
+  v: unknown,
+  fmt: (n: number) => string,
+  opts?: { none?: string; unset?: (n: number) => boolean },
+): Row {
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) return null;
-  return fmt(n);
+  const off = !Number.isFinite(n) || (opts?.unset ?? ((x) => x < 0))(n);
+  return { label, value: off ? (opts?.none ?? "no limit") : fmt(n), off };
 }
 
 function text(v: unknown, fallback: string): string {
@@ -428,7 +439,8 @@ function ConfigCard({
    * about the current tick, it is a setting the loop runs under. Written
    * straight through and invalidated, so the switch reflects what is on disk
    * and a failed write snaps back instead of leaving the reader believing a
-   * loop is armed when it is not.
+   * loop is armed when it is not — with the refusal printed beside it, since a
+   * switch that snaps back silently reads as a click that did not register.
    */
   const restartMutation = useMutation({
     mutationFn: (enabled: boolean) => api.setRestartOnBoot(slug, sslug, enabled),
@@ -447,11 +459,10 @@ function ConfigCard({
         value: seconds(config.tick_timeout_sec, "none"),
         off: !Number(config.tick_timeout_sec),
       },
-      {
-        label: "max ticks",
-        value: limit(config.max_ticks, (n) => (n > 0 ? String(n) : "unlimited")) ?? "unlimited",
-        off: !Number(config.max_ticks),
-      },
+      limitRow("max ticks", config.max_ticks, String, {
+        none: "unlimited",
+        unset: (n) => n <= 0,
+      }),
     ];
 
     const where: Row[] = [
@@ -474,36 +485,12 @@ function ConfigCard({
         value: formatCurrency(Number(config.total_amount_quote) || 0),
         hint: "What one session may put to work",
       },
-      {
-        label: "max position",
-        value: limit(risk.max_position_size_quote, (n) => formatCurrency(n)) ?? "no limit",
-        off: limit(risk.max_position_size_quote, () => "") === null,
-      },
-      {
-        label: "max executors",
-        value: limit(risk.max_open_executors, (n) => String(n)) ?? "no limit",
-        off: limit(risk.max_open_executors, () => "") === null,
-      },
-      {
-        label: "max drawdown",
-        value: limit(risk.max_drawdown_pct, (n) => `${n}%`) ?? "no limit",
-        off: limit(risk.max_drawdown_pct, () => "") === null,
-      },
-      {
-        label: "shutdown drawdown",
-        value: limit(risk.shutdown_drawdown_pct, (n) => `${n}%`) ?? "no limit",
-        off: limit(risk.shutdown_drawdown_pct, () => "") === null,
-      },
-      {
-        label: "max drift",
-        value: limit(risk.max_drift_quote, (n) => formatCurrency(n)) ?? "no limit",
-        off: limit(risk.max_drift_quote, () => "") === null,
-      },
-      {
-        label: "max leverage",
-        value: limit(risk.max_leverage, (n) => `${n}×`) ?? "no limit",
-        off: limit(risk.max_leverage, () => "") === null,
-      },
+      limitRow("max position", risk.max_position_size_quote, (n) => formatCurrency(n)),
+      limitRow("max executors", risk.max_open_executors, (n) => String(n)),
+      limitRow("max drawdown", risk.max_drawdown_pct, (n) => `${n}%`),
+      limitRow("shutdown drawdown", risk.shutdown_drawdown_pct, (n) => `${n}%`),
+      limitRow("max drift", risk.max_drift_quote, (n) => formatCurrency(n)),
+      limitRow("max leverage", risk.max_leverage, (n) => `${n}×`),
     ];
 
     // Whatever a newer build writes that this dashboard has no name for. Shown
@@ -531,10 +518,7 @@ function ConfigCard({
     ];
   }, [config, risk]);
 
-  const context = text(
-    config.trading_context || strategy.default_trading_context,
-    "",
-  );
+  const context = text(effectiveTradingContext(strategy), "");
 
   return (
     <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -570,9 +554,14 @@ function ConfigCard({
               ? "resumes on restart"
               : "stops on restart"}
         </button>
+        {restartMutation.isError && (
+          <span role="alert" data-write-error className="text-xs text-red-400">
+            {restartMutation.error.message}
+          </span>
+        )}
       </header>
 
-      <div className="grid gap-x-8 gap-y-5 p-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-x-8 gap-y-5 p-3 @lg:grid-cols-2 @5xl:grid-cols-4">
         {groups.map((group) => (
           <div key={group.title} className="min-w-0">
             <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -616,4 +605,17 @@ function ConfigCard({
       )}
     </section>
   );
+}
+
+/**
+ * The document without its YAML front matter, for reading.
+ *
+ * Markdown has no notion of front matter: the opening `---` rendered as a rule
+ * and the closing one turned every key above it into one enormous setext
+ * heading. The same settings are in the Configuration card on this band, laid
+ * out; the editor still shows the file whole.
+ */
+function withoutFrontMatter(md: string): string {
+  const m = /^\uFEFF?---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(md);
+  return m ? md.slice(m[0].length).replace(/^\s+/, "") : md;
 }

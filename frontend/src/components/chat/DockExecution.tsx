@@ -5,9 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import {
   decisionHref,
-  declaredServerOf,
   fleetRows,
-  rowHref,
   dueInSec,
   tickCountdownLabel,
   type FleetRow,
@@ -22,8 +20,14 @@ import {
 } from "@/components/chat/executionTree";
 import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { useFleetData } from "@/hooks/useFleetData";
+import {
+  groupLoopsByAgent,
+  loopSummaryLabel,
+  loopsOnServer,
+  useLiveLoops,
+  type LiveFleetOwner,
+} from "@/hooks/useLiveLoops";
 import { useSeconds } from "@/hooks/useSeconds";
-import { api } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
 import {
   formatCompactVolume,
@@ -34,6 +38,7 @@ import {
 } from "@/lib/formatters";
 import { quoteConverter, runningLeaves } from "@/lib/perf-population";
 import { UNATTACHED_BOT, controllerNodeId, type PerfLeaf } from "@/lib/perf-tree";
+import { agentsQuery } from "@/lib/queryClient";
 
 /**
  * The columns, left to right — the header row and every body row read from it.
@@ -73,6 +78,9 @@ const FIXED_PX = COLUMNS.reduce((sum, c) => sum + (c.width ?? 0), 0);
 /** Below this the controller column stops being readable and the table scrolls. */
 const MIN_LABEL_PX = 120;
 export const TABLE_MIN_PX = FIXED_PX + MIN_LABEL_PX;
+
+/** Held still, so an agent with no second loop is not a new array every render. */
+const EMPTY_LOOPS: LiveFleetOwner[] = [];
 
 /**
  * How many characters of a bot name a group header keeps.
@@ -126,8 +134,8 @@ function clipBotName(name: string): string {
  *
  * **The trade-off is one server.** The panel reads `dockServer` — the chat
  * slot's, falling back to the ambient one — and the sheet's bar names it. An
- * agent trading somewhere else is named in a line at the foot rather than
- * shown as a zero.
+ * agent trading somewhere else has no row here at all: this desk answers for
+ * its own server only.
  *
  * **Running is the kill switch, not `status`.** The `/bots` payload hardcodes
  * `"running"` for every controller it reports; what actually stops one is
@@ -171,13 +179,26 @@ export function DockExecution({
   // does not chart, and the walk costs a paged request per controller.
   const fleet = useFleetData(server, { population: "running", history: false });
 
-  // Same key and interval `AgentChatTab` and the rail already poll, so the
-  // agent rows' liveness arrives with a request nobody made for them.
-  const { data: agents = [] } = useQuery({
-    queryKey: ["agents"],
-    queryFn: api.getAgents,
-    refetchInterval: 10000,
-  });
+  // The shared roster (key and cadence: `agentsQuery`), so the agent rows'
+  // liveness arrives with a request nobody made for them.
+  const { data: agents = [] } = useQuery(agentsQuery());
+
+  // Every live loop, from `fleet-map` (FEAT-124) — under the shared query key
+  // `useFleetData` (below) already polls, so this costs nothing new. Unlike
+  // `fleetRows`' `scopeStrategy`, `fleet-map` does not collapse an agent to
+  // one strategy, so this is how a second concurrent loop stops being
+  // invisible in this panel.
+  //
+  // `fleet-map` is deliberately unscoped — `LoopsPanel`'s global view needs
+  // every server — so this panel narrows it back down through `loopsOnServer`
+  // (CORR-429). A loop with no declared server follows the ambient one and
+  // always stays.
+  const { loops } = useLiveLoops();
+  const loopsHere = useMemo(
+    () => loopsOnServer(loops, agents, server),
+    [loops, agents, server],
+  );
+  const loopsByAgent = useMemo(() => groupLoopsByAgent(loopsHere), [loopsHere]);
 
   // A clock only while something is looping: the countdown is the one thing in
   // this panel that moves on its own, and an interval running under a fleet
@@ -282,31 +303,6 @@ export function DockExecution({
     () => [...live.values()].filter((row) => row.live?.status === "running").length,
     [live],
   );
-
-  /**
-   * The agents that trade somewhere else — named, not shown as a zero.
-   *
-   * The desk is one server, deliberately, and an agent whose declared server is
-   * not this one has no records here to fold. A row of dashes would read as *it
-   * made nothing*; a line saying where it does trade is the honest version of
-   * the same fact, and it links out to the page that can answer.
-   */
-  const elsewhere = useMemo(() => {
-    const here = new Set(
-      rows.flatMap((row) => (row.agent ? [row.agent.slug] : [])),
-    );
-    return agents
-      .filter((agent) => !here.has(agent.slug) && (agent.strategies ?? []).length > 0)
-      .map((agent) => {
-        const row = live.get(agent.slug);
-        const declared = declaredServerOf(agent, row?.strategy ?? null);
-        return { row, declared };
-      })
-      .filter(
-        (entry): entry is { row: FleetRow; declared: string } =>
-          !!entry.row && !!entry.declared && entry.declared !== server,
-      );
-  }, [agents, rows, live, server]);
 
   const footer = (
     <button
@@ -444,6 +440,7 @@ export function DockExecution({
                   <AgentRow
                     row={row}
                     live={row.agent ? live.get(row.agent.slug) ?? null : null}
+                    loops={row.agent ? loopsByAgent.get(row.agent.slug) ?? EMPTY_LOOPS : EMPTY_LOOPS}
                     nowSec={nowSec}
                     symbol={currencySymbol}
                     open={open.has(row.id)}
@@ -482,24 +479,6 @@ export function DockExecution({
             {unattached} executor{unattached === 1 ? "" : "s"}
           </span>
         </button>
-      )}
-
-      {elsewhere.length > 0 && (
-        <div
-          data-execution-elsewhere
-          className="border-t border-[var(--color-border)] px-3 py-1 text-[10px] text-[var(--color-text-muted)]"
-        >
-          {elsewhere.map(({ row, declared }) => (
-            <Link
-              key={row.slug}
-              to={rowHref(row)}
-              title={`${row.name} trades on ${declared}, which this desk is not reading`}
-              className="block truncate transition-colors hover:text-[var(--color-text)]"
-            >
-              {row.name} · trades on {declared}
-            </Link>
-          ))}
-        </div>
       )}
 
       {footer}
@@ -546,10 +525,17 @@ function Twisty({
  * scope, and ARCH-324's rule is that there is one of it. The liveness beside it
  * — the dot, the last decision, the next tick — is the run's, from `fleetRows`,
  * because none of the three is a fact about trading records at all.
+ *
+ * When `loops` holds more than one entry (FEAT-124: `fleet-map` does not
+ * collapse an agent to a single strategy the way `fleetRows`' `scopeStrategy`
+ * does), that single countdown/decision line is superseded by one sub-line per
+ * live loop, worded through `loopSummaryLabel` — the same formatter
+ * `LoopsPanel` reads, so the two surfaces cannot disagree about the same fact.
  */
 function AgentRow({
   row,
   live,
+  loops,
   nowSec,
   symbol,
   open,
@@ -559,6 +545,8 @@ function AgentRow({
   row: ExecutionRow;
   /** The agent's own run, or `null` for an owner nothing claims. */
   live: FleetRow | null;
+  /** Every loop `fleet-map` reports for this agent on this server — length <= 1 changes nothing on screen. */
+  loops: LiveFleetOwner[];
   nowSec: number;
   symbol: string;
   open: boolean;
@@ -632,35 +620,56 @@ function AgentRow({
           </button>
         </div>
 
-        {live && (
-          <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
-            {due !== null && (
-              <span
-                data-agent-due
-                className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+        {loops.length > 1 ? (
+          <div className="flex flex-col gap-0.5 pl-[18px]">
+            {loops.map((loop) => (
+              <div
+                key={`${loop.agentSlug}/${loop.strategySlug}`}
+                data-agent-loop={`${loop.agentSlug}/${loop.strategySlug}`}
+                className="flex items-baseline gap-1.5 text-[10px] text-[var(--color-text-muted)]"
               >
-                {tickCountdownLabel(due)}
-              </span>
-            )}
-            {live.lastDid ? (
-              <Link
-                to={decisionHref(live)}
-                data-agent-decision
-                title="Read the whole tick this came from"
-                className={`min-w-0 truncate transition-colors hover:underline ${
-                  live.lastDid.ok ? "" : "text-[var(--color-red)]"
-                }`}
-              >
-                {live.lastDid.summary}
-              </Link>
-            ) : (
-              live.lastSaid && (
-                <span data-agent-decision className="min-w-0 truncate">
-                  {live.lastSaid}
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 self-center rounded-full ${
+                    loop.live.status === "running" ? "bg-emerald-400" : "bg-amber-400"
+                  }`}
+                />
+                <span className="min-w-0 truncate font-mono">
+                  {loop.strategyName} · {loopSummaryLabel(loop.live, nowSec * 1000)}
                 </span>
-              )
-            )}
+              </div>
+            ))}
           </div>
+        ) : (
+          live && (
+            <div className="flex items-baseline gap-1.5 pl-[18px] text-[10px] text-[var(--color-text-muted)]">
+              {due !== null && (
+                <span
+                  data-agent-due
+                  className={`shrink-0 font-mono ${due <= 0 ? "text-amber-400" : ""}`}
+                >
+                  {tickCountdownLabel(due)}
+                </span>
+              )}
+              {live.lastDid ? (
+                <Link
+                  to={decisionHref(live)}
+                  data-agent-decision
+                  title="Read the whole tick this came from"
+                  className={`min-w-0 truncate transition-colors hover:underline ${
+                    live.lastDid.ok ? "" : "text-[var(--color-red)]"
+                  }`}
+                >
+                  {live.lastDid.summary}
+                </Link>
+              ) : (
+                live.lastSaid && (
+                  <span data-agent-decision className="min-w-0 truncate">
+                    {live.lastSaid}
+                  </span>
+                )
+              )}
+            </div>
+          )
         )}
       </td>
       {total(row.totals.volume, "volume traded", false)}

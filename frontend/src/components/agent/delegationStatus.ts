@@ -1,4 +1,5 @@
 import type { DelegationStatus, DelegationSummary } from "@/lib/api";
+import { formatDuration } from "@/lib/formatters";
 
 // How a delegation's states read, owned in one place: the fleet report's task
 // list, the chat workspace's context dock and the history view all colour them.
@@ -43,6 +44,17 @@ export const DELEGATION_STATUS: Record<
 };
 
 /**
+ * Whether a raw status string is one `DELEGATION_STATUS` can colour.
+ *
+ * Derived from the exhaustive map rather than a second list, so a status added
+ * to the union is recognised the moment it is mapped (ARCH-398). `Object.hasOwn`,
+ * not `in`: `"toString" in DELEGATION_STATUS` is true through the prototype.
+ */
+export function isDelegationStatus(s: string): s is DelegationStatus {
+  return Object.hasOwn(DELEGATION_STATUS, s);
+}
+
+/**
  * How long this task has been going, compactly.
  *
  * Only a running task gets a live elapsed time; everything else reports when it
@@ -55,11 +67,6 @@ export function formatDelegationTime(
 ): string {
   if (!d.started_at) return "";
   const secs = Math.max(0, now / 1000 - d.started_at);
-  const compact =
-    secs < 60
-      ? `${Math.floor(secs)}s`
-      : secs < 3600
-        ? `${Math.floor(secs / 60)}m`
-        : `${Math.floor(secs / 3600)}h`;
+  const compact = formatDuration(secs);
   return d.status === "running" ? compact : `${compact} ago`;
 }

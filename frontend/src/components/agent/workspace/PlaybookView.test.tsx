@@ -56,6 +56,7 @@ vi.mock("@/components/routines/ReportBrowser", () => ({
 }));
 
 const { PlaybookView } = await import("./PlaybookView");
+const { api } = await import("@/lib/api");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -167,6 +168,44 @@ describe("PlaybookView", () => {
     expect(text).toContain("unlimited"); // max_ticks: 0
   });
 
+  /** The value cell of the setting labelled `label`, as the config card draws it. */
+  function settingValue(label: string): HTMLElement {
+    const dt = Array.from(container.querySelectorAll("dt")).find(
+      (el) => el.textContent === label,
+    );
+    const dd = dt?.nextElementSibling as HTMLElement | null;
+    if (!dd) throw new Error(`no setting "${label}"`);
+    return dd;
+  }
+  const isOff = (dd: HTMLElement) => dd.className.includes("opacity-60");
+
+  it("dims max ticks at its default 0 and shows a positive cap as a live number", () => {
+    render();
+    let dd = settingValue("max ticks");
+    expect(dd.textContent).toBe("unlimited");
+    expect(isOff(dd)).toBe(true);
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    render({ ...STRATEGY, config: { ...STRATEGY.config, max_ticks: 25 } } as StrategyDetail);
+    dd = settingValue("max ticks");
+    expect(dd.textContent).toBe("25");
+    expect(isOff(dd)).toBe(false);
+  });
+
+  it("marks a risk limit off exactly when it reads no limit", () => {
+    render();
+    const drawdown = settingValue("max drawdown"); // -1
+    expect(drawdown.textContent).toBe("no limit");
+    expect(isOff(drawdown)).toBe(true);
+    const drift = settingValue("max drift"); // absent
+    expect(drift.textContent).toBe("no limit");
+    expect(isOff(drift)).toBe(true);
+    const executors = settingValue("max executors"); // 5
+    expect(executors.textContent).toBe("5");
+    expect(isOff(executors)).toBe(false);
+  });
+
   it("tells an empty playbook what it is for", () => {
     render({ ...STRATEGY, strategy_md: "" });
     expect(container.textContent).toContain("standing brief");
@@ -185,6 +224,27 @@ describe("PlaybookView", () => {
     const sw = container.querySelector('[role="switch"]');
     expect(sw?.getAttribute("aria-checked")).toBe("true");
     expect(sw?.textContent).toContain("resumes on restart");
+  });
+
+  it("says why a refused restart write snapped back", async () => {
+    vi.mocked(api.setRestartOnBoot).mockRejectedValueOnce(
+      new Error("Another user's loop is running this strategy — stop it first"),
+    );
+    render();
+    const sw = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await act(async () => sw.click());
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(api.setRestartOnBoot).toHaveBeenCalledWith("brigado", "pmm_king", false);
+    const after = container.querySelector('[role="switch"]');
+    expect(after?.getAttribute("aria-checked")).toBe("true");
+    // Beside the switch, in the Configuration card's own header.
+    expect(after?.closest("header")?.querySelector('[role="alert"]')?.textContent).toContain(
+      "Another user's loop is running this strategy",
+    );
   });
 });
 

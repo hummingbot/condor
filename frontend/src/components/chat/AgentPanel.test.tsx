@@ -53,6 +53,7 @@ vi.mock("@/hooks/useChat", () => ({
 }));
 
 const { AgentPanel } = await import("./AgentPanel");
+const { AgentWiring } = await import("./AgentWiring");
 const { RailButton } = await import("./WorkspaceRail");
 const { Bot } = await import("lucide-react");
 
@@ -130,8 +131,17 @@ function client() {
 }
 
 type PanelProps = Parameters<typeof AgentPanel>[0];
+type WiringProps = Parameters<typeof AgentWiring>[0];
 
-async function renderPanel(over: Partial<PanelProps> = {}) {
+/**
+ * The panel as `AgentChatTab` mounts it: the wiring is the host's node in the
+ * panel's bar, so the pickers are still exercised through the panel. `over`
+ * reaches the panel's own props, `wiringOver` the pickers'.
+ */
+async function renderPanel(
+  over: Partial<PanelProps> = {},
+  wiringOver: Partial<WiringProps> = {},
+) {
   await act(async () => {
     root.render(
       <MemoryRouter>
@@ -139,16 +149,21 @@ async function renderPanel(over: Partial<PanelProps> = {}) {
           <AgentPanel
             slug="orca"
             name="Orca LP Expert"
-            slot={slot()}
-            pendingAgentKey=""
-            ambientServer="brigado_2"
-            agents={AGENTS}
-            customProviders={[]}
-            agentBindings={BINDINGS}
-            isStreaming={false}
+            wiring={
+              <AgentWiring
+                slot={slot()}
+                pendingAgentKey=""
+                ambientServer="brigado_2"
+                agents={AGENTS}
+                customProviders={[]}
+                agentBindings={BINDINGS}
+                isStreaming={false}
+                onSelectBrain={(sel) => (picked.model = sel.agentKey)}
+                onSelectServer={(name) => (picked.server = name)}
+                {...wiringOver}
+              />
+            }
             onTabChange={(t) => sectionsAsked.push(t)}
-            onSelectBrain={(sel) => (picked.model = sel.agentKey)}
-            onSelectServer={(name) => (picked.server = name)}
             onOpenRoutine={() => {}}
             onOpenStrategy={() => {}}
             onAskAgent={() => {}}
@@ -306,7 +321,7 @@ describe("the panel's wiring bar", () => {
   });
 
   it("goes dead with a reason while a turn is in flight", async () => {
-    await renderPanel({ isStreaming: true });
+    await renderPanel({}, { isStreaming: true });
 
     for (const name of ["model", "server"]) {
       const control = row(name) as HTMLButtonElement;
@@ -316,9 +331,10 @@ describe("the panel's wiring bar", () => {
   });
 
   it("offers no picker for a server the agent pinned", async () => {
-    await renderPanel({
-      slot: slot({ server_pinned: true, label: "Orca LP Expert" }),
-    });
+    await renderPanel(
+      {},
+      { slot: slot({ server_pinned: true, label: "Orca LP Expert" }) },
+    );
 
     const control = row("server")!;
     expect(control.tagName).not.toBe("BUTTON");
@@ -329,7 +345,7 @@ describe("the panel's wiring bar", () => {
 
 describe("with no session yet", () => {
   it("still reads, and the model field is the next chat's", async () => {
-    await renderPanel({ slot: null, pendingAgentKey: "gpt-5" });
+    await renderPanel({}, { slot: null, pendingAgentKey: "gpt-5" });
 
     expect(row("model")!.textContent).toContain("GPT-5");
     expect(row("model")!.title).toContain("next conversation");
@@ -341,7 +357,7 @@ describe("with no session yet", () => {
   });
 
   it("states the server rather than offering a dead control", async () => {
-    await renderPanel({ slot: null });
+    await renderPanel({}, { slot: null });
 
     const control = row("server")!;
     // Nothing to respawn, and the ambient selector already owns the choice.
@@ -403,9 +419,69 @@ describe("the panel", () => {
     expect(doors[0].textContent).toContain("Workspace");
   });
 
+  it("places whatever wiring its host hands it in the bar, and reads none of it", async () => {
+    // The pickers are the host's node (ARCH-412): the panel's contract is the
+    // slot, not the nine props of the component that usually fills it.
+    const exactKeys: Record<keyof PanelProps, true> = {
+      slug: true,
+      name: true,
+      wiring: true,
+      tab: true,
+      onTabChange: true,
+      onOpenRoutine: true,
+      onOpenStrategy: true,
+      onAskAgent: true,
+      onDirtyChange: true,
+      onClose: true,
+    };
+    expect(Object.keys(exactKeys)).toHaveLength(10);
+
+    await renderPanel({ wiring: <span data-testid="host-wiring">wired</span> });
+
+    const node = container.querySelector('[data-testid="host-wiring"]');
+    expect(node).not.toBeNull();
+    // In the bar beside the one door out, not in the sections' body.
+    expect(node!.parentElement!.querySelector("a")!.textContent).toContain(
+      "Workspace",
+    );
+    expect(row("model")).toBeNull();
+    expect(row("server")).toBeNull();
+  });
+
   it("just closes when nothing is being edited", async () => {
     await renderPanel();
     await click(document.querySelector<HTMLElement>('button[title^="Close"]')!);
     expect(closed).toBe(1);
+  });
+
+  it("reports an unsaved editor to its host and leaves the question to it", async () => {
+    // CORR-395: the sheet's close is one of many doors out of the pane, so the
+    // guard is the host's (`usePaneGuard`); the panel only says it is dirty.
+    const reported: boolean[] = [];
+    await renderPanel({ onDirtyChange: (d) => reported.push(d) });
+
+    const edit = [...container.querySelectorAll<HTMLElement>("button")].find(
+      (b) => b.textContent?.trim() === "Edit",
+    )!;
+    await click(edit);
+    const textarea = container.querySelector("textarea")!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(textarea, "a draft");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+    expect(reported.at(-1)).toBe(true);
+
+    await click(document.querySelector<HTMLElement>('button[title^="Close"]')!);
+    expect(closed).toBe(1);
+    expect(document.body.textContent).not.toContain("Discard changes?");
+
+    // Unmounting takes the flag with it.
+    await act(async () => root.render(<></>));
+    expect(reported.at(-1)).toBe(false);
   });
 });

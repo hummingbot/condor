@@ -357,11 +357,11 @@ def route(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_run_module, "run_agent_to_completion", _answer())
     monkeypatch.setattr(wake, "_in_flight", {})
 
-    async def fake_conversation_for_session(session_key):
+    async def fake_conversation_for_session(session_key, user):
         return "conv-1" if session_key else ""
 
     monkeypatch.setattr(
-        "condor.web.routes.agents._conversation_for_session",
+        "condor.web.routes.agents._owned_conversation_for_session",
         fake_conversation_for_session,
     )
     return None

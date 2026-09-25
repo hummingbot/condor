@@ -14,6 +14,16 @@ from pydantic import BaseModel, Field
 
 from condor.fsutil import atomic_write_text
 
+# The execution modes that run a single tick as an experiment: no journal, the
+# tick captured as a dry-run snapshot instead. The one definition of that set —
+# AgentConfig.execution_mode below is the Literal naming every mode.
+EXPERIMENT_MODES: frozenset[str] = frozenset({"dry_run", "run_once"})
+
+
+def is_experiment_mode(mode: str) -> bool:
+    """True for an execution mode that runs as an experiment (dry_run/run_once)."""
+    return mode in EXPERIMENT_MODES
+
 
 class RiskLimitsConfig(BaseModel):
     max_position_size_quote: float = Field(
@@ -125,32 +135,6 @@ class AgentConfig(BaseModel):
         if d.get("dry_run") and "execution_mode" not in d:
             cleaned["execution_mode"] = "dry_run"
         return cls(**cleaned)
-
-
-def load_agent_config(
-    agent_dir: Path, defaults: dict[str, Any] | None = None
-) -> AgentConfig:
-    """Load config from config.yml in the agent directory, falling back to defaults."""
-    config_path = agent_dir / "config.yml"
-    if config_path.exists():
-        try:
-            data = yaml.safe_load(config_path.read_text()) or {}
-            return AgentConfig(**data)
-        except Exception:
-            pass
-    if defaults:
-        return AgentConfig.from_dict(defaults)
-    return AgentConfig()
-
-
-def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
-    """Save config to config.yml in the agent directory."""
-    config_path = agent_dir / "config.yml"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        config_path,
-        yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False),
-    )
 
 
 def load_full_config(

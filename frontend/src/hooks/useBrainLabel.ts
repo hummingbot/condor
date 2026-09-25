@@ -45,12 +45,12 @@ function shortModelLabel(label: string): string {
 /**
  * What the current selection is called, in the pieces a trigger needs.
  *
- * Shared rather than inlined in each button, because `BrainPicker` is no
- * longer the only thing that names this: the agent panel's header button says
- * the same thing about the same session (FEAT-081), and two buttons that
- * resolve "what is answering" separately are two buttons that will eventually
- * disagree — an empty `agent_key` means "whatever the bound Agent runs on",
- * which only this resolution knows.
+ * Shared rather than inlined at each call site, because `BrainPicker` is no
+ * longer the only thing that names this: the agent panel's own bar says the
+ * same thing about the same session, through `AgentWiring`'s Model field
+ * (FEAT-081), and two controls that resolve "what is answering" separately are
+ * two controls that will eventually disagree — an empty `agent_key` means
+ * "whatever the bound Agent runs on", which only this resolution knows.
  */
 export function useBrainLabel({
   agents,

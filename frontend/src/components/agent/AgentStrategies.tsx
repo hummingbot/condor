@@ -3,10 +3,13 @@ import { CircleDot, Plus, Repeat } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { invalidateStrategyCatalog } from "@/components/agent/agentQueries";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { EntityCard } from "@/components/agent/EntityCard";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type StrategySummary } from "@/lib/api";
+import { agentQuery } from "@/lib/queryClient";
 
 /**
  * The loops this agent owns — read, created, opened and deleted.
@@ -22,11 +25,12 @@ import { api, type StrategySummary } from "@/lib/api";
  * carries. That endpoint is not cheap — it prices every session's executors
  * through the Hummingbot API — so the poll is conditional (PERF-305): an idle
  * agent is read once and a live one keeps the 5s cadence, because "running" is
- * exactly when a card's PnL and instances can still change. The agent page
- * polls the same key unconditionally and react-query takes the shortest
- * interval among observers, so page behaviour is unchanged; it is the chat's
- * agent panel, where nothing else observes the key, that used to pay 5s of
- * Hummingbot round-trips for an agent with no loop running.
+ * exactly when a card's PnL and instances can still change. The gate is not
+ * this component's to keep on its own: react-query drives a shared key at the
+ * shortest interval any observer asks for, so every reader of `["agent", slug]`
+ * declares it through the one `agentQuery` factory — the workspace page and its
+ * run screen included, whose two flat 5s declarations silently overrode this
+ * gate on the screen a reader leaves open longest until PERF-343.
  *
  * Opening a strategy hands it to `onOpenStrategy` when the host has somewhere
  * to put it — the chat's workspace pane does, and opens the same workbench the
@@ -57,20 +61,10 @@ export function AgentStrategies({
     null,
   );
 
-  const { data: agent } = useQuery({
-    queryKey: ["agent", slug],
-    queryFn: () => api.getAgent(slug),
-    enabled: !!slug,
-    // Only a live loop can change these cards; an idle agent is read once.
-    refetchInterval: (q) =>
-      q.state.data?.strategies.some((s) => s.status === "running") ? 5000 : false,
-  });
+  // Only a live loop can change these cards; an idle agent is read once (`agentQuery`).
+  const { data: agent } = useQuery(agentQuery(slug));
 
-  /** Both catalogues count strategies, so both are re-read after a change. */
-  const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-    queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
-  };
+  const refresh = () => invalidateStrategyCatalog(queryClient, slug);
 
   // Every Agent is loopable. This brings its implicit default playbook on disk
   // so the normal strategy UI (config, start, sessions) can drive the loop.
@@ -97,9 +91,7 @@ export function AgentStrategies({
   function openStrategy(strategySlug: string) {
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else
-      navigate(
-        `/agents/${slug}?open=runs&strategy=${encodeURIComponent(strategySlug)}`,
-      );
+      navigate(workspaceHref(slug, { open: "runs", strategy: strategySlug }));
   }
 
   /**
@@ -112,12 +104,13 @@ export function AgentStrategies({
     if (onOpenStrategy) onOpenStrategy(strategySlug);
     else
       navigate(
-        `/agents/${slug}?open=playbook&strategy=${encodeURIComponent(strategySlug)}`,
+        workspaceHref(slug, { open: "playbook", strategy: strategySlug }),
       );
   }
 
   const deleteMut = useMutation({
-    mutationFn: () => api.deleteStrategy(slug, deleteStrategy!.slug),
+    mutationFn: (strategy: StrategySummary) =>
+      api.deleteStrategy(slug, strategy.slug),
     onSuccess: () => {
       refresh();
       setDeleteStrategy(null);
@@ -212,7 +205,7 @@ export function AgentStrategies({
             ? deleteMut.error.message
             : "Failed to delete strategy. It may be running."
         }
-        onConfirm={() => deleteMut.mutate()}
+        onConfirm={() => deleteStrategy && deleteMut.mutate(deleteStrategy)}
         onClose={() => setDeleteStrategy(null)}
       >
         Delete{" "}
@@ -249,9 +242,7 @@ function CreateStrategyDialog({
     mutationFn: () =>
       api.createStrategy(agentSlug, { name, description, default_trading_context: defaultContext }),
     onSuccess: (strategy) => {
-      queryClient.invalidateQueries({ queryKey: ["agent", agentSlug] });
-      // The knowledge panel counts strategies off its own query.
-      queryClient.invalidateQueries({ queryKey: ["agent-brain", agentSlug] });
+      invalidateStrategyCatalog(queryClient, agentSlug);
       onClose();
       setName("");
       setDescription("");

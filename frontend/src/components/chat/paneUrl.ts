@@ -27,6 +27,11 @@ import {
   isKnowledgeTab,
   type KnowledgeTabId,
 } from "@/components/agent/knowledgeTabs";
+import {
+  readPaneSection,
+  type PaneSection,
+} from "@/components/agent/workspace/sections";
+import { parseRunId } from "@/components/agent/lab/runs";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 
 /**
@@ -59,12 +64,27 @@ import type { LibraryFocus } from "@/components/chat/DockRoutines";
  * belongs to what (see `WorkspaceSheet`'s `taken`). So the strategy *replaces*
  * the panel and closing it puts the panel back — which is why it carries the
  * agent slug it was opened from.
+ *
+ * `loops` (FEAT-123) carries nothing: it lists every strategy with a live tick
+ * loop across every agent, which is a fact about the fleet rather than about
+ * the pane, so there is no extra parameter to round-trip.
  */
 export type PaneView =
   | { kind: "agent"; slug?: string; tab?: KnowledgeTabId }
   | { kind: "desk" }
   | { kind: "routines"; focus: LibraryFocus }
-  | { kind: "strategy"; agentSlug: string; strategySlug: string }
+  | { kind: "loops" }
+  | {
+      kind: "strategy";
+      agentSlug: string;
+      strategySlug: string;
+      /** Which tab of the run screen is open — Now when absent. */
+      section?: PaneSection;
+      /** The run in scope, as the page spells `?run=`. */
+      run?: string | null;
+      /** A tick opened over the pane, as the page spells `?tick=`. */
+      tick?: number | null;
+    }
   | null;
 
 export const PANEL_PARAM = "panel";
@@ -91,6 +111,15 @@ export const AGENT_PARAM = "who";
  * carried between the two hosts as a value rather than translated.
  */
 export const TAB_PARAM = "tab";
+/**
+ * Which tab of a strategy's run screen the pane is on, and the run and tick in
+ * scope — the page's own `?run=`/`?tick=` spellings, so expanding the pane to
+ * the page and collapsing it back carries them as values (see `paneHref`).
+ */
+export const SECTION_PARAM = "sec";
+export const RUN_PARAM = "run";
+export const TICK_PARAM = "tick";
+const STRATEGY_PARAMS = [SECTION_PARAM, RUN_PARAM, TICK_PARAM] as const;
 
 /**
  * Read the pane out of the query string.
@@ -120,16 +149,28 @@ export function readPane(
     }
     case "desk":
       return { kind: "desk" };
+    case "loops":
+      return { kind: "loops" };
     case "routines":
       return { kind: "routines", focus: libraryFocus };
     case "strategy": {
       const loop = params.get(LOOP_PARAM) ?? "";
       const slash = loop.indexOf("/");
       if (slash <= 0 || slash === loop.length - 1) return null;
+      // A retired tab (`detail`) reads as its successor, not as no tab.
+      const sec = readPaneSection(params.get(SECTION_PARAM));
+      // Kept as spelled, once it parses: the page's grammar owns the spelling.
+      const runRaw = params.get(RUN_PARAM);
+      const run = runRaw && parseRunId(runRaw) ? runRaw : null;
+      const tickRaw = params.get(TICK_PARAM);
+      const tick = tickRaw && /^\d+$/.test(tickRaw) ? Number(tickRaw) : null;
       return {
         kind: "strategy",
         agentSlug: loop.slice(0, slash),
         strategySlug: loop.slice(slash + 1),
+        ...(sec ? { section: sec } : {}),
+        ...(run ? { run } : {}),
+        ...(tick !== null ? { tick } : {}),
       };
     }
     default:
@@ -157,18 +198,39 @@ export function writePane(
     params.get(PANEL_PARAM) === "agent" &&
     (pane.slug ?? "") === (params.get(AGENT_PARAM) ?? "");
   const next = new URLSearchParams(params);
+  // `?run=`/`?tick=` are the strategy pane's only while it is in the pane, so
+  // they are cleared only on the way out of one — never somebody else's.
+  const leavingStrategy = params.get(PANEL_PARAM) === "strategy";
   if (!pane) {
     next.delete(PANEL_PARAM);
     next.delete(LOOP_PARAM);
     next.delete(AGENT_PARAM);
     next.delete(TAB_PARAM);
+    if (leavingStrategy) for (const key of STRATEGY_PARAMS) next.delete(key);
     return next;
   }
   next.set(PANEL_PARAM, pane.kind);
   if (pane.kind === "strategy") {
-    next.set(LOOP_PARAM, `${pane.agentSlug}/${pane.strategySlug}`);
+    const loop = `${pane.agentSlug}/${pane.strategySlug}`;
+    // The same loop keeps its tab unless told otherwise; its run and tick are
+    // only ever what the caller says, because a run of one loop is not a run of
+    // the next and "unset" is how a caller clears one.
+    const sameLoop =
+      params.get(PANEL_PARAM) === "strategy" && params.get(LOOP_PARAM) === loop;
+    const carried = readPaneSection(params.get(SECTION_PARAM));
+    const section =
+      pane.section ?? (sameLoop && carried ? carried : undefined);
+    next.set(LOOP_PARAM, loop);
+    if (section) next.set(SECTION_PARAM, section);
+    else next.delete(SECTION_PARAM);
+    if (pane.run) next.set(RUN_PARAM, pane.run);
+    else next.delete(RUN_PARAM);
+    if (pane.tick !== null && pane.tick !== undefined)
+      next.set(TICK_PARAM, String(pane.tick));
+    else next.delete(TICK_PARAM);
   } else {
     next.delete(LOOP_PARAM);
+    if (leavingStrategy) for (const key of STRATEGY_PARAMS) next.delete(key);
   }
   if (pane.kind === "agent" && pane.slug) next.set(AGENT_PARAM, pane.slug);
   else next.delete(AGENT_PARAM);
@@ -186,4 +248,52 @@ export function writePane(
     next.delete(TAB_PARAM);
   }
   return next;
+}
+
+/**
+ * Whether putting `next` in the pane unmounts the agent panel that is there
+ * now (CORR-395) — and with it any editor holding unsaved text.
+ *
+ * True when an agent panel is open and `next` is anything else: no pane, the
+ * desk, the routine library, a strategy sheet, or an agent panel that resolves
+ * to a *different* agent. Both slugs resolve by the rule `AgentChatTab` reads
+ * the pane with, `slug || panelSlug`, so a bare `{kind: "agent"}` while an
+ * Execution row's agent is open counts as a hand-off, and a section change on
+ * the same agent (the panel's own tab strip) does not.
+ */
+export function paneHandoffDropsPanel(
+  pane: PaneView,
+  next: PaneView,
+  panelSlug: string,
+): boolean {
+  if (pane?.kind !== "agent") return false;
+  if (next?.kind !== "agent") return true;
+  return (next.slug || panelSlug) !== (pane.slug || panelSlug);
+}
+
+/**
+ * The conversation, with this strategy in its side panel — the page's way back.
+ *
+ * `returnTo` is where the pane's full-screen door was pressed (`/?…`, which
+ * names the conversation and anything else the chat had in its URL); without
+ * one — a page opened from a link — it is a bare `/`. Either way the pane is
+ * re-pointed at what the page is showing *now*, so a loop, run or section
+ * changed on the page is what the panel opens on.
+ */
+export function paneReturnHref(
+  returnTo: string | undefined,
+  pane: {
+    agentSlug: string;
+    strategySlug: string;
+    section: PaneSection;
+    run?: string | null;
+  },
+): string {
+  const [path, query = ""] = (returnTo || "/").split("?");
+  const next = writePane(new URLSearchParams(query), {
+    kind: "strategy",
+    ...pane,
+  });
+  const qs = next.toString();
+  return `${path || "/"}${qs ? `?${qs}` : ""}`;
 }

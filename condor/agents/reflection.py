@@ -50,7 +50,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from condor.frontmatter import parse_frontmatter
 from condor.memory.paths import CHAT_SLUG
 from condor.runtime import conversations
 from condor.runtime.conversations import ConversationMeta
@@ -108,21 +107,10 @@ def load_policy(agent_slug: str | None = None) -> str:
     parsed off and discarded — this file is a body, but an override is free to
     carry metadata without it leaking into the prompt.
     """
-    from condor.memory.paths import agent_home_layers, defaults_layers
+    from condor.memory.paths import read_layered_file
 
-    candidates = [home / REFLECT_FILENAME for home in agent_home_layers(agent_slug)]
-    candidates += [d / REFLECT_FILENAME for d in defaults_layers()]
-    for path in candidates:
-        try:
-            if not path.is_file():
-                continue
-            _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-            body = body.strip()
-            if body:
-                return body
-        except Exception:  # noqa: BLE001 - an unreadable policy is not a crash
-            log.warning("Could not read %s", path, exc_info=True)
-    return ""
+    found = read_layered_file(REFLECT_FILENAME, agent_slug, skip_empty_body=True)
+    return found[1] if found else ""
 
 
 def build_prompt(

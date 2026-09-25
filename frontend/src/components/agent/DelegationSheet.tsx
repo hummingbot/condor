@@ -17,6 +17,17 @@ const NO_TRANSCRIPT =
   "A consult returns its answer straight to the caller; only background tasks record a transcript.";
 
 /**
+ * What the sheet reads off a record it was handed: its listing fields, no body.
+ * A full `Delegation` or `DelegationSummary` satisfies it, and so does a run-rail
+ * row narrowed to these fields — which need not invent a user, a chat or an end
+ * it does not carry (ARCH-398).
+ */
+export type DelegationListing = Pick<
+  DelegationSummary,
+  "task_id" | "agent" | "task" | "status" | "kind" | "started_at"
+>;
+
+/**
  * One delegation, opened: the ask, then its transcript or its result.
  *
  * Extracted from the context dock once history gained a third caller — the
@@ -32,7 +43,7 @@ export function DelegationSheet({
   task,
   onClose,
 }: {
-  task: Delegation | DelegationSummary;
+  task: Delegation | DelegationListing;
   onClose: () => void;
 }) {
   const isConsult = (task.kind ?? "delegate") === "consult";

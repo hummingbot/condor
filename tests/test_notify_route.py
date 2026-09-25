@@ -16,7 +16,6 @@ import pytest
 from fastapi import HTTPException
 
 from condor.web.models import WebUser
-from condor.web.routes import agents as agents_routes
 from condor.web.routes.agents import NotifyRequest, notify_user
 from mcp_servers.condor.tools import notification as notification_tool
 
@@ -69,11 +68,24 @@ def notes(monkeypatch):
     return written
 
 
-def _resolves_to(monkeypatch, conversation_id: str):
-    async def fake(session_key: str) -> str:
-        return conversation_id if session_key else ""
+def _resolves_to(monkeypatch, conversation_id: str, owner: int = CALLER.id):
+    """Stub the session registry: a key names a live session recorded under
+    ``owner`` with ``conversation_id`` on it, or no session at all when the
+    conversation id is empty."""
+    from condor.runtime import client
+    from condor.runtime.models import SessionInfo
 
-    monkeypatch.setattr(agents_routes, "_conversation_for_session", fake)
+    async def fake_get_info(key):
+        if not conversation_id:
+            return None
+        return SessionInfo(
+            key=str(key),
+            agent_key="condor",
+            user_id=owner,
+            conversation_id=conversation_id,
+        )
+
+    monkeypatch.setattr(client, "get_info", fake_get_info)
 
 
 # ── The route: one push, one note ──

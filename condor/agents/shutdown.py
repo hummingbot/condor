@@ -20,7 +20,7 @@ import asyncio
 import logging
 from typing import Any
 
-from condor.frontmatter import parse_frontmatter
+from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.runtime.timeouts import resolve_tick_timeout
 
 from .strategy import STRATEGIES_DIRNAME, Strategy
@@ -84,23 +84,18 @@ def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
     strategy happened to resolve from. If nothing is on disk, returns the
     built-in default policy with an empty body.
     """
-    from condor.memory.paths import agent_home_layers, defaults_layers
+    from condor.memory.paths import read_layered_file
 
-    homes = agent_home_layers(strategy.agent_slug)
-    candidates = [
-        *(h / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md" for h in homes),
-        *(h / "shutdown.md" for h in homes),
-        *(d / "shutdown.md" for d in defaults_layers()),
-    ]
-    for path in candidates:
-        if not path.exists():
-            continue
-        try:
-            meta, body = parse_frontmatter(path.read_text())
-            return ShutdownPolicy.from_dict(meta), body.strip()
-        except Exception:
-            log.exception("Failed to parse shutdown.md at %s", path)
-    return ShutdownPolicy(), ""
+    # No skip_empty_body: a frontmatter-only shutdown.md *is* a policy.
+    found = read_layered_file(
+        "shutdown.md",
+        strategy.agent_slug,
+        within=(STRATEGIES_DIRNAME, strategy.slug),
+    )
+    if found is None:
+        return ShutdownPolicy(), ""
+    meta, body = found
+    return ShutdownPolicy.from_dict(meta), body
 
 
 # ---------------------------------------------------------------------------
@@ -169,13 +164,22 @@ def _should_remain_open(position: dict, policy: ShutdownPolicy) -> bool:
 async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
     """This session's running executors -- fresh if possible, else last snapshot.
 
-    Re-runs the core providers so the winddown acts on current truth; on any
+    Re-runs only the executors core provider so the winddown acts on current
+    truth without paying for the positions and account-wide drift reads it
+    would discard. Scoped like the tick: the ledger's bases, so a session that
+    deployed more than its configured bot winds all of them down. On any
     failure it falls back to ``engine._last_skill_data`` (already scoped to this
     session's ``agent_id`` by the last tick).
     """
+    ledger = getattr(engine, "ledger", None)
     try:
         results = await engine.provider_registry.run_core_providers(
-            client, engine.config, agent_id=engine.agent_id
+            client,
+            engine.config,
+            agent_id=engine.agent_id,
+            bot_names=ledger.bases() if ledger else None,
+            owned=ledger.owned() if ledger else None,
+            names=("executors",),
         )
         ex_result = results.get("executors")
         if ex_result is not None and "executors" in getattr(ex_result, "data", {}):
@@ -186,18 +190,15 @@ async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
 
 
 async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
-    """Positions summary scoped to this session (``controller_id``)."""
-    try:
-        result = await client.executors.get_positions_summary(
-            controller_id=agent_id or None
-        )
-    except Exception:
-        log.exception("shutdown: failed to fetch positions summary")
-        return []
-    positions = result.get("positions", result) if isinstance(result, dict) else result
-    if not isinstance(positions, list):
-        positions = [positions] if positions else []
-    return [p for p in positions if isinstance(p, dict)]
+    """Positions summary scoped to this session (``controller_id``).
+
+    Non-strict on purpose: ``run_shutdown`` never raises for an individual API
+    failure and ``_verify_and_retry`` calls this unguarded, so a failed request
+    is logged by the fetcher and reads as no positions.
+    """
+    return await fetch_tracked_positions(
+        client, controller_id=agent_id or None, strict=False
+    )
 
 
 async def _deterministic_baseline(
@@ -211,23 +212,26 @@ async def _deterministic_baseline(
     from condor.fetchers.executors import describe_executor_error, stop_executor
 
     running = await _get_running_executors(engine, client)
-    stopped = 0
-    failures: list[str] = []
-    for ex in running:
+    targets = [ex for ex in running if ex.get("id") or ex.get("executor_id")]
+
+    async def _stop_one(ex: dict) -> str | None:
         ex_id = ex.get("id") or ex.get("executor_id")
-        if not ex_id:
-            continue
-        keep = _keep_position(ex, policy)
         try:
-            await stop_executor(client, ex_id, keep_position=keep)
+            await stop_executor(client, ex_id, keep_position=_keep_position(ex, policy))
         except Exception as e:
             # A raise is the only failure signal: these failures are read back
             # by the operator and by the LLM cleanup pass, so keep the raw
             # exception (which embeds the backend URL) out of them.
             _, message = describe_executor_error(e)
-            failures.append(f"stop {ex_id}: {message}")
-            continue
-        stopped += 1
+            return f"stop {ex_id}: {message}"
+        return None
+
+    # Every stop signal goes out at once (PERF-668): on a hanging API a serial
+    # loop would not even send the last executor's stop until the previous ones
+    # had each hit the client timeout. gather keeps results in ``running`` order.
+    results = await asyncio.gather(*(_stop_one(ex) for ex in targets))
+    failures = [r for r in results if r]
+    stopped = sum(1 for r in results if r is None)
     return stopped, failures
 
 
@@ -248,16 +252,20 @@ async def _verify_and_retry(
     from condor.fetchers.executors import stop_executor
 
     running = await _get_running_executors(engine, client)
-    for ex in running:
-        if _keep_position(ex, policy):
-            continue
+    targets = [
+        ex
+        for ex in running
+        if not _keep_position(ex, policy) and (ex.get("id") or ex.get("executor_id"))
+    ]
+
+    async def _retry_one(ex: dict) -> None:
         ex_id = ex.get("id") or ex.get("executor_id")
-        if not ex_id:
-            continue
         try:
             await stop_executor(client, ex_id, keep_position=False)
         except Exception:
             log.exception("shutdown: retry stop failed for %s", ex_id)
+
+    await asyncio.gather(*(_retry_one(ex) for ex in targets))
 
     positions = await _fetch_positions(client, engine.agent_id)
     return [p for p in positions if not _should_remain_open(p, policy)]
@@ -313,23 +321,33 @@ async def _run_llm_cleanup(
     if not body or agent is None:
         return
     try:
-        from .agent_run import run_agent_to_completion
+        from condor.runtime import context as runtime_context
 
-        running = await _get_running_executors(engine, client)
-        positions = await _fetch_positions(client, engine.agent_id)
+        from .engine import _NullTracker, build_gated_client
+
+        # Independent reads, and each swallows its own failure.
+        running, positions = await asyncio.gather(
+            _get_running_executors(engine, client),
+            _fetch_positions(client, engine.agent_id),
+        )
         context = _build_llm_context(policy, running, positions, failures)
         cleanup_timeout = resolve_tick_timeout(
             strategy=engine.config.get("tick_timeout_sec")
         )
+        prompt = runtime_context.build_agent_context(
+            agent, engine.user_id, body, context
+        )
+        # The tick's own client and gate, in shutdown mode (SEC-631): the same
+        # narrow toolset, and only the brakes are approved — each still bound to
+        # this session's executors and bot namespace.
+        risk_state = engine.risk.get_state(engine.journal or _NullTracker())
+        llm = build_gated_client(engine, risk_state, client, "shutdown")
         async with asyncio.timeout(cleanup_timeout):
-            await run_agent_to_completion(
-                slug=agent.slug,
-                user_id=engine.user_id,
-                chat_id=engine.chat_id,
-                server_name=engine.config.get("server_name"),
-                task=body,
-                context=context,
-            )
+            await llm.start()
+            try:
+                await llm.prompt(prompt)
+            finally:
+                await llm.stop()
     except asyncio.TimeoutError:
         log.warning(
             "TickEngine %s: shutdown LLM cleanup timed out (floor already secured)",
@@ -339,6 +357,24 @@ async def _run_llm_cleanup(
         log.exception(
             "TickEngine %s: shutdown LLM cleanup failed (floor already secured)",
             engine.agent_id,
+        )
+    _journal_cleanup_refusals(engine)
+
+
+def _journal_cleanup_refusals(engine: Any) -> None:
+    """Write what the gate refused during the cleanup pass into the journal.
+
+    The journal is still open here (``TickEngine._run_shutdown`` closes it only
+    in its ``finally``), and nothing drains the refusal log after this: the run
+    ends with the winddown. Never raises — the verify step still has to run.
+    """
+    try:
+        engine._last_refusals = engine._refusals.drain()
+        if engine.journal:
+            engine._journal_refusals(engine.journal.tick_count + 1)
+    except Exception:
+        log.exception(
+            "TickEngine %s: could not journal the cleanup's refusals", engine.agent_id
         )
 
 

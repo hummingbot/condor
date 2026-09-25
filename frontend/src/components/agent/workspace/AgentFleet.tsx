@@ -5,7 +5,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { PerfBrowser } from "@/components/perf/PerfBrowser";
 import { useFleetData } from "@/hooks/useFleetData";
 import { useServer } from "@/hooks/useServer";
-import { attributionOf, ownerRowLabel } from "@/lib/agent-attribution";
+import { attributionIndex, ownerRowLabel } from "@/lib/agent-attribution";
 import type { AgentRunRow } from "@/lib/api";
 import { parsePopulation } from "@/lib/perf-tree";
 
@@ -91,20 +91,17 @@ export function AgentFleet({
    *
    * The one thing the browser cannot say about itself: it is rooted, so its own
    * counts are the root's. Counted over the same records the tree is built from
-   * and by the same rule (`attributionOf`), so the two can never disagree about
+   * and by the same rule (`attributionIndex`), so the two can never disagree about
    * which controllers are this agent's.
    */
   const counts = useMemo(() => {
     const all =
       population === "terminated" ? fleet.terminatedControllers : fleet.controllers;
+    // One index per fold, not one per controller (PERF-409).
+    const agentOf = attributionIndex(fleet.owners, fleet.deeds);
     let mine = 0;
     for (const ctrl of all) {
-      const owned = attributionOf(
-        fleet.owners,
-        fleet.deeds,
-        ctrl.bot_name,
-        ctrl.controller_id || ctrl.controller_name,
-      );
+      const owned = agentOf(ctrl.bot_name, ctrl.controller_id || ctrl.controller_name);
       if (owned.runKey === runKey) mine += 1;
     }
     return { mine, total: all.length };

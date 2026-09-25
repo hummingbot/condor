@@ -6,10 +6,18 @@ live ticks and the web API always agree.
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
+
+from condor.fetchers.executors import describe_executor_error
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
+
+log = logging.getLogger(__name__)
 
 
 class ExecutorsProvider(BaseProvider):
@@ -22,8 +30,9 @@ class ExecutorsProvider(BaseProvider):
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
     ) -> ProviderResult:
+        from condor.agents.attribution import ownership_windows
         from condor.agents.performance import fetch_agent_performance
 
         if not agent_id:
@@ -39,17 +48,27 @@ class ExecutorsProvider(BaseProvider):
         bases = list(bot_names or []) or [config.get("bot_name", "")]
 
         try:
-            # ``since`` slices an adopted bot's history to this session's window,
+            # Each owned base is sliced to the window this session held it over,
             # so what the agent is told it earned is what the dashboard attributes
             # to it — inherited PnL is not reported as its own.
             perf = await fetch_agent_performance(
-                client, agent_id, bot_names=bases, since=since
+                client,
+                agent_id,
+                bot_names=bases,
+                windows=ownership_windows(owned or []),
+                # The session report's curve, cut from the histories these
+                # figures were sliced from, so the tick walks them once.
+                pnl_series=True,
             )
         except Exception as e:
+            # The summary is embedded in the tick prompt and snapshot, and the
+            # raw exception carries the backend URL: keep it in the server log.
+            log.warning("executors provider fetch failed", exc_info=True)
+            _, message = describe_executor_error(e)
             return ProviderResult(
                 name=self.name,
-                data={"error": str(e)},
-                summary=f"Active Executors: failed to fetch ({e})",
+                data={"error": message},
+                summary=f"Active Executors: failed to fetch ({message})",
             )
 
         running = [e for e in perf.executors if e["status"] == "RUNNING"]
@@ -147,6 +166,9 @@ class ExecutorsProvider(BaseProvider):
                 "controllers": perf.controllers,
                 "close_type_counts": perf.close_type_counts,
                 "fees_known": perf.fees_known,
+                # None when it could not be derived here; the engine then fetches
+                # it itself (TickEngine._pnl_series).
+                "pnl_series": perf.pnl_series,
             },
             summary="\n".join(lines),
         )

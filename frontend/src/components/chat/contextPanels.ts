@@ -32,7 +32,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Radio, Zap } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { conversationInstances } from "@/components/chat/DockRoutines";
 import type { RailItem } from "@/components/chat/WorkspaceRail";
@@ -51,6 +51,16 @@ const WIDE = "(min-width: 1280px)";
 export type ContextPaneId = "tasks" | "routines";
 
 const PANES: ContextPaneId[] = ["tasks", "routines"];
+
+/**
+ * The lists before the queries have answered, one identity each.
+ *
+ * A `= []` default is a fresh array on every render while a query is disabled
+ * or still loading, which would break the memo over this hook's result — and
+ * with it `ContextDock`'s — on every 50 ms stream flush (PERF-394).
+ */
+const NO_INSTANCES: RoutineInstance[] = [];
+const NO_ROUTINES: RoutineInfo[] = [];
 
 /**
  * What is open, for a window that has not said.
@@ -115,21 +125,24 @@ export function useContextPanels({
 }): ContextPanels {
   const [shown, setShown] = useState<ContextPaneId[]>(readOpen);
 
-  const write = (next: ContextPaneId[]) => {
-    setShown(next);
-    localStorage.setItem(DOCK_PANES_KEY, JSON.stringify(next));
-  };
+  // Stable for the host's life: the page re-renders on every stream flush, and
+  // a fresh closure here would re-render the memoised dock with it (PERF-394).
+  const toggle = useCallback(
+    (id: ContextPaneId) =>
+      setShown((prev) => {
+        const next = prev.includes(id)
+          ? prev.filter((p) => p !== id)
+          : PANES.filter((p) => p === id || prev.includes(p));
+        localStorage.setItem(DOCK_PANES_KEY, JSON.stringify(next));
+        return next;
+      }),
+    [],
+  );
 
-  const toggle = (id: ContextPaneId) =>
-    setShown((prev) => {
-      const next = prev.includes(id)
-        ? prev.filter((p) => p !== id)
-        : PANES.filter((p) => p === id || prev.includes(p));
-      localStorage.setItem(DOCK_PANES_KEY, JSON.stringify(next));
-      return next;
-    });
-
-  const closeAll = () => write([]);
+  const closeAll = useCallback(() => {
+    setShown([]);
+    localStorage.setItem(DOCK_PANES_KEY, JSON.stringify([]));
+  }, []);
 
   // Crossing the breakpoint re-derives the default for a window that has never
   // said: a narrow one must not wake up with an overlay on the transcript, and
@@ -145,7 +158,7 @@ export function useContextPanels({
 
   const anyOpen = shown.length > 0 || libraryOpen;
 
-  const { data: instances = [] } = useQuery({
+  const { data: instances = NO_INSTANCES } = useQuery({
     queryKey: ["routine-instances"],
     queryFn: api.getRoutineInstances,
     // Polled whenever anything in the dock is up, not only while the Routines
@@ -156,7 +169,7 @@ export function useContextPanels({
 
   // The library itself, for the picker. Shares react-query's cache with the
   // report browser, so the pane it opens costs no second fetch.
-  const { data: routines = [] } = useQuery({
+  const { data: routines = NO_ROUTINES } = useQuery({
     queryKey: ["routines"],
     queryFn: api.getRoutines,
     enabled: anyOpen,
@@ -179,26 +192,33 @@ export function useContextPanels({
    * job of a rail you are meant to watch while you type, and it is why the
    * delegation list is polled by the page rather than by the dock.
    */
-  const railItems: RailItem[] = [
-    {
-      id: "tasks",
-      label: "Tasks",
-      Icon: Radio,
-      hint: "Work handed to other agents from this conversation",
-      active: shown.includes("tasks"),
-      count: mineRunning,
-      onToggle: () => toggle("tasks"),
-    },
-    {
-      id: "routines",
-      label: "Routines",
-      Icon: Zap,
-      hint: "Scripts this agent runs, on demand or on a schedule",
-      active: shown.includes("routines"),
-      count: routinesRunning,
-      onToggle: () => toggle("routines"),
-    },
-  ];
+  const railItems = useMemo<RailItem[]>(
+    () => [
+      {
+        id: "tasks",
+        label: "Tasks",
+        Icon: Radio,
+        hint: "Work handed to other agents from this conversation",
+        active: shown.includes("tasks"),
+        count: mineRunning,
+        onToggle: () => toggle("tasks"),
+      },
+      {
+        id: "routines",
+        label: "Routines",
+        Icon: Zap,
+        hint: "Scripts this agent runs, on demand or on a schedule",
+        active: shown.includes("routines"),
+        count: routinesRunning,
+        onToggle: () => toggle("routines"),
+      },
+    ],
+    [shown, mineRunning, routinesRunning, toggle],
+  );
 
-  return { shown, toggle, closeAll, instances, routines, railItems };
+  // One identity per real change, so `ContextDock`'s memo holds across a flush.
+  return useMemo(
+    () => ({ shown, toggle, closeAll, instances, routines, railItems }),
+    [shown, toggle, closeAll, instances, routines, railItems],
+  );
 }

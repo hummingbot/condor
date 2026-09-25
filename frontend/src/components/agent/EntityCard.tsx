@@ -163,14 +163,15 @@ export function EntityCard({
 }
 
 /** One tile of the card's fact row. */
-function Fact({
+export function Fact({
   label,
   value,
   sub,
   chip,
 }: {
   label: string;
-  value: string;
+  /** A plain string, or a coloured span for a rule this tile has to call out (e.g. overdue). */
+  value: React.ReactNode;
   sub?: string;
   chip?: React.ReactNode;
 }) {
@@ -195,10 +196,10 @@ function Fact({
  *
  * The card's job is to be scanned in a grid, so the cadence facts are tiles and
  * this is the one thing a tile cannot hold: a sentence. It is the deed — a tool
- * call that ran — and not the model's narration of it; `LoopPulse` in the panel
- * behind the click shows both, plus the strip and the error.
+ * call that ran — and not the model's narration of it; the run screen behind
+ * the click shows both, plus the tick spine and the error.
  */
-function LastDeedLine({ did }: { did: NonNullable<RunningInstance["last_did"]> }) {
+export function LastDeedLine({ did }: { did: NonNullable<RunningInstance["last_did"]> }) {
   return (
     <div className="mb-3 rounded-md border border-emerald-500/15 bg-emerald-500/[0.04] px-2 py-1.5">
       <span

@@ -369,6 +369,25 @@ class ConfigManager:
         """Get a specific server configuration."""
         return self._data.get("servers", {}).get(name)
 
+    def server_name_for_client(self, client: Any) -> Optional[str]:
+        """The configured server a client talks to, or ``None`` if it matches none.
+
+        By identity against the clients this manager handed out, else by the
+        ``base_url`` :meth:`get_client` builds from a server's host and port — so
+        a caller holding only a client (the fetchers) can still ask for the
+        server-keyed caches, such as market rates.
+        """
+        for name, (cached, _) in list(self._clients.items()):
+            if cached is client:
+                return name
+        base_url = str(getattr(client, "base_url", "") or "").rstrip("/")
+        if not base_url:
+            return None
+        for name, server in self._data.get("servers", {}).items():
+            if f"http://{server.get('host')}:{server.get('port')}" == base_url:
+                return name
+        return None
+
     def add_server(
         self,
         name: str,

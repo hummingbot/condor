@@ -1,6 +1,7 @@
 import { Fragment } from "react";
 
 import { DockExecution } from "@/components/chat/DockExecution";
+import { DockLoops } from "@/components/chat/DockLoops";
 import { DockPortfolio } from "@/components/chat/DockPortfolio";
 import { DockSection } from "@/components/chat/DockSection";
 import { DockSplitHandle } from "@/components/chat/DockSplitHandle";
@@ -55,6 +56,16 @@ import { DESK_SPLIT_KEY } from "@/lib/sessionState";
  * a tab. That is why a closed `DockSection` unmounts its body rather than
  * hiding it, and it is the one part of the original design that neither move
  * touched.
+ *
+ * **Loops joined as a third section (FEAT-1xx), not a fourth panel.** It used
+ * to be its own sheet — the rail's global "every agent, every server" view,
+ * `LoopsPanel` — which put a reader's own server's loops behind a second
+ * overlay after they had already opened this one, at a width neither of them
+ * chose. `DockLoops` reads the identical cards (`LoopCardGrid`) narrowed to
+ * this panel's own server (`loopsOnServer`, the same rule `DockExecution`'s
+ * agent rows already follow), so the three sections finally answer one
+ * question each at one width instead of two surfaces disagreeing about how
+ * wide a loop card should be.
  */
 export function AccountDock({
   server,
@@ -62,6 +73,7 @@ export function AccountDock({
   onToggle,
   onClose,
   onOpenAgent,
+  onOpenLoop,
 }: {
   server: string | null;
   /** The open sections, from {@link useAccountPanels}. */
@@ -73,14 +85,25 @@ export function AccountDock({
    * execution section, whose agent rows are the only thing here that names one.
    */
   onOpenAgent?: (slug: string) => void;
+  /**
+   * Open a loop's strategy sheet — handed straight to the Loops section, the
+   * same hand-off `LoopsPanel`'s own cards make (FEAT-1xx).
+   */
+  onOpenLoop?: (agentSlug: string, strategySlug: string) => void;
 }) {
   const { frac, setFrac, defaultFrac } = useDockSplit(DESK_SPLIT_KEY);
   if (shown.length === 0 || !server) return null;
 
-  // The seam is only a control while there are two panes to divide: with one
-  // section open it already has the panel, and a handle under it would drag
-  // against a header.
-  const split = shown.length > 1;
+  // The seam only knows how to divide *two* panes — one dragged fraction and
+  // its complement — and only the original two: Portfolio and Execution are
+  // always adjacent in `PANELS`, so the handle's own geometry read
+  // (`previousElementSibling`/`nextElementSibling`) lands on the two `<div>`s
+  // either side of it. Loops sits third, so any pairing that includes it, and
+  // the three-way case, fall back to an even split instead — `DockSection`'s
+  // own default when `share` is omitted — rather than a drag model whose
+  // sibling read would land on the wrong pane the moment a closed section
+  // sits between the two open ones.
+  const split = shown.length === 2 && shown.includes("portfolio") && shown.includes("execution");
 
   return (
     <WorkspaceSheet
@@ -105,9 +128,12 @@ export function AccountDock({
         data-testid="account-dock"
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        {PANELS.map(({ id, label, Icon, hint }, i) => (
+        {PANELS.map(({ id, label, Icon, hint }) => (
           <Fragment key={id}>
-            {split && i > 0 && (
+            {/* Only the Portfolio/Execution pair drags — see `split` above —
+                and only Execution ever needs the handle above it, since
+                Portfolio is always first. */}
+            {split && id === "execution" && (
               <DockSplitHandle
                 frac={frac}
                 setFrac={setFrac}
@@ -120,15 +146,24 @@ export function AccountDock({
               label={label}
               hint={hint}
               open={shown.includes(id)}
-              // The top section keeps `frac` of the panel and the bottom the
-              // rest, which is the same ratio however tall the panel is.
-              share={split ? (i === 0 ? frac : 1 - frac) : undefined}
+              // The dragged split only ever applies to the Portfolio/Execution
+              // pair; every other combination — Loops alone or beside either
+              // one, or all three together — shares evenly, `DockSection`'s
+              // own default when `share` is omitted.
+              share={
+                split ? (id === "portfolio" ? frac : 1 - frac) : undefined
+              }
               onToggle={() => onToggle(id)}
             >
               {id === "portfolio" ? (
                 <DockPortfolio server={server} />
-              ) : (
+              ) : id === "execution" ? (
                 <DockExecution server={server} onOpenAgent={onOpenAgent} />
+              ) : (
+                <DockLoops
+                  server={server}
+                  onOpenLoop={onOpenLoop ?? (() => {})}
+                />
               )}
             </DockSection>
           </Fragment>

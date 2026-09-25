@@ -154,3 +154,29 @@ def test_unassigning_under_an_unknown_strategy_is_404(strategy, client):
     )
 
     assert res.status_code == 404
+
+
+def test_a_claim_without_a_session_goes_to_the_newest_run_after_an_unclaim(
+    strategy, client
+):
+    """The unclaim rewrites every session's ledger, bumping old session dirs'
+    mtimes; the next claim (the UI never sends ``session_num``) must still land
+    in the highest-numbered session, not whichever dir was written last."""
+    import os
+
+    for n in range(1, 11):
+        (_sessions(strategy) / f"session_{n}").mkdir(parents=True)
+    _claimed(strategy, *(f"session_{n}" for n in range(1, 11)))
+    client.post(
+        "/agents/brigado/strategies/pmm_king/unclaim-bot", json={"bot_name": BOT}
+    )
+    os.utime(_sessions(strategy) / "session_10", (1000, 1000))
+
+    res = client.post(
+        "/agents/brigado/strategies/pmm_king/claim-bot",
+        json={"bot_name": BOT, "since": 1000.0},
+    )
+
+    assert res.status_code == 200
+    assert BotLedger(NS, _sessions(strategy) / "session_10").bases() == [BOT]
+    assert BotLedger(NS, _sessions(strategy) / "session_9").bases() == []

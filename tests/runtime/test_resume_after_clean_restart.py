@@ -64,6 +64,7 @@ class _StoppableEngine(SimpleNamespace):
 
     async def stop(self):
         self.supervisor.unregister(self.agent_id, LoopState.STOPPED)
+        return True
 
 
 def _engine(supervisor, session_dir: Path) -> _StoppableEngine:

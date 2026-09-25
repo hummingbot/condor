@@ -9,7 +9,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { applyWorkspacePatch, patchReplaces } from "./workspaceUrl";
+import {
+  applyWorkspacePatch,
+  patchReplaces,
+  workspaceHref,
+} from "./workspaceUrl";
 
 const q = (s: string) => new URLSearchParams(s);
 /** What a patch leaves behind, as a plain string, for readable expectations. */
@@ -107,6 +111,43 @@ describe("applyWorkspacePatch", () => {
         "open=runs&run=s%3A3",
       );
     });
+  });
+});
+
+describe("workspaceHref", () => {
+  it("escapes the slug and writes the keys in the grammar's order", () => {
+    expect(workspaceHref("a b", { strategy: "s", open: "money" })).toBe(
+      "/agents/a%20b?open=money&strategy=s",
+    );
+  });
+
+  it("is a bare address when there is no query", () => {
+    expect(workspaceHref("a")).toBe("/agents/a");
+    expect(workspaceHref("a", { strategy: null })).toBe("/agents/a");
+  });
+
+  it("carries a base's other keys and drops the retired view", () => {
+    expect(
+      workspaceHref("a", { open: "runs" }, "?view=runs&fscope=x&tick=3"),
+    ).toBe("/agents/a?fscope=x&tick=3&open=runs");
+  });
+
+  it("writes fscope after the four keys", () => {
+    expect(
+      workspaceHref("a", {
+        fscope: "agent:a.s",
+        tick: 4,
+        run: "s2",
+        strategy: "s",
+        open: "fleet",
+      }),
+    ).toBe("/agents/a?open=fleet&strategy=s&run=s2&tick=4&fscope=agent%3Aa.s");
+  });
+
+  it("applies the cascades to a base", () => {
+    expect(workspaceHref("a", { strategy: "t" }, "?strategy=s&run=s1&tick=9")).toBe(
+      "/agents/a?strategy=t",
+    );
   });
 });
 
