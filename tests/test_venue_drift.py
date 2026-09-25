@@ -545,3 +545,45 @@ def test_unmeasured_survives_an_unanswered_venue():
     report = check([_held()], None, reason="down", unmeasured=["x (dca P)"])
     assert report.unmeasured == ("x (dca P)",)
     assert "x (dca P)" in summarize(report)
+
+
+# ── Spot holds are out of scope (CORR-711) ──
+
+
+def _spot_held():
+    """A ``PositionHold`` a spot executor left behind with ``keep_position``."""
+    return _held(
+        pair="SOL-USDT",
+        amount=2.0,
+        controller="c1",
+        account="a",
+        connector="binance",
+        price=150.0,
+    )
+
+
+def test_a_spot_hold_is_not_a_ghost():
+    report = check([_spot_held()], [])
+    assert report.rows == ()
+    assert report.drifting_count == 0
+
+
+def test_a_spot_hold_is_not_listed_as_unanswered():
+    report = check([_spot_held()], None)
+    assert report.trusted is False
+    assert report.rows == ()
+    assert "0 tracked row(s)" in summarize(report)
+
+
+def test_a_spot_hold_beside_a_perp_hold_leaves_only_the_perp_row():
+    report = check(
+        [_spot_held(), _held(amount=1.0)],
+        [_venue(amount=1.0)],
+    )
+    row = _one(report)
+    assert row.connector == "binance_perpetual"
+    assert row.verdict == "agreed"
+
+
+def test_a_spot_hold_never_reaches_the_worst_quote():
+    assert worst_quote(check([_spot_held()], []), ["c1"]) is None

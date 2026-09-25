@@ -243,6 +243,15 @@ def test_a_shutting_down_grids_fills_are_tracked_not_an_orphan():
     assert "ORPHAN" not in result.summary
 
 
+def test_a_spot_hold_is_not_reported_as_a_ghost():
+    """The venue side is perps only, so a spot hold can never be verified (CORR-711)."""
+    spot = dict(_held(pair="SOL-USDT", controller="brigado"), connector_name="binance")
+    result = _run(_Client(tracked=[spot], venue=[]), agent_id="brigado")
+    assert result.data["drifting"] == 0
+    assert result.data["worst_quote"] is None
+    assert "GHOST" not in result.summary
+
+
 def test_an_unmeasurable_running_executor_is_named_and_leaves_the_orphan():
     dca = dict(_running_grid(), executor_type="dca_executor", executor_id="dca_1")
     client = _Client(tracked=[], venue=[_venue_row(amount=0.51)], running=[dca])

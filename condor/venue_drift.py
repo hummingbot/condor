@@ -36,7 +36,11 @@ Three rules this module encodes, each the answer to a way of getting it wrong:
    side offered a price — no statement is not zero.
 
 Scope: **perps only**, because upstream's ``/trading/positions`` only queries
-connectors whose name contains ``_perpetual``. Spot inventory is a genuinely
+connectors whose name contains ``_perpetual``. Both tracked inputs are narrowed
+to perps here (:func:`_is_perp`): the active executors in
+:func:`tracked_from_active` and the held rows in :func:`check`, since a spot
+``PositionHold`` can never meet a venue row and would read as a ghost forever
+(CORR-711). Spot inventory is a genuinely
 different comparison (a wallet balance is shared by everything on the account
 and is not a position) and LP/CLMM truth is on-chain; both are out of scope and
 named as such rather than faked here.
@@ -160,6 +164,11 @@ def _price_of(row: Mapping[str, Any], *keys: str) -> float | None:
         if price > 0:
             return price
     return None
+
+
+def _is_perp(connector: str) -> bool:
+    """Whether ``connector`` is one the venue side can answer for at all."""
+    return "_perpetual" in connector
 
 
 def _key(row: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -295,7 +304,7 @@ def tracked_from_active(
         connector = str(
             ex.get("connector_name") or cfg.get("connector_name") or ""
         ).strip()
-        if "_perpetual" not in connector:
+        if not _is_perp(connector):
             continue
         pair = str(ex.get("trading_pair") or cfg.get("trading_pair") or "").strip()
         info = ex.get("custom_info")
@@ -382,8 +391,14 @@ def check(
     ``unmeasured`` names active executors :func:`tracked_from_active` could not
     count; the report carries them so the summary can say so.
     """
+    # Perps only on the tracked side too, before either branch: a spot hold is
+    # neither verifiable (no venue row can ever match it) nor unverified.
     tracked_rows = _fold(
-        tracked or [],
+        (
+            row
+            for row in tracked or []
+            if isinstance(row, Mapping) and _is_perp(_key(row)[1])
+        ),
         amount_keys=("net_amount_base", "amount"),
         price_keys=("buy_breakeven_price", "entry_price", "current_price"),
         take_controllers=True,
