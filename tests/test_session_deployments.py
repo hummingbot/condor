@@ -168,6 +168,45 @@ def test_bot_row_pnl_matches_the_sliced_kpi():
     ] == [74.0, 33.0]
 
 
+def test_an_unpriced_controller_is_flagged_and_left_out_of_its_bots_row():
+    """A quote with no USD rate stays at face value (CORR-703): its row says so,
+    and the bot row does not fold native money into USD figures (CORR-707)."""
+    inst = "ns-bot-20260701-000000"
+    usd = {
+        **_controller(inst, "usd", pnl=20.0, volume=2000.0),
+        "unrealized_pnl_quote": 2.0,
+    }
+    eur = {
+        **_controller(inst, "eur", pnl=10.0, volume=900.0),
+        "unrealized_pnl_quote": 5.0,
+        "quote": "EUR",
+        "usd_converted": False,
+    }
+    perf = _Perf(bot_names=[inst], bot_instances=[inst], controllers=[usd, eur])
+    held = [OwnedBot(base="ns-bot", origin="deployed", since=1.0, last_seen=9e9)]
+
+    # No window: the lifetime fallback sums only the priced controller.
+    rows = build_deployments(held, ["ns-bot"], perf, [], AGENT_ID)
+    bot = _by_kind(rows, "bot")[0]
+    assert (bot.pnl, bot.volume, bot.usd_converted) == (22.0, 2000.0, True)
+    ctrls = {c.label: c for c in _by_kind(rows, "controller")}
+    assert ctrls["eur"].usd_converted is False
+    assert ctrls["usd"].usd_converted is True
+    assert (ctrls["usd"].pnl, ctrls["usd"].volume) == (22.0, 2000.0)
+
+    # With a window: the open book takes only the priced controller's unrealized.
+    windowed = _Perf(
+        bot_names=[inst],
+        bot_instances=[inst],
+        controllers=[usd, eur],
+        base_windows={"ns-bot": (15.0, 1500.0, 2, 1.0)},
+    )
+    bot = _by_kind(build_deployments(held, ["ns-bot"], windowed, [], AGENT_ID), "bot")[
+        0
+    ]
+    assert (bot.pnl, bot.volume) == (17.0, 1500.0)
+
+
 def test_a_stopped_bot_row_carries_its_sliced_window():
     """No live snapshot, so no controllers — but the KPI counts what it realized."""
     owned = [

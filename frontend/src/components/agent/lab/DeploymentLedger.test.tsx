@@ -36,6 +36,7 @@ function row(over: Partial<DeploymentRow> = {}): DeploymentRow {
     pnl: 0,
     volume: 0,
     scope: "bot:ema_trend_loop-20260806-213931",
+    usd_converted: true,
     ...over,
   };
 }
@@ -98,6 +99,27 @@ describe("DeploymentLedger", () => {
       "/bots?scope=bot%3Aema_trend_loop-20260806-213931",
       "/bots?scope=exec%3Ae1",
     ]);
+  });
+
+  it("never states a dollar figure for a row whose quote had no USD rate", async () => {
+    await render([
+      row({
+        kind: "controller",
+        label: "eur_ctrl",
+        pnl: 10,
+        volume: 900,
+        usd_converted: false,
+      }),
+    ]);
+    expect(container.textContent).not.toContain("$");
+    expect(
+      container.querySelector('[title="no USD rate for this quote"]'),
+    ).not.toBeNull();
+  });
+
+  it("formats a converted row as money", async () => {
+    await render([row({ pnl: 10, volume: 900 })]);
+    expect(container.textContent).toContain("$");
   });
 
   it("names the tick that created a row when the join found one", async () => {

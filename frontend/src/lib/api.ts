@@ -1043,6 +1043,11 @@ export interface DeploymentRow {
   volume: number;
   /** The fleet address this row links to: `bot:` / `ctrl:` / `exec:`. */
   scope: string;
+  /**
+   * `false` when `pnl`/`volume` are not USD: a controller whose quote had no
+   * USD rate is left at face value (CORR-707). Rendered as `—`, never as `$`.
+   */
+  usd_converted: boolean;
 }
 
 export interface SessionCanvas {

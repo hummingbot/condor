@@ -444,6 +444,13 @@ class DeploymentRow(BaseModel):
     volume: float = 0.0
     #: The fleet address this row links to (``bot:``/``ctrl:``/``exec:``).
     scope: str = ""
+    #: ``False`` when ``pnl``/``volume`` are not USD: a controller whose quote
+    #: had no USD rate keeps its face value and this flag
+    #: (:func:`condor.fetchers.bot_performance.restate_universe_in_usd`) — the
+    #: ``converted`` convention of :mod:`condor.quote_conversion` (CORR-707). A
+    #: bot row is always USD: its sums leave such a controller out, exactly as
+    #: the bot totals did.
+    usd_converted: bool = True
 
 
 def _instance_for_base(base: str, live: list[str], instances: list[str]) -> str:
@@ -499,11 +506,15 @@ def build_deployments(
 
     rows: list[DeploymentRow] = []
     for bot in sorted(owned, key=lambda b: (b.since, b.base)):
-        mine = [
+        ran = [
             c
             for c in controllers
             if strip_deploy_suffix(str(c.get("bot_name") or "")) == bot.base
         ]
+        # A controller left at face value is not USD, and the bot totals it
+        # came from already excluded it; adding it here would put native money
+        # into a USD row (CORR-707).
+        mine = [c for c in ran if c.get("usd_converted", True) is not False]
         live = bot.base in bot_bases
         window = base_windows.get(bot.base)
         if window is not None:
@@ -563,6 +574,7 @@ def build_deployments(
                 pnl=_controller_pnl(c),
                 volume=float(c.get("volume_traded") or 0.0),
                 scope=f"ctrl:{instance}:{cid}" if instance and cid else "",
+                usd_converted=c.get("usd_converted", True) is not False,
             )
         )
 
