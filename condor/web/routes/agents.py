@@ -1065,6 +1065,9 @@ async def _compute_strategy_performance(
 
     A render in which any executor fetch failed is returned but not cached, so
     the next poll re-fetches instead of serving the failed ids' $0 rows for 30s.
+    An ``unreachable`` render is returned but not cached either (CORR-709):
+    ``get_client`` already rate-limits reconnects, so a 30s entry here would only
+    stack on its fail-fast window. ``no_server``/``no_access`` stay cached.
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
@@ -1230,7 +1233,9 @@ async def _compute_strategy_performance(
     }
 
     result = (sessions, totals, unavailable)
-    if not fetch_failed:
+    # An outage is transient, not a config/permission state: skip the cache so
+    # the first poll after the server recovers prices again (CORR-709).
+    if not fetch_failed and unavailable != "unreachable":
         _cache_set(cache_key, result)
     return result
 

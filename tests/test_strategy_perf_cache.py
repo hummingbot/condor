@@ -73,9 +73,9 @@ def perf_env(tmp_path, monkeypatch):
     # The running-engine registry moved into the supervisor (FEAT-012).
     monkeypatch.setattr(loops_module.get_supervisor(), "_engines", {})
 
-    def use_client(client):
+    def use_client(client, server="srv", reason=""):
         async def _fake_get_client(strategy_dir, default_config, principal):
-            return client, "srv", ""
+            return client, server, reason
 
         monkeypatch.setattr(agents_routes, "_get_client_for_strategy", _fake_get_client)
 
@@ -483,6 +483,47 @@ def test_no_client_rollup_is_still_cached(perf_env):
     sessions, totals = _compute(strategy_dir)
     assert sessions == []
     assert totals["total_pnl"] == 0
+    assert len(agents_routes._PERF_CACHE) == 1
+
+
+def test_unreachable_rollup_is_not_cached(perf_env):
+    """CORR-709: an unreachable server is an outage, not a config state; the
+    first poll after it recovers must price again instead of serving the cached
+    "unreachable" $0 rollup for another 30s."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    use_client(None, "srv", "unreachable")
+
+    sessions, totals, unavailable = asyncio.run(
+        agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
+    )
+    assert unavailable == "unreachable"
+    assert totals["total_pnl"] == 0
+    assert agents_routes._PERF_CACHE == {}
+
+    # Server recovers; no manual cache clear.
+    api = _FakeExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
+    use_client(_FakeClient(api))
+    _sessions, totals, unavailable = asyncio.run(
+        agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
+    )
+    assert unavailable == ""
+    assert totals["total_pnl"] == pytest.approx(1.0)
+    assert len(agents_routes._PERF_CACHE) == 1
+
+
+@pytest.mark.parametrize("server, reason", [("", "no_server"), ("srv", "no_access")])
+def test_config_and_permission_rollups_stay_cached(perf_env, server, reason):
+    """CORR-709: no_server/no_access are config and permission states, not
+    outages, so their rollup keeps the 30s cache."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    use_client(None, server, reason)
+
+    _sessions, _totals, unavailable = asyncio.run(
+        agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
+    )
+    assert unavailable == reason
     assert len(agents_routes._PERF_CACHE) == 1
 
 
