@@ -101,6 +101,10 @@ class DriftReport:
     trusted: bool = True  # False when the venue did not answer
     reason: str = ""  # why not, when not
     accounts: tuple[str, ...] = ()
+    # Running executors whose open inventory could not be read, so they could not
+    # be counted on the tracked side. Named so an orphan on their pair is read
+    # with that in mind — never silently scored as agreement.
+    unmeasured: tuple[str, ...] = ()
 
     @property
     def drifting_count(self) -> int:
@@ -203,6 +207,125 @@ def _fold(
     return folded
 
 
+# ── Running executors as tracked rows ──
+
+#: The executor types whose open inventory the API exposes while they run, and
+#: where. Grid: ``custom_info.position_size_quote`` is its open filled position
+#: (``position_size_base * position_break_even_price``). Position:
+#: ``filled_amount_quote`` is ``open_filled_amount * entry_price`` plus the close
+#: order's fills — and a position executor places its close order only as it
+#: leaves RUNNING, so while it runs that sum is the open inventory. In both,
+#: ``custom_info.current_position_average_price`` is the price it was valued at,
+#: so the division gives the base back exactly rather than estimating it.
+_MEASURED_TYPES = frozenset({"grid", "position"})
+
+_TRADE_SIDE = {
+    "1": "LONG",
+    "buy": "LONG",
+    "long": "LONG",
+    "2": "SHORT",
+    "sell": "SHORT",
+    "short": "SHORT",
+}
+
+
+def _executor_kind(ex: Mapping[str, Any], cfg: Mapping[str, Any]) -> str:
+    raw = str(ex.get("executor_type") or cfg.get("type") or ex.get("type") or "")
+    return raw.strip().lower().replace("_executor", "").replace("executor", "")
+
+
+def _position_side(*candidates: Any) -> str:
+    """``LONG``/``SHORT`` from any TradeType encoding, or ``""`` when none reads.
+
+    The same side arrives as ``1``/``2``, ``BUY``/``SELL`` or a stringified enum
+    (``TradeType.SELL``) depending on which serializer produced the row.
+    """
+    for raw in candidates:
+        word = str(raw if raw is not None else "").strip()
+        prefix, _, tail = word.rpartition(".")
+        if prefix and tail.isalpha():
+            word = tail
+        side = _TRADE_SIDE.get(word.lower())
+        if side:
+            return side
+    return ""
+
+
+def tracked_from_active(
+    executors: Iterable[Mapping[str, Any]] | None,
+) -> tuple[list[dict], list[str]]:
+    """Running executors' open inventory, as ``PositionHold``-shaped tracked rows.
+
+    The API's ``position_holds`` only learns about a position when an executor
+    stops with ``keep_position=True``; a **running** grid or position executor's
+    fills are on the venue and nowhere on the tracked side, so without this every
+    live directional executor reads as an orphan (CORR-708).
+
+    Returns ``(rows, unmeasured)``. Only perp connectors are considered — the
+    venue side is perps only, so a spot executor here would read as a ghost. A
+    running perp executor whose inventory cannot be read (a type that does not
+    expose it, or a missing amount, price or side) is **not guessed at**: it goes
+    to ``unmeasured`` as ``"<id> (<type> <pair>)"`` and contributes nothing, so a
+    venue position it might explain still reads as an orphan. Under-counting the
+    tracked side is the direction that cannot hide exposure.
+    """
+    rows: list[dict] = []
+    unmeasured: list[str] = []
+    for ex in executors or []:
+        if not isinstance(ex, Mapping):
+            continue
+        if str(ex.get("status") or "").strip().upper() != "RUNNING":
+            continue
+        cfg = ex.get("config")
+        cfg = cfg if isinstance(cfg, Mapping) else {}
+        connector = str(
+            ex.get("connector_name") or cfg.get("connector_name") or ""
+        ).strip()
+        if "_perpetual" not in connector:
+            continue
+        pair = str(ex.get("trading_pair") or cfg.get("trading_pair") or "").strip()
+        info = ex.get("custom_info")
+        info = info if isinstance(info, Mapping) else {}
+        kind = _executor_kind(ex, cfg)
+        ex_id = str(ex.get("executor_id") or ex.get("id") or "").strip()
+        label = f"{ex_id or '?'} ({kind or 'unknown'} {pair or '?'})"
+
+        if kind == "grid":
+            quote_raw = info.get("position_size_quote")
+        elif kind == "position":
+            quote_raw = ex.get("filled_amount_quote")
+        else:
+            quote_raw = None
+        if kind not in _MEASURED_TYPES or quote_raw is None:
+            unmeasured.append(label)
+            continue
+
+        quote = abs(_as_float(quote_raw))
+        if quote <= _FLAT_EPS:
+            continue  # running, nothing filled: holds nothing
+        price = _price_of(info, "current_position_average_price")
+        side = _position_side(info.get("side"), ex.get("side"), cfg.get("side"))
+        if price is None or not side:
+            unmeasured.append(label)
+            continue
+
+        rows.append(
+            {
+                "account_name": str(
+                    ex.get("account_name") or cfg.get("account_name") or ""
+                ).strip(),
+                "connector_name": connector,
+                "trading_pair": pair,
+                "position_side": side,
+                "net_amount_base": quote / price,
+                "buy_breakeven_price": price,
+                "controller_id": str(ex.get("controller_id") or "").strip(),
+                "executor_ids": [ex_id] if ex_id else [],
+            }
+        )
+    return rows, unmeasured
+
+
 # ── The check ──
 
 
@@ -229,6 +352,7 @@ def check(
     venue: list[dict] | None,
     *,
     reason: str = "",
+    unmeasured: Sequence[str] = (),
 ) -> DriftReport:
     """Compare the tracked book against the venue's.
 
@@ -238,6 +362,9 @@ def check(
     did not answer — the report is untrusted, every row reads ``unanswered``,
     and ``reason`` says why. That is the one distinction that matters most: an
     unreachable venue must never be scored as agreement.
+
+    ``unmeasured`` names running executors :func:`tracked_from_active` could not
+    count; the report carries them so the summary can say so.
     """
     tracked_rows = _fold(
         tracked or [],
@@ -269,6 +396,7 @@ def check(
             trusted=False,
             reason=reason or "venue did not answer",
             accounts=tuple(sorted({k[0] for k in tracked_rows})),
+            unmeasured=tuple(unmeasured),
         )
 
     venue_rows = _fold(
@@ -316,6 +444,7 @@ def check(
         trusted=True,
         reason="",
         accounts=tuple(sorted({r.account for r in rows})),
+        unmeasured=tuple(unmeasured),
     )
 
 
@@ -408,6 +537,17 @@ def summarize(
     Formatting lives here so the provider is I/O and nothing else, and so a
     future dashboard surface renders the same verdicts from the same words.
     """
+    text = _summarize_rows(report, controller_ids)
+    if report.unmeasured:
+        text += (
+            f"\n  {len(report.unmeasured)} running executor(s) expose no readable "
+            "inventory and are not counted on the tracked side, so an orphan on "
+            "their pair may be theirs: " + ", ".join(report.unmeasured)
+        )
+    return text
+
+
+def _summarize_rows(report: DriftReport, controller_ids: Collection[str] | None) -> str:
     if not report.trusted:
         head = (
             f"Book vs venue — THE VENUE DID NOT ANSWER: {report.reason}. "

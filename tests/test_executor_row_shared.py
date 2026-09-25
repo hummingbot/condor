@@ -155,7 +155,15 @@ MARKERS = ("current_position_average_price", "break_even_price", "held_position_
 # export, where the row's price is by definition the close price and the
 # timestamps arrive as ISO strings. It is listed here so a real second copy of the
 # live transform still trips the assertion below.
-KNOWN_SEPARATE_TRANSFORMS = {"condor/fetchers/archived_run.py"}
+#
+# ``condor/venue_drift.py`` is not a display row either: ``tracked_from_active``
+# divides a running executor's open quote by the exact price it was valued at
+# (CORR-708). The display chain would substitute ``config.entry_price`` first —
+# a position executor's limit price, not its fill — and misstate the base.
+KNOWN_SEPARATE_TRANSFORMS = {
+    "condor/fetchers/archived_run.py",
+    "condor/venue_drift.py",
+}
 
 
 @pytest.mark.parametrize("marker", MARKERS)

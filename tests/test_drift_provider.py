@@ -19,16 +19,25 @@ from condor.agents.providers.drift import DriftProvider, owned_controller_ids
 
 
 class _Executors:
-    def __init__(self, positions, raises=None):
+    def __init__(self, positions, raises=None, running=(), running_raises=None):
         self.positions = positions
         self.raises = raises
         self.calls = []
+        self.running = list(running)
+        self.running_raises = running_raises
+        self.search_calls = []
 
     async def get_positions_summary(self, controller_id=None):
         self.calls.append(controller_id)
         if self.raises:
             raise self.raises
         return {"positions": self.positions}
+
+    async def search_executors(self, **kwargs):
+        self.search_calls.append(kwargs)
+        if self.running_raises:
+            raise self.running_raises
+        return {"data": self.running, "pagination": {"has_more": False}}
 
 
 class _Trading:
@@ -43,8 +52,18 @@ class _Trading:
 
 
 class _Client:
-    def __init__(self, tracked=(), venue=(), tracked_raises=None, venue_raises=None):
-        self.executors = _Executors(list(tracked), tracked_raises)
+    def __init__(
+        self,
+        tracked=(),
+        venue=(),
+        tracked_raises=None,
+        venue_raises=None,
+        running=(),
+        running_raises=None,
+    ):
+        self.executors = _Executors(
+            list(tracked), tracked_raises, running, running_raises
+        )
         self.trading = _Trading(list(venue), venue_raises)
 
 
@@ -68,6 +87,26 @@ def _venue_row(pair="SOL-PERP", amount=10.0):
         "side": "LONG",
         "amount": amount,
         "entry_price": 100.0,
+    }
+
+
+def _running_grid(pair="SOL-PERP", base=0.51, price=100.0, controller="brigado.mm_1"):
+    """A running LONG grid as ``search_executors`` returns it, with fills."""
+    return {
+        "executor_id": "j5B2VAi4",
+        "executor_type": "grid_executor",
+        "account_name": "master",
+        "connector_name": "binance_perpetual",
+        "trading_pair": pair,
+        "controller_id": controller,
+        "status": "RUNNING",
+        "side": "BUY",
+        "filled_amount_quote": 90.0,
+        "custom_info": {
+            "side": "TradeType.BUY",
+            "position_size_quote": base * price,
+            "current_position_average_price": price,
+        },
     }
 
 
@@ -102,6 +141,67 @@ def test_the_tracked_side_is_fetched_unscoped():
     client = _Client(tracked=[_held()], venue=[_venue_row()])
     _run(client)
     assert client.executors.calls == [None]
+
+
+def test_running_executors_are_fetched_account_wide_and_running_only():
+    client = _Client(tracked=[_held()], venue=[_venue_row()])
+    _run(client)
+    assert len(client.executors.search_calls) == 1
+    call = client.executors.search_calls[0]
+    assert call["status"] == "RUNNING"
+    assert "controller_ids" not in call and "account_names" not in call
+
+
+# ── CORR-708: a running executor's inventory is tracked, not an orphan ──
+
+
+def test_a_running_grids_fills_agree_with_the_venue_and_are_yours():
+    client = _Client(
+        tracked=[], venue=[_venue_row(amount=0.51)], running=[_running_grid()]
+    )
+    result = _run(client)
+    rows = result.data["report"]["rows"]
+    assert [r["verdict"] for r in rows] == ["agreed"]
+    assert rows[0]["controller_ids"] == ("brigado.mm_1",)
+    assert result.data["mine"] == ["brigado.mm_1"]
+    assert result.data["drifting"] == 0
+    assert "ORPHAN" not in result.summary
+
+
+def test_a_venue_position_no_executor_explains_is_still_an_orphan():
+    client = _Client(
+        tracked=[_held(pair="BTC-PERP", amount=1.0)],
+        venue=[_venue_row(pair="BTC-PERP", amount=1.0), _venue_row(amount=0.51)],
+        running=[_running_grid(pair="ETH-PERP")],
+    )
+    result = _run(client)
+    verdicts = {r["pair"]: r["verdict"] for r in result.data["report"]["rows"]}
+    assert verdicts == {"BTC-PERP": "agreed", "ETH-PERP": "ghost", "SOL-PERP": "orphan"}
+    assert "ORPHAN" in result.summary
+
+
+def test_a_failed_running_executors_read_fails_the_provider():
+    """Never half a book: the fills would read as orphans, or worse, as agreed."""
+    client = _Client(
+        tracked=[_held()],
+        venue=[_venue_row()],
+        running_raises=RuntimeError("executors down"),
+    )
+    with pytest.raises(RuntimeError, match="executors down"):
+        _run(client)
+
+    results = asyncio.run(ProviderRegistry().run_core_providers(client, {}))
+    assert results["drift"].summary == "(provider drift failed)"
+    assert results["drift"].data == {}
+
+
+def test_an_unmeasurable_running_executor_is_named_and_leaves_the_orphan():
+    dca = dict(_running_grid(), executor_type="dca_executor", executor_id="dca_1")
+    client = _Client(tracked=[], venue=[_venue_row(amount=0.51)], running=[dca])
+    result = _run(client)
+    assert [r["verdict"] for r in result.data["report"]["rows"]] == ["orphan"]
+    assert result.data["report"]["unmeasured"] == ("dca_1 (dca SOL-PERP)",)
+    assert "dca_1 (dca SOL-PERP)" in result.summary
 
 
 def test_a_mismatch_reaches_the_summary_and_the_worst_quote():

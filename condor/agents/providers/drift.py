@@ -19,7 +19,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from condor import venue_drift
-from condor.fetchers.executors import describe_executor_error
+from condor.fetchers.executors import describe_executor_error, fetch_all_executors
 from condor.fetchers.positions import fetch_positions
 from condor.fetchers.tracked_positions import fetch_tracked_positions
 
@@ -79,16 +79,28 @@ class DriftProvider(BaseProvider):
         # read as an orphan. The agent's own involvement is an annotation on the
         # account's drift, never a filter of it.
         #
-        # The two reads are independent, so they go out together. A failed
-        # tracked read still fails the provider (the registry records it); only
-        # a failed venue read degrades to "unanswered".
-        tracked, venue = await asyncio.gather(
+        # The tracked side is two reads: the held book (``position_holds``,
+        # written only when an executor stops with ``keep_position=True``) and
+        # the running executors' open inventory, which is on the venue and in no
+        # hold — without it every live grid or position executor reads as an
+        # orphan (CORR-708). All three reads are independent, so they go out
+        # together. A failed read of either tracked half fails the provider (the
+        # registry records it): half a book scored against the venue would name
+        # the running executors' fills as orphans. Only a failed venue read
+        # degrades to "unanswered".
+        held, venue, active = await asyncio.gather(
             fetch_tracked_positions(client, strict=True),
             fetch_positions(client, strict=True),
+            fetch_all_executors(client, status="RUNNING"),
             return_exceptions=True,
         )
-        if isinstance(tracked, BaseException):
-            raise tracked
+        if isinstance(held, BaseException):
+            raise held
+        if isinstance(active, BaseException):
+            raise active
+        running, unmeasured = venue_drift.tracked_from_active(active)
+        tracked = held + running
+
         if isinstance(venue, Exception):
             # An unreachable venue is not a flat venue. ``strict=True`` is how
             # the fetcher already draws that line; refusing to swallow it here
@@ -97,11 +109,13 @@ class DriftProvider(BaseProvider):
             # carries the backend URL) — clipped, as an API detail can be long.
             log.warning("drift provider venue fetch failed", exc_info=venue)
             _, message = describe_executor_error(venue)
-            report = venue_drift.check(tracked, None, reason=message[:120])
+            report = venue_drift.check(
+                tracked, None, reason=message[:120], unmeasured=unmeasured
+            )
         elif isinstance(venue, BaseException):
             raise venue
         else:
-            report = venue_drift.check(tracked, venue)
+            report = venue_drift.check(tracked, venue, unmeasured=unmeasured)
 
         mine = owned_controller_ids(agent_id, tracked)
         worst = venue_drift.worst_quote(report, mine)
