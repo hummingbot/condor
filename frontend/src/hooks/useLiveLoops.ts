@@ -97,6 +97,13 @@ export function loopStats(
  * and the desk's own Loops section) narrows it back down: a strategy with no
  * declared server follows the ambient one instead of being excluded. Extracted
  * so the two panels cannot drift into filtering it two different ways.
+ *
+ * A loop whose agent is not in `agents` is dropped whenever there is a server
+ * to scope to (CORR-431): `fleet-map` and the roster are separate queries, so
+ * a missing agent is usually a roster still loading, and a loop that cannot be
+ * placed on a server must not be counted on this one. Callers that decide
+ * something from the result (the desk's Loops auto-open) must also wait for
+ * the roster, not just `fleet-map`.
  */
 export function loopsOnServer(
   loops: LiveFleetOwner[],
@@ -106,7 +113,7 @@ export function loopsOnServer(
   if (!server) return loops;
   return loops.filter((loop) => {
     const agent = agents.find((a) => a.slug === loop.agentSlug);
-    if (!agent) return true;
+    if (!agent) return false;
     const strategy =
       (agent.strategies ?? []).find((s) => s.slug === loop.strategySlug) ?? null;
     const declared = declaredServerOf(agent, strategy);

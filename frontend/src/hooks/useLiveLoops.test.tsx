@@ -263,14 +263,32 @@ describe("loopStats", () => {
       expect(loopsOnServer(loops, [], null)).toBe(loops);
     });
 
-    it("keeps a loop with no agent in the roster — the roster join missed, not a fact about its server", () => {
+    it("drops a loop with no agent in the roster — it cannot be placed on this server (CORR-431)", () => {
       const loop = owner({
         agentSlug: "ghost",
         strategySlug: "brl_mm",
         live: live(),
       }) as never;
 
-      expect(loopsOnServer([loop], [], "brigado_2")).toEqual([loop]);
+      expect(loopsOnServer([loop], [], "brigado_2")).toEqual([]);
+    });
+
+    it("drops a loop whose agent is missing from a loaded roster, keeps the known one", () => {
+      const known = owner({
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        live: live(),
+      }) as never;
+      const ghost = owner({
+        agentSlug: "ghost",
+        strategySlug: "brl_mm",
+        live: live(),
+      }) as never;
+      const agents = [agentWithStrategies("brigado_2", [{ slug: "brl_mm" }])];
+
+      expect(loopsOnServer([known, ghost], agents, "brigado_2")).toEqual([
+        known,
+      ]);
     });
 
     it("drops a loop declared on another server, keeps the one declared here (CORR-429)", () => {

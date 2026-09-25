@@ -207,7 +207,9 @@ export function AgentChatTab() {
   }, []);
 
   // The shared roster: key and cadence live in `agentsQuery`.
-  const { data: agents = [] } = useQuery(agentsQuery());
+  const { data: agents = [], isLoading: agentsLoading } = useQuery(
+    agentsQuery(),
+  );
   const { data: delegationData } = useQuery({
     queryKey: ["delegations"],
     queryFn: api.getDelegations,
@@ -512,7 +514,13 @@ export function AgentChatTab() {
     // this browser happened to have recorded (FEAT-114).
     desk: searchParams.get(DESK_PARAM),
     onOpenChange: (open) => openPane(open ? { kind: "desk" } : null),
-    loopsActivity: { count: loopsHere.length, isLoading: loopsLoading },
+    // Settled only once the roster has too: `loopsOnServer` cannot place a
+    // loop without its agent, so a roster still loading reads as zero here
+    // and would otherwise decide the Loops default from it (CORR-431).
+    loopsActivity: {
+      count: loopsHere.length,
+      isLoading: loopsLoading || agentsLoading,
+    },
   });
   const conversationId = activeSlot?.info.conversation_id || "";
   const context = useContextPanels({

@@ -33,8 +33,13 @@ export function DockLoops({
   server: string;
   onOpenLoop: (agentSlug: string, strategySlug: string) => void;
 }) {
-  const { loops, isLoading } = useLiveLoops();
-  const { data: agents = [] } = useQuery(agentsQuery());
+  const { loops, isLoading: loopsLoading } = useLiveLoops();
+  const { data: agents = [], isLoading: agentsLoading } = useQuery(
+    agentsQuery(),
+  );
+  // `loopsOnServer` drops a loop it cannot place without the roster
+  // (CORR-431), so "nothing looping" is not an answer until both have loaded.
+  const isLoading = loopsLoading || agentsLoading;
   const scoped = useMemo(
     () => loopsOnServer(loops, agents, server),
     [loops, agents, server],
