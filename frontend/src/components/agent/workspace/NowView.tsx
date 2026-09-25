@@ -12,8 +12,9 @@ import { sessionPnlPoints } from "@/components/agent/session/pnlPoints";
 import { OutsideWindow } from "@/components/agent/workspace/OutsideWindow";
 import type { WorkspaceAlert } from "@/components/agent/workspace/views";
 import { ReportViewer } from "@/components/routines/ReportViewer";
-import { api, type AgentPerformance } from "@/lib/api";
+import { api, type AgentPerformance, type StrategyUnavailable } from "@/lib/api";
 import type { Decision, ParsedJournal } from "@/lib/parse-agent";
+import { unavailableLabel } from "@/lib/strategy-unavailable";
 
 /**
  * What this run is and what it did, with nothing to click first (FEAT-119).
@@ -40,6 +41,7 @@ export function NowView({
   decisions,
   deployments,
   perf,
+  unavailable,
   journal,
   pnlSeries,
   onOpenTick,
@@ -56,6 +58,11 @@ export function NowView({
   deployments: React.ComponentProps<typeof DeploymentLedger>["rows"];
   /** What the run's records are worth, for the vitals strip. */
   perf: AgentPerformance | null;
+  /**
+   * Why `perf` is empty when it is not "traded nothing" (CORR-430). The vitals
+   * already hide on an all-zero answer; this says the zeros are unread, not real.
+   */
+  unavailable?: StrategyUnavailable;
   /** The run's journal, for the chart's fallback series. */
   journal: ParsedJournal | null;
   pnlSeries?: { timestamp: string; pnl: number }[] | null;
@@ -84,6 +91,7 @@ export function NowView({
   const report = reportData?.report ?? null;
 
   const priced = hasPricedMoney(perf);
+  const unavailableNote = unavailableLabel(unavailable);
   const metrics = journal?.metrics;
   const points = useMemo(
     () => (metrics ? sessionPnlPoints(metrics, pnlSeries) : []),
@@ -113,6 +121,14 @@ export function NowView({
           is priced money to put in them — a run that never traded reporting
           seven `+$0.00` tiles is the absence of a fact printed as a fact — and
           the curve only from two points up. */}
+      {unavailableNote && (
+        <p
+          data-now-unavailable
+          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs text-amber-500/90"
+        >
+          {unavailableNote}
+        </p>
+      )}
       {priced || hasChart ? (
         <section
           data-now-money

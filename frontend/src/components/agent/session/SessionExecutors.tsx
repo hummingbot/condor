@@ -13,6 +13,7 @@ import { type AgentExecutorRow, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { pnlTextClass } from "@/lib/formatters";
 import { formatWithRate } from "@/lib/rates";
+import { unavailableLabel } from "@/lib/strategy-unavailable";
 
 // ── Helper ──
 
@@ -172,6 +173,20 @@ export function SessionExecutors({
       <div className="flex h-32 items-center justify-center">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
       </div>
+    );
+  }
+
+  // No rows because the server could not be read is a third fact (CORR-430):
+  // it says why, instead of the empty state claiming nothing traded.
+  const unavailable = unavailableLabel(sessionDetail.unavailable);
+  if (unavailable && executorInfos.length === 0) {
+    return (
+      <p
+        data-session-unavailable
+        className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs leading-relaxed text-amber-500/90"
+      >
+        {unavailable}
+      </p>
     );
   }
 

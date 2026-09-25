@@ -208,7 +208,7 @@ export function AgentRunScreen({
   // One run, in the three readings the answer stack is cut from. Read at this
   // level so the bands are served from one round of requests rather than each
   // declaring the query it wants.
-  const { alerts, decisions, journal, deployments, perf, pnlSeries, sessionNum } =
+  const { alerts, decisions, journal, deployments, perf, pnlSeries, sessionNum, unavailable } =
     useRunReading({ slug, sslug, run: selectedRun });
 
   // The controllers whose executors the Runs tab's market chart streams: the
@@ -308,6 +308,7 @@ export function AgentRunScreen({
       decisions={decisions}
       deployments={deployments}
       perf={perf}
+      unavailable={unavailable}
       journal={journal}
       pnlSeries={pnlSeries}
       onOpenTick={(next) => setParams({ tick: next })}

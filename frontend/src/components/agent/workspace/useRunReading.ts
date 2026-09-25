@@ -12,6 +12,7 @@ import {
   type AgentPerformance,
   type AgentRunRow,
   type DeploymentRow,
+  type StrategyUnavailable,
 } from "@/lib/api";
 import { parseJournal, type Decision, type ParsedJournal } from "@/lib/parse-agent";
 
@@ -53,6 +54,8 @@ export function useRunReading({
   pnlSeries: { timestamp: string; pnl: number }[] | null;
   /** 0 when the scope has no session run, which is what gates every query. */
   sessionNum: number;
+  /** Why `perf` is empty when it is not "traded nothing" (CORR-430); `""` otherwise. */
+  unavailable: StrategyUnavailable;
 } {
   const sessionNum = run && run.kind === "session" && sslug ? run.number : 0;
   const enabled = !!sslug && sessionNum > 0;
@@ -116,6 +119,7 @@ export function useRunReading({
     perf: perfData?.performance ?? null,
     pnlSeries: perfData?.pnl_series ?? null,
     sessionNum,
+    unavailable: perfData?.unavailable ?? "",
   };
 }
 

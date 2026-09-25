@@ -240,6 +240,20 @@ describe("the vitals", () => {
     expect(sub.querySelector(".truncate")).not.toBeNull();
   });
 
+  it("give way to the reason when the server could not be read (CORR-430)", async () => {
+    await render({ perf: null, journal: summary(), unavailable: "no_access" });
+    expect(container.querySelector("[data-now-unavailable]")?.textContent).toBe(
+      "Server access unavailable for this strategy",
+    );
+    expect(text()).not.toContain("Total PnL");
+    expect(text()).not.toContain("$0");
+  });
+
+  it('say nothing extra when "unavailable" is ""', async () => {
+    await render({ perf: null, journal: summary(), unavailable: "" });
+    expect(container.querySelector("[data-now-unavailable]")).toBeNull();
+  });
+
   it("are absent for a run that never traded, rather than eight zeroes", async () => {
     await render({ perf: null, journal: summary() });
     expect(text()).not.toContain("Total PnL");

@@ -120,6 +120,7 @@ import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
+import { unavailableLabel } from "@/lib/strategy-unavailable";
 import { useViewFacts } from "@/lib/viewFacts";
 import {
   attributionIndex,
@@ -781,6 +782,9 @@ export function PerfBrowser({
     () => (runQueryOn ? runRecords(runLedger?.deployments) : null),
     [runQueryOn, runLedger],
   );
+  // Why the run filters to nothing when its server could not be read (CORR-430):
+  // an empty ledger then means "unread", not "deployed nothing".
+  const runUnavailable = runQueryOn ? unavailableLabel(runLedger?.unavailable) : "";
   const clearRun = useCallback(
     () => (onClearRun ? onClearRun() : setParam("run", "", "")),
     [onClearRun, setParam],
@@ -2713,6 +2717,11 @@ export function PerfBrowser({
                 >
                   <X className="h-2.5 w-2.5" />
                 </button>
+              </span>
+            )}
+            {runUnavailable && (
+              <span data-run-unavailable className="shrink-0 text-[10px] text-amber-500/90">
+                {runUnavailable}
               </span>
             )}
             <div className="flex items-center border border-[var(--color-border)] rounded overflow-hidden mr-1">

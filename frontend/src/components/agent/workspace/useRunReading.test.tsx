@@ -142,6 +142,44 @@ describe("useRunReading polling", () => {
   });
 });
 
+describe("useRunReading's unavailable reason (CORR-430)", () => {
+  let reasons: string[] = [];
+  function ReasonProbe() {
+    reasons.push(useRunReading({ slug: "brigado", sslug: "brl_mm", run: run("stopped") }).unavailable);
+    return null;
+  }
+  async function mountReason() {
+    reasons = [];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <ReasonProbe />
+        </QueryClientProvider>,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("hands out the session-executors response's reason", async () => {
+    getStrategySessionExecutors.mockResolvedValue({
+      deployments: [],
+      performance: null,
+      pnl_series: [],
+      unavailable: "unreachable",
+    });
+    await mountReason();
+    expect(reasons.at(-1)).toBe("unreachable");
+  });
+
+  it('reads an older backend that omits it as ""', async () => {
+    await mountReason();
+    expect(reasons.at(-1)).toBe("");
+  });
+});
+
 describe("the run screen raises no overdue alert (READ-424)", () => {
   // The loop bar above the tabs already counts a late tick in amber and never
   // unmounts, so the hook no longer reads the live engine at all: no overdue
