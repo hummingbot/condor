@@ -83,23 +83,28 @@ class DriftProvider(BaseProvider):
         # written only when an executor stops with ``keep_position=True``) and
         # the running executors' open inventory, which is on the venue and in no
         # hold — without it every live grid or position executor reads as an
-        # orphan (CORR-708). All three reads are independent, so they go out
-        # together. A failed read of either tracked half fails the provider (the
-        # registry records it): half a book scored against the venue would name
-        # the running executors' fills as orphans. Only a failed venue read
-        # degrades to "unanswered".
-        held, venue, active = await asyncio.gather(
+        # orphan (CORR-708). "Active" is RUNNING plus SHUTTING_DOWN: a stopping
+        # executor keeps its fills on the venue until its close order lands,
+        # which a rejected-and-retried close can stretch indefinitely (CORR-710).
+        # The API filters on one status, so that is two reads. All four reads
+        # are independent, so they go out together. A failed read of either
+        # tracked half fails the provider (the registry records it): half a book
+        # scored against the venue would name the active executors' fills as
+        # orphans. Only a failed venue read degrades to "unanswered".
+        held, venue, running_rows, shutting_rows = await asyncio.gather(
             fetch_tracked_positions(client, strict=True),
             fetch_positions(client, strict=True),
             fetch_all_executors(client, status="RUNNING"),
+            fetch_all_executors(client, status="SHUTTING_DOWN"),
             return_exceptions=True,
         )
-        if isinstance(held, BaseException):
-            raise held
-        if isinstance(active, BaseException):
-            raise active
-        running, unmeasured = venue_drift.tracked_from_active(active)
-        tracked = held + running
+        for read in (held, running_rows, shutting_rows):
+            if isinstance(read, BaseException):
+                raise read
+        active, unmeasured = venue_drift.tracked_from_active(
+            running_rows + shutting_rows
+        )
+        tracked = held + active
 
         if isinstance(venue, Exception):
             # An unreachable venue is not a flat venue. ``strict=True`` is how

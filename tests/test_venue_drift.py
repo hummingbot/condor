@@ -466,21 +466,57 @@ def test_unreadable_running_executors_are_named_and_never_counted():
     ]
     report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)], unmeasured=unmeasured)
     assert _one(report).verdict == "orphan"
-    assert "5 running executor(s) expose no readable inventory" in summarize(report)
+    assert "5 active executor(s) expose no readable inventory" in summarize(report)
     assert "d1 (dca SOL-USDT)" in summarize(report)
 
 
-def test_spot_and_non_running_executors_are_out_of_scope():
+def test_spot_and_inactive_executors_are_out_of_scope():
     rows, unmeasured = tracked_from_active(
         [
             _running(connector="binance"),  # spot: the venue side is perps only
             _running(kind="lp_executor", connector="meteora/clmm"),
             _running(status="TERMINATED"),
-            _running(status="SHUTTING_DOWN"),
+            _running(kind="position_executor", status="TERMINATED"),
+            _running(connector="binance", status="SHUTTING_DOWN"),
             "not a row",  # type: ignore[list-item]
         ]
     )
     assert rows == [] and unmeasured == []
+
+
+# ── CORR-710: a shutting-down executor's fills are still on the venue ──
+
+
+def test_a_shutting_down_grid_still_counts_its_residual_inventory():
+    """Its close order has not flattened it yet: the fills are the grid's, not an
+    orphan's. ``position_size_quote`` still reads the residual open base."""
+    rows, unmeasured = tracked_from_active(
+        [_running(status="SHUTTING_DOWN", quote=76.5, price=150.0)]
+    )
+    assert unmeasured == []
+    assert len(rows) == 1
+    assert rows[0]["position_side"] == "LONG"
+    assert rows[0]["net_amount_base"] == pytest.approx(0.51)
+    assert rows[0]["controller_id"] == "s7.grid_1"
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)])
+    assert _one(report).verdict == "agreed"
+
+
+def test_a_shutting_down_position_executor_is_named_never_read():
+    """Its ``filled_amount_quote`` now includes the close order's fills, so it
+    is not inventory: the executor is named, and the orphan it may explain
+    stays an orphan rather than a guessed agreement."""
+    stopping = _running(
+        kind="position_executor", status="SHUTTING_DOWN", quote=76.5, price=150.0
+    )
+    rows, unmeasured = tracked_from_active([stopping])
+    assert rows == []
+    assert unmeasured == ["j5B2VAi4 (position SOL-USDT) shutting down"]
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)], unmeasured=unmeasured)
+    assert _one(report).verdict == "orphan"
+    text = summarize(report)
+    assert "1 active executor(s) expose no readable inventory" in text
+    assert "j5B2VAi4 (position SOL-USDT) shutting down" in text
 
 
 def test_side_encodings_all_read():
@@ -502,7 +538,7 @@ def test_held_positions_behave_as_before_without_running_executors():
     report = check([_held(amount=10.0)] + rows, [_venue(amount=10.0)])
     assert _one(report).verdict == "agreed"
     assert report.unmeasured == ()
-    assert "running executor" not in summarize(report)
+    assert "active executor" not in summarize(report)
 
 
 def test_unmeasured_survives_an_unanswered_venue():

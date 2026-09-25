@@ -19,12 +19,23 @@ from condor.agents.providers.drift import DriftProvider, owned_controller_ids
 
 
 class _Executors:
-    def __init__(self, positions, raises=None, running=(), running_raises=None):
+    def __init__(
+        self,
+        positions,
+        raises=None,
+        running=(),
+        running_raises=None,
+        shutting=(),
+        shutting_raises=None,
+    ):
         self.positions = positions
         self.raises = raises
         self.calls = []
-        self.running = list(running)
-        self.running_raises = running_raises
+        self.by_status = {"RUNNING": list(running), "SHUTTING_DOWN": list(shutting)}
+        self.raises_by_status = {
+            "RUNNING": running_raises,
+            "SHUTTING_DOWN": shutting_raises,
+        }
         self.search_calls = []
 
     async def get_positions_summary(self, controller_id=None):
@@ -35,9 +46,11 @@ class _Executors:
 
     async def search_executors(self, **kwargs):
         self.search_calls.append(kwargs)
-        if self.running_raises:
-            raise self.running_raises
-        return {"data": self.running, "pagination": {"has_more": False}}
+        status = kwargs.get("status")
+        if self.raises_by_status.get(status):
+            raise self.raises_by_status[status]
+        rows = self.by_status.get(status, [])
+        return {"data": rows, "pagination": {"has_more": False}}
 
 
 class _Trading:
@@ -60,9 +73,16 @@ class _Client:
         venue_raises=None,
         running=(),
         running_raises=None,
+        shutting=(),
+        shutting_raises=None,
     ):
         self.executors = _Executors(
-            list(tracked), tracked_raises, running, running_raises
+            list(tracked),
+            tracked_raises,
+            running,
+            running_raises,
+            shutting,
+            shutting_raises,
         )
         self.trading = _Trading(list(venue), venue_raises)
 
@@ -143,13 +163,15 @@ def test_the_tracked_side_is_fetched_unscoped():
     assert client.executors.calls == [None]
 
 
-def test_running_executors_are_fetched_account_wide_and_running_only():
+def test_active_executors_are_fetched_account_wide_running_and_shutting_down():
+    """The API filters on one status, so RUNNING and SHUTTING_DOWN are one read
+    each (CORR-710) — and nothing else: a stopped executor's fills are a hold."""
     client = _Client(tracked=[_held()], venue=[_venue_row()])
     _run(client)
-    assert len(client.executors.search_calls) == 1
-    call = client.executors.search_calls[0]
-    assert call["status"] == "RUNNING"
-    assert "controller_ids" not in call and "account_names" not in call
+    statuses = sorted(c["status"] for c in client.executors.search_calls)
+    assert statuses == ["RUNNING", "SHUTTING_DOWN"]
+    for call in client.executors.search_calls:
+        assert "controller_ids" not in call and "account_names" not in call
 
 
 # ── CORR-708: a running executor's inventory is tracked, not an orphan ──
@@ -193,6 +215,32 @@ def test_a_failed_running_executors_read_fails_the_provider():
     results = asyncio.run(ProviderRegistry().run_core_providers(client, {}))
     assert results["drift"].summary == "(provider drift failed)"
     assert results["drift"].data == {}
+
+
+def test_a_failed_shutting_down_read_fails_the_provider_not_agreed():
+    """Its fills are on the venue: losing the read must not score them."""
+    client = _Client(
+        tracked=[],
+        venue=[_venue_row(amount=0.51)],
+        running=[_running_grid()],
+        shutting_raises=RuntimeError("shutting read down"),
+    )
+    with pytest.raises(RuntimeError, match="shutting read down"):
+        _run(client)
+
+    results = asyncio.run(ProviderRegistry().run_core_providers(client, {}))
+    assert results["drift"].summary == "(provider drift failed)"
+    assert results["drift"].data == {}
+
+
+def test_a_shutting_down_grids_fills_are_tracked_not_an_orphan():
+    stopping = dict(_running_grid(), status="SHUTTING_DOWN")
+    client = _Client(tracked=[], venue=[_venue_row(amount=0.51)], shutting=[stopping])
+    result = _run(client)
+    rows = result.data["report"]["rows"]
+    assert [r["verdict"] for r in rows] == ["agreed"]
+    assert rows[0]["controller_ids"] == ("brigado.mm_1",)
+    assert "ORPHAN" not in result.summary
 
 
 def test_an_unmeasurable_running_executor_is_named_and_leaves_the_orphan():
