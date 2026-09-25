@@ -29,7 +29,7 @@ when_to_consult: When the user wants to deploy, configure, monitor, or refine an
   grid trading strategy that auto-adjusts direction based on market conditions.
 server_required: true
 server_name: ''
-created_by: 1474408604
+created_by: 0
 created_at: '2026-07-28T14:49:09.946902+00:00'
 ---
 

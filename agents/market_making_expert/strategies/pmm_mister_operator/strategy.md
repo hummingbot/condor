@@ -12,7 +12,7 @@ default_config:
     max_position_size_quote: 600
     max_open_executors: 10
 default_trading_context: ''
-created_by: 481175164
+created_by: 0
 created_at: '2026-06-24T22:46:20.971134+00:00'
 ---
 

@@ -10,7 +10,7 @@ default_config:
   total_amount_quote: 200
   max_pairs: 3
 default_trading_context: ''
-created_by: 481175164
+created_by: 0
 created_at: '2026-07-31T12:14:56.290226+00:00'
 ---
 

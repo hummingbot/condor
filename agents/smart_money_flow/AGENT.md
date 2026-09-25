@@ -31,7 +31,7 @@ tools:
 - run_code
 when_to_consult: When the user wants a directional read on where capital is flowing in crypto markets, or wants to deploy the Smart-Money Flow trading agent (flow positioning on Derive perps).
 server_required: false
-created_by: 5587715073
+created_by: 0
 created_at: '2026-07-28T00:00:00.000000+00:00'
 ---
 
