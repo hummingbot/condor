@@ -25,12 +25,13 @@ from condor.web.routes import agents as agents_routes
 ADMIN = 1
 OWNER = 2  # created the strategy, may reach "srv"
 STRANGER = 3  # authenticated, may NOT reach "srv"
+ORPHAN = 4  # a creator id with no user record on this install (CORR-704)
 SERVER = "srv"
 PNL = 7.0
 
 
 class _FakeCM:
-    """Just the four ConfigManager methods this path touches."""
+    """Just the ConfigManager methods this path touches."""
 
     def __init__(self, servers=(SERVER,), access=((OWNER, SERVER),)):
         self.servers = set(servers)
@@ -40,6 +41,9 @@ class _FakeCM:
 
     def is_admin(self, user_id: int) -> bool:
         return user_id == ADMIN
+
+    def get_user(self, user_id: int):
+        return {"user_id": user_id} if user_id in (ADMIN, OWNER, STRANGER) else None
 
     def get_server(self, name: str):
         return {"name": name} if name in self.servers else None
@@ -189,6 +193,22 @@ def test_a_strategy_with_no_recorded_creator_falls_back_to_the_caller(cm, strate
     assert agents_routes._strategy_principal(strategy, _user(STRANGER)) == STRANGER
 
 
+def test_a_creator_unknown_to_this_install_falls_back_to_the_caller(cm, strategy):
+    """No user record means no subject to stand in — same as ``created_by == 0``."""
+    strategy.created_by = ORPHAN
+    assert agents_routes._strategy_principal(strategy, _user(ADMIN)) == ADMIN
+    # A non-admin is still only ever themselves.
+    assert agents_routes._strategy_principal(strategy, _user(STRANGER)) == STRANGER
+    client, _ = asyncio.run(
+        agents_routes._get_client_for_strategy(
+            strategy.home,
+            None,
+            agents_routes._strategy_principal(strategy, _user(ADMIN)),
+        )
+    )
+    assert client is cm.client
+
+
 def test_a_non_admin_is_always_checked_as_themselves(cm, strategy):
     """Never as the creator — that would hand a stranger the creator's reach."""
     assert agents_routes._strategy_principal(strategy, _user(STRANGER)) == STRANGER
@@ -258,3 +278,35 @@ def test_the_rollup_cache_does_not_hand_one_callers_figures_to_another(
     assert _perf_pnl(strategy, STRANGER) == 0.0
     # And the allowed caller keeps their figures.
     assert _perf_pnl(strategy, OWNER) == pytest.approx(PNL)
+
+
+def test_an_admin_sees_the_fleet_of_a_strategy_whose_creator_is_orphaned(
+    cm, strategy, priced, monkeypatch
+):
+    """CORR-704: the executor visible in Bots must not vanish from Fleet."""
+    from condor.agents import performance as perf_mod
+
+    executor = {"id": "ex1", "controller_id": "ag.st_1"}
+
+    async def _one(*a, **kw):
+        return AgentPerformance(
+            agent_id="x", realized_pnl=PNL, total_pnl=PNL, executors=[executor]
+        )
+
+    monkeypatch.setattr(perf_mod, "fetch_agent_performance", _one)
+    strategy.created_by = ORPHAN
+
+    out = asyncio.run(
+        agents_routes.get_session_executors("ag", "st", 1, user=_user(ADMIN))
+    )
+    assert out["executors"] == [executor]
+    assert out["performance"]["total_pnl"] == pytest.approx(PNL)
+    assert _perf_pnl(strategy, ADMIN) == pytest.approx(PNL)
+    assert cm.client_calls == [SERVER, SERVER]
+
+    # A non-admin gets nothing out of the orphaned creator.
+    agents_routes._PERF_CACHE.clear()
+    cm.client_calls.clear()
+    assert _executors_pnl(strategy, STRANGER) == 0.0
+    assert _perf_pnl(strategy, STRANGER) == 0.0
+    assert cm.client_calls == []

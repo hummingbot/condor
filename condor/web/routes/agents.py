@@ -946,14 +946,22 @@ def _strategy_principal(strategy, user: WebUser) -> int:
     act on their behalf, so an admin is held to the *creator's* reach instead —
     the same subject-not-caller rule ``conversations.py`` applies (SEC-333), and
     the reason an admin stops seeing a fleet once the user who built the
-    strategy has been cut off from it. A strategy with no recorded creator
-    (``created_by == 0``: everything written before the field existed) has no
-    subject to stand in, so the caller remains the principal.
+    strategy has been cut off from it.
+
+    Two cases have no subject to stand in, so the caller remains the principal:
+    a strategy with no recorded creator (``created_by == 0``: everything written
+    before the field existed), and one whose creator has no user record on this
+    install (an imported or copied folder, a deleted user). Holding an admin to
+    an id the install has never heard of protects nothing — the admin reads the
+    same server through ``/servers/{name}/executors`` anyway — it only hides the
+    fleet (CORR-704). A creator who *is* known but was blocked or lost the share
+    still binds the admin.
     """
     from config_manager import get_config_manager
 
+    cm = get_config_manager()
     creator = int(getattr(strategy, "created_by", 0) or 0)
-    if creator and get_config_manager().is_admin(user.id):
+    if creator and cm.is_admin(user.id) and cm.get_user(creator) is not None:
         return creator
     return user.id
 
