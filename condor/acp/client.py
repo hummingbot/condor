@@ -321,7 +321,7 @@ _CLAUDE_SESSION_ENV_VARS = (
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
 # The suffix is selected at runtime via session/set_model against the agent's
 # advertised models (see ACPClient._select_model), which resolves aliases
-# ("opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
+# ("fable", "opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
 # NOTE: claude-agent-acp ignores ANTHROPIC_MODEL; the protocol is the real lever.
 _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 
