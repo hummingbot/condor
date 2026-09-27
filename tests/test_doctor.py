@@ -479,3 +479,42 @@ def test_hummingbot_api_check_fails_when_env_exists_but_config_does_not(
 
     checks = doctor.check_hummingbot_api()
     assert checks[0].state == doctor.FAIL
+
+
+def _fake_bridge(monkeypatch, installed: str, latest: str) -> None:
+    class FakeResult:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(cmd, **kwargs):
+        return FakeResult(
+            f"{installed}\n" if cmd[0] == "claude-agent-acp" else f"{latest}\n"
+        )
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+
+def test_claude_acp_bridge_behind_latest_warns_with_the_upgrade_command(monkeypatch):
+    _fake_bridge(monkeypatch, installed="0.70.0", latest="0.81.2")
+
+    [check] = doctor.check_claude_acp_bridge()
+
+    assert check.state == doctor.WARN
+    assert "0.70.0, latest is 0.81.2" in check.detail
+    assert "npm install -g @agentclientprotocol/claude-agent-acp@latest" in check.detail
+
+
+def test_claude_acp_bridge_not_behind_latest_is_ok(monkeypatch):
+    # Compared numerically: 0.10.0 is newer than 0.9.0, not older.
+    _fake_bridge(monkeypatch, installed="0.10.0", latest="0.9.0")
+
+    [check] = doctor.check_claude_acp_bridge()
+
+    assert check.state == doctor.OK
+
+
+def test_claude_acp_bridge_row_is_absent_when_not_installed(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: None)
+
+    assert doctor.check_claude_acp_bridge() == []
