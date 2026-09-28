@@ -321,6 +321,17 @@ def _scan(root: Path, origin: str, stock: bool) -> dict[str, ControllerSource]:
     return found
 
 
+def shared_controllers() -> dict[str, ControllerSource]:
+    """The ``_shared`` library alone, local over stock — what every agent inherits."""
+    from condor.memory.paths import shared_controller_roots
+
+    shared_local, shared_stock = shared_controller_roots()
+    merged: dict[str, ControllerSource] = {}
+    merged.update(_scan(shared_stock, SHARED_ORIGIN, stock=True))
+    merged.update(_scan(shared_local, SHARED_ORIGIN, stock=False))
+    return merged
+
+
 def agent_controllers(agent_slug: str | None) -> dict[str, ControllerSource]:
     """Every controller an agent can see: its OWN library over the SHARED one.
 
@@ -328,16 +339,13 @@ def agent_controllers(agent_slug: str | None) -> dict[str, ControllerSource]:
     own-local — the routines merge. A falsy slug is Condor, like every other
     per-agent resolver.
     """
-    from condor.memory.paths import CHAT_SLUG, shared_controller_roots
+    from condor.memory.paths import CHAT_SLUG
 
     slug = agent_slug or CHAT_SLUG
-    shared_local, shared_stock = shared_controller_roots()
     own_local, own_stock = controller_dirs(slug)
     origin = f"agent:{slug}"
 
-    merged: dict[str, ControllerSource] = {}
-    merged.update(_scan(shared_stock, SHARED_ORIGIN, stock=True))
-    merged.update(_scan(shared_local, SHARED_ORIGIN, stock=False))
+    merged = shared_controllers()
     merged.update(_scan(own_stock, origin, stock=True))
     merged.update(_scan(own_local, origin, stock=False))
     return dict(sorted(merged.items()))

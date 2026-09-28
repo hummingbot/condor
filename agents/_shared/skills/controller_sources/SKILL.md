@@ -25,6 +25,21 @@ needs a human's confirmation and is refused in a dry run or a winddown. Saved co
 (`client.controllers.create_or_update_controller(...)`): it is out of bounds for the same
 reason.
 
+## The four copies
+A controller exists in four places at once. Keep them apart. A `sync` changes exactly one of
+them, the server copy; every impact message says which of the other three stay behind.
+
+| Copy | Where it lives | When it changes |
+|---|---|---|
+| **folder** | `agents/{slug}/controllers/` or `.condor/agents/{slug}/controllers/` | `manage_agent_controllers write` |
+| **server** | the Hummingbot API's controllers directory | `sync` (create or overwrite) |
+| **running bots** | each bot container's imported class | only on stop → archive → redeploy |
+| **backtests** | the API process's imported class | only when the API restarts |
+
+The server copy is one per **name**, shared by every agent (and every Condor, and every
+human) pushing to that server. The impact lists the agents on *this* Condor that own the same
+name; it cannot see another Condor or a hand edit. Those show up as `drift` instead.
+
 ## Layout
 ```
 controllers/<name>/<name>.py        # folder name == file name == controller_name in every config
@@ -52,21 +67,32 @@ manage_agent_controllers(action="status", name="pmm_king")
 
 ## Drift: never overwrite blind
 1. Run `sync` without `overwrite`. It refuses (`refused: true`) and returns the `diff`
-   (server copy → your folder).
+   (server copy → your folder) and the **impact**: `impact_text` (prose) and `impact`
+   (the same as data). The impact names the other agents with a controller of this name
+   (same or different code), the running bots whose deployed configs use it, and the
+   backtest caveat. "Could not check running bots" means **unknown**, never "none".
 2. Read the diff. Is the server's side an edit someone made on purpose (a hotfix, another
    agent's version of the same name)?
-3. **Report the diff to the user and ask.** Interactive: ask in the chat. Loop: send a
-   notification and skip the deploy this tick. Don't block and don't retry-overwrite.
+3. **Show the user the diff and `impact_text` verbatim, then ask.** Interactive: ask in the
+   chat. Loop: send a notification and skip the deploy this tick. Don't block and don't
+   retry-overwrite.
 4. Only with a go-ahead (or a loop playbook that explicitly authorises it) call
-   `sync(overwrite=true)`. The server's copy is saved under `.server_backups/` first.
+   `sync(overwrite=true)`. The server's copy is saved under `.server_backups/` first. The
+   refusal in step 1 is the **preview** that makes the overwrite possible: without one from
+   the last 15 minutes, or if the server or folder copy changed since, the overwrite is
+   refused with `preview_required` and nothing is sent. That refusal is itself a fresh
+   preview; show it and ask again. The human approving the call sees the same impact.
 5. If the server's version is the right one, `pull` it into your folder instead
    (`pull` with `overwrite=true` replaces your differing file).
 
-## After an overwrite: backtests are stale
-If `sync` returns `backtest_cache_stale: true`, the API keeps the OLD class for backtests
-until it restarts. **Do not backtest that controller and trust the numbers.** Tell the user
-it needs an API restart. Never restart it yourself: a restart reaps running executors.
-Live bots deployed after the sync start a fresh container and do use the new code.
+## After an overwrite: running bots and backtests are behind
+The result carries `impact_text` again, now describing what happened.
+- **Running bots:** tell the user which bots are now on the OLD class. They keep it until
+  they are stopped, archived and redeployed. That is the user's call. Never restart a bot.
+- **Backtests** (`backtest_cache_stale: true`): the API keeps the OLD class for backtests
+  until it restarts. **Do not backtest that controller and trust the numbers.** Tell the user
+  it needs an API restart. Never restart it yourself: a restart reaps running executors.
+- Bots deployed after the sync start a fresh container and do use the new code.
 
 ## Styles: references, not live configs
 - Sample configs are **starting points**. `upload_config` publishes one as
@@ -81,7 +107,8 @@ Live bots deployed after the sync start a fresh container and do use the new cod
   written `PositionMode.ONEWAY` instead of `ONEWAY`, a `controller_name` that doesn't match
   the folder. Directional controllers: the field rules in `controller_development` apply.
 - To change a **running** bot's config, use `manage_bots(action="update_config")`. Uploading
-  a saved config does not touch running bots.
+  a saved config (even with `overwrite=true`) does not touch running bots: each keeps the
+  config it was deployed with.
 
 ## Editing a controller
 - Read it (`read`), rewrite the **whole** file, and `write` it. Then `status` shows `drift`
@@ -109,7 +136,7 @@ Live bots deployed after the sync start a fresh container and do use the new cod
 
 ## Never
 - `manage_controllers upsert target="controller"` for a controller that lives in a folder.
-- `overwrite=true` without reading the diff and having a go-ahead.
+- `overwrite=true` without showing the user the diff and `impact_text` and having a go-ahead.
 - Reading `unreachable` as fine.
 - Backtesting right after a replacing sync and reporting the result as current.
 - Restarting the API.

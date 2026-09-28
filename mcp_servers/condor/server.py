@@ -600,9 +600,11 @@ async def manage_agent_controllers(
     - "status": per controller, missing | in_sync | drift | unreachable
       (unreachable is NOT in sync). Optional name narrows it.
     - "sync": upload a missing controller (name). A drifted one is refused with a
-      diff; overwrite=true replaces it only after backing up the server copy, and
-      the result says backtests are stale until the API restarts. Never pass
-      overwrite=true without the user's go-ahead.
+      diff and an impact preview (impact_text: other agents sharing the name,
+      running bots left on the old class, stale backtests). overwrite=true is
+      accepted only after that preview (15 min, same server copy; else
+      preview_required) and backs up the server copy first. Show the user the
+      diff and impact_text verbatim and get their go-ahead before overwrite=true.
     - "upload_config": save a style as a server config (name, sample), named
       "<name>__<sample>" unless config_name is given. Idempotent; a differing
       config is refused unless overwrite=true; needs the controller synced first.
@@ -619,8 +621,9 @@ async def manage_agent_controllers(
         controller_type: For pull — directional_trading, market_making or generic.
         configs: For pull — server config ids to adopt as styles.
         config_name: For upload_config — override the "<name>__<sample>" id.
-        overwrite: Replace a differing server copy (sync/upload_config) or a
-            differing folder copy (pull).
+        overwrite: Replace a differing server copy (sync — only after a sync
+            without it previewed the impact; upload_config) or a differing
+            folder copy (pull).
         shared: Condor only, without agent — target the _shared library.
 
     Returns:

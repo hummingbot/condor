@@ -16,6 +16,7 @@ from starlette.testclient import TestClient
 from condor import agent_controllers as ac
 from condor.agent_controllers_sync import (
     MAX_DIFF_LINES,
+    clear_previews,
     controller_statuses,
     pull_controller,
     sync_controller,
@@ -108,6 +109,14 @@ class FakeClient:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def _no_previews():
+    """Impact previews are process-global (FEAT-129): none leak between tests."""
+    clear_previews()
+    yield
+    clear_previews()
 
 
 @pytest.fixture
@@ -209,6 +218,8 @@ def test_sync_overwrite_backs_up_then_posts_and_says_backtests_are_stale(home):
     client = FakeClient()
     server_copy = MM_SOURCE + "# hotfix\n"
     client.controllers.code[("market_making", "pmm_king")] = server_copy
+    # The drift refusal is the preview an overwrite requires (FEAT-129).
+    assert _run(sync_controller(client, "mm", _src(), "brigado"))["refused"]
     out = _run(sync_controller(client, "mm", _src(), "brigado", overwrite=True))
 
     backup = Path(out["backup"])

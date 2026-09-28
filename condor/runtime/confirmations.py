@@ -65,6 +65,10 @@ class PendingConfirmation:
     # cannot say *whose* action, which is exactly the ambiguity a chat with
     # several agents in it introduces.
     origin: str = ""
+    # What the call would do beyond its one-line summary, read from state the
+    # gate already holds — today only a controller overwrite's recorded impact
+    # preview (FEAT-129). Empty for every other call.
+    detail: str = ""
     tool_call: dict = field(default_factory=dict)
     options: list[dict] = field(default_factory=list)
     status: ConfirmationStatus = ConfirmationStatus.PENDING
@@ -89,6 +93,7 @@ class PendingConfirmation:
             "user_id": self.user_id,
             "summary": self.summary,
             "origin": self.origin,
+            "detail": self.detail,
             # The call itself, normalized once here so every surface previews
             # the same thing the gate judged: the bare tool name and its
             # arguments, or ``None`` when they could not be read. A summary line
@@ -132,6 +137,7 @@ class ConfirmationRegistry:
         options: list[dict],
         timeout_seconds: int = CONFIRMATION_TIMEOUT,
         origin: str = "",
+        detail: str = "",
     ) -> PendingConfirmation:
         """Create a pending entry. Synchronous and I/O-free by design.
 
@@ -144,6 +150,7 @@ class ConfirmationRegistry:
             user_id=user_id,
             summary=summary,
             origin=origin,
+            detail=detail,
             tool_call=tool_call,
             options=options,
             timeout_seconds=timeout_seconds,
@@ -316,6 +323,18 @@ def _select_allow(options: list[dict]) -> dict:
 CANCELLED: dict[str, Any] = {"outcome": {"outcome": "cancelled"}}
 
 
+def _session_of(session_key: str):
+    """The live session behind ``session_key``, or ``None``. Never raises."""
+    try:
+        from condor.runtime.keys import SessionKey
+        from condor.runtime.sessions import get_session
+
+        return get_session(SessionKey.parse(session_key))
+    except Exception:  # noqa: BLE001 - attribution must never block an approval
+        log.debug("Could not read session %s", session_key, exc_info=True)
+        return None
+
+
 def describe_origin(session_key: str) -> str:
     """Name the identity behind a session: ``"<agent> on <server>"``.
 
@@ -324,14 +343,7 @@ def describe_origin(session_key: str) -> str:
     session record does not, so this is the only place the answer is current.
     Best-effort — an unknown session simply goes unattributed.
     """
-    try:
-        from condor.runtime.keys import SessionKey
-        from condor.runtime.sessions import get_session
-
-        session = get_session(SessionKey.parse(session_key))
-    except Exception:  # noqa: BLE001 - attribution must never block an approval
-        log.debug("Could not describe origin of %s", session_key, exc_info=True)
-        return ""
+    session = _session_of(session_key)
     if session is None:
         return ""
 
@@ -363,6 +375,58 @@ def _summarize(tool_call: dict[str, Any]) -> str:
         tool_name = tool_call.get("tool") or tool_call.get("title") or "Unknown"
         log.exception("Could not summarize %s; prompting with its name", tool_name)
         return f"{tool_name} (arguments could not be summarized)"
+
+
+NO_PREVIEW_DETAIL = (
+    "No impact preview on record — this overwrite will be refused; deny it and "
+    "ask the agent to run sync without overwrite first."
+)
+
+DETAIL_UNAVAILABLE = (
+    "The impact preview could not be read — deny this unless you have seen "
+    "the impact another way."
+)
+
+
+def _controller_overwrite_detail(tool_call: dict[str, Any], session_key: str) -> str:
+    """The recorded impact of a ``manage_agent_controllers sync overwrite``, or ``""``.
+
+    A dict lookup, never I/O: the drift refusal that must precede an overwrite
+    already computed the impact (FEAT-129). The preview is keyed on the
+    *target* agent — the ``agent`` argument when Condor names one, else the
+    session's own — and the session's server, exactly as the sync route keys it.
+    """
+    if danger.tool_call_name(tool_call) != danger.AGENT_CONTROLLERS_TOOL:
+        return ""
+    args = danger.tool_call_input(tool_call)
+    if args is None or args.get("action") != "sync" or not args.get("overwrite"):
+        return ""
+
+    from condor.agent_controllers_sync import preview_for
+
+    session = _session_of(session_key)
+    agent = args.get("agent")
+    if not (isinstance(agent, str) and agent):
+        agent = getattr(session, "agent_slug", None) or None
+    server = getattr(session, "server_name", None) or ""
+    name = str(args.get("name") or "")
+    preview = preview_for(agent, name, server) if name and server else None
+    if preview is None:
+        return NO_PREVIEW_DETAIL
+    return preview.impact.render(overwriting=True)
+
+
+def _detail(tool_call: dict[str, Any], session_key: str) -> str:
+    """Extra context for the prompt, or a truthful stand-in when reading it raises.
+
+    Wrapped like :func:`_summarize`: a raise inside the permission callback
+    becomes a cancellation (CORR-294).
+    """
+    try:
+        return _controller_overwrite_detail(tool_call, session_key)
+    except Exception:
+        log.exception("Could not build the confirmation detail")
+        return DETAIL_UNAVAILABLE
 
 
 def build_permission_callback(
@@ -410,6 +474,7 @@ def build_permission_callback(
             user_id=user_id,
             summary=_summarize(tool_call),
             origin=describe_origin(session_key),
+            detail=_detail(tool_call, session_key),
             tool_call=tool_call,
             options=options,
             timeout_seconds=timeout_seconds,
