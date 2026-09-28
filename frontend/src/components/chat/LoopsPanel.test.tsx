@@ -198,6 +198,28 @@ describe("LoopsPanel", () => {
     expect(card.textContent).toContain("2 dry");
   });
 
+  // QA on PR 244: with the API down the card read `$0.00`, an outage printed
+  // as a loop that traded nothing.
+  it("draws a dash, not $0.00, when the server could not price the loop", async () => {
+    const base = agentSummary();
+    await render({
+      loops: [owner()],
+      agents: [
+        {
+          ...base,
+          strategies: [
+            { ...base.strategies[0], latest_session_pnl: 0, unavailable: "unreachable" },
+          ],
+        },
+      ],
+    });
+
+    const pnl = cards()[0].querySelector<HTMLElement>("[data-loop-pnl]")!;
+    expect(pnl.textContent).toBe("—");
+    expect(pnl.title).toBe("Server unreachable");
+    expect(cards()[0].textContent).not.toContain("$0.00");
+  });
+
   it("degrades — no PnL, a session label instead of a run count — when the join misses", async () => {
     await render({
       loops: [owner({ live: live({ sessionNum: 7 }) })],

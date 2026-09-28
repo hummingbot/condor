@@ -1252,6 +1252,13 @@ async def _compute_strategy_performance(
         "trade_count": float(sum(s.trade_count for s in real_sessions)),
     }
 
+    # A client came back, but it could not price this render: a connection
+    # `get_client` still holds (it re-checks only every ~60s) to a backend that
+    # has since gone down. Unreported, the failed ids' all-zero rows summed to a
+    # loop that "traded nothing" — `0` where a reader needed "unavailable".
+    if fetch_failed and not unavailable:
+        unavailable = "unreachable"
+
     result = (sessions, totals, unavailable)
     # An outage is transient, not a config/permission state: skip the cache so
     # the first poll after the server recovers prices again (CORR-709).
@@ -2973,7 +2980,12 @@ async def get_session_executors(
         strategy.home, strategy.default_config, session_nums, session_num
     )
     owned = session_ownership(strategy.home, strategy.default_config, session_num)
-    perf = await fetch_agent_performance(client, agent_id, windows=windows)
+    # Same rule as the rollup: a held client to a backend that has gone down
+    # still answers, with zeros — say it was unreachable, not "traded nothing".
+    failed_ids: set[str] = set()
+    perf = await fetch_agent_performance(
+        client, agent_id, windows=windows, failed_ids=failed_ids
+    )
     # close_type_counts is base-lifetime, not window-sliced: the payload counts
     # closes per controller with no timestamp to slice on. Equal to the session's
     # own closes whenever the session deployed the bases it owns (the normal
@@ -3013,7 +3025,7 @@ async def get_session_executors(
         "performance": model.model_dump(),
         "pnl_series": pnl_series,
         "deployments": [d.model_dump() for d in deployments],
-        "unavailable": "",
+        "unavailable": "unreachable" if failed_ids else "",
     }
 
 

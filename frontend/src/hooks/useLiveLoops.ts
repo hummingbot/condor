@@ -6,7 +6,7 @@ import {
   tickCountdownLabel,
 } from "@/components/agent/workspace/fleet";
 import { api } from "@/lib/api";
-import type { AgentSummary } from "@/lib/api";
+import type { AgentSummary, StrategyUnavailable } from "@/lib/api";
 import type { FleetOwner, LiveLoop } from "@/lib/agent-attribution";
 import { formatRelativeTime } from "@/lib/formatters";
 
@@ -67,6 +67,8 @@ export function groupLoopsByAgent(
 
 export interface LoopCardStats {
   latestSessionPnl: number;
+  /** Why the PnL could not be read (CORR-706), or `""` — then it is a dash, never `$0.00`. */
+  unavailable: StrategyUnavailable;
   sessionCount: number;
   experimentCount: number;
 }
@@ -82,6 +84,7 @@ export function loopStats(
   return strategy
     ? {
         latestSessionPnl: strategy.latest_session_pnl,
+        unavailable: strategy.unavailable ?? "",
         sessionCount: strategy.session_count,
         experimentCount: strategy.experiment_count,
       }

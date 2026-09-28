@@ -218,6 +218,7 @@ describe("loopStats", () => {
 
     expect(loopStats(loop, [agentSummary()])).toEqual({
       latestSessionPnl: 12.5,
+      unavailable: "",
       sessionCount: 3,
       experimentCount: 1,
     });

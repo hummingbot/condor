@@ -13,6 +13,7 @@ import {
 import { countdown } from "@/lib/agent-attribution";
 import type { AgentSummary } from "@/lib/api";
 import { formatCurrencyPnl, formatRelativeTime, pnlColor } from "@/lib/formatters";
+import { unavailableLabel } from "@/lib/strategy-unavailable";
 
 /**
  * Every loop, from every agent, one click from the rail (FEAT-123) — grouped by
@@ -179,15 +180,27 @@ function LoopCard({
         </span>
         {/* Absent, not zero, when the roster join misses — a card is never
             allowed to fabricate a PnL it has not actually resolved. */}
-        {stats && (
-          <span
-            data-loop-pnl
-            className="ml-auto shrink-0 font-mono text-[11px] font-semibold"
-            style={{ color: pnlColor(stats.latestSessionPnl) }}
-          >
-            {formatCurrencyPnl(stats.latestSessionPnl, "$")}
-          </span>
-        )}
+        {stats &&
+          (stats.unavailable ? (
+            // The server could not price it: a dash that says why on hover,
+            // not the `$0.00` an outage used to read as (QA on PR 244).
+            <span
+              data-loop-pnl
+              data-loop-pnl-unavailable
+              className="ml-auto shrink-0 font-mono text-[11px] font-semibold text-[var(--color-text-muted)]"
+              title={unavailableLabel(stats.unavailable)}
+            >
+              —
+            </span>
+          ) : (
+            <span
+              data-loop-pnl
+              className="ml-auto shrink-0 font-mono text-[11px] font-semibold"
+              style={{ color: pnlColor(stats.latestSessionPnl) }}
+            >
+              {formatCurrencyPnl(stats.latestSessionPnl, "$")}
+            </span>
+          ))}
       </div>
 
       {live.lastDid ? (

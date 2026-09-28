@@ -547,3 +547,65 @@ def test_priced_is_bound_once_as_the_access_predicate():
     assert isinstance(call, ast.Call) and call.func.id == "_may_use_strategy_server"
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     assert "experiments_with_rows" in names
+
+
+def _unavailable(strategy_dir):
+    return asyncio.run(
+        agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
+    )[2]
+
+
+def test_a_held_client_to_a_downed_backend_reads_unreachable(perf_env):
+    """QA on PR 244: with `hummingbot-api` stopped, the run showed `0`.
+
+    ``get_client`` keeps the connection it built for up to ~60s, so the outage
+    arrives as a client whose every fetch fails — not as ``unreachable``. The
+    failed ids' all-zero rows then summed to a loop that traded nothing. The
+    rollup must say it could not price the render; once the backend is back,
+    the reason clears on the next poll.
+    """
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    api = _FakeExecutorsApi(
+        {f"{RUN_KEY}_1": [_closed_executor(1.0)]}, fail_ids={f"{RUN_KEY}_1"}
+    )
+    use_client(_FakeClient(api))
+
+    assert _unavailable(strategy_dir) == "unreachable"
+
+    api.fail_ids.clear()
+    assert _unavailable(strategy_dir) == ""
+
+
+def test_a_failed_bot_snapshot_reads_unreachable(perf_env):
+    """The bot snapshot is the rollup's other fetch; its outage is one too."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    _write_bot_ledger(strategy_dir, 1, "ns-bot")
+    api = _FakeExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
+    client = _FakeBotClient(api, "ns-bot-20260701-000000", unrealized=7.0, fail=True)
+    use_client(client)
+
+    assert _unavailable(strategy_dir) == "unreachable"
+
+
+def test_the_single_session_fetch_reports_a_failed_bot_snapshot():
+    """The run views' own fetch: a degraded snapshot lands the id in ``failed_ids``."""
+    from condor.agents.performance import fetch_agent_performance
+
+    aid = f"{RUN_KEY}_1"
+    client = _FakeBotClient(
+        _FakeExecutorsApi({aid: []}), "ns-bot-20260701-000000", fail=True
+    )
+    failed: set[str] = set()
+    asyncio.run(
+        fetch_agent_performance(client, aid, bot_names=["ns-bot"], failed_ids=failed)
+    )
+    assert failed == {aid}
+
+    client.fail = False
+    failed.clear()
+    asyncio.run(
+        fetch_agent_performance(client, aid, bot_names=["ns-bot"], failed_ids=failed)
+    )
+    assert failed == set()

@@ -480,3 +480,49 @@ def test_the_endpoint_serves_the_ledger_the_session_recorded(tmp_path, monkeypat
     assert rows[0]["created_tick"] == 10
     assert rows[0]["live"] is True
     assert rows[1]["scope"] == "ctrl:ag-st-20260807-022100:c1"
+
+
+def test_the_endpoint_says_unreachable_when_the_held_client_fails(
+    tmp_path, monkeypatch
+):
+    """QA on PR 244: a run read `0` while `hummingbot-api` was down.
+
+    The client was the one ``get_client`` still held, so the no-client branch
+    never ran and the endpoint reported ``unavailable: ""`` over an all-zero
+    performance row. A fetch that failed must say so.
+    """
+    import asyncio
+
+    from condor.agents import performance as perf_mod
+    from condor.web.routes import agents as agents_route
+
+    sdir = _strategy_on_disk(tmp_path)
+    monkeypatch.setattr(
+        agents_route,
+        "_get_strategy",
+        lambda slug, sslug: type("S", (), {"home": sdir, "default_config": {}})(),
+    )
+
+    async def _client(*a, **kw):
+        return object(), "srv", ""
+
+    down = {"on": True}
+
+    async def _perf(client, agent_id, *a, failed_ids=None, **kw):
+        if down["on"] and failed_ids is not None:
+            failed_ids.add(agent_id)
+        return AgentPerformance(agent_id=agent_id)
+
+    async def _series(*a, **kw):
+        return []
+
+    monkeypatch.setattr(agents_route, "_get_client_for_strategy", _client)
+    monkeypatch.setattr(perf_mod, "fetch_agent_performance", _perf)
+    monkeypatch.setattr(perf_mod, "fetch_agent_pnl_series", _series)
+
+    run = lambda: asyncio.run(  # noqa: E731
+        agents_route.get_session_executors("ag", "st", 1, user=_User())
+    )
+    assert run()["unavailable"] == "unreachable"
+    down["on"] = False
+    assert run()["unavailable"] == ""

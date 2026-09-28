@@ -117,6 +117,7 @@ async def fetch_agent_performance(
     bot_names: list[str] | None = None,
     windows: Mapping[str, OwnershipWindow] | None = None,
     pnl_series: bool = False,
+    failed_ids: set[str] | None = None,
 ) -> AgentPerformance:
     """Fetch authoritative performance for a single ``agent_id``.
 
@@ -137,6 +138,10 @@ async def fetch_agent_performance(
 
     ``pnl_series`` also fills :attr:`AgentPerformance.pnl_series` from the
     histories the slices were cut from (see :func:`fetch_agent_performance_batch`).
+
+    ``failed_ids`` is filled as the batch fills it: ``agent_id`` lands in it when
+    the figures came back degraded, so the caller can say "unavailable" instead
+    of rendering the outage as a run that traded nothing.
     """
     names = list(dict.fromkeys(b for b in [*(bot_names or []), *(windows or {})] if b))
     batch = await fetch_agent_performance_batch(
@@ -145,6 +150,7 @@ async def fetch_agent_performance(
         {agent_id: names} if names else None,
         windows={agent_id: dict(windows)} if names and windows else None,
         pnl_series=pnl_series,
+        failed_ids=failed_ids,
     )
     return batch.get(
         agent_id, AgentPerformance(agent_id=agent_id, bot_names=list(names))
@@ -398,8 +404,9 @@ async def fetch_agent_performance_batch(
     ``since``) keeps the lifetime aggregate.
 
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
-    search raised — their entries may be partial/empty. This lets callers avoid
-    caching a failed fetch as a genuinely empty result.
+    search raised, or — in controller mode — whose bots' live snapshot failed;
+    their entries may be partial/empty. This lets callers avoid caching a failed
+    fetch as a genuinely empty result, and say it was unavailable.
 
     ``pnl_series`` asks for each controller-mode agent's realized curve too, built
     from the histories its windows were sliced from, so a caller wanting both the
@@ -462,7 +469,7 @@ async def fetch_agent_performance_batch(
 
         from condor.agents.attribution import fold_sliced_window
         from condor.fetchers.bot_performance import (
-            fetch_bot_universe,
+            fetch_bot_universe_checked,
             fetch_live_instance_names,
             partition_instances,
             resolve_bots,
@@ -470,7 +477,9 @@ async def fetch_agent_performance_batch(
 
         # Stopped instances still hold the realized PnL they earned, and a session
         # that stopped its bot before the rollup ran would otherwise report $0.
-        all_bot_perf, archived = await fetch_bot_universe(client)
+        all_bot_perf, archived, degraded = await fetch_bot_universe_checked(client)
+        if degraded and failed_ids is not None:
+            failed_ids.update(wanted)
         # Server-wide like ``archived``: which snapshot instances are running now.
         # A stopped one's final snapshot is not a live book ([[CORR-633]]).
         live_names = await fetch_live_instance_names(client)
