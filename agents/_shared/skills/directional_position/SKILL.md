@@ -14,6 +14,17 @@ source: builtin
 `create_position_executor` teaches the call and warns about the sharpest trap. This
 playbook is the checklist that should run before it.
 
+## 0. Take the connector from the user's words
+
+The venue name picks the market, literally:
+
+- **A bare exchange name is spot.** "long AVAX on Binance" → `binance`.
+- **"perp", "perpetual" or "futures" is the perpetual connector.** "long AVAX on
+  Binance perp" → `binance_perpetual`.
+
+Never switch between them on your own, not even when spot is unfunded or a short needs
+a perp. Say what is missing and ask. Name the exact connector in the confirmation line.
+
 ## 1. Convert the intent into an amount — this is where money is lost
 
 **`amount` is in BASE currency.** Almost every human instruction is in quote. "Buy $500
@@ -108,7 +119,17 @@ that eats 1% of it is a different trade than it looked.
 The trailing stop needs **both** `trailing_stop_activation_price` and
 `trailing_stop_trailing_delta`; one alone does nothing.
 
-## 6. After it opens
+## 6. Confirm it opened, then manage it
+
+**An executor ID is not a position.** The API accepts the config first. The executor
+checks its budget when it starts, and an unfunded one terminates at once with
+`INSUFFICIENT_BALANCE`. Read the create result before you say anything:
+
+- **Error** (`INSUFFICIENT_BALANCE`, `FAILED`): nothing opened and nothing was spent.
+  Report it that way, with the balances the error lists, and ask how to fund it.
+- **"nothing filled yet"**: the entry is not confirmed. Say the order is working, not
+  that the position is open. Check `get_executor` before claiming a fill.
+- **"filled $X"**: now it is open.
 
 ```
 list_executors(executor_types=["position_executor"])
@@ -124,6 +145,7 @@ elsewhere.
 
 ## Checklist before you call
 
+- [ ] Connector matches the user's words: bare exchange = spot, "perp" = `_perpetual`.
 - [ ] `amount` is in BASE currency, and `amount * price` matches the intended USD size.
 - [ ] Stop placed where the thesis breaks, not at a comfortable loss.
 - [ ] Size derived from the stop distance, not the other way round.

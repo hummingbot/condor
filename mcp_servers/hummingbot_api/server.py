@@ -781,6 +781,13 @@ async def create_position_executor(
     ORDER TYPES are `1`=MARKET, `2`=LIMIT, `3`=LIMIT_MAKER. Omitting them uses the
     backend's own defaults (LIMIT to open, MARKET for every exit).
 
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -892,6 +899,13 @@ async def create_grid_executor(
     LEVEL COUNT is the intersection of two limits — `total_amount_quote /
     min_order_amount_quote`, and the price range divided by
     `min_spread_between_orders`. The tighter one wins.
+
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
 
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
@@ -1007,6 +1021,13 @@ async def create_dca_executor(
     here. Note this is the opposite convention from `create_position_executor`, whose
     `amount` is in base currency.
 
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -1104,6 +1125,13 @@ async def create_order_executor(
     `order_id` is internal and appears nowhere on chain), plus `slippage_pct` and
     `max_slippage_pct`. `slippage_pct` is the LIVE tolerance: above the configured start
     means earlier attempts failed on slippage and this one is paying to get through.
+
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
 
     Args:
         connector_name: Exchange connector, or a NETWORK id for a DEX swap (see above).
@@ -1211,6 +1239,13 @@ async def create_lp_executor(
     A stopped executor always closes the on-chain position; `keep_position` only decides
     whether the net token change is KEPT as a spot position or swapped back to the
     original quote asset.
+
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
 
     Args:
         connector_name: The NETWORK, e.g. 'solana-mainnet-beta'. See above.
