@@ -193,8 +193,9 @@ one-off variant, upload under a new `config_name` instead of editing the style.
 2. Rewrite the **full** `update_processed_data` — never patch partial snippets
 3. Re-run the self-review checklist
 4. `write` it, then `sync` with `overwrite=true` — the drift is your own edit (see
-   `controller_sources`: the server copy is backed up, and backtests stay stale until
-   the API restarts)
+   `controller_sources`: the server copy is backed up, running bots keep the old class,
+   and the next backtest and any bot deployed from now on use the new code — no API
+   restart needed)
 5. Re-upload any configs referencing it — they do **not** auto-update
 
 ## Go/No-Go → Phase 3

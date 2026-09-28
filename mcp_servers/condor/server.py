@@ -601,7 +601,8 @@ async def manage_agent_controllers(
       (unreachable is NOT in sync). Optional name narrows it.
     - "sync": upload a missing controller (name). A drifted one is refused with a
       diff and an impact preview (impact_text: other agents sharing the name,
-      running bots left on the old class, stale backtests). overwrite=true is
+      running bots left on the old class; the next backtest and new bots use the
+      new code, no API restart needed). overwrite=true is
       accepted only after that preview (15 min, same server copy; else
       preview_required) and backs up the server copy first. Show the user the
       diff and impact_text verbatim and get their go-ahead before overwrite=true.

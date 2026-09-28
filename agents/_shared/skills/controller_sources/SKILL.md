@@ -25,16 +25,17 @@ needs a human's confirmation and is refused in a dry run or a winddown. Saved co
 (`client.controllers.create_or_update_controller(...)`): it is out of bounds for the same
 reason.
 
-## The four copies
-A controller exists in four places at once. Keep them apart. A `sync` changes exactly one of
-them, the server copy; every impact message says which of the other three stay behind.
+## The three copies (and backtests)
+A controller exists in three places at once. Keep them apart. A `sync` changes exactly one of
+them, the server copy; every impact message says which running bots stay behind. Backtests
+are not a copy: each run loads the server copy fresh, so they never lag.
 
 | Copy | Where it lives | When it changes |
 |---|---|---|
 | **folder** | `agents/{slug}/controllers/` or `.condor/agents/{slug}/controllers/` | `manage_agent_controllers write` |
 | **server** | the Hummingbot API's controllers directory | `sync` (create or overwrite) |
 | **running bots** | each bot container's imported class | only on stop → archive → redeploy |
-| **backtests** | the API process's imported class | only when the API restarts |
+| *backtests* | not a copy: each run loads the **server** copy fresh | every run (never lags) |
 
 The server copy is one per **name**, shared by every agent (and every Condor, and every
 human) pushing to that server. The impact lists the agents on *this* Condor that own the same
@@ -85,14 +86,13 @@ manage_agent_controllers(action="status", name="pmm_king")
 5. If the server's version is the right one, `pull` it into your folder instead
    (`pull` with `overwrite=true` replaces your differing file).
 
-## After an overwrite: running bots and backtests are behind
+## After an overwrite: running bots are behind, backtests are not
 The result carries `impact_text` again, now describing what happened.
 - **Running bots:** tell the user which bots are now on the OLD class. They keep it until
   they are stopped, archived and redeployed. That is the user's call. Never restart a bot.
-- **Backtests** (`backtest_cache_stale: true`): the API keeps the OLD class for backtests
-  until it restarts. **Do not backtest that controller and trust the numbers.** Tell the user
-  it needs an API restart. Never restart it yourself: a restart reaps running executors.
-- Bots deployed after the sync start a fresh container and do use the new code.
+- **Backtests and new bots:** the next backtest and any bot deployed from now on use the new
+  code — no API restart needed. Each backtest loads the server copy fresh; a new bot starts a
+  fresh container.
 
 ## Styles: references, not live configs
 - Sample configs are **starting points**. `upload_config` publishes one as
@@ -138,5 +138,4 @@ The result carries `impact_text` again, now describing what happened.
 - `manage_controllers upsert target="controller"` for a controller that lives in a folder.
 - `overwrite=true` without showing the user the diff and `impact_text` and having a go-ahead.
 - Reading `unreachable` as fine.
-- Backtesting right after a replacing sync and reporting the result as current.
 - Restarting the API.

@@ -198,22 +198,37 @@ def test_a_slow_bot_config_read_is_unknown(home, monkeypatch):
     assert impact.live_bots is None and "timed out" in impact.live_bots_error
 
 
-def test_render_always_states_all_four_copies():
+def test_render_always_states_every_copy_and_backtests():
     empty = ControllerImpact("pmm_king", "brigado", (), ())
     for overwriting in (True, False):
         text = empty.render(overwriting=overwriting)
         assert "SERVER copy" in text and "FOLDER copy" in text
         assert "Other agents with a 'pmm_king': none" in text
         assert "Running bots using it: none" in text
-        assert "Backtests keep the OLD class until the API restarts" in text
-        assert "reaps running executors" in text
+        # Each backtest runs in a fresh worker that imports the server copy.
+        assert (
+            "The next backtest and any bot deployed from now on use the new code"
+            in text
+        )
+        assert "no API restart needed" in text
+        _assert_no_restart_the_api(text)
+        assert "OLD class" not in text
     assert empty.render(overwriting=True).startswith("This replaces")
     assert empty.render(overwriting=False).startswith("Replaced")
 
     created = ControllerImpact("pmm_king", "brigado", (), (), server_had_copy=False)
     text = created.render(overwriting=False)
     assert text.startswith("Created the SERVER copy") and "FOLDER copy" in text
-    assert "Running bots using it: none" in text and "Backtests" in text
+    assert "The next backtest and any bot deployed from now on use the new code" in text
+    _assert_no_restart_the_api(text)
+    assert "Running bots using it: none" in text and "next backtest" in text
+
+
+def _assert_no_restart_the_api(text):
+    """No controller-sync text ever asks for an API restart."""
+    lowered = text.lower()
+    for phrase in ("restart the api", "api restarts", "until the api", "reaps"):
+        assert phrase not in lowered, phrase
 
 
 # ── 2. Preview registry and sync wiring ──
@@ -283,10 +298,15 @@ def test_overwrite_with_a_matching_preview_returns_the_post_impact(home):
 
     out = _run(sync_controller(client, "mm", _src(), "brigado", overwrite=True))
 
-    assert out["overwritten"] is True and out["backtest_cache_stale"] is True
+    assert out["overwritten"] is True and "backtest_cache_stale" not in out
     assert client.controllers.code[("market_making", "pmm_king")] == MM_SOURCE
     assert out["impact_text"].startswith("Replaced the SERVER copy")
-    assert "king-btc" in out["impact_text"] and "restart" in out["message"]
+    assert "king-btc" in out["impact_text"]
+    assert (
+        "The next backtest and any bot deployed from now on use the new code"
+        in out["message"]
+    )
+    _assert_no_restart_the_api(out["message"])
     assert out["impact"]["live_bots"][0]["bot_name"] == "king-btc"
     # One preview, one overwrite.
     assert preview_for("mm", "pmm_king", "brigado") is None

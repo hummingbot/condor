@@ -214,7 +214,7 @@ def test_sync_refuses_drift_with_a_diff_and_no_post(home):
     assert not (home / "controllers" / "pmm_king" / ac.BACKUPS_DIRNAME).exists()
 
 
-def test_sync_overwrite_backs_up_then_posts_and_says_backtests_are_stale(home):
+def test_sync_overwrite_backs_up_then_posts_and_says_backtests_use_new_code(home):
     client = FakeClient()
     server_copy = MM_SOURCE + "# hotfix\n"
     client.controllers.code[("market_making", "pmm_king")] = server_copy
@@ -225,7 +225,13 @@ def test_sync_overwrite_backs_up_then_posts_and_says_backtests_are_stale(home):
     backup = Path(out["backup"])
     assert backup.parent == home / "controllers" / "pmm_king" / ac.BACKUPS_DIRNAME
     assert backup.name.startswith("brigado-") and backup.read_text() == server_copy
-    assert out["backtest_cache_stale"] is True and "restart" in out["message"]
+    assert "backtest_cache_stale" not in out
+    assert (
+        "The next backtest and any bot deployed from now on use the new code"
+        in out["message"]
+    )
+    assert "no API restart needed" in out["message"]
+    assert "restart the api" not in out["message"].lower()
     assert client.controllers.code[("market_making", "pmm_king")] == MM_SOURCE
     # Nothing new is discovered from the backup dir.
     assert list(ac.agent_controllers("mm")) == ["pmm_king"]
@@ -450,7 +456,7 @@ def test_route_sync_upload_and_pull(http):
         "/agents/mm/controllers/pmm_king/sync",
         json={"server_name": "srv", "overwrite": True},
     ).json()
-    assert ok["backtest_cache_stale"] is True
+    assert ok["overwritten"] is True and "backtest_cache_stale" not in ok
 
     up = web.post(
         "/agents/mm/controllers/pmm_king/configs/aggressive",

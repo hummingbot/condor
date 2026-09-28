@@ -1266,7 +1266,6 @@ export interface ControllerActionResult {
   config_name?: string;
   overwritten?: boolean;
   backup?: string;
-  backtest_cache_stale?: boolean;
   /** Who a push affects (FEAT-129): drift refusals and completed pushes. */
   impact?: ControllerImpact;
   /** The same impact as prose — the words the agent and the approver read. */

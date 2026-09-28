@@ -40,11 +40,6 @@ export function ControllersTab({
     retry: false,
   });
 
-  // Controllers overwritten this visit: the server's backtests keep running
-  // the class they imported first, and that stays true until the API restarts,
-  // so the note stays until the tab is left.
-  const [stale, setStale] = useState<string[]>([]);
-
   const queryClient = useQueryClient();
   const refetch = () =>
     queryClient.invalidateQueries({ queryKey: ["agent-controllers", slug] });
@@ -78,15 +73,6 @@ export function ControllersTab({
         . A missing one can be synced; a drifted one is only replaced after
         you have read the diff, and the server copy is backed up first.
       </p>
-      {stale.length > 0 && (
-        <p
-          role="status"
-          className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-400"
-        >
-          Backtests on this server use the old class of{" "}
-          {stale.join(", ")} until the API restarts.
-        </p>
-      )}
       {controllers.length === 0 ? (
         <Empty>No controllers in this agent's folder.</Empty>
       ) : (
@@ -99,9 +85,6 @@ export function ControllersTab({
             badge={verdictOf(c.name)}
             detail={detailOf(c.name)}
             onChanged={refetch}
-            onStale={(name) =>
-              setStale((s) => (s.includes(name) ? s : [...s, name]))
-            }
           />
         ))
       )}
@@ -304,7 +287,6 @@ function ControllerItem({
   badge,
   detail,
   onChanged,
-  onStale,
 }: {
   slug: string;
   card: ControllerCard;
@@ -312,7 +294,6 @@ function ControllerItem({
   badge: Badge;
   detail?: string;
   onChanged: () => void;
-  onStale: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [result, setResult] = useState<ControllerActionResult | null>(null);
@@ -320,10 +301,7 @@ function ControllerItem({
   const sync = useMutation({
     mutationFn: (overwrite: boolean) =>
       api.syncAgentController(slug, card.name, server as string, overwrite),
-    onSuccess: (r) => {
-      setResult(r);
-      if (r.backtest_cache_stale) onStale(card.name);
-    },
+    onSuccess: setResult,
     onError: (e) => setResult(errorResult(card.name, e)),
     onSettled: onChanged,
   });

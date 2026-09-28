@@ -5,9 +5,9 @@
  * What is pinned here: each verdict renders its own badge and an unanswered
  * server never reads as in sync; no server means no status fetch; Sync, the
  * drift review and the style upload call their endpoints and re-fetch the
- * status after; overwriting takes two clicks and surfaces the backup and the
- * stale-backtest note; and the panel only shows the tab when there is
- * something in it.
+ * status after; overwriting takes two clicks and surfaces the backup, with
+ * no stale-backtests warning (each backtest loads the controller fresh); and
+ * the panel only shows the tab when there is something in it.
  *
  * @vitest-environment jsdom
  */
@@ -265,7 +265,6 @@ describe("actions", () => {
               changed: true,
               overwritten: true,
               backup: "agents/brigado/controllers/.server_backups/charlie.py",
-              backtest_cache_stale: true,
               message: "Replaced 'charlie' on srv.",
             }
           : {
@@ -305,9 +304,9 @@ describe("actions", () => {
       true,
     );
     expect(itemFor("charlie").textContent).toContain(".server_backups/charlie.py");
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "until the API restarts",
-    );
+    // Backtests load the controller fresh on every run: nothing to warn about.
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).not.toMatch(/restart the api|api restarts/i);
     // Once for the tab, once after each of the two syncs.
     expect(getAgentControllers).toHaveBeenCalledTimes(3);
   });

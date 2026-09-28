@@ -54,11 +54,11 @@ BOTS_BEHIND_NOTE = (
     "new code."
 )
 
-#: The API process keeps the class its backtests imported first.
-BACKTESTS_NOTE = (
-    "Backtests keep the OLD class until the API restarts: do not trust a "
-    "backtest of this controller until then. Restarting is the user's call, "
-    "never yours (a restart reaps running executors)."
+#: Every backtest runs in a fresh worker process that imports the server copy,
+#: and a newly deployed bot starts a fresh container: only running bots lag.
+NEW_CODE_NOTE = (
+    "The next backtest and any bot deployed from now on use the new code — no "
+    "API restart needed."
 )
 
 #: A saved config is copied into a bot at deploy time, so replacing it moves no bot.
@@ -199,10 +199,11 @@ async def controller_status(
 
 # ── Impact of a push (FEAT-129) ──
 #
-# A controller has four copies: the agent's FOLDER, the SERVER's, the class
-# each RUNNING BOT imported, and the class the API's BACKTESTS imported. A sync
-# changes exactly one of them — the server copy — and every impact message says
-# which of the other three stay behind, in the same words everywhere.
+# A controller has three copies: the agent's FOLDER, the SERVER's, and the
+# class each RUNNING BOT imported. BACKTESTS read the server copy on every run,
+# so they never lag. A sync changes exactly one copy — the server's — and every
+# impact message says, in the same words everywhere, that running bots stay
+# behind and backtests do not.
 
 
 @dataclass(frozen=True)
@@ -253,7 +254,7 @@ class ControllerImpact:
         }
 
     def render(self, *, overwriting: bool) -> str:
-        """The four copies, always in the same order.
+        """The copies and backtests, always in the same order.
 
         ``overwriting=True`` describes what an overwrite *would* do (a preview,
         the human's prompt); ``False`` what a push *did*.
@@ -293,7 +294,6 @@ class ControllerImpact:
                 "• Running bots using it: none — no bot can run a controller the "
                 "server did not have."
             )
-            backtests_line = "• Backtests: they import it fresh; nothing is stale."
         else:
             if self.live_bots is None:
                 why = f" ({self.live_bots_error})" if self.live_bots_error else ""
@@ -314,8 +314,7 @@ class ControllerImpact:
                     "• Running bots using it: none. Bots deployed from now on run "
                     "the new code."
                 )
-            backtests_line = f"• {BACKTESTS_NOTE}"
-        return "\n".join((head, owners_line, bots_line, backtests_line))
+        return "\n".join((head, owners_line, bots_line, f"• {NEW_CODE_NOTE}"))
 
 
 def _shared_owners(
@@ -524,7 +523,7 @@ async def sync_controller(
       with ``overwrite`` — only while a preview of this same server and folder
       copy is live, else ``preview_required`` — the server copy is backed up
       under the agent's ``.server_backups/``, replaced, and the result names
-      the running bots and backtests left on the old class;
+      the running bots left on the old class;
     - ``unreachable`` → refused: not knowing is not agreeing.
     """
     from mcp_servers.hummingbot_api.tools.controllers import modify_controllers
@@ -639,14 +638,13 @@ async def sync_controller(
             "changed": True,
             "overwritten": True,
             "backup": str(backup),
-            "backtest_cache_stale": True,
             "impact": preview.impact.to_dict(),
             "impact_text": impact_text,
             "message": impact_text,
             "result": result.get("result"),
         }
 
-    # missing: a brand-new class has never been imported, so nothing is stale.
+    # missing: a brand-new class has never been imported, so no bot runs it.
     result = await modify_controllers(
         client,
         action="upsert",
