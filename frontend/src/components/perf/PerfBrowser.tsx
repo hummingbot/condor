@@ -1276,10 +1276,24 @@ export function PerfBrowser({
    *
    * A bot row selects it outright; a fleet row narrowed to one bot by the
    * bubbles still *is* that bot's report, and keeps the actions it had before
-   * the row came back (a single-bot fleet draws no bot level at all).
+   * the row came back (a single-bot fleet draws no bot level at all). An agent
+   * row is the same case one level down: an agent running one bot collapses its
+   * bot level away, so the agent row *is* that bot's report — and on the agent
+   * workspace's fleet, where the agent row is the root, it is the only place
+   * that bot's Stop and Logs could ever be drawn.
    */
+  const soloScopeBot = useMemo(() => {
+    if (scope.kind !== "agent") return undefined;
+    const seen = new Set(scope.leaves.map((leaf) => leaf.bot));
+    const only = seen.size === 1 ? [...seen][0] : undefined;
+    return only && only !== UNATTACHED_BOT ? only : undefined;
+  }, [scope]);
   const scopeBotName =
-    scope.kind === "bot" ? botOfNodeId(scope.id) : scope.kind === "fleet" ? soloRealBot : undefined;
+    scope.kind === "bot"
+      ? botOfNodeId(scope.id)
+      : scope.kind === "fleet"
+        ? soloRealBot
+        : soloScopeBot;
 
   /**
    * The one agent this scope is about, whichever way it got there.
