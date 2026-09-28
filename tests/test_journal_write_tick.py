@@ -186,7 +186,7 @@ def test_an_empty_risk_state_still_renders_default_limits(tmp_path):
         assert "- Position Size: $0.00 / $500.00 limit" in section
         assert "- Open Executors: 0 / 5 limit" in section
         assert "- Drawdown: disabled" in section
-        assert "- Status: ACTIVE" in section
+        assert "- Risk Check: passed" in section
         assert "Max Leverage" not in section
 
 

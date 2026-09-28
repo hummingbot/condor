@@ -87,4 +87,16 @@ describe("the agent's response", () => {
     render(snapshot("Held the range."));
     expect(response().textContent).toContain("Held the range.");
   });
+
+  // A stopped session's history read "Status: ACTIVE" and looked live. The
+  // line was only ever the risk gate's verdict for that tick.
+  it("labels a legacy risk status as the tick's risk check, not the run's state", () => {
+    render({
+      ...snapshot("ok"),
+      riskState: "- Drawdown: disabled\n- Status: ACTIVE",
+    });
+
+    expect(container.textContent).toContain("Risk Check: passed");
+    expect(container.textContent).not.toContain("Status: ACTIVE");
+  });
 });

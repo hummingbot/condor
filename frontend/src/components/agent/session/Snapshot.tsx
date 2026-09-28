@@ -15,6 +15,17 @@ import { toolCallState } from "@/lib/formatters";
 // only three clicks deep inside an overlay with no URL. The Lab's tick spine is
 // that picker, so the pair is gone and this is exported (FEAT-099).
 
+/**
+ * Snapshots written before the risk line was renamed say `Status: ACTIVE`,
+ * which on a stopped session reads as "this run is still live". It was only
+ * ever the risk gate's verdict for that tick, so say that.
+ */
+function relabelRiskVerdict(line: string): string {
+  return line
+    .replace(/^Status: ACTIVE\b/, "Risk Check: passed")
+    .replace(/^Status: BLOCKED\b/, "Risk Check: BLOCKED");
+}
+
 export function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
   // Same options the marker previews use, so a tick already previewed renders
   // straight from cache — no second request, no spinner.
@@ -107,11 +118,12 @@ export function SnapshotBody({ parsed }: { parsed: ParsedSnapshot }) {
             <h4 className="mb-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Risk State</h4>
             <div className="space-y-1 font-mono text-xs leading-relaxed text-[var(--color-text-muted)]">
               {parsed.riskState.split("\n").map((line, i) => {
-                const isBlocked = line.includes("BLOCKED");
-                const isActiveLine = line.includes("ACTIVE");
+                const text = relabelRiskVerdict(line.replace(/^- /, ""));
+                const isBlocked = text.includes("BLOCKED");
+                const isPassed = /^Risk Check: passed/.test(text);
                 return (
-                  <div key={i} className={isBlocked ? "text-red-400" : isActiveLine ? "text-emerald-400" : ""}>
-                    {line.replace(/^- /, "")}
+                  <div key={i} className={isBlocked ? "text-red-400" : isPassed ? "text-emerald-400" : ""}>
+                    {text}
                   </div>
                 );
               })}

@@ -202,8 +202,11 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
             f"Max Leverage: {max_leverage:g}x "
             "(declare `leverage` on every create; omitting it is refused)"
         )
+    # "Risk Check", not "Status": a snapshot outlives its session, and a stopped
+    # run's history reading "Status: ACTIVE" looked like the run was still live.
+    # This is the risk gate's verdict for this one tick, nothing more.
     lines.append(
-        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}"
+        f"Risk Check: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'passed'}"
     )
     return [bullet + line for line in lines]
 
