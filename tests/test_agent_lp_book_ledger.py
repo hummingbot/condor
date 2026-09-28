@@ -28,6 +28,7 @@ from condor.agents.engine import TickEngine
 from condor.agents.journal import JournalManager
 from condor.agents.ownership import same_strategy_family, strip_session_suffix
 from condor.agents.performance import _extract_executors_list
+from condor.fetchers.executors import EXECUTORS_PAGE_SIZE
 
 AGENT_ID = "solana_dex_lp_expert.adaptive_band_roaming_49"
 FAMILY = "solana_dex_lp_expert.adaptive_band_roaming"
@@ -59,6 +60,24 @@ def test_same_strategy_family_covers_self_sibling_and_rejects_foreign():
 def test_family_prefix_is_not_a_loose_startswith():
     # ``..._49`` must not be matched by ``..._4`` — the separator is required.
     assert same_strategy_family(f"{FAMILY}_4", f"{FAMILY}_49")
+
+
+def test_family_rejects_a_strategy_slug_that_extends_the_prefix():
+    """``adaptive_band_roaming`` must not absorb ``..._roaming_aggressive``.
+
+    Slugs contain underscores, so a prefix test admitted a *different* strategy
+    whose slug starts with ours. That band then entered this strategy's book,
+    inflating its exposure and — since an open ledger entry settles the stop gate
+    — letting this strategy stop another strategy's band.
+    """
+    assert not same_strategy_family(f"{FAMILY}_49", f"{FAMILY}_aggressive_3")
+    assert not same_strategy_family(f"{FAMILY}_49", f"{FAMILY}_aggressive")
+
+
+def test_strip_session_suffix_leaves_an_unsuffixed_id_whole():
+    # No session token to strip: the id must not be cut at an inner underscore.
+    assert strip_session_suffix(FAMILY) == FAMILY
+    assert strip_session_suffix("") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +168,25 @@ def test_mirror_marks_a_vanished_band_stopped(journal):
     assert journal.get_open_executor_count() == 1
 
 
+def test_mirror_reopens_a_band_that_reappears(journal):
+    """A band dropped from one short page must come back when seen again.
+
+    A row left ``status=closed`` was excluded from the open count and the
+    exposure the gate reads, permanently, even once the band was live again.
+    """
+    engine = _engine(journal)
+    engine._mirror_executor_ledger([_row("band-1"), _row("band-2")])
+    engine._mirror_executor_ledger([_row("band-1")])  # band-2 read as closed
+    assert journal.get_open_executor_count() == 1
+
+    # The API recovers and band-2 is live again: it must count as open.
+    engine._mirror_executor_ledger([_row("band-1"), _row("band-2", amount=31.41)])
+    rows = {r["executor"]: r for r in journal.list_executors()}
+    assert rows["band-2"]["status"] == "open"
+    assert "stopped" not in rows["band-2"]
+    assert journal.get_open_executor_count() == 2
+
+
 def test_mirror_is_a_noop_without_a_journal():
     engine = _engine(None)
     # Must not raise: experiments run with no journal.
@@ -160,12 +198,32 @@ def test_mirror_is_a_noop_without_a_journal():
 # ---------------------------------------------------------------------------
 
 
-def test_book_totals_prefers_the_ledger(journal):
+def test_book_totals_counts_adopted_bands_the_provider_cannot_see(journal):
     engine = _engine(journal)
     engine._last_skill_data = {"executors": [], "total_exposure": 0.0}
     journal.track_executor("band-1", "lp_executor", {"total_amount_quote": 30.88})
     journal.track_executor("band-2", "lp_executor", {"total_amount_quote": 31.41})
     assert engine._book_totals() == (2, pytest.approx(30.88 + 31.41))
+
+
+def test_book_totals_keeps_bot_exposure_alongside_ledger_bands(journal):
+    """Bot positions and a session's own LP band both count. Neither replaces
+    the other — dropping the bots' exposure let the gate approve past its
+    limits."""
+    engine = _engine(journal)
+    engine._last_skill_data = {"executors": [{"id": "bot-1"}], "total_exposure": 12.5}
+    journal.track_executor("band-1", "lp_executor", {"total_amount_quote": 30.88})
+    assert engine._book_totals() == (2, pytest.approx(12.5 + 30.88))
+
+
+def test_book_totals_does_not_double_count_a_band_the_provider_lists(journal):
+    engine = _engine(journal)
+    engine._last_skill_data = {
+        "executors": [{"id": "band-1"}],
+        "total_exposure": 30.88,
+    }
+    journal.track_executor("band-1", "lp_executor", {"total_amount_quote": 30.88})
+    assert engine._book_totals() == (1, pytest.approx(30.88))
 
 
 def test_book_totals_falls_back_to_the_provider_without_a_journal():
@@ -197,6 +255,22 @@ class _FakeExecutors:
         return self._result
 
 
+class _PagedExecutors:
+    """Serves ``pages`` in order, one per call, cursor until the last page."""
+
+    def __init__(self, pages):
+        self._pages = pages
+        self.calls = 0
+
+    async def search_executors(self, limit, cursor=None, **kwargs):
+        page = self._pages[self.calls] if self.calls < len(self._pages) else []
+        self.calls += 1
+        envelope = {"executors": page}
+        if self.calls < len(self._pages):
+            envelope["next_cursor"] = f"c{self.calls}"
+        return envelope
+
+
 class _FakeClient:
     def __init__(self, result=None, raises=False):
         self.executors = _FakeExecutors(result, raises)
@@ -225,6 +299,28 @@ async def test_fetch_returns_none_when_the_api_fails():
     assert (
         await TickEngine._fetch_family_lp_rows(engine, _FakeClient(raises=True)) is None
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_walks_every_page_not_just_the_first():
+    """Another strategy's bands may fill the first page; ours are on the next.
+
+    Reading only the first page leaves our live bands out of the book, and the
+    mirror then marks them closed — a short book at the gate.
+    """
+    filler = [
+        {"id": f"f{i}", "controller_id": "other.strategy_1", "type": "lp_executor"}
+        for i in range(EXECUTORS_PAGE_SIZE)
+    ]
+    ours = {"id": "mine", "controller_id": AGENT_ID, "type": "lp_executor"}
+
+    client = _FakeClient()
+    client.executors = _PagedExecutors([filler, [ours]])
+    rows = await TickEngine._fetch_family_lp_rows(
+        SimpleNamespace(agent_id=AGENT_ID), client
+    )
+    assert [r["id"] for r in rows] == ["mine"]
+    assert client.executors.calls == 2
 
 
 @pytest.mark.asyncio
