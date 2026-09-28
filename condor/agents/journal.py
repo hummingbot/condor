@@ -914,8 +914,22 @@ class JournalManager:
         self._append_to_section("Executors", entry)
 
     def update_executor(
-        self, executor_id: str, pnl: float, volume: float, stopped: bool = False
+        self,
+        executor_id: str,
+        pnl: float,
+        volume: float,
+        stopped: bool = False,
+        reopen: bool = False,
     ) -> None:
+        """Refresh one ledger row's PnL/volume, and optionally its status.
+
+        ``stopped`` closes a row whose executor vanished from the live book;
+        ``reopen`` restores one that came back. The reopen exists because a
+        missing row is not proof of a closed position: a band can drop out of a
+        short search page and reappear on the next tick, and a row left
+        ``status=closed`` is excluded from the open count and the exposure the
+        risk gate reads -- permanently, until something rewrites the status.
+        """
         text = self.read_full()
         pattern = rf"(- executor={re.escape(executor_id)} \|.*)"
         m = re.search(pattern, text)
@@ -929,9 +943,23 @@ class JournalManager:
             new_line = re.sub(r"status=\w+", "status=closed", new_line)
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
             new_line += f" | stopped={now}"
+        elif reopen:
+            new_line = re.sub(r"status=\w+", "status=open", new_line)
+            # Drop the stamp a previous stop appended, or the row would read as
+            # both open and stopped.
+            new_line = re.sub(r"\s*\| stopped=[^|]*", "", new_line)
 
         text = text.replace(old_line, new_line)
         self._write_journal(text)
+
+    def list_executors(self) -> list[dict[str, Any]]:
+        """The session's Executors ledger rows, in file order.
+
+        Public because the tick engine is this ledger's writer: it keeps the
+        rows mirroring the live book, which means reading the current ones back
+        to *update* them rather than tracking them a second time.
+        """
+        return list(self._parse_executors())
 
     # ------------------------------------------------------------------
     # Metric snapshots (inline in journal)

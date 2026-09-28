@@ -56,6 +56,20 @@ log = logging.getLogger(__name__)
 # subprocesses), and re-executing them would orphan every running loop.
 
 
+# Row cap for the per-tick LP book walk. Expressed in rows because that is what
+# the pager counts; well above any real fleet's band count, so it bounds a
+# pathological history without ever truncating a live book.
+_LP_BOOK_MAX_ROWS = 10_000
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort float, for figures arriving as strings from the ledger."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class _NullTracker:
     """Stub tracker for experiments (no journal)."""
 
@@ -532,6 +546,13 @@ class TickEngine:
         if drift_result:
             self._last_skill_data["drift"] = drift_result.data
 
+        # 2b. Mirror this strategy's live LP bands into the session ledger. The
+        # book read below is every RUNNING band of this agent+strategy — the ones
+        # this session opened and the ones it adopted from a predecessor, which
+        # carry that predecessor's controller_id and so were invisible to a
+        # strictly session-scoped count.
+        await self._sync_lp_book(client)
+
         # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
             name: result.summary for name, result in skill_results.items()
@@ -546,12 +567,9 @@ class TickEngine:
 
         # 4. Get risk state (experiments pass None — returns clean state)
         risk_state = self.risk.get_state(self.journal or _NullTracker())
-        live_executors = self._last_skill_data.get("executors", [])
-        live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
-        risk_state.executor_count = live_open_count
-        risk_state.total_exposure = float(
-            self._last_skill_data.get("total_exposure", 0.0) or 0.0
-        )
+        book_open, book_exposure = self._book_totals()
+        risk_state.executor_count = book_open
+        risk_state.total_exposure = book_exposure
         self._apply_drift_verdict(risk_state, drift_result)
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
@@ -624,7 +642,7 @@ class TickEngine:
                 canvas_nudge = self._nudge.next(
                     tick=next_tick,
                     last_revised_tick=canvas_mod.last_revised_tick(self.session_dir),
-                    open_count=live_open_count,
+                    open_count=book_open,
                     total_pnl=float(self._last_skill_data.get("total_pnl", 0.0) or 0.0),
                     had_error=bool(self._last_error),
                 )
@@ -776,13 +794,15 @@ class TickEngine:
 
                 skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
                 skill_volume = self._last_skill_data.get("total_volume", 0.0)
-                skill_executors = len(self._last_skill_data.get("executors", []))
-                skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
+                # The book, not the provider's session-scoped rows: the two
+                # disagreed the moment a band was adopted, and it was the
+                # ledger-side figure the tracker and the gate are held to.
+                book_open, book_exposure = self._book_totals()
                 self.journal.record_snapshot(
                     total_pnl=skill_pnl,
                     total_volume=skill_volume,
-                    open_count=skill_executors,
-                    position_size=skill_exposure,
+                    open_count=book_open,
+                    position_size=book_exposure,
                 )
 
                 action_brief = (
@@ -794,7 +814,7 @@ class TickEngine:
                     tick=tick_num,
                     status="Running",
                     pnl=skill_pnl,
-                    open_count=skill_executors,
+                    open_count=book_open,
                     last_action=action_brief,
                 )
 
@@ -939,6 +959,154 @@ class TickEngine:
                 self.agent_id,
                 ", ".join(self.ledger.bases()),
             )
+
+    # ------------------------------------------------------------------
+    # LP book (executor-mode sessions)
+    # ------------------------------------------------------------------
+
+    async def _sync_lp_book(self, client) -> list[dict[str, Any]] | None:
+        """Mirror this strategy's live LP bands into the session's ledger.
+
+        The book is every RUNNING ``lp_executor`` of this agent+strategy: the
+        bands this session opened *and* the ones it adopted from a predecessor.
+        An adopted band carries the predecessor session's ``controller_id``, so
+        a strictly session-scoped count could not see it at all -- a session
+        running three bands reported two, and the risk gate sized its limits
+        against that wrong book.
+
+        Returns the rows, or ``None`` when the API could not be reached: the
+        ledger then keeps its last known state rather than reporting an empty
+        book, which is the safe direction for a gate.
+        """
+        if self.journal is None:
+            return None
+        rows = await self._fetch_family_lp_rows(client)
+        if rows is None:
+            return None
+        with self.journal.batch():
+            self._mirror_executor_ledger(rows)
+        return rows
+
+    async def _fetch_family_lp_rows(self, client) -> list[dict[str, Any]] | None:
+        from functools import partial
+
+        from condor.fetchers._pagination import collect_pages
+        from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, build_executor_row
+
+        from .ownership import same_strategy_family
+        from .performance import _extract_executors_list
+
+        # Walk EVERY page, not the first one. The filter that decides ownership
+        # (the strategy family) is applied here, after the fetch, over the
+        # install-wide RUNNING set: asking for a single page and filtering it
+        # lets other strategies' bands fill that page and drop ours out of it,
+        # and the mirror would then read our missing bands as closed. A short
+        # book under-counts exposure at the gate and mislabels live bands.
+        try:
+            raw = await collect_pages(
+                partial(
+                    client.executors.search_executors,
+                    executor_types=["lp_executor"],
+                    status="RUNNING",
+                ),
+                _extract_executors_list,
+                page_size=EXECUTORS_PAGE_SIZE,
+                max_items=_LP_BOOK_MAX_ROWS,
+            )
+        except Exception as e:
+            log.warning("TickEngine %s: LP book fetch deferred (%s)", self.agent_id, e)
+            return None
+        return [
+            build_executor_row(ex)
+            for ex in raw
+            if isinstance(ex, dict)
+            and same_strategy_family(self.agent_id, str(ex.get("controller_id") or ""))
+        ]
+
+    def _mirror_executor_ledger(self, rows: list[dict[str, Any]]) -> None:
+        """Make the Executors ledger mirror the live book.
+
+        ``track_executor``/``update_executor`` existed but had no caller in
+        production, so the section stayed empty in every session: the tracker
+        reported ``open_executors: 0`` and zero exposure however many bands ran,
+        and ``RiskEngine.get_state`` read the same empty ledger. Writing it here
+        is what turns the section into a record.
+        """
+        if self.journal is None:
+            return
+        live = {str(r.get("id") or ""): r for r in rows if r.get("id")}
+        known = {str(e.get("executor") or ""): e for e in self.journal.list_executors()}
+        for eid, row in live.items():
+            pnl = float(row.get("pnl") or 0)
+            volume = float(row.get("volume") or 0)
+            if eid in known:
+                # A band seen live again after being marked closed must go back
+                # to open. Without this, a band dropped from one short page (see
+                # `_fetch_family_lp_rows`) stayed closed forever: the row was
+                # updated but its status never restored, so the count and the
+                # exposure kept excluding a live position even once the API
+                # recovered.
+                self.journal.update_executor(
+                    eid,
+                    pnl=pnl,
+                    volume=volume,
+                    reopen=str(known[eid].get("status") or "") != "open",
+                )
+                continue
+            self.journal.track_executor(
+                eid,
+                str(row.get("type") or "lp_executor"),
+                {
+                    "connector_name": row.get("connector") or "",
+                    "trading_pair": row.get("pair") or "",
+                    "side": row.get("side") or "",
+                    "total_amount_quote": float(row.get("amount") or 0),
+                },
+            )
+            self.journal.update_executor(eid, pnl=pnl, volume=volume)
+        for eid, entry in known.items():
+            if not eid or eid in live or entry.get("status") != "open":
+                continue
+            self.journal.update_executor(
+                eid,
+                pnl=float(entry.get("pnl") or 0),
+                volume=float(entry.get("volume") or 0),
+                stopped=True,
+            )
+
+    def _book_totals(self) -> tuple[int, float]:
+        """``(open count, exposure)`` for the session's live book.
+
+        The union of the two places a live position can be recorded: the
+        provider's RUNNING rows (a controller-mode session's bot positions, plus
+        any executor carrying this session's tag) and the Executors ledger (the
+        strategy's LP bands, including adopted ones the provider cannot see --
+        their tag belongs to the predecessor session).
+
+        They overlap for a band this session both opened and the provider lists,
+        so the ledger contributes only the bands the provider did not already
+        count. Taking one side *instead* of the other is what dropped a live
+        session's bot exposure the moment it also held an LP band, letting the
+        gate approve past its limits.
+        """
+        rows = self._last_skill_data.get("executors") or []
+        rows = rows if isinstance(rows, list) else []
+        provider_count = len(rows)
+        provider_exposure = _as_float(self._last_skill_data.get("total_exposure"))
+        if self.journal is None:
+            return provider_count, provider_exposure
+        provider_ids = {str(r.get("id") or "") for r in rows if isinstance(r, dict)}
+        extra = [
+            e
+            for e in self.journal.list_executors()
+            if e.get("status") == "open"
+            and str(e.get("executor") or "")
+            and str(e.get("executor")) not in provider_ids
+        ]
+        exposure = provider_exposure + sum(
+            _as_float(str(e.get("amount") or "").lstrip("$")) for e in extra
+        )
+        return provider_count + len(extra), exposure
 
     async def _pnl_series(self) -> list[dict]:
         """This session's realized curve for the live report, or ``[]``.
@@ -1106,21 +1274,32 @@ class TickEngine:
         is the full set (the session's own tag plus every row of the bots its
         ledger owns), with the RUNNING-only ``executors`` as the fallback for a
         provider result that carries no full set.
+
+        The session's own Executors ledger is folded in on top, because the
+        snapshot cannot see an adopted band: it carries the predecessor session's
+        controller_id, so a session could not stop a band it had taken over.
         """
         rows = (
             self._last_skill_data.get("all_executors")
             or self._last_skill_data.get("executors")
             or []
         )
-        if not isinstance(rows, list):
-            return {}
         owners: dict[str, str] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            executor_id = str(row.get("id") or "")
-            if executor_id:
-                owners[executor_id] = str(row.get("controller_id") or "")
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                executor_id = str(row.get("id") or "")
+                if executor_id:
+                    owners[executor_id] = str(row.get("controller_id") or "")
+        # ``getattr`` not ``self.journal``: callers build a partial engine to
+        # exercise this map, and a missing attribute here would crash the
+        # permission callback rather than fall back to the snapshot's owners.
+        ledger = getattr(self, "journal", None)
+        for entry in ledger.list_executors() if ledger else []:
+            executor_id = str(entry.get("executor") or "")
+            if executor_id and entry.get("status") == "open":
+                owners.setdefault(executor_id, self.agent_id)
         return owners
 
     def _agent_key(self) -> str:

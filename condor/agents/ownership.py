@@ -78,6 +78,51 @@ def strip_deploy_suffix(name: str) -> str:
         base = shorter
 
 
+#: A session is named ``{agent}.{strategy}_{N}``, an experiment ``..._e{N}``.
+#: Slugs never contain a dot (``condor.frontmatter.slugify``), so the dot
+#: separates the two slugs and the trailing token is the only session marker.
+_SESSION_SUFFIX_RE = re.compile(r"_e?\d+$")
+
+
+def strip_session_suffix(agent_id: str) -> str:
+    """``{agent}.{strategy}_12`` / ``_e3`` -> ``{agent}.{strategy}``.
+
+    The counterpart of :func:`strip_deploy_suffix` for agent ids: an id names one
+    *session* of a strategy, and everything before the session token is what
+    every session of that strategy shares.
+
+    Only a trailing ``_<n>`` / ``_e<n>`` is removed, never "everything after the
+    last underscore". A strategy slug contains underscores itself
+    (``adaptive_band_roaming``), so cutting at the last one is right only by
+    luck; an id carrying no session token is left whole instead of mangled.
+    """
+    return _SESSION_SUFFIX_RE.sub("", (agent_id or "").strip())
+
+
+def same_strategy_family(agent_id: str, controller_id: str) -> bool:
+    """True when ``controller_id`` names a session of this agent's strategy.
+
+    Includes this session itself. An executor is tagged with the session that
+    *opened* it, so a band an earlier session of the same strategy opened still
+    belongs to the strategy's live session -- which is what lets a restarted (or
+    adopting) session see the band it inherited at all. Attribution by exact
+    session id cannot: it reported a session running three live bands as
+    carrying two, and the risk gate sized its limits against that wrong book.
+
+    The two sides are compared as *whole* family keys, not by prefix. A slug may
+    contain underscores, so ``{agent}.foo`` is a prefix of ``{agent}.foo_bar``:
+    a ``startswith(prefix + "_")`` test admitted ``{agent}.foo_bar_4`` into
+    ``{agent}.foo``'s book, over-counting exposure and -- because an open ledger
+    entry settles the stop gate before its controller is looked up -- letting one
+    strategy stop another's band.
+    """
+    family = strip_session_suffix(agent_id)
+    other = strip_session_suffix(controller_id)
+    if not family or not other:
+        return False
+    return family == other
+
+
 def resolve_bot_name(
     config: dict[str, Any], agent_slug: str, strategy_slug: str
 ) -> str:
