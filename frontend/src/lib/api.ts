@@ -1267,6 +1267,23 @@ export interface ControllerActionResult {
   overwritten?: boolean;
   backup?: string;
   backtest_cache_stale?: boolean;
+  /** Who a push affects (FEAT-129): drift refusals and completed pushes. */
+  impact?: ControllerImpact;
+  /** The same impact as prose — the words the agent and the approver read. */
+  impact_text?: string;
+  /** An overwrite refused for want of a fresh preview (this refusal is one). */
+  preview_required?: boolean;
+}
+
+/** Who a controller push affects, as `ControllerImpact.to_dict` sends it. */
+export interface ControllerImpact {
+  controller: string;
+  server_name: string;
+  shared_owners: { agent: string; same_code: boolean }[];
+  /** `null` = could not check — never read as "no bots". */
+  live_bots: { bot_name: string; config_ids: string[] }[] | null;
+  live_bots_error: string;
+  server_had_copy: boolean;
 }
 
 export interface StrategyCard {
@@ -2482,6 +2499,8 @@ export interface PendingConfirmation {
   slot_id: string;
   summary: string;
   origin: string;
+  /** What the call leaves behind (a controller overwrite's impact), or "". */
+  detail?: string;
   expires_at: number;
   /** Seconds until the runtime denies it, measured on the server's clock. */
   expires_in?: number;

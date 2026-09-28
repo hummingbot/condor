@@ -169,10 +169,13 @@ const DANGER =
  */
 function OverwritePair({
   label,
+  confirmLabel = "Confirm",
   pending,
   onConfirm,
 }: {
   label: string;
+  /** The second click's label — it names what the push leaves behind. */
+  confirmLabel?: string;
   pending: boolean;
   onConfirm: () => void;
 }) {
@@ -200,7 +203,7 @@ function OverwritePair({
           onConfirm();
         }}
       >
-        Confirm
+        {confirmLabel}
       </button>
       <button
         type="button"
@@ -231,6 +234,14 @@ function Outcome({ result }: { result: ControllerActionResult }) {
           Server copy backed up to{" "}
           <code className="break-all">{result.backup}</code>
         </p>
+      )}
+      {result.impact_text && (
+        <pre
+          data-testid="controller-impact"
+          className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-amber-500/40 bg-amber-500/5 p-2 font-sans text-[11px] leading-snug text-[var(--color-text)]"
+        >
+          {result.impact_text}
+        </pre>
       )}
       {result.error && (
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-[var(--color-surface-hover)] p-2 text-[10px] text-[var(--color-red)]">
@@ -264,6 +275,18 @@ function Diff({ text }: { text: string }) {
       ))}
     </pre>
   );
+}
+
+/**
+ * The overwrite's second click, naming the running bots it leaves on the old
+ * class — or saying they could not be checked, which is not "none".
+ */
+function confirmLabelFor(result: ControllerActionResult | null): string {
+  const bots = result?.impact?.live_bots;
+  if (bots === null) return "Confirm — running bots unknown";
+  if (!bots || bots.length === 0) return "Confirm";
+  const n = bots.length;
+  return `Confirm — ${n} running bot${n === 1 ? " keeps" : "s keep"} the old class`;
 }
 
 function errorResult(name: string, e: unknown): ControllerActionResult {
@@ -306,7 +329,9 @@ function ControllerItem({
   });
 
   const canPush = !!server && !!card.controller_type;
-  // A refused drift sync carries the diff; only then is Overwrite on offer.
+  // A refused drift sync carries the diff and the impact (FEAT-129); only then
+  // is Overwrite on offer — and the server only accepts the overwrite while
+  // that preview is fresh.
   const reviewed =
     result?.refused && result.verdict === "drift" && !!result.diff;
 
@@ -384,6 +409,7 @@ function ControllerItem({
             {badge === "drift" && reviewed && (
               <OverwritePair
                 label="Overwrite server copy (backup kept)"
+                confirmLabel={confirmLabelFor(result)}
                 pending={sync.isPending}
                 onConfirm={() => sync.mutate(true)}
               />

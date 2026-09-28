@@ -111,6 +111,24 @@ describe("ApprovalPrompt", () => {
     expect(onResolve).toHaveBeenLastCalledWith("abc123", false);
   });
 
+  it("shows a controller overwrite's impact under the summary", () => {
+    const impact =
+      "This replaces the SERVER copy of 'pmm_king' on brigado with your FOLDER copy.\n" +
+      "• Running bots using it: pmm-king-btc (2 configs) — they keep the OLD class";
+    render(request({ detail: impact }));
+
+    const block = container.querySelector('[data-testid="approval-detail"]');
+    expect(block?.textContent).toBe(impact);
+    // Under the summary, above the call preview.
+    const text = container.textContent ?? "";
+    expect(text.indexOf("BUY 1 SOL-USDC")).toBeLessThan(text.indexOf("pmm-king-btc"));
+  });
+
+  it("renders no detail block for a call without one", () => {
+    render(request());
+    expect(container.querySelector('[data-testid="approval-detail"]')).toBeNull();
+  });
+
   it("renders an older backend's summary-only request without inventing a preview", () => {
     render(request({ tool: undefined, input: undefined, deadline: undefined, origin: "" }));
 

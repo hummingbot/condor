@@ -91,6 +91,14 @@ export function ApprovalPrompt({
           {request.origin ? `${request.origin} wants to run:` : "The agent wants to run:"}
         </p>
         <p className="text-sm font-medium text-[var(--color-text)]">{request.summary}</p>
+        {request.detail && (
+          <pre
+            data-testid="approval-detail"
+            className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-1.5 font-sans text-xs leading-snug text-[var(--color-text)]"
+          >
+            {request.detail}
+          </pre>
+        )}
         {request.tool && (
           <div className="overflow-hidden rounded-md border border-[var(--chat-rule)] bg-[var(--chat-inset)] font-mono text-xs">
             <div className="px-2.5 py-1.5 text-[var(--color-text)]">

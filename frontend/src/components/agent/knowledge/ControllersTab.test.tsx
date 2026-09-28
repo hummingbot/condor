@@ -312,6 +312,73 @@ describe("actions", () => {
     expect(getAgentControllers).toHaveBeenCalledTimes(3);
   });
 
+  it("shows the impact before the overwrite and names the running bots on the second click", async () => {
+    const impactText =
+      "This replaces the SERVER copy of 'charlie' on srv with your FOLDER copy.\n" +
+      "• Running bots using it: bot-a (1 config), bot-b (2 configs)";
+    syncAgentController.mockResolvedValue({
+      name: "charlie",
+      verdict: "drift",
+      refused: true,
+      reason: "differs — show the user the diff and the impact",
+      diff: "-a\n+b",
+      impact_text: impactText,
+      impact: {
+        controller: "charlie",
+        server_name: "srv",
+        shared_owners: [],
+        live_bots: [
+          { bot_name: "bot-a", config_ids: ["c1"] },
+          { bot_name: "bot-b", config_ids: ["c2", "c3"] },
+        ],
+        live_bots_error: "",
+        server_had_copy: true,
+      },
+    });
+    await renderTab();
+    await click(button(itemFor("charlie"), "Review diff"));
+
+    expect(
+      itemFor("charlie").querySelector('[data-testid="controller-impact"]')
+        ?.textContent,
+    ).toBe(impactText);
+
+    await click(
+      button(itemFor("charlie"), "Overwrite server copy (backup kept)"),
+    );
+    expect(
+      button(itemFor("charlie"), "Confirm — 2 running bots keep the old class"),
+    ).toBeTruthy();
+    expect(syncAgentController).toHaveBeenCalledTimes(1);
+  });
+
+  it("says running bots are unknown, not none, when they could not be checked", async () => {
+    syncAgentController.mockResolvedValue({
+      name: "charlie",
+      verdict: "drift",
+      refused: true,
+      reason: "differs",
+      diff: "-a\n+b",
+      impact_text: "could not check running bots — treat as unknown, not as none",
+      impact: {
+        controller: "charlie",
+        server_name: "srv",
+        shared_owners: [],
+        live_bots: null,
+        live_bots_error: "listing bots failed",
+        server_had_copy: true,
+      },
+    });
+    await renderTab();
+    await click(button(itemFor("charlie"), "Review diff"));
+    await click(
+      button(itemFor("charlie"), "Overwrite server copy (backup kept)"),
+    );
+    expect(
+      button(itemFor("charlie"), "Confirm — running bots unknown"),
+    ).toBeTruthy();
+  });
+
   it("can back out of an armed overwrite", async () => {
     syncAgentController.mockResolvedValue({
       name: "charlie",
