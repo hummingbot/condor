@@ -36,7 +36,7 @@ def _seed_suspended(
 ) -> Path:
     """A session dir as the *previous* process's shutdown left it."""
     session_dir = (
-        agents_root / agent_slug / "strategies" / sslug / "sessions" / f"session_{num}"
+        agents_root / agent_slug / "loops" / sslug / "sessions" / f"session_{num}"
     )
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "journal.md").write_text("# Journal\n\n## Decisions\n\n")

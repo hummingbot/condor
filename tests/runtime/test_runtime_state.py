@@ -42,8 +42,8 @@ def state_root(tmp_path, monkeypatch):
     monkeypatch.setattr(state_module, "_last_write", {})
     monkeypatch.setattr(state_module, "_dirty", set())
     # Writes land under the strategy dir when it exists.
-    (tmp_path / "brigado" / "strategies" / "mm").mkdir(parents=True)
-    (tmp_path / "brigado" / "strategies" / "other").mkdir(parents=True)
+    (tmp_path / "brigado" / "loops" / "mm").mkdir(parents=True)
+    (tmp_path / "brigado" / "loops" / "other").mkdir(parents=True)
     return tmp_path
 
 
@@ -138,7 +138,7 @@ def test_persistence_across_reload(state_root):
     assert get_state(NS, "cursor") == "exec-99"
 
     # And it landed under the strategy it belongs to, not a global blob.
-    written = state_root / "brigado" / "strategies" / "mm" / "state.json"
+    written = state_root / "brigado" / "loops" / "mm" / "state.json"
     assert written.is_file()
     assert json.loads(written.read_text())["entries"]["cursor"]["value"] == "exec-99"
 
@@ -175,7 +175,7 @@ def test_cleanup_orphans(state_root):
 
     import shutil
 
-    shutil.rmtree(state_root / "brigado" / "strategies" / "other")
+    shutil.rmtree(state_root / "brigado" / "loops" / "other")
 
     assert cleanup_orphans(agents_root=state_root) == 1
     assert NS in state_module._cache
@@ -217,7 +217,7 @@ def test_state_routes_share_the_loop_namespace(state_root, monkeypatch):
 
     from condor.web.routes import agents as routes
 
-    (state_root / "a" / "strategies" / "s").mkdir(parents=True)
+    (state_root / "a" / "loops" / "s").mkdir(parents=True)
     monkeypatch.setattr(routes, "_get_strategy", lambda *a, **k: None)
     monkeypatch.setattr(routes, "_require_no_foreign_live_run", lambda *a, **k: None)
 

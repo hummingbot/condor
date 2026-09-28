@@ -3,7 +3,7 @@
 The journal answers *what happened*; the canvas answers *what the agent
 currently believes*. It lives beside the journal in the session directory:
 
-    agents/{slug}/strategies/{sslug}/sessions/session_{N}/
+    agents/{slug}/loops/{sslug}/sessions/session_{N}/
         canvas.md             # current narrative — one block per section
         canvas_revisions.md   # append-only; every revision ever written
 

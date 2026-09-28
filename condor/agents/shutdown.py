@@ -3,10 +3,10 @@
 When a strategy hits a kill-switch (a hard risk breach or a manual emergency
 stop) its open **positions and executors** must be wound down, not left stranded.
 The policy is declared per strategy in a ``shutdown.md`` file that reuses the exact
-YAML-frontmatter + markdown-body format of ``strategy.md`` and the same
+YAML-frontmatter + markdown-body format of ``loop.md`` and the same
 strategy-over-agent-over-default inheritance chain:
 
-    agents/{slug}/strategies/{sslug}/shutdown.md   # this strategy
+    agents/{slug}/loops/{sslug}/shutdown.md   # this strategy
     agents/{slug}/shutdown.md                       # this agent (all its strategies)
     agents/_defaults/shutdown.md                    # shipped default
 
@@ -23,7 +23,7 @@ from typing import Any
 from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.runtime.timeouts import resolve_tick_timeout
 
-from .strategy import STRATEGIES_DIRNAME, Strategy
+from .strategy import LOOPS_DIRNAME, Strategy
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
     found = read_layered_file(
         "shutdown.md",
         strategy.agent_slug,
-        within=(STRATEGIES_DIRNAME, strategy.slug),
+        within=(LOOPS_DIRNAME, strategy.slug),
     )
     if found is None:
         return ShutdownPolicy(), ""

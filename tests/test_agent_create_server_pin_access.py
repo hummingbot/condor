@@ -155,7 +155,7 @@ def test_put_agent_md_resending_the_stored_foreign_pin_is_a_round_trip(env):
 
 def _existing_agent(env):
     AgentStore().create(name="Existing", description="d")
-    return env / "existing" / "strategies"
+    return env / "existing" / "loops"
 
 
 def test_create_strategy_with_a_foreign_server_is_refused_and_creates_nothing(env):
@@ -179,7 +179,7 @@ def test_create_strategy_with_own_or_no_pin_works(env, config):
     )
 
     assert res.status_code == 200
-    assert (strategies / "grid" / "strategy.md").exists()
+    assert (strategies / "grid" / "loop.md").exists()
 
 
 def _strategy(env, server_name: str | None = None):
@@ -228,7 +228,7 @@ def _strategy_md(server_name: str) -> str:
 
 def test_put_strategy_md_naming_a_foreign_server_is_refused(env):
     strategy = _strategy(env)
-    md = strategy.home / "strategy.md"
+    md = strategy.home / "loop.md"
     before = md.read_bytes()
 
     res = _client().put(

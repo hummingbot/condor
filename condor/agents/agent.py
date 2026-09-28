@@ -30,7 +30,7 @@ Disk layout::
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
         skills/<slug>/SKILL.md         # shared skills (the brain + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
-        strategies/{sslug}/            # owned playbooks (see strategy.py)
+        loops/{sslug}/            # owned playbooks (see strategy.py)
 
 ``<root>`` is **two** roots since FEAT-115: the shipped library the repo tracks
 and this install's own, which git has never heard of. An Agent may be

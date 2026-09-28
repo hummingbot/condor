@@ -101,6 +101,6 @@ Parameters most commonly tuned in real operations:
 **Other**
 - `tick_mode` — if true, controller runs only on candle ticks; false = continuous (default)
 
-The full regime→param decision logic lives in the `pmm_mister_operator` strategy.
+The full regime→param decision logic lives in the `pmm_mister_operator` loop.
 These templates are starting points — every deploy still goes through normal
 risk/confirmation controls.

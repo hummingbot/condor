@@ -23,7 +23,7 @@ def base(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(root))
     monkeypatch.setattr(journal_module, "local_agents_root", lambda: root)
     monkeypatch.setattr(engine_module, "get_engine", lambda _aid: None)
-    strategy_dir = root / "brigado" / "strategies" / "grid"
+    strategy_dir = root / "brigado" / "loops" / "grid"
     strategy_dir.mkdir(parents=True)
     return strategy_dir
 

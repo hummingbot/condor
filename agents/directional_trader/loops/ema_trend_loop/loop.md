@@ -14,7 +14,7 @@ created_by: 0
 created_at: '2026-07-31T12:14:56.290226+00:00'
 ---
 
-# EMA Trend Loop — Tick Strategy
+# EMA Trend Loop — Tick Playbook
 
 ## Objective
 Run a portfolio of EMA trend-following controllers across any available pairs on binance_perpetual. Each tick: discover available configs, backtest candidates, decide which ones to run, monitor open positions, manage risk, and journal learnings that inform the next tick's decisions.

@@ -126,9 +126,9 @@ def test_a_new_strategy_lands_local_and_the_shipped_tree_is_untouched(stock):
 
     s = StrategyStore().get("scout", "grid")
     assert s is not None
-    assert s.home == agent_home("scout") / "strategies" / "grid"
-    assert s.source == s.home / "strategy.md"
-    assert not (stock / "strategies").exists()
+    assert s.home == agent_home("scout") / "loops" / "grid"
+    assert s.source == s.home / "loop.md"
+    assert not (stock / "loops").exists()
 
 
 # ── 3. The fork is per item ──
@@ -193,13 +193,13 @@ def test_deleting_a_stock_agent_is_refused(stock):
 
 def test_deleting_a_stock_strategy_is_refused(stock):
     _write(
-        stock / "strategies" / "shipped" / "strategy.md",
+        stock / "loops" / "shipped" / "loop.md",
         "---\nname: Shipped\n---\n\ntick\n",
     )
 
     with pytest.raises(ValueError, match="ships with Condor"):
         StrategyStore().delete("scout", "shipped")
-    assert (stock / "strategies" / "shipped" / "strategy.md").exists()
+    assert (stock / "loops" / "shipped" / "loop.md").exists()
 
 
 def test_deleting_a_local_strategy_still_works(stock):
@@ -267,10 +267,10 @@ def test_the_raw_agent_md_route_writes_into_the_local_root(stock):
 
 def test_the_raw_strategy_md_route_writes_into_the_local_root(stock):
     _write(
-        stock / "strategies" / "shipped" / "strategy.md",
+        stock / "loops" / "shipped" / "loop.md",
         "---\nname: Shipped\n---\n\ntick\n",
     )
-    before = (stock / "strategies" / "shipped" / "strategy.md").read_text()
+    before = (stock / "loops" / "shipped" / "loop.md").read_text()
 
     resp = _client().put(
         "/agents/scout/strategies/shipped",
@@ -278,8 +278,8 @@ def test_the_raw_strategy_md_route_writes_into_the_local_root(stock):
     )
 
     assert resp.status_code == 200, resp.text
-    assert (stock / "strategies" / "shipped" / "strategy.md").read_text() == before
-    local = agent_home("scout") / "strategies" / "shipped" / "strategy.md"
+    assert (stock / "loops" / "shipped" / "loop.md").read_text() == before
+    local = agent_home("scout") / "loops" / "shipped" / "loop.md"
     assert "mine" in local.read_text()
 
 
@@ -291,7 +291,7 @@ def test_the_raw_learnings_route_writes_into_the_local_root(stock):
     )
 
     assert resp.status_code == 200, resp.text
-    learnings = agent_home("scout") / "strategies" / "grid" / "learnings.md"
+    learnings = agent_home("scout") / "loops" / "grid" / "learnings.md"
     assert learnings.read_text() == "learned"
 
 
@@ -450,12 +450,12 @@ def test_a_differing_local_strategy_shutdown_policy_is_warned_about_once(
     stock, forget_shadow_warnings, caplog
 ):
     from condor.agents.shutdown import load_shutdown_policy
-    from condor.agents.strategy import STRATEGIES_DIRNAME
+    from condor.agents.strategy import LOOPS_DIRNAME
 
     strategy = StrategyStore().create(
         agent_slug="scout", name="Grid", instructions="tick"
     )
-    shipped = stock / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md"
+    shipped = stock / LOOPS_DIRNAME / strategy.slug / "shutdown.md"
     _write(shipped, "---\non_kill_switch: hold\n---\n\nshipped")
     _write(strategy.home / "shutdown.md", "---\non_kill_switch: hold\n---\n\nours")
 
@@ -473,13 +473,13 @@ def test_an_identical_local_strategy_shutdown_policy_says_nothing(
     stock, forget_shadow_warnings, caplog
 ):
     from condor.agents.shutdown import load_shutdown_policy
-    from condor.agents.strategy import STRATEGIES_DIRNAME
+    from condor.agents.strategy import LOOPS_DIRNAME
 
     strategy = StrategyStore().create(
         agent_slug="scout", name="Grid", instructions="tick"
     )
     text = "---\non_kill_switch: hold\n---\n\nsame"
-    _write(stock / STRATEGIES_DIRNAME / strategy.slug / "shutdown.md", text)
+    _write(stock / LOOPS_DIRNAME / strategy.slug / "shutdown.md", text)
     _write(strategy.home / "shutdown.md", text)
 
     with caplog.at_level("WARNING"):
@@ -615,10 +615,8 @@ def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock)
     _write(
         home / "skills" / "basis" / "SKILL.md", SKILL_MD.format(slug="basis", body="B.")
     )
-    _write(
-        home / "strategies" / "carry" / "strategy.md", "---\nname: Carry\n---\n\ntick\n"
-    )
-    _write(home / "strategies" / "carry" / "learnings.md", "learned")
+    _write(home / "loops" / "carry" / "loop.md", "---\nname: Carry\n---\n\ntick\n")
+    _write(home / "loops" / "carry" / "learnings.md", "learned")
     _write(home / "store" / "user_7" / "audit.log", "ran")
     _write(home / "mutes.yml", "skills: []\n")
 
@@ -630,13 +628,13 @@ def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock)
     assert set(result["paths"]) == {
         f"{prefix}/perps/AGENT.md",
         f"{prefix}/perps/skills/basis/SKILL.md",
-        f"{prefix}/perps/strategies/carry/strategy.md",
+        f"{prefix}/perps/loops/carry/loop.md",
     }
     shipped = stock_agent_home("perps")
     assert (shipped / "AGENT.md").exists()
     assert not (shipped / "store").exists()
     assert not (shipped / "mutes.yml").exists()
-    assert not (shipped / "strategies" / "carry" / "learnings.md").exists()
+    assert not (shipped / "loops" / "carry" / "learnings.md").exists()
 
 
 def test_publishing_clears_the_fork_stamp(stock):
@@ -755,7 +753,7 @@ def repo_layout(tmp_path, monkeypatch):
         AGENT_MD.format(name="Brigado", desc="shipped", body="Ship."),
     )
     _write(
-        stock_root / "brigado" / "strategies" / "default" / "strategy.md",
+        stock_root / "brigado" / "loops" / "default" / "loop.md",
         "---\nname: Default\n---\n\nLoop.\n",
     )
     return stock_root, local_root, agent_md
@@ -779,8 +777,8 @@ def test_a_traversal_slug_never_resolves_into_the_shipped_tree(repo_layout):
 
 def test_the_strategy_slug_cannot_traverse_either(repo_layout):
     _, local_root, _ = repo_layout
-    (local_root / "condor" / "strategies").mkdir(parents=True, exist_ok=True)
-    sslug = "../../../../agents/brigado/strategies/default"
+    (local_root / "condor" / "loops").mkdir(parents=True, exist_ok=True)
+    sslug = "../../../../agents/brigado/loops/default"
 
     assert StrategyStore().get("condor", sslug) is None
     assert StrategyStore().get_by_key(f"condor.{sslug}") is None
@@ -821,7 +819,7 @@ def test_manage_skill_cannot_target_a_traversal_slug(repo_layout):
             body="b",
         )
     )
-    assert result == {"error": f"No agent or strategy found for '{TRAVERSAL}'"}
+    assert result == {"error": f"No agent or loop found for '{TRAVERSAL}'"}
     assert not (stock_root / "brigado" / "skills").exists()
 
 

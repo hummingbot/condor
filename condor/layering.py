@@ -274,7 +274,7 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
     """Every library file under ``home``, relative to it — runtime output skipped.
 
     ``path`` narrows to one file or folder (``skills/recon``,
-    ``strategies/grid``); empty takes the whole agent. The runtime filter applies
+    ``loops/grid``); empty takes the whole agent. The runtime filter applies
     either way, so naming a folder cannot smuggle a store out.
     """
     rel_parts = tuple(part for part in path.split("/") if part and part != "..")

@@ -1,14 +1,14 @@
 ---
 name: agent_builder
-description: Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by delegating it a question, then progressively improve it with routines and (optionally) a loop strategy.
-when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by asking it things or also runs a strategy on a loop.
+description: Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by delegating it a question, then progressively improve it with routines and (optionally) a loop of its own.
+when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by asking it things or also runs a loop of its own.
 created: 2026-06-18
 source: builtin
 ---
 
 You are helping the user build or operate an **autonomous trading agent**. Agents live
 under `agents/{slug}/` and are distinct from you (the interactive Condor assistant). You
-drive them via `manage_agents`, `manage_strategies`, `control_agent`, `manage_routines`,
+drive them via `manage_agents`, `manage_loops`, `control_agent`, `manage_routines`,
 `trading_agent_journal_read` and `delegate`.
 
 ## Mental model — start minimal, improve in layers
@@ -25,7 +25,7 @@ no such thing as an "advisory-only" or "loop-only" agent. The layers below add *
 
 The whole point of this skill is to build the agent in the **smallest useful step first,
 then layer capability on only when the user wants it.** Do NOT front-load routines,
-strategies, executors, or model questions. The progression is:
+loops, executors, or model questions. The progression is:
 
 1. **Create the agent from just its role + what it's for.** Nothing else required. The
    moment it exists it can already be delegated to and looped.
@@ -34,9 +34,9 @@ strategies, executors, or model questions. The progression is:
 3. **Improve it with routines** — give it structured market data of its own. Define one,
    create it, run it, look at the output together. This is what turns a guessing LLM into
    a real specialist.
-4. **(Optional) Give its loop a dedicated playbook** — a strategy the engine runs on a
+4. **(Optional) Give its loop a dedicated playbook** — a loop the engine runs on a
    tick. The agent can already loop without one (it ticks a default playbook driven by
-   its own brain); a strategy is how you make that loop specific and disciplined. The
+   its own brain); a loop of its own is how you make it specific and disciplined. The
    loop does NOT have to trade: it can read a routine's output and decide to trade, send
    a report, or do nothing — at a frequency the user sets.
 
@@ -48,7 +48,7 @@ agents/{slug}/
   AGENT.md                         # identity + role (the brain) — step 1
   routines/*.py                    # agent-scoped analysis scripts — step 3
   skills/{name}/SKILL.md           # the agent's own reusable playbooks
-  strategies/{slug}/strategy.md    # OPTIONAL loop playbook — step 4 (a default
+  loops/{slug}/loop.md             # OPTIONAL loop playbook — step 4 (a default
                                    # one is created on first start if there is none)
   sessions/session_N/              # run journals/snapshots (created at runtime)
 ```
@@ -96,7 +96,7 @@ manage_agents(
 > almost every agent — and it is the only value that travels, because an agent is
 > shared, committed, and read on machines whose server list is nothing like the
 > creating operator's. Naming the server you happen to be on **pins** the agent to
-> it: its `mcp-hummingbot` subprocess and every strategy it deploys use that server
+> it: its `mcp-hummingbot` subprocess and every loop it deploys use that server
 > forever, regardless of the chat, and on anyone else's install it names a server
 > that does not exist. Pass a name **only** when the user explicitly says this agent
 > must always trade on that specific server. It is not a field to fill in helpfully
@@ -196,23 +196,23 @@ system default. Until that is surfaced, the only mitigation is task sizing.
 ## Step 4 — (Optional) Give its loop a dedicated playbook
 
 Only if the user wants the agent to act autonomously. The agent can already loop without
-this step — `control_agent(action="start", strategy_id="<agent_slug>")` ticks a
+this step — `control_agent(action="start", loop_id="<agent_slug>")` ticks a
 default playbook driven by
-its AGENT.md — but that default is deliberately generic. A **strategy** is the specific
+its AGENT.md — but that default is deliberately generic. A **loop** is the specific
 tick playbook the engine runs in a **session**, and it is what you want for anything that
 trades.
 
-**How a strategy is authored, dry-run and launched lives in the shared `strategy_builder`
-playbook — read it (`manage_skill(action="read", name="strategy_builder")`) and follow it,
+**How a loop is authored, dry-run and launched lives in the shared `loop_builder`
+playbook — read it (`manage_skill(action="read", name="loop_builder")`) and follow it,
 passing `agent_slug="<agent_slug>"`.** It is the single source of truth, and it is shared
 precisely so an agent can give *itself* a loop without coming back through you. Don't
 restate its mechanics here; your job at this step is only to:
 
-- decide **with the user** whether a dedicated strategy is warranted at all,
+- decide **with the user** whether a dedicated loop is warranted at all,
 - make clear the loop does NOT have to trade — it can read routine X's output and decide
   to trade, send a report, or watch a condition — at a **frequency the user sets**
   (`frequency_sec`),
-- then run `strategy_builder` for the agent you just created.
+- then run `loop_builder` for the agent you just created.
 
 If the agent is capable enough to author its own loop, prefer handing it the job:
 `delegate(action="start", agent="<agent_slug>", task="give yourself a loop that …")`. It
@@ -220,20 +220,20 @@ reads the same shared playbook and knows its own domain better than you do.
 
 ## Monitoring existing agents
 1. `manage_agents(action="list")` — all agents, with their
-   routing hint and owned strategies. Only list that shows agents owning no strategy.
+   routing hint and owned loops. Only list that shows agents owning no loop.
 2. `control_agent(action="list")` — running loop instances, with their status.
 3. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
 
 ## Reference
 
 **Capability rule:** there isn't one. Every agent is delegable and loopable on any
-model; `when_to_consult` and owning a strategy are quality, not permission. The model
+model; `when_to_consult` and owning a loop are quality, not permission. The model
 only changes *how* a run executes, never what it may reach: the `tools` allowlist
 binds on every key, ACP bridges included — a tool it leaves out is never mounted. So
 an allowlist must name every tool the agent's own playbooks call *plus* the family the
 inherited framework skills call (`delegate`, `send_notification`, `run_code`,
 `manage_memory`, `manage_skill`, `manage_routines`, `trading_agent_journal_read`,
-`trading_agent_journal_write`, `manage_agents`, `manage_strategies`, `control_agent`,
+`trading_agent_journal_write`, `manage_agents`, `manage_loops`, `control_agent`,
 `get_available_models`); leave it empty for unrestricted. Every run reached through `delegate` — `start` or `ask` —
 is unattended: nobody is asked to approve its tool calls, so only hand work to agents
 and tasks you trust.
@@ -248,7 +248,7 @@ or missing one costs you routing accuracy, so write it well. Rules:
 - **State the boundary** when two agents are close ("…executor deployment — NOT
   controller backtesting"). Same shape applies to a skill's `when_to_use`.
 
-**Model selection:** Set per session, not baked in. The agent/strategy `agent_key` is the
+**Model selection:** Set per session, not baked in. The agent/loop `agent_key` is the
 default; override at launch via `config={"agent_key": "…"}`. **Recommend from what the
 operator actually has — call `get_available_models` and pick for the agent's job. Do NOT
 default to a hardcoded model.** The tool reports:
@@ -293,7 +293,7 @@ Choose by the agent's job, not by habit:
 Propose one sensible pick with a one-line why; offer the alternatives you saw. Don't turn
 it into a questionnaire — it's the easiest thing to change later.
 
-**Generic vs Specific strategies:**
+**Generic vs Specific loops:**
 - GENERIC (default): pair/connector are NOT in the instructions — passed at launch via
   `trading_context`. Refer to "the configured trading pair"; keep sensible `default_config`.
 - SPECIFIC: pair/connector baked into the instructions (e.g. an ETH/BTC ratio play).
@@ -315,7 +315,7 @@ and target it explicitly with `manage_skill(..., agent="<slug>")`.
 **Editing & deleting:** read the current brain with `manage_agents(action="get",
 agent_slug=…)`, edit with `manage_agents(action="update", agent_slug=…, instructions=…)`.
 `manage_agents(action="delete", agent_slug=…)` refuses while the agent still owns
-strategies — delete those first (`manage_strategies(action="delete", strategy_id=…)`).
+loops — delete those first (`manage_loops(action="delete", loop_id=…)`).
 
 ## Rules
 - **Minimal first.** Create the agent from just role + purpose; never open with a config
@@ -328,7 +328,7 @@ strategies — delete those first (`manage_strategies(action="delete", strategy_
   operator" — pass either one only when the user named it. A guessed model or a
   helpfully-filled server pin fails on someone else's install, long after creation
   reported success.
-- Create the AGENT.md FIRST — routines and strategies require an existing agent_slug.
+- Create the AGENT.md FIRST — routines and loops require an existing agent_slug.
 - **One routine per background delegation.** Never bundle 2+ routines in one `delegate`
   call — always split and sequence them. If handed too much work as the background
   worker, commit what you have and instruct the user to trigger a follow-up.

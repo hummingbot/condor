@@ -27,7 +27,7 @@ AGENT_RING = set(condor_profiles.PROFILE_TOOLS["agent"]) | set(
 )
 
 #: What the framework skills every agent inherits (``agent_framework``,
-#: ``strategy_builder``, ``operate_your_loop``, ``skill_authoring``,
+#: ``loop_builder``, ``operate_your_loop``, ``skill_authoring``,
 #: ``self_improve``) and the tick's house prompt tell *any* agent to call.
 FRAMEWORK = {
     "delegate",
@@ -39,7 +39,7 @@ FRAMEWORK = {
     "trading_agent_journal_read",
     "trading_agent_journal_write",
     "manage_agents",
-    "manage_strategies",
+    "manage_loops",
     "control_agent",
     "get_available_models",
 }

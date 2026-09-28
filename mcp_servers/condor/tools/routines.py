@@ -727,8 +727,8 @@ def create_routine(
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
-            "error": "Pass agent — the slug of an existing agent (a legacy strategy "
-            "key 'agent_slug.strategy_slug' is also accepted) — or CONDOR_AGENT_SLUG "
+            "error": "Pass agent — the slug of an existing agent (a legacy loop "
+            "key 'agent_slug.loop_slug' is also accepted) — or CONDOR_AGENT_SLUG "
             "must be set."
         }
 
@@ -810,8 +810,8 @@ def edit_routine(
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
-            "error": "Pass agent — the slug of an existing agent (a legacy strategy "
-            "key 'agent_slug.strategy_slug' is also accepted) — or CONDOR_AGENT_SLUG "
+            "error": "Pass agent — the slug of an existing agent (a legacy loop "
+            "key 'agent_slug.loop_slug' is also accepted) — or CONDOR_AGENT_SLUG "
             "must be set."
         }
 
@@ -861,8 +861,8 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
-            "error": "Pass agent — the slug of an existing agent (a legacy strategy "
-            "key 'agent_slug.strategy_slug' is also accepted) — or CONDOR_AGENT_SLUG "
+            "error": "Pass agent — the slug of an existing agent (a legacy loop "
+            "key 'agent_slug.loop_slug' is also accepted) — or CONDOR_AGENT_SLUG "
             "must be set."
         }
 

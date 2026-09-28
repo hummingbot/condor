@@ -82,8 +82,10 @@ def _state_dir(namespace: str) -> Path:
     from condor.paths import local_agents_root
 
     if namespace.count(".") == 1:
+        from condor.agents.strategy import LOOPS_DIRNAME
+
         agent_slug, strategy_slug = namespace.split(".", 1)
-        candidate = local_agents_root() / agent_slug / "strategies" / strategy_slug
+        candidate = local_agents_root() / agent_slug / LOOPS_DIRNAME / strategy_slug
         if candidate.is_dir():
             return candidate
 
@@ -248,6 +250,7 @@ class BoundState:
 
 def cleanup_orphans(agents_root: Path | None = None) -> int:
     """Forget namespaces whose strategy directory is gone. Returns the count."""
+    from condor.agents.strategy import LOOPS_DIRNAME
     from condor.paths import local_agents_root
 
     root = Path(agents_root) if agents_root is not None else local_agents_root()
@@ -256,7 +259,7 @@ def cleanup_orphans(agents_root: Path | None = None) -> int:
         if namespace.count(".") != 1:
             continue
         agent_slug, strategy_slug = namespace.split(".", 1)
-        if not (root / agent_slug / "strategies" / strategy_slug).is_dir():
+        if not (root / agent_slug / LOOPS_DIRNAME / strategy_slug).is_dir():
             _cache.pop(namespace, None)
             _dirty.discard(namespace)
             _last_write.pop(namespace, None)

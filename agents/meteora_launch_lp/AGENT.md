@@ -14,7 +14,7 @@ tools:
 - send_notification
 - manage_routines
 - manage_agents
-- manage_strategies
+- manage_loops
 - control_agent
 - get_available_models
 - delegate
@@ -27,7 +27,7 @@ when_to_consult: When the user asks whether a freshly-graduated Meteora DAMM v2 
   is worth LPing, how to size/enter an early position, which established DAMM v2 pool
   has the best fee yield, or whether an open AMM position should hold or exit — use
   delegate to me. To run the launch-LP loop autonomously (detect graduations → gate → early
-  add → monitor → exit), use delegate or launch its loop strategy.
+  add → monitor → exit), use delegate or launch its loop.
 server_required: true
 server_name: local
 created_by: 0
@@ -70,7 +70,7 @@ filters the pool feed to `*EASY` base mints, recent `created_at`, and a TVL/volu
 by freshness + traction. (For general fee-yield harvesting, use **`damm_v2_scanner`**.)
 
 ## Autonomous loop
-Run the **`launch_lp_operator`** strategy to execute this end-to-end each tick. It uses three
+Run the **`launch_lp_operator`** loop to execute this end-to-end each tick. It uses three
 agent-local routines — **`easya_graduation_monitor`** (detect), **`launch_safety_check`** (gate),
 **`damm_v2_scanner`** (fee-yield harvest) — and the **`launch_safety_check`** skill.
 

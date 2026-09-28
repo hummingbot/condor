@@ -20,7 +20,7 @@ from mcp_servers.condor.tools import trading_agent
 def agents(tmp_path, monkeypatch):
     root = tmp_path / "agents"
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(root))
-    (root / "brigado" / "strategies" / "grid").mkdir(parents=True)
+    (root / "brigado" / "loops" / "grid").mkdir(parents=True)
     import condor.agents.engine as engine_module
 
     monkeypatch.setattr(engine_module, "get_engine", lambda _aid: None)
@@ -35,7 +35,7 @@ def victim(tmp_path):
 
 
 def _rel(agents, victim):
-    return os.path.relpath(victim, agents / "brigado" / "strategies")
+    return os.path.relpath(victim, agents / "brigado" / "loops")
 
 
 def test_a_traversal_id_resolves_nothing_and_writes_nothing(agents, victim):
@@ -53,7 +53,7 @@ def test_a_traversal_id_resolves_nothing_and_writes_nothing(agents, victim):
 
 def test_a_slashed_id_without_dots_is_refused(agents):
     # The nested dir exists, so only the one-segment rule refuses it.
-    (agents / "condor" / "strategies" / "other" / "deep").mkdir(parents=True)
+    (agents / "condor" / "loops" / "other" / "deep").mkdir(parents=True)
     assert resolve_agent_dirs("condor.other/deep_1") == (None, None)
 
 
@@ -72,16 +72,16 @@ def test_the_journal_manager_fallback_refuses_a_traversal_id(agents, victim):
 
 
 def test_well_formed_and_unicode_ids_still_resolve(agents):
-    (agents / "brigado" / "strategies" / "grid" / "sessions" / "session_1").mkdir(
+    (agents / "brigado" / "loops" / "grid" / "sessions" / "session_1").mkdir(
         parents=True
     )
     session, base = resolve_agent_dirs("brigado.grid_1")
-    assert base == agents / "brigado" / "strategies" / "grid"
+    assert base == agents / "brigado" / "loops" / "grid"
     assert session == base / "sessions" / "session_1"
 
-    (agents / "señor_trader" / "strategies" / "grid" / "sessions" / "session_1").mkdir(
+    (agents / "señor_trader" / "loops" / "grid" / "sessions" / "session_1").mkdir(
         parents=True
     )
     session, base = resolve_agent_dirs("señor_trader.grid_1")
-    assert base == agents / "señor_trader" / "strategies" / "grid"
+    assert base == agents / "señor_trader" / "loops" / "grid"
     assert session == base / "sessions" / "session_1"

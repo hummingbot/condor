@@ -75,7 +75,7 @@ CONDOR_COMMON = {
 }
 CONDOR_ORCHESTRATION = {
     "manage_agents",
-    "manage_strategies",
+    "manage_loops",
     "control_agent",
     "get_available_models",
 }
@@ -154,7 +154,7 @@ def test_no_seat_can_reach_a_raw_market_data_reader(forbidden):
 
 @pytest.mark.parametrize(
     "forbidden",
-    ["manage_agents", "manage_strategies", "control_agent", "get_available_models"],
+    ["manage_agents", "manage_loops", "control_agent", "get_available_models"],
 )
 def test_a_tick_cannot_reach_the_orchestration_family(forbidden):
     """It is running inside the loop these tools start and stop."""

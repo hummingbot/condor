@@ -1,4 +1,4 @@
-"""Agent CRUD, strategy CRUD, instance lifecycle, and the journal."""
+"""Agent CRUD, loop CRUD, instance lifecycle, and the journal."""
 
 from pathlib import Path
 
@@ -7,17 +7,17 @@ from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
 
 # ---------------------------------------------------------------------------
-# Strategy CRUD (sub-resource of an Agent)
+# Loop CRUD (sub-resource of an Agent; ``Strategy`` in the Python names)
 #
-# ``strategy_id`` is the opaque composite key ``"{agent_slug}.{strategy_slug}"``
-# returned by list_strategies/create_strategy — the LLM just passes it back.
-# ``agent_slug`` (the owning Agent) is required to create a strategy.
+# ``loop_id`` is the opaque composite key ``"{agent_slug}.{strategy_slug}"``
+# returned by list/create — the LLM just passes it back.
+# ``agent_slug`` (the owning Agent) is required to create a loop.
 # ---------------------------------------------------------------------------
 
 
 def _manage_strategy(
     action: str,
-    strategy_id: str | None,
+    loop_id: str | None,
     agent_slug: str | None,
     name: str | None,
     description: str | None,
@@ -33,7 +33,7 @@ def _manage_strategy(
     if action == "list_strategies":
         strategies = store.list_all()
         return {
-            "strategies": [
+            "loops": [
                 {
                     "id": s.key,
                     "agent_slug": s.agent_slug,
@@ -48,11 +48,11 @@ def _manage_strategy(
         }
 
     elif action == "get_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get_by_key(strategy_id)
+        if not loop_id:
+            return {"error": "loop_id is required"}
+        s = store.get_by_key(loop_id)
         if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
+            return {"error": f"Loop '{loop_id}' not found"}
         return {
             "id": s.key,
             "agent_slug": s.agent_slug,
@@ -71,7 +71,7 @@ def _manage_strategy(
             return {"error": "name and instructions are required"}
         if not agent_slug:
             return {
-                "error": "agent_slug (the owning Agent) is required to create a strategy"
+                "error": "agent_slug (the owning Agent) is required to create a loop"
             }
         from condor.agents.agent import AgentStore
 
@@ -90,14 +90,14 @@ def _manage_strategy(
             )
         except ValueError as exc:  # taken or reserved name (CORR-635)
             return {"error": str(exc)}
-        return {"created": True, "strategy_id": strategy.key, "name": strategy.name}
+        return {"created": True, "loop_id": strategy.key, "name": strategy.name}
 
     elif action == "update_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get_by_key(strategy_id)
+        if not loop_id:
+            return {"error": "loop_id is required"}
+        s = store.get_by_key(loop_id)
         if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
+            return {"error": f"Loop '{loop_id}' not found"}
         if name:
             s.name = name
         if description:
@@ -111,22 +111,22 @@ def _manage_strategy(
         if config:
             s.default_config = config
         store.update(s)
-        return {"updated": True, "strategy_id": s.key, "name": s.name}
+        return {"updated": True, "loop_id": s.key, "name": s.name}
 
     elif action == "delete_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        parts = split_key(strategy_id)
+        if not loop_id:
+            return {"error": "loop_id is required"}
+        parts = split_key(loop_id)
         if not parts:
-            return {"error": f"Invalid strategy_id '{strategy_id}'"}
+            return {"error": f"Invalid loop_id '{loop_id}'"}
         deleted = store.delete(parts[0], parts[1])
         return {"deleted": deleted}
 
-    return {"error": f"Unknown strategy action: {action}"}
+    return {"error": f"Unknown loop action: {action}"}
 
 
 # ---------------------------------------------------------------------------
-# Agent definitions (the AGENT.md identities — distinct from strategies/instances)
+# Agent definitions (the AGENT.md identities — distinct from loops/instances)
 # ---------------------------------------------------------------------------
 
 
@@ -134,8 +134,8 @@ def _list_agent_definitions() -> dict:
     """List the Agent identities (``*/AGENT.md`` across both agent roots).
 
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
-    *strategy* (a looping playbook it owns) and from a running *instance*. This
-    surfaces agents that ``list_strategies`` / ``list_agents`` (instances) never
+    *loop* (a looping playbook it owns) and from a running *instance*. This
+    surfaces agents that ``manage_loops`` / ``control_agent`` (instances) never
     show. No capability flags: every agent listed here can be delegated to,
     delegated to and looped.
     """
@@ -156,7 +156,7 @@ def _list_agent_definitions() -> dict:
                 "description": a.description,
                 "agent_key": a.agent_key,
                 "when_to_consult": a.consult_hint,
-                "strategies": owned,
+                "loops": owned,
                 "tools": a.tools,
             }
         )
@@ -166,10 +166,10 @@ def _list_agent_definitions() -> dict:
 # ---------------------------------------------------------------------------
 # Agent CRUD (the AGENT.md identity itself — the primary artifact)
 #
-# An Agent is the brain/identity. It is created FIRST; routines and strategies
+# An Agent is the brain/identity. It is created FIRST; routines and loops
 # are sub-resources that hang off an existing agent_slug. There are no capability
 # flags: the moment an agent exists it can be delegated to and looped.
-# ``when_to_consult`` is a routing hint; a bespoke strategy is an optimization
+# ``when_to_consult`` is a routing hint; a bespoke loop is an optimization
 # over the default playbook every agent already loops.
 # ---------------------------------------------------------------------------
 
@@ -379,8 +379,8 @@ def _manage_agent(
         if owned:
             return {
                 "error": (
-                    f"Agent '{agent_slug}' still owns {len(owned)} strategy(ies). "
-                    "Delete its strategies first."
+                    f"Agent '{agent_slug}' still owns {len(owned)} loop(s). "
+                    "Delete its loops first."
                 )
             }
         return {"deleted": store.delete(agent_slug)}
@@ -395,7 +395,7 @@ def _manage_agent(
 
 async def _agent_lifecycle(
     action: str,
-    strategy_id: str | None,
+    loop_id: str | None,
     agent_id: str | None,
     config: dict | None,
 ) -> dict:
@@ -413,18 +413,18 @@ async def _agent_lifecycle(
             return {"agents": agents}
 
         if action == "start_agent":
-            if not strategy_id:
-                return {"error": "strategy_id is required"}
+            if not loop_id:
+                return {"error": "loop_id is required"}
 
             from condor.agents.strategy import StrategyStore
 
             store = StrategyStore()
             # Accepts a composite key OR a bare agent slug: every agent is
-            # loopable, so a slug resolves to its only strategy or to a default
+            # loopable, so a slug resolves to its only loop or to a default
             # playbook materialized from its identity on first start.
-            strategy = store.resolve_for_loop(strategy_id)
+            strategy = store.resolve_for_loop(loop_id)
             if not strategy:
-                return {"error": f"No strategy or agent matches '{strategy_id}'"}
+                return {"error": f"No loop or agent matches '{loop_id}'"}
 
             from condor.agents.config import load_full_config
             from config_manager import get_config_manager, get_effective_server
@@ -731,25 +731,22 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="publish", agent_slug=...)',
     ),
-    "list_strategies": ("manage_strategies", 'manage_strategies(action="list")'),
-    "get_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="get", strategy_id=...)',
-    ),
+    "list_strategies": ("manage_loops", 'manage_loops(action="list")'),
+    "get_strategy": ("manage_loops", 'manage_loops(action="get", loop_id=...)'),
     "create_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="create", agent_slug=..., name=..., instructions=...)',
+        "manage_loops",
+        'manage_loops(action="create", agent_slug=..., name=..., instructions=...)',
     ),
     "update_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="update", strategy_id=...)',
+        "manage_loops",
+        'manage_loops(action="update", loop_id=...)',
     ),
     "delete_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="delete", strategy_id=...)',
+        "manage_loops",
+        'manage_loops(action="delete", loop_id=...)',
     ),
     "list_agents": ("control_agent", 'control_agent(action="list")'),
-    "start_agent": ("control_agent", 'control_agent(action="start", strategy_id=...)'),
+    "start_agent": ("control_agent", 'control_agent(action="start", loop_id=...)'),
     "stop_agent": ("control_agent", 'control_agent(action="stop", agent_id=...)'),
     "pause_agent": ("control_agent", 'control_agent(action="pause", agent_id=...)'),
     "resume_agent": ("control_agent", 'control_agent(action="resume", agent_id=...)'),
@@ -853,9 +850,9 @@ def manage_agents(
     )
 
 
-def manage_strategies(
+def manage_loops(
     action: str,
-    strategy_id: str | None = None,
+    loop_id: str | None = None,
     agent_slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -864,12 +861,12 @@ def manage_strategies(
     skills: list[str] | None = None,
     config: dict | None = None,
 ) -> dict:
-    resolved, err = _resolve_action("manage_strategies", action, _STRATEGY_ACTIONS)
+    resolved, err = _resolve_action("manage_loops", action, _STRATEGY_ACTIONS)
     if err:
         return err
     return _manage_strategy(
         resolved,
-        strategy_id,
+        loop_id,
         agent_slug,
         name,
         description,
@@ -883,7 +880,7 @@ def manage_strategies(
 async def control_agent(
     action: str,
     agent_id: str | None = None,
-    strategy_id: str | None = None,
+    loop_id: str | None = None,
     config: dict | None = None,
     key: str | None = None,
     value=None,
@@ -897,4 +894,4 @@ async def control_agent(
         # The namespace is derived from agent_id, never taken from the caller,
         # so an agent cannot read another's cursors by guessing a key.
         return await _agent_state(resolved, agent_id, key, value, expires_in, clear)
-    return await _agent_lifecycle(resolved, strategy_id, agent_id, config)
+    return await _agent_lifecycle(resolved, loop_id, agent_id, config)

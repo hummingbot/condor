@@ -63,7 +63,7 @@ async def manage_skill(
     target = agent
     agent_slug, resolved = _resolve_agent_slug(target)
     if target and not resolved:
-        return {"error": f"No agent or strategy found for '{target}'"}
+        return {"error": f"No agent or loop found for '{target}'"}
     store = SkillStore(agent_slug)
     source = f"agent:{agent_slug}" if agent_slug else "chat"
 

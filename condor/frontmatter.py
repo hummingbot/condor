@@ -1,7 +1,7 @@
 """YAML-frontmatter round-trip and slug helpers — the one implementation.
 
 Every markdown-with-frontmatter file Condor persists (``AGENT.md``,
-``strategy.md``, memory facts, skill playbooks) goes through this module, so
+``loop.md``, memory facts, skill playbooks) goes through this module, so
 parse and render can never drift apart between callers. Consolidated from the
 near-verbatim private copies in ``condor/agents/strategy.py`` and
 ``condor/memory/store.py`` (ARCH-202), following the same pattern that

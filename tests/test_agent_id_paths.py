@@ -46,13 +46,13 @@ def test_parse_agent_id_rejects_malformed_ids(bad):
 
 
 def test_strategy_dir_is_the_strategy_home_composition(agents_root):
-    assert strategy_dir_for_run_key("a.s") == agents_root / "a" / "strategies" / "s"
+    assert strategy_dir_for_run_key("a.s") == agents_root / "a" / "loops" / "s"
     # The dot-less legacy flat prefix has no producer since FEAT-004.
     assert strategy_dir_for_run_key("flat") is None
 
 
 def test_a_legacy_trading_sessions_dir_is_resolved_not_shadowed(agents_root):
-    strategy_dir = agents_root / "a" / "strategies" / "s"
+    strategy_dir = agents_root / "a" / "loops" / "s"
     legacy = strategy_dir / "trading_sessions" / "session_1"
     _touch(legacy / "journal.md", "# Journal - a.s_1\n")
 
@@ -64,7 +64,7 @@ def test_a_legacy_trading_sessions_dir_is_resolved_not_shadowed(agents_root):
 
 def test_a_session_not_on_disk_resolves_to_nothing(agents_root):
     # CORR-654: no phantom session dir for an unknown session number.
-    strategy_dir = agents_root / "a" / "strategies" / "s"
+    strategy_dir = agents_root / "a" / "loops" / "s"
     strategy_dir.mkdir(parents=True)
     assert resolve_agent_dirs("a.s_4") == (None, None)
     assert resolve_agent_dirs("a.s_e4") == (None, strategy_dir)
@@ -76,7 +76,7 @@ def test_a_session_not_on_disk_resolves_to_nothing(agents_root):
 
 
 def test_unknown_or_malformed_ids_resolve_to_nothing(agents_root):
-    (agents_root / "a" / "strategies" / "s").mkdir(parents=True)
+    (agents_root / "a" / "loops" / "s").mkdir(parents=True)
     (agents_root / "flat").mkdir(parents=True)
     assert resolve_agent_dirs("a.missing_1") == (None, None)
     assert resolve_agent_dirs("a.s_x") == (None, None)
@@ -84,7 +84,7 @@ def test_unknown_or_malformed_ids_resolve_to_nothing(agents_root):
 
 
 def test_resolve_experiment_file_finds_the_legacy_dir(agents_root):
-    strategy_dir = agents_root / "a" / "strategies" / "s"
+    strategy_dir = agents_root / "a" / "loops" / "s"
     _touch(strategy_dir / "experiments" / "experiment_2.md")
 
     assert _resolve_experiment_file("a.s_e2") == (

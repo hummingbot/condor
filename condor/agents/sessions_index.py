@@ -5,7 +5,7 @@ journal and experiment file formats) is owned by :mod:`condor.agents.journal`;
 this module provides the enumeration and lookup helpers that consumers (web
 routes, MCP tools) use to browse that layout without re-implementing it.
 
-All helpers take the strategy dir (``agents/{agent_slug}/strategies/{sslug}``)
+All helpers take the strategy dir (``agents/{agent_slug}/loops/{sslug}``)
 and return plain data — no FastAPI/Pydantic dependencies.
 """
 
@@ -22,7 +22,7 @@ from condor.agents.journal import (
     count_journal_ticks,
     iter_session_dirs,
 )
-from condor.agents.strategy import STRATEGIES_DIRNAME
+from condor.agents.strategy import LOOPS_DIRNAME
 from condor.memory.paths import agent_home, safe_slug
 from condor.paths import UnsafeIdError
 
@@ -477,7 +477,7 @@ def strategy_dir_for_run_key(run_key: str) -> Path | None:
     if not dot:
         return None
     try:
-        return agent_home(agent_slug) / STRATEGIES_DIRNAME / safe_slug(slug)
+        return agent_home(agent_slug) / LOOPS_DIRNAME / safe_slug(slug)
     except UnsafeIdError:
         return None
 

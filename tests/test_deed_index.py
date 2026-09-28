@@ -68,9 +68,9 @@ def _write_agent(root: Path, slug: str, name: str) -> Path:
 
 def _write_strategy(root: Path, agent_slug: str, sslug: str) -> Path:
     """The slug comes from the frontmatter name, so the two have to agree."""
-    d = root / agent_slug / "strategies" / sslug
+    d = root / agent_slug / "loops" / sslug
     d.mkdir(parents=True, exist_ok=True)
-    (d / "strategy.md").write_text(f"---\nname: {sslug}\n---\n\nPlaybook.\n")
+    (d / "loop.md").write_text(f"---\nname: {sslug}\n---\n\nPlaybook.\n")
     return d
 
 

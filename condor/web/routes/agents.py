@@ -12,7 +12,7 @@ via ``TickEngine``. So the route shape is::
     /agents/{slug}/strategies/{sslug}/...    -> per-strategy run/journal/perf
 
 Per-strategy operational history (sessions, learnings, experiments, routines)
-hangs off ``agents/{slug}/strategies/{sslug}/`` while the Agent's brain
+hangs off ``agents/{slug}/loops/{sslug}/`` while the Agent's brain
 stays shared at ``agents/{slug}/``.
 """
 
@@ -53,6 +53,7 @@ from condor.agents.sessions_index import (
     list_session_snapshots,
     list_sessions,
 )
+from condor.agents.strategy import LOOP_MD, LOOPS_DIRNAME
 from condor.fsutil import atomic_write_text
 from condor.layering import fork_if_stock
 from condor.web.auth import (
@@ -930,7 +931,7 @@ def _gate_pin_change(user: WebUser, new: Any, stored: str) -> None:
     """Refuse a server pin the caller cannot reach, unless it is already stored.
 
     One rule for every writer of a server pin that is not a dedicated field —
-    raw AGENT.md, strategy.md front matter, a strategy's config dict — so they
+    raw AGENT.md, loop.md front matter, a strategy's config dict — so they
     answer like ``POST /agents`` and ``PATCH /config`` (SEC-594) instead of
     storing whatever the body names (SEC-693). An empty pin needs no access, and
     re-sending the value already on disk is the normal editor round-trip of a
@@ -1889,9 +1890,9 @@ def _tool_cards(slug: str, allowlist: list[str]) -> list[ToolCard]:
     It reads the two ``profiles.py`` leaf modules — never ``server.py``, whose
     import parses argv and builds a ``FastMCP`` singleton.
     """
-    from condor.runtime.toolsets import seat_tools
+    from condor.runtime.toolsets import canonical_tool_name, seat_tools
 
-    named = set(allowlist)
+    named = {canonical_tool_name(name) for name in allowlist}
     return [
         ToolCard(**row, allowlisted=row["name"] in named) for row in seat_tools(slug)
     ]
@@ -2677,7 +2678,7 @@ async def create_strategy(
         )
     except ValueError as exc:
         # Refused before anything is written, so the existing playbook's
-        # strategy.md and config.yml below are never touched (CORR-635).
+        # loop.md and config.yml below are never touched (CORR-635).
         raise _create_refusal(exc) from exc
 
     if req.config:
@@ -2728,7 +2729,7 @@ async def get_strategy(
     strategy_dir = strategy.home
     run_key = _runkey(slug, sslug)
 
-    md_path = strategy_dir / "strategy.md"
+    md_path = strategy_dir / LOOP_MD
     strategy_md = md_path.read_text() if md_path.exists() else ""
 
     from condor.agents.config import load_full_config
@@ -2781,7 +2782,7 @@ async def update_strategy_md(
     req: UpdateStrategyMdRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Update strategy.md content."""
+    """Update loop.md content."""
     strategy = _get_strategy(slug, sslug)
     _require_no_foreign_live_run(slug, sslug, user)
     # ``default_config`` in the front matter carries the strategy's server pin;
@@ -2793,7 +2794,7 @@ async def update_strategy_md(
         (strategy.default_config or {}).get("server_name") or "",
     )
     # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here.
-    target = fork_if_stock(slug, "strategies", strategy.slug, "strategy.md")
+    target = fork_if_stock(slug, LOOPS_DIRNAME, strategy.slug, LOOP_MD)
     atomic_write_text(target, req.content)
     return {"updated": True}
 
@@ -2836,7 +2837,7 @@ async def delete_strategy(
     try:
         removed = _strategy_store().delete(slug, sslug)
     except ValueError as exc:
-        # A strategy whose ``strategy.md`` is still the shipped one is refused
+        # A strategy whose ``loop.md`` is still the shipped one is refused
         # by the store (layering.stock_delete_error). Unhandled here that
         # refusal reached the browser as a 500, which the delete dialog reports
         # as "it may be running" — the one thing it certainly was not.

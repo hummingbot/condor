@@ -6,7 +6,7 @@ description: The lifecycle of a loop that is already running — finding your ow
   call; nothing here needs a YAML edit or a restart.
 when_to_use: A loop is already running and the user wants it stopped, paused, resumed, wound
   down, or listed — "stop the agent", "pause it", "kill it", "close everything and stop",
-  "what is running". Read this BEFORE improvising — `strategy_builder` covers authoring and
+  "what is running". Read this BEFORE improvising — `loop_builder` covers authoring and
   launching, this covers everything after the loop is live.
 created: '2026-08-31T00:00:00Z'
 source: builtin
@@ -14,7 +14,7 @@ source: builtin
 
 # Operate your loop
 
-`strategy_builder` gets a loop running. This playbook is everything **after** that: the
+`loop_builder` gets a loop running. This playbook is everything **after** that: the
 running session is a `TickEngine` and `control_agent` is the whole control surface for it.
 There is no other one.
 
@@ -33,13 +33,13 @@ control_agent(action="list")
 ```
 
 Each entry is one **running instance** with its `agent_id` (the form is
-`"<agent_slug>.<strategy_slug>"` plus a run suffix), its `status` — `running`, `paused` or
+`"<agent_slug>.<loop_slug>"` plus a run suffix), its `status` — `running`, `paused` or
 `stopped` — and its config. `{"agents": [], "message": "No agents running"}` means nothing
 is live for you.
 
 Two companions when you need the wider picture:
 
-- `manage_agents(action="list")` — the agents and the strategies they *own*, running or not.
+- `manage_agents(action="list")` — the agents and the loops they *own*, running or not.
 - `trading_agent_journal_read(agent_id=…, section="summary")` — what this instance has
   actually been doing.
 
@@ -89,19 +89,19 @@ own stops and are supposed to keep working.
 control_agent(action="shutdown", agent_id="<agent_id>")
 ```
 
-The escalation. Before halting, it runs the winddown governed by the strategy's
+The escalation. Before halting, it runs the winddown governed by the loop's
 `shutdown.md` policy: a deterministic baseline that stops **this session's** executors with
 `keep_position` set per policy, then a bounded LLM cleanup pass, then a verify pass that
 re-queries positions, retries once, and loudly alerts the user about anything the policy
 said to close and could not. It always ends stopped.
 
-The policy's `on_kill_switch` decides what "wind down" means, and it is per strategy:
+The policy's `on_kill_switch` decides what "wind down" means, and it is per loop:
 
 - `flatten_all` — close everything.
 - `keep_spot_close_perp` — close perp exposure, keep spot. This is the shipped default.
 - `keep_all` — close nothing; effectively a `stop` with the ceremony.
 
-So `shutdown` is **not** a guarantee that the book is flat. Read the strategy's
+So `shutdown` is **not** a guarantee that the book is flat. Read the loop's
 `shutdown.md` before promising the user it is, and never describe `shutdown` as "closes
 everything" without checking `on_kill_switch`.
 
@@ -120,7 +120,7 @@ outcomes, and the user cannot infer which from the word "stop".
 ## 4. What needs a human, and what does not
 
 `control_agent(action="start", …)` is **confirmation-gated** (SEC-275): starting an
-unattended loop pauses for a human, who sees a summary naming the strategy and — when you
+unattended loop pauses for a human, who sees a summary naming the loop and — when you
 overrode them — the execution mode and the size. Expect that prompt on a start; it is not
 an error, and the loop does not begin until it is approved.
 
@@ -162,8 +162,8 @@ funded positions unattended reads as "done" and is not.
   readable across instances. Useful for cursors a loop carries between ticks; irrelevant to
   its lifecycle.
 - Restarting is not a lifecycle action: end the current instance, then start a fresh one
-  through `strategy_builder`.
-- Editing a strategy's playbook or config (`update_strategy`) does not reach a running
+  through `loop_builder`.
+- Editing a loop's playbook or config (`manage_loops(action="update")`) does not reach a running
   instance. Stop it and start it again for the change to take effect.
 
 ## Rules

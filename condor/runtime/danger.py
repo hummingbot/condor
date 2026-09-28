@@ -757,15 +757,17 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
 
     if tool_name == "control_agent":
         # The human is approving an unattended loop, so the line has to name the
-        # strategy it will run and — when the caller overrode them — the two
+        # loop it will run and — when the caller overrode them — the two
         # numbers that decide how much it can lose. Without this the prompt says
         # "control_agent" and a config dict.
         action = input_data.get("action", "?")
         if action in DANGEROUS_CONTROL_ACTIONS:
-            strategy = input_data.get("strategy_id") or "?"
+            # ``strategy_id`` is the pre-FEAT-128 spelling: a replayed or logged
+            # input still formats.
+            loop = input_data.get("loop_id") or input_data.get("strategy_id") or "?"
             overrides = input_data.get("config")
             overrides = overrides if isinstance(overrides, dict) else {}
-            summary = f"Start a live agent loop on '{strategy}'"
+            summary = f"Start a live agent loop on '{loop}'"
             mode = overrides.get("execution_mode")
             if mode:
                 summary += f" in {mode} mode"

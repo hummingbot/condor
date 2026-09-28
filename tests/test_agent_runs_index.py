@@ -51,9 +51,9 @@ def _write_agent(root: Path, slug: str, name: str) -> Path:
 
 
 def _write_strategy(root: Path, agent_slug: str, sslug: str, name: str) -> Path:
-    d = root / agent_slug / "strategies" / sslug
+    d = root / agent_slug / "loops" / sslug
     d.mkdir(parents=True, exist_ok=True)
-    (d / "strategy.md").write_text(f"---\nname: {name}\n---\n\nPlaybook.\n")
+    (d / "loop.md").write_text(f"---\nname: {name}\n---\n\nPlaybook.\n")
     return d
 
 

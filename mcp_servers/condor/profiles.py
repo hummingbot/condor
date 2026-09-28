@@ -17,6 +17,27 @@ registered.
 
 from __future__ import annotations
 
+#: Tools that were renamed, old name → new name (FEAT-128). **Never registered**:
+#: a live caller of an old name gets unknown-tool and sees the new one in the
+#: list (FEAT-067's "a dead alias is not free"). The map only reads a *stored*
+#: name -- an AGENT.md ``tools:`` allowlist or a ``mutes.yml`` written before the
+#: rename -- as the tool it now means, so a list naming the old spelling neither
+#: mutes the new tool nor loses it.
+RENAMED_TOOLS: dict[str, str] = {"manage_strategies": "manage_loops"}
+
+
+def canonical_tool_name(name: str) -> str:
+    """``name`` with a renamed tool's old spelling replaced by the current one.
+
+    Namespaced names (``mcp__condor__manage_strategies``) keep their prefix; the
+    match is on the last ``__`` segment, the same rule every allowlist reader uses.
+    """
+    name = str(name)
+    prefix, sep, last = name.rpartition("__")
+    renamed = RENAMED_TOOLS.get(last)
+    return f"{prefix}{sep}{renamed}" if renamed else name
+
+
 #: One line per tool, for the operator's switch in the brain panel. Prose, not
 #: the docstring: the panel has one line of room and the docstring's first line
 #: is written for the model.
@@ -31,7 +52,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "trading_agent_journal_read": "Read the trading journal",
     "trading_agent_journal_write": "Write a line to the trading journal",
     "manage_agents": "Create and edit agent identities (AGENT.md)",
-    "manage_strategies": "Create and edit strategies — the looping playbooks",
+    "manage_loops": "Create and edit loops — the playbooks an agent runs each tick",
     "control_agent": "Start, stop, pause and resume live agent instances",
     "get_available_models": "List the models an agent can run on",
 }
@@ -55,15 +76,15 @@ COMMON_TOOLS: tuple[str, ...] = (
 )
 
 #: Orchestration: who exists, what loops they own, and which instances are
-#: running. An *attended* specialist owns these — ``strategy_builder`` is a
+#: running. An *attended* specialist owns these — ``loop_builder`` is a
 #: shared playbook every agent inherits, and it tells the agent to author its own
-#: strategy with ``manage_strategies``, pick a model from ``get_available_models``
+#: loop with ``manage_loops``, pick a model from ``get_available_models``
 #: and launch itself with ``control_agent``. A tick is the one seat that must
 #: not: it is already running inside the very loop these tools start and stop,
 #: and nothing in a tick playbook reaches for them.
 ORCHESTRATION_TOOLS: tuple[str, ...] = (
     "manage_agents",
-    "manage_strategies",
+    "manage_loops",
     "control_agent",
     "get_available_models",
 )

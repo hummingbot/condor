@@ -130,8 +130,8 @@ def test_strategy_crud_under_agent(tmp_path, monkeypatch):
     )
     assert s.slug == "brl_mm"
     assert s.key == "brigado.brl_mm"
-    assert s.home == tmp_path / "brigado" / "strategies" / "brl_mm"
-    assert (s.home / "strategy.md").exists()
+    assert s.home == tmp_path / "brigado" / "loops" / "brl_mm"
+    assert (s.home / "loop.md").exists()
 
     # get / get_by_key / list
     assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"
@@ -178,7 +178,7 @@ def test_agent_with_no_strategy_is_still_loopable(tmp_path, monkeypatch):
     assert resolved is not None
     assert resolved.slug == strategy_module.DEFAULT_STRATEGY_SLUG
     assert resolved.key == "brigado.default"
-    assert (resolved.home / "strategy.md").exists()
+    assert (resolved.home / "loop.md").exists()
     assert resolved.instructions.strip()  # a real playbook body, not empty
 
     # Idempotent: a second start reuses the same one instead of piling up.
@@ -269,7 +269,7 @@ def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
-    result = ta.manage_strategies(
+    result = ta.manage_loops(
         action="create",
         agent_slug="ghost",
         name="S",
@@ -945,8 +945,8 @@ def test_post_strategies_with_a_taken_name_is_409_and_leaves_playbook_and_config
         },
     )
     assert first.status_code == 200
-    home = tmp_path / "brigado" / "strategies" / "brl_mm"
-    md, cfg = home / "strategy.md", home / "config.yml"
+    home = tmp_path / "brigado" / "loops" / "brl_mm"
+    md, cfg = home / "loop.md", home / "config.yml"
     before = (md.read_bytes(), cfg.read_bytes())
 
     again = client.post(
@@ -973,7 +973,7 @@ def test_reserved_names_are_400_not_500(tmp_path, monkeypatch):
     )
     assert res.status_code == 400
     assert "reserved" in res.json()["detail"]
-    assert not (tmp_path / "brigado" / "strategies" / "chat").exists()
+    assert not (tmp_path / "brigado" / "loops" / "chat").exists()
 
 
 def test_store_create_refuses_an_existing_agent_and_strategy(tmp_path, monkeypatch):
@@ -991,7 +991,7 @@ def test_store_create_refuses_an_existing_agent_and_strategy(tmp_path, monkeypat
 
     strategies = StrategyStore()
     strategies.create(agent_slug="brigado", name="BRL MM", instructions="Keep.")
-    smd = tmp_path / "brigado" / "strategies" / "brl_mm" / "strategy.md"
+    smd = tmp_path / "brigado" / "loops" / "brl_mm" / "loop.md"
     sbefore = smd.read_bytes()
     with pytest.raises(ValueError, match="already exists"):
         strategies.create(agent_slug="brigado", name="brl mm", instructions="Lost.")
@@ -1028,11 +1028,11 @@ def test_mcp_create_with_a_taken_name_returns_an_error_dict(tmp_path, monkeypatc
     reserved = ta.manage_agents(action="create", name="condor", agent_key="x")
     assert "reserved" in reserved["error"]
 
-    made = ta.manage_strategies(
+    made = ta.manage_loops(
         action="create", agent_slug="brigado", name="BRL MM", instructions="x"
     )
     assert made["created"] is True
-    dup = ta.manage_strategies(
+    dup = ta.manage_loops(
         action="create", agent_slug="brigado", name="brl mm", instructions="y"
     )
     assert "already exists" in dup["error"]

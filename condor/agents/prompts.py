@@ -1,7 +1,7 @@
 """Prompt builder for trading agent ticks.
 
 Assembles the single prompt sent to a fresh ACP session each tick,
-combining: base rules, strategy instructions, config, risk state,
+combining: base rules, loop instructions, config, risk state,
 pre-computed core data, and journal context (learnings + recent decisions).
 """
 
@@ -55,7 +55,7 @@ RULES:
 - Trade ONLY via the create_*_executor tools — create_position_executor,
   create_grid_executor, create_dca_executor, create_order_executor,
   create_lp_executor. NEVER use place_order.
-- If your strategy deploys a controller-based bot, manage_bots(action="deploy")
+- If your loop deploys a controller-based bot, manage_bots(action="deploy")
   MUST include max_global_drawdown_quote within your risk limits — deploys
   without a declared loss cap are blocked by the risk engine.
 - Be conservative. When in doubt, hold and journal why.
@@ -75,7 +75,7 @@ RULES:
 - manage_bots(action="deploy") MUST include max_global_drawdown_quote within your risk
   limits — deploys without a declared loss cap are blocked by the risk engine.
 - Standalone executors (the create_*_executor tools) are a fallback, used ONLY
-  when the strategy instructions explicitly ask for them.
+  when the loop instructions explicitly ask for them.
 - Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
@@ -121,7 +121,7 @@ AUTHORIZATION_LIVE_UNATTENDED = """\
 [AUTHORIZATION — this seat is unattended and already approved]
 - Nobody is watching this tick. A question asked here is never answered: the
   tick ends, the loop moves on, and the market does not wait.
-- Your authorization is the launch the user already approved: this strategy,
+- Your authorization is the launch the user already approved: this loop,
   this execution mode, this capital, and the limits in [RISK STATE] below. The
   house rule about confirming before you move money is the ATTENDED rule — it
   governs a chat with a human in it, not this loop.
@@ -152,7 +152,7 @@ SKILLS & ROUTINES:
   name="...") and follow it instead of re-deriving the procedure.
 - A skill may reference a routine (shown as "→ routine: <name>"); run it with
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
-  to discover routines; routines tagged "agent" are local to your strategy.
+  to discover routines; routines tagged "agent" are local to your agent.
 - Before AUTHORING a routine (create/edit/fix), read the routine_cookbook playbook
   with manage_skill(action="read", name="routine_cookbook") and follow it — then
   test what you wrote with manage_routines(action="run", ...) before relying on it.
@@ -371,7 +371,7 @@ def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
             )
 
     lines.append(
-        "Do NOT create standalone executors unless the strategy instructions "
+        "Do NOT create standalone executors unless the loop instructions "
         "explicitly tell you to. The bot's PnL is attributed to you automatically."
     )
     return "\n".join(lines)
@@ -443,8 +443,8 @@ def build_tick_prompt(
     """Build the full prompt for one agent tick.
 
     Composes the Agent's domain identity (``agent.instructions``) with the
-    strategy's tactic (``strategy.instructions``): the Agent says *who you are and
-    what you know*; the strategy says *what to do this tick*.
+    loop's tactic (``strategy.instructions``): the Agent says *who you are and
+    what you know*; the loop says *what to do this tick*.
     """
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
@@ -525,11 +525,11 @@ def build_tick_prompt(
     # Server credentials are injected via env vars into the MCP process,
     # so no need to include them in the prompt or call configure_server.
 
-    # Agent identity + domain knowledge (who you are), then the strategy tactic
-    # (what to do this tick). The Agent body is shared across all its strategies.
+    # Agent identity + domain knowledge (who you are), then the loop's tactic
+    # (what to do this tick). The Agent body is shared across all its loops.
     if agent.instructions.strip():
         sections.append(f"[AGENT — domain identity & knowledge]\n{agent.instructions}")
-    sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
+    sections.append(f"[LOOP INSTRUCTIONS]\n{strategy.instructions}")
 
     # Available skills (playbooks) + routines, unified under one header. Both are
     # read fresh each tick — the agent may create a skill mid-session, and an
@@ -574,7 +574,7 @@ def build_tick_prompt(
     }
     config_lines = [
         "[CURRENT CONFIG]",
-        "These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.",
+        "These are the ACTIVE values for this session. If the loop instructions mention different defaults, IGNORE them and use these values instead.",
     ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
@@ -610,7 +610,7 @@ def build_tick_prompt(
         )
         sections.append("\n".join(refusal_lines))
 
-    # Loop state -- the scratch cursors this (agent, strategy) has persisted
+    # Loop state -- the scratch cursors this (agent, loop) has persisted
     # (condor.runtime.state): a last-processed executor id, a cooldown deadline.
     # Written from the dashboard or an attended session; the tick only reads
     # them, since nothing in TOOL_PROFILES["tick"] can write the store. Omitted
@@ -618,7 +618,7 @@ def build_tick_prompt(
     # it has no keys in.
     if loop_state:
         state_lines = [
-            "[LOOP STATE — scratch values persisted for this strategy; read-only this tick]"
+            "[LOOP STATE — scratch values persisted for this loop; read-only this tick]"
         ]
         for key, value in sorted(loop_state.items()):
             rendered = (

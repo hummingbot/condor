@@ -313,16 +313,17 @@ class LoopSupervisor:
         out — the difference between a loss to report and a restart to honour.
         """
         from condor.agents.sessions_index import iter_session_dirs
+        from condor.agents.strategy import LOOPS_DIRNAME
         from condor.paths import local_agents_root
 
         root = Path(agents_root) if agents_root is not None else local_agents_root()
         if not root.is_dir():
             return
 
-        # <local>/*/strategies/*/sessions/session_*/status.json — the layout is
+        # <local>/*/loops/*/sessions/session_*/status.json — the layout is
         # owned by the journal, so the directory names come from there.
         for agent_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-            strategies = agent_dir / "strategies"
+            strategies = agent_dir / LOOPS_DIRNAME
             if not strategies.is_dir():
                 continue
             for strategy_dir in sorted(p for p in strategies.iterdir() if p.is_dir()):

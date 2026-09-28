@@ -1,35 +1,35 @@
-"""Strategy definitions and persistence — a *playbook* owned by an Agent.
+"""Strategy definitions and persistence — a *loop*, the playbook owned by an Agent.
 
-Each strategy is a tick-loop playbook that lives **under its owning Agent**, as
-``strategy.md`` (YAML frontmatter + markdown body) inside a per-strategy folder::
+Each strategy (a *loop* in every surface since FEAT-128) is a tick-loop playbook that lives **under its owning Agent**, as
+``loop.md`` (YAML frontmatter + markdown body) inside a per-strategy folder::
 
     <root>/
         {agent_slug}/
             AGENT.md                       # the owning Agent (see agent.py)
             routines/                      # routines shared by all of this agent's strategies
             skills/                        # skill playbooks (the agent "brain")
-            strategies/
+            loops/
                 {strategy_slug}/
-                    strategy.md            # this playbook: tactics + config
+                    loop.md                # this playbook: tactics + config
                     learnings.md           # cross-session learnings of this strategy
                     sessions/session_N/    # per-run journal (format unchanged)
                     dry_runs/              # experiment snapshots
 
 A strategy is identified by the pair ``(agent_slug, slug)``; its opaque composite
-key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``strategy_id``.
+key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``loop_id``.
 Authoring one is optional: an Agent that owns none still loops, on the *default*
 playbook :func:`StrategyStore.ensure_default` materializes from its identity.
 The Agent's memory/skills/routines (the "brain") are shared across all of its
 strategies and its delegated runs — they live one level up, at
 ``{agent_slug}/``.
 
-A strategy directory is a **mixed node** since FEAT-115: ``strategy.md`` is
+A strategy directory is a **mixed node** since FEAT-115: ``loop.md`` is
 library content (authored, shareable, possibly shipped by the repo) while
 ``learnings.md``, ``config.yml``, ``state.json``, ``sessions/`` and ``dry_runs/``
 beside it are this install's runtime output. So the folder answers two
 questions, and has two properties: :attr:`Strategy.home` is the local directory
 everything runtime is written into, and :attr:`Strategy.source` is the resolved
-``strategy.md`` — local, else the shipped one.
+``loop.md`` — local, else the shipped one.
 """
 
 from __future__ import annotations
@@ -59,8 +59,11 @@ from condor.paths import UnsafeIdError
 
 log = logging.getLogger(__name__)
 
-STRATEGIES_DIRNAME = "strategies"
-STRATEGY_MD = "strategy.md"
+# The playbook is a *loop* on disk and in every surface a person or a model reads
+# (FEAT-128); the Python names (``Strategy``, ``StrategyStore``) and the REST
+# paths kept "strategy". ``condor.migrations`` v5 renames an older install.
+LOOPS_DIRNAME = "loops"
+LOOP_MD = "loop.md"
 
 # Every Agent is loopable — one that was never given a bespoke playbook loops
 # this one, created on its first start (see ``StrategyStore.ensure_default``).
@@ -80,7 +83,7 @@ Each tick:
 4. Journal the decision and the reasoning behind it.
 
 Prefer doing nothing over acting on a weak read. When you want a tighter, more
-specific loop, write a dedicated strategy under this agent and run that instead.
+specific loop, write a dedicated loop under this agent and run that instead.
 """
 
 
@@ -113,20 +116,18 @@ class Strategy:
 
     @property
     def home(self) -> Path:
-        """The **writable** folder of this strategy: ``<local>/{agent}/strategies/{slug}``.
+        """The **writable** folder of this strategy: ``<local>/{agent}/loops/{slug}``.
 
         Sessions, learnings, config, runtime state, dry runs and the ownership
         ledger — everything this install produced by running the playbook. Local
         always: none of it has a stock counterpart to layer over.
         """
-        return agent_home(self.agent_slug) / STRATEGIES_DIRNAME / self.slug
+        return agent_home(self.agent_slug) / LOOPS_DIRNAME / self.slug
 
     @property
     def source(self) -> Path | None:
-        """The authored ``strategy.md`` — local, else the shipped one."""
-        return resolve_agent_file(
-            self.agent_slug, STRATEGIES_DIRNAME, self.slug, STRATEGY_MD
-        )
+        """The authored ``loop.md`` — local, else the shipped one."""
+        return resolve_agent_file(self.agent_slug, LOOPS_DIRNAME, self.slug, LOOP_MD)
 
 
 def split_key(key: str) -> tuple[str, str] | None:
@@ -142,7 +143,7 @@ def split_key(key: str) -> tuple[str, str] | None:
 
 
 def _load_strategy_from_file(path: Path, agent_slug: str) -> Strategy | None:
-    """Load a Strategy from a ``strategy.md`` file under an agent."""
+    """Load a Strategy from a ``loop.md`` file under an agent."""
     try:
         meta, body = parse_frontmatter(path.read_text())
         return Strategy(
@@ -172,7 +173,7 @@ class AlreadyExistsError(ValueError):
 
 
 class StrategyStore:
-    """CRUD for strategies stored as ``strategy.md`` under ``{agent}/strategies/``.
+    """CRUD for strategies stored as ``loop.md`` under ``{agent}/loops/``.
 
     Every method is scoped to an owning ``agent_slug``; ``list_all`` and
     ``get_by_key`` span all agents for callers (overviews, MCP) that need a flat
@@ -181,9 +182,7 @@ class StrategyStore:
 
     def _strategies_roots(self, agent_slug: str) -> tuple[Path, ...]:
         """``(local, stock)`` strategy folders of an agent — read order."""
-        return tuple(
-            home / STRATEGIES_DIRNAME for home in agent_home_layers(agent_slug)
-        )
+        return tuple(home / LOOPS_DIRNAME for home in agent_home_layers(agent_slug))
 
     def create(
         self,
@@ -238,9 +237,7 @@ class StrategyStore:
 
     def get(self, agent_slug: str, sslug: str) -> Strategy | None:
         try:
-            path = resolve_agent_file(
-                agent_slug, STRATEGIES_DIRNAME, sslug, STRATEGY_MD
-            )
+            path = resolve_agent_file(agent_slug, LOOPS_DIRNAME, sslug, LOOP_MD)
         except UnsafeIdError:
             # Either slug is not one path segment (SEC-648): nothing lives there.
             return None
@@ -301,7 +298,7 @@ class StrategyStore:
         """This agent's playbooks — the union of both roots, local shadowing stock.
 
         The slugs are collected across the layers first and each is then
-        resolved through :meth:`get`, so a locally forked ``strategy.md``
+        resolved through :meth:`get`, so a locally forked ``loop.md``
         shadows the shipped one of the same name rather than being listed twice.
         """
         sslugs: set[str] = set()
@@ -315,7 +312,7 @@ class StrategyStore:
             except OSError:
                 continue
             for d in children:
-                if d.is_dir() and (d / STRATEGY_MD).exists():
+                if d.is_dir() and (d / LOOP_MD).exists():
                     sslugs.add(d.name)
 
         strategies: list[Strategy] = []
@@ -339,7 +336,7 @@ class StrategyStore:
         """Remove a strategy — its local folder, and only if the playbook is local.
 
         The directory is a mixed node, so this crosses the boundary and has to
-        say which half it means. A shipped ``strategy.md`` is refused outright
+        say which half it means. A shipped ``loop.md`` is refused outright
         (an update would bring it back); a *local* strategy whose playbook is
         stock cannot exist, because writing one forks it down first. What is
         removed is :attr:`Strategy.home` — sessions, learnings, config and state
@@ -348,7 +345,7 @@ class StrategyStore:
         strategy = self.get(agent_slug, sslug)
         if not strategy:
             return False
-        if resolves_to_stock(agent_slug, STRATEGIES_DIRNAME, sslug, STRATEGY_MD):
+        if resolves_to_stock(agent_slug, LOOPS_DIRNAME, sslug, LOOP_MD):
             raise ValueError(stock_delete_error(f"{agent_slug}.{sslug}"))
         try:
             shutil.rmtree(strategy.home)
@@ -372,7 +369,7 @@ class StrategyStore:
         # Forks a shipped playbook down before overwriting it, so the tracked
         # copy is never the file this writes.
         target = fork_if_stock(
-            strategy.agent_slug, STRATEGIES_DIRNAME, strategy.slug, STRATEGY_MD
+            strategy.agent_slug, LOOPS_DIRNAME, strategy.slug, LOOP_MD
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(

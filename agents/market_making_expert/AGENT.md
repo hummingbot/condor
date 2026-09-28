@@ -15,7 +15,7 @@ tools:
 - search_history
 - manage_routines
 - manage_agents
-- manage_strategies
+- manage_loops
 - control_agent
 - get_available_models
 - delegate

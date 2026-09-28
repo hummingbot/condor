@@ -26,7 +26,7 @@ PYDANTIC_AI_KEY = "openai:gpt-4o"
 ORCHESTRATION_TOOLS = (
     "mcp__condor__control_agent",
     "mcp__condor__manage_agents",
-    "mcp__condor__manage_strategies",
+    "mcp__condor__manage_loops",
     "mcp__condor__get_available_models",
     "mcp__condor__delegate",
     "mcp__condor__run_code",

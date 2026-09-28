@@ -458,3 +458,52 @@ def test_the_route_refuses_a_tool_this_seat_never_mounts(web_env):
     )
     assert bad.status_code == 400
     assert load_mutes("brigado")["tools"] == set()
+
+
+# ── FEAT-128: a stored old tool name means the tool it became ──
+
+
+def test_an_allowlist_naming_manage_strategies_keeps_manage_loops_on_both_backends(
+    monkeypatch,
+):
+    """An AGENT.md written before the rename must not mute its own loop tool.
+
+    ``manage_strategies`` is never registered again; the allowlist and the
+    pydantic-ai filter read the stored name as ``manage_loops`` instead.
+    """
+    from types import SimpleNamespace
+
+    from condor.acp.pydantic_ai_client import PydanticAIClient
+    from condor.agents.agent import AgentStore
+
+    slug = _agent_allowing("manage_strategies", "delegate")
+
+    # ACP (and every other) seat: the argv subtraction.
+    muted = _muted_on(_session_args(monkeypatch, agent_slug=slug)["condor"])
+    assert "manage_loops" not in muted and "delegate" not in muted
+    assert "manage_agents" in muted
+
+    # pydantic-ai: the definition filter.
+    client = PydanticAIClient(
+        model="ollama:x", allowed_tools=AgentStore().get(slug).tools
+    )
+    defs = [
+        SimpleNamespace(name="mcp__condor__manage_loops"),
+        SimpleNamespace(name="delegate"),
+        SimpleNamespace(name="manage_agents"),
+    ]
+    kept = asyncio.run(client._prepare_tools(None, defs))
+    assert sorted(d.name for d in kept) == ["delegate", "mcp__condor__manage_loops"]
+
+
+def test_a_mutes_file_naming_the_old_tool_mutes_the_new_one(tmp_path):
+    from condor.memory.mutes import mutes_path
+
+    path = mutes_path("perps")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("tools: [manage_strategies]\nskills: [strategy_builder]\n")
+
+    mutes = load_mutes("perps")
+    assert mutes["tools"] == {"manage_loops"}
+    assert mutes["skills"] == {"loop_builder"}
+    assert {r["name"] for r in seat_tools("perps") if r["muted"]} == {"manage_loops"}

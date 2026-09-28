@@ -36,9 +36,9 @@ def _roots(monkeypatch, tmp_path):
 
 
 def _write_strategy(root: Path, agent_slug: str, sslug: str, name: str) -> Path:
-    d = root / "agents" / agent_slug / "strategies" / sslug
+    d = root / "agents" / agent_slug / "loops" / sslug
     d.mkdir(parents=True, exist_ok=True)
-    (d / "strategy.md").write_text(f"---\nname: {name}\n---\n\nPlaybook.\n")
+    (d / "loop.md").write_text(f"---\nname: {name}\n---\n\nPlaybook.\n")
     return d
 
 

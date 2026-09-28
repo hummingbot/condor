@@ -17,6 +17,9 @@ from typing import Any
 
 from condor.acp.client import bot_process_marker
 from condor.paths import local_agents_root, stock_agents_root
+from mcp_servers.condor.profiles import RENAMED_TOOLS, canonical_tool_name
+
+__all__ = ["RENAMED_TOOLS", "canonical_tool_name"]
 
 log = logging.getLogger(__name__)
 
@@ -90,9 +93,9 @@ def seat_profile(agent_slug: str | None, tick: bool) -> str:
     - ``agent`` — an attended specialist (a chat bound to an agent, a
       background copy of one). Keeps its domain tools: the LP experts name
       ``manage_amm``, the shared ``recover_orphaned_position`` playbook closes a
-      stranded position with ``manage_clmm``, and ``strategy_builder`` — shared,
+      stranded position with ``manage_clmm``, and ``loop_builder`` — shared,
       so every agent inherits it — has the agent author and launch its own
-      strategy. It loses only the operator surface no agent's tool list names.
+      loop. It loses only the operator surface no agent's tool list names.
     - ``full`` — the chat coordinator, where a human confirms every dangerous
       call, and any launch with no seat at all.
 
@@ -180,7 +183,8 @@ def allowlist_mutes(agent_slug: str | None) -> set[str]:
 
     An empty list means unrestricted, as it always has; so does an unknown slug.
     Names may be namespaced (``mcp__condor__delegate``), the form pydantic-ai
-    also accepts, and match on their last segment.
+    also accepts, and match on their last segment. A renamed tool's old name
+    (:data:`RENAMED_TOOLS`) allows the tool it now means.
     """
     if not agent_slug:
         return set()
@@ -189,7 +193,7 @@ def allowlist_mutes(agent_slug: str | None) -> set[str]:
     agent = AgentStore().get(agent_slug)
     if agent is None or not agent.tools:
         return set()
-    allowed = {str(name).rsplit("__", 1)[-1] for name in agent.tools}
+    allowed = {canonical_tool_name(name).rsplit("__", 1)[-1] for name in agent.tools}
     return _every_tool_name() - allowed
 
 

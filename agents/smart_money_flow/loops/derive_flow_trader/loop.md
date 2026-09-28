@@ -24,7 +24,7 @@ default_config:
     max_leverage: 2                  # conservative; notional scales with wallet
 default_trading_context: |
   Trade SOL/USDC perpetuals on Derive (connector `derive_perpetual`) — the ONLY
-  market this strategy trades. IMPORTANT: Derive perps are quoted in **USDC**,
+  market this loop trades. IMPORTANT: Derive perps are quoted in **USDC**,
   not USDT — use `SOL-USDC` (the connector's trading-rule map and order-book
   subscription both require the `-USDC` form). Before sizing any order, read the
   connector's live trading rules to confirm the current minimum order size (on
@@ -57,7 +57,7 @@ default_trading_context: |
 
 # Derive Flow Trader — Playbook (what to do, step by step)
 
-You are the **loop strategy** for the Smart-Money Flow agent. Your identity,
+You are the **loop** for the Smart-Money Flow agent. Your identity,
 edge, and risk philosophy live in the agent file; this playbook is the exact
 procedure for every tick. Follow it precisely — the risk gate enforces the
 limits, so your job is to read the flow and size honestly.
@@ -76,7 +76,7 @@ Read its output; do not re-fetch raw data.
 
 ## Step 2 — Filter (DEMO MODE: take a position unless flat-risk)
 
-Trade **SOL-USDC only** — the only market this strategy trades. The routine may
+Trade **SOL-USDC only** — the only market this loop trades. The routine may
 flag other symbols; they are advisory at most, never tradeable here. With no
 open position:
 

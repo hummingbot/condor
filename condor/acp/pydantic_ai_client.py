@@ -816,8 +816,11 @@ class PydanticAIClient:
         from all MCP servers; we keep only those whose name is allowlisted. Tool
         names may be namespaced by the MCP layer (e.g. ``mcp__condor__manage_skill``),
         so we match on either the full name or its last ``__``-delimited segment.
+        A stored old name of a renamed tool allows the tool it now means.
         """
-        allowed = self.allowed_tools or set()
+        from mcp_servers.condor.profiles import canonical_tool_name
+
+        allowed = {canonical_tool_name(n) for n in self.allowed_tools or ()}
 
         def _ok(name: str) -> bool:
             return name in allowed or name.rsplit("__", 1)[-1] in allowed

@@ -217,7 +217,7 @@ def read_layered_file(
     The one resolver for an agent's single-file policies (``reflect.md``,
     ``core_rules.md``, ``shutdown.md``). Levels, most specific first:
     ``<home>/<*within>/<filename>`` when ``within`` is given (a strategy passes
-    ``("strategies", <slug>)``), then ``<home>/<filename>``, then
+    ``("loops", <slug>)``), then ``<home>/<filename>``, then
     ``_defaults/<filename>`` — each consulted in both roots, local before stock.
     When a local file wins over a shipped sibling that differs, the shadow is
     warned about once (:func:`_warn_once_if_shadowed`).

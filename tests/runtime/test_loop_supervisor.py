@@ -64,7 +64,7 @@ def _seed_session(
     ``user_id=None`` writes the pre-CORR-082 shape, which carried no owner.
     """
     session_dir = (
-        agents_root / agent_slug / "strategies" / sslug / "sessions" / f"session_{num}"
+        agents_root / agent_slug / "loops" / sslug / "sessions" / f"session_{num}"
     )
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "journal.md").write_text("# Journal\n\n## Decisions\n\n")
@@ -415,7 +415,7 @@ def test_sessions_index_reports_real_status(tmp_path):
     supervisor = LoopSupervisor()
     asyncio.run(supervisor.reconcile_boot(agents_root=tmp_path))
 
-    strategy_dir = tmp_path / "brigado" / "strategies" / "mm"
+    strategy_dir = tmp_path / "brigado" / "loops" / "mm"
     status = infer_latest_session_status(strategy_dir, "brigado.mm")
 
     assert status["status"] == LoopState.INTERRUPTED
@@ -424,12 +424,12 @@ def test_sessions_index_reports_real_status(tmp_path):
 
 def test_sessions_index_falls_back_for_legacy_sessions(tmp_path):
     """Sessions written before status files existed still report idle."""
-    session_dir = tmp_path / "brigado" / "strategies" / "mm" / "sessions" / "session_3"
+    session_dir = tmp_path / "brigado" / "loops" / "mm" / "sessions" / "session_3"
     session_dir.mkdir(parents=True)
     (session_dir / "journal.md").write_text("# Journal\n")
 
     status = infer_latest_session_status(
-        tmp_path / "brigado" / "strategies" / "mm", "brigado.mm"
+        tmp_path / "brigado" / "loops" / "mm", "brigado.mm"
     )
     assert status["status"] == "idle"
     assert status["session_num"] == 3

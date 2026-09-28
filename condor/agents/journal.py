@@ -4,9 +4,9 @@ Data is organized by strategy (a playbook owned by an Agent) and session::
 
     agents/
         {agent_slug}/
-            strategies/
+            loops/
                 {strategy_slug}/
-                    strategy.md        # strategy definition (tactic + config)
+                    loop.md            # loop definition (tactic + config)
                     config.yml         # runtime config
                     learnings.md       # cross-session learnings
                     dry_runs/          # experiment snapshots (experiment_N.md)

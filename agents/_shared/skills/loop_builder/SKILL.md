@@ -1,30 +1,30 @@
 ---
-name: strategy_builder
-description: Give YOURSELF a loop — write a tick playbook (a strategy) under your own slug, dry-run it, and start it. The shared contract for how a strategy is authored, validated and launched; read by any agent that wants to act autonomously instead of only answering what it is handed.
-when_to_use: You are an agent and the user wants you to act on a loop — run every N seconds, watch a condition, report on a schedule, or trade autonomously. Also read this before editing or re-launching a strategy you already own. NOT for creating or deleting other agents (that is Condor's agent_builder).
+name: loop_builder
+description: Give YOURSELF a loop — write a tick playbook (a loop) under your own slug, dry-run it, and start it. The shared contract for how a loop is authored, validated and launched; read by any agent that wants to act autonomously instead of only answering what it is handed.
+when_to_use: You are an agent and the user wants you to act on a loop — run every N seconds, watch a condition, report on a schedule, or trade autonomously. Also read this before editing or re-launching a loop you already own. NOT for creating or deleting other agents (that is Condor's agent_builder).
 created: '2026-08-11T00:00:00Z'
 source: chat
 ---
 
-# Strategy Builder
+# Loop Builder
 
 You are an **agent**. You can already be delegated to and looped — from the
 moment you existed. This playbook covers the last of those: giving your loop a **specific
 tick playbook** instead of the generic default.
 
-A **strategy** is a tick system prompt the engine runs in a **session**, at a frequency
-the user sets. It lives at `agents/{your_slug}/strategies/{strategy_slug}/strategy.md` and
+A **loop** is a tick system prompt the engine runs in a **session**, at a frequency
+the user sets. It lives at `agents/{your_slug}/loops/{loop_slug}/loop.md` and
 it is yours — you author it, under your own slug.
 
 > **Scope.** This is about giving *yourself* a loop. Creating, editing or deleting *other*
 > agents belongs to Condor (`agent_builder`). If the user wants a whole new specialist,
 > say so and let them ask Condor.
 
-## When a strategy is worth it
+## When a loop of your own is worth it
 
-`control_agent(action="start", strategy_id="<your_slug>")` already works with no
-strategy — it ticks a default playbook driven by your AGENT.md. That default is deliberately generic. Write a
-strategy when the loop needs to be **specific and disciplined**: a fixed analysis order, a
+`control_agent(action="start", loop_id="<your_slug>")` already works with no
+loop of your own — it ticks a default playbook driven by your AGENT.md. That default is deliberately generic. Write a
+loop when it needs to be **specific and disciplined**: a fixed analysis order, a
 decision rule, executor schemas, risk limits.
 
 **The loop does NOT have to trade.** Define the tick task however the user wants:
@@ -35,21 +35,21 @@ decision rule, executor schemas, risk limits.
 
 ## Step 1 — Prepare (only if it trades)
 
-BEFORE writing the strategy, read the signature of every create tool the loop will use —
+BEFORE writing the loop, read the signature of every create tool the loop will use —
 `create_grid_executor`, `create_position_executor`, etc.; their typed parameters ARE the
 schema — and embed the required params/types directly into the instructions. The tick LLM has no other way to learn them.
 Same for any controller config it manages (`manage_controllers`).
 
 If the loop should reason over structured data, make sure the routine exists first
 (`manage_routines(action="list", agent="<your_slug>")`). Routines are agent-scoped, so any
-strategy you own can call them. Need a new one? Do NOT write it inline — hand it to a
+loop you own can call them. Need a new one? Do NOT write it inline — hand it to a
 background worker: `delegate(action="start", agent="condor", task="build a routine that …
 for agent <your_slug>")`.
 
-## Step 2 — Create the strategy
+## Step 2 — Create the loop
 
 ```
-manage_strategies(
+manage_loops(
     action="create",
     agent_slug="<your_slug>",              # yourself
     name="BRL MM",
@@ -61,7 +61,7 @@ manage_strategies(
 )
 ```
 
-Returns the composite key `"<your_slug>.<strategy_slug>"` — that is the `strategy_id` for
+Returns the composite key `"<your_slug>.<loop_slug>"` — that is the `loop_id` for
 everything after.
 
 The tick instructions MUST include:
@@ -85,7 +85,7 @@ The tick instructions MUST include:
 ## Step 3 — Dry run before live (if it trades)
 
 ```
-control_agent(action="start", strategy_id="<your_slug.strategy_slug>",
+control_agent(action="start", loop_id="<your_slug.loop_slug>",
     config={"execution_mode": "dry_run",
             "trading_context": "Trade BTC-USDT on binance_perpetual",
             "frequency_sec": 60, "total_amount_quote": 100,
@@ -107,7 +107,7 @@ the model, start it, confirm it's running, and give the user the monitoring comm
 
 ## Monitoring what you own
 
-1. `manage_agents(action="list")` — agents and the strategies they own.
+1. `manage_agents(action="list")` — agents and the loops they own.
 2. `control_agent(action="list")` — running loop instances, with their status.
 3. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
 
@@ -119,23 +119,23 @@ the wrong one strands live capital. This playbook ends at launch.
 
 ## Reference
 
-**Model:** the strategy's `agent_key` defaults to yours; override per launch with
+**Model:** the loop's `agent_key` defaults to yours; override per launch with
 `config={"agent_key": "…"}`. Never invent one — call `get_available_models` and pick from
 what the operator actually has, or leave it inherited. Every key is held to your `tools`
 allowlist — a tool it leaves out is never mounted — and an ACP key
 (`claude-code`/`claude-acp`/`gemini`/`copilot`) still confirmation-gates mutations.
 
-**Server:** leave `server_name` empty unless the user pins it. A strategy you own runs on
+**Server:** leave `server_name` empty unless the user pins it. A loop you own runs on
 whichever server your agent resolves.
 
-**Editing & deleting:** `update_strategy(strategy_id=…, instructions=…)` to revise the tick
-playbook; `delete_strategy(strategy_id=…)` to remove it. Stop any running instance first.
+**Editing & deleting:** `manage_loops(action="update", loop_id=…, instructions=…)` to revise
+the tick playbook; `manage_loops(action="delete", loop_id=…)` to remove it. Stop any running instance first.
 
 ## Rules
 
-- Author strategies **under your own slug only**. Another agent's fleet is not yours to edit.
+- Author loops **under your own slug only**. Another agent's fleet is not yours to edit.
 - Fetch executor/controller schemas BEFORE writing instructions that use them.
-- One strategy per loop job — don't overload a tick with unrelated objectives.
+- One loop per job — don't overload a tick with unrelated objectives.
 - A loop doesn't have to trade. When it does: risk limits always, dry run always.
 - Show the user the dry-run journal before proposing to go live.
 - Don't write routine code inline — delegate it to a Condor worker.

@@ -81,6 +81,28 @@ sides hold identically is dropped; one they hold differently keeps the local
 copy — the one the product has been reading all along, since local shadows
 stock — and sets the leftover aside under
 ``.condor/migration-backups/agents/<slug>/`` rather than deleting it.
+
+**v5 (FEAT-128): strategies are loops.** An agent's looping playbook is called
+a loop everywhere a person or a model reads it, so the folder follows:
+``<local>/<slug>/strategies/<s>/strategy.md`` becomes
+``<local>/<slug>/loops/<s>/loop.md``. The stock half arrives renamed through
+git; v5 renames the local half, which is where every session, ``state.json``,
+learning and ownership file lives. It is a pure directory rename -- every
+stored path is recomposed from ``(agent_slug, strategy_slug)`` at read time,
+and namespace-keyed state never named the folder -- so nothing inside moves
+relative to its loop.
+
+Same discipline as before: a ``loops/`` that already exists is merged into,
+local wins, and a differing leftover is set aside under
+``.condor/migration-backups/loops/<slug>/``. Two names a person may have stored
+follow the rename: a local fork of the shared ``strategy_builder`` skill moves
+to ``loop_builder``, and a ``mutes.yml`` naming ``strategy_builder`` or the
+``manage_strategies`` tool is rewritten to the new names.
+
+v2 still writes ``strategies/`` -- it is history, and on an old install it runs
+in the same boot *before* v5, which then renames what it produced. An
+old-layout agent folder dropped into ``.condor/agents`` after v5's marker is
+written is not revisited; rename its ``strategies/`` to ``loops/`` by hand.
 """
 
 from __future__ import annotations
@@ -109,6 +131,7 @@ MARKER_FILENAME = ".migrated-v1"
 MARKER_V2_FILENAME = ".migrated-v2"
 MARKER_V3_FILENAME = ".migrated-v3"
 MARKER_V4_FILENAME = ".migrated-v4"
+MARKER_V5_FILENAME = ".migrated-v5"
 BACKUPS_DIRNAME = "migration-backups"
 
 # Runtime output that lived under a *tracked* agent directory. Everything here
@@ -149,6 +172,10 @@ class MigrationReport:
     stranded_delegations: int = 0
     # v4: leftover copies that lost to a differing local file, set aside
     agent_backups: int = 0
+    # v5 (FEAT-128): strategies/ -> loops/, strategy.md -> loop.md
+    loops_renamed: int = 0
+    loop_md_renamed: int = 0
+    mutes_rewritten: int = 0
 
     @property
     def total(self) -> int:
@@ -162,6 +189,9 @@ class MigrationReport:
             + self.agent_forks
             + self.stranded_delegations
             + self.agent_backups
+            + self.loops_renamed
+            + self.loop_md_renamed
+            + self.mutes_rewritten
         )
 
 
@@ -215,12 +245,21 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
             return report
         _write_marker(root, MARKER_V4_FILENAME, "FEAT-115")
 
+    if not (root / MARKER_V5_FILENAME).is_file():
+        try:
+            _rename_strategies_to_loops(report, paths.local_agents_root())
+        except Exception:  # noqa: BLE001 - same rule: never block a boot
+            log.exception("Loop rename failed; leaving strategies/ in place")
+            return report
+        _write_marker(root, MARKER_V5_FILENAME, "FEAT-128")
+
     if report.total or report.dropped_stubs:
         log.warning(
             "Runtime migrated to %s: %d conversations, %d delegations, "
             "%d stranded delegations, %d set-aside agent files, "
             "%d state namespaces, %d telemetry files, %d agent artefacts, "
-            "%d agent directories, %d hoisted forks "
+            "%d agent directories, %d hoisted forks, "
+            "loops_renamed=%d loop_md_renamed=%d mutes_rewritten=%d "
             "(%d empty conversation stubs dropped, %d already present)",
             root,
             report.conversations,
@@ -232,6 +271,9 @@ def ensure_migrated(agents_root: Path | None = None) -> MigrationReport:
             report.agent_artefacts,
             report.agent_dirs,
             report.agent_forks,
+            report.loops_renamed,
+            report.loop_md_renamed,
+            report.mutes_rewritten,
             report.dropped_stubs,
             report.skipped,
         )
@@ -695,3 +737,124 @@ def _git(repo_dir: Path, *args: str) -> str | None:
         log.warning("git %s failed: %s", args[0], done.stderr.strip())
         return None
     return done.stdout
+
+
+# ── v5: strategies are loops (FEAT-128) ──
+
+# The names v5 moves from and to. Literals, not ``condor.agents.strategy``'s
+# constants: a migration records the layout it migrates *from*, which must not
+# change when the current constants do.
+_OLD_LOOPS_DIRNAME = "strategies"
+_NEW_LOOPS_DIRNAME = "loops"
+_OLD_LOOP_MD = "strategy.md"
+_NEW_LOOP_MD = "loop.md"
+_RENAMED_SKILLS = {"strategy_builder": "loop_builder"}
+_RENAMED_TOOLS = {"manage_strategies": "manage_loops"}
+
+
+def _rename_strategies_to_loops(report: MigrationReport, local_root: Path) -> None:
+    """``<local>/<slug>/strategies/<s>/strategy.md`` → ``loops/<s>/loop.md``.
+
+    Each step is idempotent on its own: a second run finds nothing named the
+    old way and changes nothing. A destination is never overwritten -- where
+    both names exist the new one wins (it is what the new build reads) and a
+    differing old copy goes to ``.condor/migration-backups/loops/``.
+    """
+    if not local_root.is_dir():
+        return
+    backups = paths.runtime_root() / BACKUPS_DIRNAME / _NEW_LOOPS_DIRNAME
+
+    for home in _agent_dirs(local_root):
+        old = home / _OLD_LOOPS_DIRNAME
+        new = home / _NEW_LOOPS_DIRNAME
+        if old.is_dir():
+            if _move(old, new):
+                report.loops_renamed += 1
+            elif new.is_dir():
+                _merge_tree(report, old, new, backups / home.name)
+                if not old.exists():
+                    report.loops_renamed += 1
+        if new.is_dir():
+            for loop_dir in sorted(p for p in new.iterdir() if p.is_dir()):
+                _rename_loop_md(report, loop_dir, backups / home.name / loop_dir.name)
+
+    shared_skills = local_root / "_shared" / "skills"
+    for old_name, new_name in _RENAMED_SKILLS.items():
+        old = shared_skills / old_name
+        if not old.is_dir():
+            continue
+        if not _move(old, shared_skills / new_name):
+            _merge_tree(
+                report, old, shared_skills / new_name, backups / "_shared" / old_name
+            )
+        _rename_skill_frontmatter(shared_skills / new_name / "SKILL.md", old_name)
+
+    for mutes in sorted(local_root.glob("*/mutes.yml")):
+        if _rewrite_mutes(mutes):
+            report.mutes_rewritten += 1
+
+
+def _rename_loop_md(report: MigrationReport, loop_dir: Path, backups: Path) -> None:
+    old = loop_dir / _OLD_LOOP_MD
+    new = loop_dir / _NEW_LOOP_MD
+    if not old.is_file():
+        return
+    if _move(old, new):
+        report.loop_md_renamed += 1
+    elif new.is_file() and _same_bytes(old, new):
+        old.unlink()
+        report.loop_md_renamed += 1
+    elif _move(old, backups / _OLD_LOOP_MD):
+        report.agent_backups += 1
+        log.info("Loop rename: kept %s, set %s aside", new, old)
+
+
+def _rename_skill_frontmatter(skill_md: Path, old_name: str) -> None:
+    """A forked skill's ``name:`` still says the old slug; follow the folder."""
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    new_name = _RENAMED_SKILLS[old_name]
+    updated = text.replace(f"\nname: {old_name}\n", f"\nname: {new_name}\n", 1)
+    if updated != text:
+        try:
+            skill_md.write_text(updated, encoding="utf-8")
+        except OSError:
+            log.warning("Could not rename the skill in %s", skill_md, exc_info=True)
+
+
+def _rewrite_mutes(mutes: Path) -> bool:
+    """Rename a muted ``strategy_builder`` skill / ``manage_strategies`` tool."""
+    import yaml
+
+    try:
+        raw = yaml.safe_load(mutes.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return False  # unreadable stays exactly as it was; the loader ignores it
+    if not isinstance(raw, dict):
+        return False
+
+    changed = False
+    for kind, renames in (("skills", _RENAMED_SKILLS), ("tools", _RENAMED_TOOLS)):
+        values = raw.get(kind)
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        renamed = [renames.get(str(v), v) for v in values]
+        if renamed != values:
+            # A list naming both spellings keeps one entry, not two.
+            raw[kind] = sorted({str(v) for v in renamed if v})
+            changed = True
+    if not changed:
+        return False
+
+    from condor.fsutil import atomic_write_text
+
+    try:
+        atomic_write_text(mutes, yaml.safe_dump(raw, default_flow_style=False))
+    except OSError:
+        log.warning("Could not rewrite %s", mutes, exc_info=True)
+        return False
+    return True
