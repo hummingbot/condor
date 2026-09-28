@@ -1,0 +1,28 @@
+# Aggressive: ETH-USDT perp, 3m bands, shorter length (50) and 1.8 std, and
+# thresholds pulled inside the bands (0.1 / 0.9) so it trades often.
+# Up to 3 stacked positions per side 5 min apart, 10x leverage, tight
+# barriers, 45 min time limit. Only for choppy, mean-reverting sessions;
+# backtest first, it bleeds fast in a trend.
+controller_name: bollinger_v1
+controller_type: directional_trading
+connector_name: binance_perpetual
+trading_pair: ETH-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: ETH-USDT
+interval: 3m
+bb_length: 50
+bb_std: 1.8
+bb_long_threshold: 0.1
+bb_short_threshold: 0.9
+total_amount_quote: 500
+max_executors_per_side: 3
+cooldown_time: 300
+leverage: 10
+position_mode: HEDGE
+stop_loss: 0.015
+take_profit: 0.01
+time_limit: 2700
+take_profit_order_type: LIMIT
+trailing_stop:
+  activation_price: 0.008
+  trailing_delta: 0.003

@@ -45,8 +45,15 @@ dependencies = [
 # ``black --check`` with no black on PATH and failed to spawn it.
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
+[tool.black]
+# Agent controller folders hold Hummingbot controller source verbatim: the
+# folder copy is digest-compared against the API server's, so reformatting it
+# would report drift against every server holding the upstream file.
+extend-exclude = "agents/[^/]+/controllers/"
+
 [tool.isort]
 profile = "black"
+extend_skip_glob = ["agents/*/controllers/*"]
 
 [tool.setuptools.package-data]
 "condor.reports" = ["report_runtime.js"]

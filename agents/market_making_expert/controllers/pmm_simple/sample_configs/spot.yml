@@ -1,0 +1,23 @@
+# Spot: two-level quotes on Binance spot SOL-USDT, no leverage.
+# On spot the controller first market-buys the SOL its sell levels need
+# (position rebalance) and keeps that inventory topped up within 5%.
+# TP 0.35% clears Binance spot maker fees (~0.15-0.20% round trip).
+# Sizing: 300 USDT over 4 orders (75 USDT each, above the ~5 USDT min notional).
+controller_name: pmm_simple
+controller_type: market_making
+connector_name: binance
+trading_pair: SOL-USDT
+total_amount_quote: 300
+buy_spreads: [0.003, 0.006]
+sell_spreads: [0.003, 0.006]
+buy_amounts_pct: [1, 1]
+sell_amounts_pct: [1, 1]
+executor_refresh_time: 180
+cooldown_time: 120
+leverage: 1
+stop_loss: 0.02
+take_profit: 0.0035
+time_limit: 3600
+take_profit_order_type: LIMIT
+position_rebalance_threshold_pct: 0.05
+skip_rebalance: false

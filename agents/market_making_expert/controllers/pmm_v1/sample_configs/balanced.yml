@@ -1,0 +1,25 @@
+# balanced: three-level symmetric ladder (20/40/60 bps) on ETH-USDT spot. Standard 30s
+# refresh with a 10 bps tolerance, 60s post-fill pause, inventory skew toward 50/50.
+# The default starting point for a normal, liquid, range-bound market.
+# order_amount is in BASE units (ETH): 0.01 ETH per level.
+controller_name: pmm_v1
+controller_type: generic
+connector_name: binance
+trading_pair: ETH-USDT
+order_amount: 0.01
+buy_spreads:
+- 0.002
+- 0.004
+- 0.006
+sell_spreads:
+- 0.002
+- 0.004
+- 0.006
+order_refresh_time: 30
+order_refresh_tolerance_pct: 0.001
+filled_order_delay: 60
+inventory_skew_enabled: true
+target_base_pct: 0.5
+inventory_range_multiplier: 1.0
+price_ceiling: -1
+price_floor: -1

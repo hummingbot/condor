@@ -1,0 +1,53 @@
+# pmm_mister / aggressive
+# Tight quotes, fast refresh/cooldown and more stacked executors per level on a
+# deep perp book (ETH-USDT), 10x leverage and a wide inventory band (30%-80%).
+# Profit protection off so it keeps two-sided flow. Only for quiet, mean-reverting
+# tape; widen or pause as soon as a trend or volatility expansion shows up.
+# Category: generic (PMMister extends ControllerBase) - sync/upload as generic.
+controller_name: pmm_mister
+controller_type: generic
+connector_name: binance_perpetual
+trading_pair: ETH-USDT
+total_amount_quote: 1000
+portfolio_allocation: 0.2
+position_mode: ONEWAY
+position_side: BUY
+leverage: 10
+target_base_pct: 0.5
+min_base_pct: 0.3
+max_base_pct: 0.8
+min_skew: 0.5
+buy_spreads:
+  - 0.0004
+  - 0.001
+sell_spreads:
+  - 0.0004
+  - 0.001
+buy_amounts_pct:
+  - 1
+  - 1
+sell_amounts_pct:
+  - 1
+  - 1
+open_order_type: LIMIT_MAKER
+take_profit: 0.0008
+take_profit_order_type: LIMIT_MAKER
+max_active_executors_by_level: 5
+executor_refresh_time: 15
+buy_cooldown_time: 15
+sell_cooldown_time: 15
+buy_position_effectivization_time: 120
+sell_position_effectivization_time: 120
+price_distance_tolerance: 0.0003
+refresh_tolerance: 0.0003
+tolerance_scaling: 1.2
+tick_mode: false
+position_profit_protection: false
+global_tp_enabled: true
+global_take_profit: 0.02
+global_tp_activation_from: min_base
+global_sl_enabled: true
+global_stop_loss: 0.06
+global_sl_activation_from: target_base
+global_pnl_reference: position
+manual_kill_switch: false

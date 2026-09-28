@@ -1,0 +1,24 @@
+# Conservative: BTC-USDT perp, 15m bands at 2.5 std so only deep excursions
+# trigger. One position per side, 1h cooldown, 3x leverage, wide time limit.
+# Use when BTC is ranging calmly and you want few, high-conviction fades.
+controller_name: bollinger_v1
+controller_type: directional_trading
+connector_name: binance_perpetual
+trading_pair: BTC-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: BTC-USDT
+interval: 15m
+bb_length: 100
+bb_std: 2.5
+bb_long_threshold: 0.0
+bb_short_threshold: 1.0
+total_amount_quote: 300
+max_executors_per_side: 1
+cooldown_time: 3600
+leverage: 3
+position_mode: HEDGE
+stop_loss: 0.02
+take_profit: 0.015
+time_limit: 43200
+take_profit_order_type: LIMIT
+trailing_stop: null

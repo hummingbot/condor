@@ -1,0 +1,24 @@
+# aggressive: tight 10/20 bps ladder on BTC-USDT spot, fast 15s refresh with tolerance
+# disabled (-1 = requote every cycle), short 15s post-fill pause, and a narrow
+# inventory range (multiplier 0.5) so skew reacts hard to imbalance. Maximises fill rate
+# in quiet, mean-reverting markets; loses money quickly in a trend. order_amount is in
+# BASE units (BTC); keep order_amount x price above the exchange minimum notional.
+controller_name: pmm_v1
+controller_type: generic
+connector_name: binance
+trading_pair: BTC-USDT
+order_amount: 0.0002
+buy_spreads:
+- 0.001
+- 0.002
+sell_spreads:
+- 0.001
+- 0.002
+order_refresh_time: 15
+order_refresh_tolerance_pct: -1
+filled_order_delay: 15
+inventory_skew_enabled: true
+target_base_pct: 0.5
+inventory_range_multiplier: 0.5
+price_ceiling: -1
+price_floor: -1

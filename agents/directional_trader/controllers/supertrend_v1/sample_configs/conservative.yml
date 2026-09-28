@@ -1,0 +1,23 @@
+# Conservative: BTC-USDT perp on 15m candles, low leverage, one position per side.
+# Enters only on a genuine pullback to the Supertrend line (within 0.3%),
+# wide stops and a long time limit so trades get room to run with the trend.
+controller_name: supertrend_v1
+controller_type: directional_trading
+connector_name: binance_perpetual
+trading_pair: BTC-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: BTC-USDT
+interval: 15m
+length: 20
+multiplier: 3.0
+percentage_threshold: 0.003
+total_amount_quote: 300
+leverage: 3
+position_mode: HEDGE
+max_executors_per_side: 1
+cooldown_time: 3600
+stop_loss: 0.02
+take_profit: 0.03
+time_limit: 43200
+take_profit_order_type: LIMIT
+trailing_stop: null

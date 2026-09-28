@@ -1,0 +1,52 @@
+# pmm_mister / conservative
+# Wide two-level quotes on a liquid perp, low leverage, small inventory band
+# (5%-35% of total_amount_quote), inventory skew on, global TP and SL armed.
+# Use in choppy/uncertain or mildly volatile ranges, or for a first live run.
+# Category: generic (PMMister extends ControllerBase) - sync/upload as generic.
+controller_name: pmm_mister
+controller_type: generic
+connector_name: binance_perpetual
+trading_pair: SOL-USDT
+total_amount_quote: 1000
+portfolio_allocation: 0.1
+position_mode: ONEWAY
+position_side: BUY
+leverage: 2
+target_base_pct: 0.2
+min_base_pct: 0.05
+max_base_pct: 0.35
+min_skew: 0.3
+buy_spreads:
+  - 0.0015
+  - 0.003
+sell_spreads:
+  - 0.0015
+  - 0.003
+buy_amounts_pct:
+  - 1
+  - 1
+sell_amounts_pct:
+  - 1
+  - 1
+open_order_type: LIMIT_MAKER
+take_profit: 0.0015
+take_profit_order_type: LIMIT_MAKER
+max_active_executors_by_level: 2
+executor_refresh_time: 60
+buy_cooldown_time: 60
+sell_cooldown_time: 60
+buy_position_effectivization_time: 300
+sell_position_effectivization_time: 300
+price_distance_tolerance: 0.001
+refresh_tolerance: 0.001
+tolerance_scaling: 1.2
+tick_mode: false
+position_profit_protection: true
+global_tp_enabled: true
+global_take_profit: 0.02
+global_tp_activation_from: min_base
+global_sl_enabled: true
+global_stop_loss: 0.04
+global_sl_activation_from: target_base
+global_pnl_reference: position
+manual_kill_switch: false
