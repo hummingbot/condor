@@ -22,6 +22,7 @@ tools:
 - get_market_data
 - search_history
 - manage_routines
+- manage_agent_controllers
 - manage_agents
 - manage_loops
 - control_agent

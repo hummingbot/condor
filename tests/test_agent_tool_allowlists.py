@@ -36,6 +36,7 @@ FRAMEWORK = {
     "manage_memory",
     "manage_skill",
     "manage_routines",
+    "manage_agent_controllers",
     "trading_agent_journal_read",
     "trading_agent_journal_write",
     "manage_agents",

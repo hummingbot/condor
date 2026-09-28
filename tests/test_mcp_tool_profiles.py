@@ -66,6 +66,7 @@ CONDOR_COMMON = {
     "delegate",
     "send_notification",
     "manage_routines",
+    "manage_agent_controllers",
     "run_code",
     "manage_servers",
     "manage_memory",

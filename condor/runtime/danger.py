@@ -190,6 +190,17 @@ READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
 #: no trace at all. Recording them is the log's question, not the gate's.
 MUTATING_CONTROLLER_ACTIONS = {"upsert", "delete"}
 READ_ONLY_CONTROLLER_ACTIONS = {"list", "describe"}
+#: An agent's own controller source (FEAT-126). Outside the gate like
+#: ``manage_controllers`` — uploading a missing controller or config touches no
+#: running bot — with one exception: an ``overwrite`` replaces a server copy that
+#: differs from the folder, which may be someone's deliberate edit. That call is
+#: confirmed where a human is present (and refused in a dry run or a winddown).
+AGENT_CONTROLLERS_TOOL = "manage_agent_controllers"
+MUTATING_AGENT_CONTROLLER_ACTIONS = {"write", "delete", "sync", "upload_config", "pull"}
+READ_ONLY_AGENT_CONTROLLER_ACTIONS = {"list", "read", "status"}
+#: The actions whose ``overwrite=true`` replaces a copy on the *server*. ``pull``
+#: overwrites the agent's own folder, which is local and not gated.
+OVERWRITING_AGENT_CONTROLLER_ACTIONS = {"sync", "upload_config"}
 #: The snippet runner. Deliberately *not* in ``DANGEROUS_TOOLS`` and not to be
 #: added: since ARCH-308 a tick reads a market it can compute on only through
 #: ``client.market_data.*`` inside a snippet, so a name gate here would put a
@@ -420,7 +431,30 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     if tool_name == "manage_bots":
         return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
 
+    if tool_name == AGENT_CONTROLLERS_TOOL:
+        return is_overwriting_controller_push(tool_call)
+
     return False
+
+
+def is_overwriting_controller_push(tool_call: dict[str, Any]) -> bool:
+    """Does this ``manage_agent_controllers`` call replace a server copy? (FEAT-126)
+
+    Only ``sync``/``upload_config`` with a truthy ``overwrite``. Fails closed on
+    arguments that cannot be read, like every gate predicate (SEC-093): an
+    unreadable call might be the overwrite.
+    """
+    if tool_call_name(tool_call) != AGENT_CONTROLLERS_TOOL:
+        return False
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    action = input_data.get("action")
+    if not isinstance(action, str) or not action:
+        return True
+    return action in OVERWRITING_AGENT_CONTROLLER_ACTIONS and bool(
+        input_data.get("overwrite")
+    )
 
 
 def _is_mutating_action(
@@ -495,6 +529,15 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
         # Recorded unless it is one of the two reads: a token or pool edit is a
         # write to Gateway's config even though nothing gates it.
         return _is_mutating_action(tool_call, set(), READ_ONLY_CONFIG_ACTIONS)
+
+    if tool_name == AGENT_CONTROLLERS_TOOL:
+        # Every write, gated or not: a sync that created a controller is how a
+        # fleet's code got onto the server.
+        return _is_mutating_action(
+            tool_call,
+            MUTATING_AGENT_CONTROLLER_ACTIONS,
+            READ_ONLY_AGENT_CONTROLLER_ACTIONS,
+        )
 
     # Gated by name, and every one of them writes: an order, a signature, an
     # executor create, an executor stop.
@@ -580,6 +623,17 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
             "this session runs in dry-run mode, where nothing mutates, and a "
             "routine is Python holding the same unrestricted API client as a "
             "snippet — 'list', 'describe' and 'read_routine' still work"
+        )
+
+    if tool_call_name(tool_call) == AGENT_CONTROLLERS_TOOL and _is_mutating_action(
+        tool_call,
+        MUTATING_AGENT_CONTROLLER_ACTIONS,
+        READ_ONLY_AGENT_CONTROLLER_ACTIONS,
+    ):
+        return (
+            "this session runs in dry-run mode, where nothing mutates, and this "
+            "writes controller source or pushes it to a server — 'list', 'read' "
+            "and 'status' still work"
         )
 
     if tool_call_name(tool_call) == MARKET_DATA_TOOL and _is_mutating_action(
@@ -835,6 +889,26 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             or "?"
         )
         return f"Controller {target}: {action} '{name}'"
+
+    if tool_name == AGENT_CONTROLLERS_TOOL:
+        action = input_data.get("action", "?")
+        name = str(input_data.get("name") or "").strip() or "?"
+        what = f"Agent controller {action} '{name}'"
+        sample = input_data.get("sample")
+        if isinstance(sample, str) and sample:
+            what += f" style '{sample}'"
+        agent = input_data.get("agent")
+        if input_data.get("shared"):
+            what += " (shared)"
+        elif isinstance(agent, str) and agent:
+            what += f" ({agent})"
+        if input_data.get("overwrite"):
+            what += (
+                " — OVERWRITE the server copy (backed up first)"
+                if action in OVERWRITING_AGENT_CONTROLLER_ACTIONS
+                else " — overwrite the folder copy"
+            )
+        return what
 
     if tool_name == CODE_RUN_TOOL:
         # Never gated either, so this line is written for the log (SEC-616). The

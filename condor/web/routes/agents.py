@@ -3872,3 +3872,166 @@ async def get_strategy_reports(
         "reports": [ReportSummary(**r).model_dump() for r in reports],
         "total": total,
     }
+
+
+# ── Agent-owned controller source (FEAT-126) ──
+#
+# The folder is ``agents/{slug}/controllers/<name>/`` (+ the ``_shared`` library
+# every agent reads under its own); :mod:`condor.agent_controllers` resolves it
+# and :mod:`condor.agent_controllers_sync` does the server I/O. These routes are
+# the one door the MCP subprocess (``manage_agent_controllers``) and the
+# dashboard use. Refusals (drift, missing, validation) come back as 200 with
+# ``refused: true`` so the caller can read the diff; only a caller error is 4xx.
+
+
+class ControllerSyncRequest(BaseModel):
+    server_name: str
+    overwrite: bool = False
+
+
+class ControllerConfigUploadRequest(BaseModel):
+    server_name: str
+    config_name: str | None = None
+    overwrite: bool = False
+
+
+class ControllerPullRequest(BaseModel):
+    server_name: str
+    controller_type: Literal["directional_trading", "market_making", "generic"]
+    controller_name: str
+    configs: list[str] = Field(default_factory=list)
+    overwrite: bool = False
+
+
+def _agent_controller(slug: str, name: str):
+    """The controller ``name`` as agent ``slug`` sees it, or 404."""
+    from condor.agent_controllers import get_controller
+
+    _get_agent(slug)
+    src = get_controller(slug, name)
+    if src is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Controller '{name}' not found for agent '{slug}'",
+        )
+    return src
+
+
+async def _controller_client(user: WebUser, server_name: str):
+    """The API client for ``server_name`` after the TRADER floor, or 502."""
+    from config_manager import get_config_manager
+
+    check_server_access(user.id, server_name)
+    try:
+        return await get_config_manager().get_client(server_name)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Server '{server_name}' is unreachable: {exc}"
+        )
+
+
+@router.get("/{slug}/controllers")
+async def list_agent_controllers(
+    slug: str,
+    server_name: str | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """The agent's controllers; with ``server_name``, each one's server verdict.
+
+    Without a server this is disk only. With one, a client that cannot be built
+    reads as ``unreachable`` for every row rather than failing the listing — an
+    unanswered server is never ``in_sync``.
+    """
+    from condor.agent_controllers import agent_controllers
+    from condor.agent_controllers_sync import ServerStatus, controller_statuses
+
+    _get_agent(slug)
+    sources = list(agent_controllers(slug).values())
+    rows = [src.to_dict() for src in sources]
+    if server_name:
+        from config_manager import get_config_manager
+
+        check_server_access(user.id, server_name)
+        try:
+            client = await get_config_manager().get_client(server_name)
+        except Exception as exc:
+            statuses = {
+                src.name: ServerStatus("unreachable", detail=str(exc))
+                for src in sources
+            }
+        else:
+            statuses = await controller_statuses(client, sources)
+        for row in rows:
+            row["server"] = statuses[row["name"]].to_dict()
+    return {"agent": slug, "server_name": server_name or "", "controllers": rows}
+
+
+@router.post("/{slug}/controllers/pull")
+async def pull_agent_controller(
+    slug: str, req: ControllerPullRequest, user: WebUser = Depends(get_current_user)
+):
+    """Adopt a server's controller (+ named configs) into the agent's local folder."""
+    from condor.agent_controllers import ControllerError
+    from condor.agent_controllers_sync import pull_controller
+
+    _get_agent(slug)
+    client = await _controller_client(user, req.server_name)
+    try:
+        return await pull_controller(
+            client,
+            slug,
+            req.controller_type,
+            req.controller_name,
+            req.configs,
+            req.overwrite,
+        )
+    except ControllerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{slug}/controllers/{name}/sync")
+async def sync_agent_controller(
+    slug: str,
+    name: str,
+    req: ControllerSyncRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Upload the controller where missing; refuse drift unless ``overwrite``."""
+    from condor.agent_controllers import ControllerError
+    from condor.agent_controllers_sync import sync_controller
+
+    src = _agent_controller(slug, name)
+    client = await _controller_client(user, req.server_name)
+    try:
+        return await sync_controller(
+            client, slug, src, req.server_name, overwrite=req.overwrite
+        )
+    except ControllerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{slug}/controllers/{name}/configs/{sample}")
+async def upload_agent_controller_config(
+    slug: str,
+    name: str,
+    sample: str,
+    req: ControllerConfigUploadRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Save a style as a config on the server (``{name}__{sample}`` by default)."""
+    from condor.agent_controllers import ControllerError
+    from condor.agent_controllers_sync import upload_sample_config
+
+    src = _agent_controller(slug, name)
+    client = await _controller_client(user, req.server_name)
+    try:
+        return await upload_sample_config(
+            client,
+            src,
+            sample,
+            req.server_name,
+            config_name=req.config_name,
+            overwrite=req.overwrite,
+        )
+    except ControllerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

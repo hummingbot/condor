@@ -266,6 +266,10 @@ _RUNTIME_NAMES = frozenset(
         "config.yml",
         "owned_bots.json",
         "disowned_bots.json",
+        # A controller's server copies kept by an overwriting sync (FEAT-126).
+        # The dot only hides the *directory*; the files in it are plain names,
+        # which the dotfile check below would let through.
+        ".server_backups",
     }
 )
 

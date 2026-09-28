@@ -29,6 +29,7 @@ EXPECTED_TOOLS = {
     "manage_agents",
     "manage_memory",
     "manage_routines",
+    "manage_agent_controllers",
     "manage_servers",
     "manage_skill",
     "manage_loops",

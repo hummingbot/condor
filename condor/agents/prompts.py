@@ -279,6 +279,7 @@ def _build_tool_preload(
         "mcp__condor__manage_memory",
         "mcp__condor__manage_skill",
         "mcp__condor__manage_routines",
+        "mcp__condor__manage_agent_controllers",
     ]
     tools = [t for t in tools if t.rsplit("__", 1)[-1] not in muted]
     return (
@@ -331,6 +332,10 @@ def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
         "instead of creating standalone executors:",
         '- Check current state first: manage_bots(action="status").',
         "- Define/update controller config templates with manage_controllers.",
+        "- A controller you own (the CONTROLLERS list): run manage_agent_controllers"
+        '(action="status") before manage_bots deploy, and never pass '
+        "overwrite=true without the user's go-ahead unless your loop "
+        "instructions say so.",
         f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
         "otherwise update_config / start_controllers / stop_controllers.",
     ]
@@ -551,6 +556,14 @@ def build_tick_prompt(
         )
     if routines_section:
         skills_routines.append(f"\n{routines_section}")
+    try:
+        from condor.agent_controllers import controllers_section as _controllers
+
+        controllers_section = _controllers(strategy.agent_slug)
+    except Exception:
+        controllers_section = ""  # Don't fail the tick over a folder read
+    if controllers_section:
+        skills_routines.append(f"\n{controllers_section}")
     sections.append("\n".join(skills_routines))
 
     # Session trading context (natural language directives for this session)

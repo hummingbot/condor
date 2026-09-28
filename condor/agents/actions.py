@@ -78,6 +78,9 @@ _DISPATCH_TOOLS = frozenset(
         # Never gated, but a fleet is assembled out of these: without the action
         # a rejected `upsert` and a routine `list` share one verb (FEAT-102).
         "manage_controllers",
+        # An agent's own controller source (FEAT-126): a `sync` and a `list`
+        # must not share one verb, and an overwrite is the row a reader hunts for.
+        "manage_agent_controllers",
     }
 )
 

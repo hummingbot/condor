@@ -16,6 +16,7 @@ from mcp_servers._profiles import resolve_profiles
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.profiles import PROFILE_TOOLS
 from mcp_servers.condor.settings import DEFAULT_TOOL_PROFILE, settings
+from mcp_servers.condor.tools import agent_controllers as agent_controllers_tool
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import delegate as delegate_tool
@@ -552,6 +553,94 @@ async def manage_routines(
     return await routines.manage_routines(action, name, config, agent, code, shared)
 
 
+@handle_errors("manage agent controllers")
+@telemetry_taps.tracked("manage_agent_controllers")
+async def manage_agent_controllers(
+    action: Literal[
+        "list",
+        "read",
+        "write",
+        "delete",
+        "status",
+        "sync",
+        "upload_config",
+        "pull",
+    ],
+    name: str | None = None,
+    agent: str | None = None,
+    sample: str | None = None,
+    code: str | None = None,
+    controller_md: str | None = None,
+    controller_type: str | None = None,
+    configs: list[str] | None = None,
+    config_name: str | None = None,
+    overwrite: bool = False,
+    shared: bool | None = None,
+) -> dict:
+    """The Hummingbot controllers you OWN: source + sample configs in your folder,
+    pushed to the active server on demand. Read the `controller_sources` skill
+    before your first sync.
+
+    Layout: controllers/<name>/<name>.py, optional controllers/<name>/CONTROLLER.md
+    (description, `type:` when it cannot be inferred), and
+    controllers/<name>/sample_configs/<style>.yml. `_shared` controllers are
+    read by every agent (marked shared) and are read-only to agents.
+
+    Your folder is the source of truth; the server holds a copy. Never upload
+    folder-owned code with manage_controllers upsert.
+
+    Local actions:
+    - "list": your controllers, their type and styles.
+    - "read": source, CONTROLLER.md and styles (name); with sample=, that style's YAML.
+    - "write": save source (name, code) and/or CONTROLLER.md (controller_md); with
+      sample=, save that style (code = YAML text).
+    - "delete": delete a controller (name) or one style (name, sample).
+
+    Server actions (the session's active server):
+    - "status": per controller, missing | in_sync | drift | unreachable
+      (unreachable is NOT in sync). Optional name narrows it.
+    - "sync": upload a missing controller (name). A drifted one is refused with a
+      diff; overwrite=true replaces it only after backing up the server copy, and
+      the result says backtests are stale until the API restarts. Never pass
+      overwrite=true without the user's go-ahead.
+    - "upload_config": save a style as a server config (name, sample), named
+      "<name>__<sample>" unless config_name is given. Idempotent; a differing
+      config is refused unless overwrite=true; needs the controller synced first.
+    - "pull": adopt a server controller into your folder (name, controller_type,
+      optional configs=[config ids] become styles).
+
+    Args:
+        action: The action to perform.
+        name: Controller name (folder == module == controller_name).
+        agent: Target agent's slug — Condor only (onboarding into an agent).
+        sample: A style (sample config stem) for read/write/delete/upload_config.
+        code: Controller source for write; YAML text when sample= is given.
+        controller_md: CONTROLLER.md text for write (frontmatter `type:`/`description:`).
+        controller_type: For pull — directional_trading, market_making or generic.
+        configs: For pull — server config ids to adopt as styles.
+        config_name: For upload_config — override the "<name>__<sample>" id.
+        overwrite: Replace a differing server copy (sync/upload_config) or a
+            differing folder copy (pull).
+        shared: Condor only, without agent — target the _shared library.
+
+    Returns:
+        Action-specific result dict; refusals carry refused=true, reason and diff.
+    """
+    return await agent_controllers_tool.manage_agent_controllers(
+        action,
+        name=name,
+        agent=agent,
+        sample=sample,
+        code=code,
+        controller_md=controller_md,
+        controller_type=controller_type,
+        configs=configs,
+        config_name=config_name,
+        overwrite=overwrite,
+        shared=shared,
+    )
+
+
 @handle_errors("run code")
 @telemetry_taps.tracked("run_code")
 async def run_code(
@@ -773,6 +862,7 @@ async def manage_agents(
             tool it omits is never mounted on any model, so keep the family the
             inherited framework playbooks call — delegate, send_notification,
             run_code, manage_memory, manage_skill, manage_routines,
+            manage_agent_controllers,
             trading_agent_journal_read, trading_agent_journal_write,
             manage_agents, manage_loops, control_agent,
             get_available_models — plus every tool the agent's own playbooks name.

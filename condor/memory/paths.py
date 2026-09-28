@@ -301,6 +301,25 @@ def shared_routines_roots() -> tuple[Path, Path]:
     )
 
 
+def shared_controller_root() -> Path:
+    """Where a published controller is **written**: ``<local>/_shared/controllers``.
+
+    The controller twin of :func:`shared_routines_root` (FEAT-126): the
+    directory is the publication flag, only the chat writes here, and every
+    agent reads it *under* its own ``controllers/``, which shadow it by name.
+    See :mod:`condor.agent_controllers`.
+    """
+    return local_agents_root() / "_shared" / "controllers"
+
+
+def shared_controller_roots() -> tuple[Path, Path]:
+    """``(local, stock)`` shared controller libraries — read order."""
+    return (
+        local_agents_root() / "_shared" / "controllers",
+        stock_agents_root() / "_shared" / "controllers",
+    )
+
+
 def store_root(user_id: int, agent_slug: str | None = None) -> Path:
     """Root of an agent's per-user store: ``<local home>/store/user_{id}``.
 

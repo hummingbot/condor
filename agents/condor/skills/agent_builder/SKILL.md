@@ -218,6 +218,13 @@ If the agent is capable enough to author its own loop, prefer handing it the job
 `delegate(action="start", agent="<agent_slug>", task="give yourself a loop that …")`. It
 reads the same shared playbook and knows its own domain better than you do.
 
+## Controllers — when the user brings a controller to onboard
+
+When the user hands you a Hummingbot controller `.py` (and sample configs) for an agent,
+or one that exists only on a server should become an agent's, follow the shared
+`controller_sources` playbook (`manage_skill(action="read", name="controller_sources")`).
+It owns the review, `write`/`pull`, `status`/`sync` and `upload_config` steps — don't restate them.
+
 ## Monitoring existing agents
 1. `manage_agents(action="list")` — all agents, with their
    routing hint and owned loops. Only list that shows agents owning no loop.
@@ -232,7 +239,8 @@ only changes *how* a run executes, never what it may reach: the `tools` allowlis
 binds on every key, ACP bridges included — a tool it leaves out is never mounted. So
 an allowlist must name every tool the agent's own playbooks call *plus* the family the
 inherited framework skills call (`delegate`, `send_notification`, `run_code`,
-`manage_memory`, `manage_skill`, `manage_routines`, `trading_agent_journal_read`,
+`manage_memory`, `manage_skill`, `manage_routines`, `manage_agent_controllers`,
+`trading_agent_journal_read`,
 `trading_agent_journal_write`, `manage_agents`, `manage_loops`, `control_agent`,
 `get_available_models`); leave it empty for unrestricted. Every run reached through `delegate` — `start` or `ask` —
 is unattended: nobody is asked to approve its tool calls, so only hand work to agents
