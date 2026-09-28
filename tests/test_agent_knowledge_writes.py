@@ -330,3 +330,112 @@ def test_ruling_on_a_proposal_that_is_not_there_says_so(env):
 
     assert client.delete("/agents/brigado/skill-proposals").status_code == 404
     assert client.post("/agents/brigado/skill-proposals/accept").status_code == 400
+
+
+# ── Controllers (FEAT-127) ──
+
+_MM_SOURCE = '''"""Pure maker around mid."""
+from hummingbot.strategy_v2.controllers.market_making_controller_base import (
+    MarketMakingControllerBase,
+)
+
+
+class PmmKing(MarketMakingControllerBase):
+    pass
+'''
+
+
+def _controller(base, name, source=_MM_SOURCE, samples=None):
+    d = base / "controllers" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.py").write_text(source)
+    for stem, text in (samples or {}).items():
+        (d / "sample_configs").mkdir(exist_ok=True)
+        (d / "sample_configs" / f"{stem}.yml").write_text(text)
+    return d
+
+
+def test_the_brain_lists_own_and_shared_controllers(env):
+    _controller(env / "brigado", "pmm_king", samples={"tight": "spread: 0.1\n"})
+    _controller(env / "_shared", "grid_basic")
+    _controller(env / "brigado", "mystery", source="class Mystery:\n    pass\n")
+
+    cards = {
+        c["name"]: c
+        for c in _client().get("/agents/brigado/brain").json()["controllers"]
+    }
+
+    assert set(cards) == {"pmm_king", "grid_basic", "mystery"}
+    assert cards["pmm_king"]["controller_type"] == "market_making"
+    assert cards["pmm_king"]["styles"] == ["tight"]
+    assert cards["pmm_king"]["description"] == "Pure maker around mid."
+    assert cards["pmm_king"]["shared"] is False
+    assert cards["grid_basic"]["shared"] is True
+    assert cards["mystery"]["controller_type"] is None
+    assert "cannot be inferred" in cards["mystery"]["type_error"]
+
+
+def test_an_agent_without_controllers_has_none(env):
+    assert _client().get("/agents/brigado/brain").json()["controllers"] == []
+
+
+def test_a_broken_controller_library_does_not_break_the_brain(env, monkeypatch):
+    import condor.agent_controllers as ac
+
+    def boom(slug):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(ac, "agent_controllers", boom)
+    brain = _client().get("/agents/brigado/brain")
+    assert brain.status_code == 200
+    assert brain.json()["controllers"] == []
+    assert brain.json()["name"] == "Brigado"
+
+
+def test_the_brain_never_asks_a_server_about_controllers(env, monkeypatch):
+    import condor.agent_controllers_sync as sync
+
+    _controller(env / "brigado", "pmm_king")
+
+    async def no_network(*a, **k):
+        raise AssertionError("the brain must not reach a server")
+
+    monkeypatch.setattr(sync, "controller_statuses", no_network)
+    monkeypatch.setattr(sync, "controller_status", no_network)
+    assert len(_client().get("/agents/brigado/brain").json()["controllers"]) == 1
+
+
+def test_a_controllers_source_and_styles_read_back(env):
+    _controller(
+        env / "brigado",
+        "pmm_king",
+        source=_MM_SOURCE.replace("\n", "\r\n"),
+        samples={"tight": "spread: 0.1\n", "wide": "spread: 0.5\n"},
+    )
+    client = _client()
+
+    body = client.get("/agents/brigado/controllers/pmm_king/source").json()
+    assert body["controller_type"] == "market_making"
+    assert body["styles"] == ["tight", "wide"]
+    # Normalised — exactly what a sync would upload.
+    assert "\r" not in body["source"] and "class PmmKing" in body["source"]
+
+    sample = client.get("/agents/brigado/controllers/pmm_king/configs/wide").json()
+    assert sample == {"name": "pmm_king", "sample": "wide", "yaml": "spread: 0.5\n"}
+
+
+def test_controller_reads_are_confined_to_the_resolved_folder(env):
+    _controller(env / "brigado", "pmm_king", samples={"tight": "spread: 0.1\n"})
+    (env / "brigado" / "AGENT.md").write_text("secret")
+    client = _client()
+
+    assert client.get("/agents/brigado/controllers/nope/source").status_code == 404
+    assert (
+        client.get("/agents/brigado/controllers/pmm_king/configs/nope").status_code
+        == 404
+    )
+    for bad in ("..%2F..%2FAGENT", "..", "%2E%2E"):
+        r = client.get(f"/agents/brigado/controllers/pmm_king/configs/{bad}")
+        assert r.status_code == 404
+        assert "secret" not in r.text
+    assert client.get("/agents/nobody/controllers/pmm_king/source").status_code == 404

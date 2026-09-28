@@ -393,6 +393,24 @@ class RoutineCard(BaseModel):
     muted: bool = False
 
 
+class ControllerCard(BaseModel):
+    """One controller this Agent owns or inherits from ``_shared`` (FEAT-127).
+
+    Disk only: whether a server has it costs network calls, so the tab fetches
+    that itself (``GET /{slug}/controllers?server_name=``) and never ``/brain``.
+    """
+
+    name: str
+    #: ``None`` when it cannot be resolved; ``type_error`` then says why.
+    controller_type: str | None = None
+    description: str = ""
+    #: Sample config stems, sorted.
+    styles: list[str] = []
+    shared: bool = False
+    stock: bool = False
+    type_error: str = ""
+
+
 class StrategyCard(BaseModel):
     """A strategy row without its performance — see ``/strategies`` for that."""
 
@@ -456,6 +474,7 @@ class AgentBrain(BaseModel):
     memories: list[MemoryCard] = []
     routines: list[RoutineCard] = []
     strategies: list[StrategyCard] = []
+    controllers: list[ControllerCard] = []
 
 
 class SkillBody(BaseModel):
@@ -1882,6 +1901,28 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
     ]
 
 
+def _controller_cards(slug: str) -> list[ControllerCard]:
+    """The controllers this Agent can sync — its own folder over ``_shared``.
+
+    A filesystem walk and nothing else: the per-server verdict is the tab's own
+    lazy fetch, so an unreachable server can never stall this panel.
+    """
+    from condor.agent_controllers import agent_controllers
+
+    return [
+        ControllerCard(
+            name=src.name,
+            controller_type=src.controller_type,
+            description=src.description,
+            styles=list(src.samples),
+            shared=src.shared,
+            stock=src.stock,
+            type_error=src.type_error,
+        )
+        for src in agent_controllers(slug).values()
+    ]
+
+
 def _tool_cards(slug: str, allowlist: list[str]) -> list[ToolCard]:
     """The seat's real tool surface, each row carrying its two flags.
 
@@ -1950,6 +1991,12 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
     except Exception:
         log.debug("brain: tool cards failed for %s", slug, exc_info=True)
 
+    controllers: list[ControllerCard] = []
+    try:
+        controllers = _controller_cards(agent.slug)
+    except Exception:
+        log.debug("brain: controller cards failed for %s", slug, exc_info=True)
+
     return AgentBrain(
         slug=agent.slug,
         name=agent.name,
@@ -1966,6 +2013,7 @@ async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
         memories=memories,
         routines=routines,
         strategies=strategies,
+        controllers=controllers,
     )
 
 
@@ -3964,6 +4012,54 @@ async def list_agent_controllers(
         for row in rows:
             row["server"] = statuses[row["name"]].to_dict()
     return {"agent": slug, "server_name": server_name or "", "controllers": rows}
+
+
+@router.get("/{slug}/controllers/{name}/source")
+async def get_agent_controller_source(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """A controller's source (normalised, as ``sync`` uploads it) and its styles.
+
+    Read-only: authoring stays with the agent or the operator's editor. The path
+    is the resolved controller's own file, never one built from the request.
+    """
+    from condor.agent_controllers import read_source
+
+    src = _agent_controller(slug, name)
+    try:
+        source = read_source(src)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read '{name}': {exc}")
+    return {
+        "name": src.name,
+        "controller_type": src.controller_type,
+        "description": src.description,
+        "shared": src.shared,
+        "digest": src.digest,
+        "source": source,
+        "styles": list(src.samples),
+    }
+
+
+@router.get("/{slug}/controllers/{name}/configs/{sample}")
+async def get_agent_controller_sample(
+    slug: str, name: str, sample: str, user: WebUser = Depends(get_current_user)
+):
+    """One style's raw YAML — only a stem the controller's own folder lists."""
+    src = _agent_controller(slug, name)
+    path = src.samples.get(sample)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Controller '{name}' has no style '{sample}'",
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Could not read style '{sample}': {exc}"
+        )
+    return {"name": src.name, "sample": sample, "yaml": text}
 
 
 @router.post("/{slug}/controllers/pull")

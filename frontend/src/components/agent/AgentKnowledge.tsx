@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Cpu,
   History,
   Loader2,
   Repeat,
@@ -35,6 +36,7 @@ import {
   Empty,
   Row,
 } from "@/components/agent/knowledge/KnowledgeChrome";
+import { ControllersTab } from "@/components/agent/knowledge/ControllersTab";
 import { MemoryEditor } from "@/components/agent/knowledge/MemoryEditor";
 import { SkillEditor } from "@/components/agent/knowledge/SkillEditor";
 import {
@@ -289,6 +291,7 @@ export const AgentKnowledge = memo(function AgentKnowledge({
     tools: brain?.tools.filter((t) => !t.muted).length ?? 0,
     strategies: brain?.strategies.length ?? 0,
     routines: brain?.routines.filter((r) => !r.muted).length ?? 0,
+    controllers: brain?.controllers?.length ?? 0,
   };
   const totals = {
     skills: brain?.skills.length ?? 0,
@@ -344,6 +347,18 @@ export const AgentKnowledge = memo(function AgentKnowledge({
       count: counts.routines,
       ...withMuted(counts.routines, totals.routines),
     },
+    // Only for an agent that carries controllers (FEAT-127): every other
+    // agent's strip is unchanged rather than growing a section that is empty.
+    ...(counts.controllers > 0
+      ? [
+          {
+            id: "controllers" as const,
+            label: "Controllers",
+            icon: <Cpu className="h-3.5 w-3.5" />,
+            count: counts.controllers,
+          },
+        ]
+      : []),
     {
       id: "activity",
       label: "Activity",
@@ -571,6 +586,12 @@ export const AgentKnowledge = memo(function AgentKnowledge({
                   muteMut.mutate({ kind: "routine", name, muted })
                 }
                 onAskAgent={onAskAgent}
+              />
+            )}
+            {activeTab === "controllers" && (
+              <ControllersTab
+                slug={slug}
+                controllers={brain.controllers ?? []}
               />
             )}
             {activeTab === "activity" && <ActivityFeed agent={slug} />}

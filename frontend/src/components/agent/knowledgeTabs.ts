@@ -17,6 +17,7 @@ export const KNOWLEDGE_TABS = [
   "tools",
   "loops",
   "routines",
+  "controllers",
   "activity",
 ] as const;
 

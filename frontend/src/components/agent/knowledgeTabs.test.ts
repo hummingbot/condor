@@ -8,6 +8,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  KNOWLEDGE_TABS,
   isKnowledgeTab,
   lastKnowledgeTab,
   rememberKnowledgeTab,
@@ -41,6 +42,16 @@ describe("the remembered section", () => {
     localStorage.setItem(KNOWLEDGE_TAB_KEY, "nonsense");
     expect(isKnowledgeTab("nonsense")).toBe(false);
     expect(lastKnowledgeTab()).toBeUndefined();
+  });
+
+  it("knows Controllers, between Routines and Activity (FEAT-127)", () => {
+    expect(isKnowledgeTab("controllers")).toBe(true);
+    expect(KNOWLEDGE_TABS.indexOf("controllers")).toBe(
+      KNOWLEDGE_TABS.indexOf("routines") + 1,
+    );
+    expect(KNOWLEDGE_TABS.indexOf("activity")).toBe(
+      KNOWLEDGE_TABS.indexOf("controllers") + 1,
+    );
   });
 
   it("reads a remembered Strategies from before the rename as Loops (FEAT-128)", () => {

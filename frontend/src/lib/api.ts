@@ -1139,6 +1139,11 @@ export interface AgentBrain {
   memories: MemoryCard[];
   routines: RoutineCard[];
   strategies: StrategyCard[];
+  /**
+   * Controllers it owns or inherits from `_shared` (FEAT-127) — disk only.
+   * Optional because a server running code from before FEAT-127 leaves it out.
+   */
+  controllers?: ControllerCard[];
 }
 
 /**
@@ -1209,6 +1214,59 @@ export interface RoutineCard {
   category: string;
   /** Switched off for this Agent. `/routines` still lists and runs it. */
   muted: boolean;
+}
+
+/** One controller an agent can sync to a server (FEAT-127). */
+export interface ControllerCard {
+  name: string;
+  /** `null` when the type cannot be resolved — `type_error` says why. */
+  controller_type: string | null;
+  description: string;
+  /** Sample config stems. */
+  styles: string[];
+  /** Inherited from the `_shared` library. */
+  shared: boolean;
+  stock: boolean;
+  type_error: string;
+}
+
+export type ControllerVerdict = "in_sync" | "missing" | "drift" | "unreachable";
+
+/** One row of `GET /agents/{slug}/controllers?server_name=`. */
+export interface ControllerStatusRow {
+  name: string;
+  controller_type: string | null;
+  styles: string[];
+  shared: boolean;
+  digest: string;
+  type_error?: string;
+  server?: {
+    verdict: ControllerVerdict;
+    server_digest?: string;
+    server_type?: string;
+    detail?: string;
+  };
+}
+
+/**
+ * What a sync or a config upload answers. A refusal (drift, missing,
+ * unreachable, a validation error) is a 200 with `refused: true` and the
+ * `reason` — plus the `diff` or `error` to read before deciding.
+ */
+export interface ControllerActionResult {
+  name: string;
+  verdict?: ControllerVerdict;
+  changed?: boolean;
+  refused?: boolean;
+  reason?: string;
+  diff?: string;
+  error?: string;
+  message?: string;
+  warning?: string;
+  config_name?: string;
+  overwritten?: boolean;
+  backup?: string;
+  backtest_cache_stale?: boolean;
 }
 
 export interface StrategyCard {
@@ -3037,6 +3095,66 @@ export const api = {
   /** Identity + the four libraries, for the panel behind a conversation. */
   getAgentBrain: (slug: string) =>
     apiFetch<AgentBrain>(`/api/v1/agents/${encodeURIComponent(slug)}/brain`),
+
+  /** The agent's controllers, each with its verdict on `serverName`. */
+  getAgentControllers: (slug: string, serverName: string) =>
+    apiFetch<{
+      agent: string;
+      server_name: string;
+      controllers: ControllerStatusRow[];
+    }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers?server_name=${encodeURIComponent(serverName)}`,
+    ),
+
+  /** Upload a controller where the server lacks it; `overwrite` replaces a
+   *  drifted server copy (backed up first). */
+  syncAgentController: (
+    slug: string,
+    name: string,
+    serverName: string,
+    overwrite = false,
+  ) =>
+    apiFetch<ControllerActionResult>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/sync`,
+      {
+        method: "POST",
+        body: JSON.stringify({ server_name: serverName, overwrite }),
+      },
+    ),
+
+  /** Save a style as a config on the server (`{name}__{sample}`). */
+  uploadAgentControllerConfig: (
+    slug: string,
+    name: string,
+    sample: string,
+    serverName: string,
+    overwrite = false,
+  ) =>
+    apiFetch<ControllerActionResult>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/configs/${encodeURIComponent(sample)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ server_name: serverName, overwrite }),
+      },
+    ),
+
+  getAgentControllerSource: (slug: string, name: string) =>
+    apiFetch<{
+      name: string;
+      controller_type: string | null;
+      description: string;
+      shared: boolean;
+      digest: string;
+      source: string;
+      styles: string[];
+    }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/source`,
+    ),
+
+  getAgentControllerSample: (slug: string, name: string, sample: string) =>
+    apiFetch<{ name: string; sample: string; yaml: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/configs/${encodeURIComponent(sample)}`,
+    ),
 
   getAgentSkill: (slug: string, name: string) =>
     apiFetch<SkillBody>(
