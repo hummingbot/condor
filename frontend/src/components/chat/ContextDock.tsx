@@ -1,5 +1,5 @@
 import { PanelRightClose, Radio, Zap } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import {
   DockRoutines,
@@ -71,8 +71,18 @@ function readWidth(): number {
  * reader nothing about why one word was on the left of it and another on the
  * right. Closed, this now renders no column and no strip — only the library
  * sheet, which is the pane's, not the column's.
+ *
+ * ## Memoised
+ *
+ * The page hosting it re-renders on every 50 ms flush of a streaming answer,
+ * while the lists here move only on a 5 s / 15 s poll — so without `memo` the
+ * Tasks and Routines panes re-sorted and reconciled every row twenty times a
+ * second (PERF-394, the `ChatRail` treatment of PERF-206). Every non-scalar
+ * prop is identity-stable across a flush for that reason: `useContextPanels`
+ * memoises its result, and `AgentChatTab` memoises `runContext` and
+ * `onLibraryChange`.
  */
-export function ContextDock({
+export const ContextDock = memo(function ContextDock({
   panels,
   delegations,
   conversationId,
@@ -270,4 +280,4 @@ export function ContextDock({
       {librarySheet}
     </>
   );
-}
+});

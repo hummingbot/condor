@@ -166,21 +166,6 @@ export const ACCOUNT_DOCK_KEY = "condor.dock.account";
 export const DESK_SPLIT_KEY = "condor.dock.account.split";
 
 /**
- * Which of an agent run screen's disclosures are open, as a JSON array of
- * section ids — Runs, Detail, Money, Fleet and Playbook (FEAT-119).
- *
- * One list for every agent rather than one per slug: what a reader wants to see
- * about a run is a habit, not a property of the agent, and a key per agent
- * would make the first visit to each of them a fresh page with everything shut.
- * `?open=` is what says something different about one particular address.
- *
- * KEPT, beside `ACCOUNT_DOCK_KEY` and `DOCK_PANES_KEY` and for the same reason:
- * which disclosures a reader has open is a fact about this window, and the
- * runs, money and records behind them are fetched for whoever is logged in now.
- */
-export const AGENT_SECTIONS_KEY = "condor.agent.sections";
-
-/**
  * Where the reader put the split between the transcript and the workspace
  * pane, as a fraction of the row (ARCH-273, ARCH-291).
  *
@@ -266,15 +251,22 @@ export const BROWSE_HINT_KEY = "condor.market.browse-hint";
  * to land on Brain however long the reader had been in Strategies. This is what
  * the re-open reads when the link that opened it did not name a section.
  *
- * One value for every agent rather than one per slug, for the reason
- * `AGENT_SECTIONS_KEY` above gives: which section a reader wants is a habit,
- * not a property of the agent.
+ * One value for every agent rather than one per slug: which section a reader
+ * wants is a habit, not a property of the agent.
  *
- * KEPT, beside the disclosure keys above it: it names a section of a panel, and
- * the brain, skills and loops behind that section are fetched for whoever is
- * logged in now.
+ * KEPT: it names a section of a panel, and the brain, skills and loops behind
+ * that section are fetched for whoever is logged in now.
  */
 export const KNOWLEDGE_TAB_KEY = "condor.agent.knowledge-tab";
+
+/**
+ * Which section of a strategy the side panel was last on — `now` or one of the
+ * run screen's four sections (components/agent/workspace/sections).
+ *
+ * KEPT, beside `KNOWLEDGE_TAB_KEY` and for its reason: it names a section of a
+ * panel, and what is behind it is fetched for whoever is logged in now.
+ */
+export const PANE_SECTION_KEY = "condor.agent.pane-section";
 
 const SESSION_KEYS = [
   ORDER_DEFAULTS_KEY,

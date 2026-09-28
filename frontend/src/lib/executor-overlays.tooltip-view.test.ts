@@ -43,8 +43,9 @@ function overlay(patch: Partial<ExecutorOverlay> = {}): ExecutorOverlay {
 }
 
 const usd: OverlayTooltipFormatters = {
-  formatValue: (v: number) => `$${v.toFixed(2)}`,
-  formatPnl: (v: number) => `${v >= 0 ? "+" : ""}$${v.toFixed(2)}`,
+  formatValue: (v: number) => `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}`,
+  formatPnl: (v: number) =>
+    v >= 0 ? `+$${v.toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`,
 };
 
 /** A tooltip div that counts the two expensive things the handler does to it. */
@@ -132,8 +133,9 @@ describe("createOverlayTooltipView", () => {
     const { el, counts, html } = makeTooltip();
     const o = overlay();
     const eur: OverlayTooltipFormatters = {
-      formatValue: (v: number) => `€${v.toFixed(2)}`,
-      formatPnl: (v: number) => `${v >= 0 ? "+" : ""}€${v.toFixed(2)}`,
+      formatValue: (v: number) => `${v < 0 ? "-" : ""}€${Math.abs(v).toFixed(2)}`,
+      formatPnl: (v: number) =>
+        v >= 0 ? `+€${v.toFixed(2)}` : `-€${Math.abs(v).toFixed(2)}`,
     };
 
     view.show(el, o, usd);

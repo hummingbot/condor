@@ -35,9 +35,9 @@ def _write_agent(root, slug, name):
 
 
 def _write_strategy(root, agent_slug, sslug, name, *, config=""):
-    d = root / agent_slug / "strategies" / sslug
+    d = root / agent_slug / "loops" / sslug
     d.mkdir(parents=True, exist_ok=True)
-    (d / "strategy.md").write_text(f"---\nname: {name}\n{config}---\n\nPlaybook.\n")
+    (d / "loop.md").write_text(f"---\nname: {name}\n{config}---\n\nPlaybook.\n")
     return d
 
 

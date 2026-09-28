@@ -38,11 +38,14 @@ class TelegramChannel:
         # agents on several servers, and "Approve this action?" on its own does
         # not say whose action, or where it lands.
         asked_by = f"\nRequested by {pending.origin}\n" if pending.origin else ""
+        # What the call leaves behind (a controller overwrite's impact), sent
+        # as plain text like the summary: no parse mode, nothing to escape.
+        detail = f"\n\n{pending.detail}" if pending.detail else ""
         await self._bot.send_message(
             chat_id=self._chat_id,
             text=(
                 f"Trade Confirmation\n{asked_by}\n"
-                f"{pending.summary}\n\nApprove this action?"
+                f"{pending.summary}{detail}\n\nApprove this action?"
             ),
             reply_markup=keyboard,
         )

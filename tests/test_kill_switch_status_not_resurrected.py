@@ -11,6 +11,7 @@ the risk engine had just emergency-wound-down.
 
 import asyncio
 import json
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ import pytest
 
 from condor.agents import engine as engine_module
 from condor.agents import shutdown as shutdown_module
+from condor.agents.config import is_experiment_mode
 from condor.agents.engine import TickEngine
 from condor.runtime.loops import LoopSupervisor
 from condor.runtime.registry_file import LoopState, read_status
@@ -46,7 +48,7 @@ def _session_dir(agents_root: Path) -> Path:
 
 def _stub_engine(session_dir: Path, *, restart_on_boot=True, mode="loop"):
     """A stand-in carrying exactly what ``_loop``/``_run_shutdown`` touch."""
-    return SimpleNamespace(
+    stub = SimpleNamespace(
         agent_id="acme.scalper_1",
         agent=SimpleNamespace(slug="acme"),
         strategy=SimpleNamespace(slug="scalper"),
@@ -56,6 +58,7 @@ def _stub_engine(session_dir: Path, *, restart_on_boot=True, mode="loop"):
         user_id=4242,
         journal=_FakeJournal(),
         ledger=None,
+        is_experiment=is_experiment_mode(mode),
         config={
             "frequency_sec": 0,
             "execution_mode": mode,
@@ -70,6 +73,10 @@ def _stub_engine(session_dir: Path, *, restart_on_boot=True, mode="loop"):
         _last_stop_reason="",
         _notify=_swallow,
     )
+    # The shared teardown every exit path ends in (ARCH-646).
+    stub._reap_client = partial(TickEngine._reap_client, stub)
+    stub._finish = partial(TickEngine._finish, stub)
+    return stub
 
 
 async def _swallow(msg):

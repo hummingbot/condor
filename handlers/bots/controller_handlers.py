@@ -8043,10 +8043,7 @@ async def _pmm_show_advanced(context, chat_id, message_id, config):
 # PMM V1 WIZARD
 # ============================================
 
-from .controllers.pmm_v1 import FIELD_ORDER as PV1_FIELD_ORDER
-from .controllers.pmm_v1 import FIELDS as PV1_FIELDS
 from .controllers.pmm_v1 import generate_id as pv1_generate_id
-from .controllers.pmm_v1 import parse_spreads as pv1_parse_spreads
 from .controllers.pmm_v1 import validate_config as pv1_validate_config
 
 

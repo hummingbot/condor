@@ -3,11 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   GECKO_MAX_CANDLES,
   geckoIntervalForSpan,
-  geckoIntervalSpan,
+  GECKO_TIMEFRAMES,
 } from "./gecko-candles";
 
 const HOUR = 3600;
 const DAY = 86400;
+
+/** How far back one request of `interval` candles reaches, in seconds. */
+const span = (interval: string) =>
+  GECKO_TIMEFRAMES.find((t) => t.interval === interval)!.seconds * GECKO_MAX_CANDLES;
 
 describe("geckoIntervalForSpan", () => {
   it("keeps 1m for a window one request of 1m candles covers", () => {
@@ -24,19 +28,15 @@ describe("geckoIntervalForSpan", () => {
   it("picks the finest interval that still fits, never a coarser one", () => {
     for (const seconds of [HOUR, 20 * HOUR, 3 * DAY, 30 * DAY, 200 * DAY]) {
       const chosen = geckoIntervalForSpan(seconds);
-      expect(geckoIntervalSpan(chosen)).toBeGreaterThanOrEqual(seconds);
+      expect(span(chosen)).toBeGreaterThanOrEqual(seconds);
     }
     // One step finer would not have fit 30 days.
     expect(geckoIntervalForSpan(30 * DAY)).toBe("1h");
-    expect(geckoIntervalSpan("15m")).toBeLessThan(30 * DAY);
+    expect(span("15m")).toBeLessThan(30 * DAY);
   });
 
   it("falls back to the coarsest timeframe past what any request spans", () => {
     expect(geckoIntervalForSpan(10 * 365 * DAY)).toBe("1d");
-  });
-
-  it("spans the cap, not a page", () => {
-    expect(geckoIntervalSpan("15m")).toBe(900 * GECKO_MAX_CANDLES);
   });
 });
 

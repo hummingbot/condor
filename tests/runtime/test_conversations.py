@@ -157,6 +157,41 @@ def test_an_unreadable_meta_is_skipped_by_a_limited_listing(conv_root):
     assert listed == [ids[-2], ids[-3]], "skipped, and the limit is still filled"
 
 
+def test_list_filters_by_agent_before_the_limit(conv_root):
+    """A limit counts matching rows, not every meta walked (CORR-652)."""
+    import os
+
+    base = 1_800_000_000
+    brigado: list[str] = []
+    unbound: list[str] = []
+    # Pinned mtimes: the walk must not lean on the filesystem's tick resolution.
+    for i in range(12):
+        slug = "brigado" if i % 3 == 0 else ""
+        meta = new_conversation(USER, WEB, agent_slug=slug)
+        os.utime(
+            _conv_dir(USER, meta.id) / conversations.META_FILENAME, (base + i,) * 2
+        )
+        (brigado if slug else unbound).append(meta.id)
+    # Newer non-matching metas sit on top of every brigado one.
+    for i in range(12, 20):
+        meta = new_conversation(USER, WEB)
+        os.utime(
+            _conv_dir(USER, meta.id) / conversations.META_FILENAME, (base + i,) * 2
+        )
+        unbound.append(meta.id)
+
+    listed = list_conversations(USER, limit=3, agent_slug="brigado")
+    assert [m.id for m in listed] == brigado[::-1][:3], "N brigado metas, newest first"
+
+    condor = list_conversations(USER, limit=5, agent_slug="condor")
+    assert [m.id for m in condor] == unbound[::-1][:5], "unbound resolves to condor"
+
+    everything = list_conversations(USER, limit=0, agent_slug="brigado")
+    assert sorted(m.id for m in everything) == sorted(brigado), "limit=0 still filters"
+    assert len(list_conversations(USER, limit=0, agent_slug="condor")) == len(unbound)
+    assert list_conversations(USER, limit=0, agent_slug="nobody") == []
+
+
 def test_delete_removes_the_transcript(conv_root):
     meta = new_conversation(USER, WEB)
     append_turn(USER, meta.id, TurnEntry(role="user", text="hi"))

@@ -130,12 +130,27 @@ def _icon(value) -> str:
     return word if word in ICON_VOCABULARY else ""
 
 
-def _rank(entries: list[StarterEntry]) -> list[StarterEntry]:
-    """Best first: score, then recency, then slug so the order is stable."""
-    return sorted(entries, key=lambda e: (-e.score, -e.last_seen.timestamp(), e.slug))
+def _decayed(entry: StarterEntry, now: datetime) -> float:
+    """The stored score (the count as of ``last_seen``) aged to ``now``."""
+    age_days = max(0.0, (now - entry.last_seen).total_seconds() / 86400.0)
+    return entry.score * 0.5 ** (age_days / HALFLIFE_DAYS)
 
 
-def read(user_id: int, agent_slug: str | None = None) -> list[StarterEntry]:
+def _rank(entries: list[StarterEntry], now: datetime) -> list[StarterEntry]:
+    """Best first: score aged to ``now``, then recency, then slug for stability.
+
+    Ranking on the stored score would freeze a row that stopped recurring at
+    its old count, so last season's habit would outrank today's forever.
+    """
+    return sorted(
+        entries,
+        key=lambda e: (-_decayed(e, now), -e.last_seen.timestamp(), e.slug),
+    )
+
+
+def read(
+    user_id: int, agent_slug: str | None = None, now: datetime | None = None
+) -> list[StarterEntry]:
     """Every learned opener for this pair, ranked best first.
 
     A missing, truncated or hand-mangled file reads as *no openers* rather than
@@ -155,14 +170,17 @@ def read(user_id: int, agent_slug: str | None = None) -> list[StarterEntry]:
             entries.append(StarterEntry(**row))
         except Exception:  # noqa: BLE001 - one bad row is not the file
             log.debug("Skipping unparseable starter row for user %s", user_id)
-    return _rank(entries)
+    return _rank(entries, now or _utcnow())
 
 
 def top(
-    user_id: int, agent_slug: str | None = None, limit: int = 3
+    user_id: int,
+    agent_slug: str | None = None,
+    limit: int = 3,
+    now: datetime | None = None,
 ) -> list[StarterEntry]:
-    """The openers worth showing: the best ``limit`` of them."""
-    return read(user_id, agent_slug)[:limit]
+    """The openers worth showing: the best ``limit`` of them as of ``now``."""
+    return read(user_id, agent_slug, now)[:limit]
 
 
 def merge(
@@ -175,16 +193,16 @@ def merge(
 
     The whole ranking is the two lines in the loop below. An intent already on
     file has its score aged to ``now`` and then incremented; a new one starts at
-    ``1.0``. Because the decay is applied at merge time rather than at read
-    time, the stored score is always "the count as of ``last_seen``" — which is
-    what makes a rival seen twice this week outrank one seen once two months ago
-    without anybody re-walking a history.
+    ``1.0``. The stored score is always "the count as of ``last_seen``", and
+    readers (and the cap below) age it to their own ``now`` — which is what
+    makes a rival seen twice this week outrank one seen once two months ago, or
+    one that stopped recurring entirely, without anybody re-walking a history.
 
     An intent without a usable label is dropped rather than stored under a
     placeholder slug: a chip nobody can read is worse than one chip fewer.
     """
     now = now or _utcnow()
-    by_slug = {entry.slug: entry for entry in read(user_id, agent_slug)}
+    by_slug = {entry.slug: entry for entry in read(user_id, agent_slug, now)}
 
     for intent in intents or []:
         if not isinstance(intent, dict):
@@ -212,8 +230,7 @@ def merge(
             )
             continue
 
-        age_days = max(0.0, (now - entry.last_seen).total_seconds() / 86400.0)
-        entry.score = entry.score * 0.5 ** (age_days / HALFLIFE_DAYS) + 1.0
+        entry.score = _decayed(entry, now) + 1.0
         entry.count += 1
         entry.last_seen = now
         # Latest wording wins for everything but the title.
@@ -221,7 +238,7 @@ def merge(
         entry.icon = icon or entry.icon
         entry.skill = skill or entry.skill
 
-    ranked = _rank(list(by_slug.values()))[:MAX_ENTRIES]
+    ranked = _rank(list(by_slug.values()), now)[:MAX_ENTRIES]
     write_status(
         store_root(user_id, agent_slug),
         STARTERS_FILENAME,

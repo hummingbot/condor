@@ -111,58 +111,60 @@ Before uploading:
 - [ ] **No look-ahead** — `.shift(1)` wherever entry-bar logic needs it
 - [ ] **Complete module** — both classes, all imports
 
-## Step 4 — Upload the controller
+## Step 4 — Write the controller to your folder, then sync it
+
+Your folder is the source of truth; the server holds a copy. Follow the shared
+`controller_sources` playbook (`manage_skill(action="read", name="controller_sources")`)
+for the status/sync/drift rules — never upload folder-owned code with
+`manage_controllers(action="upsert", target="controller")`.
 
 ```python
-manage_controllers(
-    action="upsert",
-    target="controller",
-    controller_type="directional_trading",
-    controller_name="ema_cross_adx",
-    controller_code="<full python source>",
+manage_agent_controllers(
+    action="write",
+    name="ema_cross_adx",
+    code="<full python source>",
 )
+manage_agent_controllers(action="status", name="ema_cross_adx")
+manage_agent_controllers(action="sync", name="ema_cross_adx")   # when missing
 ```
 
-Confirm `created: true` / `updated: true`. Add `confirm_override=True` when
-replacing an existing template.
+The type is inferred from the base class (`DirectionalTradingControllerBase` →
+`directional_trading`).
 
-The `controller_code` string is wrapped as a `Controller` object by the MCP tool —
-the endpoint rejects a bare source string.
+## Step 5 — Create the initial config as a style, then upload it
 
-A new `.py` may still be shadowed by the module cached in `sys.modules` — if the
-upload succeeds but `describe` keeps showing the old fields, restart the API
-container.
-
-## Step 5 — Create the initial config
+Write the initial config as a sample (a "style") next to the controller, then upload
+it — it lands on the server as `ema_cross_adx__v1`:
 
 ```python
-manage_controllers(
-    action="upsert",
-    target="config",
-    config_name="ema_cross_adx_v1",
-    config_data={
-        "controller_type": "directional_trading",
-        "controller_name": "ema_cross_adx",
-        "connector_name": "binance_perpetual",
-        "trading_pair": "BTC-USDT",
-        "candles_connector": "binance_perpetual",
-        "candles_trading_pair": "BTC-USDT",
-        "interval": "1h",
-        "max_records": 500,
-        # strategy params
-        "ema_fast": 20,
-        "ema_slow": 50,
-        "adx_period": 14,
-        "adx_threshold": 25.0,
-        # execution params
-        "total_amount_quote": 100,
-        "stop_loss": 0.03,
-        "take_profit": 0.05,
-        "trailing_stop": None,
-        "time_limit": 86400,
-        "leverage": 5,
-    },
+manage_agent_controllers(
+    action="write",
+    name="ema_cross_adx",
+    sample="v1",
+    code="""
+controller_type: directional_trading
+controller_name: ema_cross_adx
+connector_name: binance_perpetual
+trading_pair: BTC-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: BTC-USDT
+interval: 1h
+max_records: 500
+# strategy params
+ema_fast: 20
+ema_slow: 50
+adx_period: 14
+adx_threshold: 25.0
+# execution params
+total_amount_quote: 100
+stop_loss: 0.03
+take_profit: 0.05
+trailing_stop: null
+time_limit: 86400
+leverage: 5
+""",
 )
+manage_agent_controllers(action="upload_config", name="ema_cross_adx", sample="v1")
 ```
 
 Rules that actually bite:
@@ -172,23 +174,28 @@ Rules that actually bite:
 - **`controller_name` must match the controller module name** (`ema_cross_adx` →
   `bots/controllers/directional_trading/ema_cross_adx.py`). It is how the backend
   resolves the config class.
-- `config_name` becomes the YAML filename **and** the config id.
+- The server config id is `<controller>__<style>` unless you pass `config_name`; it
+  becomes the YAML filename **and** the config id.
 - Config classes set `extra="forbid"` — a typo'd field is a hard rejection, not a
   warning. Discover the real field set with
   `manage_controllers(action="describe", controller_name="<name>")`.
-- `confirm_override=True` is required when overwriting an existing config.
+- `overwrite=true` is required when replacing a differing config on the server; the
+  refusal shows the diff first.
 
 ## Step 6 — Modifying an existing controller
 
-**Config only:**
-1. `manage_controllers(action="describe", config_name="...")` — read current values
-2. Re-upsert with `confirm_override=True` and the updated `config_data`
+**Config only:** edit the style (`manage_agent_controllers(action="read", name=..., sample=...)`,
+then `write` it back with `sample=`) and `upload_config` with `overwrite=true`. For a
+one-off variant, upload under a new `config_name` instead of editing the style.
 
 **Controller code:**
-1. `manage_controllers(action="describe", controller_name="...", include_code=True)`
+1. `manage_agent_controllers(action="read", name="...")`
 2. Rewrite the **full** `update_processed_data` — never patch partial snippets
 3. Re-run the self-review checklist
-4. Upsert with `confirm_override=True`
+4. `write` it, then `sync` with `overwrite=true` — the drift is your own edit (see
+   `controller_sources`: the server copy is backed up, running bots keep the old class,
+   and the next backtest and any bot deployed from now on use the new code — no API
+   restart needed)
 5. Re-upload any configs referencing it — they do **not** auto-update
 
 ## Go/No-Go → Phase 3

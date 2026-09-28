@@ -6,8 +6,8 @@ verify/alert on residual), and the engine wrapper's idempotency guard.
 """
 
 import asyncio
-import inspect
 from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -207,7 +207,20 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
     strat = Strategy(agent_slug="acme", name="Scalper")
 
     class _Registry:
-        async def run_core_providers(self, client, config, agent_id=""):
+        """Records each provider run; a full core sweep fails loudly (PERF-641)."""
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def run_core_providers(
+            self, client, config, agent_id="", bot_names=None, owned=None, names=None
+        ):
+            assert names is not None, "shutdown must not run every core provider"
+            self.calls.append(
+                {"names": list(names), "bot_names": bot_names, "owned": owned}
+            )
+            if "executors" not in names:
+                return {}
             return {"executors": SimpleNamespace(data={"executors": running_executors})}
 
     client = _FakeClient(positions_sequence)
@@ -397,6 +410,9 @@ def test_run_shutdown_idempotent(monkeypatch):
         agent_id="acme.scalper_1",
         _notify=_notify,
     )
+    # The shared teardown every exit path ends in (ARCH-646).
+    stub._reap_client = partial(TickEngine._reap_client, stub)
+    stub._finish = partial(TickEngine._finish, stub)
 
     async def _drive():
         await TickEngine._run_shutdown(stub, "first")
@@ -408,18 +424,140 @@ def test_run_shutdown_idempotent(monkeypatch):
     assert stub._shutting_down is True
 
 
+# ── stop() racing an emergency winddown (CORR-644) ──
+
+
+class _RecordingSupervisor:
+    def __init__(self):
+        self.finals = []
+
+    def unregister(self, agent_id, final_state):
+        self.finals.append(final_state)
+
+
+def _winddown_stub(monkeypatch):
+    """A stub engine whose run_shutdown blocks on a gate, plus its supervisor."""
+    import condor.agents.engine as engine_module
+    from condor.runtime.registry_file import LoopState
+
+    gate = asyncio.Event()
+    events = []
+
+    async def fake_run_shutdown(engine, reason):
+        events.append(("start", reason))
+        await gate.wait()
+        events.append(("done", reason))
+
+    monkeypatch.setattr(shutdown_module, "run_shutdown", fake_run_shutdown)
+    supervisor = _RecordingSupervisor()
+    monkeypatch.setattr(engine_module, "_supervisor", lambda: supervisor)
+
+    async def _notify(msg):
+        events.append(("notify", msg))
+
+    stub = SimpleNamespace(
+        _shutting_down=False,
+        _shutdown_finished=None,
+        _running=True,
+        _paused=False,
+        _task=None,
+        _active_client=None,
+        journal=None,
+        ledger=None,
+        config={},
+        _last_stop_reason="",
+        agent_id="acme.scalper_1",
+        _notify=_notify,
+    )
+    stub._reap_client = partial(TickEngine._reap_client, stub)
+    stub._finish = partial(TickEngine._finish, stub)
+    return stub, gate, events, supervisor, LoopState
+
+
+def test_stop_during_a_winddown_lets_it_finish(monkeypatch):
+    """A risk-engine winddown runs inside the tick task; stop() must not cancel it."""
+    stub, gate, events, supervisor, LoopState = _winddown_stub(monkeypatch)
+
+    async def _drive():
+        stub._task = asyncio.create_task(TickEngine._run_shutdown(stub, "risk"))
+        await asyncio.sleep(0)
+        assert events == [("start", "risk")]
+
+        stop_task = asyncio.create_task(TickEngine.stop(stub))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not stop_task.done()  # waiting on the winddown, not tearing down
+
+        gate.set()
+        result = await stop_task
+        # stop() returned only after the winddown completed.
+        assert ("done", "risk") in events
+        await stub._task
+        return result
+
+    result = asyncio.run(_drive())
+    assert result is False
+    assert [e for e in events if e[0] != "notify"] == [
+        ("start", "risk"),
+        ("done", "risk"),
+    ]
+    assert not any(e[0] == "notify" for e in events)
+    assert stub._task.cancelled() is False
+    assert supervisor.finals == [LoopState.STOPPED]
+    assert stub._last_stop_reason == "shutdown"
+
+
+def test_stop_after_a_manual_winddown_waits_for_it(monkeypatch):
+    """Manual /shutdown cancels _task first; a concurrent stop() still waits."""
+    stub, gate, events, supervisor, LoopState = _winddown_stub(monkeypatch)
+
+    async def _drive():
+        stub._task = asyncio.create_task(asyncio.sleep(3600))
+        await asyncio.sleep(0)
+        manual = asyncio.create_task(TickEngine._run_shutdown(stub, "manual"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert stub._task.cancelled() is True
+        assert events == [("start", "manual")]
+
+        stop_task = asyncio.create_task(TickEngine.stop(stub))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not stop_task.done()
+        assert supervisor.finals == []
+
+        gate.set()
+        result = await stop_task  # must not raise CancelledError
+        assert ("done", "manual") in events
+        await manual
+        return result
+
+    assert asyncio.run(_drive()) is False
+    assert supervisor.finals == [LoopState.STOPPED]
+
+
+def test_plain_stop_still_cancels_the_tick_task(monkeypatch):
+    """Regression guard: no winddown in flight, stop() cancels and stops once."""
+    stub, _gate, events, supervisor, LoopState = _winddown_stub(monkeypatch)
+
+    async def _drive():
+        stub._task = asyncio.create_task(asyncio.sleep(3600))
+        await asyncio.sleep(0)
+        return await TickEngine.stop(stub)
+
+    assert asyncio.run(_drive()) is True
+    assert stub._task.cancelled() is True
+    assert supervisor.finals == [LoopState.STOPPED]
+    assert stub._last_stop_reason == "user"
+    assert events == []
+
+
 # ── soft-vs-hard drawdown triggers ──
 
 
 class _FakeTracker:
     def __init__(self, drawdown_pct):
         self._dd = drawdown_pct
-
-    def get_total_exposure(self):
-        return 0.0
-
-    def get_open_executor_count(self):
-        return 0
 
     def get_drawdown_pct(self):
         return self._dd
@@ -461,10 +599,20 @@ def test_shutdown_threshold_disabled_by_default():
 
 
 def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
+    from condor.agents.risk import RefusalLog, RiskEngine
+
     engine, client, notes = _fake_engine(running, positions_seq, monkeypatch, tmp_path)
-    engine.agent = SimpleNamespace(slug="acme")
+    engine.agent = SimpleNamespace(slug="acme", tools=[], instructions="You are acme.")
     engine.user_id = 7
     engine.chat_id = 99
+    # What the tick's gate reads off the engine (SEC-631).
+    engine.risk = RiskEngine()
+    engine.journal.get_drawdown_pct = lambda: 0.0
+    engine._refusals = RefusalLog()
+    engine._last_refusals = []
+    engine._agent_key = lambda: "claude-code"
+    engine._executor_owners = partial(TickEngine._executor_owners, engine)
+    engine._journal_refusals = partial(TickEngine._journal_refusals, engine)
     engine.strategy.home.mkdir(parents=True, exist_ok=True)
     (engine.strategy.home / "shutdown.md").write_text(
         f"---\non_kill_switch: flatten_all\n---\n{body}\n"
@@ -472,47 +620,418 @@ def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
     return engine, client, notes
 
 
-def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
-    from condor.agents import agent_run as agent_run_module
+class _FakeLLM:
+    """A model client that runs ``script(callback)`` as its one prompt."""
 
+    def __init__(self, permission_callback, script=None):
+        self.permission_callback = permission_callback
+        self.script = script
+        self.prompts: list[str] = []
+        self.started = self.stopped = False
+
+    async def start(self):
+        self.started = True
+
+    async def prompt(self, text):
+        self.prompts.append(text)
+        if self.script is not None:
+            await self.script(self.permission_callback)
+        return "done"
+
+    async def stop(self):
+        self.stopped = True
+
+
+def _patch_llm(monkeypatch, script=None, mounts=None):
+    """Stub the mount + client factory the gated builder uses; return the log."""
+    import condor.runtime.llm_client as llm_client_module
+    import condor.runtime.toolsets as toolsets_module
+
+    built: list[tuple[dict, _FakeLLM]] = []
+
+    def fake_mounts(user_id, chat_id, **kwargs):
+        if mounts is not None:
+            mounts.append({"user_id": user_id, "chat_id": chat_id, **kwargs})
+        return [{"name": "fake"}]
+
+    def fake_build(agent_key, **kwargs):
+        llm = _FakeLLM(kwargs.get("permission_callback"), script)
+        built.append((kwargs, llm))
+        return llm
+
+    monkeypatch.setattr(toolsets_module, "build_mcp_servers_for_session", fake_mounts)
+    monkeypatch.setattr(llm_client_module, "build_llm_client", fake_build)
+    return built
+
+
+def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
         running, [[]], tmp_path, monkeypatch, body="Do cleanup."
     )
-    seen = {}
-
-    async def fake_complete(**kwargs):
-        seen.update(kwargs)
-        return "done"
-
-    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_complete)
+    built = _patch_llm(monkeypatch)
     asyncio.run(run_shutdown(engine, "breach"))
-    assert seen["task"] == "Do cleanup."
-    assert seen["slug"] == "acme"
-    # Unattended by construction: the shared engine builds no permission callback
-    # at all any more, so there is no argument here that could re-attend the run.
-    from condor.agents import agent_run
 
-    assert (
-        "permission_callback"
-        not in inspect.signature(agent_run.run_agent_to_completion).parameters
+    [(kwargs, llm)] = built
+    [prompt] = llm.prompts
+    assert "[TASK]\nDo cleanup." in prompt
+    assert "You are acme." in prompt
+    assert llm.started and llm.stopped
+
+
+def test_llm_cleanup_mounts_the_tick_profile(tmp_path, monkeypatch):
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
     )
+    mounts: list[dict] = []
+    built = _patch_llm(monkeypatch, mounts=mounts)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    [mount] = mounts
+    assert mount["tick"] is True
+    assert mount["agent_slug"] == "acme"
+    assert (mount["user_id"], mount["chat_id"]) == (7, 99)
+    [(kwargs, _)] = built
+    assert kwargs["permission_callback"] is not None
+
+
+def test_llm_cleanup_refuses_new_exposure_and_allows_owned_stops(tmp_path, monkeypatch):
+    import condor.fetchers.executors as executors_fetcher
+
+    running = [
+        {
+            "id": "e1",
+            "connector": "binance_perpetual",
+            "controller_id": "acme.scalper_1",
+        }
+    ]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+
+    async def detail(api, executor_id):
+        return {"id": executor_id, "controller_id": "other.session_3"}
+
+    monkeypatch.setattr(executors_fetcher, "get_executor_detail", detail)
+    options = [{"kind": "allow_once", "optionId": "allow"}]
+    outcomes: dict[str, str] = {}
+
+    async def script(callback):
+        calls = {
+            "create": {
+                "tool": "create_position_executor",
+                "input": {"controller_id": "acme.scalper_1", "amount": 1},
+            },
+            "leverage": {
+                "tool": "set_account_position_mode_and_leverage",
+                "input": {"leverage": 2},
+            },
+            "deploy": {
+                "tool": "manage_bots",
+                "input": {"action": "deploy", "bot_name": "acme-x"},
+            },
+            "swap": {"tool": "execute_swap", "input": {"amount": 1}},
+            "own_stop": {"tool": "stop_executor", "input": {"executor_id": "e1"}},
+            "foreign_stop": {
+                "tool": "stop_executor",
+                "input": {"executor_id": "e_theirs"},
+            },
+        }
+        for name, call in calls.items():
+            result = await callback(call, options)
+            outcomes[name] = result["outcome"]["outcome"]
+
+    _patch_llm(monkeypatch, script=script)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert outcomes == {
+        "create": "cancelled",
+        "leverage": "cancelled",
+        "deploy": "cancelled",
+        "swap": "cancelled",
+        "own_stop": "selected",
+        "foreign_stop": "cancelled",
+    }
+    blocked = [r for a, r in engine.journal.actions if a == "risk_blocked"]
+    assert len(blocked) == 5
+    for tool in (
+        "create_position_executor",
+        "set_account_position_mode_and_leverage",
+        "manage_bots",
+        "execute_swap",
+        "stop_executor",
+    ):
+        assert any(r.startswith(f"{tool} refused") for r in blocked), tool
+    assert engine._refusals.drain() == []
+
+
+def test_llm_cleanup_never_bypasses_the_risk_gate(tmp_path, monkeypatch):
+    from condor.agents import agent_run as agent_run_module
+
+    running = [
+        {"id": "e_perp", "connector": "binance_perpetual"},
+        {"id": "e_spot", "connector": "binance"},
+    ]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+
+    async def ungated(**kwargs):
+        raise AssertionError("the cleanup must not use the ungated delegation path")
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", ungated)
+    built = _patch_llm(monkeypatch)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert dict(client.executors.stop_calls) == {"e_perp": False, "e_spot": False}
+    [(_, llm)] = built
+    assert len(llm.prompts) == 1
+    assert any("complete" in n for n in notes)
 
 
 def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
-    from condor.agents import agent_run as agent_run_module
+    import condor.runtime.llm_client as llm_client_module
 
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
         running, [[]], tmp_path, monkeypatch, body="Cleanup."
     )
+    _patch_llm(monkeypatch)
 
-    async def boom(**kwargs):
+    def boom(agent_key, **kwargs):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", boom)
+    monkeypatch.setattr(llm_client_module, "build_llm_client", boom)
     asyncio.run(run_shutdown(engine, "breach"))
     # The deterministic floor still ran and the winddown completed cleanly.
     assert dict(client.executors.stop_calls) == {"e1": False}
     assert any("complete" in n for n in notes)
     assert not any("🚨" in n for n in notes)
+
+
+def test_winddown_survives_a_positions_fetch_failure_during_verify(
+    tmp_path, monkeypatch
+):
+    """_verify_and_retry calls the positions fetch unguarded, so it must go
+    through the non-strict fetcher: a failed request reads as no positions and
+    the winddown still completes instead of propagating ([[ARCH-682]])."""
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+
+    async def boom(controller_id=None):
+        raise RuntimeError("positions endpoint down")
+
+    monkeypatch.setattr(client.executors, "get_positions_summary", boom)
+    asyncio.run(run_shutdown(engine, "test breach"))
+
+    assert ("shutdown_done", "stopped=1, failures=0, verify=flat") in [
+        (a, r) for a, r in engine.journal.actions
+    ]
+
+
+# ── winddown reads only the executor list (PERF-641) ──
+
+
+class _Ledger:
+    def bases(self):
+        return ["bot_a", "bot_b"]
+
+    def owned(self):
+        return ["owned-records"]
+
+
+def _count_positions_calls(client):
+    counter = {"n": 0}
+    original = client.executors.get_positions_summary
+
+    async def counted(controller_id=None):
+        counter["n"] += 1
+        return await original(controller_id=controller_id)
+
+    client.executors.get_positions_summary = counted
+    return counter
+
+
+def test_winddown_only_runs_the_executors_provider(tmp_path, monkeypatch):
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    _patch_llm(monkeypatch)
+    positions_calls = _count_positions_calls(client)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    # Baseline + LLM pass; nothing stranded, so no verify retry.
+    calls = engine.provider_registry.calls
+    assert [c["names"] for c in calls] == [["executors"], ["executors"]]
+    assert all(c["bot_names"] is None and c["owned"] is None for c in calls)
+    # One positions read from the LLM pass, one from the verify step.
+    assert positions_calls["n"] == 2
+    assert any("complete" in n for n in notes)
+
+
+def test_a_stranded_retry_reads_the_executors_provider_again(tmp_path, monkeypatch):
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    stuck = [{"connector_name": "binance_perpetual", "trading_pair": "ETH-USDT"}]
+    engine, client, notes = _engine_with_llm(
+        running, [stuck, stuck, []], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    _patch_llm(monkeypatch)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    names = [c["names"] for c in engine.provider_registry.calls]
+    assert names == [["executors"]] * 3
+    assert not any("🚨" in n for n in notes)
+
+
+def test_winddown_scopes_the_executor_read_to_the_ledger(tmp_path, monkeypatch):
+    running = [{"id": "e1", "connector": "binance"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    engine.ledger = _Ledger()
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    [call] = engine.provider_registry.calls
+    assert call["bot_names"] == ["bot_a", "bot_b"]
+    assert call["owned"] == ["owned-records"]
+
+
+def test_llm_pass_reads_executors_and_positions_concurrently(tmp_path, monkeypatch):
+    """Each read waits for the other to start, so a serial pass times out."""
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    started: list[str] = []
+    gate = asyncio.Event()
+
+    async def _mark(name):
+        started.append(name)
+        if len(started) == 2:
+            gate.set()
+        await asyncio.wait_for(gate.wait(), timeout=2)
+
+    async def executors(engine_, client_):
+        await _mark("executors")
+        return running
+
+    async def positions(client_, agent_id):
+        await _mark("positions")
+        return []
+
+    monkeypatch.setattr(shutdown_module, "_get_running_executors", executors)
+    monkeypatch.setattr(shutdown_module, "_fetch_positions", positions)
+    built = _patch_llm(monkeypatch)
+    asyncio.run(
+        shutdown_module._run_llm_cleanup(
+            engine, client, ShutdownPolicy(), "Do cleanup.", []
+        )
+    )
+
+    assert sorted(started) == ["executors", "positions"]
+    [(_, llm)] = built
+    assert len(llm.prompts) == 1
+
+
+# ── stop fan-out (PERF-668) ──
+
+
+def _gate_stops_in_batches(client, batch):
+    """Make each fake stop wait until ``batch`` stops of its round have started.
+
+    A serial loop never gets the next stop out, so it deadlocks on the gate and
+    the caller's ``asyncio.wait_for`` raises instead.
+    """
+    api = client.executors
+
+    async def gated_stop(executor_id, keep_position=False):
+        api.stop_calls.append((executor_id, keep_position))
+        target = -(-len(api.stop_calls) // batch) * batch
+        while len(api.stop_calls) < target:
+            await asyncio.sleep(0)
+        return {"status": "ok"}
+
+    api.stop_executor = gated_stop
+
+
+def test_baseline_stops_executors_concurrently(tmp_path, monkeypatch):
+    running = [
+        {"id": "e1", "connector": "binance_perpetual"},
+        {"id": "e2", "connector": "binance"},
+        {"id": "e3", "connector": "hyperliquid_perpetual"},
+    ]
+    # Nothing stranded, so the verify step issues no retry stops.
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    _gate_stops_in_batches(client, 3)
+
+    async def _go():
+        await asyncio.wait_for(run_shutdown(engine, "test"), timeout=2)
+
+    asyncio.run(_go())
+
+    assert dict(client.executors.stop_calls) == {"e1": False, "e2": True, "e3": False}
+    assert ("shutdown_done", "stopped=3, failures=0, verify=flat") in (
+        engine.journal.actions
+    )
+
+
+class _StopRejected(Exception):
+    def __init__(self, status, message):
+        super().__init__(f"{status}, message={message!r}, url=http://internal:8000")
+        self.status = status
+        self.message = message
+
+
+def test_one_failed_stop_is_reported_in_running_order(tmp_path, monkeypatch):
+    running = [
+        {"id": "e1", "connector": "binance_perpetual"},
+        {"id": "e2", "connector": "binance_perpetual"},
+        {"id": "e3", "connector": "binance_perpetual"},
+    ]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    api = client.executors
+
+    async def stop(executor_id, keep_position=False):
+        api.stop_calls.append((executor_id, keep_position))
+        if executor_id == "e2":
+            raise _StopRejected(409, "executor already stopping")
+        return {"status": "ok"}
+
+    api.stop_executor = stop
+    stopped, failures = asyncio.run(
+        shutdown_module._deterministic_baseline(engine, client, ShutdownPolicy())
+    )
+
+    assert failures == ["stop e2: executor already stopping"]
+    assert stopped == len(running) - 1
+
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    client.executors.stop_executor = stop
+    asyncio.run(run_shutdown(engine, "breach"))
+    [note] = notes
+    assert "1 winddown error(s): stop e2: executor already stopping" in note
+    assert "internal" not in note
+
+
+def test_retry_pass_stops_executors_concurrently(tmp_path, monkeypatch):
+    running = [
+        {"id": "e1", "connector": "binance_perpetual"},
+        {"id": "e2", "connector": "binance_perpetual"},
+        {"id": "e3", "connector": "binance_perpetual"},
+    ]
+    stuck = [{"connector_name": "binance_perpetual", "trading_pair": "ETH-USDT"}]
+    residual = [{"connector_name": "binance_perpetual", "trading_pair": "SOL-USDT"}]
+    engine, client, notes = _fake_engine(
+        running, [stuck, residual], monkeypatch, tmp_path
+    )
+    _gate_stops_in_batches(client, 3)
+
+    async def _go():
+        await asyncio.wait_for(run_shutdown(engine, "breach"), timeout=2)
+
+    asyncio.run(_go())
+
+    calls = client.executors.stop_calls
+    assert len(calls) == 6
+    assert sorted(calls[3:]) == [("e1", False), ("e2", False), ("e3", False)]
+    assert any("🚨" in n and "SOL-USDT" in n for n in notes)

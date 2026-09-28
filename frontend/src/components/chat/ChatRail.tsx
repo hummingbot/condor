@@ -280,7 +280,7 @@ function LiveStrip({
         <Link
           to={`/agents/${agents[0].slug}`}
           className={rowClass}
-          title={`Open ${agents[0].name}'s strategies`}
+          title={`Open ${agents[0].name}'s loops`}
         >
           {icon}
           <span className="min-w-0 flex-1 truncate">
@@ -295,7 +295,7 @@ function LiveStrip({
           className={rowClass}
           aria-expanded={open}
           aria-haspopup="listbox"
-          title="Open a running agent's strategies"
+          title="Open a running agent's loops"
         >
           {icon}
           <span className="min-w-0 flex-1 truncate">

@@ -18,10 +18,9 @@ lazy import in a hot function.
 
 **The record is the ledger, not the tape.** An ask writes one small
 ``status.json`` and nothing else — no events sidecar, no transcript. Its answer
-goes straight back to the caller through the cheaper one-shot
-``client.prompt()``, and flipping the hottest agent path onto ``prompt_stream``
-to persist a transcript would be a behaviour change paid on every ask for a file
-almost nobody opens. The seam stays open:
+goes straight back to the caller, and persisting a transcript of the stream
+the engine already reads would be a write paid on every ask for a file almost
+nobody opens. The seam stays open:
 :func:`~condor.agents.agent_run.run_agent_to_completion` already takes an
 ``event_sink``, so a later feature that wants ask transcripts passes one.
 

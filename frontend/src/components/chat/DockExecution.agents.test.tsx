@@ -108,7 +108,7 @@ function executor(over: Partial<ExecutorInfo> = {}): ExecutorInfo {
   };
 }
 
-function owner(slug: string, sslug: string) {
+function owner(slug: string, sslug: string, over: Record<string, unknown> = {}) {
   return {
     runKey: `${slug}.${sslug}`,
     agentSlug: slug,
@@ -119,6 +119,23 @@ function owner(slug: string, sslug: string) {
     declaredBots: [],
     agentIds: [],
     live: null,
+    ...over,
+  };
+}
+
+/** A `fleet-map` `LiveLoop` — the fact a live owner carries (FEAT-124). */
+function liveLoop(over: Record<string, unknown> = {}) {
+  return {
+    agentId: "a1",
+    sessionNum: 1,
+    status: "running",
+    tickCount: 1,
+    lastTickAt: NOW / 1000 - 10,
+    frequencySec: 60,
+    lastAction: "",
+    lastDid: null,
+    lastError: "",
+    ...over,
   };
 }
 
@@ -316,6 +333,91 @@ describe("the agent rows", () => {
   });
 });
 
+describe("an agent with more than one live loop (FEAT-124)", () => {
+  it("renders a detail sub-line per loop, each with its own tick count", async () => {
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner("brigado", "brl_mm", { live: liveLoop({ status: "running", tickCount: 41 }) }),
+        owner("brigado", "grid", {
+          strategyName: "Grid",
+          live: liveLoop({ status: "paused", tickCount: 7 }),
+        }),
+        owner("quiet", "brl_mm"),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+
+    await render();
+
+    const row = agentRow("brigado.brl_mm");
+    const loops = row.querySelectorAll("[data-agent-loop]");
+    expect(loops).toHaveLength(2);
+    expect(loops[0].textContent).toContain("tick 41");
+    expect(loops[1].textContent).toContain("tick 7");
+    // Superseded, not duplicated: the single countdown/decision line is gone.
+    expect(row.querySelector("[data-agent-due]")).toBeNull();
+  });
+
+  it("leaves a single-loop agent's row exactly as it was", async () => {
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner("brigado", "brl_mm", { live: liveLoop() }),
+        owner("quiet", "brl_mm"),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+
+    await render();
+
+    const row = agentRow("brigado.brl_mm");
+    expect(row.querySelectorAll("[data-agent-loop]")).toHaveLength(0);
+    expect(row.querySelector("[data-agent-due]")).not.toBeNull();
+  });
+
+  it("drops a loop whose strategy is declared on another server (CORR-429)", async () => {
+    // Two loops stay on `SERVER` — enough to keep the per-loop sub-lines
+    // rendering (`loops.length > 1`) — and a third is declared on `other_box`.
+    // A row with exactly one surviving loop falls back to the single-loop
+    // display instead, which is covered by the test above.
+    getAgents.mockResolvedValue([
+      agent("brigado", "Brigado", {
+        strategies: [
+          { slug: "brl_mm", name: "BRL MM", session_count: 2, server_name: SERVER, instances: [] },
+          { slug: "grid", name: "Grid", session_count: 1, server_name: SERVER, instances: [] },
+          { slug: "extra", name: "Extra", session_count: 1, server_name: "other_box", instances: [] },
+        ],
+      }),
+      agent("quiet", "Quiet"),
+    ]);
+    getFleetMap.mockResolvedValue({
+      owners: [
+        owner("brigado", "brl_mm", { live: liveLoop({ status: "running", tickCount: 41 }) }),
+        owner("brigado", "grid", {
+          strategyName: "Grid",
+          live: liveLoop({ status: "running", tickCount: 55 }),
+        }),
+        owner("brigado", "extra", {
+          strategyName: "Extra",
+          live: liveLoop({ status: "running", tickCount: 99 }),
+        }),
+        owner("quiet", "brl_mm"),
+      ],
+      deeds: { bots: {}, since: 0 },
+    });
+
+    await render();
+
+    const row = agentRow("brigado.brl_mm");
+    const loops = row.querySelectorAll("[data-agent-loop]");
+    // Only the two loops declared on `SERVER` render: this panel is
+    // `SERVER`'s own, and `extra`'s loop is declared on `other_box`.
+    expect(loops).toHaveLength(2);
+    expect(row.textContent).toContain("tick 41");
+    expect(row.textContent).toContain("tick 55");
+    expect(row.textContent).not.toContain("tick 99");
+  });
+});
+
 describe("what no agent owns", () => {
   it("is a named bucket, not a dropped row", async () => {
     getBots.mockResolvedValue({
@@ -332,30 +434,5 @@ describe("what no agent owns", () => {
     expect(text()).toContain("Before the ledger");
     expect(controllerRows()).toHaveLength(2);
     expect(counts()).toContain("2 controllers");
-  });
-
-  it("names an agent trading on another server instead of showing it a zero", async () => {
-    getAgents.mockResolvedValue([
-      agent("brigado", "Brigado"),
-      agent("elsewhere", "Elsewhere", {
-        strategies: [
-          {
-            slug: "brl_mm",
-            name: "BRL MM",
-            session_count: 1,
-            server_name: "other_box",
-            instances: [],
-          },
-        ],
-      }),
-    ]);
-
-    await render();
-
-    const note = container.querySelector("[data-execution-elsewhere]")!;
-    expect(note.textContent).toContain("Elsewhere");
-    expect(note.textContent).toContain("trades on other_box");
-    // And it is not given a row of dashes among the agents that trade here.
-    expect(agentRows().some((r) => r.textContent?.includes("Elsewhere"))).toBe(false);
   });
 });

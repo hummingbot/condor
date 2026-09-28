@@ -12,40 +12,47 @@
  * hold to.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { PANE_SECTION_KEY } from "@/lib/sessionState";
 
 import {
   SECTIONS,
+  lastPaneSection,
+  openForPaneSection,
+  pageSection,
   parseSections,
+  readPaneSection,
   sectionForView,
-  serializeSections,
 } from "./sections";
 
 describe("parseSections", () => {
   it("reads a dot-joined list", () => {
-    expect(parseSections("runs.money")).toEqual(["runs", "money"]);
+    expect(parseSections("runs.fleet")).toEqual(["runs", "fleet"]);
   });
 
   it("drops ids that name no section, rather than failing", () => {
     // A stale or hand-edited parameter should open what it does name: the
     // reader gets the sections they asked for, not an error page.
-    expect(parseSections("runs.lab.money")).toEqual(["runs", "money"]);
+    expect(parseSections("runs.lab.fleet")).toEqual(["runs", "fleet"]);
     expect(parseSections("lab")).toEqual([]);
   });
 
   it("collapses repeats", () => {
-    expect(parseSections("money.money")).toEqual(["money"]);
+    expect(parseSections("fleet.fleet")).toEqual(["fleet"]);
+  });
+
+  it("drops the retired Money band like any other unknown id", () => {
+    expect(parseSections("money.playbook")).toEqual(["playbook"]);
   });
 
   it("returns them in the order the screen draws them", () => {
-    // Whatever order they were clicked in: the disclosures are a stack, and a
-    // URL that reordered them would render a different page from the clicks.
+    // A pre-tabs `?open=` set lands on its first section in drawing order,
+    // whatever order its links were written in.
     expect(parseSections("playbook.runs")).toEqual(["runs", "playbook"]);
   });
 
   it("tells a URL that says nothing from one that says nothing is open", () => {
-    // The difference is load-bearing: absent falls back to what this browser
-    // had open, empty is a reader who closed everything.
     expect(parseSections(null)).toBeNull();
     expect(parseSections(undefined)).toBeNull();
     expect(parseSections("")).toEqual([]);
@@ -53,28 +60,16 @@ describe("parseSections", () => {
   });
 });
 
-describe("serializeSections", () => {
-  it("round-trips through the parser", () => {
-    expect(parseSections(serializeSections(["money", "runs"]))).toEqual([
-      "runs",
-      "money",
-    ]);
-  });
-
-  it("writes an empty string for nothing open, which clears the key", () => {
-    expect(serializeSections([])).toBe("");
-  });
-});
-
 describe("sectionForView — where a retired ?view= lands", () => {
-  it("sends the four Doing views to their disclosure", () => {
+  it("sends the four Doing views to their tab", () => {
     expect(sectionForView("runs")).toBe("runs");
-    expect(sectionForView("money")).toBe("money");
+    // Money is gone; Fleet charts the same fold.
+    expect(sectionForView("money")).toBe("fleet");
     expect(sectionForView("fleet")).toBe("fleet");
     expect(sectionForView("playbook")).toBe("playbook");
   });
 
-  it("sends Now to no disclosure — the answer stack is the screen", () => {
+  it("sends Now to no section — it is the first tab", () => {
     expect(sectionForView("now")).toBeNull();
   });
 
@@ -91,14 +86,63 @@ describe("sectionForView — where a retired ?view= lands", () => {
     expect(sectionForView(null)).toBeNull();
   });
 
-  it("covers every disclosure the screen has", () => {
-    // The four Doing views map onto four of the five; `detail` is new here and
-    // was `runs`' lower half, so no retired address can name it.
+  it("covers every section the screen has", () => {
     const landed = new Set(
       ["runs", "money", "fleet", "playbook"].map(sectionForView),
     );
-    for (const id of SECTIONS) {
-      if (id !== "detail") expect(landed.has(id)).toBe(true);
-    }
+    for (const id of SECTIONS) expect(landed.has(id)).toBe(true);
+  });
+});
+
+describe("the retired Detail tab (ARCH-427)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is no longer a section", () => {
+    expect(SECTIONS).toEqual(["runs", "fleet", "playbook"]);
+  });
+
+  it("opens Fleet from `?open=detail`, where its records went", () => {
+    expect(parseSections("detail")).toEqual(["fleet"]);
+    expect(pageSection("detail")).toBe("fleet");
+    // Merged with a live id, it collapses rather than opening Fleet twice.
+    expect(parseSections("detail.fleet")).toEqual(["fleet"]);
+    expect(parseSections("playbook.detail")).toEqual(["fleet", "playbook"]);
+  });
+
+  it("reads a pane's `?sec=detail` as Fleet", () => {
+    expect(readPaneSection("detail")).toBe("fleet");
+    expect(readPaneSection("runs")).toBe("runs");
+    expect(readPaneSection("now")).toBe("now");
+    expect(readPaneSection("money")).toBeNull();
+    expect(readPaneSection(null)).toBeNull();
+  });
+
+  it("re-opens a pane remembered on Detail on Fleet", () => {
+    const store = new Map([[PANE_SECTION_KEY, "detail"]]);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+    });
+    expect(lastPaneSection()).toBe("fleet");
+    store.set(PANE_SECTION_KEY, "nonsense");
+    expect(lastPaneSection()).toBe("now");
+  });
+});
+
+describe("the page's tab", () => {
+  it("is the first section `?open=` names, else Now", () => {
+    expect(pageSection(null)).toBe("now");
+    expect(pageSection("")).toBe("now");
+    expect(pageSection("fleet")).toBe("fleet");
+    // A pre-tabs set: the first one in drawing order.
+    expect(pageSection("playbook.runs")).toBe("runs");
+    expect(pageSection("money")).toBe("now");
+  });
+
+  it("round-trips through `?open=`, Now clearing it", () => {
+    expect(openForPaneSection("now")).toBe("");
+    for (const id of SECTIONS) expect(pageSection(openForPaneSection(id))).toBe(id);
   });
 });

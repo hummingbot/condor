@@ -18,9 +18,22 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    // The status rides along on the Error so a caller can tell apart failures that
+    // read the same as a message but call for different things from the operator —
+    // a 501 from the API-settings routes means "this server is older than this
+    // panel, upgrade it", not "something is broken". `message` is unchanged, so
+    // every existing caller reads exactly what it read before.
+    throw Object.assign(new Error(err.detail || `Request failed: ${res.status}`), {
+      status: res.status,
+    });
   }
   return res.json();
+}
+
+/** The HTTP status of a failed `apiFetch`, when the thrown value carries one. */
+export function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
 }
 
 /**
@@ -758,7 +771,6 @@ export interface RunningInstance {
   status: string;
   agent_key: string;
   tick_count: number;
-  daily_pnl: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
@@ -790,6 +802,16 @@ export interface RunningInstance {
   last_error: string;
 }
 
+/**
+ * Why a strategy's figures could not be read, or `""` when they could
+ * (CORR-706). Without it, all three render as a session that traded nothing:
+ * - `no_server` — its config names no server
+ * - `no_access` — the caller may not use the server it names (SEC-334)
+ * - `unreachable` — the server is offline or its credentials failed
+ * Optional on the wire so an older backend reads as `""`.
+ */
+export type StrategyUnavailable = "" | "no_server" | "no_access" | "unreachable";
+
 export interface StrategySummary {
   slug: string;
   name: string;
@@ -799,7 +821,8 @@ export interface StrategySummary {
   session_count: number;
   experiment_count: number;
   tick_count: number;
-  daily_pnl: number;
+  /** PnL of the newest session only; `total_pnl` is the rollup across all sessions. */
+  latest_session_pnl: number;
   total_pnl: number;
   total_volume: number;
   open_positions: number;
@@ -813,6 +836,8 @@ export interface StrategySummary {
    * than folding the wrong fleet.
    */
   server_name?: string;
+  /** Why the figures above are zero when it is not "nothing traded". */
+  unavailable?: StrategyUnavailable;
   instances: RunningInstance[];
 }
 
@@ -883,15 +908,16 @@ export interface AgentSummary {
   session_count: number;
   experiment_count: number;
   tick_count: number;
-  daily_pnl: number;
+  /** PnL of the newest session only; `total_pnl` is the rollup across all sessions. */
+  latest_session_pnl: number;
   total_pnl: number;
   total_volume: number;
   open_positions: number;
   /**
    * The agent's server *pin*, `""` when it follows the ambient one (ARCH-324).
    *
-   * A strategy's own `server_name` overrides it — the rule `AgentWorkspace`
-   * already applies (`strategy?.config?.server_name || agent.server_name`).
+   * A strategy's own `server_name` overrides it — the rule `declaredServerOf`
+   * (workspace/fleet.ts) owns, and both the home and the workspace call.
    */
   server_name?: string;
   instances: RunningInstance[];
@@ -927,6 +953,9 @@ export interface AgentPerformance {
   /** An experiment whose snapshot recorded an error. */
   error?: boolean;
   status: string;
+  /** When the session started, unix seconds (its config.yml mtime). 0 or
+   *  absent = unknown; always 0 for an experiment. */
+  started_at?: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
@@ -1014,6 +1043,11 @@ export interface DeploymentRow {
   volume: number;
   /** The fleet address this row links to: `bot:` / `ctrl:` / `exec:`. */
   scope: string;
+  /**
+   * `false` when `pnl`/`volume` are not USD: a controller whose quote had no
+   * USD rate is left at face value (CORR-707). Rendered as `—`, never as `$`.
+   */
+  usd_converted: boolean;
 }
 
 export interface SessionCanvas {
@@ -1105,6 +1139,11 @@ export interface AgentBrain {
   memories: MemoryCard[];
   routines: RoutineCard[];
   strategies: StrategyCard[];
+  /**
+   * Controllers it owns or inherits from `_shared` (FEAT-127) — disk only.
+   * Optional because a server running code from before FEAT-127 leaves it out.
+   */
+  controllers?: ControllerCard[];
 }
 
 /**
@@ -1175,6 +1214,75 @@ export interface RoutineCard {
   category: string;
   /** Switched off for this Agent. `/routines` still lists and runs it. */
   muted: boolean;
+}
+
+/** One controller an agent can sync to a server (FEAT-127). */
+export interface ControllerCard {
+  name: string;
+  /** `null` when the type cannot be resolved — `type_error` says why. */
+  controller_type: string | null;
+  description: string;
+  /** Sample config stems. */
+  styles: string[];
+  /** Inherited from the `_shared` library. */
+  shared: boolean;
+  stock: boolean;
+  type_error: string;
+}
+
+export type ControllerVerdict = "in_sync" | "missing" | "drift" | "unreachable";
+
+/** One row of `GET /agents/{slug}/controllers?server_name=`. */
+export interface ControllerStatusRow {
+  name: string;
+  controller_type: string | null;
+  styles: string[];
+  shared: boolean;
+  digest: string;
+  type_error?: string;
+  server?: {
+    verdict: ControllerVerdict;
+    server_digest?: string;
+    server_type?: string;
+    detail?: string;
+  };
+}
+
+/**
+ * What a sync or a config upload answers. A refusal (drift, missing,
+ * unreachable, a validation error) is a 200 with `refused: true` and the
+ * `reason` — plus the `diff` or `error` to read before deciding.
+ */
+export interface ControllerActionResult {
+  name: string;
+  verdict?: ControllerVerdict;
+  changed?: boolean;
+  refused?: boolean;
+  reason?: string;
+  diff?: string;
+  error?: string;
+  message?: string;
+  warning?: string;
+  config_name?: string;
+  overwritten?: boolean;
+  backup?: string;
+  /** Who a push affects (FEAT-129): drift refusals and completed pushes. */
+  impact?: ControllerImpact;
+  /** The same impact as prose — the words the agent and the approver read. */
+  impact_text?: string;
+  /** An overwrite refused for want of a fresh preview (this refusal is one). */
+  preview_required?: boolean;
+}
+
+/** Who a controller push affects, as `ControllerImpact.to_dict` sends it. */
+export interface ControllerImpact {
+  controller: string;
+  server_name: string;
+  shared_owners: { agent: string; same_code: boolean }[];
+  /** `null` = could not check — never read as "no bots". */
+  live_bots: { bot_name: string; config_ids: string[] }[] | null;
+  live_bots_error: string;
+  server_had_copy: boolean;
 }
 
 export interface StrategyCard {
@@ -1309,6 +1417,8 @@ export interface StrategyDetail {
   sessions: SessionInfo[];
   experiments: ExperimentInfo[];
   instances: RunningInstance[];
+  /** Same meaning as `StrategySummary.unavailable`. */
+  unavailable?: StrategyUnavailable;
 }
 
 export interface SnapshotSummary {
@@ -1562,6 +1672,94 @@ export interface GatewayWalletGroup {
   default_address?: string;
 }
 
+/**
+ * What a hummingbot-api server runs and how it was deployed (FEAT-121).
+ *
+ * Every field below the versions degrades on its own: a server with no docker.sock,
+ * an unreachable daemon, or a process that cannot find its own container still
+ * reports both versions and the tunables, with `container` null and `pinned` null —
+ * null, not false, because "we could not tell" is not "it is the published image".
+ */
+export interface ApiServerContainer {
+  id: string | null;
+  name: string | null;
+  image: string | null;
+  image_id: string | null;
+  /** Registry digest, null for an image that was built on the box. */
+  digest: string | null;
+  compose_project: string | null;
+  compose_working_dir: string | null;
+  compose_config_files: string | null;
+}
+
+export interface ApiServerInfo {
+  api_version: string;
+  hummingbot_version: string | null;
+  /** The MARKET_DATA_* knobs as the API process resolved them. Read-only. */
+  market_data: Record<string, number>;
+  docker_available: boolean;
+  container: ApiServerContainer | null;
+  pinned: boolean | null;
+  pinned_reason: string | null;
+  override_file: string | null;
+}
+
+/** The client defaults a deploy copies into every new bot. */
+export interface ApiClientConfig {
+  account_name: string;
+  rate_oracle_source: { name: string };
+  global_token: { global_token_name: string; global_token_symbol: string };
+  rate_limits_share_pct: number;
+  /** Which sources this server's bundled hummingbot knows about. */
+  available_sources: string[];
+}
+
+export interface ApiClientConfigUpdate {
+  rate_oracle_source?: string;
+  global_token_name?: string;
+  global_token_symbol?: string;
+  rate_limits_share_pct?: number;
+}
+
+/**
+ * Whether a server can replace its own hummingbot-api container, and what that costs.
+ *
+ * `can_upgrade` is the server's verdict and the only one that matters: it re-runs this
+ * same preflight before it starts, so a second judgement here could only disagree with
+ * the one that actually runs. When it is false, `blocked_reason` says why in the
+ * operator's terms and is meant to be shown verbatim.
+ */
+export interface ApiUpgradePreflight {
+  image_ref: string | null;
+  current_digest: string | null;
+  available_digest: string | null;
+  up_to_date: boolean | null;
+  pinned: boolean | null;
+  pinned_reason: string | null;
+  override_file: string | null;
+  compose: { project: string; working_dir: string; config_files: string[] } | null;
+  /** Closed as SYSTEM_CLEANUP by the restart, and not restored. */
+  running_executors: number | null;
+  /** Separate containers; they keep running. */
+  running_bots: number | null;
+  can_upgrade: boolean;
+  blocked_reason: string | null;
+}
+
+/**
+ * An upgrade run. `restarting` is Condor's own: the server stopped answering, which
+ * during this operation is what success looks like half-way through.
+ */
+export interface ApiUpgradeStatus {
+  run_id: string | null;
+  phase: "idle" | "pulling" | "recreating" | "restarting" | "done" | "failed";
+  detail: string | null;
+  previous_digest?: string | null;
+  new_digest?: string | null;
+  exit_code?: number | null;
+  log_tail: string[];
+}
+
 export interface CredentialInfo {
   connector_name: string;
   connector_type: string;
@@ -1571,14 +1769,6 @@ export interface ConnectorInfo {
   name: string;
   type: string;
   [key: string]: unknown;
-}
-
-export interface ConnectorFieldInfo {
-  key: string;
-  type: string;
-  required: boolean;
-  default?: unknown;
-  description?: string;
 }
 
 // ── Voice Settings ──
@@ -2308,6 +2498,8 @@ export interface PendingConfirmation {
   slot_id: string;
   summary: string;
   origin: string;
+  /** What the call leaves behind (a controller overwrite's impact), or "". */
+  detail?: string;
   expires_at: number;
   /** Seconds until the runtime denies it, measured on the server's clock. */
   expires_in?: number;
@@ -2922,6 +3114,66 @@ export const api = {
   getAgentBrain: (slug: string) =>
     apiFetch<AgentBrain>(`/api/v1/agents/${encodeURIComponent(slug)}/brain`),
 
+  /** The agent's controllers, each with its verdict on `serverName`. */
+  getAgentControllers: (slug: string, serverName: string) =>
+    apiFetch<{
+      agent: string;
+      server_name: string;
+      controllers: ControllerStatusRow[];
+    }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers?server_name=${encodeURIComponent(serverName)}`,
+    ),
+
+  /** Upload a controller where the server lacks it; `overwrite` replaces a
+   *  drifted server copy (backed up first). */
+  syncAgentController: (
+    slug: string,
+    name: string,
+    serverName: string,
+    overwrite = false,
+  ) =>
+    apiFetch<ControllerActionResult>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/sync`,
+      {
+        method: "POST",
+        body: JSON.stringify({ server_name: serverName, overwrite }),
+      },
+    ),
+
+  /** Save a style as a config on the server (`{name}__{sample}`). */
+  uploadAgentControllerConfig: (
+    slug: string,
+    name: string,
+    sample: string,
+    serverName: string,
+    overwrite = false,
+  ) =>
+    apiFetch<ControllerActionResult>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/configs/${encodeURIComponent(sample)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ server_name: serverName, overwrite }),
+      },
+    ),
+
+  getAgentControllerSource: (slug: string, name: string) =>
+    apiFetch<{
+      name: string;
+      controller_type: string | null;
+      description: string;
+      shared: boolean;
+      digest: string;
+      source: string;
+      styles: string[];
+    }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/source`,
+    ),
+
+  getAgentControllerSample: (slug: string, name: string, sample: string) =>
+    apiFetch<{ name: string; sample: string; yaml: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/controllers/${encodeURIComponent(name)}/configs/${encodeURIComponent(sample)}`,
+    ),
+
   getAgentSkill: (slug: string, name: string) =>
     apiFetch<SkillBody>(
       `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
@@ -3173,6 +3425,8 @@ export const api = {
       /** What this run put into the world (FEAT-100). Empty for a run that
        *  deployed nothing, and for a session whose server is unreachable. */
       deployments?: DeploymentRow[];
+      /** Why `executors` is empty when it is not "traded nothing" (CORR-706). */
+      unavailable?: StrategyUnavailable;
     }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
@@ -3273,9 +3527,11 @@ export const api = {
   /**
    * Every stretch of work an agent has done, newest first (FEAT-111).
    *
-   * `limit` is the rail's window and not a filter: a chatty install has
-   * hundreds of conversations, and the rail asks for a bigger page rather than
-   * pulling the archive on every five-second poll.
+   * `limit` is the rail's window over chats and delegations, not a filter: a
+   * chatty install has hundreds of conversations, and the rail asks for a
+   * bigger page rather than pulling the archive on every five-second poll.
+   * Loop runs (sessions, experiments) are always carried, so the list can be
+   * longer than `limit` (CORR-376).
    */
   getAgentRuns: async (slug: string, limit?: number): Promise<AgentRunRow[]> => {
     const data = await apiFetch<{ runs: AgentRunRow[] }>(
@@ -3630,6 +3886,48 @@ export const api = {
   getGatewayNetworks: (server: string) =>
     apiFetch<{ networks: GatewayNetworkInfo[] }>(
       `/api/v1/settings/gateway/networks?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiServerInfo: (server: string) =>
+    apiFetch<ApiServerInfo>(
+      `/api/v1/settings/api/info?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiClientConfig: (server: string) =>
+    apiFetch<ApiClientConfig>(
+      `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+    ),
+
+  getApiUpgradePreflight: (server: string) =>
+    apiFetch<ApiUpgradePreflight>(
+      `/api/v1/settings/api/upgrade/preflight?server=${encodeURIComponent(server)}`,
+    ),
+
+  /**
+   * Start replacing the server's hummingbot-api container. Owner only.
+   *
+   * `acknowledgeExecutorLoss` is consent to every running executor being closed as
+   * SYSTEM_CLEANUP; the server refuses with the reason when it is withheld.
+   */
+  startApiUpgrade: (server: string, acknowledgeExecutorLoss: boolean) =>
+    apiFetch<{ run_id: string; phase: string }>(
+      `/api/v1/settings/api/upgrade?server=${encodeURIComponent(server)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ acknowledge_executor_loss: acknowledgeExecutorLoss }),
+      },
+    ),
+
+  getApiUpgradeStatus: (server: string) =>
+    apiFetch<ApiUpgradeStatus>(
+      `/api/v1/settings/api/upgrade/status?server=${encodeURIComponent(server)}`,
+    ),
+
+  /** Partial: only the fields present are written, the rest keep their values. */
+  updateApiClientConfig: (server: string, changes: ApiClientConfigUpdate) =>
+    apiFetch<{ success: boolean; message: string; config: ApiClientConfig }>(
+      `/api/v1/settings/api/client-config?server=${encodeURIComponent(server)}`,
+      { method: "PUT", body: JSON.stringify(changes) },
     ),
 
   getGatewayNetworkConfig: (server: string, networkId: string) =>

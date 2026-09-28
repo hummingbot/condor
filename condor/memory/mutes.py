@@ -66,7 +66,12 @@ def load_mutes(agent_slug: str | None = None) -> dict[str, set[str]]:
     Absent, empty or unreadable file → nothing muted. A mute set that cannot be
     parsed must not blank a library: the failure mode of "the operator loses a
     curation" is a nuisance, "the agent loses its playbooks" is an outage.
+
+    A tool or skill muted under a name it has since lost (FEAT-128) reads as the
+    one it became: boot migration v5 rewrites this install's files, and this
+    covers one copied in from elsewhere afterwards.
     """
+
     empty: dict[str, set[str]] = {kind: set() for kind in KINDS}
     path = mutes_path(agent_slug)
     try:
@@ -80,8 +85,22 @@ def load_mutes(agent_slug: str | None = None) -> dict[str, set[str]]:
         if isinstance(values, str):  # a one-item list written by hand
             values = [values]
         if isinstance(values, list):
-            empty[kind] = {str(v) for v in values if v}
+            empty[kind] = {_current_name(kind, str(v)) for v in values if v}
     return empty
+
+
+#: A shared skill that was renamed, old slug → new slug (FEAT-128).
+RENAMED_SKILLS: dict[str, str] = {"strategy_builder": "loop_builder"}
+
+
+def _current_name(kind: str, name: str) -> str:
+    if kind == "tools":
+        from mcp_servers.condor.profiles import canonical_tool_name
+
+        return canonical_tool_name(name)
+    if kind == "skills":
+        return RENAMED_SKILLS.get(name, name)
+    return name
 
 
 def is_muted(agent_slug: str | None, kind: str, name: str) -> bool:

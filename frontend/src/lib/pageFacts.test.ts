@@ -84,7 +84,7 @@ describe("routeFacts", () => {
       routeFacts("/agents/orca-lp-expert", "?open=playbook&strategy=sol-lp"),
     ).toEqual({
       label: "Agent run screen",
-      subject: 'strategy "sol-lp" of agent "orca-lp-expert"',
+      subject: 'loop "sol-lp" of agent "orca-lp-expert"',
     });
     // A tick is the one thing that covers the screen, so it is the one thing
     // that changes what the reader is looking at.
@@ -141,7 +141,7 @@ describe("renderViewBlock", () => {
       {
         label: "Bot detail",
         subject: 'bot "backpack-mm-3" (id 42)',
-        onScreen: { PNL: "$-412.30", controllers: 3, "active executors": 12 },
+        onScreen: { PNL: "-$412.30", controllers: 3, "active executors": 12 },
       },
     ];
     const block = renderViewBlock(facts, "/bots/42");
@@ -149,7 +149,7 @@ describe("renderViewBlock", () => {
     expect(block).toContain("Screen: Bot detail");
     expect(block).toContain('About: bot "backpack-mm-3" (id 42)');
     expect(block).toContain(
-      "On screen: PNL $-412.30 · controllers 3 · active executors 12",
+      "On screen: PNL -$412.30 · controllers 3 · active executors 12",
     );
     expect(block).toContain("URL: /bots/42");
   });

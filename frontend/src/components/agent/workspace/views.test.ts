@@ -20,6 +20,7 @@ import type { AgentRunRow, StrategySummary } from "@/lib/api";
 import {
   alertsFor,
   journalNamesDeploy,
+  ownsStrategy,
   parseWorkspace,
   pickRun,
   pickStrategy,
@@ -59,7 +60,7 @@ function strategy(over: Partial<StrategySummary> = {}): StrategySummary {
     session_count: 0,
     experiment_count: 0,
     tick_count: 0,
-    daily_pnl: 0,
+    latest_session_pnl: 0,
     total_pnl: 0,
     total_volume: 0,
     open_positions: 0,
@@ -113,6 +114,23 @@ describe("parsing the URL", () => {
       tick: null,
       open: null,
     });
+  });
+});
+
+describe("the strategy the URL narrows to (CORR-397)", () => {
+  const strategies = [strategy(), strategy({ slug: "sol_lp" })];
+
+  it("is the named slug when the agent owns it", () => {
+    expect(ownsStrategy(strategies, "brl_mm")).toBe("brl_mm");
+  });
+
+  it("is null for a slug the agent does not own", () => {
+    expect(ownsStrategy(strategies, "ghost")).toBeNull();
+  });
+
+  it("is null when the URL names none", () => {
+    expect(ownsStrategy(strategies, null)).toBeNull();
+    expect(ownsStrategy([], "brl_mm")).toBeNull();
   });
 });
 
@@ -208,6 +226,24 @@ describe("the run in scope", () => {
       pickRun(withChat, "brl_mm", { kind: "delegation", number: 0, id: "abc" })
         ?.run_id,
     ).toBe("d:abc");
+  });
+
+  it("adds no fallback when a named session is not in a chat-only window (CORR-376)", () => {
+    // The window can hold only chats; resolving the address is the backend's
+    // job (loop runs always ride along), not a guess made here.
+    const chatsOnly = [
+      run({
+        run_id: "c:only",
+        kind: "conversation",
+        id: "only",
+        number: 0,
+        strategy_slug: "",
+        strategy_name: "",
+        started_at: 9_000,
+      }),
+    ];
+    expect(pickRun(chatsOnly, "brl_mm", null)).toBeNull();
+    expect(pickRun(chatsOnly, "brl_mm", { kind: "session", number: 3, id: "3" })).toBeNull();
   });
 
   it("never opens on a chat by default", () => {
@@ -325,7 +361,7 @@ describe("what Now leads with", () => {
   it("raises an overdue tick", () => {
     const alerts = alertsFor({ ...healthy, nowSec: 1_090 });
     expect(alerts.map((a) => a.kind)).toEqual(["overdue"]);
-    expect(alerts[0].text).toContain("30s overdue");
+    expect(alerts[0].text).toBe("The next tick is overdue by 30s.");
   });
 
   it("does not call a stopped loop overdue", () => {

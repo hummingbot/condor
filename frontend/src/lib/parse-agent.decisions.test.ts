@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { parseJournal } from "@/lib/parse-agent";
+import { parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 function journal(decisions: string): string {
   return `# Journal\n\n## Decisions\n${decisions}\n\n## Ticks\n`;
@@ -65,5 +65,25 @@ describe("parseJournal decisions", () => {
     expect(decisions.map((d) => d.tick)).toEqual([3, 0]);
     expect(decisions[0].riskNote).toBe("risk");
     expect(decisions[1].action).toBe("ERROR: API unreachable");
+  });
+});
+
+describe("parsed shapes carry only what the panels render", () => {
+  it("parseJournal does not parse an executors ledger", () => {
+    const parsed = parseJournal(
+      "# Journal\n\n## Executors\n- executor=abc | type=grid | binance SOL-USDT BUY | amount=$10\n\n## Ticks\n",
+    );
+
+    expect(Object.keys(parsed).sort()).toEqual(
+      ["decisions", "decisionsArchived", "metrics", "summary", "ticks"].sort(),
+    );
+  });
+
+  it("parseSnapshot does not read the experiment Mode:/Model: lines", () => {
+    const parsed = parseSnapshot("# Experiment #3 — 2026-09-16 10:00\nMode: dry_run\nModel: claude-fable-5\n");
+
+    expect(parsed.tick).toBe(3);
+    expect(parsed).not.toHaveProperty("model");
+    expect(parsed).not.toHaveProperty("executionMode");
   });
 });

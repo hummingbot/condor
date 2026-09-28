@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 def domain_context(agent_slug: str, user_id: int) -> list[str]:
     """The Agent's memory and skills indexes, as prompt sections.
 
-    Returns zero, one or two sections — an empty index contributes nothing, and
+    Returns zero to three sections (memory, skills, owned controllers — FEAT-126)
+    — an empty index contributes nothing, and
     a store that cannot be read is skipped rather than allowed to break session
     start. Callers add their own prefix (identity header or bare instructions)
     and suffix (nothing, or the delegated task).
@@ -52,5 +53,19 @@ def domain_context(agent_slug: str, user_id: int) -> list[str]:
             )
     except Exception:
         log.debug("Could not load skill index for %s", agent_slug, exc_info=True)
+
+    try:
+        from condor.agent_controllers import controllers_section
+        from condor.memory.paths import CHAT_SLUG
+
+        # The chat reaches controllers through `agent=`; its context is unchanged.
+        is_chat = not agent_slug or agent_slug == CHAT_SLUG
+        controllers = "" if is_chat else controllers_section(agent_slug)
+        if controllers:
+            sections.append(
+                "[DOMAIN CONTROLLERS — controller source you own]\n" + controllers
+            )
+    except Exception:
+        log.debug("Could not load controllers for %s", agent_slug, exc_info=True)
 
     return sections

@@ -1,4 +1,4 @@
-"""Agent CRUD, strategy CRUD, instance lifecycle, and the journal."""
+"""Agent CRUD, loop CRUD, instance lifecycle, and the journal."""
 
 from pathlib import Path
 
@@ -7,17 +7,17 @@ from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
 
 # ---------------------------------------------------------------------------
-# Strategy CRUD (sub-resource of an Agent)
+# Loop CRUD (sub-resource of an Agent; ``Strategy`` in the Python names)
 #
-# ``strategy_id`` is the opaque composite key ``"{agent_slug}.{strategy_slug}"``
-# returned by list_strategies/create_strategy — the LLM just passes it back.
-# ``agent_slug`` (the owning Agent) is required to create a strategy.
+# ``loop_id`` is the opaque composite key ``"{agent_slug}.{strategy_slug}"``
+# returned by list/create — the LLM just passes it back.
+# ``agent_slug`` (the owning Agent) is required to create a loop.
 # ---------------------------------------------------------------------------
 
 
 def _manage_strategy(
     action: str,
-    strategy_id: str | None,
+    loop_id: str | None,
     agent_slug: str | None,
     name: str | None,
     description: str | None,
@@ -33,7 +33,7 @@ def _manage_strategy(
     if action == "list_strategies":
         strategies = store.list_all()
         return {
-            "strategies": [
+            "loops": [
                 {
                     "id": s.key,
                     "agent_slug": s.agent_slug,
@@ -48,11 +48,11 @@ def _manage_strategy(
         }
 
     elif action == "get_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get_by_key(strategy_id)
+        if not loop_id:
+            return {"error": "loop_id is required"}
+        s = store.get_by_key(loop_id)
         if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
+            return {"error": f"Loop '{loop_id}' not found"}
         return {
             "id": s.key,
             "agent_slug": s.agent_slug,
@@ -71,30 +71,33 @@ def _manage_strategy(
             return {"error": "name and instructions are required"}
         if not agent_slug:
             return {
-                "error": "agent_slug (the owning Agent) is required to create a strategy"
+                "error": "agent_slug (the owning Agent) is required to create a loop"
             }
         from condor.agents.agent import AgentStore
 
         if AgentStore().get(agent_slug) is None:
             return {"error": f"Agent '{agent_slug}' not found"}
-        strategy = store.create(
-            agent_slug=agent_slug,
-            name=name,
-            description=description or "",
-            agent_key=agent_key,
-            instructions=instructions,
-            skills=skills,
-            default_config=config,
-            created_by=settings.user_id,
-        )
-        return {"created": True, "strategy_id": strategy.key, "name": strategy.name}
+        try:
+            strategy = store.create(
+                agent_slug=agent_slug,
+                name=name,
+                description=description or "",
+                agent_key=agent_key,
+                instructions=instructions,
+                skills=skills,
+                default_config=config,
+                created_by=settings.user_id,
+            )
+        except ValueError as exc:  # taken or reserved name (CORR-635)
+            return {"error": str(exc)}
+        return {"created": True, "loop_id": strategy.key, "name": strategy.name}
 
     elif action == "update_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get_by_key(strategy_id)
+        if not loop_id:
+            return {"error": "loop_id is required"}
+        s = store.get_by_key(loop_id)
         if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
+            return {"error": f"Loop '{loop_id}' not found"}
         if name:
             s.name = name
         if description:
@@ -108,22 +111,22 @@ def _manage_strategy(
         if config:
             s.default_config = config
         store.update(s)
-        return {"updated": True, "strategy_id": s.key, "name": s.name}
+        return {"updated": True, "loop_id": s.key, "name": s.name}
 
     elif action == "delete_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        parts = split_key(strategy_id)
+        if not loop_id:
+            return {"error": "loop_id is required"}
+        parts = split_key(loop_id)
         if not parts:
-            return {"error": f"Invalid strategy_id '{strategy_id}'"}
+            return {"error": f"Invalid loop_id '{loop_id}'"}
         deleted = store.delete(parts[0], parts[1])
         return {"deleted": deleted}
 
-    return {"error": f"Unknown strategy action: {action}"}
+    return {"error": f"Unknown loop action: {action}"}
 
 
 # ---------------------------------------------------------------------------
-# Agent definitions (the AGENT.md identities — distinct from strategies/instances)
+# Agent definitions (the AGENT.md identities — distinct from loops/instances)
 # ---------------------------------------------------------------------------
 
 
@@ -131,8 +134,8 @@ def _list_agent_definitions() -> dict:
     """List the Agent identities (``*/AGENT.md`` across both agent roots).
 
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
-    *strategy* (a looping playbook it owns) and from a running *instance*. This
-    surfaces agents that ``list_strategies`` / ``list_agents`` (instances) never
+    *loop* (a looping playbook it owns) and from a running *instance*. This
+    surfaces agents that ``manage_loops`` / ``control_agent`` (instances) never
     show. No capability flags: every agent listed here can be delegated to,
     delegated to and looped.
     """
@@ -153,7 +156,7 @@ def _list_agent_definitions() -> dict:
                 "description": a.description,
                 "agent_key": a.agent_key,
                 "when_to_consult": a.consult_hint,
-                "strategies": owned,
+                "loops": owned,
                 "tools": a.tools,
             }
         )
@@ -163,10 +166,10 @@ def _list_agent_definitions() -> dict:
 # ---------------------------------------------------------------------------
 # Agent CRUD (the AGENT.md identity itself — the primary artifact)
 #
-# An Agent is the brain/identity. It is created FIRST; routines and strategies
+# An Agent is the brain/identity. It is created FIRST; routines and loops
 # are sub-resources that hang off an existing agent_slug. There are no capability
 # flags: the moment an agent exists it can be delegated to and looped.
-# ``when_to_consult`` is a routing hint; a bespoke strategy is an optimization
+# ``when_to_consult`` is a routing hint; a bespoke loop is an optimization
 # over the default playbook every agent already loops.
 # ---------------------------------------------------------------------------
 
@@ -217,6 +220,49 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
+def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
+    """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
+
+    An Agent's server pin decides which account its tools trade on, so every
+    writer of that field answers the same way: ``POST /agents`` and ``PATCH
+    /config`` gate it (SEC-594), a raw ``AGENT.md`` write gates it (SEC-693),
+    and this tool — the third door onto the same field, and the one the web
+    routes' own docstring names as performing "the same write" — did not.
+
+    Credentials never actually leaked, because every site that turns a stored
+    name into a client re-checks reach (``config_manager.may_use_stored_server``
+    at each of its five call sites). What leaked was the *label*: an Agent
+    pinned over MCP to a server the caller cannot reach reports that name
+    verbatim in ``AgentSummary`` and in the chat header's
+    ``SessionBinding.server_name``, so the UI names a foreign account as the one
+    at risk — exactly the mislabel SEC-594 and SEC-693 were shipped to prevent.
+
+    The predicate is ``may_use_stored_server`` rather than the web layer's
+    ``check_server_access``: the two apply the same TRADER floor to the same
+    ``has_server_access``, but the web one lives in ``condor/web/auth.py`` and
+    signals by raising ``HTTPException``, which this layer cannot import (it
+    sits below the web app) and could not answer with anyway — an MCP tool
+    reports refusal as ``{"error": ...}``, the shape ``manage_servers`` already
+    uses for this exact sentence. ``may_use_stored_server`` is the boolean
+    sibling that ARCH-587 gave the callers below the web layer, and it also
+    checks existence, so an admin — for whom ``has_server_access`` answers True
+    on any string at all (SEC-164) — cannot pin an Agent to a name that
+    resolves to no server.
+
+    An empty pin needs no access, and re-sending the value already stored is
+    the ordinary round-trip of a pin someone else legitimately set, so only a
+    *change* is checked — the same two exemptions ``_gate_pin_change`` makes.
+    """
+    if not new or new == stored:
+        return None
+
+    from config_manager import get_config_manager, may_use_stored_server
+
+    if not may_use_stored_server(get_config_manager(), settings.user_id, new):
+        return {"error": f"No access to server '{new}'"}
+    return None
+
+
 def _manage_agent(
     action: str,
     agent_slug: str | None,
@@ -237,22 +283,30 @@ def _manage_agent(
     if action == "create_agent":
         if not name:
             return {"error": "name is required to create an agent"}
+        # Creating an Agent already pinned to an unreachable server is the edit
+        # that is refused below, so it is refused here too.
+        refusal = _refuse_unreachable_pin(server_name, "")
+        if refusal:
+            return refusal
         # Default to the model the creator is actually running. Guessing here
         # produces agents pinned to a backend the user never configured — the
         # coordinator has no way to know which models are reachable, so an
         # invented agent_key is a coin flip that only surfaces on the first run.
         resolved_key = agent_key or _creator_agent_key()
-        agent = store.create(
-            name=name,
-            description=description or "",
-            instructions=instructions or "",
-            agent_key=resolved_key,
-            tools=tools,
-            when_to_consult=when_to_consult or "",
-            server_required=True if server_required is None else server_required,
-            server_name=server_name or "",
-            created_by=settings.user_id,
-        )
+        try:
+            agent = store.create(
+                name=name,
+                description=description or "",
+                instructions=instructions or "",
+                agent_key=resolved_key,
+                tools=tools,
+                when_to_consult=when_to_consult or "",
+                server_required=True if server_required is None else server_required,
+                server_name=server_name or "",
+                created_by=settings.user_id,
+            )
+        except ValueError as exc:  # taken or reserved name (CORR-635)
+            return {"error": str(exc)}
         return {
             "created": True,
             "agent_slug": agent.slug,
@@ -287,6 +341,11 @@ def _manage_agent(
         a = store.get(agent_slug)
         if not a:
             return {"error": f"Agent '{agent_slug}' not found"}
+        # Ahead of every assignment, so a refused pin leaves the record whole
+        # rather than persisting the fields that happened to be listed first.
+        refusal = _refuse_unreachable_pin(server_name, a.server_name)
+        if refusal:
+            return refusal
         if name:
             a.name = name
         if description is not None:
@@ -320,8 +379,8 @@ def _manage_agent(
         if owned:
             return {
                 "error": (
-                    f"Agent '{agent_slug}' still owns {len(owned)} strategy(ies). "
-                    "Delete its strategies first."
+                    f"Agent '{agent_slug}' still owns {len(owned)} loop(s). "
+                    "Delete its loops first."
                 )
             }
         return {"deleted": store.delete(agent_slug)}
@@ -336,7 +395,7 @@ def _manage_agent(
 
 async def _agent_lifecycle(
     action: str,
-    strategy_id: str | None,
+    loop_id: str | None,
     agent_id: str | None,
     config: dict | None,
 ) -> dict:
@@ -354,18 +413,18 @@ async def _agent_lifecycle(
             return {"agents": agents}
 
         if action == "start_agent":
-            if not strategy_id:
-                return {"error": "strategy_id is required"}
+            if not loop_id:
+                return {"error": "loop_id is required"}
 
             from condor.agents.strategy import StrategyStore
 
             store = StrategyStore()
             # Accepts a composite key OR a bare agent slug: every agent is
-            # loopable, so a slug resolves to its only strategy or to a default
+            # loopable, so a slug resolves to its only loop or to a default
             # playbook materialized from its identity on first start.
-            strategy = store.resolve_for_loop(strategy_id)
+            strategy = store.resolve_for_loop(loop_id)
             if not strategy:
-                return {"error": f"No strategy or agent matches '{strategy_id}'"}
+                return {"error": f"No loop or agent matches '{loop_id}'"}
 
             from condor.agents.config import load_full_config
             from config_manager import get_config_manager, get_effective_server
@@ -402,7 +461,6 @@ async def _agent_lifecycle(
                     "config": config_dict,
                     "trading_context": trading_context,
                     "chat_id": settings.chat_id,
-                    "user_id": settings.user_id,
                 },
             )
 
@@ -463,27 +521,20 @@ def _resolve_experiment_file(agent_id: str):
     (path | None, num | None); num is set even when the file isn't on disk yet
     so callers can distinguish "experiment in progress" from "not an experiment".
     """
-    from condor.agents.journal import resolve_agent_dirs
+    from condor.agents.sessions_index import (
+        find_experiment_file,
+        parse_agent_id,
+        strategy_dir_for_run_key,
+    )
 
-    last_sep = agent_id.rfind("_")
-    if last_sep == -1:
+    parsed = parse_agent_id(agent_id)
+    if parsed is None or parsed[2] != "experiment":
         return None, None
-    num_part = agent_id[last_sep + 1 :]
-    if not num_part.startswith("e"):
-        return None, None
-    try:
-        num = int(num_part[1:])
-    except ValueError:
-        return None, None
-
-    _, base_dir = resolve_agent_dirs(agent_id)
-    if base_dir is None:
+    run_key, num, _ = parsed
+    base_dir = strategy_dir_for_run_key(run_key)
+    if base_dir is None or not base_dir.is_dir():
         return None, num
-    for dirname in ("dry_runs", "experiments"):
-        path = base_dir / dirname / f"experiment_{num}.md"
-        if path.exists():
-            return path, num
-    return None, num
+    return find_experiment_file(base_dir, num), num
 
 
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
@@ -534,6 +585,24 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
         return {"content": jm.read_recent(max_entries=max_entries)}
 
 
+def _may_feed_run(engine) -> bool:
+    """Whether this seat may write what ``engine`` reads back each tick (SEC-638).
+
+    The tick's own MCP subprocess runs as the engine's owner, so the loop's
+    writes pass; a foreign chat session's agent is refused unless its user is
+    an admin. An unowned restored loop (``user_id == 0``) is left as it was.
+    """
+    owner = getattr(engine, "user_id", 0) or 0
+    if not owner or owner == settings.user_id:
+        return True
+    try:
+        from config_manager import get_config_manager
+
+        return bool(get_config_manager().is_admin(settings.user_id))
+    except Exception:  # noqa: BLE001 - no config is not a licence to write
+        return False
+
+
 def journal_write(
     agent_id: str,
     entry_type: str,
@@ -573,6 +642,10 @@ def journal_write(
             return {
                 "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
             }
+        # Every entry type is read back by the loop: learnings, state and the
+        # canvas directly, actions as the prompt's recent decisions.
+        if not _may_feed_run(engine):
+            return {"error": "Not your agent"}
         session_dir = engine.session_dir
         agent_dir = engine.strategy.home
     else:
@@ -658,25 +731,22 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="publish", agent_slug=...)',
     ),
-    "list_strategies": ("manage_strategies", 'manage_strategies(action="list")'),
-    "get_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="get", strategy_id=...)',
-    ),
+    "list_strategies": ("manage_loops", 'manage_loops(action="list")'),
+    "get_strategy": ("manage_loops", 'manage_loops(action="get", loop_id=...)'),
     "create_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="create", agent_slug=..., name=..., instructions=...)',
+        "manage_loops",
+        'manage_loops(action="create", agent_slug=..., name=..., instructions=...)',
     ),
     "update_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="update", strategy_id=...)',
+        "manage_loops",
+        'manage_loops(action="update", loop_id=...)',
     ),
     "delete_strategy": (
-        "manage_strategies",
-        'manage_strategies(action="delete", strategy_id=...)',
+        "manage_loops",
+        'manage_loops(action="delete", loop_id=...)',
     ),
     "list_agents": ("control_agent", 'control_agent(action="list")'),
-    "start_agent": ("control_agent", 'control_agent(action="start", strategy_id=...)'),
+    "start_agent": ("control_agent", 'control_agent(action="start", loop_id=...)'),
     "stop_agent": ("control_agent", 'control_agent(action="stop", agent_id=...)'),
     "pause_agent": ("control_agent", 'control_agent(action="pause", agent_id=...)'),
     "resume_agent": ("control_agent", 'control_agent(action="resume", agent_id=...)'),
@@ -780,9 +850,9 @@ def manage_agents(
     )
 
 
-def manage_strategies(
+def manage_loops(
     action: str,
-    strategy_id: str | None = None,
+    loop_id: str | None = None,
     agent_slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -791,12 +861,12 @@ def manage_strategies(
     skills: list[str] | None = None,
     config: dict | None = None,
 ) -> dict:
-    resolved, err = _resolve_action("manage_strategies", action, _STRATEGY_ACTIONS)
+    resolved, err = _resolve_action("manage_loops", action, _STRATEGY_ACTIONS)
     if err:
         return err
     return _manage_strategy(
         resolved,
-        strategy_id,
+        loop_id,
         agent_slug,
         name,
         description,
@@ -810,7 +880,7 @@ def manage_strategies(
 async def control_agent(
     action: str,
     agent_id: str | None = None,
-    strategy_id: str | None = None,
+    loop_id: str | None = None,
     config: dict | None = None,
     key: str | None = None,
     value=None,
@@ -824,4 +894,4 @@ async def control_agent(
         # The namespace is derived from agent_id, never taken from the caller,
         # so an agent cannot read another's cursors by guessing a key.
         return await _agent_state(resolved, agent_id, key, value, expires_in, clear)
-    return await _agent_lifecycle(resolved, strategy_id, agent_id, config)
+    return await _agent_lifecycle(resolved, loop_id, agent_id, config)

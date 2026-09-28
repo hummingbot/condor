@@ -16,6 +16,7 @@ from mcp_servers._profiles import resolve_profiles
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.profiles import PROFILE_TOOLS
 from mcp_servers.condor.settings import DEFAULT_TOOL_PROFILE, settings
+from mcp_servers.condor.tools import agent_controllers as agent_controllers_tool
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import delegate as delegate_tool
@@ -514,8 +515,8 @@ async def manage_routines(
     - "delete_routine": Delete an agent-local routine (requires name)
 
     Agent-local routines live in .condor/agents/{slug}/routines/ and are visible
-    only to that AGENT — they are shared across all of its strategies, there is
-    no per-strategy routine library. They follow the same pattern as global
+    only to that AGENT — they are shared across all of its loops, there is
+    no per-loop routine library. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
     Writes always land under .condor/agents/ — never under the tracked agents/
     library the repo ships, which you read but do not edit.
@@ -550,6 +551,98 @@ async def manage_routines(
         Action-specific result dict.
     """
     return await routines.manage_routines(action, name, config, agent, code, shared)
+
+
+@handle_errors("manage agent controllers")
+@telemetry_taps.tracked("manage_agent_controllers")
+async def manage_agent_controllers(
+    action: Literal[
+        "list",
+        "read",
+        "write",
+        "delete",
+        "status",
+        "sync",
+        "upload_config",
+        "pull",
+    ],
+    name: str | None = None,
+    agent: str | None = None,
+    sample: str | None = None,
+    code: str | None = None,
+    controller_md: str | None = None,
+    controller_type: str | None = None,
+    configs: list[str] | None = None,
+    config_name: str | None = None,
+    overwrite: bool = False,
+    shared: bool | None = None,
+) -> dict:
+    """The Hummingbot controllers you OWN: source + sample configs in your folder,
+    pushed to the active server on demand. Read the `controller_sources` skill
+    before your first sync.
+
+    Layout: controllers/<name>/<name>.py, optional controllers/<name>/CONTROLLER.md
+    (description, `type:` when it cannot be inferred), and
+    controllers/<name>/sample_configs/<style>.yml. `_shared` controllers are
+    read by every agent (marked shared) and are read-only to agents.
+
+    Your folder is the source of truth; the server holds a copy. Never upload
+    folder-owned code with manage_controllers upsert.
+
+    Local actions:
+    - "list": your controllers, their type and styles.
+    - "read": source, CONTROLLER.md and styles (name); with sample=, that style's YAML.
+    - "write": save source (name, code) and/or CONTROLLER.md (controller_md); with
+      sample=, save that style (code = YAML text).
+    - "delete": delete a controller (name) or one style (name, sample).
+
+    Server actions (the session's active server):
+    - "status": per controller, missing | in_sync | drift | unreachable
+      (unreachable is NOT in sync). Optional name narrows it.
+    - "sync": upload a missing controller (name). A drifted one is refused with a
+      diff and an impact preview (impact_text: other agents sharing the name,
+      running bots left on the old class; the next backtest and new bots use the
+      new code, no API restart needed). overwrite=true is
+      accepted only after that preview (15 min, same server copy; else
+      preview_required) and backs up the server copy first. Show the user the
+      diff and impact_text verbatim and get their go-ahead before overwrite=true.
+    - "upload_config": save a style as a server config (name, sample), named
+      "<name>__<sample>" unless config_name is given. Idempotent; a differing
+      config is refused unless overwrite=true; needs the controller synced first.
+    - "pull": adopt a server controller into your folder (name, controller_type,
+      optional configs=[config ids] become styles).
+
+    Args:
+        action: The action to perform.
+        name: Controller name (folder == module == controller_name).
+        agent: Target agent's slug — Condor only (onboarding into an agent).
+        sample: A style (sample config stem) for read/write/delete/upload_config.
+        code: Controller source for write; YAML text when sample= is given.
+        controller_md: CONTROLLER.md text for write (frontmatter `type:`/`description:`).
+        controller_type: For pull — directional_trading, market_making or generic.
+        configs: For pull — server config ids to adopt as styles.
+        config_name: For upload_config — override the "<name>__<sample>" id.
+        overwrite: Replace a differing server copy (sync — only after a sync
+            without it previewed the impact; upload_config) or a differing
+            folder copy (pull).
+        shared: Condor only, without agent — target the _shared library.
+
+    Returns:
+        Action-specific result dict; refusals carry refused=true, reason and diff.
+    """
+    return await agent_controllers_tool.manage_agent_controllers(
+        action,
+        name=name,
+        agent=agent,
+        sample=sample,
+        code=code,
+        controller_md=controller_md,
+        controller_type=controller_type,
+        configs=configs,
+        config_name=config_name,
+        overwrite=overwrite,
+        shared=shared,
+    )
 
 
 @handle_errors("run code")
@@ -738,23 +831,23 @@ async def manage_agents(
     and the primary artifact. It is created FIRST; everything else hangs off its
     slug. From the moment it exists it can be delegated to
     (`delegate`) and looped (`control_agent(action="start")`) — there is no
-    capability flag and nothing to enable. See `manage_strategies` for the
+    capability flag and nothing to enable. See `manage_loops` for the
     playbooks an agent owns, `control_agent` for its running instances.
 
     Actions:
-    - "list": All agents with their when_to_consult hint, owned strategies,
-      agent_key and tools. Use this to answer "what agents exist?" — strategies
-      and running instances do NOT show agents that own no loop strategy.
+    - "list": All agents with their when_to_consult hint, owned loops,
+      agent_key and tools. Use this to answer "what agents exist?" — loops
+      and running instances do NOT show agents that own no loop.
     - "create": New agent (AGENT.md identity + brain). Requires name. Returns
-      agent_slug — use it for routines and strategies.
+      agent_slug — use it for routines and loops.
     - "get": Full definition including the AGENT.md body (requires agent_slug).
     - "update": Change AGENT.md / metadata (requires agent_slug + fields to change).
     - "delete": Delete an agent (requires agent_slug; refuses if it still owns
-      strategies). Refused outright for an agent the repo ships — mute or edit
+      loops). Refused outright for an agent the repo ships — mute or edit
       it instead; an update would bring a deleted one straight back.
     - "publish": ADMIN ONLY. Copy a local agent into the tracked library the
       repo ships (requires agent_slug; `path` narrows it to one skill or
-      strategy). Every other write lands under .condor/agents/, so this is the
+      loop). Every other write lands under .condor/agents/, so this is the
       only way to author what other installs receive. It leaves the repo dirty
       on purpose — review and commit. There is no "install": a shipped agent is
       present the moment an install pulls.
@@ -773,8 +866,9 @@ async def manage_agents(
             tool it omits is never mounted on any model, so keep the family the
             inherited framework playbooks call — delegate, send_notification,
             run_code, manage_memory, manage_skill, manage_routines,
+            manage_agent_controllers,
             trading_agent_journal_read, trading_agent_journal_write,
-            manage_agents, manage_strategies, control_agent,
+            manage_agents, manage_loops, control_agent,
             get_available_models — plus every tool the agent's own playbooks name.
         when_to_consult: One-line hint describing when to route work to this agent.
             Purely for routing — every agent is delegable with or without it; it
@@ -784,11 +878,11 @@ async def manage_agents(
             unless the user explicitly asks to pin this agent to one server — empty
             means follow the ambient chat server, which is what travels to other
             installs. When set, the agent's mcp-hummingbot subprocess and any
-            strategy it deploys use THIS server regardless of the chat's active
+            loop it deploys use THIS server regardless of the chat's active
             server, and on a machine without that server the agent is broken. Do
             not fill it in with whatever server the chat happens to be on.
         path: For "publish" only — narrow to one item of the agent, relative to
-            its directory ("skills/lp_rebalance", "strategies/grid", "AGENT.md").
+            its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
             mutes and session output are never published.
 
@@ -810,9 +904,9 @@ async def manage_agents(
     )
 
 
-@handle_errors("manage strategies")
-@telemetry_taps.tracked("manage_strategies")
-async def manage_strategies(
+@handle_errors("manage loops")
+@telemetry_taps.tracked("manage_loops")
+async def manage_loops(
     action: Literal[
         "list",
         "get",
@@ -826,7 +920,7 @@ async def manage_strategies(
         "update_strategy",
         "delete_strategy",
     ],
-    strategy_id: str | None = None,
+    loop_id: str | None = None,
     agent_slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -835,30 +929,33 @@ async def manage_strategies(
     skills: list[str] | None = None,
     config: dict | None = None,
 ) -> dict:
-    """Create and edit strategies — the looping playbooks an agent owns.
+    """Create and edit loops — the playbook an agent follows each tick when it runs on its own.
 
-    A *strategy* is a sub-resource of an agent: the instructions one loop follows,
-    plus its default config. It is an optimization over the default playbook every
-    agent already loops, so an agent needs no strategy to run. ``strategy_id`` is
-    the opaque key returned by list/create, of the form "agent_slug.strategy_slug"
-    — just pass it back. Create the owning agent first (`manage_agents`); start a
-    strategy with `control_agent(action="start")`.
+    A *loop* is a sub-resource of an agent: the instructions it follows every
+    tick, plus its default config. It is an optimization over the default
+    playbook every agent already loops, so an agent needs no loop of its own to
+    run. ``loop_id`` is the opaque key returned by list/create, of the form
+    "agent_slug.loop_slug" — just pass it back. Create the owning agent first
+    (`manage_agents`); start a loop with `control_agent(action="start")`.
+
+    Not a Hummingbot strategy or controller config: those are deployed with the
+    Hummingbot tools. A loop is the agent's own playbook.
 
     Actions:
-    - "list": All strategies across all agents.
-    - "get": Full details including the instructions body (requires strategy_id).
-    - "create": New strategy under an agent (requires agent_slug, name, instructions).
-    - "update": Change an existing strategy (requires strategy_id + fields to change).
-    - "delete": Delete a strategy (requires strategy_id).
+    - "list": All loops across all agents.
+    - "get": Full details including the instructions body (requires loop_id).
+    - "create": New loop under an agent (requires agent_slug, name, instructions).
+    - "update": Change an existing loop (requires loop_id + fields to change).
+    - "delete": Delete a loop (requires loop_id).
 
     Args:
-        action: What to do with the strategy.
-        strategy_id: Strategy key "agent_slug.strategy_slug" (get/update/delete).
+        action: What to do with the loop.
+        loop_id: Loop key "agent_slug.loop_slug" (get/update/delete).
         agent_slug: The owning agent — required to create.
-        name: Strategy name (create/update).
-        description: Strategy description (create/update).
+        name: Loop name (create/update).
+        description: Loop description (create/update).
         instructions: The playbook text the loop follows (create/update).
-        agent_key: Default LLM for this strategy's loop, overriding the owning
+        agent_key: Default LLM for this loop, overriding the owning
             agent's. Same form as manage_agents.agent_key.
         skills: Optional skill names to enable for the loop (create/update).
         config: Default config for the loop (create/update) — the same keys
@@ -867,9 +964,9 @@ async def manage_strategies(
     Returns:
         Action-specific result dict.
     """
-    return trading_agent.manage_strategies(
+    return trading_agent.manage_loops(
         action,
-        strategy_id=strategy_id,
+        loop_id=loop_id,
         agent_slug=agent_slug,
         name=name,
         description=description,
@@ -901,7 +998,7 @@ async def control_agent(
         "shutdown_agent",
     ],
     agent_id: str | None = None,
-    strategy_id: str | None = None,
+    loop_id: str | None = None,
     config: dict | None = None,
     key: str | None = None,
     value: Any = None,
@@ -911,9 +1008,9 @@ async def control_agent(
     """Run and steer live agent instances (start / stop / pause / resume).
 
     An *instance* is one running session of an agent's loop, identified by
-    ``agent_id``. Start one from a strategy — or from a bare agent slug, since
+    ``agent_id``. Start one from a loop — or from a bare agent slug, since
     every agent is loopable. See `manage_agents` for the identities and
-    `manage_strategies` for the playbooks; read what a running instance did with
+    `manage_loops` for the playbooks; read what a running instance did with
     `trading_agent_journal_read`.
 
     STOP vs SHUTDOWN: "stop" halts the loop and KEEPS its open positions.
@@ -923,9 +1020,9 @@ async def control_agent(
 
     Actions:
     - "list": All running instances with status.
-    - "start": Start a session (requires strategy_id, optional config overrides).
-      strategy_id may be a BARE AGENT SLUG — the agent then loops its only
-      strategy, or a default playbook created from its identity on first start.
+    - "start": Start a session (requires loop_id, optional config overrides).
+      loop_id may be a BARE AGENT SLUG — the agent then runs its only
+      loop, or a default playbook created from its identity on first start.
     - "stop": Stop a running instance, keeping positions (requires agent_id).
     - "shutdown": Stop AND wind down positions/executors (requires agent_id).
     - "pause": Pause a running instance (requires agent_id).
@@ -939,9 +1036,9 @@ async def control_agent(
     Args:
         action: The lifecycle action to take on the loop.
         agent_id: The running instance (everything except list and start).
-        strategy_id: Strategy key "agent_slug.strategy_slug", or a bare agent slug
+        loop_id: Loop key "agent_slug.loop_slug", or a bare agent slug
             (start only).
-        config: Overrides on the strategy's defaults, for "start" only: agent_key,
+        config: Overrides on the loop's defaults, for "start" only: agent_key,
             model_base_url (for LM Studio/vLLM), execution_mode, frequency_sec,
             tick_timeout_sec (wall-clock budget for one tick's agent session;
             0 = runtime default of 600s), total_amount_quote, trading_context,
@@ -958,7 +1055,7 @@ async def control_agent(
     return await trading_agent.control_agent(
         action,
         agent_id=agent_id,
-        strategy_id=strategy_id,
+        loop_id=loop_id,
         config=config,
         key=key,
         value=value,
@@ -1070,7 +1167,7 @@ async def manage_skill(
     files — edit the playbook body itself with "edit".)
 
     Skills are scoped PER-AGENT (one library per agent, shared by everyone using
-    it; there is no per-strategy library). A launched agent WRITES only to its
+    it; there is no per-loop library). A launched agent WRITES only to its
     own. From the chat, pass `agent="<slug>"` to author or inspect a specific
     agent's library — DO THIS whenever the playbook belongs to a domain agent
     rather than to the chat, otherwise the skill silently lands in Condor's own

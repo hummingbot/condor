@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import json
 import os
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -203,6 +204,8 @@ def list_reports(
     search: str | None = None,
     agent: str | None = None,
     subject: str | None = None,
+    source_name: str | Iterable[str] | None = None,
+    source_prefix: str | None = None,
     limit: int = 50,
     offset: int = 0,
     owner_id: int | None = None,
@@ -219,6 +222,13 @@ def list_reports(
     built by :mod:`condor.reports.subjects`. Entries saved without a subject —
     every entry written before the field existed — never match one, and a key
     whose report has since been pruned simply matches nothing.
+
+    ``source_name`` matches the producer's name exactly — one name, or any of
+    an iterable of accepted names — and ``source_prefix`` matches names that
+    start with it (ARCH-692). Both apply before ``total`` and the page slice,
+    so a match is never lost past ``limit`` the way post-filtering a ``search``
+    page loses it: ``search`` is a substring over title, source and tags, and
+    ranks ``pmm_king`` hits alongside ``pmm`` ones.
     """
     entries = _read_index()
     entries.sort(key=lambda entry: entry.get("created_at", ""), reverse=True)
@@ -235,6 +245,15 @@ def list_reports(
         entries = [entry for entry in entries if entry.get("agent") == agent]
     if subject:
         entries = [entry for entry in entries if entry.get("subject") == subject]
+    if source_name is not None:
+        names = {source_name} if isinstance(source_name, str) else set(source_name)
+        entries = [entry for entry in entries if entry.get("source_name") in names]
+    if source_prefix:
+        entries = [
+            entry
+            for entry in entries
+            if entry.get("source_name", "").startswith(source_prefix)
+        ]
     if search:
         query = search.lower()
         entries = [

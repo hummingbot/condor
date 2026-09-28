@@ -312,6 +312,7 @@ async def get_conversation_deployments(
     which is what lets the rail badge this without polling the fleet.
     """
     from condor.agents.actions import ACTIONS_FILENAME, MAX_ACTION_LINES, read_actions
+    from condor.agents.attribution import ownership_windows
     from condor.agents.deed_index import build_deed_index
     from condor.agents.deeds import attribution_tag, for_conversation
     from condor.agents.ownership import read_owned
@@ -349,15 +350,29 @@ async def get_conversation_deployments(
         if (ref := index.owner_of(bot.base)) is not None
         and ref.run_id == conversation_id
     ]
-    since = min((b.since for b in owned if b.since > 0), default=0.0)
+    # Every recorded base is priced over the window this conversation held it,
+    # which for a base another run has claimed since closes at that run's claim:
+    # the conversation keeps what it realized before the handover, and the open
+    # book goes to whoever holds the bot now. A base the index attributes to
+    # nobody has no evidence this conversation held it, so its window is empty.
+    handovers: dict[str, float] = {}
+    for bot in owned:
+        if bot.base not in bases_now:
+            ref = index.owner_of(bot.base)
+            handovers[bot.base] = ref.at if ref is not None else bot.since
+    windows = {
+        base: window
+        for base, window in ownership_windows(owned, handovers).items()
+        # A base this conversation does not hold never carries the open book,
+        # even when the claim that took it has no usable instant.
+        if base in bases_now or not window.is_open
+    }
 
     perf: Any = AgentPerformance(agent_id=agent_id)
     client = await _client_for(meta, owner_id)
     if client is not None:
         try:
-            perf = await fetch_agent_performance(
-                client, agent_id, bot_names=bases_now, since=since
-            )
+            perf = await fetch_agent_performance(client, agent_id, windows=windows)
         except Exception:  # noqa: BLE001 - a priceless row still names the bot
             log.warning(
                 "deployments: performance for %s failed", conversation_id, exc_info=True

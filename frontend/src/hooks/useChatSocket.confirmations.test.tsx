@@ -148,6 +148,18 @@ describe("re-reading pending approvals on a socket open", () => {
     });
   });
 
+  it("carries a controller overwrite's impact detail", async () => {
+    getPendingConfirmations.mockResolvedValue([
+      { ...stranded, detail: "This replaces the SERVER copy of 'pmm_king'" },
+    ]);
+
+    await arrive();
+
+    expect(chat().permissionRequests.s1.detail).toBe(
+      "This replaces the SERVER copy of 'pmm_king'",
+    );
+  });
+
   it("carries the call and a local deadline, so the prompt can preview and count down", async () => {
     getPendingConfirmations.mockResolvedValue([
       { ...stranded, tool: "place_order", input: { amount: 1 }, expires_in: 90 },

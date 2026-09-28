@@ -1,0 +1,52 @@
+# pmm_mister / balanced
+# Default steady-state profile for a ranging market on a liquid perp:
+# moderate spreads, 5x leverage, inventory band 20%-60% around a 40% target,
+# moderate skew, global SL armed at the target, global TP armed from min_base.
+# Category: generic (PMMister extends ControllerBase) - sync/upload as generic.
+controller_name: pmm_mister
+controller_type: generic
+connector_name: binance_perpetual
+trading_pair: SOL-USDT
+total_amount_quote: 1000
+portfolio_allocation: 0.1
+position_mode: ONEWAY
+position_side: BUY
+leverage: 5
+target_base_pct: 0.4
+min_base_pct: 0.2
+max_base_pct: 0.6
+min_skew: 0.5
+buy_spreads:
+  - 0.0008
+  - 0.002
+sell_spreads:
+  - 0.0008
+  - 0.002
+buy_amounts_pct:
+  - 1
+  - 1
+sell_amounts_pct:
+  - 1
+  - 1
+open_order_type: LIMIT_MAKER
+take_profit: 0.001
+take_profit_order_type: LIMIT_MAKER
+max_active_executors_by_level: 3
+executor_refresh_time: 30
+buy_cooldown_time: 30
+sell_cooldown_time: 30
+buy_position_effectivization_time: 180
+sell_position_effectivization_time: 180
+price_distance_tolerance: 0.0005
+refresh_tolerance: 0.0005
+tolerance_scaling: 1.2
+tick_mode: false
+position_profit_protection: true
+global_tp_enabled: true
+global_take_profit: 0.03
+global_tp_activation_from: min_base
+global_sl_enabled: true
+global_stop_loss: 0.05
+global_sl_activation_from: target_base
+global_pnl_reference: position
+manual_kill_switch: false

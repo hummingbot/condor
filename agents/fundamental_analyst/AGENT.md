@@ -9,7 +9,7 @@ when_to_consult: When the user wants to analyze a company or protocol's fundamen
   market cap / FDV looks over- or undervalued
 server_required: false
 server_name: ''
-created_by: 481175164
+created_by: 0
 created_at: '2026-09-03T10:12:01.046428+00:00'
 ---
 

@@ -128,7 +128,7 @@ def test_the_rules_outrank_the_agents_own_identity(defaults):
     """Position is the point: an agent cannot talk its way out of the rules."""
     prompt = _tick_prompt()
 
-    assert prompt.index(CORE_RULES_HEADER) < prompt.index("[STRATEGY INSTRUCTIONS]")
+    assert prompt.index(CORE_RULES_HEADER) < prompt.index("[LOOP INSTRUCTIONS]")
 
 
 def test_a_tick_without_a_rulebook_still_builds():

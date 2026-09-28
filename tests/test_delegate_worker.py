@@ -298,8 +298,11 @@ def _delegated_worker_kwarg(monkeypatch, tmp_path, slug: str) -> bool:
         async def stop(self):
             pass
 
-        async def prompt(self, text):
-            return "done"
+        async def prompt_stream(self, text):
+            from condor.acp.client import PromptDone, TextChunk
+
+            yield TextChunk(text="done")
+            yield PromptDone(stop_reason="end_turn")
 
     monkeypatch.setattr(
         "condor.runtime.toolsets.build_mcp_servers_for_session", fake_build

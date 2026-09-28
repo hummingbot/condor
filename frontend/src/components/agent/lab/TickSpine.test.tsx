@@ -67,6 +67,7 @@ let picked: (number | null)[];
 async function render({
   hasActionsLog = true,
   selectedTick = null as number | null,
+  bare = false,
 } = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -81,6 +82,7 @@ async function render({
           hasActionsLog={hasActionsLog}
           selectedTick={selectedTick}
           onSelectTick={(t) => picked.push(t)}
+          bare={bare}
         />
       </QueryClientProvider>,
     );
@@ -209,5 +211,61 @@ describe("a beat is an address", () => {
     await render();
 
     expect(beats()[0].title).toBe("#4 — Deploy bot 'brl_mm'");
+  });
+});
+
+describe("drawn bare, beside the tabs (ARCH-425)", () => {
+  // jsdom lays nothing out, so a strip is as wide as this says it is.
+  const realScrollWidth = Object.getOwnPropertyDescriptor(
+    Element.prototype,
+    "scrollWidth",
+  );
+  beforeEach(() => {
+    Object.defineProperty(Element.prototype, "scrollWidth", {
+      configurable: true,
+      get: () => 2_400,
+    });
+  });
+  afterEach(() => {
+    if (realScrollWidth) {
+      Object.defineProperty(Element.prototype, "scrollWidth", realScrollWidth);
+    }
+  });
+
+  const strip = () =>
+    container.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+
+  it("keeps to one scrolling line and brings no border of its own", async () => {
+    JOURNAL = journal(
+      Array.from({ length: 300 }, (_, i) => ({ tick: i + 1, actions: 0 })),
+    );
+    await render({ bare: true });
+
+    expect(beats()).toHaveLength(300);
+    const cls = strip().className;
+    expect(cls).toContain("flex-nowrap");
+    expect(cls).toContain("overflow-x-auto");
+    expect(cls).not.toContain("border-b");
+    expect(cls).not.toContain("flex-wrap ");
+    // A beat that could shrink would turn 300 of them into a hairline.
+    expect(beats()[0].className).toContain("shrink-0");
+  });
+
+  it("opens on the newest beat", async () => {
+    JOURNAL = journal(
+      Array.from({ length: 300 }, (_, i) => ({ tick: i + 1, actions: 0 })),
+    );
+    await render({ bare: true });
+
+    expect(strip().scrollLeft).toBe(2_400);
+  });
+
+  it("is still the wrapping, bordered row when not bare", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }]);
+    await render();
+
+    expect(strip().className).toContain("flex-wrap");
+    expect(strip().className).toContain("border-b");
+    expect(strip().scrollLeft).toBe(0);
   });
 });

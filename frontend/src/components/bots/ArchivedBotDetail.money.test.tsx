@@ -208,7 +208,7 @@ describe("an archived run that could not be converted to USD", () => {
         converted: false,
       }),
     );
-    expect(totalPnl()).toBe("R$-410.00");
+    expect(totalPnl()).toBe("-R$410.00");
     expect(statValue("Volume")).toBe("R$5.0K");
   });
 
@@ -216,7 +216,7 @@ describe("an archived run that could not be converted to USD", () => {
     await render(
       perfOf({ total_pnl: -410, quote_currency: "TRY", usd_rates: {}, converted: false }),
     );
-    expect(totalPnl()).toBe("TRY -410.00");
+    expect(totalPnl()).toBe("-TRY 410.00");
   });
 
   it("still says dollars when the run was converted", async () => {

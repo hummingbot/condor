@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp_servers._profiles import make_resolver
 from mcp_servers._profiles import register_tools as _register_tools
 from mcp_servers._profiles import resolve_profiles
+from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters import (
     format_amm_result,
     format_clmm_result,
@@ -23,7 +24,7 @@ from mcp_servers.hummingbot_api.formatters import (
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
-from mcp_servers.hummingbot_api.profiles import PROFILE_TOOLS
+from mcp_servers.hummingbot_api.profiles import AGENT_SEAT_PROFILES, PROFILE_TOOLS
 from mcp_servers.hummingbot_api.schemas import (
     AMMRequest,
     CLMMRequest,
@@ -550,6 +551,20 @@ async def manage_controllers(
         confirm_override: Required True if overwriting existing items.
         include_code: If True, include full controller source code in describe output. Default False.
     """
+    if (
+        action == "upsert"
+        and target != "config"
+        and settings.tool_profile in AGENT_SEAT_PROFILES
+    ):
+        # The backstop under the permission gates (SEC-713): a delegated or
+        # consulted agent run builds no gate, so the refusal has to live here too.
+        raise ToolError(
+            "Refused: an agent does not upload controller code with "
+            "manage_controllers. Controller code goes through "
+            "manage_agent_controllers (write → status → sync), which checks the "
+            "server copy and backs it up — use that. Saved configs "
+            "(target='config') still work here."
+        )
     client = await hummingbot_client.get_client()
     result = await controllers_tools.manage_controllers(
         client=client,
@@ -766,6 +781,13 @@ async def create_position_executor(
     ORDER TYPES are `1`=MARKET, `2`=LIMIT, `3`=LIMIT_MAKER. Omitting them uses the
     backend's own defaults (LIMIT to open, MARKET for every exit).
 
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -877,6 +899,13 @@ async def create_grid_executor(
     LEVEL COUNT is the intersection of two limits — `total_amount_quote /
     min_order_amount_quote`, and the price range divided by
     `min_spread_between_orders`. The tighter one wins.
+
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
 
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
@@ -992,6 +1021,13 @@ async def create_dca_executor(
     here. Note this is the opposite convention from `create_position_executor`, whose
     `amount` is in base currency.
 
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -1089,6 +1125,13 @@ async def create_order_executor(
     `order_id` is internal and appears nowhere on chain), plus `slippage_pct` and
     `max_slippage_pct`. `slippage_pct` is the LIVE tolerance: above the configured start
     means earlier attempts failed on slippage and this one is paying to get through.
+
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
 
     Args:
         connector_name: Exchange connector, or a NETWORK id for a DEX swap (see above).
@@ -1196,6 +1239,13 @@ async def create_lp_executor(
     A stopped executor always closes the on-chain position; `keep_position` only decides
     whether the net token change is KEPT as a spot position or swapped back to the
     original quote asset.
+
+    AN EXECUTOR ID IS NOT A POSITION. The API accepts the config first and the executor
+    checks its budget when it starts; an unfunded one terminates at once with
+    INSUFFICIENT_BALANCE. This tool watches the new executor for a few seconds and
+    reports what it did: an error means nothing was opened, and "nothing filled yet"
+    means the entry is not confirmed. Tell the user a position is open only when the
+    result (or `get_executor`) shows it running with volume filled.
 
     Args:
         connector_name: The NETWORK, e.g. 'solana-mainnet-beta'. See above.

@@ -13,6 +13,8 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_PARAM,
   TAB_PARAM,
+  paneHandoffDropsPanel,
+  paneReturnHref,
   readPane,
   writePane,
   type PaneView,
@@ -26,6 +28,7 @@ describe("reading the pane off the URL", () => {
   it("opens the panel the URL names", () => {
     expect(readPane(q("?panel=agent"), {})).toEqual({ kind: "agent" });
     expect(readPane(q("?panel=desk"), {})).toEqual({ kind: "desk" });
+    expect(readPane(q("?panel=loops"), {})).toEqual({ kind: "loops" });
   });
 
   it("reads whose agent panel it is, and defaults to the conversation's", () => {
@@ -92,6 +95,7 @@ describe("writing the pane into the URL", () => {
   it("round-trips every panel", () => {
     expect(round({ kind: "agent" })).toEqual({ kind: "agent" });
     expect(round({ kind: "desk" })).toEqual({ kind: "desk" });
+    expect(round({ kind: "loops" })).toEqual({ kind: "loops" });
     expect(
       round({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" }),
     ).toEqual({ kind: "strategy", agentSlug: "brigado", strategySlug: "brl_mm" });
@@ -173,6 +177,18 @@ describe("writing the pane into the URL", () => {
       expect(writePane(q(open), null).get(TAB_PARAM)).toBeNull();
     });
 
+    it("reads a pre-rename ?tab=strategies as the Loops section (FEAT-128)", () => {
+      expect(readPane(q(`?panel=agent&${TAB_PARAM}=strategies`), {})).toEqual({
+        kind: "agent",
+        tab: "loops",
+      });
+      // And the same agent's pane carries it forward under its new name.
+      const next = writePane(q(`?panel=agent&${TAB_PARAM}=strategies`), {
+        kind: "agent",
+      });
+      expect(next.get(TAB_PARAM)).toBe("loops");
+    });
+
     it("reads a section nobody has as a panel open on Brain", () => {
       // A hand-typed `?tab=` is not an error page: the link still asked for
       // this agent's panel and that is what it gets.
@@ -187,12 +203,129 @@ describe("writing the pane into the URL", () => {
       // neither writes them nor clears somebody else's.
       const next = writePane(q("?view=money&strategy=brl_mm&run=s:3&tick=40"), {
         kind: "agent",
-        tab: "strategies",
+        tab: "loops",
       });
       expect(next.get("view")).toBe("money");
       expect(next.get("strategy")).toBe("brl_mm");
       expect(next.get("run")).toBe("s:3");
       expect(next.get("tick")).toBe("40");
     });
+  });
+});
+
+describe("whether a hand-off drops the agent panel (CORR-395)", () => {
+  const drops = (pane: PaneView, next: PaneView) =>
+    paneHandoffDropsPanel(pane, next, "orca");
+
+  it("does not for a section change on the same agent", () => {
+    expect(drops({ kind: "agent" }, { kind: "agent", tab: "tools" })).toBe(false);
+    expect(
+      drops({ kind: "agent", slug: "kraken" }, { kind: "agent", slug: "kraken", tab: "memories" }),
+    ).toBe(false);
+    // A bare agent pane and one naming the conversation's own slug are one panel.
+    expect(drops({ kind: "agent" }, { kind: "agent", slug: "orca" })).toBe(false);
+  });
+
+  it("does not when no agent panel is open", () => {
+    expect(drops(null, { kind: "desk" })).toBe(false);
+    expect(drops({ kind: "desk" }, null)).toBe(false);
+    expect(drops({ kind: "routines", focus: {} }, { kind: "agent" })).toBe(false);
+    expect(
+      drops({ kind: "strategy", agentSlug: "orca", strategySlug: "lp" }, { kind: "agent" }),
+    ).toBe(false);
+  });
+
+  it("does for a close, the desk, the library and a strategy sheet", () => {
+    expect(drops({ kind: "agent" }, null)).toBe(true);
+    expect(drops({ kind: "agent" }, { kind: "desk" })).toBe(true);
+    expect(drops({ kind: "agent" }, { kind: "routines", focus: {} })).toBe(true);
+    expect(
+      drops({ kind: "agent" }, { kind: "strategy", agentSlug: "orca", strategySlug: "lp" }),
+    ).toBe(true);
+  });
+
+  it("does for an agent panel that resolves to someone else", () => {
+    expect(drops({ kind: "agent" }, { kind: "agent", slug: "kraken" })).toBe(true);
+    // An Execution row's agent is open; a bare agent pane means the conversation's.
+    expect(drops({ kind: "agent", slug: "kraken" }, { kind: "agent" })).toBe(true);
+  });
+});
+
+describe("the strategy pane's section, run and tick", () => {
+  const q = (s: string) => new URLSearchParams(s);
+
+  it("round-trips through the URL", () => {
+    const next = writePane(q("?conversation=c1"), {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+      section: "fleet",
+      run: "s:3",
+      tick: 40,
+    });
+    expect(next.get("conversation")).toBe("c1");
+    expect(readPane(next, {})).toEqual({
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+      section: "fleet",
+      run: "s:3",
+      tick: 40,
+    });
+  });
+
+  it("keeps the tab on the same loop and drops it for another", () => {
+    const here = q("?panel=strategy&loop=brigado/brl_mm&sec=fleet");
+    const same = writePane(here, {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+    });
+    expect(same.get("sec")).toBe("fleet");
+    const other = writePane(here, {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "usdt_mm",
+    });
+    expect(other.get("sec")).toBeNull();
+  });
+
+  it("reads a retired `sec=detail` as Fleet, and carries it so (ARCH-427)", () => {
+    const here = q("?panel=strategy&loop=brigado/brl_mm&sec=detail");
+    expect(readPane(here, {})).toMatchObject({ kind: "strategy", section: "fleet" });
+    const same = writePane(here, {
+      kind: "strategy",
+      agentSlug: "brigado",
+      strategySlug: "brl_mm",
+    });
+    expect(same.get("sec")).toBe("fleet");
+  });
+
+  it("clears its keys on the way out of the strategy pane", () => {
+    const next = writePane(
+      q("?panel=strategy&loop=brigado/brl_mm&sec=runs&run=s:3&tick=4"),
+      { kind: "agent" },
+    );
+    expect(next.get("sec")).toBeNull();
+    expect(next.get("run")).toBeNull();
+    expect(next.get("tick")).toBeNull();
+  });
+
+  it("builds the page's way back into the conversation it came from", () => {
+    expect(
+      paneReturnHref("/?conversation=c1&panel=agent&tab=brain", {
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        section: "playbook",
+        run: "s:1",
+      }),
+    ).toBe("/?conversation=c1&panel=strategy&loop=brigado%2Fbrl_mm&sec=playbook&run=s%3A1");
+    expect(
+      paneReturnHref(undefined, {
+        agentSlug: "brigado",
+        strategySlug: "brl_mm",
+        section: "now",
+      }),
+    ).toBe("/?panel=strategy&loop=brigado%2Fbrl_mm&sec=now");
   });
 });

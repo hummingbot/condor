@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from urllib.parse import urlsplit
 
+import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.fetchers.api_server import (
+    ApiServerSettingsUnsupported,
+    fetch_client_config,
+    fetch_system_info,
+    fetch_upgrade_preflight,
+    fetch_upgrade_status,
+    start_upgrade,
+    update_client_config,
+)
 from condor.server_data_service import (
     CREDENTIAL_DERIVED,
     ServerDataType,
@@ -19,7 +30,8 @@ from condor.web.auth import (
 from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
-    CredentialInfo,
+    ApiClientConfigUpdateRequest,
+    ApiUpgradeRequest,
     GatewayNetworkUpdateRequest,
     GatewayPullRequest,
     GatewayStartRequest,
@@ -550,6 +562,241 @@ async def gateway_wallet_remove(
             server,
         )
         raise upstream_error("Failed to remove wallet", e)
+
+
+# ── Hummingbot API server (FEAT-121) ──
+#
+# Scoped to the server the navbar points at, exactly like the Gateway routes above: the
+# ``?server=`` query param is the only picker, so the panel and the rest of the app can
+# never disagree about which server is "the" server.
+#
+# These three reach past ``hummingbot-api-client``, which is pinned to a released PyPI
+# version with no method for either route — see ``condor.fetchers.raw_api``. The one
+# consequence visible here is ``ApiServerSettingsUnsupported``: a server whose API
+# predates the routes answers 404, and that is a capability answer, not an outage, so it
+# becomes a 501 the panel can turn into "upgrade this server's API" rather than a 502
+# that reads as "the server is down".
+
+
+def _api_too_old(server: str, exc: Exception) -> HTTPException:
+    """A 501 that names the upgrade, for a server whose API predates these routes."""
+    logger.info("Server '%s' does not serve the API settings routes: %s", server, exc)
+    return HTTPException(
+        status_code=501,
+        detail=(
+            "This server's hummingbot-api is older than this panel. "
+            "Upgrade it to read its version and bot defaults."
+        ),
+    )
+
+
+@router.get("/api/info")
+async def api_server_info(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Versions, image provenance and market-data tunables of the selected server.
+
+    TRADER: it reports what the server runs, which is server state, and carries no
+    credential — ``MarketDataSettings`` is intervals and timeouts by construction.
+    """
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        return await fetch_system_info(client)
+    except ApiServerSettingsUnsupported as e:
+        raise _api_too_old(server, e)
+    except Exception as e:
+        logger.exception("Failed to fetch API server info from '%s'", server)
+        raise upstream_error("Failed to fetch API server info", e)
+
+
+@router.get("/api/client-config")
+async def api_client_config(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """The client defaults bots deployed from this server will inherit.
+
+    TRADER: a rate oracle source and a display token are not secrets, and a trader who
+    can deploy a bot should be able to see what that bot will be built with. Writing
+    them is OWNER, below.
+    """
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        return await fetch_client_config(client)
+    except ApiServerSettingsUnsupported as e:
+        raise _api_too_old(server, e)
+    except Exception as e:
+        logger.exception("Failed to fetch bot client defaults from '%s'", server)
+        raise upstream_error("Failed to fetch bot client defaults", e)
+
+
+@router.put("/api/client-config")
+async def api_client_config_update(
+    req: ApiClientConfigUpdateRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Change the client defaults new bot deploys inherit. OWNER only.
+
+    This rewrites a file on the owner's host that decides how every bot deployed there
+    next is configured — infrastructure, not trading, which is the same line the gateway
+    pull and wallet routes draw.
+
+    Running bots are untouched: a deploy copies ``conf_client.yml`` into the instance, so
+    a bot keeps the copy it was built with until it is redeployed.
+    """
+    cm = get_config_manager()
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    try:
+        return await update_client_config(
+            client,
+            rate_oracle_source=req.rate_oracle_source,
+            global_token_name=req.global_token_name,
+            global_token_symbol=req.global_token_symbol,
+            rate_limits_share_pct=req.rate_limits_share_pct,
+        )
+    except ApiServerSettingsUnsupported as e:
+        raise _api_too_old(server, e)
+    except Exception as e:
+        # Includes the upstream 400/422 naming an invalid oracle source or share, which
+        # upstream_error forwards as a 400 with the API's own message.
+        logger.exception("Failed to update bot client defaults on '%s'", server)
+        raise upstream_error("Failed to update bot client defaults", e)
+
+
+# ── Upgrading a server's hummingbot-api (FEAT-122) ──
+#
+# The dangerous half of this lives on the server (``services/self_upgrade.py``): it
+# re-runs its own preflight before starting, refuses a pinned deployment outright, and
+# treats a fact it could not establish as a refusal. These routes add the two things
+# that are Condor's to decide.
+#
+# **Who may.** Reading the preflight is TRADER — "this server is two versions behind and
+# has 4 executors running" is server state, the same class of fact the Version card
+# already shows. Starting it is OWNER, the same bar as the gateway pull: it replaces the
+# code running on the owner's host, and it closes every executor on the way.
+#
+# **A restarting server is not a broken one.** The upgrade's whole purpose is to replace
+# the container answering these calls, so for a minute the status poll cannot connect.
+# Reported as a 502 the operator reads "the upgrade broke my server" at the exact moment
+# nothing is wrong, so a *transport* failure on the status route — no HTTP answer at all —
+# becomes ``phase: "restarting"``. An HTTP answer keeps its status: a 500 from a server
+# that is up is a real failure and has to look like one.
+
+
+def _upgrade_route_missing(server: str, exc: Exception) -> HTTPException:
+    """A 501 for a server whose API has no upgrade routes — which it upgrades over SSH."""
+    logger.info("Server '%s' does not serve the self-upgrade routes: %s", server, exc)
+    return HTTPException(
+        status_code=501,
+        detail=(
+            "This server's hummingbot-api cannot upgrade itself. "
+            "Upgrade it over SSH once; later upgrades can be done from here."
+        ),
+    )
+
+
+@router.get("/api/upgrade/preflight")
+async def api_upgrade_preflight(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Whether this server can replace its own hummingbot-api, and what it would cost.
+
+    TRADER: it reports what the server is running and how far behind it is, which is the
+    same kind of fact the Version card already shows. Acting on it is OWNER, below.
+
+    A refusal is a 200 with ``can_upgrade: false`` and a reason, not an error — that is
+    the normal answer for a pinned server and the panel renders it as such.
+    """
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        return await fetch_upgrade_preflight(client)
+    except ApiServerSettingsUnsupported as e:
+        raise _upgrade_route_missing(server, e)
+    except Exception as e:
+        logger.exception("Failed to fetch the upgrade preflight from '%s'", server)
+        raise upstream_error("Failed to check for an upgrade", e)
+
+
+@router.post("/api/upgrade")
+async def api_upgrade_start(
+    req: ApiUpgradeRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Start replacing this server's hummingbot-api with the published image. OWNER only.
+
+    The same line the gateway pull draws, for a stronger reason: this rewrites what code
+    runs on the owner's host *and* restarts it, closing every running executor as
+    SYSTEM_CLEANUP. Bot containers are separate and keep running.
+
+    The server re-runs its own preflight, so a 409 here means it refused — and a refusal
+    means nothing was pulled and nothing was changed. ``upstream_error`` forwards it as a
+    400 carrying the server's own reason.
+    """
+    cm = get_config_manager()
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    try:
+        return await start_upgrade(
+            client, acknowledge_executor_loss=req.acknowledge_executor_loss
+        )
+    except ApiServerSettingsUnsupported as e:
+        raise _upgrade_route_missing(server, e)
+    except Exception as e:
+        logger.exception("Failed to start the hummingbot-api upgrade on '%s'", server)
+        raise upstream_error("Failed to start the upgrade", e)
+
+
+@router.get("/api/upgrade/status")
+async def api_upgrade_status(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    """Follow an upgrade, across the restart it causes. OWNER only.
+
+    Owner rather than trader because the log tail is the helper container's output from
+    the owner's own host, which is closer to a server log than to server state.
+
+    A transport failure — a refused connection, a timeout, a client that cannot be built
+    because the server is not answering — is reported as ``phase: "restarting"``, because
+    during this particular operation that is the expected state and not a fault. Anything
+    that did answer over HTTP keeps its status.
+    """
+    cm = get_config_manager()
+    _require_owner(cm, user.id, server)
+    try:
+        client = await cm.get_client(server)
+        return await fetch_upgrade_status(client)
+    except ApiServerSettingsUnsupported as e:
+        raise _upgrade_route_missing(server, e)
+    except ValueError as e:
+        # The config manager's own rejection ("no such server"): not a restart.
+        raise HTTPException(status_code=502, detail=f"Cannot connect to server: {e}")
+    except aiohttp.ClientResponseError as e:
+        # It answered, so it is up; whatever it said keeps its own status.
+        logger.exception("Failed to fetch the upgrade status from '%s'", server)
+        raise upstream_error("Failed to fetch the upgrade status", e)
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+        logger.info("Server '%s' is not answering while upgrading: %s", server, e)
+        return {
+            "run_id": None,
+            "phase": "restarting",
+            "detail": (
+                "The server is not answering. It is being replaced; this is expected for "
+                "a minute or two."
+            ),
+            "log_tail": [],
+        }
+    except Exception as e:
+        logger.exception("Failed to fetch the upgrade status from '%s'", server)
+        raise upstream_error("Failed to fetch the upgrade status", e)
 
 
 # ── Voice Preferences ──

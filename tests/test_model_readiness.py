@@ -148,6 +148,7 @@ def test_acp_bridges_surface_login_state(monkeypatch):
         "command": "claude-agent-acp",
         "available": True,
         "logged_in": True,
+        "outdated": None,
     }
     assert by_key["gemini"]["available"] is True
     assert by_key["gemini"]["logged_in"] is False

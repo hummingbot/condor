@@ -126,9 +126,9 @@ def test_a_new_strategy_lands_local_and_the_shipped_tree_is_untouched(stock):
 
     s = StrategyStore().get("scout", "grid")
     assert s is not None
-    assert s.home == agent_home("scout") / "strategies" / "grid"
-    assert s.source == s.home / "strategy.md"
-    assert not (stock / "strategies").exists()
+    assert s.home == agent_home("scout") / "loops" / "grid"
+    assert s.source == s.home / "loop.md"
+    assert not (stock / "loops").exists()
 
 
 # ── 3. The fork is per item ──
@@ -193,13 +193,13 @@ def test_deleting_a_stock_agent_is_refused(stock):
 
 def test_deleting_a_stock_strategy_is_refused(stock):
     _write(
-        stock / "strategies" / "shipped" / "strategy.md",
+        stock / "loops" / "shipped" / "loop.md",
         "---\nname: Shipped\n---\n\ntick\n",
     )
 
     with pytest.raises(ValueError, match="ships with Condor"):
         StrategyStore().delete("scout", "shipped")
-    assert (stock / "strategies" / "shipped" / "strategy.md").exists()
+    assert (stock / "loops" / "shipped" / "loop.md").exists()
 
 
 def test_deleting_a_local_strategy_still_works(stock):
@@ -267,10 +267,10 @@ def test_the_raw_agent_md_route_writes_into_the_local_root(stock):
 
 def test_the_raw_strategy_md_route_writes_into_the_local_root(stock):
     _write(
-        stock / "strategies" / "shipped" / "strategy.md",
+        stock / "loops" / "shipped" / "loop.md",
         "---\nname: Shipped\n---\n\ntick\n",
     )
-    before = (stock / "strategies" / "shipped" / "strategy.md").read_text()
+    before = (stock / "loops" / "shipped" / "loop.md").read_text()
 
     resp = _client().put(
         "/agents/scout/strategies/shipped",
@@ -278,8 +278,8 @@ def test_the_raw_strategy_md_route_writes_into_the_local_root(stock):
     )
 
     assert resp.status_code == 200, resp.text
-    assert (stock / "strategies" / "shipped" / "strategy.md").read_text() == before
-    local = agent_home("scout") / "strategies" / "shipped" / "strategy.md"
+    assert (stock / "loops" / "shipped" / "loop.md").read_text() == before
+    local = agent_home("scout") / "loops" / "shipped" / "loop.md"
     assert "mine" in local.read_text()
 
 
@@ -291,8 +291,42 @@ def test_the_raw_learnings_route_writes_into_the_local_root(stock):
     )
 
     assert resp.status_code == 200, resp.text
-    learnings = agent_home("scout") / "strategies" / "grid" / "learnings.md"
+    learnings = agent_home("scout") / "loops" / "grid" / "learnings.md"
     assert learnings.read_text() == "learned"
+
+
+def test_the_create_strategy_route_seeds_the_journals_learnings_template(stock):
+    from condor.agents.journal import LEARNINGS_TEMPLATE
+
+    resp = _client().post("/agents/scout/strategies", json={"name": "Grid"})
+
+    assert resp.status_code == 200, resp.text
+    strategy = StrategyStore().get("scout", "grid")
+    assert (strategy.home / "learnings.md").read_text() == LEARNINGS_TEMPLATE
+
+
+def test_a_learning_appended_to_a_route_created_strategy_adds_no_section(
+    stock, tmp_path
+):
+    import re
+
+    from condor.agents.journal import JournalManager
+
+    resp = _client().post("/agents/scout/strategies", json={"name": "Grid"})
+    assert resp.status_code == 200, resp.text
+    home = StrategyStore().get("scout", "grid").home
+
+    JournalManager(
+        "scout_grid.1", session_dir=tmp_path / "session_1", agent_dir=home
+    ).append_learning("Spreads widen at the open", "market")
+
+    text = (home / "learnings.md").read_text()
+    assert re.findall(r"^## (.+)$", text, re.MULTILINE) == [
+        "Market Observations",
+        "Execution Notes",
+        "Retired Insights",
+    ]
+    assert "Spreads widen at the open" in text
 
 
 # ── 7. The defaults and the back-walk sites ──
@@ -332,6 +366,164 @@ def test_the_shutdown_policy_walks_strategy_then_agent_then_defaults(stock):
 
     _write(strategy.home / "shutdown.md", "---\non_kill_switch: hold\n---\n\nS")
     assert load_shutdown_policy(strategy)[1] == "S"
+
+
+@pytest.fixture
+def forget_shadow_warnings():
+    """The shadow warning is once per process; each test starts from none."""
+    from condor.memory import paths
+
+    paths._SHADOWED_RULEBOOKS_WARNED.clear()
+    yield
+    paths._SHADOWED_RULEBOOKS_WARNED.clear()
+
+
+def _shadow_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and "shadows" in r.getMessage()
+    ]
+
+
+def test_the_three_policy_loaders_share_one_resolver():
+    """ARCH-656: no loader builds its own candidate walk or parses frontmatter."""
+    import inspect
+
+    from condor.agents import prompts, reflection, shutdown
+
+    for fn in (
+        reflection.load_policy,
+        prompts.load_core_rules,
+        shutdown.load_shutdown_policy,
+    ):
+        src = inspect.getsource(fn)
+        assert "read_layered_file" in src
+        for hand_rolled in (
+            "agent_home_layers",
+            "defaults_layers",
+            "parse_frontmatter",
+        ):
+            assert hand_rolled not in src, (fn.__name__, hand_rolled)
+
+    from condor.memory import paths
+
+    # Tests and callers clear the set by its old name: it must be the same object.
+    assert prompts._SHADOWED_RULEBOOKS_WARNED is paths._SHADOWED_RULEBOOKS_WARNED
+
+
+def test_a_differing_local_reflect_policy_is_warned_about_once(
+    forget_shadow_warnings, caplog
+):
+    from condor.agents.reflection import load_policy
+    from condor.memory.paths import defaults_layers
+
+    local_defaults, stock_defaults = defaults_layers()
+    _write(stock_defaults / "reflect.md", "shipped reflection")
+    _write(local_defaults / "reflect.md", "our reflection")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            assert load_policy("scout") == "our reflection"
+
+    warnings = _shadow_warnings(caplog)
+    assert len(warnings) == 1
+    assert str(local_defaults / "reflect.md") in warnings[0]
+    assert str(stock_defaults / "reflect.md") in warnings[0]
+
+
+def test_an_identical_local_reflect_policy_says_nothing(forget_shadow_warnings, caplog):
+    from condor.agents.reflection import load_policy
+    from condor.memory.paths import defaults_layers
+
+    local_defaults, stock_defaults = defaults_layers()
+    _write(stock_defaults / "reflect.md", "same reflection")
+    _write(local_defaults / "reflect.md", "same reflection")
+
+    with caplog.at_level("WARNING"):
+        assert load_policy("scout") == "same reflection"
+
+    assert not _shadow_warnings(caplog)
+
+
+def test_a_differing_local_strategy_shutdown_policy_is_warned_about_once(
+    stock, forget_shadow_warnings, caplog
+):
+    from condor.agents.shutdown import load_shutdown_policy
+    from condor.agents.strategy import LOOPS_DIRNAME
+
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    shipped = stock / LOOPS_DIRNAME / strategy.slug / "shutdown.md"
+    _write(shipped, "---\non_kill_switch: hold\n---\n\nshipped")
+    _write(strategy.home / "shutdown.md", "---\non_kill_switch: hold\n---\n\nours")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            assert load_shutdown_policy(strategy)[1] == "ours"
+
+    warnings = _shadow_warnings(caplog)
+    assert len(warnings) == 1
+    assert str(strategy.home / "shutdown.md") in warnings[0]
+    assert str(shipped) in warnings[0]
+
+
+def test_an_identical_local_strategy_shutdown_policy_says_nothing(
+    stock, forget_shadow_warnings, caplog
+):
+    from condor.agents.shutdown import load_shutdown_policy
+    from condor.agents.strategy import LOOPS_DIRNAME
+
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    text = "---\non_kill_switch: hold\n---\n\nsame"
+    _write(stock / LOOPS_DIRNAME / strategy.slug / "shutdown.md", text)
+    _write(strategy.home / "shutdown.md", text)
+
+    with caplog.at_level("WARNING"):
+        assert load_shutdown_policy(strategy)[1] == "same"
+
+    assert not _shadow_warnings(caplog)
+
+
+def test_a_frontmatter_only_strategy_shutdown_policy_still_wins(stock):
+    """An empty body is a legitimate shutdown.md: its policy must not fall through."""
+    from condor.agents.shutdown import (
+        DEFAULT_POLICY,
+        VALID_POLICIES,
+        load_shutdown_policy,
+    )
+    from condor.memory.paths import defaults_layers
+
+    other = next(p for p in sorted(VALID_POLICIES) if p != DEFAULT_POLICY)
+    _write(
+        defaults_layers()[1] / "shutdown.md",
+        f"---\non_kill_switch: {DEFAULT_POLICY}\n---\n\nD",
+    )
+    _write(stock / "shutdown.md", f"---\non_kill_switch: {DEFAULT_POLICY}\n---\n\nA")
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    _write(strategy.home / "shutdown.md", f"---\non_kill_switch: {other}\n---\n")
+
+    policy, body = load_shutdown_policy(strategy)
+    assert policy.on_kill_switch == other
+    assert body == ""
+
+
+def test_a_directory_named_like_the_policy_is_skipped_not_crashed_on(stock):
+    from condor.agents.shutdown import load_shutdown_policy
+    from condor.memory.paths import defaults_layers
+
+    _write(defaults_layers()[1] / "shutdown.md", "---\non_kill_switch: hold\n---\n\nD")
+    strategy = StrategyStore().create(
+        agent_slug="scout", name="Grid", instructions="tick"
+    )
+    (strategy.home / "shutdown.md").mkdir(parents=True)
+
+    assert load_shutdown_policy(strategy)[1] == "D"
 
 
 # ── 8. Routines layer by name, the way they always have ──
@@ -423,10 +615,8 @@ def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock)
     _write(
         home / "skills" / "basis" / "SKILL.md", SKILL_MD.format(slug="basis", body="B.")
     )
-    _write(
-        home / "strategies" / "carry" / "strategy.md", "---\nname: Carry\n---\n\ntick\n"
-    )
-    _write(home / "strategies" / "carry" / "learnings.md", "learned")
+    _write(home / "loops" / "carry" / "loop.md", "---\nname: Carry\n---\n\ntick\n")
+    _write(home / "loops" / "carry" / "learnings.md", "learned")
     _write(home / "store" / "user_7" / "audit.log", "ran")
     _write(home / "mutes.yml", "skills: []\n")
 
@@ -438,13 +628,13 @@ def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock)
     assert set(result["paths"]) == {
         f"{prefix}/perps/AGENT.md",
         f"{prefix}/perps/skills/basis/SKILL.md",
-        f"{prefix}/perps/strategies/carry/strategy.md",
+        f"{prefix}/perps/loops/carry/loop.md",
     }
     shipped = stock_agent_home("perps")
     assert (shipped / "AGENT.md").exists()
     assert not (shipped / "store").exists()
     assert not (shipped / "mutes.yml").exists()
-    assert not (shipped / "strategies" / "carry" / "learnings.md").exists()
+    assert not (shipped / "loops" / "carry" / "learnings.md").exists()
 
 
 def test_publishing_clears_the_fork_stamp(stock):
@@ -537,3 +727,117 @@ def test_a_promoted_proposal_lands_in_the_local_library(stock):
         in (agent_home("scout") / "skills" / "recon" / "SKILL.md").read_text()
     )
     assert (stock / "skills" / "recon" / "SKILL.md").read_text().endswith("Look.\n")
+
+
+# ── SEC-648: a slug is one path segment, never a way into the shipped tree ──
+
+TRAVERSAL = "../../agents/brigado"
+
+
+@pytest.fixture
+def repo_layout(tmp_path, monkeypatch):
+    """The documented layout: stock ``<repo>/agents``, local ``<repo>/.condor/agents``.
+
+    With it ``<local>/../../agents/brigado`` *is* the shipped brigado, which is
+    what made a traversal slug read as a local file to every layering guard.
+    """
+    stock_root = tmp_path / "agents"
+    local_root = tmp_path / ".condor" / "agents"
+    monkeypatch.setenv("CONDOR_STOCK_AGENTS_ROOT", str(stock_root))
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(local_root))
+    # A real install has its local root; without it the OS cannot walk the
+    # ``..`` through a missing directory and the traversal never lands.
+    local_root.mkdir(parents=True)
+    agent_md = _write(
+        stock_root / "brigado" / "AGENT.md",
+        AGENT_MD.format(name="Brigado", desc="shipped", body="Ship."),
+    )
+    _write(
+        stock_root / "brigado" / "loops" / "default" / "loop.md",
+        "---\nname: Default\n---\n\nLoop.\n",
+    )
+    return stock_root, local_root, agent_md
+
+
+def _local_files(local_root):
+    return sorted(p for p in local_root.rglob("*")) if local_root.exists() else []
+
+
+def test_a_traversal_slug_never_resolves_into_the_shipped_tree(repo_layout):
+    from condor.layering import resolves_to_stock
+    from condor.paths import UnsafeIdError
+
+    assert AgentStore().get(TRAVERSAL) is None
+    assert StrategyStore().list(TRAVERSAL) == []
+    # The layering guard itself refuses the slug rather than answering "local";
+    # the stores above are what turn that refusal into "no such agent".
+    with pytest.raises(UnsafeIdError):
+        resolves_to_stock(TRAVERSAL, "AGENT.md")
+
+
+def test_the_strategy_slug_cannot_traverse_either(repo_layout):
+    _, local_root, _ = repo_layout
+    (local_root / "condor" / "loops").mkdir(parents=True, exist_ok=True)
+    sslug = "../../../../agents/brigado/loops/default"
+
+    assert StrategyStore().get("condor", sslug) is None
+    assert StrategyStore().get_by_key(f"condor.{sslug}") is None
+
+
+def test_deleting_or_updating_through_a_traversal_slug_leaves_the_shipped_copy(
+    repo_layout,
+):
+    from condor.agents.agent import Agent
+    from condor.paths import UnsafeIdError
+
+    _, local_root, agent_md = repo_layout
+    original = agent_md.read_bytes()
+
+    assert AgentStore().delete(TRAVERSAL) is False
+    assert agent_md.read_bytes() == original
+
+    with pytest.raises(UnsafeIdError) as exc:
+        AgentStore().update(Agent(slug=TRAVERSAL, name="x"))
+    assert isinstance(exc.value, ValueError)
+    assert agent_md.read_bytes() == original
+    assert _local_files(local_root) == []
+
+
+def test_manage_skill_cannot_target_a_traversal_slug(repo_layout):
+    import asyncio
+
+    from mcp_servers.condor.tools.skills import manage_skill
+
+    stock_root, _, _ = repo_layout
+    result = asyncio.run(
+        manage_skill(
+            action="create",
+            agent=TRAVERSAL,
+            name="evil",
+            description="d",
+            when_to_use="w",
+            body="b",
+        )
+    )
+    assert result == {"error": f"No agent or loop found for '{TRAVERSAL}'"}
+    assert not (stock_root / "brigado" / "skills").exists()
+
+
+def test_safe_slug_accepts_every_slug_slugify_produces():
+    from condor.frontmatter import slugify
+    from condor.memory.paths import CHAT_SLUG, safe_slug
+    from condor.paths import UnsafeIdError, local_agents_root
+
+    names = ["RIVER Scalper v2", "BRL MM", "Risk Sentry", "Ñandú Bot", "Émile"]
+    names.append("--- ---")
+    assert slugify("--- ---") == "unnamed"
+    for name in names:
+        assert agent_home(slugify(name)) == local_agents_root() / slugify(name)
+    assert agent_home(None) == local_agents_root() / CHAT_SLUG
+    assert agent_home("") == local_agents_root() / CHAT_SLUG
+
+    for bad in ("..", ".", "a/b", "a\\b", "a\0b", "x..y", "../x"):
+        with pytest.raises(UnsafeIdError):
+            safe_slug(bad)
+    with pytest.raises(UnsafeIdError):
+        resolve_agent_file("scout", "skills", "../../other", "SKILL.md")

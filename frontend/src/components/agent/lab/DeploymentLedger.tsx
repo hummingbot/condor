@@ -18,6 +18,14 @@ import {
   pnlTextClass,
 } from "@/lib/formatters";
 
+// A bot row's figures are the run's slice of that bot's history; a controller's
+// are lifetime (the history is per instance, never per controller), so the two
+// levels must not be read as the same basis (CORR-661).
+const FIGURE_BASIS_HINT =
+  "Bot rows: this run's slice of the bot's history. Controller rows: the controller's lifetime figure.";
+
+const NO_USD_RATE_HINT = "no USD rate for this quote";
+
 /**
  * What this run put into the world (FEAT-100).
  *
@@ -79,8 +87,18 @@ export function DeploymentLedger({
                 <th className="px-2 py-1.5 font-bold">Created at</th>
                 <th className="px-2 py-1.5 font-bold">Since</th>
                 <th className="px-2 py-1.5 font-bold">Live</th>
-                <th className="px-2 py-1.5 text-right font-bold">PnL</th>
-                <th className="px-2 py-1.5 text-right font-bold">Volume</th>
+                <th
+                  className="px-2 py-1.5 text-right font-bold"
+                  title={FIGURE_BASIS_HINT}
+                >
+                  PnL
+                </th>
+                <th
+                  className="px-2 py-1.5 text-right font-bold"
+                  title={FIGURE_BASIS_HINT}
+                >
+                  Volume
+                </th>
                 <th className="px-2 py-1.5" />
               </tr>
             </thead>
@@ -142,12 +160,33 @@ function LedgerRow({ row, sessionNum }: { row: DeploymentRow; sessionNum?: numbe
           {liveLabel(row)}
         </span>
       </td>
-      <td className={`px-2 py-1.5 text-right font-mono ${pnlTextClass(row.pnl)}`}>
-        {formatCurrencyPnl(row.pnl)}
-      </td>
-      <td className="px-2 py-1.5 text-right font-mono text-[11px] text-[var(--color-text-muted)]">
-        {formatCompactUsd(row.volume)}
-      </td>
+      {/* A quote with no USD rate is still at face value: formatting it as
+          dollars would state a number that is not one (CORR-707). */}
+      {row.usd_converted === false ? (
+        <>
+          <td
+            className="px-2 py-1.5 text-right font-mono text-[var(--color-text-muted)]"
+            title={NO_USD_RATE_HINT}
+          >
+            —
+          </td>
+          <td
+            className="px-2 py-1.5 text-right font-mono text-[11px] text-[var(--color-text-muted)]"
+            title={NO_USD_RATE_HINT}
+          >
+            —
+          </td>
+        </>
+      ) : (
+        <>
+          <td className={`px-2 py-1.5 text-right font-mono ${pnlTextClass(row.pnl)}`}>
+            {formatCurrencyPnl(row.pnl)}
+          </td>
+          <td className="px-2 py-1.5 text-right font-mono text-[11px] text-[var(--color-text-muted)]">
+            {formatCompactUsd(row.volume)}
+          </td>
+        </>
+      )}
       <td className="px-2 py-1.5 text-right">
         {href && (
           <Link

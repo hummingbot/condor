@@ -1,10 +1,10 @@
 import {
+  ArrowLeft,
   ChevronLeft,
   ChevronRight,
   Layers,
   Maximize2,
   Minimize2,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -55,11 +55,14 @@ export function ReportViewer({
       if (e.key === "ArrowLeft") { goPrev(); e.preventDefault(); }
       else if (e.key === "ArrowRight") { goNext(); e.preventDefault(); }
       else if (e.key === "Escape" && fullscreen) { setFullscreen(false); e.preventDefault(); }
+      // Out of the viewer altogether when it is not fullscreen: with the Back
+      // button, this is how a reader leaves a report opened over a view.
+      else if (e.key === "Escape" && onClose) { onClose(); e.preventDefault(); }
       else if (e.key === "f" && allowFullscreen && !e.metaKey && !e.ctrlKey) { setFullscreen((f) => !f); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goPrev, goNext, fullscreen, allowFullscreen]);
+  }, [goPrev, goNext, fullscreen, allowFullscreen, onClose]);
 
   return (
     <div
@@ -147,13 +150,19 @@ export function ReportViewer({
               size="md"
             />
           )}
-          {fullscreen && onClose && (
+          {/* Whenever there is somewhere to go back to — not only in
+              fullscreen: a viewer opened over a view with fullscreen off had
+              no way out at all (CORR-422). */}
+          {onClose && (
             <button
+              type="button"
+              data-report-close
               onClick={onClose}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Close"
+              title="Back (Esc)"
+              aria-label="Close report"
             >
-              <X className="h-4 w-4" />
+              <ArrowLeft className="h-4 w-4" />
             </button>
           )}
         </div>

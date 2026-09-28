@@ -325,6 +325,31 @@ describe("AgentFleet", () => {
     expect(text()).toContain("brigado-brl_mm-btc");
   });
 
+  // Parity with `/bots`: an agent running one bot collapses its bot level, so
+  // the agent row at the root is the only place that bot's actions can live.
+  it("draws the bot's Stop and Logs when the agent runs a single bot", async () => {
+    await render();
+
+    expect(button("Stop bot")).toBeTruthy();
+    expect(button("Logs")).toBeTruthy();
+  });
+
+  // QA on PR 244 had the loop bar's run filter on ("run S1 only") — the
+  // default on this tab — and still found no Stop.
+  it("keeps the bot's Stop when the run filter narrows to that bot", async () => {
+    getStrategySessionExecutors.mockResolvedValue({
+      deployments: [
+        { kind: "bot", label: "brigado-brl_mm-btc", scope: "bot:brigado-brl_mm-btc" },
+        { kind: "controller", label: "pmm-1", scope: "ctrl:brigado-brl_mm-btc:pmm-1" },
+      ],
+    });
+
+    await render("", { run: session(1) });
+
+    expect(text()).toContain("run S1 only");
+    expect(button("Stop bot")).toBeTruthy();
+  });
+
   it("says so rather than drawing an empty fleet when there is no server at all", async () => {
     await render("", { serverName: "", ambient: null as unknown as string });
 

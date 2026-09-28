@@ -36,9 +36,9 @@ def roots(tmp_path, monkeypatch):
 
 def _ship(stock, sslug: str, name: str) -> None:
     """Put a strategy in the shipped library, the way a release would."""
-    home = stock / "brigado" / "strategies" / sslug
+    home = stock / "brigado" / "loops" / sslug
     home.mkdir(parents=True)
-    (home / "strategy.md").write_text(f"---\nname: {name}\n---\n\nTick.\n")
+    (home / "loop.md").write_text(f"---\nname: {name}\n---\n\nTick.\n")
 
 
 def _client() -> TestClient:
@@ -69,7 +69,7 @@ def test_a_shipped_strategy_with_local_runtime_output_is_still_refused(roots):
     """
     local, stock = roots
     _ship(stock, "brl_mm", "BRL MM")
-    home = local / "brigado" / "strategies" / "brl_mm"
+    home = local / "brigado" / "loops" / "brl_mm"
     home.mkdir(parents=True)
     (home / "learnings.md").write_text("# Learnings\n")
 
@@ -83,7 +83,7 @@ def test_a_local_strategy_still_deletes(roots):
     """The refusal is scoped to shipped playbooks, not to deletes at large."""
     local, _ = roots
     StrategyStore().create(agent_slug="brigado", name="Scalp")
-    home = local / "brigado" / "strategies" / "scalp"
+    home = local / "brigado" / "loops" / "scalp"
     assert home.exists()
 
     res = _client().delete("/agents/brigado/strategies/scalp")

@@ -13,7 +13,8 @@
 // be a state and not a footnote.
 
 import type { AgentActionRow } from "@/lib/agent-attribution";
-import type { AgentRunRow } from "@/lib/api";
+import type { AgentPerformance, AgentRunRow, StrategyDetail } from "@/lib/api";
+import { formatDuration } from "@/lib/formatters";
 
 /**
  * The four kinds of work a run can be (FEAT-111).
@@ -135,18 +136,8 @@ export function runDurationSec(
   return seconds >= 0 ? seconds : null;
 }
 
-/** `4h12m`, `12m`, `45s`. Compact enough to sit beside a tick count. */
-export function formatDuration(seconds: number | null): string {
-  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "";
-  const s = Math.floor(seconds);
-  if (s >= 86400) {
-    const days = Math.floor(s / 86400);
-    return `${days}d${Math.floor((s % 86400) / 3600)}h`;
-  }
-  if (s >= 3600) return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
-  if (s >= 60) return `${Math.floor(s / 60)}m`;
-  return `${s}s`;
-}
+/** `4h12m`, `12m`, `45s` — the shared duration rule, re-exported for `runFacts`'s callers. */
+export { formatDuration };
 
 /**
  * The rail's second line: `20 ticks · 4h12m`.
@@ -252,3 +243,50 @@ export const BEAT_TITLES: Record<BeatState, string> = {
   idle: "no actions on this tick",
   unlogged: "no action log for this run",
 };
+
+/**
+ * The controller ids whose executors a live chart should stream for a run.
+ *
+ * `seed` is the caller's executor-mode ids: a running engine tags its own
+ * executors with its agent_id. A bot-mode run adds nothing there — a bot's
+ * controllers tag their executors with their own config id, never with the
+ * agent_id — which is why the live charts once stayed empty for it. So the
+ * seed is widened with every controller whose bot is alive now.
+ *
+ * Liveness is `bot_name` in `perf.bot_names`, never the controller's own
+ * `status` (see `AgentControllerRow.status`: the snapshot reports "running"
+ * even for archived instances). A controller with no id is skipped. The seed
+ * is never mutated, and its ids come first, each once.
+ */
+export function liveControllerIds(
+  perf: Pick<AgentPerformance, "bot_names" | "controllers"> | null | undefined,
+  seed: readonly string[] = [],
+): string[] {
+  const ids = new Set(seed);
+  const live = new Set(perf?.bot_names ?? []);
+  for (const c of perf?.controllers ?? []) {
+    if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
+  }
+  return Array.from(ids);
+}
+
+// ── Trading context ──
+
+/**
+ * The trading context a strategy starts under when the caller names none.
+ *
+ * Mirrors the backend start route (`start_strategy` in condor/web/routes/agents.py:
+ * `if req.trading_context ... elif not config_dict.get("trading_context") and
+ * strategy.default_trading_context`): the context written in the strategy's
+ * config.yml wins, and the strategy's default only fills an empty one. Plain
+ * truthiness, no trimming — a whitespace-only config value wins on the server
+ * too, and trimming here would be a new mismatch. A non-string config value is
+ * treated as absent.
+ */
+export function effectiveTradingContext(
+  strategy: Pick<StrategyDetail, "config" | "default_trading_context">,
+): string {
+  const fromConfig = strategy.config.trading_context;
+  if (typeof fromConfig === "string" && fromConfig) return fromConfig;
+  return strategy.default_trading_context || "";
+}

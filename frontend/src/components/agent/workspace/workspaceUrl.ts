@@ -22,14 +22,6 @@ import {
   type WorkspaceUrl,
 } from "@/components/agent/workspace/views";
 
-/** The four keys the screen spends. */
-export const WORKSPACE_PARAMS = [
-  "strategy",
-  "run",
-  "tick",
-  OPEN_PARAM,
-] as const;
-
 /**
  * The two words the retired `?view=` grammar spelled a section with.
  *
@@ -101,6 +93,31 @@ export function applyWorkspacePatch(
 
   for (const key of LEGACY_VIEW_PARAMS) next.delete(key);
   return next;
+}
+
+/**
+ * The run screen's address, with this move applied — the only place one is built.
+ *
+ * Every link, redirect and `navigate()` into `/agents/:slug` goes through here,
+ * so each one escapes the slug, obeys the two cascades above and drops the
+ * retired `?view=`/`?tab=`, and the next key the grammar gains has one place to
+ * be taught. `base` is the query the move starts from (a redirect carries the
+ * old address's); a fresh link starts from nothing.
+ *
+ * `fscope` is the fleet browser's key, not the screen's, so it is written after
+ * the four: a link that opens the fleet on one term names it last. An empty
+ * query is no `?` at all — a bare row link stays `/agents/brigado`.
+ */
+export function workspaceHref(
+  slug: string,
+  patch: WorkspaceUrlPatch & { fscope?: string } = {},
+  base: URLSearchParams | string = "",
+): string {
+  const { fscope, ...move } = patch;
+  const params = applyWorkspacePatch(new URLSearchParams(base), move);
+  if (fscope) params.set("fscope", fscope);
+  const query = params.toString();
+  return `/agents/${encodeURIComponent(slug)}${query ? `?${query}` : ""}`;
 }
 
 /**

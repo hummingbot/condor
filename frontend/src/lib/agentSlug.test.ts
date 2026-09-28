@@ -4,6 +4,7 @@ import {
   bubbleAgentSlug,
   isAgentPage,
   normalizeAgentSlug,
+  slotFor,
 } from "@/lib/agentSlug";
 import { CHAT_SLUG } from "@/lib/api";
 
@@ -32,7 +33,9 @@ describe("bubbleAgentSlug", () => {
     expect(bubbleAgentSlug("/agents/condor")).toBe("");
     // ...and to the same one the bubble uses everywhere else, which is the
     // defect: two buckets meant two "Condor" conversations.
-    expect(bubbleAgentSlug("/agents/condor")).toBe(bubbleAgentSlug("/portfolio"));
+    expect(bubbleAgentSlug("/agents/condor")).toBe(
+      bubbleAgentSlug("/portfolio"),
+    );
   });
 
   it("binds a specialist's page to that specialist", () => {
@@ -64,5 +67,29 @@ describe("isAgentPage", () => {
     expect(isAgentPage("/")).toBe(false);
     expect(isAgentPage("/bots")).toBe(false);
     expect(isAgentPage("/portfolio")).toBe(false);
+  });
+});
+
+describe("slotFor", () => {
+  const slot = (slot_id: string, agent_slug?: string) => ({
+    info: { slot_id, agent_slug },
+  });
+
+  it("matches the slot's binding normalized, so a legacy \"condor\" record is Condor's", () => {
+    const slots = [slot("a", "condor"), slot("b", "orca")];
+    expect(slotFor(slots, "", null)).toBe(slots[0]);
+    expect(slotFor(slots, "orca", null)).toBe(slots[1]);
+    expect(slotFor(slots, "nobody", null)).toBeNull();
+  });
+
+  it("prefers the focused conversation, else the newest", () => {
+    const slots = [
+      slot("old", "orca"),
+      slot("other", "whale"),
+      slot("new", "orca"),
+    ];
+    expect(slotFor(slots, "orca", "old")).toBe(slots[0]);
+    expect(slotFor(slots, "orca", null)).toBe(slots[2]);
+    expect(slotFor(slots, "orca", "other")).toBe(slots[2]);
   });
 });

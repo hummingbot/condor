@@ -322,6 +322,27 @@ def _install_bridge(base: str, say=print) -> bool:
     return True
 
 
+def _upgrade_bridge(state: Readiness, say=print) -> bool:
+    """Run :attr:`Readiness.upgrade` for an outdated bridge. ``False`` if none or it failed.
+
+    The line is the one that row's "outdated" detail already showed — several
+    commands joined with ``&&``, each shlex-quoted — so it runs through a shell.
+    """
+    if not state.upgrade:
+        return False
+    say(f"\n  → {state.upgrade}")
+    try:
+        result = subprocess.run(state.upgrade, shell=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"  ✗ Upgrade failed: {e}")
+        return False
+    if result.returncode != 0:
+        say(f"  ✗ Upgrade failed (exit {result.returncode}) — try it manually.")
+        return False
+    say("  ✓ Upgraded.")
+    return True
+
+
 # ── The prompt loop ─────────────────────────────────────────────────────────
 
 
@@ -367,6 +388,11 @@ def choose(
             say(
                 f"  {_BADGES.get(state.state, '?')} {options[key]['label']} — {state.detail}\n"
             )
+        elif _upgrade_bridge(state, say):
+            base = base_of(key)
+            states.pop(base, None)
+            state = asyncio.run(readiness.probe(base, env))
+            states[base] = state
         if key in ("ollama:", "lmstudio:"):
             picked_key = _pick_local(key, state, ask, say)
             if picked_key is None:
@@ -433,7 +459,9 @@ def main(argv: list[str] | None = None) -> int:
     # runs there.
     base = base_of(chosen)
     state = _state_for(chosen, states, read_env(ENV_PATH))
-    if state.state == MISSING and base in ACP_COMMANDS and _install_bridge(base):
+    if (state.state == MISSING and base in ACP_COMMANDS and _install_bridge(base)) or (
+        _upgrade_bridge(state)
+    ):
         states.pop(base, None)
         state = _state_for(chosen, states, read_env(ENV_PATH))
 

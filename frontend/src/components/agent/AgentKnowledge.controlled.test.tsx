@@ -169,13 +169,16 @@ describe("the sections", () => {
       "skills",
       "memories",
       "tools",
-      "strategies",
+      "loops",
       "routines",
+      "controllers",
       "activity",
     ]);
 
     await render({ slug: "orca" });
-    expect(tabs()).toHaveLength(KNOWLEDGE_TABS.length);
+    // Controllers is the one section shown only when there is something in it
+    // (FEAT-127), and this agent carries none.
+    expect(tabs()).toHaveLength(KNOWLEDGE_TABS.length - 1);
     // Seven keys and nothing else. The strip is the Being taxonomy, so an
     // eighth key that is not a section — a Now, a Deployed — is the drift
     // FEAT-118 took the pane back from (see its Alternative D).
@@ -184,7 +187,7 @@ describe("the sections", () => {
       "Skills",
       "Memories",
       "Tools",
-      "Strategies",
+      "Loops",
       "Routines",
       "Activity",
     ]);
@@ -195,8 +198,8 @@ describe("the sections", () => {
     // because there is nothing left for a host to pass.
     await render({ slug: "orca" });
 
-    await click(tabNamed("Strategies"));
-    expect(body()).toContain("No strategies yet");
+    await click(tabNamed("Loops"));
+    expect(body()).toContain("No loops yet");
 
     await click(tabNamed("Activity"));
     expect(getDelegationHistory).toHaveBeenCalledWith("orca", 100, undefined);

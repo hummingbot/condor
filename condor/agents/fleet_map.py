@@ -180,9 +180,9 @@ def _pseudo_owners(known: set[str], agents: dict[str, Any]) -> list[FleetOwner]:
     now carries a ``controller_id`` tag of its own
     (:func:`~condor.agents.deeds.attribution_tag`), so these owners have a tag
     set exactly like a strategy's — the deed index's, where a loop's comes from
-    ``enumerate_agent_ids``. The browser's matcher needs no new case for it:
-    ``agentOfControllerId`` is exact-string membership over this list and does
-    not care which walk filled it.
+    ``enumerate_agent_ids``. The browser's matcher needs no new case for it: the
+    controller-id tag lookup in ``attributionIndex`` is exact-string membership
+    over this list and does not care which walk filled it.
     """
     from condor.agents.deed_index import PSEUDO_STRATEGY_NAMES, build_deed_index
 

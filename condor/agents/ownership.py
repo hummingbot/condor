@@ -148,6 +148,30 @@ def _parse_bots(data: dict[str, Any]) -> dict[str, OwnedBot]:
     return out
 
 
+def read_ledger(session_dir: Path | None) -> tuple[str, list[OwnedBot]]:
+    """``(namespace, owned bots oldest takeover first)`` from one read of the ledger.
+
+    The single parse behind :func:`read_owned` and :func:`read_ledger_namespace`,
+    for a caller that needs both — the deed index would otherwise open the same
+    ``owned_bots.json`` twice per run. Missing directory or file reads as
+    ``("", [])`` silently; an unreadable or corrupt file warns and reads the same.
+    """
+    if session_dir is None:
+        return "", []
+    path = Path(session_dir) / LEDGER_FILENAME
+    if not path.exists():
+        return "", []
+    try:
+        data = json.loads(path.read_text()) or {}
+    except Exception:
+        log.warning("BotLedger: unreadable %s", path)
+        return "", []
+    namespace = str(data.get("namespace", "") or "")
+    return namespace, sorted(
+        _parse_bots(data).values(), key=lambda b: (b.since, b.base)
+    )
+
+
 def read_owned(session_dir: Path | None) -> list[OwnedBot]:
     """Bots a session recorded owning, oldest takeover first.
 
@@ -157,17 +181,7 @@ def read_owned(session_dir: Path | None) -> list[OwnedBot]:
     predates the ledger or the file is unreadable, which callers read as "no
     evidence" and fall back on.
     """
-    if session_dir is None:
-        return []
-    path = Path(session_dir) / LEDGER_FILENAME
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text()) or {}
-    except Exception:
-        log.warning("BotLedger: unreadable %s", path)
-        return []
-    return sorted(_parse_bots(data).values(), key=lambda b: (b.since, b.base))
+    return read_ledger(session_dir)[1]
 
 
 def read_ledger_namespace(session_dir: Path | None) -> str:
@@ -183,14 +197,7 @@ def read_ledger_namespace(session_dir: Path | None) -> str:
     reader has no business instantiating the writer — and because ``_load``
     would happily create the object for a file that does not exist.
     """
-    if session_dir is None:
-        return ""
-    path = Path(session_dir) / LEDGER_FILENAME
-    try:
-        data = json.loads(path.read_text()) or {}
-    except Exception:
-        return ""
-    return str(data.get("namespace", "") or "")
+    return read_ledger(session_dir)[0]
 
 
 def prior_session_bases(sessions_root: Path | None) -> set[str]:

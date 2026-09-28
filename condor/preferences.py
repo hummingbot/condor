@@ -1217,6 +1217,7 @@ def resolve_custom_endpoint(
     user_data: Optional[Dict] = None,
     user_id: Optional[int] = None,
     strict: bool = False,
+    env_fallback: bool = True,
 ) -> tuple[Optional[str], Optional[str]]:
     """Resolve ``(base_url, api_key)`` for a ``custom@<endpoint>:<model>`` key.
 
@@ -1236,6 +1237,11 @@ def resolve_custom_endpoint(
     warning and falling back to the ``CUSTOM_LLM_*`` env vars. Interactive
     surfaces (chat sessions) want the loud failure; background surfaces
     (delegate, engine) keep the lenient default.
+
+    ``env_fallback=False`` returns only what the user's saved record holds and
+    never the ``CUSTOM_LLM_*`` env values — for a caller about to send the key
+    to a URL somebody else chose, where the install's key must not travel
+    (SEC-630).
     """
     provider_name, model_id = parse_custom_agent_key(agent_key)
     if not model_id:
@@ -1264,8 +1270,11 @@ def resolve_custom_endpoint(
     provider = provider or {}
     import os
 
-    base_url = provider.get("base_url") or os.environ.get("CUSTOM_LLM_BASE_URL")
-    api_key = provider.get("api_key") or os.environ.get("CUSTOM_LLM_API_KEY")
+    base_url = provider.get("base_url")
+    api_key = provider.get("api_key")
+    if env_fallback:
+        base_url = base_url or os.environ.get("CUSTOM_LLM_BASE_URL")
+        api_key = api_key or os.environ.get("CUSTOM_LLM_API_KEY")
     return base_url or None, api_key or None
 
 

@@ -48,7 +48,12 @@ vi.mock("@/hooks/useChat", () => ({
 vi.mock("@/hooks/useServer", () => ({ useServer: () => ({ server: "srv" }) }));
 vi.mock("@/hooks/useStarters", () => ({ useStarters: () => [] }));
 // The bubble's only network read; an empty roster is all this case needs.
-vi.mock("@tanstack/react-query", () => ({ useQuery: () => ({ data: [] }) }));
+// Spread the real module: ChatBubble imports `agentsQuery` from lib/queryClient,
+// which builds the app's QueryClient at import time.
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
+  useQuery: () => ({ data: [] }),
+}));
 
 const { ChatBubble } = await import("./ChatBubble");
 

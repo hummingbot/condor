@@ -543,16 +543,25 @@ def test_the_confirmation_gate_is_untouched_by_the_log_growing():
     """Criterion: no new confirmation prompt reaches a running agent.
 
     ``manage_controllers`` becoming recordable must not make it gated — a
-    widened gate would stop a live fleet on every config write.
+    widened gate would stop a live fleet on every config write. The one
+    exception is deliberate and narrow (SEC-713): deleting a controller
+    *template* is gated like an overwriting ``sync``, and a raw code upsert is
+    refused outright by ``raw_controller_code_refusal`` rather than asked about.
     """
     from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
 
     assert "manage_controllers" not in DANGEROUS_TOOLS
     for action in ("list", "describe", "upsert", "delete", "something_new"):
+        call = {
+            "tool": "manage_controllers",
+            "input": {"action": action, "target": "config"},
+        }
+        assert is_dangerous_tool_call(call) is False, action
+    for action in ("list", "describe", "upsert", "something_new"):
         call = {"tool": "manage_controllers", "input": {"action": action}}
         assert is_dangerous_tool_call(call) is False, action
-    assert (
-        is_dangerous_tool_call({"tool": "manage_controllers", "input": None}) is False
+    assert is_dangerous_tool_call(
+        {"tool": "manage_controllers", "input": {"action": "delete"}}
     )
 
 

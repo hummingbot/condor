@@ -92,7 +92,8 @@ def test_runtime_artefacts_move_out_from_under_the_library(repo):
     assert (local / "scout" / "store" / "user_7" / "audit.log").read_text() == "ran"
     assert (local / "scout" / "mutes.yml").exists()
     assert (local / "scout" / "proposals" / "p.md").exists()
-    grid = local / "scout" / "strategies" / "grid"
+    # v2 moves them into strategies/, and v5 (same boot) renames that to loops/.
+    grid = local / "scout" / "loops" / "grid"
     assert (grid / "learnings.md").read_text() == "learned"
     assert (grid / "sessions" / "session_1" / "journal.md").exists()
     assert (grid / "config.yml").exists()
@@ -148,7 +149,7 @@ def test_an_excluded_agent_with_a_store_still_leaves_the_library(repo):
     assert not (agents / "brigado").exists()
     assert (local / "AGENT.md").exists()
     assert (local / "store" / "user_7" / "audit.log").read_text() == "ran"
-    assert not resolves_to_stock("brigado", "strategies", "fleet", "strategy.md")
+    assert not resolves_to_stock("brigado", "loops", "fleet", "loop.md")
 
 
 def test_v4_merges_a_leftover_the_local_copy_winning(repo):
@@ -179,7 +180,7 @@ def test_v4_merges_a_leftover_the_local_copy_winning(repo):
     assert (local / "AGENT.md").read_text() == "edited"
     assert (local / "skills" / "lp" / "SKILL.md").read_text() == "same"
     assert (local / "routines" / "r.py").read_text() == "only in the leftover"
-    assert (local / "strategies" / "fleet" / "strategy.md").exists()
+    assert (local / "loops" / "fleet" / "loop.md").exists()
     # Regenerated output is dropped, never set aside as a "disagreement".
     assert (
         local / "routines" / "__pycache__" / "r.pyc"
@@ -227,9 +228,7 @@ def test_a_staged_edit_is_hoisted_too(repo):
     report = ensure_migrated()
 
     assert report.agent_forks == 1
-    hoisted = (
-        paths.local_agents_root() / "scout" / "strategies" / "grid" / "strategy.md"
-    )
+    hoisted = paths.local_agents_root() / "scout" / "loops" / "grid" / "loop.md"
     assert "my tick" in hoisted.read_text()
     assert _dirty(repo) == ""
 

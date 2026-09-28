@@ -64,7 +64,7 @@ export function describePage(pathname: string, search = ""): PageContext {
     // `/executors/new*` — none of them gets a case.
     case "agents":
       if (second && third === "strategies" && fourth) {
-        return of(`Strategy detail (agent "${second}", strategy "${fourth}")`, "Agents & chat");
+        return of(`Loop detail (agent "${second}", loop "${fourth}")`, "Agents & chat");
       }
       return of(`Agent detail ("${second}")`, "Agents & chat");
     case "portfolio":

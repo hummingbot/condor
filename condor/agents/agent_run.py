@@ -22,8 +22,8 @@ tick and a background worker run for nobody's conversation and pass no
 so ``on_complete="resume"`` has nothing to wake and returns ``False`` silently,
 while ``notify`` sends the answer to the *user* rather than to the agent that
 needed it. For those seats a blocking ask is not a worse delegation — it is the
-only shape that works, and the cheap one: one ``client.prompt()`` and a ledger
-row, against a detached task with an event sidecar, a transcript and a bell.
+only shape that works, and the cheap one: one prompt stream and a ledger row,
+against a detached task with an event sidecar, a transcript and a bell.
 
 Every run here is **unattended**: no ``permission_callback`` is built, so an ACP
 agent auto-approves its own tool calls. See :mod:`condor.runtime.confirmations`,
@@ -58,6 +58,12 @@ log = logging.getLogger(__name__)
 # copy of the answer. The answer itself is returned to the caller uncut.
 MAX_RECORDED_RESULT = 2000
 
+# The terminal ``PromptDone`` reasons that mean the session failed rather than
+# answered. Both clients end a turn this way instead of raising, so the engine
+# turns them into an exception its callers already record as an error. Every
+# other reason (end_turn, max_tokens, refusal, cancelled) returns the text.
+FAILED_STOP_REASONS = frozenset({"error", "disconnected", "timeout"})
+
 
 async def run_agent_to_completion(
     slug: str,
@@ -73,14 +79,17 @@ async def run_agent_to_completion(
     """Load the Agent ``slug``, run its brain to completion on ``task``, return text.
 
     The run is unattended: no ``permission_callback`` is built, so an ACP agent
-    auto-approves its own tool calls and ``client.prompt()`` returning IS the
-    "task done" signal. No strategy is involved — the Agent's identity + shared
+    auto-approves its own tool calls and the stream ending IS the "task done"
+    signal — unless its terminal ``PromptDone`` says the session failed
+    (:data:`FAILED_STOP_REASONS`), which raises ``RuntimeError`` carrying any
+    text the client streamed before it (the pydantic client's formatted error). No strategy is involved — the Agent's identity + shared
     memory/skills drive the run.
 
     If ``event_sink`` is provided, it is called with every streamed
     :data:`condor.acp.client.ACPEvent` (thoughts, tool calls, text) as they arrive,
-    so a caller can persist the full session transcript. When ``None`` the cheaper
-    one-shot ``client.prompt()`` is used.
+    so a caller can persist the full session transcript. Either way the run reads
+    ``client.prompt_stream()``; ``client.prompt()`` is the same stream joined, and
+    it hides the terminal event.
 
     ``delegate_worker`` is DELEGATE's flag (FEAT-032): it tells the subprocess it
     is the detached background seat rather than the interactive one. Every agent
@@ -186,21 +195,32 @@ async def run_agent_to_completion(
 
     prompt = runtime_context.build_agent_context(agent, user_id, task, context)
 
+    from condor.acp.client import PromptDone, TextChunk
+
+    chunks: list[str] = []
+    stop_reason = ""
     await client.start()
     try:
-        if event_sink is None:
-            answer = await client.prompt(prompt)
-        else:
-            from condor.acp.client import TextChunk
-
-            chunks: list[str] = []
-            async for event in client.prompt_stream(prompt):
+        async for event in client.prompt_stream(prompt):
+            if event_sink is not None:
                 event_sink(event)
-                if isinstance(event, TextChunk):
-                    chunks.append(event.text)
-            answer = "".join(chunks)
+            if isinstance(event, TextChunk):
+                chunks.append(event.text)
+            elif isinstance(event, PromptDone):
+                stop_reason = event.stop_reason
     finally:
         await client.stop()
+
+    answer = "".join(chunks)
+    # Neither client raises when the session dies: the turn just ends on a
+    # terminal PromptDone. Without this check a disconnected subprocess, a failed
+    # request or the client's own hard stop would come back as the placeholder
+    # (or a provider error message) and every door would record it as "done".
+    if stop_reason in FAILED_STOP_REASONS:
+        detail = answer.strip()
+        raise RuntimeError(
+            f"agent session ended: {stop_reason}" + (f" — {detail}" if detail else "")
+        )
 
     return fallback_note + (answer or "(the agent returned no answer)")
 

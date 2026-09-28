@@ -118,16 +118,26 @@ describe("a `?view=` naming one of the seven Being sections", () => {
     await render("/agents/brigado?tab=memories");
     expect(new URLSearchParams(at.split("?")[1]).get("tab")).toBe("memories");
   });
+
+  it("reads a bookmarked Strategies section as Loops (FEAT-128)", async () => {
+    await render("/agents/brigado?tab=strategies");
+    const params = new URLSearchParams(at.split("?")[1]);
+    expect(at.split("?")[0]).toBe("/");
+    expect(params.get("panel")).toBe("agent");
+    expect(params.get("tab")).toBe("loops");
+  });
 });
 
 describe("a `?view=` naming one of the Doing views", () => {
-  it.each([["money"], ["fleet"], ["playbook"], ["runs"]])(
-    "opens the %s disclosure on this screen",
-    async (view) => {
-      await render(`/agents/brigado?view=${view}`);
-      expect(at).toBe(`/agents/brigado?open=${view}`);
-    },
-  );
+  it.each([
+    ["money", "fleet"],
+    ["fleet", "fleet"],
+    ["playbook", "playbook"],
+    ["runs", "runs"],
+  ])("sends %s to the %s tab on this screen", async (view, tab) => {
+    await render(`/agents/brigado?view=${view}`);
+    expect(at).toBe(`/agents/brigado?open=${tab}`);
+  });
 
   it("carries the rest of the query string with it", async () => {
     await render("/agents/brigado?view=fleet&strategy=brl_mm&fscope=bot%3Ax");

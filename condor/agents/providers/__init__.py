@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from collections.abc import Collection
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseProvider, ProviderResult
+
+if TYPE_CHECKING:
+    from condor.agents.ownership import OwnedBot
 
 log = logging.getLogger(__name__)
 
@@ -50,43 +55,42 @@ class ProviderRegistry:
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
-        since: float = 0.0,
+        owned: list[OwnedBot] | None = None,
+        names: Collection[str] | None = None,
     ) -> dict[str, ProviderResult]:
-        """Run all core providers and return {name: ProviderResult} dict.
+        """Run the core providers and return {name: ProviderResult} dict.
 
         ``bot_names`` are the bases the session owns per its ownership ledger, so
         a session operating several bots sees all of them in its core data.
-        ``since`` is the earliest instant it took one over, which scopes bot PnL
-        to this session's window.
+        ``owned`` is that ledger's records, which scope each base's PnL to the
+        window this session held it over.
+        ``names`` narrows the run to those core providers (the shutdown winddown
+        only needs ``executors``); ``None`` runs every one, as the tick does.
         """
         if not _REGISTRY:
             _auto_register()
 
-        results: dict[str, ProviderResult] = {}
-        for provider in list_core_providers():
+        async def _run_one(provider: BaseProvider) -> ProviderResult:
             try:
-                result = await provider.execute(
+                return await provider.execute(
                     client,
                     config,
                     agent_id=agent_id,
                     bot_names=bot_names,
-                    since=since,
+                    owned=owned,
                 )
-                results[result.name] = result
             except Exception:
                 log.exception("Core provider %s failed", provider.name)
-                results[provider.name] = ProviderResult(
+                return ProviderResult(
                     name=provider.name,
                     data={},
                     summary=f"(provider {provider.name} failed)",
                 )
-        return results
 
-    async def run_provider(
-        self, name: str, client: Any, config: dict
-    ) -> ProviderResult | None:
-        """Run a single provider by name."""
-        provider = get_provider(name)
-        if not provider:
-            return None
-        return await provider.execute(client, config)
+        providers = [
+            p for p in list_core_providers() if names is None or p.name in names
+        ]
+        # The providers are independent (none reads another's result), so their
+        # API round trips run concurrently; gather keeps registration order.
+        outcomes = await asyncio.gather(*(_run_one(p) for p in providers))
+        return {result.name: result for result in outcomes}

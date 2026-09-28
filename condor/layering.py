@@ -266,6 +266,10 @@ _RUNTIME_NAMES = frozenset(
         "config.yml",
         "owned_bots.json",
         "disowned_bots.json",
+        # A controller's server copies kept by an overwriting sync (FEAT-126).
+        # The dot only hides the *directory*; the files in it are plain names,
+        # which the dotfile check below would let through.
+        ".server_backups",
     }
 )
 
@@ -274,7 +278,7 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
     """Every library file under ``home``, relative to it — runtime output skipped.
 
     ``path`` narrows to one file or folder (``skills/recon``,
-    ``strategies/grid``); empty takes the whole agent. The runtime filter applies
+    ``loops/grid``); empty takes the whole agent. The runtime filter applies
     either way, so naming a folder cannot smuggle a store out.
     """
     rel_parts = tuple(part for part in path.split("/") if part and part != "..")

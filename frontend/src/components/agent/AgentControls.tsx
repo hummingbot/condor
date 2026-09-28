@@ -1,9 +1,4 @@
-import {
-  type QueryClient,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Clock,
   MessageSquareText,
@@ -17,27 +12,9 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { invalidateLifecycle } from "@/components/agent/agentQueries";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
-
-/**
- * What a start/stop/pause/resume just made stale.
- *
- * Two keys, not one. The strategy's own record is the obvious half; the agent
- * detail is the half that used to be missed, and it is load-bearing because
- * `strategies[].status` is what the workspace reads for the "Live" badge and
- * the delete guard — and what re-arms the gated `["agent", slug]` poll
- * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
- * over a loop that had just started, with nothing left to reopen it.
- */
-function invalidateLifecycle(
-  queryClient: QueryClient,
-  slug: string,
-  sslug: string,
-) {
-  queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
-  queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-}
 
 // ── Start Session Dialog ──
 
@@ -73,8 +50,10 @@ export function StartSessionDialog({
   const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
   const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
   const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
-  // Seeded from the strategy's stored answer, so a strategy already opted in
-  // does not quietly start opted out every time someone opens this dialog.
+  // Every field above and this one is seeded from agentConfig once, on mount.
+  // AgentControls mounts the dialog only while it is open, so each open seeds
+  // from the config as it stands then: a strategy already opted in (say, by the
+  // RestartChip after the page loaded) does not start opted out (CORR-387).
   const [restartOnBoot, setRestartOnBoot] = useState(!!agentConfig.restart_on_boot);
 
   const { data: servers } = useQuery({
@@ -398,14 +377,9 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
   return (
     <>
       <div className="flex items-center gap-2">
-        {status === "idle" || status === "stopped" ? (
-          <button
-            onClick={() => setShowStartDialog(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
-          >
-            <Play className="h-3.5 w-3.5" /> Start
-          </button>
-        ) : status === "running" ? (
+        {/* Only running and paused are live; every other state (idle, stopped,
+            completed, interrupted, error, suspended, "") is startable (CORR-370). */}
+        {status === "running" ? (
           <>
             <button
               onClick={() => pauseMut.mutate()}
@@ -427,20 +401,32 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
             </button>
             {stopControls}
           </>
-        ) : null}
+        ) : (
+          <button
+            onClick={() => setShowStartDialog(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
+          >
+            <Play className="h-3.5 w-3.5" /> Start
+          </button>
+        )}
         {controlError && (
           <p className="text-xs text-red-400">{controlError.message}</p>
         )}
       </div>
 
-      <StartSessionDialog
-        open={showStartDialog}
-        onClose={() => setShowStartDialog(false)}
-        slug={slug}
-        sslug={sslug}
-        agentConfig={agentConfig}
-        defaultContext={defaultContext}
-      />
+      {/* Mounted per open, not hidden: its fields are useState seeds, so a
+          dialog kept mounted would post the config from the first render and
+          override a restart_on_boot/server/budget written since (CORR-387). */}
+      {showStartDialog && (
+        <StartSessionDialog
+          open
+          onClose={() => setShowStartDialog(false)}
+          slug={slug}
+          sslug={sslug}
+          agentConfig={agentConfig}
+          defaultContext={defaultContext}
+        />
+      )}
     </>
   );
 }

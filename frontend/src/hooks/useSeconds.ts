@@ -11,8 +11,8 @@ import { useEffect, useState } from "react";
  * stop it the moment the loop is not running.
  *
  * It lived inside `AgentScopeHeader` while the fleet band was the only surface
- * that counted down to a tick. `LoopPulse` is the second, and a clock copied is
- * a clock that drifts: two intervals started a frame apart show the same loop
+ * that counted down to a tick. It is shared because a clock copied is a clock
+ * that drifts: two intervals started a frame apart show the same loop
  * one second out from itself on the same screen.
  */
 export function useSeconds(active: boolean): number {

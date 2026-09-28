@@ -209,7 +209,15 @@ class JSONRPCPeer:
 
         handler = self._handlers.get(method)
         if handler is None:
-            log.warning("No handler for reverse-RPC method: %s", method)
+            # A leading underscore marks an ACP extension (claude-agent-acp
+            # sends ``_auth/status_update`` on every session); an unknown one
+            # is expected, not a sign something is broken.
+            extension = isinstance(method, str) and method.startswith("_")
+            log.log(
+                logging.DEBUG if extension else logging.WARNING,
+                "No handler for reverse-RPC method: %s",
+                method,
+            )
             if msg_id is not None:
                 await self.send_response(
                     msg_id,

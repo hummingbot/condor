@@ -517,7 +517,9 @@ def _meta_mtime(base: Path, name: str) -> int:
         return 0
 
 
-def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMeta]:
+def list_conversations(
+    user_id: int, *, limit: int = 100, agent_slug: str | None = None
+) -> list[ConversationMeta]:
     """This user's conversations, newest first.
 
     Only as many ``meta.json`` files are parsed as the caller asked for. The
@@ -534,7 +536,16 @@ def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMe
     ``limit=0`` walks everything, which the sharing sweep and reflection need.
     Reads only ``meta.json`` per directory. One without a readable meta (hand
     deleted, half written) is skipped rather than failing the whole listing.
+
+    ``agent_slug`` keeps only the conversations had with that agent, an unbound
+    one counting as Condor's (:data:`condor.memory.paths.CHAT_SLUG`). The filter
+    runs inside the walk, before ``limit`` counts a row, so a specialist whose
+    chats are all older than the owner's newest ``limit`` chats with Condor
+    still gets them (CORR-652). The price is a parse per newer non-matching
+    meta — bounded by the store size, the cost ``limit=0`` callers already pay.
     """
+    if agent_slug is not None:
+        from condor.memory.paths import CHAT_SLUG
     base = _user_dir(user_id)
     if not base.is_dir():
         return []
@@ -558,6 +569,8 @@ def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMe
     for name in names:
         meta = get_conversation(user_id, name)
         if meta is None:
+            continue
+        if agent_slug is not None and (meta.agent_slug or CHAT_SLUG) != agent_slug:
             continue
         metas.append(meta)
         if limit and len(metas) >= limit:

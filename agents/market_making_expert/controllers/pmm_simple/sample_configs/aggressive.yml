@@ -1,0 +1,26 @@
+# Aggressive: tight three-level ladder on BTC-USDT perpetual, weighted toward
+# the outer level, fast refresh, short holding time and a trailing stop.
+# High fill rate and thin edge per fill (TP 0.12% vs ~0.04% maker round trip).
+# Only for deep, quiet books; widen or pause as soon as volatility expands.
+# Sizing: 1000 USDT notional over 6 orders (1:1:2 weights per side): 125,
+# 125 and 250 USDT, above the ~100 USDT BTC-USDT perp min notional. 10x leverage.
+controller_name: pmm_simple
+controller_type: market_making
+connector_name: binance_perpetual
+trading_pair: BTC-USDT
+total_amount_quote: 1000
+buy_spreads: [0.0005, 0.001, 0.002]
+sell_spreads: [0.0005, 0.001, 0.002]
+buy_amounts_pct: [1, 1, 2]
+sell_amounts_pct: [1, 1, 2]
+executor_refresh_time: 30
+cooldown_time: 60
+leverage: 10
+position_mode: HEDGE
+stop_loss: 0.006
+take_profit: 0.0012
+time_limit: 900
+take_profit_order_type: LIMIT
+trailing_stop:
+  activation_price: 0.0008
+  trailing_delta: 0.0003

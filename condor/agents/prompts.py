@@ -1,7 +1,7 @@
 """Prompt builder for trading agent ticks.
 
 Assembles the single prompt sent to a fresh ACP session each tick,
-combining: base rules, strategy instructions, config, risk state,
+combining: base rules, loop instructions, config, risk state,
 pre-computed core data, and journal context (learnings + recent decisions).
 """
 
@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Collection
-from pathlib import Path
 from typing import Any
 
-from condor.frontmatter import parse_frontmatter
+from condor.memory import paths as _paths
 from condor.runtime.state import MAX_STATE_VALUE_CHARS
 
 from .agent import Agent
+from .config import is_experiment_mode
+from .journal import render_risk_lines
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ RULES:
 - Trade ONLY via the create_*_executor tools — create_position_executor,
   create_grid_executor, create_dca_executor, create_order_executor,
   create_lp_executor. NEVER use place_order.
-- If your strategy deploys a controller-based bot, manage_bots(action="deploy")
+- If your loop deploys a controller-based bot, manage_bots(action="deploy")
   MUST include max_global_drawdown_quote within your risk limits — deploys
   without a declared loss cap are blocked by the risk engine.
 - Be conservative. When in doubt, hold and journal why.
@@ -74,7 +75,7 @@ RULES:
 - manage_bots(action="deploy") MUST include max_global_drawdown_quote within your risk
   limits — deploys without a declared loss cap are blocked by the risk engine.
 - Standalone executors (the create_*_executor tools) are a fallback, used ONLY
-  when the strategy instructions explicitly ask for them.
+  when the loop instructions explicitly ask for them.
 - Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
@@ -120,7 +121,7 @@ AUTHORIZATION_LIVE_UNATTENDED = """\
 [AUTHORIZATION — this seat is unattended and already approved]
 - Nobody is watching this tick. A question asked here is never answered: the
   tick ends, the loop moves on, and the market does not wait.
-- Your authorization is the launch the user already approved: this strategy,
+- Your authorization is the launch the user already approved: this loop,
   this execution mode, this capital, and the limits in [RISK STATE] below. The
   house rule about confirming before you move money is the ATTENDED rule — it
   governs a chat with a human in it, not this loop.
@@ -151,7 +152,7 @@ SKILLS & ROUTINES:
   name="...") and follow it instead of re-deriving the procedure.
 - A skill may reference a routine (shown as "→ routine: <name>"); run it with
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
-  to discover routines; routines tagged "agent" are local to your strategy.
+  to discover routines; routines tagged "agent" are local to your agent.
 - Before AUTHORING a routine (create/edit/fix), read the routine_cookbook playbook
   with manage_skill(action="read", name="routine_cookbook") and follow it — then
   test what you wrote with manage_routines(action="run", ...) before relying on it.
@@ -278,6 +279,7 @@ def _build_tool_preload(
         "mcp__condor__manage_memory",
         "mcp__condor__manage_skill",
         "mcp__condor__manage_routines",
+        "mcp__condor__manage_agent_controllers",
     ]
     tools = [t for t in tools if t.rsplit("__", 1)[-1] not in muted]
     return (
@@ -330,6 +332,10 @@ def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
         "instead of creating standalone executors:",
         '- Check current state first: manage_bots(action="status").',
         "- Define/update controller config templates with manage_controllers.",
+        "- A controller you own (the CONTROLLERS list): run manage_agent_controllers"
+        '(action="status") before manage_bots deploy, and never pass '
+        "overwrite=true without the user's go-ahead unless your loop "
+        "instructions say so.",
         f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
         "otherwise update_config / start_controllers / stop_controllers.",
     ]
@@ -370,7 +376,7 @@ def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
             )
 
     lines.append(
-        "Do NOT create standalone executors unless the strategy instructions "
+        "Do NOT create standalone executors unless the loop instructions "
         "explicitly tell you to. The bot's PnL is attributed to you automatically."
     )
     return "\n".join(lines)
@@ -386,43 +392,16 @@ CORE_RULES_FILENAME = "core_rules.md"
 # the same block whether it is ticking or answering a chat.
 CORE_RULES_HEADER = "[CORE RULES — apply to every session]"
 
-# Pairs already warned about, so a shadow costs one line and not one per tick.
-_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
-
-
-def _warn_once_if_shadowed(local: Path, stock: Path) -> None:
-    """Say it out loud when a local rulebook silently overrides a shipped one.
-
-    The rulebook is a *single file*, so a local copy forks the whole
-    behavioural contract — the failure mode :func:`resolve_agent_file` avoids
-    one level down by resolving per item. An operator who then edits the
-    tracked file gets no error, no warning and no effect (ARCH-612). One
-    warning per pair turns that silent no-op into a line in the log.
-    """
-    key = (str(local), str(stock))
-    if key in _SHADOWED_RULEBOOKS_WARNED:
-        return
-    try:
-        if not stock.is_file():
-            return  # nothing shipped to shadow: a purely local rulebook is fine
-        if stock.read_text(encoding="utf-8") == local.read_text(encoding="utf-8"):
-            return  # a copy, not a fork
-    except OSError:
-        return
-    _SHADOWED_RULEBOOKS_WARNED.add(key)
-    log.warning(
-        "%s shadows %s and the two differ: edits to the shipped file have no "
-        "effect. Delete the local copy to fall back to it.",
-        local,
-        stock,
-    )
+# The shadow warning lives with the shared resolver; re-bound here (the same
+# set object) because callers and tests clear it by this name.
+_SHADOWED_RULEBOOKS_WARNED = _paths._SHADOWED_RULEBOOKS_WARNED
 
 
 def load_core_rules(agent_slug: str | None = None) -> str:
     """The shared behavioural rules for this agent: its own, else the default.
 
-    Resolved exactly like :func:`condor.agents.reflection.load_policy` —
-    ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
+    Resolved by :func:`condor.memory.paths.read_layered_file`, the resolver
+    ``reflect.md`` and ``shutdown.md`` share — ``<slug>/core_rules.md`` then ``_defaults/core_rules.md``, each consulted in
     both roots (local before stock), so an install that dropped its own house
     rules in shadows the shipped ones without losing them. A falsy slug reads
     only the default, which is what the chat seat wants.
@@ -431,30 +410,13 @@ def load_core_rules(agent_slug: str | None = None) -> str:
     the next tick. Returns ``""`` when nothing is on disk or the file is
     unreadable — a missing rulebook must never be what breaks a tick. When a
     local layer wins over a shipped file that differs,
-    :func:`_warn_once_if_shadowed` says so rather than letting the fork be
+    :func:`condor.memory.paths._warn_once_if_shadowed` says so rather than letting the fork be
     silent.
     """
-    from condor.memory.paths import agent_home_layers, defaults_layers
-
-    layers = (agent_home_layers(agent_slug), defaults_layers())
-    for local_home, stock_home in layers:
-        local, stock = (
-            local_home / CORE_RULES_FILENAME,
-            stock_home / CORE_RULES_FILENAME,
-        )
-        for path in (local, stock):
-            try:
-                if not path.is_file():
-                    continue
-                _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
-                body = body.strip()
-                if body:
-                    if path == local:
-                        _warn_once_if_shadowed(local, stock)
-                    return body
-            except Exception:  # noqa: BLE001 - an unreadable rulebook is not a crash
-                log.warning("Could not read %s", path, exc_info=True)
-    return ""
+    found = _paths.read_layered_file(
+        CORE_RULES_FILENAME, agent_slug, skip_empty_body=True
+    )
+    return found[1] if found else ""
 
 
 def core_rules_section(agent_slug: str | None = None) -> str:
@@ -486,16 +448,14 @@ def build_tick_prompt(
     """Build the full prompt for one agent tick.
 
     Composes the Agent's domain identity (``agent.instructions``) with the
-    strategy's tactic (``strategy.instructions``): the Agent says *who you are and
-    what you know*; the strategy says *what to do this tick*.
+    loop's tactic (``strategy.instructions``): the Agent says *who you are and
+    what you know*; the loop says *what to do this tick*.
     """
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
-    # Experiments (dry_run + run_once) keep no journal — the tick is captured as a
-    # dry-run snapshot instead. Mirrors TickEngine.is_experiment in engine.py.
-    is_experiment = execution_mode in ("dry_run", "run_once")
+    is_experiment = is_experiment_mode(execution_mode)
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
@@ -570,11 +530,11 @@ def build_tick_prompt(
     # Server credentials are injected via env vars into the MCP process,
     # so no need to include them in the prompt or call configure_server.
 
-    # Agent identity + domain knowledge (who you are), then the strategy tactic
-    # (what to do this tick). The Agent body is shared across all its strategies.
+    # Agent identity + domain knowledge (who you are), then the loop's tactic
+    # (what to do this tick). The Agent body is shared across all its loops.
     if agent.instructions.strip():
         sections.append(f"[AGENT — domain identity & knowledge]\n{agent.instructions}")
-    sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
+    sections.append(f"[LOOP INSTRUCTIONS]\n{strategy.instructions}")
 
     # Available skills (playbooks) + routines, unified under one header. Both are
     # read fresh each tick — the agent may create a skill mid-session, and an
@@ -596,6 +556,14 @@ def build_tick_prompt(
         )
     if routines_section:
         skills_routines.append(f"\n{routines_section}")
+    try:
+        from condor.agent_controllers import controllers_section as _controllers
+
+        controllers_section = _controllers(strategy.agent_slug)
+    except Exception:
+        controllers_section = ""  # Don't fail the tick over a folder read
+    if controllers_section:
+        skills_routines.append(f"\n{controllers_section}")
     sections.append("\n".join(skills_routines))
 
     # Session trading context (natural language directives for this session)
@@ -619,7 +587,7 @@ def build_tick_prompt(
     }
     config_lines = [
         "[CURRENT CONFIG]",
-        "These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.",
+        "These are the ACTIVE values for this session. If the loop instructions mention different defaults, IGNORE them and use these values instead.",
     ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
@@ -633,33 +601,7 @@ def build_tick_prompt(
         sections.append(_build_controller_mode_section(bot_name, ledger))
 
     # Risk state
-    rs = risk_state
-    max_dd = rs.get("max_drawdown_pct", -1)
-    dd_display = (
-        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-        if max_dd >= 0
-        else "disabled"
-    )
-    risk_lines = [
-        "[RISK STATE]",
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
-        f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
-        f"Drawdown: {dd_display}",
-    ]
-    # Only when one is set: a leverage limit is off by default ([[SEC-558]]),
-    # and a line reading "disabled" invites the agent to go looking for the
-    # ceiling. When it IS set, it has to be here — a limit the agent is not
-    # told about is a limit it will trip, and every create it makes on a perp
-    # has to declare a leverage at or under it.
-    max_leverage = rs.get("max_leverage", -1)
-    if max_leverage >= 0:
-        risk_lines.append(
-            f"Max Leverage: {max_leverage:g}x "
-            "(declare `leverage` on every create; omitting it is refused)"
-        )
-    risk_lines.append(
-        f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}"
-    )
+    risk_lines = ["[RISK STATE]", *render_risk_lines(risk_state, bullet="")]
     sections.append("\n".join(risk_lines))
 
     # What the gate refused last tick, and why. The permission response the model
@@ -681,7 +623,7 @@ def build_tick_prompt(
         )
         sections.append("\n".join(refusal_lines))
 
-    # Loop state -- the scratch cursors this (agent, strategy) has persisted
+    # Loop state -- the scratch cursors this (agent, loop) has persisted
     # (condor.runtime.state): a last-processed executor id, a cooldown deadline.
     # Written from the dashboard or an attended session; the tick only reads
     # them, since nothing in TOOL_PROFILES["tick"] can write the store. Omitted
@@ -689,7 +631,7 @@ def build_tick_prompt(
     # it has no keys in.
     if loop_state:
         state_lines = [
-            "[LOOP STATE — scratch values persisted for this strategy; read-only this tick]"
+            "[LOOP STATE — scratch values persisted for this loop; read-only this tick]"
         ]
         for key, value in sorted(loop_state.items()):
             rendered = (

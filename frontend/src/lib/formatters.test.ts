@@ -3,9 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatAxisCurrency,
   formatAxisTime,
+  formatCompactUsd,
   formatCompactVolume,
+  formatCurrency,
+  formatCurrencyPnl,
   formatCurrencyVolume,
   formatDateTime,
+  formatDuration,
   formatRelativeTime,
   formatRuntimeHours,
   formatTime,
@@ -28,7 +32,7 @@ describe("formatAxisCurrency", () => {
     it("gives a pnl axis 2 decimals under $10, where the axis often spans cents", () => {
       expect(formatAxisCurrency(0, "$", "pnl")).toBe("$0.00");
       expect(formatAxisCurrency(2.5, "$", "pnl")).toBe("$2.50");
-      expect(formatAxisCurrency(-2.5, "$", "pnl")).toBe("$-2.50");
+      expect(formatAxisCurrency(-2.5, "$", "pnl")).toBe("-$2.50");
       expect(formatAxisCurrency(9.99, "$", "pnl")).toBe("$9.99");
     });
 
@@ -88,11 +92,11 @@ describe("formatAxisCurrency", () => {
   });
 
   describe("negatives and zero", () => {
-    it("carries the minus inside the number, as the other helpers do", () => {
-      expect(formatAxisCurrency(-2_400_000, "$", "volume")).toBe("$-2.4M");
-      expect(formatAxisCurrency(-2_450, "$", "volume")).toBe("$-2.5K");
-      expect(formatAxisCurrency(-250, "$", "volume")).toBe("$-250");
-      expect(formatAxisCurrency(-1_000_000_000, "$", "volume")).toBe("$-1.00B");
+    it("puts the minus before the symbol, as the other helpers do (CORR-419)", () => {
+      expect(formatAxisCurrency(-2_400_000, "$", "volume")).toBe("-$2.4M");
+      expect(formatAxisCurrency(-2_450, "$", "volume")).toBe("-$2.5K");
+      expect(formatAxisCurrency(-250, "$", "volume")).toBe("-$250");
+      expect(formatAxisCurrency(-1_000_000_000, "$", "volume")).toBe("-$1.00B");
     });
 
     it("renders zero without a sign in either kind", () => {
@@ -127,6 +131,46 @@ describe("formatAxisCurrency", () => {
   });
 });
 
+// CORR-419: every currency formatter used to build `symbol + <signed number>`
+// by hand, so only `formatCurrency`'s `$`-under-$10K branch — the one that
+// delegates to `Intl` — put the minus where a reader expects it. The same
+// figure therefore rendered `-$12.34` at one magnitude and `$-12.3K` at the
+// next, and a non-dollar display currency never got it right at any magnitude.
+describe("the minus sign sits before the currency symbol", () => {
+  it("holds for formatCurrency at every tier and symbol", () => {
+    expect(formatCurrency(-12.34, "R$")).toBe("-R$12.34");
+    expect(formatCurrency(-12_345)).toBe("-$12.3K");
+    expect(formatCurrency(-2_500_000, "€")).toBe("-€2.50M");
+    expect(formatCurrency(-0.001234, "₿")).toBe("-₿0.001234");
+    expect(formatCurrency(-12.34)).toBe("-$12.34");
+  });
+
+  it("holds for the helpers built on the same ladder", () => {
+    expect(formatCurrencyPnl(-12.34, "R$")).toBe("-R$12.34");
+    expect(formatAxisCurrency(-2.5, "$", "pnl")).toBe("-$2.50");
+    expect(formatCompactUsd(-12_345)).toBe("-$12.3K");
+    expect(formatCurrencyVolume(-2_500_000, "€")).toBe("-€2.5M");
+    expect(formatCompactVolume(-2_500_000_000, "€")).toBe("-€2.50B");
+  });
+
+  it("leaves positive values, and the `+` PnL prefix, exactly as they were", () => {
+    expect(formatCurrency(12.34, "R$")).toBe("R$12.34");
+    expect(formatCurrency(12_345)).toBe("$12.3K");
+    expect(formatCurrency(2_500_000, "€")).toBe("€2.50M");
+    expect(formatCurrency(0.001234, "₿")).toBe("₿0.001234");
+    expect(formatCurrencyPnl(12.34, "R$")).toBe("+R$12.34");
+    expect(formatCurrencyVolume(2_500_000, "€")).toBe("€2.5M");
+  });
+
+  // `val < 0` is false for `-0`, which is what keeps `Intl` from printing the
+  // `-$0.00` that the `toFixed` branches never produced for the same input.
+  it("never signs a zero, however it was arrived at", () => {
+    expect(formatCurrency(0)).toBe("$0.00");
+    expect(formatCurrency(-0)).toBe("$0.00");
+    expect(formatCurrency(-0, "R$")).toBe("R$0.00");
+    expect(formatCurrencyPnl(-0)).toBe("+$0.00");
+  });
+});
 
 // ── READ-250: the X axis was hardcoded to HH:MM ──
 //
@@ -539,5 +583,36 @@ describe("namesATool", () => {
     expect(namesATool('"undefined"')).toBe(false);
     expect(namesATool(42)).toBe(false);
     expect(namesATool({ name: "run_code" })).toBe(false);
+  });
+});
+
+// ARCH-404: one duration rule for the agent area. The feed row, the code-run
+// sheet it opens, the lab run rail and the delegation elapsed time all used to
+// carry their own copy, so the same run read `2s` in the row and `1.5s` in the
+// sheet.
+describe("formatDuration", () => {
+  it("floors into compact units", () => {
+    expect(formatDuration(45)).toBe("45s");
+    expect(formatDuration(720)).toBe("12m");
+    expect(formatDuration(15_120)).toBe("4h12m");
+    expect(formatDuration(90_000)).toBe("1d1h");
+    expect(formatDuration(null)).toBe("");
+  });
+
+  it("is empty for anything that is not a real length", () => {
+    expect(formatDuration(-1)).toBe("");
+    expect(formatDuration(Number.NaN)).toBe("");
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("");
+  });
+
+  it("reads sub-minute runs to the millisecond or decimal with { ms: true }", () => {
+    expect(formatDuration(1.5, { ms: true })).toBe("1.5s");
+    expect(formatDuration(0.34, { ms: true })).toBe("340ms");
+    expect(formatDuration(30, { ms: true })).toBe("30s");
+  });
+
+  it("never lets { ms: true } touch the minute-and-up branches", () => {
+    expect(formatDuration(90, { ms: true })).toBe("1m");
+    expect(formatDuration(15_120, { ms: true })).toBe("4h12m");
   });
 });

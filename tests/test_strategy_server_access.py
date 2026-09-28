@@ -9,8 +9,9 @@ so the guard lives there: existence *and* reach, checked against the principal
 the route resolved.
 
 Refusal is the unpriced state the module already renders (no client, no money),
-not an error — a strategy the caller cannot price is listed exactly like one
-whose server is offline or was never configured.
+not an error. It is no longer *indistinguishable* from an offline or missing
+server, though: each carries an ``unavailable`` reason and nothing else
+(CORR-706).
 """
 
 import asyncio
@@ -25,12 +26,13 @@ from condor.web.routes import agents as agents_routes
 ADMIN = 1
 OWNER = 2  # created the strategy, may reach "srv"
 STRANGER = 3  # authenticated, may NOT reach "srv"
+ORPHAN = 4  # a creator id with no user record on this install (CORR-704)
 SERVER = "srv"
 PNL = 7.0
 
 
 class _FakeCM:
-    """Just the four ConfigManager methods this path touches."""
+    """Just the ConfigManager methods this path touches."""
 
     def __init__(self, servers=(SERVER,), access=((OWNER, SERVER),)):
         self.servers = set(servers)
@@ -40,6 +42,9 @@ class _FakeCM:
 
     def is_admin(self, user_id: int) -> bool:
         return user_id == ADMIN
+
+    def get_user(self, user_id: int):
+        return {"user_id": user_id} if user_id in (ADMIN, OWNER, STRANGER) else None
 
     def get_server(self, name: str):
         return {"name": name} if name in self.servers else None
@@ -116,7 +121,7 @@ def _user(user_id: int):
 
 
 def test_a_principal_without_access_never_gets_a_client(cm, strategy):
-    client, server = asyncio.run(
+    client, server, unavailable = asyncio.run(
         agents_routes._get_client_for_strategy(strategy.home, None, STRANGER)
     )
     assert client is None
@@ -124,14 +129,16 @@ def test_a_principal_without_access_never_gets_a_client(cm, strategy):
     assert cm.client_calls == []
     # The name is still reported: it is what the strategy declared.
     assert server == SERVER
+    # And the refusal says it is one, not an empty session (CORR-706).
+    assert unavailable == "no_access"
 
 
 def test_a_principal_with_access_still_gets_a_client(cm, strategy):
-    client, server = asyncio.run(
+    client, server, unavailable = asyncio.run(
         agents_routes._get_client_for_strategy(strategy.home, None, OWNER)
     )
     assert client is cm.client
-    assert (server, cm.client_calls) == (SERVER, [SERVER])
+    assert (server, cm.client_calls, unavailable) == (SERVER, [SERVER], "")
 
 
 def test_revoking_access_stops_the_figures_of_a_strategy_already_written(cm, strategy):
@@ -152,7 +159,7 @@ def test_revoking_access_stops_the_figures_of_a_strategy_already_written(cm, str
 
 def test_a_stored_name_that_names_nothing_is_refused_even_for_an_admin(cm, strategy):
     cm.servers.clear()
-    client, _ = asyncio.run(
+    client, _, _ = asyncio.run(
         agents_routes._get_client_for_strategy(strategy.home, None, ADMIN)
     )
     assert client is None
@@ -163,7 +170,7 @@ def test_a_strategy_that_named_no_server_is_unchanged(cm, strategy):
     (strategy.home / "config.yml").write_text("server_name: ''\n")
     assert asyncio.run(
         agents_routes._get_client_for_strategy(strategy.home, None, STRANGER)
-    ) == (None, "")
+    ) == (None, "", "no_server")
 
 
 # ── The principal each route resolves ──
@@ -173,7 +180,7 @@ def test_an_admin_reading_another_users_strategy_is_held_to_its_creator(cm, stra
     """Not exempted: the admin bypass is not a licence over a withdrawn share."""
     assert agents_routes._strategy_principal(strategy, _user(ADMIN)) == OWNER
     cm.access.clear()
-    client, _ = asyncio.run(
+    client, _, _ = asyncio.run(
         agents_routes._get_client_for_strategy(
             strategy.home,
             None,
@@ -187,6 +194,22 @@ def test_a_strategy_with_no_recorded_creator_falls_back_to_the_caller(cm, strate
     strategy.created_by = 0
     assert agents_routes._strategy_principal(strategy, _user(ADMIN)) == ADMIN
     assert agents_routes._strategy_principal(strategy, _user(STRANGER)) == STRANGER
+
+
+def test_a_creator_unknown_to_this_install_falls_back_to_the_caller(cm, strategy):
+    """No user record means no subject to stand in — same as ``created_by == 0``."""
+    strategy.created_by = ORPHAN
+    assert agents_routes._strategy_principal(strategy, _user(ADMIN)) == ADMIN
+    # A non-admin is still only ever themselves.
+    assert agents_routes._strategy_principal(strategy, _user(STRANGER)) == STRANGER
+    client, _, _ = asyncio.run(
+        agents_routes._get_client_for_strategy(
+            strategy.home,
+            None,
+            agents_routes._strategy_principal(strategy, _user(ADMIN)),
+        )
+    )
+    assert client is cm.client
 
 
 def test_a_non_admin_is_always_checked_as_themselves(cm, strategy):
@@ -258,3 +281,104 @@ def test_the_rollup_cache_does_not_hand_one_callers_figures_to_another(
     assert _perf_pnl(strategy, STRANGER) == 0.0
     # And the allowed caller keeps their figures.
     assert _perf_pnl(strategy, OWNER) == pytest.approx(PNL)
+
+
+def test_an_admin_sees_the_fleet_of_a_strategy_whose_creator_is_orphaned(
+    cm, strategy, priced, monkeypatch
+):
+    """CORR-704: the executor visible in Bots must not vanish from Fleet."""
+    from condor.agents import performance as perf_mod
+
+    executor = {"id": "ex1", "controller_id": "ag.st_1"}
+
+    async def _one(*a, **kw):
+        return AgentPerformance(
+            agent_id="x", realized_pnl=PNL, total_pnl=PNL, executors=[executor]
+        )
+
+    monkeypatch.setattr(perf_mod, "fetch_agent_performance", _one)
+    strategy.created_by = ORPHAN
+
+    out = asyncio.run(
+        agents_routes.get_session_executors("ag", "st", 1, user=_user(ADMIN))
+    )
+    assert out["executors"] == [executor]
+    assert out["performance"]["total_pnl"] == pytest.approx(PNL)
+    assert _perf_pnl(strategy, ADMIN) == pytest.approx(PNL)
+    assert cm.client_calls == [SERVER, SERVER]
+
+    # A non-admin gets nothing out of the orphaned creator.
+    agents_routes._PERF_CACHE.clear()
+    cm.client_calls.clear()
+    assert _executors_pnl(strategy, STRANGER) == 0.0
+    assert _perf_pnl(strategy, STRANGER) == 0.0
+    assert cm.client_calls == []
+
+
+# ── Why there is no money (CORR-706) ──
+
+
+def _executors(user_id):
+    return asyncio.run(
+        agents_routes.get_session_executors("ag", "st", 1, user=_user(user_id))
+    )
+
+
+def _assert_withheld(out, reason):
+    assert out["unavailable"] == reason
+    assert out["executors"] == []
+    assert out["pnl_series"] == [] and out["deployments"] == []
+    perf = out["performance"]
+    assert perf["total_pnl"] == 0.0 and perf["realized_pnl"] == 0.0
+    assert perf["volume"] == 0.0
+
+
+def test_session_executors_says_a_refused_principal_was_refused(cm, strategy, priced):
+    out = _executors(STRANGER)
+    _assert_withheld(out, "no_access")
+    # The reason is all a refused caller gets: no creator, no server figures.
+    assert str(OWNER) not in {str(v) for v in out.values()}
+    assert cm.client_calls == []
+
+
+def test_session_executors_says_an_unreachable_server_is_unreachable(
+    cm, strategy, priced, monkeypatch
+):
+    async def _offline(name):
+        raise ConnectionError("server down")
+
+    monkeypatch.setattr(cm, "get_client", _offline)
+    _assert_withheld(_executors(OWNER), "unreachable")
+
+
+def test_session_executors_says_a_strategy_with_no_server_has_none(
+    cm, strategy, priced
+):
+    (strategy.home / "config.yml").write_text("server_name: ''\n")
+    _assert_withheld(_executors(OWNER), "no_server")
+
+
+def test_session_executors_normal_payload_has_an_empty_reason(cm, strategy, priced):
+    out = _executors(OWNER)
+    assert out["unavailable"] == ""
+    assert set(out) == {
+        "executors",
+        "performance",
+        "pnl_series",
+        "deployments",
+        "unavailable",
+    }
+    assert out["performance"]["total_pnl"] == pytest.approx(PNL)
+
+
+def test_summary_and_detail_carry_the_reason(cm, strategy, priced):
+    summary = asyncio.run(agents_routes._build_strategy_summary(strategy, _user(OWNER)))
+    assert (summary.unavailable, _detail(strategy, OWNER).unavailable) == ("", "")
+
+    agents_routes._PERF_CACHE.clear()
+    summary = asyncio.run(
+        agents_routes._build_strategy_summary(strategy, _user(STRANGER))
+    )
+    assert summary.unavailable == "no_access"
+    assert summary.total_pnl == 0.0
+    assert _detail(strategy, STRANGER).unavailable == "no_access"

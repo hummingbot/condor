@@ -461,10 +461,12 @@ def test_notify_route_counts_a_bell_only_delivery_as_recorded(store, monkeypatch
     from condor.web.routes import agents as agents_routes
     from condor.web.routes.agents import NotifyRequest, notify_user
 
-    async def _no_conversation(session_key: str) -> str:
+    async def _no_conversation(session_key: str, user) -> str:
         return ""
 
-    monkeypatch.setattr(agents_routes, "_conversation_for_session", _no_conversation)
+    monkeypatch.setattr(
+        agents_routes, "_owned_conversation_for_session", _no_conversation
+    )
 
     class _DeadBot:
         async def send_message(self, **kw):

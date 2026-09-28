@@ -19,6 +19,8 @@
 
 import { isLoopRun, parseRunId, type RunRef } from "@/components/agent/lab/runs";
 import { OPEN_PARAM } from "@/components/agent/workspace/sections";
+import { workspaceHref } from "@/components/agent/workspace/workspaceUrl";
+import { countdown } from "@/lib/agent-attribution";
 import type { AgentRunRow, StrategySummary } from "@/lib/api";
 
 /** Everything the URL says, once. */
@@ -29,7 +31,7 @@ export interface WorkspaceUrl {
   run: RunRef | null;
   /** `?tick=`, or `null` when no tick is open over the screen. */
   tick: number | null;
-  /** The raw `?open=`, for {@link useSections} — `null` when it names none. */
+  /** The raw `?open=`, for {@link pageSection} — `null` when it names none. */
   open: string | null;
 }
 
@@ -52,6 +54,23 @@ type StrategyScope = Pick<StrategySummary, "slug" | "status" | "instances">;
 type RunScope = Pick<AgentRunRow, "strategy_slug" | "started_at">;
 
 /**
+ * The strategy `?strategy=` names, when this agent owns it; else `null`.
+ *
+ * The one ownership rule every reader of the parameter shares: `pickStrategy`
+ * honours a named slug only through it, and the bands that *narrow* on the
+ * parameter (the Runs rail's filter, the Fleet fold) take its answer rather
+ * than the raw string, so a stale slug from an old link or a deleted strategy
+ * narrows nothing instead of filtering every row out and printing a `$0.00`
+ * rollup for a scope that does not exist (CORR-397).
+ */
+export function ownsStrategy(
+  strategies: readonly Pick<StrategySummary, "slug">[],
+  named: string | null,
+): string | null {
+  return named && strategies.some((s) => s.slug === named) ? named : null;
+}
+
+/**
  * Which strategy the workspace is scoped to.
  *
  * The URL wins when it names one this agent actually owns. Absent — which is
@@ -64,7 +83,8 @@ export function pickStrategy(
   runs: readonly RunScope[],
   named: string | null,
 ): string | null {
-  if (named && strategies.some((s) => s.slug === named)) return named;
+  const owned = ownsStrategy(strategies, named);
+  if (owned) return owned;
 
   const live = strategies.find(
     (s) => s.status === "running" || s.instances.length > 0,
@@ -127,10 +147,7 @@ export function pickRun(
  * the rail it was addressing lives now (FEAT-119).
  */
 export function runsRedirect(slug: string, search: string): string {
-  const params = new URLSearchParams(search);
-  params.delete("view");
-  params.set(OPEN_PARAM, "runs");
-  return `/agents/${encodeURIComponent(slug)}?${params}`;
+  return workspaceHref(slug, { open: "runs" }, search);
 }
 
 /**
@@ -146,11 +163,7 @@ export function strategyRedirect(
   sslug: string,
   search: string,
 ): string {
-  const params = new URLSearchParams(search);
-  params.delete("view");
-  params.set(OPEN_PARAM, "playbook");
-  params.set("strategy", sslug);
-  return `/agents/${encodeURIComponent(slug)}?${params}`;
+  return workspaceHref(slug, { open: "playbook", strategy: sslug }, search);
 }
 
 // ── Alerts ──
@@ -199,8 +212,10 @@ export function journalNamesDeploy(
  *    and had six of its writes rejected left two indistinguishable rows.
  * 2. **It says it deployed and the ledger is empty.** Either the ownership
  *    claim failed or the narrative is wrong, and both are worth a person.
- * 3. **The tick is late.** The rule `LoopPulse` already draws in amber, said
- *    once more where somebody reading anything else will see it.
+ * 3. **The tick is late.** The rule the loop bar's countdown draws in amber,
+ *    worded with the same `countdown()`. Only the fleet rows raise it
+ *    (`fleetAlerts`): they have no loop bar. The run screen passes `loop: null`,
+ *    because its loop bar never unmounts and already says so (READ-424).
  *
  * `nowSec` is a parameter and not a `Date.now()` inside, for the reason every
  * clock in this codebase is: an alert that appears on its own is not testable,
@@ -258,7 +273,7 @@ export function alertsFor(input: {
     if (late > 0) {
       alerts.push({
         kind: "overdue",
-        text: `The next tick is ${Math.floor(late)}s overdue.`,
+        text: `The next tick is overdue by ${countdown(late)}.`,
       });
     }
   }

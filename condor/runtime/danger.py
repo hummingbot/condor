@@ -70,9 +70,12 @@ DANGEROUS_TOOLS = {
 BLOCKED_TOOLS: set[str] = set()
 
 # Actions within manage_bots that deploy/mutate a live bot (status/logs/get_config
-# are read-only and excluded). manage_controllers itself is excluded entirely — it
-# only writes controller templates/saved configs, never a running bot (see its own
-# tool docstring: "Does NOT affect running bots").
+# are read-only and excluded). manage_controllers is not in this set: it writes
+# controller templates and saved configs, never a running bot. That is not the
+# whole risk, though (SEC-713). A template is shared by name, per server, by every
+# agent and every future deploy, so its *code* half has its own policy below
+# (``raw_controller_code_refusal``, ``is_controller_template_delete``). Saved
+# configs stay ungated: they are ordinary deploy work.
 DANGEROUS_BOT_ACTIONS = {
     "deploy",
     "stop_bot",
@@ -183,13 +186,37 @@ READ_ONLY_LIQUIDITY_ACTIONS = {
     "quote_liquidity",
 }
 READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
-#: `manage_controllers`' writes and reads. The tool is outside the *gate*
-#: entirely and stays there (it writes controller templates and saved configs,
-#: never a running bot), but a fleet is *built* out of these calls: the twelve
+#: `manage_controllers`' writes and reads. The tool's config half is outside the
+#: *gate* and stays there (a saved config touches no running bot); its code half
+#: is not, since SEC-713 (see ``raw_controller_code_refusal``). Either way a
+#: fleet is *built* out of these calls: the twelve
 #: that assembled `pmm-king-btcbrl-20260903-181000`, six of them rejected, left
 #: no trace at all. Recording them is the log's question, not the gate's.
+CONTROLLERS_TOOL = "manage_controllers"
 MUTATING_CONTROLLER_ACTIONS = {"upsert", "delete"}
 READ_ONLY_CONTROLLER_ACTIONS = {"list", "describe"}
+#: The one ``target`` of ``manage_controllers`` that is *not* controller code. The
+#: code predicates below key on "anything but this", so a missing or unreadable
+#: target reads as code (SEC-093).
+CONTROLLER_CONFIG_TARGET = "config"
+#: Why an agent seat may not write controller code with the raw tool (SEC-713).
+#: Named once so every gate (the loop's risk callback, the attended confirmation
+#: callback) and the tests say the same thing, and the model is told what to use.
+RAW_CONTROLLER_CODE_REFUSAL = (
+    "controller code goes through manage_agent_controllers (write → status → "
+    "sync), which checks the server copy and backs it up — use that"
+)
+#: An agent's own controller source (FEAT-126). Outside the gate like
+#: ``manage_controllers`` — uploading a missing controller or config touches no
+#: running bot — with one exception: an ``overwrite`` replaces a server copy that
+#: differs from the folder, which may be someone's deliberate edit. That call is
+#: confirmed where a human is present (and refused in a dry run or a winddown).
+AGENT_CONTROLLERS_TOOL = "manage_agent_controllers"
+MUTATING_AGENT_CONTROLLER_ACTIONS = {"write", "delete", "sync", "upload_config", "pull"}
+READ_ONLY_AGENT_CONTROLLER_ACTIONS = {"list", "read", "status"}
+#: The actions whose ``overwrite=true`` replaces a copy on the *server*. ``pull``
+#: overwrites the agent's own folder, which is local and not gated.
+OVERWRITING_AGENT_CONTROLLER_ACTIONS = {"sync", "upload_config"}
 #: The snippet runner. Deliberately *not* in ``DANGEROUS_TOOLS`` and not to be
 #: added: since ARCH-308 a tick reads a market it can compute on only through
 #: ``client.market_data.*`` inside a snippet, so a name gate here would put a
@@ -237,6 +264,12 @@ READ_ONLY_ROUTINE_ACTIONS = {
     "get_instance",
     "list_instances",
 }
+#: The routine writes an emergency winddown may still make: the brake (SEC-697).
+#: The mirror of ``SHUTDOWN_BOT_ACTIONS`` in the gate, and the reason ``stop``
+#: sits above with the mutations rather than here-and-there: the note on that set
+#: puts it there because a *dry run* has no instance of its own to stop, which is
+#: the one thing a live seat winding down certainly does have.
+SHUTDOWN_ROUTINE_ACTIONS = frozenset({"stop"})
 #: The candle reader, and the answer to what refusing the two tools above costs
 #: a rehearsal (CORR-625). Both of those are refused in dry-run for holding the
 #: unrestricted API client, and since ARCH-308 they were between them the only
@@ -414,7 +447,88 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     if tool_name == "manage_bots":
         return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
 
+    if tool_name == AGENT_CONTROLLERS_TOOL:
+        return is_overwriting_controller_push(tool_call)
+
+    if tool_name == CONTROLLERS_TOOL:
+        # Only the template delete. A raw code *upsert* is never put in front of
+        # a human: every gate refuses it outright (raw_controller_code_refusal).
+        return is_controller_template_delete(tool_call)
+
     return False
+
+
+def is_overwriting_controller_push(tool_call: dict[str, Any]) -> bool:
+    """Does this ``manage_agent_controllers`` call replace a server copy? (FEAT-126)
+
+    Only ``sync``/``upload_config`` with a truthy ``overwrite``. Fails closed on
+    arguments that cannot be read, like every gate predicate (SEC-093): an
+    unreadable call might be the overwrite.
+    """
+    if tool_call_name(tool_call) != AGENT_CONTROLLERS_TOOL:
+        return False
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    action = input_data.get("action")
+    if not isinstance(action, str) or not action:
+        return True
+    return action in OVERWRITING_AGENT_CONTROLLER_ACTIONS and bool(
+        input_data.get("overwrite")
+    )
+
+
+def _controller_code_action(tool_call: dict[str, Any], action: str) -> bool:
+    """Does this ``manage_controllers`` call do ``action`` to controller *code*?
+
+    Fails closed (SEC-093): unreadable arguments or an unreadable ``action``
+    might be this action, and a ``target`` that is anything but ``"config"`` —
+    missing, null, not a string — is read as the controller template.
+    """
+    if tool_call_name(tool_call) != CONTROLLERS_TOOL:
+        return False
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    requested = input_data.get("action")
+    if not isinstance(requested, str) or not requested:
+        return True
+    return requested == action and input_data.get("target") != CONTROLLER_CONFIG_TARGET
+
+
+def is_raw_controller_code_write(tool_call: dict[str, Any]) -> bool:
+    """Does this call push controller code with the raw tool? (SEC-713)
+
+    ``manage_controllers(action="upsert", target="controller")`` writes source
+    straight to the server with none of FEAT-126's care: no drift check against
+    the agent's folder, no backup of the copy it replaces, no human. The copy it
+    replaces is shared by name with every agent on that server. The careful path
+    is ``manage_agent_controllers`` (write → status → sync), so every gate
+    refuses this outright, in every mode — see :func:`raw_controller_code_refusal`.
+    """
+    return _controller_code_action(tool_call, "upsert")
+
+
+def is_controller_template_delete(tool_call: dict[str, Any]) -> bool:
+    """Does this call delete a controller template from the server? (SEC-713)
+
+    A template is what running bots' saved configs and every future deploy of
+    that name load, so removing one gets the treatment an overwriting
+    ``sync`` gets: a human confirms it where one is present, and a dry run or a
+    winddown refuses it. Deleting a saved *config* is untouched.
+    """
+    return _controller_code_action(tool_call, "delete")
+
+
+def raw_controller_code_refusal(tool_call: dict[str, Any]) -> str | None:
+    """Why no agent seat may make this call, in any mode, or ``None`` (SEC-713).
+
+    The policy lives here so each gate only asks; the loop's risk callback and
+    the attended confirmation callback both call it before anything else.
+    """
+    if is_raw_controller_code_write(tool_call):
+        return RAW_CONTROLLER_CODE_REFUSAL
+    return None
 
 
 def _is_mutating_action(
@@ -436,6 +550,18 @@ def _is_mutating_action(
     if action in mutating:
         return True
     return action not in read_only
+
+
+def _tool_call_action(tool_call: dict[str, Any]) -> str:
+    """The call's ``action`` argument, or ``""`` when there is nothing to read.
+
+    Collapses "no arguments", "no action", "null" and "not a string" into one
+    value that is in no allowlist, so a caller carving an exception out of a
+    refusal fails closed on every one of them.
+    """
+    input_data = tool_call_input(tool_call)
+    action = input_data.get("action") if input_data is not None else None
+    return action if isinstance(action, str) else ""
 
 
 def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
@@ -477,6 +603,20 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
         # Recorded unless it is one of the two reads: a token or pool edit is a
         # write to Gateway's config even though nothing gates it.
         return _is_mutating_action(tool_call, set(), READ_ONLY_CONFIG_ACTIONS)
+
+    if tool_name == AGENT_CONTROLLERS_TOOL:
+        # Every write, gated or not: a sync that created a controller is how a
+        # fleet's code got onto the server.
+        return _is_mutating_action(
+            tool_call,
+            MUTATING_AGENT_CONTROLLER_ACTIONS,
+            READ_ONLY_AGENT_CONTROLLER_ACTIONS,
+        )
+
+    if tool_name == CONTROLLERS_TOOL:
+        # The one gated call on this tool (SEC-713). Its other writes are
+        # recorded through ``is_recordable_tool_call``'s extras.
+        return is_controller_template_delete(tool_call)
 
     # Gated by name, and every one of them writes: an order, a signature, an
     # executor create, an executor stop.
@@ -564,6 +704,24 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
             "snippet — 'list', 'describe' and 'read_routine' still work"
         )
 
+    if tool_call_name(tool_call) == AGENT_CONTROLLERS_TOOL and _is_mutating_action(
+        tool_call,
+        MUTATING_AGENT_CONTROLLER_ACTIONS,
+        READ_ONLY_AGENT_CONTROLLER_ACTIONS,
+    ):
+        return (
+            "this session runs in dry-run mode, where nothing mutates, and this "
+            "writes controller source or pushes it to a server — 'list', 'read' "
+            "and 'status' still work"
+        )
+
+    if is_controller_template_delete(tool_call):
+        return (
+            "this session runs in dry-run mode, where nothing mutates, and this "
+            "deletes a controller template from the server — 'list' and "
+            "'describe' still work"
+        )
+
     if tool_call_name(tool_call) == MARKET_DATA_TOOL and _is_mutating_action(
         tool_call, MUTATING_MARKET_DATA_ACTIONS, READ_ONLY_MARKET_DATA_ACTIONS
     ):
@@ -580,6 +738,66 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
     return None
 
 
+def shutdown_refusal(tool_call: dict[str, Any]) -> str | None:
+    """Why an emergency winddown must not auto-approve this call (SEC-697).
+
+    The sibling of :func:`dry_run_refusal` over the same two doors, and it
+    exists for the same structural reason: the *gate*'s shutdown branch refuses
+    only calls :func:`is_dangerous_tool_call` has flagged, and neither
+    ``run_code`` nor ``manage_routines`` is flagged — deliberately, because
+    gating either by name would put a confirmation in front of every tick's
+    candle read. So after a kill switch fired, the cleanup pass could still
+    execute a snippet, or write a routine and run it, each holding the same
+    unrestricted API client that lets it open a position or deploy a bot. That
+    is exactly what shutdown mode exists to prevent, and it happened silently:
+    an auto-approved call records no refusal. SEC-631 introduced the mode and
+    missed these two; SEC-616 and SEC-626 had closed the identical hole for
+    dry-run only.
+
+    Split from ``dry_run_refusal`` rather than folded into it because the two
+    modes forbid different things. A dry run forbids *mutation*, so its routine
+    half refuses ``stop`` too. A winddown forbids *exposure*, and a stop is the
+    brake — the module's standing rule is that the failure mode of standing in
+    front of a brake is worse than the failure mode of letting one through, and
+    the gate's own shutdown allowlist is built of brakes (``stop_executor``,
+    ``stop_bot``, ``stop_controllers``). ``stop`` is in
+    ``MUTATING_ROUTINE_ACTIONS`` on the argument that a dry run cannot have
+    started an instance, so the only one it could stop belongs to a live seat —
+    and that argument is precisely what does not hold here. A winddown *is* the
+    live seat, a continuous routine of its own may be placing orders right now,
+    and killing it is the cleanup rather than an escape from it.
+
+    Reads stay free in both modes and for the same reason: listing routines,
+    reading one's source, reading back a past run or snippet, changes nothing.
+    """
+    if is_code_execution_call(tool_call):
+        return (
+            "this session is shutting down after a kill switch, and a snippet "
+            "holds the unrestricted API client, so it could open exposure the "
+            "winddown just closed — 'history' and 'get' still work"
+        )
+
+    if (
+        is_mutating_routine_call(tool_call)
+        and _tool_call_action(tool_call) not in SHUTDOWN_ROUTINE_ACTIONS
+    ):
+        return (
+            "this session is shutting down after a kill switch, and a routine "
+            "is Python holding the same unrestricted API client as a snippet — "
+            "'stop' still works, and so do 'list', 'describe' and 'read_routine'"
+        )
+
+    if is_controller_template_delete(tool_call):
+        # Not a brake: removing the template running bots' configs load closes
+        # no exposure, and a winddown has no business editing the server.
+        return (
+            "this session is shutting down after a kill switch, and this "
+            "deletes a controller template other bots and deploys depend on"
+        )
+
+    return None
+
+
 def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     """Should the action log keep a row for this call? (FEAT-102)
 
@@ -590,7 +808,8 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     makes the gate's set structurally a subset that cannot fall behind.
 
     Its extras are ``manage_controllers``, ``run_code`` and ``manage_routines``.
-    The gate excludes all three tools entirely and should keep excluding them —
+    The gate excludes all three (bar ``manage_controllers``' code half, SEC-713)
+    and should keep excluding the rest —
     widening the gate would put a new confirmation prompt in front of a running
     fleet, and in front of every tick's market read — but a bot's controllers
     are *written* by exactly these calls, so a log that drops them cannot say
@@ -606,7 +825,7 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     if is_mutating_tool_call(tool_call):
         return True
 
-    if tool_call_name(tool_call) == "manage_controllers":
+    if tool_call_name(tool_call) == CONTROLLERS_TOOL:
         return _is_mutating_action(
             tool_call, MUTATING_CONTROLLER_ACTIONS, READ_ONLY_CONTROLLER_ACTIONS
         )
@@ -687,15 +906,17 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
 
     if tool_name == "control_agent":
         # The human is approving an unattended loop, so the line has to name the
-        # strategy it will run and — when the caller overrode them — the two
+        # loop it will run and — when the caller overrode them — the two
         # numbers that decide how much it can lose. Without this the prompt says
         # "control_agent" and a config dict.
         action = input_data.get("action", "?")
         if action in DANGEROUS_CONTROL_ACTIONS:
-            strategy = input_data.get("strategy_id") or "?"
+            # ``strategy_id`` is the pre-FEAT-128 spelling: a replayed or logged
+            # input still formats.
+            loop = input_data.get("loop_id") or input_data.get("strategy_id") or "?"
             overrides = input_data.get("config")
             overrides = overrides if isinstance(overrides, dict) else {}
-            summary = f"Start a live agent loop on '{strategy}'"
+            summary = f"Start a live agent loop on '{loop}'"
             mode = overrides.get("execution_mode")
             if mode:
                 summary += f" in {mode} mode"
@@ -749,9 +970,9 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Create {kind} pool {base}-{quote} on {connector}"
         return f"{kind}: {action}"
 
-    if tool_name == "manage_controllers":
-        # Never gated, so this line is written for the log rather than for a
-        # human deciding (FEAT-102). It still has to name what was written: a
+    if tool_name == CONTROLLERS_TOOL:
+        # Mostly written for the log (FEAT-102); since SEC-713 a template delete
+        # is also what a human approves from it. It has to name what was written: a
         # tick that builds a fleet makes a dozen of these, and "manage_controllers"
         # twelve times over says nothing about which config failed.
         action = input_data.get("action", "?")
@@ -763,6 +984,26 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             or "?"
         )
         return f"Controller {target}: {action} '{name}'"
+
+    if tool_name == AGENT_CONTROLLERS_TOOL:
+        action = input_data.get("action", "?")
+        name = str(input_data.get("name") or "").strip() or "?"
+        what = f"Agent controller {action} '{name}'"
+        sample = input_data.get("sample")
+        if isinstance(sample, str) and sample:
+            what += f" style '{sample}'"
+        agent = input_data.get("agent")
+        if input_data.get("shared"):
+            what += " (shared)"
+        elif isinstance(agent, str) and agent:
+            what += f" ({agent})"
+        if input_data.get("overwrite"):
+            what += (
+                " — OVERWRITE the server copy (backed up first)"
+                if action in OVERWRITING_AGENT_CONTROLLER_ACTIONS
+                else " — overwrite the folder copy"
+            )
+        return what
 
     if tool_name == CODE_RUN_TOOL:
         # Never gated either, so this line is written for the log (SEC-616). The

@@ -13,9 +13,11 @@ interface AgentPnlChartProps {
   data: PnlDataPoint[];
   height?: number;
   title?: string;
+  /** No border or background of its own, for a chart inside another card. */
+  bare?: boolean;
 }
 
-export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps) {
+export function AgentPnlChart({ data, height = 180, title, bare = false }: AgentPnlChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
@@ -174,7 +176,13 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
   // (kept mounted) so the empty→non-empty transition just flows through the data effect.
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+    <div
+      className={
+        bare
+          ? "overflow-hidden"
+          : "rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden"
+      }
+    >
       {title && (
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{title}</p>
@@ -217,25 +225,4 @@ export function metricsToDataPoints(metrics: MetricEntry[]): PnlDataPoint[] {
       value: m.pnl,
     }))
     .sort((a, b) => a.time - b.time);
-}
-
-// Helper to convert session-level performance to PnlDataPoints (aggregate)
-export function sessionsToDataPoints(
-  sessions: { session_num: number; total_pnl: number; status: string }[],
-): PnlDataPoint[] {
-  if (sessions.length === 0) return [];
-  // Use session_num as a proxy for time ordering — each session gets a synthetic timestamp
-  // spaced 1 hour apart from a base time
-  const base = Math.floor(Date.now() / 1000) - sessions.length * 3600;
-  let cumPnl = 0;
-  return sessions
-    .slice()
-    .sort((a, b) => a.session_num - b.session_num)
-    .map((s, i) => {
-      cumPnl += s.total_pnl;
-      return {
-        time: base + i * 3600,
-        value: cumPnl,
-      };
-    });
 }

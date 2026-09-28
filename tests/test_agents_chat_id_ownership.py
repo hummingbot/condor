@@ -73,11 +73,27 @@ def bot(monkeypatch):
     return fake
 
 
-def _resolves_to(monkeypatch, conversation_id: str = ""):
-    async def fake(session_key: str) -> str:
-        return conversation_id if session_key else ""
+def _resolves_to(monkeypatch, conversation_id: str = "", owner: int = CALLER.id):
+    """Stub the session registry: any key names a live session recorded under
+    ``owner`` with ``conversation_id`` on it (no session when that is empty)."""
+    from condor.runtime import client
+    from condor.runtime.models import SessionInfo
 
-    monkeypatch.setattr(agents_routes, "_conversation_for_session", fake)
+    looked_up: list[str] = []
+
+    async def fake_get_info(key):
+        looked_up.append(str(key))
+        if not conversation_id:
+            return None
+        return SessionInfo(
+            key=str(key),
+            agent_key="condor",
+            user_id=owner,
+            conversation_id=conversation_id,
+        )
+
+    monkeypatch.setattr(client, "get_info", fake_get_info)
+    return looked_up
 
 
 # ── The check itself ──
@@ -186,10 +202,17 @@ def test_notify_delivers_to_a_group_the_caller_belongs_to(monkeypatch, bot):
 # ── POST /agents/{slug}/delegate ──
 
 
-def _delegate(monkeypatch, req: DelegateRequest, user: WebUser):
+def _delegate(
+    monkeypatch,
+    req: DelegateRequest,
+    user: WebUser,
+    started: list | None = None,
+    resolve: bool = True,
+):
     monkeypatch.setattr(agents_routes, "_get_agent", lambda slug: SimpleNamespace())
-    _resolves_to(monkeypatch, "")
-    started = []
+    if resolve:
+        _resolves_to(monkeypatch, "")
+    started = [] if started is None else started
 
     async def fake_start(**kw):
         started.append(kw)
@@ -211,6 +234,133 @@ def test_delegate_accepts_the_callers_own_chat(monkeypatch, bot):
     )
     assert result["task_id"] == "t-1"
     assert started[0]["chat_id"] == CALLER.id
+
+
+# ── Body-supplied ``session_key`` (SEC-636) ──
+#
+# The key decides whose live session a delegation's completion is resumed into
+# and whose dashboard tab a note lands in, so it must name the caller's own
+# session -- ``sessions._require_ownership``'s rule, admins exempt.
+
+OTHER_USER = 777
+FOREIGN_KEY = f"tg:{OTHER_USER}"
+
+
+def test_delegate_refuses_another_users_session_key(monkeypatch, bot):
+    _resolves_to(monkeypatch, "victim-conv", owner=OTHER_USER)
+    started: list = []
+    with pytest.raises(HTTPException) as exc:
+        _delegate(
+            monkeypatch,
+            DelegateRequest(task="t", session_key=FOREIGN_KEY, on_complete="resume"),
+            CALLER,
+            started=started,
+            resolve=False,
+        )
+    assert exc.value.status_code == 403
+    assert started == []  # no delegation ever holds the foreign key
+
+
+def test_delegate_refuses_an_ownerless_session_key(monkeypatch, bot):
+    """A session with no recorded owner is nobody's to target, as in sessions.py."""
+    _resolves_to(monkeypatch, "conv-x", owner=None)
+    started: list = []
+    with pytest.raises(HTTPException) as exc:
+        _delegate(
+            monkeypatch,
+            DelegateRequest(task="t", session_key="web:1:s"),
+            CALLER,
+            started=started,
+            resolve=False,
+        )
+    assert exc.value.status_code == 403
+    assert started == []
+
+
+def test_delegate_forwards_the_callers_own_session(monkeypatch, bot):
+    _resolves_to(monkeypatch, "conv-1", owner=CALLER.id)
+    started, result = _delegate(
+        monkeypatch,
+        DelegateRequest(task="t", session_key=f"tg:{CALLER.id}"),
+        CALLER,
+        resolve=False,
+    )
+    assert result["task_id"] == "t-1"
+    assert started[0]["conversation_id"] == "conv-1"
+    assert started[0]["session_key"] == f"tg:{CALLER.id}"
+
+
+def test_admin_may_delegate_into_another_users_session(monkeypatch, bot):
+    _resolves_to(monkeypatch, "victim-conv", owner=OTHER_USER)
+    started, _ = _delegate(
+        monkeypatch,
+        DelegateRequest(task="t", session_key=FOREIGN_KEY),
+        ADMIN,
+        resolve=False,
+    )
+    assert started[0]["conversation_id"] == "victim-conv"
+
+
+def test_a_dead_or_malformed_session_key_resolves_to_nothing(monkeypatch, bot):
+    looked_up = _resolves_to(monkeypatch, "")  # registry: no such session
+    for key in (FOREIGN_KEY, "not-a-key", ""):
+        started, _ = _delegate(
+            monkeypatch,
+            DelegateRequest(task="t", session_key=key),
+            CALLER,
+            resolve=False,
+        )
+        assert started[0]["conversation_id"] == ""
+    assert looked_up == [FOREIGN_KEY]  # malformed/empty never reach the registry
+
+
+def test_notify_refuses_another_users_session_key_before_any_side_effect(
+    monkeypatch, bot
+):
+    _resolves_to(monkeypatch, "victim-conv", owner=OTHER_USER)
+    noted: list = []
+    announced: list = []
+    from condor import notifications
+    from condor.runtime import conversations
+
+    monkeypatch.setattr(
+        conversations, "record_system", lambda *a, **kw: noted.append(a)
+    )
+
+    async def fake_announce(*a, **kw):
+        announced.append(a)
+
+    monkeypatch.setattr(notifications, "announce", fake_announce)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            notify_user(
+                NotifyRequest(text="phish", chat_id=CALLER.id, session_key=FOREIGN_KEY),
+                user=CALLER,
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert noted == []
+    assert announced == []  # no bell entry
+    assert bot.calls == []  # no Telegram send
+
+
+def test_notify_notes_the_callers_own_session(monkeypatch, bot):
+    _resolves_to(monkeypatch, "conv-1", owner=CALLER.id)
+    noted: list = []
+    from condor.runtime import conversations
+
+    monkeypatch.setattr(
+        conversations, "record_system", lambda *a, **kw: noted.append(a)
+    )
+    asyncio.run(
+        notify_user(
+            NotifyRequest(text="done", chat_id=CALLER.id, session_key="web:1:s"),
+            user=CALLER,
+        )
+    )
+    assert noted[0][:2] == (CALLER.id, "conv-1")
 
 
 # ── POST /agents/{slug}(/strategies/{sslug})/start ──

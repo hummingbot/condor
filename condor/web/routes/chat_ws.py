@@ -310,6 +310,8 @@ class WebSocketChannel:
                 # Which agent, on which server, is asking. The slot addresses
                 # the request; this says out loud what the user is authorizing.
                 "origin": pending.origin,
+                # A controller overwrite's recorded impact (FEAT-129), else "".
+                "detail": pending.detail,
                 # The call itself and the time left to answer it, so the prompt
                 # previews a command that is paused rather than reading like a
                 # notice the user can leave for later.

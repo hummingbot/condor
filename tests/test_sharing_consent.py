@@ -497,7 +497,9 @@ async def test_a_4xx_from_an_edge_rather_than_the_collector_keeps_the_record(
     caplog.set_level(logging.DEBUG)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(aiohttp, "ClientSession", lambda **kw: _Session())
-        assert await outbox.post(record) is False
+        # Kept queued, and marked as blocked at the edge rather than an outage so
+        # flush holds back only this conversation (CORR-628).
+        assert await outbox.post(record) == outbox.BLOCKED
 
     assert not [r for r in caplog.records if "dropping it" in r.getMessage()]
     assert [r for r in caplog.records if "not the collector" in r.getMessage()]
@@ -1205,3 +1207,94 @@ async def test_a_brief_stall_is_not_reported_as_a_wedged_queue(
     await outbox.flush()
 
     assert not [r for r in caplog.records if "has not delivered" in r.getMessage()]
+
+
+# ── A block at the edge stalls one conversation, not the queue (CORR-628) ──
+
+
+def _share_for(share_id: str, n: int) -> dict:
+    return outbox.enqueue(
+        outbox.OP_SHARE,
+        "https://collector.invalid/v1/conversations",
+        {"n": n},
+        share_id=share_id,
+        user_id=4242,
+        kind="manual",
+    )
+
+
+def _post_blocking(blocked_ids: set[str], attempted: list[str]):
+    async def _post(record):
+        attempted.append(record["id"])
+        return outbox.BLOCKED if record["id"] in blocked_ids else True
+
+    return _post
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_unshare_does_not_hold_back_another_conversations_share(
+    chat, monkeypatch
+):
+    """Acceptance criterion: the production wedge, one WAF-blocked unshare at the head."""
+    unshare_a = _unshare(1)
+    share_b = _share_for("2", 1)
+
+    attempted: list[str] = []
+    monkeypatch.setattr(outbox, "post", _post_blocking({unshare_a["id"]}, attempted))
+    assert await outbox.flush() == (1, 1)
+    assert attempted == [unshare_a["id"], share_b["id"]]
+    assert [r["id"] for r in outbox.pending()] == [unshare_a["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_share_keeps_its_own_unshare_behind_it(chat, monkeypatch):
+    """Acceptance criterion: order is still kept within the blocked conversation."""
+    share_a = _share_for("1", 1)
+    unshare_a = _unshare(1)
+    share_b = _share_for("2", 1)
+
+    attempted: list[str] = []
+    monkeypatch.setattr(outbox, "post", _post_blocking({share_a["id"]}, attempted))
+    assert await outbox.flush() == (1, 2)
+    assert unshare_a["id"] not in attempted
+    assert attempted == [share_a["id"], share_b["id"]]
+    assert [r["id"] for r in outbox.pending()] == [share_a["id"], unshare_a["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_record_without_a_share_id_still_stops_the_flush(
+    chat, monkeypatch
+):
+    """Acceptance criterion: a record whose pair cannot be identified stalls everything."""
+    legacy = _share_for("", 1)
+    share_b = _share_for("2", 1)
+
+    attempted: list[str] = []
+    monkeypatch.setattr(outbox, "post", _post_blocking({legacy["id"]}, attempted))
+    assert await outbox.flush() == (0, 2)
+    assert attempted == [legacy["id"]]
+    assert [r["id"] for r in outbox.pending()] == [legacy["id"], share_b["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_long_blocked_record_reports_only_its_own_conversation(
+    chat, monkeypatch, caplog
+):
+    """The stall warning must not claim the whole queue is wedged behind a block."""
+    record = _unshare(1)
+    _unshare(1)
+    _share_for("2", 1)
+    _share_for("3", 1)
+    queued = outbox.pending()
+    queued[0]["queued_at"] = time.time() - 2 * outbox.STALL_WARN_AFTER_S
+    outbox._write(queued)
+
+    monkeypatch.setattr(outbox, "post", _post_blocking({record["id"]}, []))
+    caplog.set_level(logging.DEBUG)
+    assert await outbox.flush() == (2, 2)
+
+    stalled = [r for r in caplog.records if "has not delivered" in r.getMessage()]
+    assert len(stalled) == 1 and stalled[0].levelno >= logging.WARNING
+    message = stalled[0].getMessage()
+    assert "1 record(s) for the same conversation" in message
+    assert "other conversations still flow" in message

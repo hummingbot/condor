@@ -25,6 +25,7 @@ from condor.runtime.state import (
     list_state,
     load_namespace,
     namespace_for,
+    namespace_for_strategy,
     set_state,
 )
 from condor.runtime.timeouts import TimeoutPolicy, resolve_tick_timeout
@@ -41,8 +42,8 @@ def state_root(tmp_path, monkeypatch):
     monkeypatch.setattr(state_module, "_last_write", {})
     monkeypatch.setattr(state_module, "_dirty", set())
     # Writes land under the strategy dir when it exists.
-    (tmp_path / "brigado" / "strategies" / "mm").mkdir(parents=True)
-    (tmp_path / "brigado" / "strategies" / "other").mkdir(parents=True)
+    (tmp_path / "brigado" / "loops" / "mm").mkdir(parents=True)
+    (tmp_path / "brigado" / "loops" / "other").mkdir(parents=True)
     return tmp_path
 
 
@@ -137,7 +138,7 @@ def test_persistence_across_reload(state_root):
     assert get_state(NS, "cursor") == "exec-99"
 
     # And it landed under the strategy it belongs to, not a global blob.
-    written = state_root / "brigado" / "strategies" / "mm" / "state.json"
+    written = state_root / "brigado" / "loops" / "mm" / "state.json"
     assert written.is_file()
     assert json.loads(written.read_text())["entries"]["cursor"]["value"] == "exec-99"
 
@@ -174,7 +175,7 @@ def test_cleanup_orphans(state_root):
 
     import shutil
 
-    shutil.rmtree(state_root / "brigado" / "strategies" / "other")
+    shutil.rmtree(state_root / "brigado" / "loops" / "other")
 
     assert cleanup_orphans(agents_root=state_root) == 1
     assert NS in state_module._cache
@@ -191,6 +192,43 @@ def test_namespace_for_uses_agent_and_strategy():
         session_num=7,
     )
     assert namespace_for(engine) == "brigado.mm"
+
+
+def _engine(agent_slug, strategy_slug):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        agent=SimpleNamespace(slug=agent_slug),
+        strategy=SimpleNamespace(slug=strategy_slug),
+        session_num=7,
+    )
+
+
+def test_namespace_for_strategy_matches_the_engine_namespace():
+    """The routes' helper and the loop's derivation are one definition (READ-694)."""
+    engine = _engine("brigado", "mm")
+    assert namespace_for_strategy("brigado", "mm") == namespace_for(engine)
+    assert namespace_for(engine) == "brigado.mm"
+
+
+def test_state_routes_share_the_loop_namespace(state_root, monkeypatch):
+    """What the dashboard writes is what the loop's BoundState reads, and back."""
+    import asyncio
+
+    from condor.web.routes import agents as routes
+
+    (state_root / "a" / "loops" / "s").mkdir(parents=True)
+    monkeypatch.setattr(routes, "_get_strategy", lambda *a, **k: None)
+    monkeypatch.setattr(routes, "_require_no_foreign_live_run", lambda *a, **k: None)
+
+    req = routes.SetStateRequest(key="cursor", value="exec-9")
+    assert asyncio.run(routes.set_strategy_state("a", "s", req, user=None)) == {
+        "ok": True
+    }
+
+    assert BoundState(namespace_for(_engine("a", "s"))).list() == {"cursor": "exec-9"}
+    got = asyncio.run(routes.get_strategy_state("a", "s", user=None))
+    assert got == {"state": {"cursor": "exec-9"}}
 
 
 # ── The tick reads the store (ARCH-276) ──
@@ -289,7 +327,8 @@ def test_the_tick_feeds_the_prompt_from_its_own_bound_state():
 
     from condor.agents import engine
 
-    tick_src = inspect.getsource(engine.TickEngine._tick)
+    # READ-649: the prompt is built in the gather phase, not in _tick itself.
+    tick_src = inspect.getsource(engine.TickEngine._build_prompt)
     assert "self.state.list()" in tick_src
     assert "loop_state=loop_state" in tick_src
 
@@ -389,7 +428,8 @@ def test_engine_tick_has_no_hardcoded_budget():
 
     from condor.agents import engine, shutdown
 
-    tick_src = inspect.getsource(engine.TickEngine._tick)
+    # READ-649: the model-run phase owns the tick budget.
+    tick_src = inspect.getsource(engine.TickEngine._run_model)
     assert "resolve_tick_timeout" in tick_src
     assert "asyncio.timeout(300)" not in tick_src
     assert "asyncio.timeout(300)" not in inspect.getsource(shutdown)

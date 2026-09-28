@@ -15,7 +15,11 @@ from condor.agents.risk import (
     RiskEngine,
     RiskLimits,
     RiskState,
+    _amm_field,
     _planned_amount_quote,
+    _positive_price,
+    _quote_amount,
+    _requested_leverage,
     auto_approve_with_risk_check,
 )
 
@@ -208,16 +212,10 @@ def test_callback_second_create_cancelled_same_tick():
 
 
 class _BrokenTracker:
-    """Tracker whose metrics raise (e.g. corrupted journal)."""
-
-    def get_total_exposure(self) -> float:
-        raise ValueError("could not convert string to float: 'garbage'")
-
-    def get_open_executor_count(self) -> int:
-        return 0
+    """Tracker whose metric raises (e.g. corrupted journal)."""
 
     def get_drawdown_pct(self) -> float:
-        return 0.0
+        raise ValueError("could not convert string to float: 'garbage'")
 
 
 def test_get_state_fails_closed_when_tracker_raises():
@@ -397,6 +395,136 @@ def test_loop_mode_approves_update_config_within_limit():
         )
     )
     assert result["outcome"]["outcome"] == "selected"
+
+
+@pytest.mark.parametrize(
+    "cap",
+    ["nan", float("nan"), "-inf", -1, "-5", 0, "0", "$0", "0.0", " 0 ", "fifty", True],
+)
+def test_bot_deploy_refuses_unreadable_or_non_positive_loss_cap(cap):
+    """SEC-632: a NaN cap never fires on the backend and a zero cap is never
+    installed, so neither may clear the gate — and none of them may escape the
+    callback as an exception instead of a logged refusal."""
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=500.0)),
+        RiskState(),
+        execution_mode="loop",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote=cap,
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert "max_global_drawdown_quote" in result["reason"]
+    logged = refusals.drain()
+    assert len(logged) == 1
+    assert "manage_bots" in logged[0]["tool"]
+
+
+def test_bot_deploy_accepts_a_dollar_prefixed_loss_cap():
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=500.0)),
+        RiskState(),
+        execution_mode="loop",
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote="$100",
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "selected"
+
+
+@pytest.mark.parametrize("amount", ["nan", "-inf", "abc"])
+def test_update_config_refuses_unreadable_amount(amount):
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=500.0)),
+        RiskState(),
+        execution_mode="loop",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "update_config",
+                bot_name="x",
+                config_name="cfg",
+                config_data={"total_amount_quote": amount},
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert "total_amount_quote" in result["reason"]
+    assert len(refusals.drain()) == 1
+
+
+def test_bot_deploy_dollar_cap_above_the_position_limit_names_the_limit():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    call = _bot_call(
+        "deploy",
+        bot_name="x",
+        controllers_config=["cfg"],
+        max_global_drawdown_quote="$5000",
+    )
+
+    allowed, reason = engine.check_bot_action(call, RiskState())
+
+    assert allowed is False
+    assert "position limit" in reason
+
+
+@pytest.mark.parametrize(
+    "config_data", ['{"total_amount_quote": 9000}', ["total_amount_quote", 9000], 7]
+)
+def test_update_config_with_a_non_dict_config_data_is_refused_not_raised(config_data):
+    """CORR-653: a stringified config_data used to raise AttributeError out of
+    the permission callback, so the refusal never reached RefusalLog."""
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    call = _bot_call("update_config", bot_name="x", config_data=config_data)
+
+    allowed, reason = engine.check_bot_action(call, RiskState())
+    assert allowed is False
+    assert "config_data" in reason
+
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        engine, RiskState(), execution_mode="loop", refusals=refusals
+    )
+    result = asyncio.run(callback(call, _OPTIONS))
+    assert result["outcome"]["outcome"] == "cancelled"
+    logged = refusals.drain()
+    assert len(logged) == 1
+    assert "manage_bots" in logged[0]["tool"]
+
+
+@pytest.mark.parametrize("config_data", [None, {}])
+def test_update_config_without_config_data_is_still_allowed(config_data):
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    call = _bot_call("update_config", bot_name="x", config_data=config_data)
+
+    assert engine.check_bot_action(call, RiskState()) == (True, "")
 
 
 def test_loop_mode_still_approves_bot_stop():
@@ -975,3 +1103,317 @@ def test_the_candle_reader_needs_no_confirmation_in_any_mode(mode):
     )
     assert is_dangerous_tool_call(call) is False
     assert asyncio.run(callback(call, _OPTIONS))["outcome"]["outcome"] == "selected"
+
+
+# ---------------------------------------------------------------------------
+# ARCH-677: one finite-number parser behind every priced field
+# ---------------------------------------------------------------------------
+
+_PARSERS = {
+    "quote_amount": lambda v: _quote_amount(v, "amount"),
+    "amm_field": lambda v: _amm_field(v, "amount"),
+    "positive_price": _positive_price,
+    "requested_leverage": lambda v: _requested_leverage({"leverage": v}),
+}
+
+
+@pytest.mark.parametrize("parser", sorted(_PARSERS))
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "abc", True])
+def test_every_parser_refuses_the_same_malformed_input(parser, value):
+    """A bool, non-number, non-finite or negative figure is refused by every
+    door, not valued as 1 by three of them and refused by the fourth."""
+    with pytest.raises(ValueError):
+        _PARSERS[parser](value)
+
+
+@pytest.mark.parametrize("parser", sorted(_PARSERS))
+def test_every_parser_words_a_malformed_input_the_same_way(parser):
+    with pytest.raises(ValueError, match=r"must be a number, got 'abc'"):
+        _PARSERS[parser]("abc")
+
+
+def test_quote_amount_empty_is_zero_and_dollar_is_stripped():
+    assert _quote_amount(None, "amount") == 0.0
+    assert _quote_amount("", "amount") == 0.0
+    assert _quote_amount("$100", "amount") == 100.0
+    assert _quote_amount("0", "amount") == 0.0
+
+
+def test_amm_field_empty_requires_a_value_unless_defaulted():
+    with pytest.raises(ValueError, match="is required to price this call"):
+        _amm_field("", "amount")
+    assert _amm_field("", "amount", default=0.0) == 0.0
+    assert _amm_field("2.5", "amount") == 2.5
+
+
+def test_requested_leverage_strips_x_and_empty_is_none():
+    assert _requested_leverage({"leverage": "5x"}) == 5.0
+    assert _requested_leverage({}) is None
+    assert _requested_leverage({"leverage": ""}) is None
+    with pytest.raises(ValueError, match="positive finite number"):
+        _requested_leverage({"leverage": 0})
+
+
+def test_positive_price_missing_is_unavailable_and_zero_is_refused():
+    with pytest.raises(ValueError, match="reference price is unavailable"):
+        _positive_price(None)
+    with pytest.raises(ValueError, match="positive finite number"):
+        _positive_price("0")
+    assert _positive_price("1.5") == 1.5
+
+
+def test_risk_module_parses_input_numbers_in_one_place():
+    """Only _finite_number checks isfinite on a parsed input; the fetched price
+    in _planned_amount_quote goes through _positive_price."""
+    import inspect
+
+    import condor.agents.risk as risk
+
+    for fn in (
+        risk._requested_leverage,
+        risk._quote_amount,
+        risk._amm_field,
+        risk._positive_price,
+    ):
+        assert "isfinite" not in inspect.getsource(fn)
+    planned = inspect.getsource(risk._planned_amount_quote)
+    assert "_positive_price(price)" in planned
+    assert planned.count("isfinite") == 1  # the planned-total check only
+
+
+def test_planned_amount_quote_refuses_an_unpriceable_fetched_price(monkeypatch):
+    import condor.fetchers.market_data as md
+
+    async def _no_price(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(md, "fetch_current_price", _no_price)
+    with pytest.raises(ValueError, match="reference price is unavailable"):
+        asyncio.run(
+            _planned_amount_quote("create_position_executor", {"amount": "1"}, object())
+        )
+
+
+# ---------------------------------------------------------------------------
+# SEC-631: execution_mode="shutdown" lets only the brakes through
+# ---------------------------------------------------------------------------
+
+
+def _shutdown_gate(tmp_path, refusals=None, owners=None, price_client=None):
+    from condor.agents.ownership import BotLedger
+
+    ledger = BotLedger("acme-scalper", tmp_path, enforced=True)
+    return auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=1e9, max_open_executors=99)),
+        RiskState(),
+        execution_mode="shutdown",
+        ledger=ledger,
+        agent_id="acme.scalper_1",
+        price_client=price_client,
+        refusals=refusals,
+        executor_owners=owners or {"e_own": "acme.scalper_1"},
+    )
+
+
+def _outcome(result: dict) -> str:
+    return result["outcome"]["outcome"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        {
+            "tool": "create_position_executor",
+            "input": {
+                "controller_id": "acme.scalper_1",
+                "connector_name": "binance_perpetual",
+                "trading_pair": "SOL-USDT",
+                "amount": 1,
+                "total_amount_quote": 10,
+            },
+        },
+        {"tool": "create_grid_executor", "input": {"controller_id": "acme.scalper_1"}},
+        {"tool": "create_lp_executor", "input": {"controller_id": "acme.scalper_1"}},
+        {
+            "tool": "set_account_position_mode_and_leverage",
+            "input": {"leverage": 1, "trading_pair": "SOL-USDT"},
+        },
+        {"tool": "place_order", "input": {"trading_pair": "SOL-USDT"}},
+        {
+            "tool": "manage_bots",
+            "input": {"action": "deploy", "bot_name": "acme-scalper-2"},
+        },
+        {
+            "tool": "manage_bots",
+            "input": {"action": "start_controllers", "bot_name": "acme-scalper-2"},
+        },
+        {
+            "tool": "manage_bots",
+            "input": {"action": "update_config", "bot_name": "acme-scalper-2"},
+        },
+        {"tool": "execute_swap", "input": {"trading_pair": "SOL-USDC", "amount": 1}},
+        {"tool": "manage_clmm", "input": {"action": "open"}},
+        {"tool": "manage_clmm", "input": {"action": "add_liquidity"}},
+        {"tool": "manage_amm", "input": {"action": "add_liquidity"}},
+        {"tool": "manage_clmm", "input": {"action": None}},
+        {"tool": "control_agent", "input": {"action": "start"}},
+    ],
+)
+def test_shutdown_mode_refuses_every_exposure_adding_call(tmp_path, call):
+    refusals = RefusalLog()
+    result = asyncio.run(_shutdown_gate(tmp_path, refusals)(call, _OPTIONS))
+    assert _outcome(result) == "cancelled"
+    [entry] = refusals.drain()
+    assert entry["tool"] == call["tool"]
+    assert "shutting down" in entry["reason"]
+
+
+def test_shutdown_mode_allows_an_owned_stop_and_refuses_a_foreign_one(
+    tmp_path, monkeypatch
+):
+    import condor.fetchers.executors as executors_fetcher
+
+    async def detail(client, executor_id):
+        return {"id": executor_id, "controller_id": "x.y_2"}
+
+    monkeypatch.setattr(executors_fetcher, "get_executor_detail", detail)
+    gate = _shutdown_gate(tmp_path, price_client=object())
+    own = {"tool": "stop_executor", "input": {"executor_id": "e_own"}}
+    other = {"tool": "stop_executor", "input": {"executor_id": "e_other"}}
+    assert _outcome(asyncio.run(gate(own, _OPTIONS))) == "selected"
+    result = asyncio.run(gate(other, _OPTIONS))
+    assert _outcome(result) == "cancelled"
+    assert "another session" in result["reason"]
+
+
+def test_shutdown_mode_bot_stops_still_meet_the_namespace(tmp_path):
+    gate = _shutdown_gate(tmp_path)
+    for action in ("stop_bot", "stop_controllers"):
+        own = {
+            "tool": "manage_bots",
+            "input": {"action": action, "bot_name": "acme-scalper-1"},
+        }
+        assert _outcome(asyncio.run(gate(own, _OPTIONS))) == "selected"
+    foreign = {
+        "tool": "manage_bots",
+        "input": {"action": "stop_bot", "bot_name": "zed-1"},
+    }
+    result = asyncio.run(gate(foreign, _OPTIONS))
+    assert _outcome(result) == "cancelled"
+    assert "namespace" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "tool,action",
+    [
+        ("manage_clmm", "close"),
+        ("manage_clmm", "remove_liquidity"),
+        ("manage_clmm", "collect_fees"),
+        ("manage_amm", "remove_liquidity"),
+    ],
+)
+def test_shutdown_mode_lets_liquidity_removal_through(tmp_path, tool, action):
+    gate = _shutdown_gate(tmp_path)
+    call = {"tool": tool, "input": {"action": action}}
+    assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected"
+
+
+def test_shutdown_mode_leaves_safe_calls_alone(tmp_path):
+    gate = _shutdown_gate(tmp_path)
+    for call in (
+        {"tool": "list_executors", "input": {}},
+        {"tool": "manage_bots", "input": {"action": "status"}},
+        {"tool": "control_agent", "input": {"action": "stop"}},
+    ):
+        assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected"
+
+
+# ---------------------------------------------------------------------------
+# SEC-697: the two ungated doors onto arbitrary Python are refused in shutdown
+# mode too. SEC-631 built the mode out of `is_dangerous_tool_call`, which does
+# not flag either tool, so a cleanup pass could re-open what it had just closed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        _code_call(code="await client.gateway.start({'image': 'x'})"),
+        _code_call(action="run", code="print(1)"),
+        # The tool's own default is `run`, so an unreadable action executes.
+        _code_call(code="print(1)"),
+        {"tool": "run_code", "input": None},
+        _code_call(action=None, code="print(1)"),
+    ],
+)
+def test_shutdown_mode_cannot_execute_a_snippet(tmp_path, call):
+    refusals = RefusalLog()
+    result = asyncio.run(_shutdown_gate(tmp_path, refusals)(call, _OPTIONS))
+
+    assert _outcome(result) == "cancelled"
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "run_code"
+    assert "shutting down" in noted["reason"]
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["run", "run_async", "start", "create_routine", "edit_routine", "delete_routine"],
+)
+def test_shutdown_mode_cannot_write_or_execute_a_routine(tmp_path, action):
+    refusals = RefusalLog()
+    call = _routine_call(
+        action=action,
+        name="pwn",
+        code="async def run(config, context):\n    await client.gateway.start({})",
+    )
+
+    result = asyncio.run(_shutdown_gate(tmp_path, refusals)(call, _OPTIONS))
+
+    assert _outcome(result) == "cancelled", action
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "manage_routines"
+    assert "shutting down" in noted["reason"]
+
+
+def test_shutdown_mode_refuses_a_routine_action_it_cannot_read(tmp_path):
+    """Fails closed, so a newly added write cannot default to allowed."""
+    gate = _shutdown_gate(tmp_path)
+
+    for call in (
+        {"tool": "manage_routines", "input": None},
+        _routine_call(name="x"),
+        _routine_call(action=None, name="x"),
+        _routine_call(action="publish_routine", name="x"),
+    ):
+        assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "cancelled", call
+
+
+def test_shutdown_mode_still_stops_a_running_routine(tmp_path):
+    """The brake, unlike in a dry run: a winddown owns instances and must kill them.
+
+    `stop` sits in MUTATING_ROUTINE_ACTIONS because a *dry run* can reach
+    neither `start` nor `run_async`, so the only instance it could stop belongs
+    to a live seat. A winddown is that live seat, and a continuous routine of
+    its own may be placing orders while the cleanup runs.
+    """
+    refusals = RefusalLog()
+    gate = _shutdown_gate(tmp_path, refusals)
+
+    result = asyncio.run(gate(_routine_call(action="stop", name="ri_1"), _OPTIONS))
+
+    assert _outcome(result) == "selected"
+    assert refusals.drain() == []
+
+
+def test_shutdown_mode_still_reads_routines_and_past_runs(tmp_path):
+    gate = _shutdown_gate(tmp_path)
+
+    for call in (
+        _routine_call(action="list"),
+        _routine_call(action="describe", name="x"),
+        _routine_call(action="read_routine", name="x"),
+        _code_call(action="history"),
+        _code_call(action="get", run_id="cr_1"),
+    ):
+        assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected", call

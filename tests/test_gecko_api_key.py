@@ -8,24 +8,12 @@ key the paid host refuses (a free Demo key, a typo, a lapsed plan) falls back to
 keyless instead of taking the whole DEX surface down with it.
 """
 
-import ast
 import asyncio
-import importlib.util
-import sys
-from pathlib import Path
 
 import httpx
 import pytest
 
 from condor import pool_data
-
-_FLOW_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "agents"
-    / "smart_money_flow"
-    / "routines"
-    / "onchain_flow.py"
-)
 
 
 def run(coro):
@@ -239,24 +227,7 @@ def test_the_client_gets_the_timeout_it_asks_for():
     assert timeout.read == pool_data._GECKO_TIMEOUT
 
 
-# ── The market surface, shared with the smart_money_flow routine ──
-
-
-def _onchain_flow():
-    """Import ``agents/smart_money_flow/routines/onchain_flow.py`` from its file.
-
-    An agent routine lives outside any package, exactly like the shared ones
-    ``tests.conftest.load_shared_routine`` loads, so it has no dotted import path
-    and production loads it this same way.
-    """
-    name = "smart_money_flow_routine_onchain_flow"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, _FLOW_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+# ── The market surface ──
 
 
 def test_without_a_key_the_market_surface_is_the_public_host():
@@ -289,31 +260,3 @@ def test_an_unknown_surface_is_a_programming_error():
     """A typo must not silently resolve to the pool-data host."""
     with pytest.raises(ValueError):
         pool_data.coingecko_access("markets")
-
-
-def test_the_flow_routine_takes_its_hosts_from_pool_data(monkeypatch):
-    """ARCH-305: the routine must not keep its own copy of the plan branch.
-
-    It used to import the private ``_gecko_key`` and re-derive the
-    analyst/public split, which drifts silently the next time this module
-    changes how the key is sent. Asserting agreement under *both* plans fails if
-    either side grows a branch of its own.
-    """
-    flow = _onchain_flow()
-    assert flow._cg() == pool_data.coingecko_access("market")
-    with_key(monkeypatch)
-    assert flow._cg() == pool_data.coingecko_access("market")
-    assert flow._cg()[0] == "https://pro-api.coingecko.com/api/v3"
-
-
-def test_the_flow_routine_imports_nothing_private_from_pool_data():
-    """A routine bound to an underscore name breaks on the next rename here."""
-    tree = ast.parse(_FLOW_PATH.read_text())
-    private = [
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == "condor.pool_data"
-        for alias in node.names
-        if alias.name.startswith("_")
-    ]
-    assert private == []

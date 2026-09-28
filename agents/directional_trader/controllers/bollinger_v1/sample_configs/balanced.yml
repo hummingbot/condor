@@ -1,0 +1,27 @@
+# Balanced: SOL-USDT perp, 5m bands at 2.0 std (the textbook setting).
+# Up to 2 stacked positions per side 15 min apart, 5x leverage, 4h time limit,
+# trailing stop locks in gains once a fade has moved 1.2% in our favour.
+# Default starting point for a range-bound, liquid alt.
+controller_name: bollinger_v1
+controller_type: directional_trading
+connector_name: binance_perpetual
+trading_pair: SOL-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: SOL-USDT
+interval: 5m
+bb_length: 100
+bb_std: 2.0
+bb_long_threshold: 0.0
+bb_short_threshold: 1.0
+total_amount_quote: 500
+max_executors_per_side: 2
+cooldown_time: 900
+leverage: 5
+position_mode: HEDGE
+stop_loss: 0.025
+take_profit: 0.02
+time_limit: 14400
+take_profit_order_type: LIMIT
+trailing_stop:
+  activation_price: 0.012
+  trailing_delta: 0.004

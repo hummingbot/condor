@@ -1,6 +1,6 @@
 {
-  "src/components/agent/AgentPnlChart.tsx | react-refresh/only-export-components": 2,
-  "src/components/agent/AgentSessionContent.tsx | react-hooks/preserve-manual-memoization": 1,
+  "src/components/agent/AgentPnlChart.tsx | react-refresh/only-export-components": 1,
+  "src/components/agent/session/Snapshot.tsx | react-hooks/preserve-manual-memoization": 1,
   "src/components/bots/DeployBotDialog.tsx | react-refresh/only-export-components": 3,
   "src/components/chat/ChatThread.tsx | react-refresh/only-export-components": 1,
   "src/components/chat/DockRoutines.tsx | react-refresh/only-export-components": 1,

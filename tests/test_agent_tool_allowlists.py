@@ -3,8 +3,7 @@ what the agent is actually told to call.
 
 It used to bind only pydantic-ai seats. On a Claude seat it was decoration, and it
 drifted unnoticed: four of the six stock lists omitted tools their own playbooks
-call — ``meteora_launch_lp``'s loop strategy journals with a tool its list never
-named, ``solana_dex_lp_expert``'s shutdown notifies the owner with another. Now
+call — ``solana_dex_lp_expert``'s shutdown notifies the owner with a tool its list never named. Now
 the spawner never mounts what a list leaves out (``toolsets.seat_mutes``), so a
 missing name is a step the agent cannot take. These pin every stock list against
 the two sources that say what an agent needs.
@@ -27,7 +26,7 @@ AGENT_RING = set(condor_profiles.PROFILE_TOOLS["agent"]) | set(
 )
 
 #: What the framework skills every agent inherits (``agent_framework``,
-#: ``strategy_builder``, ``operate_your_loop``, ``skill_authoring``,
+#: ``loop_builder``, ``operate_your_loop``, ``skill_authoring``,
 #: ``self_improve``) and the tick's house prompt tell *any* agent to call.
 FRAMEWORK = {
     "delegate",
@@ -36,33 +35,17 @@ FRAMEWORK = {
     "manage_memory",
     "manage_skill",
     "manage_routines",
+    "manage_agent_controllers",
     "trading_agent_journal_read",
     "trading_agent_journal_write",
     "manage_agents",
-    "manage_strategies",
+    "manage_loops",
     "control_agent",
     "get_available_models",
 }
 
 #: Tool names an agent's own files mention without calling them.
-NOT_CALLS = {
-    "meteora_launch_lp": {
-        # "CLMM/DLMM LP → `create_lp_executor` / the Solana DEX LP agent. Never
-        # reach for those here." — and router swaps go to create_order_executor.
-        "create_lp_executor",
-        "create_order_executor",
-        # `manage_amm(action="quote_swap" | "execute_swap")`: actions, not tools.
-        "quote_swap",
-        "execute_swap",
-    },
-    "xrpl_market_maker": {
-        # "No `manage_gateway_config`, `explore_dex_pools` or `quote_swap` /
-        # `execute_swap`" — XRPL is a native CLOB, not Gateway.
-        "explore_dex_pools",
-        "quote_swap",
-        "execute_swap",
-    },
-}
+NOT_CALLS: dict[str, set[str]] = {}
 
 
 def _frontmatter(path: Path) -> dict:
@@ -123,9 +106,9 @@ def test_the_list_covers_what_the_agents_own_files_call(slug):
     assert not missing, f"{slug}'s own files call tools its list leaves out: {missing}"
 
 
-@pytest.mark.parametrize("slug", sorted(NOT_CALLS))
-def test_every_exemption_is_still_needed(slug):
+def test_every_exemption_is_still_needed():
     """An exemption whose mention is gone would hide the next real one."""
-    named = _named_in_own_files(slug)
-    stale = {t for t in NOT_CALLS[slug] if t not in named or t in _allowlist(slug)}
-    assert not stale, f"drop {sorted(stale)} from NOT_CALLS[{slug!r}]"
+    for slug, exempt in NOT_CALLS.items():
+        named = _named_in_own_files(slug)
+        stale = {t for t in exempt if t not in named or t in _allowlist(slug)}
+        assert not stale, f"drop {sorted(stale)} from NOT_CALLS[{slug!r}]"

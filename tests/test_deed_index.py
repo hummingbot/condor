@@ -68,9 +68,9 @@ def _write_agent(root: Path, slug: str, name: str) -> Path:
 
 def _write_strategy(root: Path, agent_slug: str, sslug: str) -> Path:
     """The slug comes from the frontmatter name, so the two have to agree."""
-    d = root / agent_slug / "strategies" / sslug
+    d = root / agent_slug / "loops" / sslug
     d.mkdir(parents=True, exist_ok=True)
-    (d / "strategy.md").write_text(f"---\nname: {sslug}\n---\n\nPlaybook.\n")
+    (d / "loop.md").write_text(f"---\nname: {sslug}\n---\n\nPlaybook.\n")
     return d
 
 
@@ -127,6 +127,26 @@ def test_a_bound_specialists_deploy_is_attributed_to_that_specialist():
     _chat_deploy("c_x", "hand-rolled-bot", agent_slug="brigado")
 
     assert build_deed_index().bots["hand-rolled-bot"].run_key == "brigado.chat"
+
+
+def test_a_run_with_a_ledger_opens_it_once(monkeypatch):
+    """Owned bots and namespace come from one read, as the docstring promises."""
+    _chat_deploy("c_x", "hand-rolled-bot", agent_slug="brigado")
+    reset_deed_index_cache()
+
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def watching_read_text(self, *args, **kwargs):
+        reads.append(self.name)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", watching_read_text)
+
+    index = build_deed_index()
+
+    assert reads.count("owned_bots.json") == 1
+    assert index.bots["hand-rolled-bot"].run_key == "brigado.chat"
 
 
 def test_a_delegation_and_the_dashboard_get_their_own_run_keys():

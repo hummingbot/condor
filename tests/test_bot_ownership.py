@@ -540,6 +540,76 @@ def test_engine_adoption_failure_is_non_fatal_and_retried(tmp_path, monkeypatch)
     assert not engine._adoption_done  # next tick tries again
 
 
+def _two_in_namespace_bots(monkeypatch):
+    """Snapshot with two bots this namespace owns, one of them long stopped."""
+    from condor.fetchers import bot_performance
+
+    async def _fake_perf(client):
+        return {
+            f"{NS}-btc-20260731-101500": {"bot_name": f"{NS}-btc-20260731-101500"},
+            f"{NS}-eth-20260101-090000": {"bot_name": f"{NS}-eth-20260101-090000"},
+        }
+
+    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
+    bot_performance.clear_live_names_cache()
+
+
+class _Orchestrator:
+    def __init__(self, answer):
+        self._answer = answer
+
+    async def get_active_bots_status(self):
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+
+class _FakeClient:
+    """A client the real ``fetch_live_instance_names`` can question.
+
+    No ``base_url``, so nothing it answers is cached across tests.
+    """
+
+    def __init__(self, answer):
+        self.bot_orchestration = _Orchestrator(answer)
+
+
+def test_adoption_skips_a_stopped_bot_in_the_namespace(tmp_path, monkeypatch):
+    """The snapshot is every bot ever run, so adopting from it raises the dead.
+
+    Both bots below carry the namespace and would be adopted on name alone
+    (CORR-699). Only the one the orchestrator still lists is running, and only
+    that one may get an ownership window opened on it now.
+    """
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
+    _two_in_namespace_bots(monkeypatch)
+
+    client = _FakeClient([{"bot_name": f"{NS}-btc-20260731-101500"}])
+    asyncio.run(engine._adopt_running_bots(client))
+
+    assert engine.ledger.bases() == [f"{NS}-btc"]
+    assert engine._adoption_done
+
+
+def test_adoption_keeps_the_whole_snapshot_when_liveness_is_unknown(
+    tmp_path, monkeypatch
+):
+    """An unanswered orchestrator must not silently adopt nothing.
+
+    ``fetch_live_instance_names`` returns ``None`` rather than an empty set when
+    it cannot tell, and the filter then leaves the snapshot alone — the behaviour
+    that predates the filter.
+    """
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
+    _two_in_namespace_bots(monkeypatch)
+
+    client = _FakeClient(RuntimeError("bot status unavailable"))
+    asyncio.run(engine._adopt_running_bots(client))
+
+    assert sorted(engine.ledger.bases()) == [f"{NS}-btc", f"{NS}-eth"]
+    assert engine._adoption_done
+
+
 def test_tick_blocks_a_foreign_bot_and_journals_it(tmp_path, monkeypatch):
     """The two halves of a tick joined by one ledger: the guard, then the journal."""
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})

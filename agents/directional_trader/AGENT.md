@@ -11,7 +11,7 @@ when_to_consult: When the user wants to design or research a directional strateg
   of the EMA trend-following strategy on BTC or SOL
 server_required: true
 server_name: ''
-created_by: 481175164
+created_by: 0
 created_at: '2026-07-30T18:02:43.013637+00:00'
 ---
 

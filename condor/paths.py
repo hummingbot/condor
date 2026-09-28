@@ -42,7 +42,7 @@ apart) and the line between them is *who writes and when*:
     ├── <slug>/AGENT.md                # this install's own: everything the
     ├── <slug>/skills/                 # running product writes -- new agents,
     ├── <slug>/store/user_{user_id}/   # forked definitions, promoted skills,
-    ├── <slug>/strategies/<sslug>/     # journals, stores, mutes. Git has
+    ├── <slug>/loops/<sslug>/          # journals, stores, mutes. Git has
     └── _shared/{skills,routines}/     # never heard of it.
 
 ``data/`` is the oldest of them and is named literally in agent-facing text
@@ -74,7 +74,7 @@ hand in ``.git/info/exclude``. FEAT-115 cut it in two along the line that was
 already there: :func:`stock_agents_root` is the **shipped library** -- tracked,
 curated, never written at runtime -- and :func:`local_agents_root` is what this
 install writes. Reads are layered, local shadowing stock **per item** (a file,
-a skill folder, a strategy's ``strategy.md``), so an operator who tweaks the
+a skill folder, a strategy's ``loop.md``), so an operator who tweaks the
 shipped ``condor`` agent keeps the tweak *and* still receives upstream's new
 skills for it. :mod:`condor.memory.paths` owns that resolution; this module
 only names the two roots.

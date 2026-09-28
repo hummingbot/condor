@@ -218,6 +218,9 @@ export interface PermissionRequest {
   summary: string;
   /** Which agent, on which server, raised it. Empty when unattributable. */
   origin?: string;
+  /** What the call leaves behind beyond its summary (a controller
+   *  overwrite's impact preview). Empty for most calls. */
+  detail?: string;
   /** The bare tool name, previewed like the command it is. */
   tool?: string;
   /** Its arguments; null when the backend could not read them. */
@@ -1080,6 +1083,7 @@ export function useChatSocket() {
             request_id: p.id,
             summary: p.summary,
             origin: p.origin || "",
+            detail: p.detail || undefined,
             tool: p.tool,
             input: p.input,
             deadline: deadlineFrom(p.expires_in),
@@ -1702,6 +1706,8 @@ export function useChatSocket() {
               request_id: data.request_id as string,
               summary: data.summary as string,
               origin: (data.origin as string) || "",
+              detail:
+                typeof data.detail === "string" && data.detail ? data.detail : undefined,
               tool: typeof data.tool === "string" ? data.tool : undefined,
               input: (data.input as Record<string, unknown> | null | undefined) ?? null,
               deadline: deadlineFrom(data.expires_in),

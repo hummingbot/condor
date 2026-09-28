@@ -1,0 +1,23 @@
+# Balanced: SOL-USDT perp on 5m candles, moderate leverage, up to two stacked entries per side.
+# Pullback-to-line entries (within 0.3%) with a trailing stop that locks in gains
+# once a trade is +1.2% net, and a 4h time limit.
+controller_name: supertrend_v1
+controller_type: directional_trading
+connector_name: binance_perpetual
+trading_pair: SOL-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: SOL-USDT
+interval: 5m
+length: 14
+multiplier: 3.0
+percentage_threshold: 0.003
+total_amount_quote: 500
+leverage: 5
+position_mode: HEDGE
+max_executors_per_side: 2
+cooldown_time: 900
+stop_loss: 0.015
+take_profit: 0.02
+time_limit: 14400
+take_profit_order_type: LIMIT
+trailing_stop: 0.012,0.004

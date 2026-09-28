@@ -6,6 +6,8 @@ boundary, and the one rule that matters most — a venue that did not answer is
 never scored as agreement.
 """
 
+import pytest
+
 from condor import venue_drift
 from condor.venue_drift import (
     ABS_TOLERANCE_QUOTE,
@@ -14,6 +16,7 @@ from condor.venue_drift import (
     check,
     drifting,
     summarize,
+    tracked_from_active,
     worst_quote,
 )
 
@@ -351,3 +354,236 @@ def test_module_does_no_io():
         text = fh.read()
     assert "import httpx" not in text
     assert "await " not in text
+
+
+# ── CORR-708: running executors' open inventory on the tracked side ──
+
+
+def _running(
+    kind="grid_executor",
+    pair="SOL-USDT",
+    side="TradeType.BUY",
+    quote=51.0,
+    price=100.0,
+    controller="s7.grid_1",
+    connector="binance_perpetual",
+    status="RUNNING",
+    ex_id="j5B2VAi4",
+):
+    """A running executor as ``search_executors`` returns it (in-memory shape)."""
+    info = {"side": side, "current_position_average_price": price}
+    row = {
+        "executor_id": ex_id,
+        "executor_type": kind,
+        "account_name": "master",
+        "connector_name": connector,
+        "trading_pair": pair,
+        "controller_id": controller,
+        "status": status,
+        "side": "BUY",
+        "custom_info": info,
+    }
+    if kind == "grid_executor":
+        info["position_size_quote"] = quote
+        row["filled_amount_quote"] = 999.0  # traded volume, not inventory
+    else:
+        row["filled_amount_quote"] = quote
+    return row
+
+
+def test_a_running_long_grid_agrees_with_its_venue_position_and_is_mine():
+    rows, unmeasured = tracked_from_active([_running()])
+    assert unmeasured == []
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)])
+    row = _one(report)
+    assert row.verdict == "agreed"
+    assert row.tracked_base == pytest.approx(0.51)
+    assert row.controller_ids == ("s7.grid_1",)
+    assert drifting(report, ["s7.grid_1"]) == ()
+
+
+def test_a_running_short_position_executor_nets_negative():
+    rows, _ = tracked_from_active(
+        [_running(kind="position_executor", side="SELL", quote=200.0, price=50.0)]
+    )
+    assert rows[0]["position_side"] == "SHORT"
+    report = check(rows, [_venue(pair="SOL-USDT", side="SHORT", amount=4.0)])
+    row = _one(report)
+    assert row.tracked_base == pytest.approx(-4.0)
+    assert row.verdict == "agreed"
+
+
+def test_running_inventory_sums_with_a_held_position_on_the_same_pair():
+    rows, _ = tracked_from_active([_running(pair="SOL-PERP", quote=500.0)])
+    report = check([_held(amount=10.0)] + rows, [_venue(amount=15.0)])
+    row = _one(report)
+    assert row.verdict == "agreed"
+    assert set(row.controller_ids) == {"brigado.mm_1", "s7.grid_1"}
+
+
+def test_a_venue_position_no_running_or_held_executor_explains_is_an_orphan():
+    rows, _ = tracked_from_active([_running(pair="ETH-USDT")])
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)])
+    by_pair = {r.pair: r.verdict for r in report.rows}
+    assert by_pair == {"ETH-USDT": "ghost", "SOL-USDT": "orphan"}
+
+
+def test_a_running_executor_covering_only_part_of_the_venue_is_a_mismatch():
+    rows, _ = tracked_from_active([_running(quote=51.0)])
+    report = check(rows, [_venue(pair="SOL-USDT", amount=5.0)])
+    assert _one(report).verdict == "mismatch"
+
+
+def test_a_running_executor_with_nothing_filled_contributes_nothing():
+    rows, unmeasured = tracked_from_active([_running(quote=0.0)])
+    assert rows == [] and unmeasured == []
+    assert _one(check(rows, [_venue(pair="SOL-USDT", amount=0.51)])).verdict == (
+        "orphan"
+    )
+
+
+def test_unreadable_running_executors_are_named_and_never_counted():
+    """No guessing: an executor whose inventory cannot be read explains nothing."""
+    no_price = _running(ex_id="p1", price=0.0)
+    no_side = _running(ex_id="s1", side=None)
+    no_side["side"] = None
+    no_amount = _running(ex_id="a1")
+    del no_amount["custom_info"]["position_size_quote"]
+    dca = _running(kind="dca_executor", ex_id="d1")
+    stale_db_record = _running(ex_id="db1")
+    stale_db_record["custom_info"] = None  # a RUNNING DB row has no final_state
+
+    rows, unmeasured = tracked_from_active(
+        [no_price, no_side, no_amount, dca, stale_db_record]
+    )
+    assert rows == []
+    assert unmeasured == [
+        "p1 (grid SOL-USDT)",
+        "s1 (grid SOL-USDT)",
+        "a1 (grid SOL-USDT)",
+        "d1 (dca SOL-USDT)",
+        "db1 (grid SOL-USDT)",
+    ]
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)], unmeasured=unmeasured)
+    assert _one(report).verdict == "orphan"
+    assert "5 active executor(s) expose no readable inventory" in summarize(report)
+    assert "d1 (dca SOL-USDT)" in summarize(report)
+
+
+def test_spot_and_inactive_executors_are_out_of_scope():
+    rows, unmeasured = tracked_from_active(
+        [
+            _running(connector="binance"),  # spot: the venue side is perps only
+            _running(kind="lp_executor", connector="meteora/clmm"),
+            _running(status="TERMINATED"),
+            _running(kind="position_executor", status="TERMINATED"),
+            _running(connector="binance", status="SHUTTING_DOWN"),
+            "not a row",  # type: ignore[list-item]
+        ]
+    )
+    assert rows == [] and unmeasured == []
+
+
+# ── CORR-710: a shutting-down executor's fills are still on the venue ──
+
+
+def test_a_shutting_down_grid_still_counts_its_residual_inventory():
+    """Its close order has not flattened it yet: the fills are the grid's, not an
+    orphan's. ``position_size_quote`` still reads the residual open base."""
+    rows, unmeasured = tracked_from_active(
+        [_running(status="SHUTTING_DOWN", quote=76.5, price=150.0)]
+    )
+    assert unmeasured == []
+    assert len(rows) == 1
+    assert rows[0]["position_side"] == "LONG"
+    assert rows[0]["net_amount_base"] == pytest.approx(0.51)
+    assert rows[0]["controller_id"] == "s7.grid_1"
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)])
+    assert _one(report).verdict == "agreed"
+
+
+def test_a_shutting_down_position_executor_is_named_never_read():
+    """Its ``filled_amount_quote`` now includes the close order's fills, so it
+    is not inventory: the executor is named, and the orphan it may explain
+    stays an orphan rather than a guessed agreement."""
+    stopping = _running(
+        kind="position_executor", status="SHUTTING_DOWN", quote=76.5, price=150.0
+    )
+    rows, unmeasured = tracked_from_active([stopping])
+    assert rows == []
+    assert unmeasured == ["j5B2VAi4 (position SOL-USDT) shutting down"]
+    report = check(rows, [_venue(pair="SOL-USDT", amount=0.51)], unmeasured=unmeasured)
+    assert _one(report).verdict == "orphan"
+    text = summarize(report)
+    assert "1 active executor(s) expose no readable inventory" in text
+    assert "j5B2VAi4 (position SOL-USDT) shutting down" in text
+
+
+def test_side_encodings_all_read():
+    for side, want in (
+        ("TradeType.BUY", "LONG"),
+        ("BUY", "LONG"),
+        (1, "LONG"),
+        ("TradeType.SELL", "SHORT"),
+        ("sell", "SHORT"),
+        (2, "SHORT"),
+    ):
+        rows, _ = tracked_from_active([_running(side=side)])
+        assert rows[0]["position_side"] == want, side
+
+
+def test_held_positions_behave_as_before_without_running_executors():
+    rows, unmeasured = tracked_from_active([])
+    assert rows == [] and unmeasured == []
+    report = check([_held(amount=10.0)] + rows, [_venue(amount=10.0)])
+    assert _one(report).verdict == "agreed"
+    assert report.unmeasured == ()
+    assert "active executor" not in summarize(report)
+
+
+def test_unmeasured_survives_an_unanswered_venue():
+    report = check([_held()], None, reason="down", unmeasured=["x (dca P)"])
+    assert report.unmeasured == ("x (dca P)",)
+    assert "x (dca P)" in summarize(report)
+
+
+# ── Spot holds are out of scope (CORR-711) ──
+
+
+def _spot_held():
+    """A ``PositionHold`` a spot executor left behind with ``keep_position``."""
+    return _held(
+        pair="SOL-USDT",
+        amount=2.0,
+        controller="c1",
+        account="a",
+        connector="binance",
+        price=150.0,
+    )
+
+
+def test_a_spot_hold_is_not_a_ghost():
+    report = check([_spot_held()], [])
+    assert report.rows == ()
+    assert report.drifting_count == 0
+
+
+def test_a_spot_hold_is_not_listed_as_unanswered():
+    report = check([_spot_held()], None)
+    assert report.trusted is False
+    assert report.rows == ()
+    assert "0 tracked row(s)" in summarize(report)
+
+
+def test_a_spot_hold_beside_a_perp_hold_leaves_only_the_perp_row():
+    report = check(
+        [_spot_held(), _held(amount=1.0)],
+        [_venue(amount=1.0)],
+    )
+    row = _one(report)
+    assert row.connector == "binance_perpetual"
+    assert row.verdict == "agreed"
+
+
+def test_a_spot_hold_never_reaches_the_worst_quote():
+    assert worst_quote(check([_spot_held()], []), ["c1"]) is None

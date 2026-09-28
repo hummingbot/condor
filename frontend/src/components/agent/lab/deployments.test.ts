@@ -22,6 +22,7 @@ function row(over: Partial<DeploymentRow> = {}): DeploymentRow {
     pnl: 0,
     volume: 0,
     scope: "bot:ag-st-20260807-022100",
+    usd_converted: true,
     ...over,
   };
 }

@@ -7,7 +7,7 @@
  * each, and the copies had already drifted: for a quote with no rate path the
  * pages kept the *quote's* symbol while the block relabelled the very same
  * unconverted number with the *display* currency's, so the screen said
- * `$-412.30 ⚠` while the agent was told `€-412.30 ⚠` (ARCH-228). The rule
+ * `-$412.30 ⚠` while the agent was told `-€412.30 ⚠` (ARCH-228). The rule
  * lives here now and both build on it.
  *
  * The rule in one line: convert when there is a rate and label the result with

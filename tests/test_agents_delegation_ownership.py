@@ -12,11 +12,13 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
+import condor.code_runs as code_runs_module
 import config_manager
 from condor.agents import delegate as delegate_module
 from condor.agents import delegation_history as history_module
 from condor.agents.delegate import DelegateTask
 from condor.web.models import WebUser
+from condor.web.routes import code as code_routes
 from condor.web.routes.agents import (
     get_delegation_events,
     get_delegation_status,
@@ -34,11 +36,43 @@ class _FakeConfigManager:
     def is_admin(self, user_id: int) -> bool:
         return user_id == ADMIN.id
 
+    def get_user_preference(self, user_id: int, key: str, default=None):
+        # Nobody here holds the `code_run` grant, so `_may_run_code` answers
+        # True for the admin alone — the only caller that reaches the code-run
+        # source these tests stub out below.
+        return default
+
+
+class _EmptyCodeRunStore:
+    """No snippet was ever run: the third source of the history list is empty."""
+
+    def list(self, **kwargs):
+        return []
+
 
 @pytest.fixture(autouse=True)
 def _registry_and_admin(monkeypatch):
-    """Two delegations owned by different users, plus a known admin id."""
+    """Two delegations owned by different users, plus a known admin id.
+
+    ``list_delegation_history`` reaches outside this module for two singletons,
+    and both are pinned here rather than left to whatever the process happens to
+    hold (CORR-701). ``condor.web.routes.code`` binds ``get_config_manager`` by
+    name at import time, so patching ``config_manager`` alone decided nothing:
+    which object that module ended up with depended on whether some earlier test
+    file had already imported it — run alone it captured this fake and blew up on
+    the missing ``get_user_preference``, run after ``test_code_run_*`` it kept the
+    real one and these tests read the real ``config.yml``. Importing the module at
+    the top of this file and setting the name on it makes the answer the same
+    either way. ``get_code_run_store`` is patched on ``condor.code_runs``, not on
+    the route module, because the lazy import inside ``list_delegation_history``
+    reads it off there at call time — and an unpatched one builds the real
+    on-disk store and caches it in a module global for the rest of the session.
+    """
     monkeypatch.setattr(config_manager, "get_config_manager", _FakeConfigManager)
+    monkeypatch.setattr(code_routes, "get_config_manager", _FakeConfigManager)
+    monkeypatch.setattr(
+        code_runs_module, "get_code_run_store", lambda: _EmptyCodeRunStore()
+    )
     delegate_module._delegations.clear()
     delegate_module._delegations["t-owner"] = DelegateTask(
         task_id="t-owner",
@@ -242,6 +276,66 @@ def test_a_live_task_shadows_its_own_disk_copy(monkeypatch):
     assert rows[0]["task"] == "owner's task"  # the live record, not the disk one
 
 
+def _strangers_live_tasks_newer_than(monkeypatch, *disk_records):
+    """Three live STRANGER tasks that sort above every on-disk record (CORR-688)."""
+    _on_disk(monkeypatch, *disk_records)
+    delegate_module._delegations.clear()
+    for n in range(3):
+        delegate_module._delegations[f"t-live-{n}"] = DelegateTask(
+            task_id=f"t-live-{n}",
+            agent_slug="scout",
+            user_id=STRANGER.id,
+            chat_id=STRANGER.id,
+            server_name=None,
+            task="stranger's live task",
+            started_at=100.0 + n,
+        )
+
+
+def test_history_page_is_not_eaten_by_foreign_live_tasks(monkeypatch):
+    """The visibility filter runs before `limit`, so a page is full (CORR-688).
+
+    Before: the three newer foreign live rows took both slots of ``limit=2`` and
+    were then filtered out, answering zero rows while two of OWNER's were on disk.
+    """
+    _strangers_live_tasks_newer_than(
+        monkeypatch, _record("h-owner-1", OWNER.id), _record("h-owner-2", OWNER.id)
+    )
+
+    rows = asyncio.run(list_delegation_history(kind="delegate", limit=2, user=OWNER))[
+        "delegations"
+    ]
+    assert {r["task_id"] for r in rows} == {"h-owner-1", "h-owner-2"}
+
+
+def test_history_page_for_admin_still_takes_the_newest_rows(monkeypatch):
+    _strangers_live_tasks_newer_than(
+        monkeypatch, _record("h-owner-1", OWNER.id), _record("h-owner-2", OWNER.id)
+    )
+
+    rows = asyncio.run(list_delegation_history(kind="delegate", limit=2, user=ADMIN))[
+        "delegations"
+    ]
+    assert [r["task_id"] for r in rows] == ["t-live-2", "t-live-1"]
+
+
+def test_history_page_skips_unowned_records_before_the_limit(monkeypatch):
+    """The final guard also filters before the cut, not only the registry scope."""
+    orphan = {**_record("h-orphan", 0), "started_at": 50.0}
+    _on_disk(monkeypatch, orphan, _record("h-owner", OWNER.id))
+    delegate_module._delegations.clear()
+    # A scoped stub would never hand OWNER the orphan; force it through so the
+    # guard is what stands between it and the page.
+    monkeypatch.setattr(
+        history_module, "list_history", lambda **kw: [orphan, _record("h-owner", 1)]
+    )
+
+    rows = asyncio.run(list_delegation_history(kind="delegate", limit=1, user=OWNER))[
+        "delegations"
+    ]
+    assert [r["task_id"] for r in rows] == ["h-owner"]
+
+
 def test_detail_and_events_fall_back_to_disk(monkeypatch):
     _on_disk(monkeypatch, _record("h-owner", OWNER.id))
     delegate_module._delegations.clear()
@@ -259,3 +353,25 @@ def test_stopping_a_finished_task_answers_honestly(monkeypatch):
     assert asyncio.run(stop_delegation_route("h-owner", user=OWNER)) == {
         "stopped": False
     }
+
+
+# ── The isolation the history tests depend on (CORR-701) ──
+
+
+def test_the_history_list_reads_no_real_singleton(monkeypatch):
+    """Every door `list_delegation_history` opens outward is pinned to a fake.
+
+    This file's four history tests pass or fail on which object those two names
+    hold, and nothing in their own assertions says so — run alone they crashed
+    on the fake's missing `get_user_preference`, run after a test file that had
+    already imported `condor.web.routes.code` they quietly questioned the real
+    `config.yml` and built the real on-disk code-run store. Asserting it here
+    means removing either patch fails on the sentence that describes it rather
+    than somewhere else, in one import order only.
+    """
+    assert code_routes.get_config_manager is _FakeConfigManager
+    assert isinstance(code_runs_module.get_code_run_store(), _EmptyCodeRunStore)
+    # The admin is the one caller that gets past `_may_run_code` and therefore
+    # the one that would reach a real store; nobody else holds the grant.
+    assert code_routes._may_run_code(ADMIN.id) is True
+    assert code_routes._may_run_code(OWNER.id) is False

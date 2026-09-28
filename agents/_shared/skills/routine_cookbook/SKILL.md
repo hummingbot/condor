@@ -106,7 +106,7 @@ user.
 ## Where the routine lives
 
 **Agent-local** — `agents/{slug}/routines/` — visible only to that agent, and
-shared across all of its strategies (there is no per-strategy library). This is
+shared across all of its loops (there is no per-loop library). This is
 the default when you *are* an agent: your own routines are yours, and you create
 them with no `agent` argument (your slug is already the scope).
 

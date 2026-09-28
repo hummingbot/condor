@@ -64,6 +64,7 @@ function row(over: Partial<DeploymentRow> = {}): DeploymentRow {
     pnl: 0,
     volume: 0,
     scope: "bot:brigado-brl_mm-20260807-022130",
+    usd_converted: true,
     ...over,
   };
 }

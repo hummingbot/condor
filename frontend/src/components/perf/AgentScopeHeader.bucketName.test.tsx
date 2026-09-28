@@ -73,7 +73,20 @@ const dashboard: FleetOwner = {
   live: null,
 };
 
-const OWNERS: readonly FleetOwner[] = [brigado, dashboard];
+/** Another door: a chat on an agent that has no loop strategy at all. */
+const chat: FleetOwner = {
+  runKey: "condor.chat",
+  agentSlug: "condor",
+  agentName: "Condor",
+  strategySlug: "chat",
+  strategyName: "Chat",
+  namespace: "",
+  declaredBots: [],
+  agentIds: [],
+  live: null,
+};
+
+const OWNERS: readonly FleetOwner[] = [brigado, dashboard, chat];
 
 let container: HTMLDivElement;
 let root: Root;
@@ -156,5 +169,46 @@ describe("what a bucket is not offered", () => {
       b.textContent?.includes("Open session"),
     );
     expect(open).toBeTruthy();
+  });
+});
+
+// CORR-396: a chat, a delegation and the dashboard are run keys, so the bucket
+// guard let them through, and the header said "idle" with an Open session
+// button that navigated to `?strategy=chat` — a slug no agent owns, which the
+// workspace silently swapped for the agent's live loop strategy.
+describe("what a door is not offered", () => {
+  it.each([
+    ["a chat", chat, "Condor / Chat"],
+    ["the dashboard", dashboard, "Condor / Dashboard"],
+  ])("reports no loop status and no session button for %s", async (_, owner, title) => {
+    await render(owner.runKey, owner);
+
+    expect(name()).toBe(title);
+    expect(container.textContent).not.toContain("idle");
+    const open = [...container.querySelectorAll<HTMLElement>("button")].find((b) =>
+      b.textContent?.includes("Open session"),
+    );
+    expect(open).toBeUndefined();
+  });
+
+  it("never navigates from anywhere in a door's header", async () => {
+    await render(chat.runKey, chat);
+
+    await act(async () => {
+      for (const el of container.querySelectorAll("*")) {
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      }
+    });
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("still navigates from a real run's session button", async () => {
+    await render(brigado.runKey, brigado);
+
+    const open = [...container.querySelectorAll<HTMLElement>("button")].find((b) =>
+      b.textContent?.includes("Open session"),
+    )!;
+    await act(async () => open.click());
+    expect(navigate).toHaveBeenCalledTimes(1);
   });
 });

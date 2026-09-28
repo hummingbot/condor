@@ -1,0 +1,21 @@
+# Conservative: wide, symmetric two-level quotes on SOL-USDT perpetual.
+# Low fill rate, generous edge per fill, tight risk. Use in quiet or ranging
+# markets when you want to earn spread without carrying much inventory.
+# Sizing: 300 USDT notional split over 4 orders (75 USDT each), 5x leverage.
+controller_name: pmm_simple
+controller_type: market_making
+connector_name: binance_perpetual
+trading_pair: SOL-USDT
+total_amount_quote: 300
+buy_spreads: [0.004, 0.008]
+sell_spreads: [0.004, 0.008]
+buy_amounts_pct: [1, 1]
+sell_amounts_pct: [1, 1]
+executor_refresh_time: 120
+cooldown_time: 120
+leverage: 5
+position_mode: HEDGE
+stop_loss: 0.015
+take_profit: 0.004
+time_limit: 2700
+take_profit_order_type: LIMIT

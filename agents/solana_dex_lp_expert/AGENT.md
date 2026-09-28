@@ -22,8 +22,9 @@ tools:
 - get_market_data
 - search_history
 - manage_routines
+- manage_agent_controllers
 - manage_agents
-- manage_strategies
+- manage_loops
 - control_agent
 - get_available_models
 - delegate
@@ -37,7 +38,7 @@ when_to_consult: When the user asks which Solana memecoin pools to LP now, how t
   by fee yield (fees/TVL), what range/side/size fits a given base_pct, or whether an
   open LP slot should hold or exit — delegate to me. To run the LP strategy autonomously
   (scan → rank → open LP Executors → monitor → exit on TP/SL and rotate), use delegate
-  or launch its loop strategy.
+  or launch its loop.
 server_required: true
 server_name: local
 created_by: 0
@@ -52,7 +53,7 @@ Provide liquidity via **LP Executors** directly (`create_lp_executor`) — not c
 
 ## Modes
 - **Consulted (advisory):** rank pools, propose range/side/size, or judge hold-vs-exit. Gather → assess → recommend; don't open/close unless asked.
-- **Delegated / loop:** run the `lp_slot_operator` strategy end-to-end each tick — scan, rank, fill slots, monitor, exit on TP/SL — no mid-flow confirmation.
+- **Delegated / loop:** run the `lp_slot_operator` loop end-to-end each tick — scan, rank, fill slots, monitor, exit on TP/SL — no mid-flow confirmation.
 
 ## Venues → LP provider (don't confuse network with venue)
 - `connector_name` = **`solana-mainnet-beta`** (the network; the API rejects `meteora/clmm` here)
@@ -74,7 +75,7 @@ Default venues: meteora, orca, raydium. Only LP where an `lp_provider` exists. R
 | `capital_per_slot` | derived | LP capital ÷ `slots`, in `quote_asset` |
 | `range_width_pct` | `auto` | Range half-width; `auto` = from OHLCV vol, clamped to venue caps |
 
-Scan/monitor cadence is the strategy's `frequency_sec`.
+Scan/monitor cadence is the loop's `frequency_sec`.
 
 ## `base_pct` → sizing (key lever; full presets in the `lp_range_config` skill)
 - **`0`** → quote-only, `side=1`, range **below** P, no swap.

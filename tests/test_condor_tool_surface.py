@@ -5,7 +5,8 @@ FEAT-067 dropped four leftovers: ``manage_notes`` (a declared-dead alias over
 ``list_routines``/``run_routine`` actions on the agent tool (strict duplicates
 of ``manage_routines``), and the ``strategy_id`` alias. FEAT-068 then split the
 ``manage_trading_agent`` funnel into ``manage_agents`` / ``manage_strategies`` /
-``control_agent``. Every docstring costs context on every session, so the
+``control_agent``, and FEAT-128 renamed ``manage_strategies`` to ``manage_loops``
+with no alias. Every docstring costs context on every session, so the
 surface is pinned here.
 """
 
@@ -28,9 +29,10 @@ EXPECTED_TOOLS = {
     "manage_agents",
     "manage_memory",
     "manage_routines",
+    "manage_agent_controllers",
     "manage_servers",
     "manage_skill",
-    "manage_strategies",
+    "manage_loops",
     "run_code",
     "send_notification",
     "trading_agent_journal_read",
@@ -53,6 +55,7 @@ def test_the_dropped_tools_are_not_registered():
             "manage_notes",
             "get_user_context",
             "manage_trading_agent",
+            "manage_strategies",
         }
         & _registered()
     )
@@ -197,10 +200,10 @@ def test_every_agent_action_reaches_manage_agents(action):
 
 
 @pytest.mark.parametrize("action", ["list", "get", "create", "update", "delete"])
-def test_every_strategy_action_reaches_manage_strategies(action):
+def test_every_loop_action_reaches_manage_loops(action):
     from mcp_servers.condor.tools import trading_agent
 
-    result = trading_agent.manage_strategies(action)
+    result = trading_agent.manage_loops(action)
     assert "Unknown action" not in result.get("error", "")
 
 
@@ -221,7 +224,7 @@ def test_every_control_action_reaches_control_agent(action):
     [
         ("start_agent", "control_agent"),
         ("list_agents", "control_agent"),
-        ("create_strategy", "manage_strategies"),
+        ("create_strategy", "manage_loops"),
         ("agent_tracker", "trading_agent_journal_read"),
     ],
 )
@@ -314,7 +317,7 @@ def test_the_agent_builder_skill_calls_only_registered_tools():
     A skill naming a dead TOOL fails harder than READ-290's dead *parameter*:
     FastMCP silently drops an unknown kwarg, but an unknown tool name is an
     error at the host. The skill was migrated to ``manage_agents`` /
-    ``manage_strategies`` for create/list/start, while its edit-and-repair
+    ``manage_loops`` for create/list/start, while its edit-and-repair
     paragraph still said ``update_agent`` / ``delete_agent`` / ``get_agent`` /
     ``delete_strategy`` — funnel-era ACTION names that are not tools. So the
     Step 2 "the persona is off, fix the AGENT.md" path blew up at exactly the
@@ -355,7 +358,7 @@ def test_no_condor_skill_names_a_funnel_era_action_as_a_tool():
         for match in pattern.finditer(path.read_text(encoding="utf-8"))
     ]
     assert not offenders, (
-        "these are actions on manage_agents/manage_strategies/control_agent, "
+        "these are actions on manage_agents/manage_loops/control_agent, "
         "not tools: " + "; ".join(offenders)
     )
 

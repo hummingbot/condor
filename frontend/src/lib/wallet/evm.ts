@@ -73,14 +73,6 @@ export const ARBITRUM_ONE: EvmChain = {
   blockExplorerUrls: ["https://arbiscan.io"],
 };
 
-export const ETHEREUM_MAINNET: EvmChain = {
-  chainId: "0x1", // 1
-  chainName: "Ethereum Mainnet",
-  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: ["https://eth.llamarpc.com"],
-  blockExplorerUrls: ["https://etherscan.io"],
-};
-
 /**
  * Ensure the wallet is on `chain`, switching to it (and adding it if unknown) first. Some wallets
  * (e.g. Rabby) reject EIP-712 typed data whose domain chainId differs from the wallet's current

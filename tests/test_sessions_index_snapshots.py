@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 from condor.agents import sessions_index
-from condor.agents.sessions_index import list_session_snapshots
+from condor.agents.sessions_index import (
+    list_runs,
+    list_session_snapshots,
+    list_sessions,
+)
 
 # Big enough that a whole-file read is unmistakable next to a line-1 read: real
 # snapshots embed the system prompt plus 2000 chars per tool call.
@@ -30,8 +34,10 @@ def _write_snapshot(d: Path, name: str, title: str, mtime: float) -> Path:
 @pytest.fixture(autouse=True)
 def _clear_cache():
     sessions_index._snapshot_info_cache.clear()
+    sessions_index._snapshot_count_cache.clear()
     yield
     sessions_index._snapshot_info_cache.clear()
+    sessions_index._snapshot_count_cache.clear()
 
 
 @pytest.fixture
@@ -188,3 +194,93 @@ def test_whole_session_removal_returns_empty(session: Path):
         f.unlink()
     (session / "snapshots").rmdir()
     assert list_session_snapshots(session) == []
+
+
+# ── PERF-686: the snapshot count is memoised on the directory's mtime ──
+
+
+@pytest.fixture
+def strategy(tmp_path: Path) -> Path:
+    session_dir = tmp_path / "sessions" / "session_1"
+    snaps = session_dir / "snapshots"
+    snaps.mkdir(parents=True)
+    (session_dir / "journal.md").write_text("# Journal\n")
+    for n in (1, 2, 3):
+        _write_snapshot(snaps, f"snapshot_{n}.md", f"# Snapshot #{n}", 1000 + n)
+    return tmp_path
+
+
+def _snap_dir(strategy: Path) -> Path:
+    return strategy / "sessions" / "session_1" / "snapshots"
+
+
+def _bump_mtime(d: Path) -> None:
+    later = d.stat().st_mtime + 10
+    os.utime(d, (later, later))
+
+
+def _counts(strategy: Path) -> tuple[int, int]:
+    (session_row,) = list_sessions(strategy)
+    (run_row,) = list_runs(strategy, "k")
+    return session_row["snapshot_count"], run_row["snapshot_count"]
+
+
+def test_a_second_count_of_an_unchanged_snapshot_dir_enumerates_nothing(
+    strategy: Path, monkeypatch
+):
+    assert list_sessions(strategy)[0]["snapshot_count"] == 3
+    snap_dir = _snap_dir(strategy)
+    enumerated: list[str] = []
+    real_scandir = os.scandir
+    real_glob = Path.glob
+
+    def scandir_spy(path="."):
+        if Path(path) == snap_dir:
+            enumerated.append("scandir")
+        return real_scandir(path)
+
+    def glob_spy(self, *args, **kwargs):
+        if self == snap_dir:
+            enumerated.append("glob")
+        return real_glob(self, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", scandir_spy)
+    monkeypatch.setattr(Path, "glob", glob_spy)
+
+    assert _counts(strategy) == (3, 3)
+    assert enumerated == []
+
+
+def test_a_new_snapshot_bumps_the_count(strategy: Path):
+    assert _counts(strategy) == (3, 3)
+    snap_dir = _snap_dir(strategy)
+    _write_snapshot(snap_dir, "snapshot_4.md", "# Snapshot #4", 1004)
+    _bump_mtime(snap_dir)
+    assert _counts(strategy) == (4, 4)
+
+
+def test_a_deleted_snapshot_lowers_the_count(strategy: Path):
+    assert _counts(strategy) == (3, 3)
+    snap_dir = _snap_dir(strategy)
+    (snap_dir / "snapshot_1.md").unlink()
+    _bump_mtime(snap_dir)
+    assert _counts(strategy) == (2, 2)
+
+
+def test_legacy_runs_dir_still_counts(tmp_path: Path):
+    session_dir = tmp_path / "sessions" / "session_1"
+    runs = session_dir / "runs"
+    runs.mkdir(parents=True)
+    (session_dir / "journal.md").write_text("# Journal\n")
+    _write_snapshot(runs, "run_1.md", "# Run #1", 1000)
+    assert _counts(tmp_path) == (1, 1)
+
+
+def test_a_removed_snapshot_dir_counts_zero_and_is_evicted(strategy: Path):
+    import shutil
+
+    assert _counts(strategy) == (3, 3)
+    snap_dir = _snap_dir(strategy)
+    shutil.rmtree(snap_dir)
+    assert _counts(strategy) == (0, 0)
+    assert snap_dir not in sessions_index._snapshot_count_cache

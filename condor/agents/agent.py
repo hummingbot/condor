@@ -30,7 +30,7 @@ Disk layout::
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
         skills/<slug>/SKILL.md         # shared skills (the brain + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
-        strategies/{sslug}/            # owned playbooks (see strategy.py)
+        loops/{sslug}/            # owned playbooks (see strategy.py)
 
 ``<root>`` is **two** roots since FEAT-115: the shipped library the repo tracks
 and this install's own, which git has never heard of. An Agent may be
@@ -70,6 +70,9 @@ from condor.memory.paths import (
     iter_agent_slugs,
     resolve_agent_file,
 )
+from condor.paths import UnsafeIdError
+
+from .strategy import AlreadyExistsError
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +196,41 @@ def identity_header(slug: str, name: str = "") -> str:
     )
 
 
+#: The tool that pushes an agent's own controller source to a server.
+CONTROLLERS_TOOL = "manage_agent_controllers"
+
+
+def _with_implied_tools(slug: str, tools: list[str]) -> list[str]:
+    """``tools`` plus any tool a capability the agent has cannot work without.
+
+    A ``tools:`` allowlist is frozen when an ``AGENT.md`` is forked down to the
+    local root, so a customized agent never receives a tool shipped after its
+    fork. For ``manage_agent_controllers`` that is not merely a missing feature:
+    the prompt's CONTROLLERS section (and the controller-mode block) tell every
+    agent that has controllers to call it before deploying — so a forked
+    allowlist left the agent told to call a tool it could not reach (QA on
+    PR 244). The condition is the prompt's own, ``agent_controllers(slug)``,
+    so the two cannot disagree. An empty list is unrestricted and stays empty;
+    an operator mute still removes the tool, which is the way to switch it off.
+    """
+    if not tools:
+        return tools
+    from mcp_servers.condor.profiles import canonical_tool_name
+
+    names = {canonical_tool_name(t).rsplit("__", 1)[-1] for t in tools}
+    if CONTROLLERS_TOOL in names:
+        return tools
+    from condor.agent_controllers import agent_controllers
+
+    try:
+        if not agent_controllers(slug):
+            return tools
+    except Exception:
+        log.exception("agent_controllers(%s) failed; leaving tools as authored", slug)
+        return tools
+    return [*tools, CONTROLLERS_TOOL]
+
+
 def _load_agent_from_file(path: Path, slug: str) -> Agent | None:
     """Load an Agent from a resolved ``AGENT.md``, whichever root it came from."""
     if not path.exists():
@@ -205,7 +243,7 @@ def _load_agent_from_file(path: Path, slug: str) -> Agent | None:
             description=meta.get("description", ""),
             instructions=body,
             agent_key=meta.get("agent_key", ""),
-            tools=meta.get("tools", []) or [],
+            tools=_with_implied_tools(slug, meta.get("tools", []) or []),
             when_to_consult=meta.get("when_to_consult", ""),
             server_required=meta.get("server_required", True),
             server_name=meta.get("server_name", "") or "",
@@ -228,7 +266,11 @@ class AgentStore:
     def get(self, slug: str) -> Agent | None:
         if not slug:
             return None
-        path = resolve_agent_file(slug, AGENT_MD)
+        try:
+            path = resolve_agent_file(slug, AGENT_MD)
+        except UnsafeIdError:
+            # Not one path segment (SEC-648): no agent can live there.
+            return None
         if path is None:
             return None
         return _load_agent_from_file(path, slug)
@@ -303,6 +345,11 @@ class AgentStore:
             raise ValueError(
                 f"'{CHAT_SLUG}' is reserved for the default agent — pick another name"
             )
+        # ``_save`` overwrites unconditionally; ``get`` resolves through the
+        # layers, so a shipped agent is refused too instead of forked and
+        # clobbered (CORR-635).
+        if self.get(slug) is not None:
+            raise AlreadyExistsError(f"Agent '{slug}' already exists")
         agent = Agent(
             slug=slug,
             name=name,
@@ -329,12 +376,17 @@ class AgentStore:
             raise ValueError(
                 f"'{CHAT_SLUG}' is the default agent and cannot be deleted"
             )
-        if resolves_to_stock(slug, AGENT_MD):
+        try:
+            stock_only_def = resolves_to_stock(slug, AGENT_MD)
+            agent_dir = agent_home(slug)
+        except UnsafeIdError:
+            # A traversal slug names no deletable agent (SEC-648).
+            return False
+        if stock_only_def:
             # A shipped agent has no local file to remove and an update would
             # bring it straight back, so deletion would be a lie. FEAT-090's
             # mute is the reversible answer that already exists.
             raise ValueError(stock_delete_error(slug))
-        agent_dir = agent_home(slug)
         path = agent_dir / AGENT_MD
         if not path.exists():
             return False

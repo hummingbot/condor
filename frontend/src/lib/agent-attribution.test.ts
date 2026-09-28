@@ -10,13 +10,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  agentOfBot,
-  agentOfControllerId,
+  attributionOf,
   countdown,
   inNamespace,
   loopFacts,
   loopStatus,
   isPseudoRunKey,
+  ownerDisplayName,
   ownerOf,
   ownerRowLabel,
   ownerTitle,
@@ -48,22 +48,22 @@ describe("the namespace rule", () => {
   const owners = [owner()];
 
   it("owns the base itself", () => {
-    expect(agentOfBot(owners, "brigado-brl_mm")).toBe("brigado.brl_mm");
+    expect(attributionOf(owners, null, "brigado-brl_mm").runKey).toBe("brigado.brl_mm");
   });
 
   it("owns a tagged sibling", () => {
-    expect(agentOfBot(owners, "brigado-brl_mm-btc")).toBe("brigado.brl_mm");
+    expect(attributionOf(owners, null, "brigado-brl_mm-btc").runKey).toBe("brigado.brl_mm");
   });
 
   it("owns a deployed instance, timestamp and all", () => {
-    expect(agentOfBot(owners, "brigado-brl_mm-btc-20260731-101500")).toBe("brigado.brl_mm");
+    expect(attributionOf(owners, null, "brigado-brl_mm-btc-20260731-101500").runKey).toBe("brigado.brl_mm");
   });
 
   it("does not own a bot whose name merely starts with the slug", () => {
     // `-` delimits the namespace, so `brl_mm_v2` is a different strategy and
     // never `brl_mm`'s — this is the collision the convention exists to rule out.
-    expect(agentOfBot(owners, "brigado-brl_mm_v2")).toBe("");
-    expect(agentOfBot(owners, "brigado-brl_mm_v2-btc")).toBe("");
+    expect(attributionOf(owners, null, "brigado-brl_mm_v2").runKey).toBe("");
+    expect(attributionOf(owners, null, "brigado-brl_mm_v2-btc").runKey).toBe("");
   });
 
   it("gives a bot to the longest namespace that claims it", () => {
@@ -73,13 +73,13 @@ describe("the namespace rule", () => {
       // the rule from depending on the order the map came back in.
       owner({ strategySlug: "brl_mm", namespace: "brigado-brl-mm" }),
     ];
-    expect(agentOfBot(both, "brigado-brl-mm-btc")).toBe("brigado.brl_mm");
+    expect(attributionOf(both, null, "brigado-brl-mm-btc").runKey).toBe("brigado.brl_mm");
   });
 
   it("attributes nothing to nobody", () => {
-    expect(agentOfBot(owners, "some-hand-rolled-bot")).toBe("");
-    expect(agentOfBot(owners, "")).toBe("");
-    expect(agentOfBot([], "brigado-brl_mm")).toBe("");
+    expect(attributionOf(owners, null, "some-hand-rolled-bot").runKey).toBe("");
+    expect(attributionOf(owners, null, "").runKey).toBe("");
+    expect(attributionOf([], null, "brigado-brl_mm").runKey).toBe("");
   });
 });
 
@@ -87,15 +87,15 @@ describe("the legacy escape hatch", () => {
   const owners = [owner({ agentSlug: "river", strategySlug: "scalper", declaredBots: ["old_hand_bot"] })];
 
   it("owns a configured name the prefix cannot prove", () => {
-    expect(agentOfBot(owners, "old_hand_bot")).toBe("river.scalper");
+    expect(attributionOf(owners, null, "old_hand_bot").runKey).toBe("river.scalper");
   });
 
   it("owns its deployed instance too", () => {
-    expect(agentOfBot(owners, "old_hand_bot-20260731-101500")).toBe("river.scalper");
+    expect(attributionOf(owners, null, "old_hand_bot-20260731-101500").runKey).toBe("river.scalper");
   });
 
   it("owns its tagged siblings, exactly as the runtime's `owns()` does", () => {
-    expect(agentOfBot(owners, "old_hand_bot-btc")).toBe("river.scalper");
+    expect(attributionOf(owners, null, "old_hand_bot-btc").runKey).toBe("river.scalper");
   });
 
   it("loses to a namespace, which is the stronger proof", () => {
@@ -103,7 +103,7 @@ describe("the legacy escape hatch", () => {
       owner({ agentSlug: "river", strategySlug: "scalper", declaredBots: ["brigado-brl_mm"] }),
       owner(),
     ];
-    expect(agentOfBot(both, "brigado-brl_mm-btc")).toBe("brigado.brl_mm");
+    expect(attributionOf(both, null, "brigado-brl_mm-btc").runKey).toBe("brigado.brl_mm");
   });
 });
 
@@ -111,22 +111,22 @@ describe("standalone executors", () => {
   const owners = [owner({ agentIds: ["brigado.brl_mm_6", "brigado.brl_mm_7"] })];
 
   it("belong to the session that tagged them", () => {
-    expect(agentOfControllerId(owners, "brigado.brl_mm_7")).toBe("brigado.brl_mm");
+    expect(attributionOf(owners, null, "", "brigado.brl_mm_7").runKey).toBe("brigado.brl_mm");
   });
 
   it("belong to their strategy whichever session it was", () => {
-    expect(agentOfControllerId(owners, "brigado.brl_mm_6")).toBe("brigado.brl_mm");
+    expect(attributionOf(owners, null, "", "brigado.brl_mm_6").runKey).toBe("brigado.brl_mm");
   });
 
   it("claim nothing for a controller config id", () => {
     // A controller is attributed through its bot, never through this.
-    expect(agentOfControllerId(owners, "pmm_simple_1")).toBe("");
-    expect(agentOfControllerId(owners, "main")).toBe("");
-    expect(agentOfControllerId(owners, "")).toBe("");
+    expect(attributionOf(owners, null, "", "pmm_simple_1").runKey).toBe("");
+    expect(attributionOf(owners, null, "", "main").runKey).toBe("");
+    expect(attributionOf(owners, null, "", "").runKey).toBe("");
   });
 
   it("do not match a session that never existed", () => {
-    expect(agentOfControllerId(owners, "brigado.brl_mm_99")).toBe("");
+    expect(attributionOf(owners, null, "", "brigado.brl_mm_99").runKey).toBe("");
   });
 });
 
@@ -140,8 +140,24 @@ describe("labels", () => {
     expect(runKeyLabel("nonsense")).toBe("nonsense");
   });
 
+  it("split a run key the way splitRunKey does, so a trailing dot has no strategy half", () => {
+    // runKeyLabel and runOwner both delegate the first-dot split to splitRunKey;
+    // a hand-rolled copy used to print "x / " for a key splitRunKey reads as strategy "",
+    // which is not a two-part key and so stays the raw key.
+    expect(splitRunKey("x.")).toEqual({ agent: "x", strategy: "" });
+    expect(runKeyLabel("x.")).toBe("x.");
+    expect(runKeyLabel("a.b.c")).toBe("a / b.c");
+  });
+
   it("spell the same subject out in display names for the tooltip", () => {
     expect(ownerTitle(owners, "brigado.brl_mm")).toBe("Brigado / BRL MM");
+  });
+
+  it("spell a held owner through the same display-name rule as the lookup (ARCH-413)", () => {
+    expect(ownerTitle(owners, "brigado.brl_mm")).toBe(
+      ownerDisplayName(ownerOf(owners, "brigado.brl_mm")!),
+    );
+    expect(ownerDisplayName(owner({ agentName: "", strategyName: "BRL MM" }))).toBe("brigado / BRL MM");
   });
 
   it("fall back to the label for an owner the map no longer holds", () => {

@@ -753,17 +753,6 @@ export function botOfNodeId(id: string): string | null {
   return null;
 }
 
-/**
- * The node id of the agent a leaf hangs under, or `null` for a leaf nobody owns.
- *
- * The run key is the whole id: it is already unique across the fleet, it is
- * what the URL carries (`?scope=agent:brigado.brl_mm`), and it is what
- * `StrategyDetail`'s *View in fleet* link is built from.
- */
-export function agentNodeId(leaf: PerfLeaf): string | null {
-  return leaf.agent ? `agent:${leaf.agent}` : null;
-}
-
 /** The run key an `agent:` node id names, or `null` for any other id. */
 export function agentOfNodeId(id: string): string | null {
   return id.startsWith("agent:") ? id.slice(6) || null : null;

@@ -31,7 +31,7 @@ _Two kinds of DEX, two stacks._ AMM/CLMM/DLMM pools and swap routers (`meteora`,
 - `send_notification` — send Telegram messages to the user
 - `manage_routines` — run/list analysis scripts
 - `manage_agents` — agent identities (AGENT.md): list/create/get/update/delete
-- `manage_strategies` — the looping playbooks an agent owns
+- `manage_loops` — loops: the playbooks an agent runs each tick
 - `control_agent` — running instances: list/start/stop/pause/resume/shutdown
 - `trading_agent_journal_read` / `trading_agent_journal_write` — agent journals
 - `manage_servers` — server management; `list` also reports who you are (role/admin) and which server is active

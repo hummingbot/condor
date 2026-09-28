@@ -120,6 +120,7 @@ import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
+import { unavailableLabel } from "@/lib/strategy-unavailable";
 import { useViewFacts } from "@/lib/viewFacts";
 import {
   attributionIndex,
@@ -781,6 +782,12 @@ export function PerfBrowser({
     () => (runQueryOn ? runRecords(runLedger?.deployments) : null),
     [runQueryOn, runLedger],
   );
+  // Why the run filters to nothing when its server could not be read (CORR-430):
+  // an empty ledger then means "unread", not "deployed nothing".
+  const runUnavailable = runQueryOn ? unavailableLabel(runLedger?.unavailable) : "";
+  // The run's figures are withheld, not zero (CORR-433): the KPI strip reads
+  // "—" rather than folding the empty set into a strip of `$0.00`.
+  const runWithheld = runUnavailable !== "";
   const clearRun = useCallback(
     () => (onClearRun ? onClearRun() : setParam("run", "", "")),
     [onClearRun, setParam],
@@ -1269,10 +1276,24 @@ export function PerfBrowser({
    *
    * A bot row selects it outright; a fleet row narrowed to one bot by the
    * bubbles still *is* that bot's report, and keeps the actions it had before
-   * the row came back (a single-bot fleet draws no bot level at all).
+   * the row came back (a single-bot fleet draws no bot level at all). An agent
+   * row is the same case one level down: an agent running one bot collapses its
+   * bot level away, so the agent row *is* that bot's report — and on the agent
+   * workspace's fleet, where the agent row is the root, it is the only place
+   * that bot's Stop and Logs could ever be drawn.
    */
+  const soloScopeBot = useMemo(() => {
+    if (scope.kind !== "agent") return undefined;
+    const seen = new Set(scope.leaves.map((leaf) => leaf.bot));
+    const only = seen.size === 1 ? [...seen][0] : undefined;
+    return only && only !== UNATTACHED_BOT ? only : undefined;
+  }, [scope]);
   const scopeBotName =
-    scope.kind === "bot" ? botOfNodeId(scope.id) : scope.kind === "fleet" ? soloRealBot : undefined;
+    scope.kind === "bot"
+      ? botOfNodeId(scope.id)
+      : scope.kind === "fleet"
+        ? soloRealBot
+        : soloScopeBot;
 
   /**
    * The one agent this scope is about, whichever way it got there.
@@ -2408,7 +2429,7 @@ export function PerfBrowser({
               {filterOptions.agents.length > 1 && (
                 <BubbleGroup
                   title="Agent"
-                  hint="Which agent's strategy owns each record — by the bot's namespace, or by the session an executor was tagged with. Unattributed is everything the fleet map credits to nobody, which on most servers is nearly all of it."
+                  hint="Which agent's loop owns each record — by the bot's namespace, or by the session an executor was tagged with. Unattributed is everything the fleet map credits to nobody, which on most servers is nearly all of it."
                   options={filterOptions.agents}
                   selected={filters.agents}
                   onChange={(v) => setFilters((f) => ({ ...f, agents: v }))}
@@ -2715,6 +2736,11 @@ export function PerfBrowser({
                 </button>
               </span>
             )}
+            {runUnavailable && (
+              <span data-run-unavailable className="shrink-0 text-[10px] text-amber-500/90">
+                {runUnavailable}
+              </span>
+            )}
             <div className="flex items-center border border-[var(--color-border)] rounded overflow-hidden mr-1">
               <button
                 onClick={goUp}
@@ -2983,6 +3009,22 @@ export function PerfBrowser({
                   <code className="font-mono">make doctor</code> names it.
                 </p>
               </div>
+            ) : runWithheld ? (
+              // A run whose server could not be read filters to nothing, and a
+              // fold of nothing is a strip of `$0.00` (CORR-433). Said here, in
+              // the same idiom as an empty fleet, because the 10px line beside
+              // the run chip is not where anyone looks for why the numbers are
+              // zero — and the tiles below read "—" rather than a measurement.
+              <div
+                data-run-withheld
+                className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
+              >
+                <p className="text-sm font-medium">{runUnavailable}</p>
+                <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                  This run's ledger could not be read, so the figures below are withheld rather than a
+                  result — the run may well have traded.
+                </p>
+              </div>
             ) : emptyPopulation ? (
               <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
                 <p className="text-sm font-medium">No bots running</p>
@@ -3021,13 +3063,13 @@ export function PerfBrowser({
               <div className="grid grid-cols-[repeat(auto-fit,minmax(104px,1fr))] gap-4">
                 <Kpi
                   label="Net PnL"
-                  value={formatCurrencyPnl(totals.net, currencySymbol)}
-                  color={pnlColor(totals.net)}
+                  value={runWithheld ? "—" : formatCurrencyPnl(totals.net, currencySymbol)}
+                  color={runWithheld ? undefined : pnlColor(totals.net)}
                   // The return % is per-leaf — each is measured against its own
                   // notional — so it rides along only where it means something.
                   // Summing or averaging them across a fold would report a
                   // return nobody earned.
-                  sub={[
+                  sub={runWithheld ? undefined : [
                     perHour(totals.net, formatCurrencyPnl),
                     totals.returnPct !== undefined
                       ? `${totals.returnPct >= 0 ? "+" : ""}${totals.returnPct.toFixed(2)}%`
@@ -3038,19 +3080,21 @@ export function PerfBrowser({
                 />
                 <Kpi
                   label="Realized"
-                  value={formatCurrencyPnl(totals.realized, currencySymbol)}
-                  color={pnlColor(totals.realized)}
-                  sub={perHour(totals.realized, formatCurrencyPnl)}
+                  value={runWithheld ? "—" : formatCurrencyPnl(totals.realized, currencySymbol)}
+                  color={runWithheld ? undefined : pnlColor(totals.realized)}
+                  sub={runWithheld ? undefined : perHour(totals.realized, formatCurrencyPnl)}
                 />
                 <Kpi
                   label="Unrealized"
-                  value={formatCurrencyPnl(totals.unrealized, currencySymbol)}
-                  color={pnlColor(totals.unrealized)}
+                  value={runWithheld ? "—" : formatCurrencyPnl(totals.unrealized, currencySymbol)}
+                  color={runWithheld ? undefined : pnlColor(totals.unrealized)}
                   // What the unrealized figure is *of*: with no open position
                   // there is nothing for it to be, and a stale non-zero reading
                   // beside "no open positions" is worth seeing.
                   sub={
-                    totals.positions === 0
+                    runWithheld
+                      ? undefined
+                      : totals.positions === 0
                       ? "no open positions"
                       : `${totals.positions} position${totals.positions !== 1 ? "s" : ""}`
                   }
@@ -3062,21 +3106,29 @@ export function PerfBrowser({
                     over rather than pretending the open ones lost. */}
                 <Kpi
                   label="Win rate"
-                  value={totals.winRate === undefined ? "—" : `${(totals.winRate * 100).toFixed(1)}%`}
+                  value={
+                    runWithheld || totals.winRate === undefined
+                      ? "—"
+                      : `${(totals.winRate * 100).toFixed(1)}%`
+                  }
                   sub={
-                    totals.closed > 0
+                    runWithheld
+                      ? undefined
+                      : totals.closed > 0
                       ? `${totals.wins.toLocaleString()} of ${totals.closed.toLocaleString()} closed`
                       : "nothing closed yet"
                   }
                 />
                 <Kpi
                   label="Volume"
-                  value={formatCurrencyVolume(totals.volume, currencySymbol)}
-                  sub={perHour(totals.volume, formatCurrencyVolume)}
+                  value={runWithheld ? "—" : formatCurrencyVolume(totals.volume, currencySymbol)}
+                  sub={runWithheld ? undefined : perHour(totals.volume, formatCurrencyVolume)}
                 />
                 <Kpi
                   label="Fees"
-                  value={totals.fees > 0 ? formatCurrencyVolume(totals.fees, currencySymbol) : "—"}
+                  value={
+                    !runWithheld && totals.fees > 0 ? formatCurrencyVolume(totals.fees, currencySymbol) : "—"
+                  }
                   // A floor and not a total: `leafFromController` hardcodes
                   // `fees: 0` because the controllers payload reports no fee
                   // total of its own, so what is measurable here is the
@@ -3087,19 +3139,25 @@ export function PerfBrowser({
                   // What the fees ate: the share of gross the venue took, which
                   // is the thing an absolute fee total cannot say on its own.
                   sub={
-                    totals.fees > 0 && totals.net + totals.fees !== 0
+                    !runWithheld && totals.fees > 0 && totals.net + totals.fees !== 0
                       ? `${((totals.fees / Math.abs(totals.net + totals.fees)) * 100).toFixed(1)}% of gross`
                       : undefined
                   }
                 />
                 <Kpi
                   label="Capital"
-                  value={totals.capital > 0 ? formatCurrencyVolume(totals.capital, currencySymbol) : "—"}
+                  value={
+                    !runWithheld && totals.capital > 0
+                      ? formatCurrencyVolume(totals.capital, currencySymbol)
+                      : "—"
+                  }
                   // Turnover rather than a controller count: how hard the
                   // capital is working is the thing the two numbers beside it
                   // do not already say, and the count is on the Runtime tile.
                   sub={
-                    totals.capital > 0 ? `${(totals.volume / totals.capital).toFixed(1)}x turnover` : undefined
+                    !runWithheld && totals.capital > 0
+                      ? `${(totals.volume / totals.capital).toFixed(1)}x turnover`
+                      : undefined
                   }
                 />
                 <Kpi

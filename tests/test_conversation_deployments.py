@@ -152,8 +152,14 @@ def _with_perf(monkeypatch, perf):
     """Stand in for the one Hummingbot call this route makes, and count it."""
     calls: list[dict] = []
 
-    async def fake(client, agent_id, bot_names=None, since=0.0):
-        calls.append({"agent_id": agent_id, "bot_names": list(bot_names or [])})
+    async def fake(client, agent_id, bot_names=None, windows=None):
+        calls.append(
+            {
+                "agent_id": agent_id,
+                "bot_names": list(bot_names or []),
+                "windows": dict(windows or {}),
+            }
+        )
         return perf
 
     monkeypatch.setattr(
@@ -217,8 +223,11 @@ def test_a_base_another_conversation_redeployed_is_no_longer_this_ones(cm, monke
     body = _client().get(f"/conversations/{mine.id}/deployments").json()
 
     assert [r["live"] for r in body["deployments"]] == [False]
-    # And the bot is not priced against this conversation either.
-    assert calls[0]["bot_names"] == []
+    # Priced only up to the other conversation's claim: this one keeps what it
+    # realized while it held the bot, and never the open book (ARCH-662).
+    window = calls[0]["windows"]["condor-solmm"]
+    assert not window.is_open
+    assert window.since == NOW - 3600 < window.end
 
 
 def test_the_executor_tag_names_this_conversation_and_never_the_empty_one(

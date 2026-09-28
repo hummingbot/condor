@@ -1,0 +1,30 @@
+# Style: balanced
+# SOL-USDT perp on 5m candles with the controller's default indicator set
+# (BB 100 / 2.0, MACD 21/42/9). Up to two stacked entries per side spaced by
+# 15 minutes, moderate leverage, symmetric-ish barriers and a 4h time limit.
+controller_name: macd_bb_v1
+controller_type: directional_trading
+connector_name: binance_perpetual
+trading_pair: SOL-USDT
+candles_connector: binance_perpetual
+candles_trading_pair: SOL-USDT
+interval: 5m
+bb_length: 100
+bb_std: 2.0
+bb_long_threshold: 0.0
+bb_short_threshold: 1.0
+macd_fast: 21
+macd_slow: 42
+macd_signal: 9
+total_amount_quote: 500
+max_executors_per_side: 2
+cooldown_time: 900
+leverage: 5
+position_mode: HEDGE
+stop_loss: 0.025
+take_profit: 0.02
+time_limit: 14400
+take_profit_order_type: LIMIT
+trailing_stop:
+  activation_price: 0.012
+  trailing_delta: 0.004

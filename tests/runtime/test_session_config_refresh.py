@@ -473,7 +473,8 @@ def test_the_tick_reads_its_routines_fresh(registry, tmp_path):
     from condor.agents.prompts import _build_routines_section
 
     assert "_cached_routines_section" not in TickEngine.__dataclass_fields__
-    tick_src = inspect.getsource(TickEngine._tick)
+    # READ-649: the prompt is built in the gather phase, not in _tick itself.
+    tick_src = inspect.getsource(TickEngine._build_prompt)
     assert "_build_routines_section(self.strategy)" in tick_src
 
     routines_dir = routines_base.assistant_routines_dir("perps")

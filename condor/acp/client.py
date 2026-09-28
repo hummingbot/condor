@@ -380,6 +380,29 @@ def resolve_model_id(preference: str, available_models: list[dict]) -> str | Non
     return None
 
 
+def advertised_models(session: dict) -> tuple[list[dict], str | None, str | None]:
+    """The models a ``session/new`` response offers: ``(models, current, config_id)``.
+
+    ``models`` is in the ``{modelId, name}`` shape :func:`resolve_model_id` reads.
+    ``config_id`` says how to switch: ``None`` means ``session/set_model``, a
+    string means ``session/set_config_option`` with that id.
+
+    claude-agent-acp dropped the ``models`` block for a ``configOptions`` entry
+    of category ``model`` somewhere between 0.21 and 0.79; reading only the old
+    block silently left every pinned brain on the bridge's default model.
+    """
+    for option in session.get("configOptions") or []:
+        if isinstance(option, dict) and option.get("category") == "model":
+            models = [
+                {"modelId": o.get("value"), "name": o.get("name", "")}
+                for o in option.get("options") or []
+                if isinstance(o, dict) and o.get("value")
+            ]
+            return models, option.get("currentValue"), option.get("id") or "model"
+    legacy = session.get("models") or {}
+    return legacy.get("availableModels") or [], legacy.get("currentModelId"), None
+
+
 # --- Event types yielded by prompt_stream ---
 
 
@@ -670,19 +693,19 @@ class ACPClient:
         # Select the requested model over the ACP protocol. The claude-agent-acp
         # bridge does NOT honor ANTHROPIC_MODEL — it defaults to Claude Code's
         # settings.model or the first advertised model — so the only reliable way
-        # to pin (e.g.) Sonnet is session/set_model with an exact advertised id.
-        await self._select_model(result.get("models") or {})
+        # to pin (e.g.) Sonnet is to select an exact advertised id over ACP.
+        await self._select_model(result)
 
-    async def _select_model(self, model_state: dict) -> None:
+    async def _select_model(self, session: dict) -> None:
         """Resolve ``self.model`` against advertised models and set it via ACP.
 
-        ``model_state`` is the ``session/new`` response's ``models`` block
-        (``{availableModels: [...], currentModelId: ...}``). No-op when no model
-        was requested or it can't be matched — we log either way so the effective
-        model is verifiable from the bot logs rather than the model's self-report.
+        ``session`` is the ``session/new`` response. Bridges advertise models in
+        one of two shapes (:func:`advertised_models`), and each is set through
+        its own request. No-op when no model was requested or it can't be
+        matched — we log either way so the effective model is verifiable from
+        the bot logs rather than the model's self-report.
         """
-        available = model_state.get("availableModels") or []
-        current = model_state.get("currentModelId")
+        available, current, config_id = advertised_models(session)
         self.active_model_id = current
         if not self.model:
             log.info("ACP session %s using default model %s", self._session_id, current)
@@ -701,12 +724,18 @@ class ACPClient:
                 "ACP session %s already on requested model %s", self._session_id, target
             )
             return
+        if config_id:
+            method = "session/set_config_option"
+            params = {
+                "sessionId": self._session_id,
+                "configId": config_id,
+                "value": target,
+            }
+        else:
+            method = "session/set_model"
+            params = {"sessionId": self._session_id, "modelId": target}
         try:
-            await self._peer.send_request(
-                "session/set_model",
-                {"sessionId": self._session_id, "modelId": target},
-                self._process.stdin,
-            )
+            await self._peer.send_request(method, params, self._process.stdin)
             self.active_model_id = target
             log.info(
                 "ACP session %s model set to %s (requested %r)",
@@ -716,9 +745,7 @@ class ACPClient:
             )
         except Exception:
             log.exception(
-                "ACP session/set_model failed for %r; staying on %s",
-                self.model,
-                current,
+                "ACP %s failed for %r; staying on %s", method, self.model, current
             )
 
     async def stop(self) -> None:
