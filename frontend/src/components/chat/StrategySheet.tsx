@@ -80,6 +80,15 @@ export function StrategySheet({
   const { data: agent } = useQuery(agentQuery(slug));
   const backTitle = `Back to ${agent?.name || slug}`;
   const title = strategy?.name || sslug;
+  // An open tick covers the screen, so the arrow above it reads as "leave this
+  // tick" — it steps back to the loop and session it was opened from, rather
+  // than past them to the agent (and the reader re-walking loop → run → tick).
+  const tickOpen = pane.tick != null;
+  const arrowTitle = tickOpen ? `Back to ${title}` : backTitle;
+  const onArrow = useCallback(
+    () => (tickOpen ? onPane({ ...pane, tick: null }) : onClose()),
+    [tickOpen, onPane, pane, onClose],
+  );
 
   const onSection = useCallback(
     (next: PaneSection, patch?: WorkspaceUrlPatch) => {
@@ -164,10 +173,10 @@ export function StrategySheet({
         <div className="flex min-w-0 items-center gap-2">
           <button
             type="button"
-            onClick={onClose}
+            onClick={onArrow}
             className="shrink-0 rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title={backTitle}
-            aria-label={backTitle}
+            title={arrowTitle}
+            aria-label={arrowTitle}
             data-strategy-back
           >
             <ArrowLeft className="h-4 w-4" />

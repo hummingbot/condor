@@ -45,11 +45,12 @@ let root: Root;
 let seen: PaneView = null;
 
 /** `AgentChatTab`'s pane, reduced to the strategy sheet and its `onClose`. */
-function Chat({ panelSlug }: { panelSlug: string }) {
+function Chat({ panelSlug, tick }: { panelSlug: string; tick?: number }) {
   const [pane, setPane] = useState<PaneView>({
     kind: "strategy",
     agentSlug: "brigado",
     strategySlug: "grid",
+    ...(tick ? { run: "s:9", tick } : {}),
   });
   useEffect(() => {
     seen = pane;
@@ -69,7 +70,7 @@ function Chat({ panelSlug }: { panelSlug: string }) {
   );
 }
 
-async function render(panelSlug: string) {
+async function render(panelSlug: string, tick?: number) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -77,7 +78,7 @@ async function render(panelSlug: string) {
     root.render(
       <MemoryRouter>
         <QueryClientProvider client={client}>
-          <Chat panelSlug={panelSlug} />
+          <Chat panelSlug={panelSlug} tick={tick} />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -125,5 +126,19 @@ describe("StrategySheet back control", () => {
     await render("condor");
     await act(async () => back().click());
     expect(seen).toEqual({ kind: "agent", slug: "brigado" });
+  });
+
+  // QA on PR 244: from a snapshot, the arrow skipped the loop and session and
+  // landed on the agent, so reviewing the next snapshot meant re-walking there.
+  it("with a tick open, steps back to that loop and session instead", async () => {
+    await render("brigado", 31);
+    expect(back().title).toBe("Back to SOL grid");
+    await act(async () => back().click());
+    expect(seen).toMatchObject({
+      kind: "strategy",
+      strategySlug: "grid",
+      run: "s:9",
+      tick: null,
+    });
   });
 });
