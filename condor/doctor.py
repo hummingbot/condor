@@ -168,8 +168,10 @@ def check_dependencies() -> list[Check]:
 _CLAUDE_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp"
 
 
-def _version_tuple(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in version.strip().split("."))
+def _version_key(version: str) -> tuple[tuple[int, ...], bool]:
+    """Semver order: release numbers, then a prerelease below its release."""
+    release, _, prerelease = version.strip().partition("-")
+    return tuple(int(part) for part in release.split(".")), not prerelease
 
 
 def check_claude_acp_bridge() -> list[Check]:
@@ -189,17 +191,19 @@ def check_claude_acp_bridge() -> list[Check]:
             ["claude-agent-acp", "--version"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=5,
             check=True,
         ).stdout.strip()
         latest = subprocess.run(
             ["npm", "view", _CLAUDE_ACP_PACKAGE, "version"],
             capture_output=True,
             text=True,
-            timeout=20,
+            # Short: `make install` runs doctor, and an unreachable registry
+            # should cost a warning, not a stall.
+            timeout=5,
             check=True,
         ).stdout.strip()
-        behind = _version_tuple(installed) < _version_tuple(latest)
+        behind = _version_key(installed) < _version_key(latest)
     except Exception as e:
         return [Check("claude-agent-acp", WARN, f"could not check version: {e}")]
     if behind:

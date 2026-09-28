@@ -518,3 +518,27 @@ def test_claude_acp_bridge_row_is_absent_when_not_installed(monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda cmd: None)
 
     assert doctor.check_claude_acp_bridge() == []
+
+
+def test_claude_acp_bridge_prerelease_is_behind_its_release(monkeypatch):
+    _fake_bridge(monkeypatch, installed="0.82.0-beta.1", latest="0.82.0")
+
+    [check] = doctor.check_claude_acp_bridge()
+
+    assert check.state == doctor.WARN
+    assert "0.82.0-beta.1, latest is 0.82.0" in check.detail
+
+
+def test_claude_acp_bridge_unreachable_registry_warns(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "npm":
+            raise doctor.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return type("R", (), {"stdout": "0.81.2\n"})()
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+    [check] = doctor.check_claude_acp_bridge()
+
+    assert check.state == doctor.WARN
+    assert "could not check version" in check.detail
