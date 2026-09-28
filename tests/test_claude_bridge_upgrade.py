@@ -104,6 +104,34 @@ def test_select_model_sends_nothing_when_already_on_it():
     assert client.active_model_id == "opus[1m]"
 
 
+def test_select_model_raises_when_the_agent_does_not_offer_it():
+    client, sent = _client_with_fake_peer("fable")
+    try:
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+    except ValueError as e:
+        assert "'fable'" in str(e)
+        assert "opus[1m], sonnet, haiku" in str(e)
+    else:
+        raise AssertionError("an unoffered model must not fall back to the default")
+    assert sent == []
+
+
+def test_select_model_raises_when_the_agent_refuses_the_switch():
+    client, _ = _client_with_fake_peer("sonnet")
+
+    async def refuse(method, params, stdin, **kw):
+        raise RuntimeError("model unavailable on this plan")
+
+    client._peer = SimpleNamespace(send_request=refuse)
+    try:
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+    except RuntimeError as e:
+        assert "model unavailable on this plan" in str(e)
+    else:
+        raise AssertionError("a refused switch must not stay on the default")
+    assert client.active_model_id == "opus[1m]"
+
+
 # ── Detecting an outdated install ──
 
 

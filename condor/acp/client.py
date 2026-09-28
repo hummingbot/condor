@@ -321,7 +321,7 @@ _CLAUDE_SESSION_ENV_VARS = (
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
 # The suffix is selected at runtime via session/set_model against the agent's
 # advertised models (see ACPClient._select_model), which resolves aliases
-# ("opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
+# ("fable", "opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
 # NOTE: claude-agent-acp ignores ANTHROPIC_MODEL; the protocol is the real lever.
 _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 
@@ -694,16 +694,21 @@ class ACPClient:
         # bridge does NOT honor ANTHROPIC_MODEL — it defaults to Claude Code's
         # settings.model or the first advertised model — so the only reliable way
         # to pin (e.g.) Sonnet is to select an exact advertised id over ACP.
-        await self._select_model(result)
+        try:
+            await self._select_model(result)
+        except Exception:
+            await self.stop()
+            raise
 
     async def _select_model(self, session: dict) -> None:
         """Resolve ``self.model`` against advertised models and set it via ACP.
 
         ``session`` is the ``session/new`` response. Bridges advertise models in
         one of two shapes (:func:`advertised_models`), and each is set through
-        its own request. No-op when no model was requested or it can't be
-        matched — we log either way so the effective model is verifiable from
-        the bot logs rather than the model's self-report.
+        its own request. No-op when no model was requested. A requested model
+        the agent doesn't offer, or a switch the agent refuses, raises: staying
+        on the default would run the session on a model the user didn't pick
+        with nothing but a log line saying so.
         """
         available, current, config_id = advertised_models(session)
         self.active_model_id = current
@@ -712,13 +717,11 @@ class ACPClient:
             return
         target = resolve_model_id(self.model, available)
         if not target:
-            log.warning(
-                "ACP model %r not found in advertised models %s; keeping default %s",
-                self.model,
-                [m.get("modelId") for m in available],
-                current,
+            offered = ", ".join(str(m.get("modelId")) for m in available) or "none"
+            raise ValueError(
+                f"The agent does not offer model {self.model!r} "
+                f"(cmd={self.command}); it offers: {offered}."
             )
-            return
         if target == current:
             log.info(
                 "ACP session %s already on requested model %s", self._session_id, target
@@ -736,17 +739,18 @@ class ACPClient:
             params = {"sessionId": self._session_id, "modelId": target}
         try:
             await self._peer.send_request(method, params, self._process.stdin)
-            self.active_model_id = target
-            log.info(
-                "ACP session %s model set to %s (requested %r)",
-                self._session_id,
-                target,
-                self.model,
-            )
-        except Exception:
-            log.exception(
-                "ACP %s failed for %r; staying on %s", method, self.model, current
-            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"The agent refused to switch to model {target!r} "
+                f"(requested {self.model!r}) via {method}: {exc}"
+            ) from exc
+        self.active_model_id = target
+        log.info(
+            "ACP session %s model set to %s (requested %r)",
+            self._session_id,
+            target,
+            self.model,
+        )
 
     async def stop(self) -> None:
         """Terminate the subprocess and ALL descendants (claude + MCP servers).

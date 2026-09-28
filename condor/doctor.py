@@ -161,7 +161,61 @@ def check_dependencies() -> list[Check]:
                 "run `make install`",
             )
         )
+    checks.extend(check_claude_acp_bridge())
     return checks
+
+
+_CLAUDE_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp"
+
+
+def _version_key(version: str) -> tuple[tuple[int, ...], bool]:
+    """Semver order: release numbers, then a prerelease below its release."""
+    release, _, prerelease = version.strip().partition("-")
+    return tuple(int(part) for part in release.split(".")), not prerelease
+
+
+def check_claude_acp_bridge() -> list[Check]:
+    """Whether claude-agent-acp is behind the latest release on npm.
+
+    Which model the ``claude-acp:opus``/``sonnet``/``fable`` aliases reach is
+    decided by the bridge, not Condor: 0.70.0 resolves ``opus`` to Opus 5,
+    0.81.2 to Opus 5.5. An install that never upgrades keeps running the old
+    models with nothing saying so. No row when the bridge isn't installed --
+    the AI model row already reports that for a Claude ACP default.
+    """
+    if not shutil.which("claude-agent-acp"):
+        return []
+    upgrade = f"`npm install -g {_CLAUDE_ACP_PACKAGE}@latest`"
+    try:
+        installed = subprocess.run(
+            ["claude-agent-acp", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        latest = subprocess.run(
+            ["npm", "view", _CLAUDE_ACP_PACKAGE, "version"],
+            capture_output=True,
+            text=True,
+            # Short: `make install` runs doctor, and an unreachable registry
+            # should cost a warning, not a stall.
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        behind = _version_key(installed) < _version_key(latest)
+    except Exception as e:
+        return [Check("claude-agent-acp", WARN, f"could not check version: {e}")]
+    if behind:
+        return [
+            Check(
+                "claude-agent-acp",
+                WARN,
+                f"{installed}, latest is {latest} — model aliases may resolve to "
+                f"older models; run {upgrade}",
+            )
+        ]
+    return [Check("claude-agent-acp", OK, f"{installed} (latest)")]
 
 
 # ── Config ───────────────────────────────────────────────────────────────────

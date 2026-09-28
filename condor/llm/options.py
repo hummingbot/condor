@@ -29,6 +29,7 @@ def _chat_agent():
 
 AGENT_OPTIONS: dict[str, dict[str, Any]] = {
     "claude-code": {"label": "Claude Code"},
+    "claude-acp:fable": {"label": "Claude (ACP) — Fable"},
     "claude-acp:opus": {"label": "Claude (ACP) — Opus"},
     "claude-acp:sonnet": {"label": "Claude (ACP) — Sonnet"},
     "claude-acp:haiku": {"label": "Claude (ACP) — Haiku"},
