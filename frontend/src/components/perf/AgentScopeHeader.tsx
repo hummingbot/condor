@@ -235,9 +235,9 @@ export function AgentScopeHeader({
       {legacyBots.length > 0 && (
         <span
           className="block truncate text-[10px] text-amber-500/90"
-          title={`These were configured before this strategy's namespace existed, so this scope folds their whole record: ${legacyBots.join(", ")}`}
+          title={`These were configured before this loop's namespace existed, so this scope folds their whole record: ${legacyBots.join(", ")}`}
         >
-          includes trading from before this strategy adopted {legacyBots.join(", ")}
+          includes trading from before this loop adopted {legacyBots.join(", ")}
         </span>
       )}
       {children}

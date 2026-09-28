@@ -1,7 +1,7 @@
 import type { StrategyUnavailable } from "@/lib/api";
 
 /**
- * The one line that says why a strategy's figures are missing (CORR-430), or
+ * The one line that says why a loop's figures are missing (CORR-430), or
  * `""` when they are not — the reader's cue to render exactly as before.
  *
  * Without it every no-client state (CORR-706) reads as a session that traded
@@ -10,7 +10,7 @@ import type { StrategyUnavailable } from "@/lib/api";
 export function unavailableLabel(reason: StrategyUnavailable | undefined): string {
   switch (reason) {
     case "no_access":
-      return "Server access unavailable for this strategy";
+      return "Server access unavailable for this loop";
     case "unreachable":
       return "Server unreachable";
     case "no_server":

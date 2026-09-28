@@ -168,7 +168,7 @@ describe("AgentStrategies delete (READ-408)", () => {
     await elapse(0);
 
     const deletes = container.querySelectorAll<HTMLElement>(
-      '[aria-label="Delete strategy"]',
+      '[aria-label="Delete loop"]',
     );
     expect(deletes).toHaveLength(2);
     act(() => deletes[1].click());

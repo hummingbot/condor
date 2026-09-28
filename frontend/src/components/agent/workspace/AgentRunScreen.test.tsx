@@ -392,7 +392,7 @@ describe("the page's tabs", () => {
     getAgentRuns.mockResolvedValue([]);
     await render("/");
     expect(container.querySelector("[data-pane-tabs]")).toBeNull();
-    expect(container.textContent).toContain("no strategies yet");
+    expect(container.textContent).toContain("no loops yet");
   });
 });
 
@@ -732,7 +732,7 @@ describe("a strategy whose runs are behind newer chats (CORR-376)", () => {
     getAgentRuns.mockResolvedValue(chats);
     await render("/?open=runs");
 
-    expect(container.textContent).not.toContain("This strategy has not run yet.");
+    expect(container.textContent).not.toContain("This loop has not run yet.");
     expect(container.textContent).not.toContain("This agent has no runs yet.");
 
     await click(container.querySelector<HTMLButtonElement>("[data-show-older-runs]")!);

@@ -368,7 +368,7 @@ export function AgentRunScreen({
           />
         ) : (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-            Loading this strategy's playbook…
+            Loading this loop's playbook…
           </p>
         );
     }
@@ -475,7 +475,7 @@ export function AgentRunScreen({
       >
         {!sslug ? (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-            This agent has no strategies yet, so there is no loop to look at.
+            This agent has no loops yet, so there is nothing to look at.
           </p>
         ) : section === "now" ? (
           <div className={isPane ? "p-4" : "mx-auto w-full max-w-6xl p-6"}>

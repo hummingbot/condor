@@ -221,7 +221,7 @@ export function NowView({
           <p className="text-xs text-[var(--color-text-muted)]">
             {sessionNum > 0
               ? "This run has not decided anything yet."
-              : "This strategy has not run yet."}
+              : "This loop has not run yet."}
           </p>
         )}
       </div>

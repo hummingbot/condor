@@ -84,7 +84,7 @@ describe("routeFacts", () => {
       routeFacts("/agents/orca-lp-expert", "?open=playbook&strategy=sol-lp"),
     ).toEqual({
       label: "Agent run screen",
-      subject: 'strategy "sol-lp" of agent "orca-lp-expert"',
+      subject: 'loop "sol-lp" of agent "orca-lp-expert"',
     });
     // A tick is the one thing that covers the screen, so it is the one thing
     // that changes what the reader is looking at.

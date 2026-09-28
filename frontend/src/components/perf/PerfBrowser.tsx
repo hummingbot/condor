@@ -2415,7 +2415,7 @@ export function PerfBrowser({
               {filterOptions.agents.length > 1 && (
                 <BubbleGroup
                   title="Agent"
-                  hint="Which agent's strategy owns each record — by the bot's namespace, or by the session an executor was tagged with. Unattributed is everything the fleet map credits to nobody, which on most servers is nearly all of it."
+                  hint="Which agent's loop owns each record — by the bot's namespace, or by the session an executor was tagged with. Unattributed is everything the fleet map credits to nobody, which on most servers is nearly all of it."
                   options={filterOptions.agents}
                   selected={filters.agents}
                   onChange={(v) => setFilters((f) => ({ ...f, agents: v }))}

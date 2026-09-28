@@ -177,6 +177,18 @@ describe("writing the pane into the URL", () => {
       expect(writePane(q(open), null).get(TAB_PARAM)).toBeNull();
     });
 
+    it("reads a pre-rename ?tab=strategies as the Loops section (FEAT-128)", () => {
+      expect(readPane(q(`?panel=agent&${TAB_PARAM}=strategies`), {})).toEqual({
+        kind: "agent",
+        tab: "loops",
+      });
+      // And the same agent's pane carries it forward under its new name.
+      const next = writePane(q(`?panel=agent&${TAB_PARAM}=strategies`), {
+        kind: "agent",
+      });
+      expect(next.get(TAB_PARAM)).toBe("loops");
+    });
+
     it("reads a section nobody has as a panel open on Brain", () => {
       // A hand-typed `?tab=` is not an error page: the link still asked for
       // this agent's panel and that is what it gets.
@@ -191,7 +203,7 @@ describe("writing the pane into the URL", () => {
       // neither writes them nor clears somebody else's.
       const next = writePane(q("?view=money&strategy=brl_mm&run=s:3&tick=40"), {
         kind: "agent",
-        tab: "strategies",
+        tab: "loops",
       });
       expect(next.get("view")).toBe("money");
       expect(next.get("strategy")).toBe("brl_mm");

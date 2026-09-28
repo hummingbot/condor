@@ -377,7 +377,7 @@ describe("the panel", () => {
       t.getAttribute("aria-label"),
     );
     expect(sections).toContain("Brain");
-    expect(sections).toContain("Strategies");
+    expect(sections).toContain("Loops");
   });
 
   it("offers the pane and nothing larger", async () => {

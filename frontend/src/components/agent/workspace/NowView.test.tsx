@@ -243,7 +243,7 @@ describe("the vitals", () => {
   it("give way to the reason when the server could not be read (CORR-430)", async () => {
     await render({ perf: null, journal: summary(), unavailable: "no_access" });
     expect(container.querySelector("[data-now-unavailable]")?.textContent).toBe(
-      "Server access unavailable for this strategy",
+      "Server access unavailable for this loop",
     );
     expect(text()).not.toContain("Total PnL");
     expect(text()).not.toContain("$0");
@@ -403,7 +403,7 @@ describe("a strategy whose runs are outside the loaded window (CORR-376)", () =>
   it("says so and offers to widen it, rather than that it never ran", async () => {
     const onShowOlderRuns = vi.fn();
     await render({ sessionNum: 0, onShowOlderRuns });
-    expect(text()).not.toContain("This strategy has not run yet.");
+    expect(text()).not.toContain("This loop has not run yet.");
     const more = container.querySelector<HTMLButtonElement>("[data-show-older-runs]")!;
     expect(more).not.toBeNull();
     await act(async () => more.click());
@@ -412,7 +412,7 @@ describe("a strategy whose runs are outside the loaded window (CORR-376)", () =>
 
   it("keeps `has not run yet` for a strategy that genuinely has not", async () => {
     await render({ sessionNum: 0 });
-    expect(text()).toContain("This strategy has not run yet.");
+    expect(text()).toContain("This loop has not run yet.");
     expect(container.querySelector("[data-show-older-runs]")).toBeNull();
   });
 });

@@ -96,7 +96,7 @@ const AGENT_STARTERS: Starter[] = [
   {
     icon: Activity,
     title: "What are you working on?",
-    hint: "Current strategies, open tasks and the last tick",
+    hint: "Current loops, open tasks and the last tick",
   },
   {
     icon: ClipboardList,

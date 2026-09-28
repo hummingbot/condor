@@ -354,7 +354,7 @@ function agentIdentityFacts(
   return {
     agent: agent.name,
     model: agent.agent_key || undefined,
-    strategies: ratio(live.length, strategies.length),
+    loops: ratio(live.length, strategies.length),
     running: names(
       live.map((s) => `${s.name} (tick ${s.instances[0]?.tick_count ?? 0})`),
     ),
@@ -394,7 +394,7 @@ function strategyScopeFacts(
   const instances = detail?.instances ?? summary?.instances ?? [];
   const live = instances[0];
   return {
-    strategy: detail?.name || summary?.name,
+    loop: detail?.name || summary?.name,
     status: detail?.status || summary?.status,
     running: live
       ? `session ${live.session_num}, tick ${live.tick_count} (${live.execution_mode})`
@@ -930,7 +930,7 @@ const ROUTES: {
       return {
         label: params.get("tick") ? "Agent tick" : "Agent run screen",
         subject: sslug
-          ? `strategy "${sslug}" of agent "${slug}"`
+          ? `loop "${sslug}" of agent "${slug}"`
           : `agent "${slug}"`,
       };
     },
@@ -943,7 +943,7 @@ const ROUTES: {
         (key) => key[1] === slug && key[2] === sslug,
       );
       return detail?.name
-        ? `strategy "${detail.name}" of agent "${slug}"`
+        ? `loop "${detail.name}" of agent "${slug}"`
         : undefined;
     },
     onScreen: ([slug], _view, qc, params) => {

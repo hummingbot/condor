@@ -752,15 +752,15 @@ describe("/agents/:slug", () => {
     });
   });
 
-  it("names the agent, its model and how many of its strategies are running", () => {
+  it("names the agent, its model and how many of its loops are running", () => {
     const line = onScreenLine("/agents/orca-lp-expert");
     expect(line).toContain("agent Orca LP Expert");
     expect(line).toContain("model claude-fable-5");
-    expect(line).toContain("strategies 1 running / 2");
+    expect(line).toContain("loops 1 running / 2");
     expect(line).toContain(`server ${SRV}`);
   });
 
-  it("names the running strategies and totals what they made (R1/R4)", () => {
+  it("names the running loops and totals what they made (R1/R4)", () => {
     const line = onScreenLine("/agents/orca-lp-expert");
     expect(line).toContain("running SOL range keeper (tick 314)");
     expect(line).toContain("latest session pnl +$100.00");
@@ -850,9 +850,9 @@ describe("/agents/:slug?strategy= — the workspace scoped to one", () => {
     );
   });
 
-  it("names the strategy in the subject once it is cached", () => {
+  it("names the loop in the subject once it is cached", () => {
     expect(routeFacts(SCOPED_PATH, SCOPED_SEARCH, qc)?.subject).toBe(
-      'strategy "SOL range keeper" of agent "orca-lp-expert"',
+      'loop "SOL range keeper" of agent "orca-lp-expert"',
     );
   });
 });

@@ -125,7 +125,7 @@ export function AgentStrategies({
         <div className="flex h-56 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50">
           <CircleDot className="mb-3 h-9 w-9 text-[var(--color-text-muted)]/30" />
           <p className="mb-1 text-sm font-medium text-[var(--color-text)]">
-            No strategies yet
+            No loops yet
           </p>
           <p className="mb-4 max-w-md text-center text-xs text-[var(--color-text-muted)]">
             This agent can already be delegated to. To let it run on a
@@ -146,7 +146,7 @@ export function AgentStrategies({
               className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-text)]"
             >
               <Plus className="h-4 w-4" />
-              New Strategy
+              New Loop
             </button>
           </div>
           {createDefaultLoop.isError && (
@@ -163,7 +163,7 @@ export function AgentStrategies({
               className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
             >
               <Plus className="h-3.5 w-3.5" />
-              New Strategy
+              New Loop
             </button>
           </div>
           {/* Up to three across on the page, one down the pane. Driven by the
@@ -179,7 +179,7 @@ export function AgentStrategies({
                 key={strategy.slug}
                 entity={strategy}
                 icon={Repeat}
-                deleteLabel="Delete strategy"
+                deleteLabel="Delete loop"
                 onClick={() => openStrategy(strategy.slug)}
                 onDelete={() => setDeleteStrategy(strategy)}
               />
@@ -197,13 +197,13 @@ export function AgentStrategies({
 
       <ConfirmDialog
         open={!!deleteStrategy}
-        title="Delete Strategy"
+        title="Delete Loop"
         isPending={deleteMut.isPending}
         isError={deleteMut.isError}
         errorText={
           deleteMut.error instanceof Error
             ? deleteMut.error.message
-            : "Failed to delete strategy. It may be running."
+            : "Failed to delete loop. It may be running."
         }
         onConfirm={() => deleteStrategy && deleteMut.mutate(deleteStrategy)}
         onClose={() => setDeleteStrategy(null)}
@@ -259,7 +259,7 @@ function CreateStrategyDialog({
         className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-4 text-lg font-semibold text-[var(--color-text)]">New Strategy</h2>
+        <h2 className="mb-4 text-lg font-semibold text-[var(--color-text)]">New Loop</h2>
 
         <div className="space-y-4">
           <div>
@@ -282,7 +282,7 @@ function CreateStrategyDialog({
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What does this strategy do?"
+              placeholder="What does this loop do?"
               rows={2}
               className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
             />
@@ -316,11 +316,11 @@ function CreateStrategyDialog({
             disabled={!name.trim() || createMutation.isPending}
             className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
           >
-            {createMutation.isPending ? "Creating..." : "Create Strategy"}
+            {createMutation.isPending ? "Creating..." : "Create Loop"}
           </button>
         </div>
         {createMutation.isError && (
-          <p className="mt-3 text-xs text-red-400">Failed to create strategy.</p>
+          <p className="mt-3 text-xs text-red-400">Failed to create loop.</p>
         )}
       </div>
     </div>

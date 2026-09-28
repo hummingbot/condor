@@ -169,7 +169,7 @@ describe("the sections", () => {
       "skills",
       "memories",
       "tools",
-      "strategies",
+      "loops",
       "routines",
       "activity",
     ]);
@@ -184,7 +184,7 @@ describe("the sections", () => {
       "Skills",
       "Memories",
       "Tools",
-      "Strategies",
+      "Loops",
       "Routines",
       "Activity",
     ]);
@@ -195,8 +195,8 @@ describe("the sections", () => {
     // because there is nothing left for a host to pass.
     await render({ slug: "orca" });
 
-    await click(tabNamed("Strategies"));
-    expect(body()).toContain("No strategies yet");
+    await click(tabNamed("Loops"));
+    expect(body()).toContain("No loops yet");
 
     await click(tabNamed("Activity"));
     expect(getDelegationHistory).toHaveBeenCalledWith("orca", 100, undefined);

@@ -332,8 +332,8 @@ export const AgentKnowledge = memo(function AgentKnowledge({
       ...withMuted(counts.tools, totals.tools),
     },
     {
-      id: "strategies",
-      label: "Strategies",
+      id: "loops",
+      label: "Loops",
       icon: <Repeat className="h-3.5 w-3.5" />,
       count: counts.strategies,
     },
@@ -555,7 +555,7 @@ export const AgentKnowledge = memo(function AgentKnowledge({
                 onAskAgent={onAskAgent}
               />
             )}
-            {activeTab === "strategies" && (
+            {activeTab === "loops" && (
               <AgentStrategies
                 slug={slug}
                 dense={dense}

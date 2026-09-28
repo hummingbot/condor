@@ -24,7 +24,7 @@
  */
 
 import {
-  isKnowledgeTab,
+  toKnowledgeTab,
   type KnowledgeTabId,
 } from "@/components/agent/knowledgeTabs";
 import {
@@ -139,8 +139,7 @@ export function readPane(
       const slug = params.get(AGENT_PARAM) || "";
       // A hand-typed section that names nothing is a panel open on Brain, not
       // an error: the pane is still exactly the thing the link asked for.
-      const raw = params.get(TAB_PARAM);
-      const tab = isKnowledgeTab(raw) ? raw : undefined;
+      const tab = toKnowledgeTab(params.get(TAB_PARAM));
       return {
         kind: "agent",
         ...(slug ? { slug } : {}),
@@ -238,9 +237,7 @@ export function writePane(
     // Said outright, else whatever the same agent's pane was already open on —
     // so the rail's own tile re-opens the section you left it on rather than
     // resetting to Brain under you.
-    const carried = isKnowledgeTab(params.get(TAB_PARAM))
-      ? (params.get(TAB_PARAM) as KnowledgeTabId)
-      : undefined;
+    const carried = toKnowledgeTab(params.get(TAB_PARAM));
     const tab = pane.tab ?? (sameAgent ? carried : undefined);
     if (tab) next.set(TAB_PARAM, tab);
     else next.delete(TAB_PARAM);

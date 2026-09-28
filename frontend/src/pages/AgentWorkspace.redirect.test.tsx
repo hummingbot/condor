@@ -118,6 +118,14 @@ describe("a `?view=` naming one of the seven Being sections", () => {
     await render("/agents/brigado?tab=memories");
     expect(new URLSearchParams(at.split("?")[1]).get("tab")).toBe("memories");
   });
+
+  it("reads a bookmarked Strategies section as Loops (FEAT-128)", async () => {
+    await render("/agents/brigado?tab=strategies");
+    const params = new URLSearchParams(at.split("?")[1]);
+    expect(at.split("?")[0]).toBe("/");
+    expect(params.get("panel")).toBe("agent");
+    expect(params.get("tab")).toBe("loops");
+  });
 });
 
 describe("a `?view=` naming one of the Doing views", () => {

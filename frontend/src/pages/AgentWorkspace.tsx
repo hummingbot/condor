@@ -11,7 +11,7 @@ import {
 } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { isKnowledgeTab } from "@/components/agent/knowledgeTabs";
+import { toKnowledgeTab } from "@/components/agent/knowledgeTabs";
 import { AgentRunScreen } from "@/components/agent/workspace/AgentRunScreen";
 import { WorkspaceHeader } from "@/components/agent/workspace/WorkspaceHeader";
 import { sectionForView } from "@/components/agent/workspace/sections";
@@ -121,11 +121,12 @@ export function AgentWorkspace() {
    */
   const legacyView = searchParams.get("view") || searchParams.get("tab");
   if (legacyView) {
-    if (isKnowledgeTab(legacyView)) {
+    const legacyTab = toKnowledgeTab(legacyView);
+    if (legacyTab) {
       const pane = writePane(new URLSearchParams(), {
         kind: "agent",
         slug,
-        tab: legacyView,
+        tab: legacyTab,
       });
       return <Navigate to={`/?${pane}`} replace />;
     }
@@ -220,12 +221,12 @@ export function AgentWorkspace() {
         title="Delete Agent"
         isPending={deleteAgentMutation.isPending}
         isError={deleteAgentMutation.isError}
-        errorText="Failed to delete agent. It may have running strategies."
+        errorText="Failed to delete agent. It may have running loops."
         onConfirm={() => deleteAgentMutation.mutate()}
         onClose={() => setShowDeleteConfirm(false)}
       >
         Delete <strong className="text-[var(--color-text)]">{agent.name}</strong> and
-        all its strategies? This cannot be undone.
+        all its loops? This cannot be undone.
       </ConfirmDialog>
     </>
   );

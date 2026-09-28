@@ -152,7 +152,7 @@ describe("a run filtered to nothing", () => {
     }
     expect(text()).not.toContain("$0.00");
     const notice = container.querySelector<HTMLElement>("[data-run-withheld]");
-    expect(notice?.textContent).toContain("Server access unavailable for this strategy");
+    expect(notice?.textContent).toContain("Server access unavailable for this loop");
     expect(notice?.textContent).toContain("withheld");
   });
 

@@ -72,7 +72,7 @@ export function LoopBar({
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border)] px-4 py-1.5 text-xs">
       {strategies.length > 0 && (
         <Picker
-          label="Strategy"
+          label="Loop"
           value={sslug ?? ""}
           onChange={onSelectStrategy}
           options={strategies.map((s) => ({ value: s.slug, label: s.name }))}

@@ -20,7 +20,7 @@ export const SECTION_META: Record<
 > = {
   runs: {
     label: "Runs",
-    hint: "Every run of every strategy — loops, dry runs, tasks and chats",
+    hint: "Every run of every loop — loop runs, dry runs, tasks and chats",
     Icon: ListTree,
   },
   fleet: {
@@ -30,7 +30,7 @@ export const SECTION_META: Record<
   },
   playbook: {
     label: "Playbook",
-    hint: "The strategy's playbook, its config and what it has learned",
+    hint: "The loop's playbook, its config and what it has learned",
     Icon: ScrollText,
   },
 };

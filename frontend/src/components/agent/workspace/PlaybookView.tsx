@@ -109,7 +109,7 @@ export function PlaybookView({
             </p>
           ) : (
             <p className="text-sm italic text-[var(--color-text-muted)]">
-              This strategy has no description.
+              This loop has no description.
             </p>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
@@ -176,8 +176,8 @@ export function PlaybookView({
             disabled={strategy.status === "running"}
             title={
               strategy.status === "running"
-                ? "Stop the strategy before deleting it"
-                : "Delete this strategy"
+                ? "Stop the loop before deleting it"
+                : "Delete this loop"
             }
             className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-30"
           >
@@ -192,10 +192,10 @@ export function PlaybookView({
       <div className="grid items-start gap-4 @3xl:grid-cols-2">
         <DocCard
           title="Playbook"
-          file="strategy.md"
+          file="loop.md"
           Icon={BookOpen}
           content={strategy.strategy_md}
-          empty="Nothing yet. The playbook is the standing brief every session of this strategy is given before its first tick — what it trades, what it may not do, and how to decide."
+          empty="Nothing yet. The playbook is the standing brief every session of this loop is given before its first tick — what it trades, what it may not do, and how to decide."
           onSave={(value) => api.updateStrategyMd(slug, sslug, value)}
           invalidateKey={["strategy", slug, sslug]}
         />
@@ -226,13 +226,13 @@ export function PlaybookView({
 
       <ConfirmDialog
         open={showDeleteConfirm}
-        title="Delete Strategy"
+        title="Delete Loop"
         isPending={deleteMutation.isPending}
         isError={deleteMutation.isError}
         errorText={
           deleteMutation.error instanceof Error
             ? deleteMutation.error.message
-            : "Failed to delete strategy. It may be running."
+            : "Failed to delete loop. It may be running."
         }
         onConfirm={() => deleteMutation.mutate()}
         onClose={() => setShowDeleteConfirm(false)}
@@ -528,7 +528,7 @@ function ConfigCard({
           Configuration
         </h3>
         <span className="text-[10px] text-[var(--color-text-muted)]">
-          what every session of this strategy runs under
+          what every session of this loop runs under
         </span>
         <button
           type="button"

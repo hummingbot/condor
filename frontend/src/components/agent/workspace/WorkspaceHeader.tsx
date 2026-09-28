@@ -300,7 +300,7 @@ export function WorkspaceHeader({
             onClick={onDelete}
             disabled={isRunning}
             className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-30"
-            title={isRunning ? "Stop all strategies before deleting" : "Delete agent"}
+            title={isRunning ? "Stop all loops before deleting" : "Delete agent"}
           >
             <Trash2 className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Delete</span>

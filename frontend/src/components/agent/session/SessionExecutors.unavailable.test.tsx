@@ -104,7 +104,7 @@ describe("SessionExecutors with a withheld server", () => {
     await mount();
 
     const note = container.querySelector("[data-session-unavailable]");
-    expect(note?.textContent).toBe("Server access unavailable for this strategy");
+    expect(note?.textContent).toBe("Server access unavailable for this loop");
     expect(text()).not.toContain("No executors for this session.");
     expect(text()).not.toContain("$0");
   });
@@ -130,7 +130,7 @@ describe("SessionExecutors with a withheld server", () => {
 
 describe("unavailableLabel", () => {
   it("has one line per reason and nothing for the priced state", () => {
-    expect(unavailableLabel("no_access")).toBe("Server access unavailable for this strategy");
+    expect(unavailableLabel("no_access")).toBe("Server access unavailable for this loop");
     expect(unavailableLabel("unreachable")).toBe("Server unreachable");
     expect(unavailableLabel("no_server")).toBe("No server configured");
     expect(unavailableLabel("")).toBe("");
