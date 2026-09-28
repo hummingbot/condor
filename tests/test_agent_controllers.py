@@ -560,3 +560,51 @@ def test_the_chat_context_is_unchanged(roots):
 
     _controller(roots.stock / "_shared", "rebate_mill", GENERIC_SOURCE)
     assert not any("CONTROLLERS" in s for s in domain_context("condor", 1))
+
+
+# ── a forked allowlist still reaches the tool its controllers need ──
+
+
+def _forked_agent(root: Path, slug: str, tools: list[str]) -> Path:
+    home = root / slug
+    home.mkdir(parents=True, exist_ok=True)
+    listed = "".join(f"- {t}\n" for t in tools)
+    (home / "AGENT.md").write_text(f"---\nname: {slug}\ntools:\n{listed}---\n\nBody.\n")
+    return home
+
+
+def test_a_customized_allowlist_gains_the_controllers_tool_when_it_has_controllers(
+    roots,
+):
+    """QA on PR 244: a local AGENT.md froze its ``tools:`` before the tool
+    shipped, while the prompt still told the agent to call it before deploying."""
+    from condor.agents.agent import AgentStore
+
+    _forked_agent(roots.local, "mm", ["manage_bots", "manage_controllers"])
+    _controller(roots.local / "mm", "pmm_qa")
+
+    tools = AgentStore().get("mm").tools
+    assert tools == ["manage_bots", "manage_controllers", "manage_agent_controllers"]
+
+
+def test_an_allowlist_without_controllers_is_left_as_authored(roots):
+    from condor.agents.agent import AgentStore
+
+    _forked_agent(roots.local, "mm", ["manage_bots"])
+    assert AgentStore().get("mm").tools == ["manage_bots"]
+
+
+def test_an_unrestricted_agent_stays_unrestricted(roots):
+    from condor.agents.agent import AgentStore
+
+    _agent(roots.local, "mm")
+    _controller(roots.local / "mm", "pmm_qa")
+    assert AgentStore().get("mm").tools == []
+
+
+def test_a_namespaced_listing_is_not_added_twice(roots):
+    from condor.agents.agent import AgentStore
+
+    _forked_agent(roots.local, "mm", ["mcp__condor__manage_agent_controllers"])
+    _controller(roots.local / "mm", "pmm_qa")
+    assert AgentStore().get("mm").tools == ["mcp__condor__manage_agent_controllers"]
