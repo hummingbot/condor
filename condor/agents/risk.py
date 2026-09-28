@@ -24,7 +24,8 @@ checks, auto-approves safe calls, and adds refusals of its own: an executor
 create must carry this session's ``controller_id``, ``stop_executor`` may only
 stop this session's executors, ``manage_bots`` mutations stay inside the bot
 ledger's namespace, dry-run mode refuses every mutation, shutdown mode lets
-only the brakes through, and ``place_order`` is always refused.
+only the brakes through, and ``place_order`` and a raw controller-code upsert
+(``manage_controllers`` ``target="controller"``, SEC-713) are always refused.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from condor.runtime.danger import (
     LEVERAGED_EXECUTOR_TOOLS,
     dry_run_refusal,
     is_dangerous_tool_call,
+    raw_controller_code_refusal,
     shutdown_refusal,
     tool_call_input,
     tool_call_name,
@@ -778,6 +780,14 @@ def auto_approve_with_risk_check(
         return {"outcome": {"outcome": "cancelled"}, "reason": reason}
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
+        # Controller code has one careful path (manage_agent_controllers: drift
+        # check, backup, confirmation), so the raw upsert is refused in every
+        # mode, like `place_order` below (SEC-713). It is checked first because
+        # the tool is not in `is_dangerous_tool_call`: nothing below would see it.
+        refusal = raw_controller_code_refusal(tool_call)
+        if refusal:
+            return deny(tool_call_name(tool_call), refusal)
+
         if is_dangerous_tool_call(tool_call):
             tool_name = tool_call_name(tool_call)
 

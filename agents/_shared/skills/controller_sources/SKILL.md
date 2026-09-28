@@ -17,9 +17,13 @@ source: builtin
 ## The one rule
 **Your folder is the source of truth. The server holds a copy.** Every change to controller
 code goes into the folder first (`write`), then to the server (`sync`).
-Never upload controller code with `manage_controllers(action="upsert", target="controller")`.
-It bypasses the folder, the drift check and the backup, and the next `status` reports your
-own edit as drift.
+`manage_controllers(action="upsert", target="controller")` is refused on every agent seat:
+it would bypass the folder, the drift check and the backup, and the next `status` would
+report your own edit as drift. `manage_controllers(action="delete", target="controller")`
+needs a human's confirmation and is refused in a dry run or a winddown. Saved configs
+(`target="config"`) are unaffected. Don't route around the refusal with `run_code`
+(`client.controllers.create_or_update_controller(...)`): it is out of bounds for the same
+reason.
 
 ## Layout
 ```

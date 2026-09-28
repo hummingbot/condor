@@ -376,6 +376,7 @@ def build_permission_callback(
     Semantics preserved exactly from the previous per-surface closures:
 
     * a tool in ``BLOCKED_TOOLS`` is refused outright (it would bypass RBAC),
+    * so is a raw controller-code upsert, with its reason (SEC-713),
     * a tool that is not dangerous is auto-approved without touching the
       registry — this is the fast path DELEGATE relies on,
     * anything else waits for a human, and **every** non-approval outcome
@@ -391,6 +392,15 @@ def build_permission_callback(
         if tool_name in danger.BLOCKED_TOOLS:
             log.warning("Blocked tool %s for session %s", tool_name, session_key)
             return CANCELLED
+
+        # Refused outright on every seat, attended or not (SEC-713): a human
+        # approving a raw code push would still get no drift check and no
+        # backup. The reason rides back so a pydantic-ai seat hands it to the
+        # model in-band, as the loop's risk gate does.
+        refusal = danger.raw_controller_code_refusal(tool_call)
+        if refusal:
+            log.info("Refused %s for session %s: %s", tool_name, session_key, refusal)
+            return {**CANCELLED, "reason": refusal}
 
         if not danger.is_dangerous_tool_call(tool_call):
             return _select_allow(options)

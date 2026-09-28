@@ -125,6 +125,15 @@ ADMIN_TOOLS: tuple[str, ...] = (
     "manage_gateway_config",
 )
 
+#: The profiles an *agent* seat runs on: a tick, and an attended or background
+#: specialist (see ``condor.runtime.toolsets.seat_profile``). ``full`` is the
+#: operator and the chat coordinator. On these two, ``manage_controllers``
+#: refuses to upsert controller *code* (SEC-713): agents own controller source
+#: through Condor's ``manage_agent_controllers``, which checks the server copy
+#: for drift and backs it up, and a delegated or consulted run has no permission
+#: gate of its own to stop the raw call. Saved configs are unaffected.
+AGENT_SEAT_PROFILES: frozenset[str] = frozenset({"tick", "agent"})
+
 #: profile name → the tools it registers. ``full`` is the default because this
 #: server is also run standalone (uvx, external hosts, `.mcp.json`).
 PROFILE_TOOLS: dict[str, tuple[str, ...]] = {

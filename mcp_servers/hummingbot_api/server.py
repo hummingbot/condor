@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp_servers._profiles import make_resolver
 from mcp_servers._profiles import register_tools as _register_tools
 from mcp_servers._profiles import resolve_profiles
+from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters import (
     format_amm_result,
     format_clmm_result,
@@ -23,7 +24,7 @@ from mcp_servers.hummingbot_api.formatters import (
 )
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
-from mcp_servers.hummingbot_api.profiles import PROFILE_TOOLS
+from mcp_servers.hummingbot_api.profiles import AGENT_SEAT_PROFILES, PROFILE_TOOLS
 from mcp_servers.hummingbot_api.schemas import (
     AMMRequest,
     CLMMRequest,
@@ -550,6 +551,20 @@ async def manage_controllers(
         confirm_override: Required True if overwriting existing items.
         include_code: If True, include full controller source code in describe output. Default False.
     """
+    if (
+        action == "upsert"
+        and target != "config"
+        and settings.tool_profile in AGENT_SEAT_PROFILES
+    ):
+        # The backstop under the permission gates (SEC-713): a delegated or
+        # consulted agent run builds no gate, so the refusal has to live here too.
+        raise ToolError(
+            "Refused: an agent does not upload controller code with "
+            "manage_controllers. Controller code goes through "
+            "manage_agent_controllers (write → status → sync), which checks the "
+            "server copy and backs it up — use that. Saved configs "
+            "(target='config') still work here."
+        )
     client = await hummingbot_client.get_client()
     result = await controllers_tools.manage_controllers(
         client=client,

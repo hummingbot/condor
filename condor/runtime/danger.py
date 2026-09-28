@@ -70,9 +70,12 @@ DANGEROUS_TOOLS = {
 BLOCKED_TOOLS: set[str] = set()
 
 # Actions within manage_bots that deploy/mutate a live bot (status/logs/get_config
-# are read-only and excluded). manage_controllers itself is excluded entirely — it
-# only writes controller templates/saved configs, never a running bot (see its own
-# tool docstring: "Does NOT affect running bots").
+# are read-only and excluded). manage_controllers is not in this set: it writes
+# controller templates and saved configs, never a running bot. That is not the
+# whole risk, though (SEC-713). A template is shared by name, per server, by every
+# agent and every future deploy, so its *code* half has its own policy below
+# (``raw_controller_code_refusal``, ``is_controller_template_delete``). Saved
+# configs stay ungated: they are ordinary deploy work.
 DANGEROUS_BOT_ACTIONS = {
     "deploy",
     "stop_bot",
@@ -183,13 +186,26 @@ READ_ONLY_LIQUIDITY_ACTIONS = {
     "quote_liquidity",
 }
 READ_ONLY_CONTROL_ACTIONS = {"list", "list_agents", "get_state"}
-#: `manage_controllers`' writes and reads. The tool is outside the *gate*
-#: entirely and stays there (it writes controller templates and saved configs,
-#: never a running bot), but a fleet is *built* out of these calls: the twelve
+#: `manage_controllers`' writes and reads. The tool's config half is outside the
+#: *gate* and stays there (a saved config touches no running bot); its code half
+#: is not, since SEC-713 (see ``raw_controller_code_refusal``). Either way a
+#: fleet is *built* out of these calls: the twelve
 #: that assembled `pmm-king-btcbrl-20260903-181000`, six of them rejected, left
 #: no trace at all. Recording them is the log's question, not the gate's.
+CONTROLLERS_TOOL = "manage_controllers"
 MUTATING_CONTROLLER_ACTIONS = {"upsert", "delete"}
 READ_ONLY_CONTROLLER_ACTIONS = {"list", "describe"}
+#: The one ``target`` of ``manage_controllers`` that is *not* controller code. The
+#: code predicates below key on "anything but this", so a missing or unreadable
+#: target reads as code (SEC-093).
+CONTROLLER_CONFIG_TARGET = "config"
+#: Why an agent seat may not write controller code with the raw tool (SEC-713).
+#: Named once so every gate (the loop's risk callback, the attended confirmation
+#: callback) and the tests say the same thing, and the model is told what to use.
+RAW_CONTROLLER_CODE_REFUSAL = (
+    "controller code goes through manage_agent_controllers (write → status → "
+    "sync), which checks the server copy and backs it up — use that"
+)
 #: An agent's own controller source (FEAT-126). Outside the gate like
 #: ``manage_controllers`` — uploading a missing controller or config touches no
 #: running bot — with one exception: an ``overwrite`` replaces a server copy that
@@ -434,6 +450,11 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     if tool_name == AGENT_CONTROLLERS_TOOL:
         return is_overwriting_controller_push(tool_call)
 
+    if tool_name == CONTROLLERS_TOOL:
+        # Only the template delete. A raw code *upsert* is never put in front of
+        # a human: every gate refuses it outright (raw_controller_code_refusal).
+        return is_controller_template_delete(tool_call)
+
     return False
 
 
@@ -455,6 +476,59 @@ def is_overwriting_controller_push(tool_call: dict[str, Any]) -> bool:
     return action in OVERWRITING_AGENT_CONTROLLER_ACTIONS and bool(
         input_data.get("overwrite")
     )
+
+
+def _controller_code_action(tool_call: dict[str, Any], action: str) -> bool:
+    """Does this ``manage_controllers`` call do ``action`` to controller *code*?
+
+    Fails closed (SEC-093): unreadable arguments or an unreadable ``action``
+    might be this action, and a ``target`` that is anything but ``"config"`` —
+    missing, null, not a string — is read as the controller template.
+    """
+    if tool_call_name(tool_call) != CONTROLLERS_TOOL:
+        return False
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    requested = input_data.get("action")
+    if not isinstance(requested, str) or not requested:
+        return True
+    return requested == action and input_data.get("target") != CONTROLLER_CONFIG_TARGET
+
+
+def is_raw_controller_code_write(tool_call: dict[str, Any]) -> bool:
+    """Does this call push controller code with the raw tool? (SEC-713)
+
+    ``manage_controllers(action="upsert", target="controller")`` writes source
+    straight to the server with none of FEAT-126's care: no drift check against
+    the agent's folder, no backup of the copy it replaces, no human. The copy it
+    replaces is shared by name with every agent on that server. The careful path
+    is ``manage_agent_controllers`` (write → status → sync), so every gate
+    refuses this outright, in every mode — see :func:`raw_controller_code_refusal`.
+    """
+    return _controller_code_action(tool_call, "upsert")
+
+
+def is_controller_template_delete(tool_call: dict[str, Any]) -> bool:
+    """Does this call delete a controller template from the server? (SEC-713)
+
+    A template is what running bots' saved configs and every future deploy of
+    that name load, so removing one gets the treatment an overwriting
+    ``sync`` gets: a human confirms it where one is present, and a dry run or a
+    winddown refuses it. Deleting a saved *config* is untouched.
+    """
+    return _controller_code_action(tool_call, "delete")
+
+
+def raw_controller_code_refusal(tool_call: dict[str, Any]) -> str | None:
+    """Why no agent seat may make this call, in any mode, or ``None`` (SEC-713).
+
+    The policy lives here so each gate only asks; the loop's risk callback and
+    the attended confirmation callback both call it before anything else.
+    """
+    if is_raw_controller_code_write(tool_call):
+        return RAW_CONTROLLER_CODE_REFUSAL
+    return None
 
 
 def _is_mutating_action(
@@ -538,6 +612,11 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
             MUTATING_AGENT_CONTROLLER_ACTIONS,
             READ_ONLY_AGENT_CONTROLLER_ACTIONS,
         )
+
+    if tool_name == CONTROLLERS_TOOL:
+        # The one gated call on this tool (SEC-713). Its other writes are
+        # recorded through ``is_recordable_tool_call``'s extras.
+        return is_controller_template_delete(tool_call)
 
     # Gated by name, and every one of them writes: an order, a signature, an
     # executor create, an executor stop.
@@ -636,6 +715,13 @@ def dry_run_refusal(tool_call: dict[str, Any]) -> str | None:
             "and 'status' still work"
         )
 
+    if is_controller_template_delete(tool_call):
+        return (
+            "this session runs in dry-run mode, where nothing mutates, and this "
+            "deletes a controller template from the server — 'list' and "
+            "'describe' still work"
+        )
+
     if tool_call_name(tool_call) == MARKET_DATA_TOOL and _is_mutating_action(
         tool_call, MUTATING_MARKET_DATA_ACTIONS, READ_ONLY_MARKET_DATA_ACTIONS
     ):
@@ -701,6 +787,14 @@ def shutdown_refusal(tool_call: dict[str, Any]) -> str | None:
             "'stop' still works, and so do 'list', 'describe' and 'read_routine'"
         )
 
+    if is_controller_template_delete(tool_call):
+        # Not a brake: removing the template running bots' configs load closes
+        # no exposure, and a winddown has no business editing the server.
+        return (
+            "this session is shutting down after a kill switch, and this "
+            "deletes a controller template other bots and deploys depend on"
+        )
+
     return None
 
 
@@ -714,7 +808,8 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     makes the gate's set structurally a subset that cannot fall behind.
 
     Its extras are ``manage_controllers``, ``run_code`` and ``manage_routines``.
-    The gate excludes all three tools entirely and should keep excluding them —
+    The gate excludes all three (bar ``manage_controllers``' code half, SEC-713)
+    and should keep excluding the rest —
     widening the gate would put a new confirmation prompt in front of a running
     fleet, and in front of every tick's market read — but a bot's controllers
     are *written* by exactly these calls, so a log that drops them cannot say
@@ -730,7 +825,7 @@ def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     if is_mutating_tool_call(tool_call):
         return True
 
-    if tool_call_name(tool_call) == "manage_controllers":
+    if tool_call_name(tool_call) == CONTROLLERS_TOOL:
         return _is_mutating_action(
             tool_call, MUTATING_CONTROLLER_ACTIONS, READ_ONLY_CONTROLLER_ACTIONS
         )
@@ -875,9 +970,9 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Create {kind} pool {base}-{quote} on {connector}"
         return f"{kind}: {action}"
 
-    if tool_name == "manage_controllers":
-        # Never gated, so this line is written for the log rather than for a
-        # human deciding (FEAT-102). It still has to name what was written: a
+    if tool_name == CONTROLLERS_TOOL:
+        # Mostly written for the log (FEAT-102); since SEC-713 a template delete
+        # is also what a human approves from it. It has to name what was written: a
         # tick that builds a fleet makes a dozen of these, and "manage_controllers"
         # twelve times over says nothing about which config failed.
         action = input_data.get("action", "?")
