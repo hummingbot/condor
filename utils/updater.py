@@ -603,17 +603,21 @@ async def stash_pop(repo_dir: str) -> tuple[bool, str]:
 
     undone = await _undo_partial_apply(repo_dir, paths)
     named = ", ".join(paths[:5]) + ("…" if len(paths) > 5 else "")
+    # Name the ref we actually resolved. Ours is not necessarily on top -- any
+    # stash pushed after it sits above -- so bare `git stash pop` would restore
+    # somebody else's work, which is the mistake this function stopped making
+    # two lines up.
     if undone:
         return False, (
             f"Your work does not apply on top of the update: {named}.\n\n"
             "Nothing was lost and nothing is half-merged — the checkout was put "
-            "back the way the update left it, and your work is still in "
-            "stash@{0}. Bring it back when you can resolve it by hand:\n"
-            "    git stash pop\n"
+            f"back the way the update left it, and your work is still in {ref}. "
+            "Bring it back when you can resolve it by hand:\n"
+            f"    git stash pop {ref}\n"
             "That will reproduce the conflict, this time where you can see it."
         )
     return False, (
-        f"{out}\n\nYour work is still in stash@{{0}} — nothing was lost — but the "
+        f"{out}\n\nYour work is still in {ref} — nothing was lost — but the "
         "checkout could not be put back cleanly and may hold conflict markers. "
         "Check `git status` before running anything from it."
     )
@@ -638,30 +642,39 @@ async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool,
     if not rel_paths:
         return True, "Nothing to move."
 
-    moved: list[str] = []
     local_root = local_agents_root()
-    for rel in rel_paths:
-        source = Path(repo_dir) / rel
-        if not source.is_file():
-            continue
-        # ``agents/scout/AGENT.md`` -> ``<local>/scout/AGENT.md``
-        target = local_root / Path(rel).relative_to("agents")
-        if target.exists():
-            # The product already has its own version of this item, and the
-            # checkout has a second, separately made edit. ``shutil.move``
-            # silently replaces the first with the second -- one customization
-            # destroyed while the message says both were kept. Refuse instead:
-            # only the operator can say which of the two they meant.
-            return False, (
-                f"You already have your own {rel} in {target.parent}, and the "
-                "copy in the checkout has been edited separately. Keeping the "
-                "checkout's version would overwrite the one already in use, so "
-                "nothing was moved — compare the two and delete the one you do "
-                "not want, then run the update again."
-            )
+    # ``agents/scout/AGENT.md`` -> ``<local>/scout/AGENT.md``
+    plan = [
+        (rel, local_root / Path(rel).relative_to("agents"))
+        for rel in rel_paths
+        if (Path(repo_dir) / rel).is_file()
+    ]
+
+    # Every destination is checked before anything moves. A conflict found
+    # half way through a batch used to return "nothing was moved" with the
+    # earlier files already gone -- the checkout left showing a deletion
+    # nobody made, and the update still blocked.
+    clashes = [rel for rel, target in plan if target.exists()]
+    if clashes:
+        # The product already has its own version of these, and the checkout
+        # has a second, separately made edit. ``shutil.move`` would replace
+        # the first with the second: one customization destroyed while the
+        # message says both were kept. Only the operator can say which they
+        # meant, so nothing is touched.
+        named = ", ".join(clashes)
+        return False, (
+            f"You already have your own version of {named} under "
+            f"{local_root}, and the copy in the checkout has been edited "
+            "separately. Keeping the checkout's version would overwrite the "
+            "one already in use, so nothing was moved — compare them and "
+            "delete the one you do not want, then run the update again."
+        )
+
+    moved: list[str] = []
+    for rel, target in plan:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(source), str(target))
+            shutil.move(str(Path(repo_dir) / rel), str(target))
         except (OSError, ValueError) as exc:
             return False, f"Could not move {rel}: {exc}"
         moved.append(rel)
@@ -676,15 +689,35 @@ async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool,
     # moved the file. An untracked path needs no reset; moving it *was* the
     # resolution.
     tracked: list[str] = []
+    staged_adds: list[str] = []
     for rel in moved:
         rc, _ = await _run_git("cat-file", "-e", f"HEAD:{rel}", repo_dir=repo_dir)
         if rc == 0:
             tracked.append(rel)
+            continue
+        # Not in HEAD, but it may still be in the *index* as a staged
+        # addition. ``checkout HEAD --`` cannot touch that, so the entry
+        # survived the move and the incoming commit that adds the same path
+        # still had something to collide with -- reported as a success.
+        rc, _ = await _run_git(
+            "ls-files", "--error-unmatch", "--", rel, repo_dir=repo_dir
+        )
+        if rc == 0:
+            staged_adds.append(rel)
     if tracked:
         rc, out = await _run_git("checkout", "HEAD", "--", *tracked, repo_dir=repo_dir)
         if rc != 0:
             return False, (
                 f"Moved your edits, but could not reset the tracked files:\n{out}"
+            )
+    if staged_adds:
+        rc, out = await _run_git(
+            "rm", "--cached", "--quiet", "--", *staged_adds, repo_dir=repo_dir
+        )
+        if rc != 0:
+            return False, (
+                f"Moved your edits, but could not clear the staged "
+                f"addition(s):\n{out}"
             )
 
     return True, (

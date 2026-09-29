@@ -385,3 +385,87 @@ async def test_keep_mine_on_an_untracked_file_reports_success(repo):
 
     assert ok is True, message
     assert not (repo / "agents" / "scout" / "invented.md").exists()
+
+
+# ── Second review pass: defects in the fixes above ──
+
+
+@pytest.mark.asyncio
+async def test_a_batch_move_checks_every_destination_before_moving_any(repo):
+    """A clash found half way through left the earlier files already gone.
+
+    The refusal said "nothing was moved" while the checkout showed a deletion
+    nobody made, and the update stayed blocked.
+    """
+    from condor.paths import local_agents_root
+
+    (repo / "agents" / "scout" / "second.md").write_text("shipped\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "two files", cwd=repo)
+
+    clash = local_agents_root() / "scout" / "second.md"
+    clash.parent.mkdir(parents=True, exist_ok=True)
+    clash.write_text("MADE THROUGH THE PRODUCT\n")
+    for name in ("AGENT.md", "second.md"):
+        (repo / "agents" / "scout" / name).write_text("shipped\nmy edit\n")
+
+    ok, message = await updater.move_to_local_root(
+        str(repo), ["agents/scout/AGENT.md", "agents/scout/second.md"]
+    )
+
+    assert ok is False
+    assert (repo / "agents" / "scout" / "AGENT.md").exists(), "moved despite refusing"
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=ENV,
+    ).stdout
+    assert " D " not in status and not status.startswith("D "), status
+    assert "second.md" in message and "AGENT.md" not in message
+
+
+@pytest.mark.asyncio
+async def test_a_staged_addition_has_its_index_entry_cleared(repo):
+    """`checkout HEAD --` cannot touch a path HEAD never had.
+
+    The staged entry survived the move, so the incoming commit that adds the
+    same path still had something to collide with — reported as a success.
+    """
+    (repo / "agents" / "scout" / "added.md").write_text("I staged this\n")
+    _git("add", "agents/scout/added.md", cwd=repo)
+
+    ok, message = await updater.move_to_local_root(str(repo), ["agents/scout/added.md"])
+
+    assert ok is True, message
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=ENV,
+    ).stdout.strip()
+    assert status == "", f"index entry survived: {status!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_abort_advice_names_our_stash_not_the_top_one(stashed):
+    """Ours is not necessarily `stash@{0}` — anything pushed later sits above.
+
+    The recovery line hardcoded `stash@{0}` and bare `git stash pop`, so
+    following it restored somebody else's work: the same mistake the lookup
+    had just been fixed to stop making.
+    """
+    repo, agent, bystander = stashed
+    await updater.stash_paths(str(repo), ["agents/scout/AGENT.md"])
+    bystander.write_text("operator's own edit\n")
+    _git("stash", "push", "-u", "-m", "someone else", "--", bystander.name, cwd=repo)
+
+    moved, output = await updater.fast_forward(str(repo))
+    assert moved, output
+    restored, message = await updater.stash_pop(str(repo))
+
+    assert restored is False, "this replay is expected to conflict"
+    assert "git stash pop stash@{1}" in message, message
+    assert "stash@{0}" not in message
