@@ -401,7 +401,12 @@ def _acquire_run_lock() -> "io.TextIOWrapper | None":
     path = runtime_root() / _LOCK_FILENAME
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("w")
+        # "a+" rather than "w". "w" truncates at *open*, before the lock is even
+        # attempted, so the process that loses the race wipes the pid written by
+        # the one holding it -- and ``start`` then reads an empty file and drops
+        # the "(pid N)" the refusal exists to carry. The file is emptied below,
+        # once this process is the one entitled to write it.
+        handle = path.open("a+")
     except OSError:
         log.debug("Could not open the update lock; proceeding unlocked")
         return None
@@ -413,6 +418,8 @@ def _acquire_run_lock() -> "io.TextIOWrapper | None":
     except (AttributeError, NameError):  # pragma: no cover - no flock here
         return handle
     try:
+        handle.seek(0)
+        handle.truncate()
         handle.write(f"{os.getpid()}\n")
         handle.flush()
     except OSError:
