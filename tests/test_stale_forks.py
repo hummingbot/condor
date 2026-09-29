@@ -268,7 +268,9 @@ def test_a_customized_shared_item_is_reported(rel, body):
     from condor.layering import all_stale_forks
     from condor.memory.paths import local_agents_root, stock_agents_root
 
-    shipped = _write(stock_agents_root().joinpath("_shared", *rel), body.format(tag="shipped"))
+    shipped = _write(
+        stock_agents_root().joinpath("_shared", *rel), body.format(tag="shipped")
+    )
     _write(local_agents_root().joinpath("_shared", *rel), body.format(tag="mine"))
 
     # Identical-but-for-my-edit already differs, so it reports immediately;

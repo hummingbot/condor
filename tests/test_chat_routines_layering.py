@@ -145,3 +145,62 @@ def test_the_lift_is_idempotent(repo):
 
     assert first.chat_routines == 1
     assert second.chat_routines == 0
+
+
+# ── The chat's local layer is reported when upstream moves under it ──
+
+
+def _chat_layers(tmp_path=None):
+    from routines.base import assistant_routines_dirs
+
+    return assistant_routines_dirs(None)
+
+
+def test_an_improved_shipped_routine_is_reported_before_and_after(monkeypatch):
+    """The scenario the local layer exists to create, and nothing reported it.
+
+    FEAT-033 keeps the shipped library at the repo-root ``routines/`` and only
+    the write target moved under the agent — so the generic scan looked for
+    stock at ``<stock>/condor/routines``, found nothing, and filed the file as
+    something the agent authored from scratch.
+    """
+    from condor.layering import all_stale_forks, locally_overridden
+
+    local_dir, stock_dir = _chat_layers()
+    shipped = stock_dir / "arb_check.py"
+    original = shipped.read_bytes() if shipped.is_file() else None
+    try:
+        shipped.parent.mkdir(parents=True, exist_ok=True)
+        shipped.write_text("# shipped\n", "utf-8")
+        local_dir.mkdir(parents=True, exist_ok=True)
+        (local_dir / "arb_check.py").write_text(
+            "# shipped\n# my improvement\n", "utf-8"
+        )
+
+        # Before: the update is about to rewrite a file we have our own copy of.
+        assert locally_overridden(["routines/arb_check.py"]) == [
+            "routines/arb_check.py"
+        ]
+
+        # After: upstream's rewrite has landed and ours still wins.
+        shipped.write_text("# UPSTREAM rewrote this\n", "utf-8")
+        stale = [f for f in all_stale_forks() if f.rel == "routines/arb_check.py"]
+        assert len(stale) == 1, "the chat's shadow of a shipped routine went unreported"
+        assert stale[0].label == "condor/routines/arb_check.py"
+        assert stale[0].unprovenanced is True, ".py can never carry a stamp"
+    finally:
+        if original is None:
+            shipped.unlink(missing_ok=True)
+        else:
+            shipped.write_bytes(original)
+
+
+def test_a_routine_the_chat_invented_is_not_reported():
+    """No shipped counterpart means it was never a fork of anything."""
+    from condor.layering import all_stale_forks
+
+    local_dir, _ = _chat_layers()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    (local_dir / "my_own_idea.py").write_text("# mine alone\n", "utf-8")
+
+    assert [f for f in all_stale_forks() if f.rel.endswith("my_own_idea.py")] == []

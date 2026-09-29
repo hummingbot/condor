@@ -312,12 +312,28 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
     against.
     """
     local, stock = _homes(agent_slug)
+    # Read the owner off the resolved path rather than from ``agent_slug``,
+    # which is None for the chat agent and would leave its items unqualified.
+    return _compare_layer(local, stock, local.name)
+
+
+def _compare_layer(
+    local: Path, stock: Path, owner: str, rel_prefix: str = ""
+) -> list[StaleFork]:
+    """Every file under ``local`` measured against ``stock/<same relative path>``.
+
+    Split out of :func:`stale_forks` because one layer does not resolve that
+    way: the chat agent's routines fall back to the repo-root ``routines/``
+    rather than to ``<stock>/condor/routines`` (see :func:`_chat_routine_forks`),
+    so it needs the same comparison against a stock root of its own.
+
+    ``rel_prefix`` keeps the reported path the one the reader would look for --
+    a chat routine is reported as ``routines/<name>.py``, which is where it sits
+    under the agent, not as the bare filename the scan happens to walk.
+    """
     if not local.is_dir():
         return []
 
-    # Read off the resolved path rather than from ``agent_slug``, which is None
-    # for the chat agent and would leave its items unqualified.
-    owner = local.name
     out: list[StaleFork] = []
     for path in sorted(local.rglob("*")):
         if not path.is_file():
@@ -325,6 +341,7 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
 
         rel = path.relative_to(local)
         counterpart = stock / rel
+        shown = f"{rel_prefix}/{rel}" if rel_prefix else str(rel)
         forked_from = _stamp_of(path)
 
         if not counterpart.is_file():
@@ -334,14 +351,14 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
             # ordinary file the agent authored, which was never a fork of
             # anything and has nothing to be stale against.
             if forked_from:
-                out.append(StaleFork(path, str(rel), forked_from, None, owner))
+                out.append(StaleFork(path, shown, forked_from, None, owner))
             continue
 
         now = content_digest(counterpart)
         if forked_from:
             if now == forked_from or _legacy_digest(counterpart) == forked_from:
                 continue
-            out.append(StaleFork(path, str(rel), forked_from, now, owner))
+            out.append(StaleFork(path, shown, forked_from, now, owner))
             continue
 
         # No stamp, but stock ships this exact path, so the local copy is
@@ -349,7 +366,7 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
         # -- nothing to report. Different content means upstream's version is
         # unreachable and nothing recorded that it ever matched.
         if now != content_digest(path):
-            out.append(StaleFork(path, str(rel), "", now, owner))
+            out.append(StaleFork(path, shown, "", now, owner))
     return out
 
 
@@ -390,9 +407,21 @@ def locally_overridden(rel_paths: list[str]) -> list[str]:
     out: list[str] = []
     for rel in rel_paths:
         parts = PurePosixPath(rel).parts
-        if len(parts) < 2 or parts[0] != "agents":
+        if len(parts) < 2:
             continue
-        if (root.joinpath(*parts[1:])).is_file():
+        if parts[0] == "agents":
+            local = root.joinpath(*parts[1:])
+        elif parts[0] == "routines":
+            # The chat agent's library is the exception: it is shipped at the
+            # repo root, not under ``agents/``, and its local layer sits at
+            # ``<local>/condor/routines`` (see ``_chat_routine_forks``). Without
+            # this arm an update that rewrites a shipped routine the chat has
+            # improved matched nothing, and the one warning that fires before
+            # the change lands never mentioned it.
+            local = root.joinpath(CHAT_LIBRARY, *parts)
+        else:
+            continue
+        if local.is_file():
             out.append(rel)
     return out
 
@@ -403,6 +432,33 @@ def locally_overridden(rel_paths: list[str]) -> list[str]:
 #: whole trees out of the scan below.
 SHARED_LIBRARY = "_shared"
 
+#: The chat agent's own library. Named here because its routines are the one
+#: layer that falls back to the repo root rather than to the shipped agent tree.
+CHAT_LIBRARY = "condor"
+
+
+def _chat_routine_forks() -> list[StaleFork]:
+    """Chat-authored routines shadowing the library they were copied from.
+
+    The one layer whose stock root is not ``<stock>/<slug>/``. FEAT-033 keeps
+    the shipped library at the repo-root ``routines/`` and FEAT-115 moved only
+    the *write* target under the agent, so the pair is
+    ``(<local>/condor/routines, <repo>/routines)`` -- which is what
+    :func:`routines.base.assistant_routines_dirs` resolves and what the loader
+    actually reads.
+
+    :func:`stale_forks` cannot see it. It asks ``_homes`` for the pair, gets
+    ``<stock>/condor/routines`` as the stock side, finds nothing there on any
+    install, and files every chat routine under "an ordinary file the agent
+    authored" -- so improving a shipped routine, which is the whole point of
+    the local layer, shadowed it in silence. Ask the loader where stock is
+    instead.
+    """
+    from routines.base import assistant_routines_dirs
+
+    local, stock = assistant_routines_dirs(None)
+    return _compare_layer(local, stock, CHAT_LIBRARY, rel_prefix="routines")
+
 
 def all_stale_forks() -> list[StaleFork]:
     """:func:`stale_forks` across every agent this install has, plus the shared root."""
@@ -410,6 +466,11 @@ def all_stale_forks() -> list[StaleFork]:
 
     out: list[StaleFork] = []
     seen: set[Path] = set()
+    # The chat routines first: the per-agent scan below walks the same files
+    # under ``<local>/condor`` and would judge them against the wrong root.
+    for fork in [*_chat_routine_forks()]:
+        seen.add(fork.path)
+        out.append(fork)
     for slug in [None, SHARED_LIBRARY, *iter_agent_slugs()]:
         for fork in stale_forks(slug):
             if fork.path in seen:
