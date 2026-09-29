@@ -1172,16 +1172,42 @@ if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
             ts_hostname=""
             _ts_candidates="$(tailnet_api_peers hummingbot-api)"
             _ts_count="$(printf '%s' "$_ts_candidates" | grep -c . || true)"
-            if [ "${_ts_count:-0}" -eq 1 ]; then
+            if [ "${_ts_count:-0}" -eq 1 ] && [ "$_ts_candidates" = "hummingbot-api" ]; then
+                # The unsuffixed name, and the only match. Nothing to choose
+                # between, and it is the name hummingbot-api's own setup asks
+                # for, so this is the node in every ordinary install.
                 ts_hostname="$_ts_candidates"
                 msg_ok "Found it on your tailnet: $ts_hostname"
+            elif [ "${_ts_count:-0}" -eq 1 ]; then
+                # One match, but under a suffix -- hummingbot-api-1, or a name
+                # somebody chose. Being alone is not evidence it is the right
+                # one: a stale node, a colleague's staging box, or another
+                # desk's API is just as alone, and accepting it silently writes
+                # it into config.yml where the next sign of trouble is a 401
+                # against a machine the operator never meant to reach. Shown
+                # and confirmed instead, with Enter as the answer when it is
+                # right, which is the common case.
+                msg_ok "Found one hummingbot-api node on your tailnet: $_ts_candidates"
+                msg_info "That is not the default name, so it is worth a look before it"
+                msg_info "goes in config.yml. Press Enter to use it, or type another."
+                prompt_visible "hummingbot-api host" "$_ts_candidates" "ts_hostname"
+                ts_hostname="${ts_hostname:-$_ts_candidates}"
             elif [ "${_ts_count:-0}" -gt 1 ]; then
                 msg_warn "More than one hummingbot-api node on this tailnet:"
                 printf '%s\n' "$_ts_candidates" | while IFS= read -r _c; do
                     [ -n "$_c" ] && echo "      • $_c"
                 done
-                msg_info "Tailscale adds -1, -2 ... when a name is taken, so these are"
-                msg_info "different machines. Pick the one you just deployed."
+                # Deliberately does NOT say "Tailscale adds -1, -2 when a name
+                # is taken, so pick the one you just deployed". Running several
+                # APIs on purpose -- hummingbot-api-1, hummingbot-api-2 -- is a
+                # normal deployment, and there those suffixes are chosen names,
+                # not collision artifacts. The old wording told such an operator
+                # their own naming was an accident, and "the one you just
+                # deployed" is the wrong instruction anyway when Condor is being
+                # pointed at an instance that has been up for weeks.
+                msg_info "These are separate machines -- deployments named on purpose, or"
+                msg_info "names Tailscale suffixed because one was already taken."
+                msg_info "Pick the one this Condor should talk to."
                 prompt_required_visible "Which node is your hummingbot-api?" "ts_hostname" "Name cannot be empty"
             else
                 msg_warn "No hummingbot-api node is visible on this tailnet yet."
