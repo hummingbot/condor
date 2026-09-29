@@ -630,8 +630,28 @@ async def repo_blocks(component: Component) -> list[Block]:
     # ref is how local work gets clobbered by commits nobody had seen yet. So a
     # fetch that failed is not a detail to shrug off: it is the whole basis of
     # the comparison below, gone.
-    fetched, _ = await updater.fetch(component.repo_dir)
+    fetched, fetch_output = await updater.fetch(component.repo_dir)
     if not fetched:
+        if updater.is_missing_remote_ref(fetch_output):
+            # Not an unreachable remote: the remote answered and has no branch
+            # of this name. Saying "unreachable" sent the reader to check a
+            # network that was never the problem, and `incoming-unknown` is the
+            # wrong shape too -- nothing is incoming, there is no upstream.
+            default = await updater.remote_default_branch(component.repo_dir)
+            switch = f" (`git switch {default}`)" if default else ""
+            return [
+                Block(
+                    component=component.key,
+                    code="no-upstream-branch",
+                    message=(
+                        f"`{branch}` exists only in this checkout — origin has "
+                        "no branch of that name, so there is nothing to update "
+                        "from. Push it to set an upstream, or switch to a "
+                        f"branch that tracks origin{switch}."
+                    ),
+                    resolutions=["cancel"],
+                )
+            ]
         return [_incoming_unknown(component, branch, "the remote is unreachable")]
 
     ahead, dirty, incoming = await asyncio.gather(

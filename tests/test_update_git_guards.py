@@ -111,3 +111,70 @@ async def test_the_remote_default_branch_is_read_not_assumed(repo, tmp_path):
     assert await updater.remote_default_branch(str(clone)) == "main"
     # No origin at all -> "cannot tell", never a guess.
     assert await updater.remote_default_branch(str(repo)) is None
+
+
+# ── A branch that was never pushed is not an unreachable remote ──
+
+
+@pytest.fixture
+def cloned(tmp_path):
+    """A checkout with a real ``origin`` that answers — a local bare repo."""
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git("init", "-q", "-b", "main", cwd=seed)
+    (seed / "f.txt").write_text("1\n")
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "c0", cwd=seed)
+    _git("clone", "-q", "--bare", str(seed), str(origin), cwd=tmp_path)
+
+    work = tmp_path / "work"
+    _git("clone", "-q", str(origin), str(work), cwd=tmp_path)
+    return work
+
+
+@pytest.mark.asyncio
+async def test_a_local_only_branch_is_named_as_such_not_blamed_on_the_network(cloned):
+    """The ordinary state of anyone on a feature branch they have not pushed.
+
+    git exits 128 both for "no such ref upstream" and for "cannot reach the
+    remote", so the guard reported an unpushed branch as an unreachable
+    remote — and sent the reader to debug a network that was fine.
+    """
+    _git("checkout", "-q", "-b", "feat/mine", cwd=cloned)
+
+    component = components.Component("condor", "Condor", str(cloned))
+    blocks = await components.repo_blocks(component)
+
+    assert [b.code for b in blocks] == ["no-upstream-branch"]
+    message = blocks[0].message
+    assert "feat/mine" in message
+    assert "unreachable" not in message.lower()
+    # And it says what to do about it, naming the branch that does track.
+    assert "main" in message
+
+
+@pytest.mark.asyncio
+async def test_a_tracked_branch_still_passes_the_guard(cloned):
+    """The fix must not turn a healthy checkout into a blocked one."""
+    component = components.Component("condor", "Condor", str(cloned))
+    assert await components.repo_blocks(component) == []
+
+
+@pytest.mark.asyncio
+async def test_the_status_card_says_why_it_cannot_compare(cloned):
+    """``Failed to fetch from remote`` was the only thing the card ever said."""
+    _git("checkout", "-q", "-b", "feat/mine", cwd=cloned)
+
+    info = await updater.check_for_updates(repo_dir=str(cloned))
+
+    assert info["error"] and "not on origin" in info["error"]
+
+
+def test_a_genuine_transport_failure_is_not_mistaken_for_a_missing_branch():
+    assert updater.is_missing_remote_ref("fatal: couldn't find remote ref feat/x")
+    assert updater.is_missing_remote_ref("fatal: could not find remote ref feat/x")
+    assert not updater.is_missing_remote_ref(
+        "fatal: unable to access 'https://...': Could not resolve host: github.com"
+    )
+    assert not updater.is_missing_remote_ref("")

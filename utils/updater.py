@@ -181,9 +181,14 @@ async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
         result["branch"] = branch
 
         # Fetch latest from remote
-        rc, _ = await _run_git("fetch", "origin", branch, repo_dir=repo_dir)
+        rc, fetch_out = await _run_git("fetch", "origin", branch, repo_dir=repo_dir)
         if rc != 0:
-            result["error"] = "Failed to fetch from remote"
+            result["error"] = (
+                f"`{branch}` is not on origin, so there is nothing to compare "
+                "against — push it, or switch to a branch that tracks origin."
+                if is_missing_remote_ref(fetch_out)
+                else "Failed to fetch from remote"
+            )
             return result
 
         # Get local and remote commits
@@ -258,6 +263,24 @@ class DirtyState:
 def _lines(output: str) -> tuple[str, ...]:
     """Split command output into non-empty stripped lines."""
     return tuple(line.strip() for line in (output or "").split("\n") if line.strip())
+
+
+#: What git says when the branch simply is not on the remote. Distinct from
+#: every other fetch failure: the network is fine, the remote answered, and it
+#: does not have this ref. Both spellings appear across git versions.
+_MISSING_REMOTE_REF = ("couldn't find remote ref", "could not find remote ref")
+
+
+def is_missing_remote_ref(output: str) -> bool:
+    """Whether a failed fetch means "no such branch upstream", not "no remote".
+
+    git exits 128 for both, so the caller that cannot tell them apart reports
+    an unpushed local branch -- the ordinary state of anyone working on a
+    feature -- as an unreachable remote, and sends the operator to check their
+    network for a problem that is not there.
+    """
+    lowered = (output or "").lower()
+    return any(marker in lowered for marker in _MISSING_REMOTE_REF)
 
 
 async def fetch(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
