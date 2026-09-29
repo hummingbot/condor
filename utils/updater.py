@@ -470,28 +470,124 @@ async def stash_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
     return True, out or "Stashed."
 
 
+STASH_MESSAGE = "condor /update"
+
+
+async def has_update_stash(repo_dir: str = CONDOR_DIR) -> bool:
+    """Whether work parked by a previous update is still sitting in a stash."""
+    rc, listing = await _run_git("stash", "list", repo_dir=repo_dir)
+    return rc == 0 and STASH_MESSAGE in listing
+
+
+async def _stash_paths_at(repo_dir: str, ref: str = "stash@{0}") -> list[str]:
+    """Every path a stash entry would write, tracked and untracked alike.
+
+    ``stash show --name-only`` covers the tracked half. Files stashed with
+    ``-u`` live in a third parent commit it does not look at, so they need
+    asking for separately or the abort below would leave them behind.
+    """
+    paths: list[str] = []
+    rc, out = await _run_git("stash", "show", "--name-only", ref, repo_dir=repo_dir)
+    if rc == 0:
+        paths.extend(_lines(out))
+    rc, out = await _run_git(
+        "ls-tree", "-r", "--name-only", f"{ref}^3", repo_dir=repo_dir
+    )
+    if rc == 0:
+        paths.extend(_lines(out))
+    seen: dict[str, None] = {}
+    for path in paths:
+        seen.setdefault(path, None)
+    return list(seen)
+
+
+async def _undo_partial_apply(repo_dir: str, paths: list[str]) -> bool:
+    """Put ``paths`` back to HEAD after an apply that conflicted. Nothing else.
+
+    ``reset --hard`` is the obvious abort and is *wrong here*: these checkouts
+    are runtime working directories, which is the whole reason the preflight
+    gates on the intersection of dirty and incoming rather than on "is the tree
+    clean". Unrelated uncommitted work is expected, and a hard reset would
+    destroy it to tidy up a failure that never touched it.
+
+    So undo exactly the stash's own path set. A path git knows goes back to
+    HEAD, index and worktree both, which clears the unmerged entry and the
+    conflict markers with it. A path that was untracked when it was stashed has
+    no HEAD version to go back to, so it is removed -- the copy in the stash is
+    the one that survives either way.
+    """
+    ok = True
+    for rel in paths:
+        rc, _ = await _run_git("cat-file", "-e", f"HEAD:{rel}", repo_dir=repo_dir)
+        if rc == 0:
+            rc, _ = await _run_git(
+                "checkout", "-f", "HEAD", "--", rel, repo_dir=repo_dir
+            )
+        else:
+            rc, _ = await _run_git("rm", "-f", "--quiet", "--", rel, repo_dir=repo_dir)
+            if rc != 0:
+                target = Path(repo_dir) / rel
+                try:
+                    target.unlink(missing_ok=True)
+                    rc = 0
+                except OSError:
+                    pass
+        if rc != 0:
+            ok = False
+    if not ok:
+        return False
+    # Only an empty unmerged set proves the abort landed; anything left would
+    # be the half-merged tree this exists to prevent, reported as prevented.
+    rc, out = await _run_git(
+        "diff", "--name-only", "--diff-filter=U", repo_dir=repo_dir
+    )
+    return rc == 0 and not out.strip()
+
+
 async def stash_pop(repo_dir: str) -> tuple[bool, str]:
     """Put back the work ``stash_paths`` parked, if it still applies cleanly.
 
     Stashing was never meant to be the end of the story -- the whole point of
-    parking work rather than discarding it is getting it back, and a clean pop
-    is the common case once the fast-forward has landed. What the original
-    caution was right about is the *failure*: a conflicting pop leaves a
-    half-merged tree plus a stash entry nobody was told about. So a conflict
-    aborts and says where the work still is, rather than leaving the operator
-    to discover both.
+    parking work rather than discarding it is getting it back, and a clean
+    restore is the common case once the fast-forward has landed.
+
+    The failure is the part that needs care, and it is not rare: ``stash`` is
+    offered as a way out of ``dirty-conflict``, which by definition means the
+    incoming commits touch the very files being parked. So the apply conflicts
+    on the main line, not in some corner.
+
+    ``git stash pop`` handles that badly for an unattended caller. It writes
+    conflict markers into the tracked file, leaves the index unmerged, keeps
+    the stash, and exits non-zero -- so the update ends with a checkout nobody
+    can build from, an agent playbook full of ``<<<<<<<``, and a suggestion to
+    run the command that just failed (it fails again: "needs merge"). Hence
+    ``apply`` and an explicit drop: apply can be undone, pop cannot.
     """
-    _, listing = await _run_git("stash", "list", repo_dir=repo_dir)
-    if "condor /update" not in listing:
+    if not await has_update_stash(repo_dir):
         return True, "Nothing of ours was stashed."
 
-    rc, out = await _run_git("stash", "pop", repo_dir=repo_dir)
-    if rc != 0:
+    paths = await _stash_paths_at(repo_dir)
+    rc, out = await _run_git("stash", "apply", repo_dir=repo_dir)
+    if rc == 0:
+        await _run_git("stash", "drop", repo_dir=repo_dir)
+        return True, "Restored the work that was stashed before the update."
+
+    undone = await _undo_partial_apply(repo_dir, paths)
+    named = ", ".join(paths[:5]) + ("…" if len(paths) > 5 else "")
+    if undone:
         return False, (
-            f"{out}\n\nYour work is still in stash@{{0}} — nothing was lost. "
-            "Resolve it by hand with: git stash pop"
+            f"Your work does not apply on top of the update: {named}.\n\n"
+            "Nothing was lost and nothing is half-merged — the checkout was put "
+            "back the way the update left it, and your work is still in "
+            "stash@{0}. Bring it back when you can resolve it by hand:\n"
+            "    git stash pop\n"
+            "That will reproduce the conflict, this time where you can see it."
         )
-    return True, "Restored the work that was stashed before the update."
+    return False, (
+        f"{out}\n\nYour work is still in stash@{{0}} — nothing was lost — but the "
+        "checkout could not be put back cleanly and may hold conflict markers. "
+        "Check `git status` before running anything from it."
+    )
 
 
 async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool, str]:

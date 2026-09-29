@@ -1043,6 +1043,26 @@ async def preflight(component_keys: list[str]) -> Preflight:
         stale_warning = _stale_fork_warning()
         if stale_warning is not None:
             warnings.append(stale_warning)
+
+        if await updater.has_update_stash(_table()[CONDOR].repo_dir):
+            # Work a previous update parked and could not replay. Nothing said
+            # so afterwards: the run ended, the step scrolled away, and the
+            # stash sat there -- invisible to the next preflight, which only
+            # looks at the working tree, and to `git status`, which does not
+            # mention stashes at all.
+            warnings.append(
+                Warning(
+                    component=CONDOR,
+                    code="stashed-work",
+                    message=(
+                        "An earlier update parked local work in a stash and it "
+                        "is still there — `git stash list` shows it as "
+                        "`condor /update`. This update will try to replay it "
+                        "again, and will put the checkout back untouched if it "
+                        "still does not apply."
+                    ),
+                )
+            )
         warnings.append(
             Warning(
                 component=CONDOR,

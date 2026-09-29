@@ -145,3 +145,162 @@ async def test_a_stash_we_did_not_make_is_left_alone(repo):
         ["git", "stash", "list"], cwd=repo, capture_output=True, text=True
     )
     assert "someone else's" in listing.stdout
+
+
+# ── S2: a stash that cannot be replayed must leave the tree usable ──
+
+
+@pytest.fixture
+def stashed(repo, tmp_path):
+    """The main line of the `stash` resolution, set up exactly as it happens.
+
+    `stash` is offered as a way out of `dirty-conflict`, and that block means
+    the incoming commits touch the file being parked — so the replay conflicts
+    in the ordinary case, not a rare one.
+    """
+    agent = repo / "agents" / "scout" / "AGENT.md"
+    origin = tmp_path / "origin.git"
+    _git("clone", "-q", "--bare", str(repo), str(origin), cwd=tmp_path)
+    _git("remote", "add", "origin", str(origin), cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    _git("branch", "-q", "--set-upstream-to=origin/main", "main", cwd=repo)
+
+    # Upstream rewrites the same file.
+    work = tmp_path / "work"
+    _git("clone", "-q", str(origin), str(work), cwd=tmp_path)
+    (work / "agents" / "scout" / "AGENT.md").write_text("# Scout v2\nUPSTREAM rule.\n")
+    _git("commit", "-aqm", "v2", cwd=work)
+    _git("push", "-q", "origin", "main", cwd=work)
+
+    # The operator's own edit, and unrelated uncommitted work elsewhere — the
+    # runtime state these checkouts are always in.
+    agent.write_text("# Scout v1\nNever on Sundays.\nMY EDIT.\n")
+    bystander = repo / "runtime-notes.txt"
+    bystander.write_text("do not lose me\n")
+    return repo, agent, bystander
+
+
+@pytest.mark.asyncio
+async def test_a_stash_that_cannot_be_replayed_leaves_no_conflict_markers(stashed):
+    """`git stash pop` wrote the markers into the file and kept the stash.
+
+    The update then reported success over a checkout holding a half-merged
+    agent playbook, an unmerged index, and advice — "resolve it by hand with
+    git stash pop" — that errors with "needs merge" when followed.
+    """
+    repo, agent, bystander = stashed
+
+    ok, _ = await updater.stash_paths(str(repo), ["agents/scout/AGENT.md"])
+    assert ok
+    ok, _ = await updater.fast_forward(str(repo))
+    assert ok
+
+    restored, message = await updater.stash_pop(str(repo))
+
+    assert restored is False, "it genuinely could not be replayed"
+    text = agent.read_text()
+    assert "<<<<<<<" not in text and ">>>>>>>" not in text, text
+    assert text == "# Scout v2\nUPSTREAM rule.\n", "the tree is the update's own"
+
+    unmerged = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=ENV,
+    ).stdout
+    assert unmerged.strip() == "", f"index left unmerged: {unmerged}"
+
+    # The work survives, and the message points at where.
+    assert await updater.has_update_stash(str(repo)) is True
+    assert "stash@{0}" in message and "nothing is half-merged" in message
+
+    # And the abort did not reach past the stash's own paths.
+    assert bystander.read_text() == "do not lose me\n"
+
+
+@pytest.mark.asyncio
+async def test_a_stash_that_replays_cleanly_is_dropped(stashed, tmp_path):
+    """The common case still completes — and does not leave the entry behind."""
+    repo, agent, _ = stashed
+    # Drop the edit that collides, so the fast-forward is unobstructed, and
+    # park something the update does not touch instead.
+    _git("checkout", "--", "agents/scout/AGENT.md", cwd=repo)
+    other = repo / "agents" / "scout" / "notes.md"
+    other.write_text("my notes\n")
+
+    ok, _ = await updater.stash_paths(str(repo), ["agents/scout/notes.md"])
+    assert ok
+    moved, output = await updater.fast_forward(str(repo))
+    assert moved, output
+
+    restored, message = await updater.stash_pop(str(repo))
+
+    assert restored is True, message
+    assert other.read_text() == "my notes\n"
+    assert await updater.has_update_stash(str(repo)) is False, "the entry was kept"
+
+
+@pytest.mark.asyncio
+async def test_nothing_of_ours_stashed_is_not_a_failure(repo):
+    assert await updater.stash_pop(str(repo)) == (
+        True,
+        "Nothing of ours was stashed.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_work_left_in_a_stash_is_reported_by_the_next_preflight(
+    stashed, monkeypatch
+):
+    """The stash outlived the run that made it and nothing mentioned it again.
+
+    `git status` does not show stashes, the finished run scrolls away, and the
+    next preflight only looks at the working tree — so parked work could sit
+    there indefinitely with every surface reporting a healthy install.
+    """
+    repo, _, _ = stashed
+    await updater.stash_paths(str(repo), ["agents/scout/AGENT.md"])
+
+    monkeypatch.setattr(
+        components,
+        "_table",
+        lambda: {
+            components.HUMMINGBOT_API: components.Component(
+                components.HUMMINGBOT_API,
+                "Hummingbot API",
+                str(repo / "no-such-api"),
+                service="hummingbot-api",
+            ),
+            components.CONDOR: components.Component(
+                components.CONDOR, "Condor", str(repo)
+            ),
+        },
+    )
+    preflight = await components.preflight([components.CONDOR])
+
+    codes = [w.code for w in preflight.warnings]
+    assert "stashed-work" in codes, codes
+    message = next(w.message for w in preflight.warnings if w.code == "stashed-work")
+    assert "condor /update" in message
+
+
+@pytest.mark.asyncio
+async def test_a_clean_checkout_gets_no_stash_warning(repo, monkeypatch):
+    monkeypatch.setattr(
+        components,
+        "_table",
+        lambda: {
+            components.HUMMINGBOT_API: components.Component(
+                components.HUMMINGBOT_API,
+                "Hummingbot API",
+                str(repo / "no-such-api"),
+                service="hummingbot-api",
+            ),
+            components.CONDOR: components.Component(
+                components.CONDOR, "Condor", str(repo)
+            ),
+        },
+    )
+    preflight = await components.preflight([components.CONDOR])
+    assert "stashed-work" not in [w.code for w in preflight.warnings]
