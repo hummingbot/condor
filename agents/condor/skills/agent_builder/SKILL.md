@@ -1,346 +1,336 @@
 ---
 name: agent_builder
-description: Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by delegating it a question, then progressively improve it with routines and (optionally) a loop of its own.
-when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by asking it things or also runs a loop of its own.
+description: Create and operate autonomous trading agents — either from scratch (role + purpose first, then routines and an optional loop) or from a folder the user already has (instructions, controllers, configs, scripts), mapping every piece onto an agent and settling the loop with the user before writing anything.
+when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — including "turn this folder / these controllers / this strategy write-up into an agent", "here are my controllers and configs, make an agent that runs them", or onboarding a bundle of files into an existing agent.
 created: 2026-06-18
 source: builtin
 ---
 
-You are helping the user build or operate an **autonomous trading agent**. Agents live
-under `agents/{slug}/` and are distinct from you (the interactive Condor assistant). You
-drive them via `manage_agents`, `manage_loops`, `control_agent`, `manage_routines`,
-`trading_agent_journal_read` and `delegate`.
+You are helping the user build or operate an **autonomous trading agent**. Agents are
+distinct from you (the interactive Condor assistant). You drive them via
+`manage_agents`, `manage_agent_controllers`, `manage_routines`, `manage_skill`,
+`manage_loops`, `control_agent`, `trading_agent_journal_read` and `delegate`.
 
-## Mental model — start minimal, improve in layers
+## Mental model
 
 An **Agent** is a specialist with an **essence**: a domain it understands and a role it
-plays. It is defined in `agents/{slug}/AGENT.md` (its brain/system prompt). There is only
-ONE kind of thing — an Agent. "Expert" is not a separate type; it's just an agent being
-asked something.
-
-**Every agent can do both things from the moment it exists** — be delegated a task
-(`delegate`, whether that is a one-line question or a multi-step build) and run on a loop
-(`control_agent(action="start")`). There is no capability flag, nothing to enable, and
-no such thing as an "advisory-only" or "loop-only" agent. The layers below add *quality*, never capability.
-
-The whole point of this skill is to build the agent in the **smallest useful step first,
-then layer capability on only when the user wants it.** Do NOT front-load routines,
-loops, executors, or model questions. The progression is:
-
-1. **Create the agent from just its role + what it's for.** Nothing else required. The
-   moment it exists it can already be delegated to and looped.
-2. **Delegate it a question to prove it's alive.** Ask it something inside its specialty
-   and show the answer. This is the agent working end-to-end.
-3. **Improve it with routines** — give it structured market data of its own. Define one,
-   create it, run it, look at the output together. This is what turns a guessing LLM into
-   a real specialist.
-4. **(Optional) Give its loop a dedicated playbook** — a loop the engine runs on a
-   tick. The agent can already loop without one (it ticks a default playbook driven by
-   its own brain); a loop of its own is how you make it specific and disciplined. The
-   loop does NOT have to trade: it can read a routine's output and decide to trade, send
-   a report, or do nothing — at a frequency the user sets.
-
-Each layer is independently valuable. Most agents are worth creating and asking things
-long before they ever get a routine, and many never need a loop at all.
+plays. There is only ONE kind of thing — an Agent. **Every agent can be delegated to
+(`delegate`) and looped (`control_agent(action="start")`) from the moment it exists.**
+There is no capability flag, no "advisory-only" or "loop-only" agent. Everything else —
+routines, skills, controllers, a loop of its own — adds *quality*, never capability.
 
 ```
-agents/{slug}/
-  AGENT.md                         # identity + role (the brain) — step 1
-  routines/*.py                    # agent-scoped analysis scripts — step 3
-  skills/{name}/SKILL.md           # the agent's own reusable playbooks
-  loops/{slug}/loop.md             # OPTIONAL loop playbook — step 4 (a default
-                                   # one is created on first start if there is none)
-  sessions/session_N/              # run journals/snapshots (created at runtime)
+.condor/agents/{slug}/             # where every write lands (agents/{slug}/ = shipped, read-only)
+  AGENT.md                         # identity + role + durable knowledge (the brain)
+  controllers/{name}/{name}.py     # Hummingbot controllers it owns (source of truth)
+  controllers/{name}/CONTROLLER.md #   what it is, how it works, parameter guide
+  controllers/{name}/sample_configs/{style}.yml
+  routines/*.py                    # structured market views it computes
+  skills/{name}/SKILL.md           # its own procedures (deploy checklist, tuning rules)
+  loops/{loop}/loop.md             # OPTIONAL tick playbook (a default is made on first start)
+  shutdown.md                      # OPTIONAL winddown policy (default: keep spot, close perp)
+  sessions/                        # run journals (runtime)
 ```
 
-Label each message with the current step, e.g. `[Step 2 — Ask it something]`.
+Only an admin can copy a local agent into the shipped `agents/` library
+(`manage_agents(action="publish")`); mention it, don't do it unasked.
 
-## Step 1 — Create the agent (minimal)
+## Pick the path
 
-When the user asks to create an agent, do NOT open with a config questionnaire
-(exchange, pair, strategy, model…). In a sentence, frame how agents work here (create →
-ask it something → improve with routines → optionally loop), then settle just two
-things in a short conversation:
+| The user brings… | Path |
+|---|---|
+| An idea: "I want an agent for X" | **A — From scratch** (minimal first, layer on) |
+| A folder / files: instructions, controllers, configs, scripts | **B — From a folder** (inventory → discuss → build) |
+| One controller for an existing agent | skip both — follow `controller_sources` (see Controllers) |
 
-- **Role / domain** — what is this agent the specialist in? (e.g. "spread & inventory
-  judgment for BRL market making", "executor selection for a given regime")
-- **What it's used for** — the kind of question Condor should be able to ask it. This
-  becomes `when_to_consult`.
+Label each message with the current step, e.g. `[B2 — Discuss]`. Only the step label as a
+header; status as key: value.
 
-That's enough to create it. **Pick the model from what the operator actually has** —
-call `get_available_models` once and choose a sensible default for THIS agent's job (see
-**Model selection** below for the heuristic); it's the easiest thing to change later.
-Then create:
+---
+
+## Path A — From scratch (minimal first)
+
+Build in the **smallest useful step first**; do NOT front-load routines, loops,
+executors or model questions.
+
+### A1 — Create the agent (minimal)
+Frame how agents work here in one sentence (create → ask it something → improve with
+routines → optionally loop), then settle just two things:
+- **Role / domain** — what it is the specialist in.
+- **What it's used for** — the kind of question Condor should hand it → `when_to_consult`.
 
 ```
 manage_agents(
     action="create",
     name="Executor Manager",
     description="Expert in deploying and tuning Hummingbot executors",
-    agent_key="openrouter:anthropic/claude-sonnet-4-5",   # chosen from get_available_models; change anytime
     when_to_consult="When the user wants to deploy, tune, or stop an executor",
-    tools=[],                              # leave open unless the user named tools
     instructions="<AGENT.md body — the agent's system prompt>"
 )
 ```
+`agent_key` and `server_name` are omitted on purpose — see **Model** and **Server** in
+the Reference. The result carries `agent_slug`; use it for everything after.
 
-> **Never invent an `agent_key`.** You cannot tell which backends are installed,
-> running, or authenticated — a guessed key names a model that may not exist, and it
-> only fails on its first run, long after creation "succeeded". Pass one *only*
-> when the user named a specific model. `manage_servers(action="list")` reports the
-> user's `active_agent_key` and their saved `custom_llm_endpoints` if you need to show
-> or confirm the choice.
+Write the **AGENT.md body** as the agent's own system prompt, kept tight: **who it is**
+(its domain + what it explicitly does NOT handle), **what it knows** (durable domain
+knowledge), **how it answers** (lead with the recommendation, key: value not prose).
 
-> **Leave `server_name` empty.** Same discipline, different field. An empty
-> `server_name` means "follow whichever server the chat is on", which is right for
-> almost every agent — and it is the only value that travels, because an agent is
-> shared, committed, and read on machines whose server list is nothing like the
-> creating operator's. Naming the server you happen to be on **pins** the agent to
-> it: its `mcp-hummingbot` subprocess and every loop it deploys use that server
-> forever, regardless of the chat, and on anyone else's install it names a server
-> that does not exist. Pass a name **only** when the user explicitly says this agent
-> must always trade on that specific server. It is not a field to fill in helpfully
-> because `server_required: true` sits next to it. The pin can be set or cleared
-> later from the agent's page (the server chip beside its model), so leaving it
-> empty costs nothing.
-
-The **AGENT.md body (`instructions`)** is the brain — write it as the agent's own system
-prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
-**what it knows** (durable domain knowledge), and **how it answers** (lead with the
-recommendation, key: value not prose). You can keep it short now and enrich it later with
-`manage_agents(action="update")`. Note it owns scoped memory (`manage_memory`) and skills
-(`manage_skill`).
-
-`manage_agents(action="create")` returns `agent_slug` — use it for everything after.
-
-Then tell the user plainly: **the agent is created. Now let's ask it something to check
-it's alive.**
-
-## Step 2 — Ask it something to prove it's alive
-
-Test it the way another agent will use it. This is the one case where blocking is
-right: the answer IS the check, it should be short, and the user is watching for it.
-
+### A2 — Ask it something to prove it's alive
+The one case where blocking is right: the answer IS the check and the user is watching.
 ```
 delegate(action="ask", agent="<agent_slug>",
          task="…a real question in its specialty…", context="…")
 ```
+Show the answer. If the persona is off, fix it with
+`manage_agents(action="update", agent_slug=…, instructions=…)` and ask again. Then tell
+the user it already works as an expert they can hand work to, and that routines are the
+next upgrade.
 
-Show the answer. This proves the agent runs end-to-end. If the persona or answer is off,
-fix the AGENT.md with `manage_agents(action="update", agent_slug=…, instructions=…)` and
-ask again.
+### A3 — Improve it with routines
+A routine pre-processes raw market data into the view its specialty needs (a band
+scanner, a regime classifier, an inventory snapshot). One routine at a time:
+1. **Define** — agree on what it outputs and why the agent needs it.
+2. **Create** — never write it yourself. Hand it to a background worker, naming the
+   target agent: `delegate(action="start", agent="condor", task="build a routine
+   <name> for agent <agent_slug> that …")`. The worker follows `routine_cookbook`,
+   writes it into the agent's library and tests it.
+3. **Analyze the output** — run it and read it together; iterate until useful:
+   `manage_routines(action="run", agent="<agent_slug>", name="band_scanner", config={…})`.
 
-When the answer looks good, **stop and tell the user the agent already works as an
-expert they can hand work to** — and that the next way to make it sharper is to give it
-routines so it reasons over real structured data instead of guessing.
+Then update the AGENT.md so the agent calls the routine by name and knows how to read it,
+and ask it again. **Stop here unless the user wants the agent to act on its own.**
 
-## Step 3 — Improve it with routines
+### A4 — (Optional) A loop of its own
+See **Designing the loop** below, then run `loop_builder`.
 
-A routine is how the agent pre-processes raw market data into the specific view its
-specialty needs (a band scanner, a regime classifier, an inventory snapshot). Offer this
-as the upgrade, then guide the user through it one routine at a time:
+---
 
-1. **Define** — agree on what this routine should output and why the agent needs it.
-2. **Create** — hand the writing to a background worker
-   (`delegate(action="start", agent="condor", task="...")`); it follows the
-   `routine_cookbook` playbook and tests the routine before reporting. Tell it the
-   target agent so it passes the right `agent`. Routines live at the agent level
-   and are shared across every run and any future loop — pass the **agent slug**:
-   ```
-   manage_routines(action="create_routine", agent="<agent_slug>",
-                   name="band_scanner", code="<python>")
-   ```
-3. **Analyze the output** — run it and read it together; iterate until it's clean and
-   useful:
-   ```
-   manage_routines(action="run", agent="<agent_slug>",
-                   name="band_scanner", config={…})
-   ```
+## Path B — From a folder
 
-Then update the AGENT.md so the agent knows to call the routine by name and how to read
-it, and ask it again to confirm it now reasons over that data. Repeat for each
-routine the agent needs. **Stop here unless the user wants the agent to act on its own on
-a loop.**
+The user has a folder — strategy notes, controllers, configs, maybe scripts — and wants an
+agent that can run *everything in it*. Your job is to map every file onto the agent
+layout, surface what the folder leaves undecided, agree a plan, then build it in order.
+**Nothing is written until the user approves the plan in B3.**
 
-## ⚠️ Background delegation limits — ALWAYS respect these
+### B1 — Inventory (read-only)
+Get the path. The folder must be readable by the Condor process: `run_code` runs Python
+inside Condor with no sandbox, so a snippet can walk the tree. Two passes:
+1. **Tree** — one snippet that lists every file with its size (skip `.git`,
+   `__pycache__`, `.venv`, binaries). Show it.
+2. **Contents** — print the text files (`.md`, `.txt`, `.py`, `.yml`/`.yaml`, `.json`),
+   a few per snippet; skip or head-truncate anything over ~50 KB (data dumps, notebooks).
 
-Background delegate sessions have a **hard wall of 900 seconds (15 minutes)**. A task
-that exceeds this is cut off mid-work, losing whatever was not yet committed.
+Condor runs from source on the user's machine, so any local path works (expand `~`). If
+the user has no path to give (e.g. a phone on Telegram), pasted file contents work too.
 
-### Sizing rule — one routine per delegation
-The safe budget for a background routine-building task is **one routine + one round of
-testing**. Building two or three routines in a single delegation will reliably hit the
-wall during the test phase of the last routine.
+Classify every file into one of these buckets:
 
-**Always split large routine work across multiple sequential delegations**, one routine
-each:
+| Found | Recognised by | Becomes |
+|---|---|---|
+| Controller | `.py` subclassing `ControllerBase` / `MarketMakingControllerBase` / `DirectionalTradingControllerBase` | `controllers/<name>/<name>.py` |
+| Controller config | YAML with `controller_name` (+ `controller_type`) | `sample_configs/<style>.yml` of that controller |
+| Routine-shaped script | `.py` with a pydantic `Config` class and an async `run` taking config + context | agent routine |
+| Other script | anything else in Python (analysis, a V1 strategy, a notebook) | a routine to rebuild from it, or out of scope |
+| Identity / domain knowledge | who trades what, market theory, pair notes | AGENT.md |
+| Procedure | deploy steps, tuning rules, checklists | agent skill |
+| Tick behaviour | "every hour check…, if … then …" | the loop |
+| Risk / exit rules | max size, stop conditions, what to do on a kill | loop risk limits + `shutdown.md` |
+| Reference data | CSVs, backtest results, charts | read for context; not imported |
+
+Present the inventory as that table, filled with the user's files — one row per file,
+and a **Not imported** list with the reason for each.
+
+### B2 — Review and discuss the nuances
+First the mechanical review, reported before anything is written (it is the review step
+of `controller_sources` onboarding — read that playbook now):
+- each controller: class names, inferred type, config class fields; does it import a
+  module that is not in the folder or in Hummingbot?
+- each config: `controller_name` matches a controller in the folder (or one already on
+  the server — check with `manage_controllers`), fields exist, numbers are numbers,
+  enums are bare names;
+- **name collisions**: `manage_agents(action="list")` and `manage_agent_controllers`
+  on candidate agents — the server copy of a controller is one per *name*, shared by
+  every agent, so a clashing name must be renamed now, not after a drift;
+- is there an existing agent this belongs to instead of a new one?
+
+Then the conversation. Ask **only what the folder does not already answer**, a few
+questions at a time, each with your proposed default:
+- **One agent or several?** Split when the folder mixes domains that would be consulted
+  separately (market making + LP management). Default: one.
+- **Which configs are real** and which are examples. Pairs, connector, and the **capital**
+  per deployment — from the user, never from a sample's `total_amount_quote`.
+- **Vague rules → measurable ones.** "Widen in high volatility" needs a number and a data
+  source; each one becomes a routine (NATR over 1h > 2%?) or a threshold in the loop.
+- **What should run on its own** — this is the loop decision; walk it through
+  **Designing the loop** below with the folder's actual rules and controllers.
+- **Before live:** backtest each config first (`backtest_flow`)? Dry-run the loop?
+- **Winddown:** the default kill policy keeps spot and closes perps. Does the folder say
+  otherwise?
+
+### B3 — Propose the build plan and get a go-ahead
+One message, concrete, in build order:
 ```
-# WRONG — will time out:
-delegate(task="Build routines A, B, and C for agent X")
-
-# RIGHT — three tasks, triggered one after the other:
-delegate(task="Build routine A for agent X. Test it with input Y. Report back.")
-# (wait for completion, verify, then:)
-delegate(task="Build routine B for agent X. Test it with input Y. Report back.")
+agent: <name> (<slug>) — new | existing <slug>
+  when_to_consult: …
+controllers: <name> ← file.py  styles: conservative ← a.yml, aggressive ← b.yml
+routines: <name> — from script.py | new — what it outputs (one delegation each)
+skills: <name> — from notes.md §Deploy
+loop: <name> — every <N>s — reads <routine> — may: <actions> — never: <actions>
+  risk_limits: … | winddown: …
+not imported: file — reason
+open questions: …
 ```
+Wait for approval or edits. Then build.
 
-If you are the background worker and you realize mid-task that you have been given too
-much work, **stop, commit what you have**, and instruct the user (via the task result) to
-trigger a follow-up delegation for the remaining items rather than racing the clock.
+### B4 — Build, in this order
+Each step depends on the one before; report after each.
+1. **Agent** — `manage_agents(action="create", …)` (or `update` for an existing one). The
+   AGENT.md holds identity + durable knowledge from the notes, plus a **Controllers**
+   section: each controller, what it is for, which style to use when. Leave procedures to
+   skills and the tick to the loop.
+2. **Prove it's alive** — `delegate(action="ask")` with a question about its own
+   strategy ("when would you use the aggressive style of X?").
+3. **Controllers** — follow `controller_sources` onboarding with `agent="<slug>"`: `write`
+   each `.py`, then each style with `sample=`. If the folder has no documentation for a
+   controller, write a CONTROLLER.md (type, how it works, parameter table, when it fails) —
+   or hand that job to the agent itself once its code is in:
+   `delegate(action="start", agent="<slug>", task="document your controller <name> in its CONTROLLER.md")`.
+   Then `status` → `sync` if `missing`; drift → the drift procedure, never a blind
+   overwrite. `upload_config` only the styles the user wants on the server.
+4. **Routines** — one background delegation per routine, passing the original script's
+   path or content as the starting point. Run each and read the output with the user.
+5. **Skills** — procedures from the notes, written into the agent's library:
+   `manage_skill(action="create", agent="<slug>", name=…, description=…, when_to_use=…, body=…)`.
+   Without `agent=` it lands in *your* library.
+6. **Loop** — run `loop_builder` for this agent with the design agreed in B3 (or delegate
+   it to the agent: `delegate(action="start", agent="<slug>", task="give yourself a loop that …")`).
+   Dry-run, show the journal, then go live only on the user's word.
+7. **Winddown** — there is no tool for `shutdown.md`. If the agreed policy differs from
+   the default, tell the user the file (`.condor/agents/<slug>/shutdown.md`, frontmatter
+   `on_kill_switch: flatten_all | keep_spot_close_perp | keep_all`) and its contents.
 
-### Timeout is currently fixed at 900s for `delegate`
-The `control_agent(action="start")` path exposes `tick_timeout_sec` in its config and
-can be raised. The `delegate` shortcut does not yet expose this — it runs at the
-system default. Until that is surfaced, the only mitigation is task sizing.
+### B5 — Report
+The B1 inventory table again with a **Status** column (created / in sync / uploaded /
+pending / not imported), then what runs now, what is pending, and the monitoring commands.
 
-## Step 4 — (Optional) Give its loop a dedicated playbook
+---
 
-Only if the user wants the agent to act autonomously. The agent can already loop without
-this step — `control_agent(action="start", loop_id="<agent_slug>")` ticks a
-default playbook driven by
-its AGENT.md — but that default is deliberately generic. A **loop** is the specific
-tick playbook the engine runs in a **session**, and it is what you want for anything that
-trades.
+## Designing the loop
 
-**How a loop is authored, dry-run and launched lives in the shared `loop_builder`
-playbook — read it (`manage_skill(action="read", name="loop_builder")`) and follow it,
-passing `agent_slug="<agent_slug>"`.** It is the single source of truth, and it is shared
-precisely so an agent can give *itself* a loop without coming back through you. Don't
-restate its mechanics here; your job at this step is only to:
+Decide this **with the user**; the agent can loop without it (a generic default playbook
+driven by its AGENT.md) — a loop of its own is how it becomes specific and disciplined.
+A loop does NOT have to trade. Offer the level that fits, lowest first:
 
-- decide **with the user** whether a dedicated loop is warranted at all,
-- make clear the loop does NOT have to trade — it can read routine X's output and decide
-  to trade, send a report, or watch a condition — at a **frequency the user sets**
-  (`frequency_sec`),
-- then run `loop_builder` for the agent you just created.
+| Level | Each tick it… | Needs |
+|---|---|---|
+| None | nothing — the agent is consulted on demand | — |
+| Watch / report | reads a routine, notifies on a condition or on schedule | a routine |
+| Operator | watches the bots it deployed; tunes updatable fields (`manage_bots` update_config); pauses via `manual_kill_switch`; notifies | controllers synced, configs uploaded |
+| Deployer | chooses a style from a regime routine, uploads a variant, deploys, later stops-archives-redeploys | all of the above + risk limits |
+| Executor trader | creates / stops executors directly | executor schemas in the loop |
 
-If the agent is capable enough to author its own loop, prefer handing it the job:
-`delegate(action="start", agent="<agent_slug>", task="give yourself a loop that …")`. It
-reads the same shared playbook and knows its own domain better than you do.
+Settle for the chosen level: **frequency** (`frequency_sec`), **what it may do without
+asking vs only notify**, **risk limits** (max capital, max open bots/executors), **stop
+condition**, and **max ticks** for the first live run. Controller-based loops never
+restart a bot: stop, archive, redeploy. Then read `loop_builder`
+(`manage_skill(action="read", name="loop_builder")`) and follow it with
+`agent_slug="<slug>"` — it owns authoring, dry-run and launch; don't restate it here.
 
-## Controllers — when the user brings a controller to onboard
+## ⚠️ Background delegations have a wall
+A `delegate(action="start")` task gets 900 s by default. `timeout_sec` raises it (never
+below 900, ceiling 1800); past that the session is cut off and loses unfinished work.
+- **One routine per delegation.** Building two or three in one task reliably hits the wall
+  during the last one's testing. Split and sequence them.
+- A folder onboarding is several jobs — keep controllers, routines and the loop in
+  separate steps, never one mega-delegation.
+- If you are the background worker and realise you were handed too much, stop, keep what
+  you finished, and say in the result which follow-up delegations remain.
 
-When the user hands you a Hummingbot controller `.py` (and sample configs) for an agent,
-or one that exists only on a server should become an agent's, follow the shared
-`controller_sources` playbook (`manage_skill(action="read", name="controller_sources")`).
-It owns the review, `write`/`pull`, `status`/`sync` and `upload_config` steps — don't restate them.
+`control_agent(action="start")` has its own per-tick budget (`tick_timeout_sec`).
+
+## Controllers — onboarding one into an existing agent
+When the user hands you a controller `.py` (and sample configs) for an agent, or one that
+exists only on a server should become an agent's, follow the shared `controller_sources`
+playbook (`manage_skill(action="read", name="controller_sources")`). It owns the review,
+`write`/`pull`, `status`/`sync` and `upload_config` steps — don't restate them.
 
 ## Monitoring existing agents
-1. `manage_agents(action="list")` — all agents, with their
-   routing hint and owned loops. Only list that shows agents owning no loop.
-2. `control_agent(action="list")` — running loop instances, with their status.
+1. `manage_agents(action="list")` — all agents, their routing hint and owned loops (the
+   only list that shows agents owning no loop).
+2. `control_agent(action="list")` — running loop instances and their status.
 3. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
+4. `manage_agent_controllers(action="status", agent="<slug>")` — its controllers vs the server.
 
 ## Reference
 
-**Capability rule:** there isn't one. Every agent is delegable and loopable on any
-model; `when_to_consult` and owning a loop are quality, not permission. The model
-only changes *how* a run executes, never what it may reach: the `tools` allowlist
-binds on every key, ACP bridges included — a tool it leaves out is never mounted. So
-an allowlist must name every tool the agent's own playbooks call *plus* the family the
-inherited framework skills call (`delegate`, `send_notification`, `run_code`,
-`manage_memory`, `manage_skill`, `manage_routines`, `manage_agent_controllers`,
-`trading_agent_journal_read`,
-`trading_agent_journal_write`, `manage_agents`, `manage_loops`, `control_agent`,
-`get_available_models`); leave it empty for unrestricted. Every run reached through `delegate` — `start` or `ask` —
-is unattended: nobody is asked to approve its tool calls, so only hand work to agents
-and tasks you trust.
-
-**Writing the `when_to_consult` hint:** it never gates anything — it is how Condor
-*picks* this agent over another, and it falls back to the description when unset. A vague
-or missing one costs you routing accuracy, so write it well. Rules:
-- **Lead with the user's action, not the domain** — "When the user wants to deploy,
-  tune, or stop an executor" matches an intent; "Executor expertise" matches nothing.
-- **Name the concrete verbs + nouns** the user would actually say (deploy/tune/stop,
-  executor, grid, spread, inventory) so keyword overlap is high.
-- **State the boundary** when two agents are close ("…executor deployment — NOT
-  controller backtesting"). Same shape applies to a skill's `when_to_use`.
-
-**Model selection:** Set per session, not baked in. The agent/loop `agent_key` is the
-default; override at launch via `config={"agent_key": "…"}`. **Recommend from what the
-operator actually has — call `get_available_models` and pick for the agent's job. Do NOT
-default to a hardcoded model.** The tool reports:
-- `acp_clis` — subscription/CLI bridges (`claude-code`, `gemini`, `copilot`, `codex`) and
-  whether each CLI is installed. No API key or per-token cost (rides the operator's
-  Claude/ChatGPT subscription); still held to the agent's `tools` allowlist.
-  **`available` means installed, not signed in** — each bridge needs its own interactive
-  login that Condor cannot probe. Never recommend one as if it were ready; name it as an
-  option and ask the user to confirm they use it.
-- `local` — `ollama` / `lmstudio`, each with the models currently **loaded** (empty =
-  server not running). Free, private, offline; addressed as `ollama:<model>` /
-  `lmstudio:<model>`. Only offer a local model that is actually loaded.
+**Model.** Omit `agent_key` on create: the agent inherits the operator's active model
+(the result says `agent_key_inherited`; `manage_servers(action="list")` shows it as
+`active_agent_key`). **Never invent a key** — a guessed one fails only on the first run,
+long after creation "succeeded". Propose a different model only when the user asks or the
+job clearly calls for it, and then pick from `get_available_models`:
+- `custom_endpoints` — the user's own validated endpoints (`custom@<endpoint>:<model-id>`;
+  don't set `model_base_url` for these). Strongest signal: prefer one that fits.
 - `cloud_keys` — which of openrouter / openai / anthropic / groq / google keys are set.
-- `custom_endpoints` — the user's own OpenAI-compatible endpoints (Venice, Together,
-  a self-hosted vLLM…), each already validated, with the chat models it serves and a
-  ready `agent_key` (`custom@<endpoint>:<model-id>`). These are the strongest signal
-  in the whole report: the user configured them deliberately and Condor verified them
-  reachable, so prefer one when it fits the job.
-- `openrouter` — tool-capable catalog, cheapest first, each with a ready `agent_key`
-  (`openrouter:<slug>`) and in/out $/Mtok. **The catalog is public — recommendations work
-  with no key.** If `openrouter.key_present` is false, those models need `OPENROUTER_API_KEY`
-  (web Settings) before they can run — say so and prefer a runnable option (a loaded local
-  model, or an installed ACP CLI) unless the user wants to add a key.
+- `openrouter` — public tool-capable catalog with ready `agent_key`s; if `key_present` is
+  false they need `OPENROUTER_API_KEY` first — say so, prefer a runnable option.
+- `local` — `ollama:` / `lmstudio:` models currently **loaded** (empty = not running).
+- `acp_clis` — subscription CLIs (`claude-code`, `gemini`, `copilot`, `codex`).
+  `available` = installed; `logged_in` is a heuristic (false/null = unverified). Offer
+  one as an option to confirm, never as ready.
 
-Choose by the agent's job, not by habit:
-- **Correctness-critical / high-capital** (decides real trades) → a strong model. Lead with
-  a credential you can verify: if `openrouter.key_present` (or another `cloud_keys` provider)
-  is true, recommend from there; offer an ACP bridge as the alternative to confirm, not the
-  default. Pick a capable OpenRouter model (e.g. a Claude/GPT/DeepSeek-V3-class,
-  not a tiny "flash" model — lightweight models drop instructions, e.g. answering in the
-  wrong language). Validate a cheaper pick with a `dry_run` before going live.
-- **Simple report / watch loop, or privacy / offline / zero-cost** → a loaded local model
-  (`ollama:…`/`lmstudio:…`) or a cheap OpenRouter model.
-- **Must be sandboxed to specific `tools`** → a pydantic-ai key
-  (`openrouter:`/`ollama:`/`lmstudio:`/`openai:`/`groq:`); only these enforce the allowlist.
-- **A saved custom endpoint** → `custom@<endpoint>:<model-id>` (e.g.
-  `custom@Venice:claude-sonnet-4-6`). The URL and API key are resolved from the user's
-  saved endpoints at run time — do NOT set `model_base_url` for these. Enforces the
-  `tools` allowlist like any other pydantic-ai key.
-  Default local URLs: Ollama=localhost:11434, LM Studio=localhost:1234.
+By job: **decides real trades** → a strong model (not a tiny "flash" one — they drop
+instructions); validate a cheaper pick with a dry run. **Watch/report loop, privacy or
+zero cost** → a loaded local model or a cheap OpenRouter one. Override per launch with
+`config={"agent_key": "…"}`. One pick with a one-line why; it's easy to change later.
 
-Propose one sensible pick with a one-line why; offer the alternatives you saw. Don't turn
-it into a questionnaire — it's the easiest thing to change later.
+**Server.** Leave `server_name` empty: it means "follow the chat's server", the only
+value that travels to other installs. Naming the current server **pins** the agent (its
+MCP subprocess and every loop it deploys) to it forever. Pin only when the user says so;
+it can be changed later from the agent's page.
 
-**Generic vs Specific loops:**
-- GENERIC (default): pair/connector are NOT in the instructions — passed at launch via
-  `trading_context`. Refer to "the configured trading pair"; keep sensible `default_config`.
-- SPECIFIC: pair/connector baked into the instructions (e.g. an ETH/BTC ratio play).
+**Tools allowlist.** Empty = unrestricted — the default. The allowlist binds on every
+model, ACP bridges included: a tool it omits is never mounted. A non-empty list must name
+every tool the agent's playbooks call **plus** the framework family (`delegate`,
+`send_notification`, `run_code`, `manage_memory`, `manage_skill`, `manage_routines`,
+`manage_agent_controllers`, `trading_agent_journal_read`, `trading_agent_journal_write`,
+`manage_agents`, `manage_loops`, `control_agent`, `get_available_models`). An agent that
+reads markets needs `get_prices` + `run_code` (there is no candle / order book / funding
+tool; market data is `client.market_data.*` inside `run_code`). An agent that owns
+controllers also needs `manage_controllers` and `manage_bots`. Every delegated run is
+unattended (no approvals), so only hand work to agents you trust.
 
-**Agent tools, memory & skills:** `tools` on the AGENT.md is a tool-name allowlist
-enforced on pydantic-ai runs and loops (empty = unrestricted; not enforceable on ACP
-keys). **A non-empty allowlist must include `run_code`** if the agent reads a market at
-all: there is no candle, order book or funding tool to name any more (ARCH-308), so
-`get_prices` plus `run_code` over `client.market_data.*` is the whole market data
-surface. An allowlist that names neither leaves the agent able to trade a market it
-cannot look at.
+**`when_to_consult`.** Never gates anything; it is how Condor *picks* this agent.
+- Lead with the user's action, not the domain ("When the user wants to deploy, tune, or
+  stop an executor", not "Executor expertise").
+- Name the concrete verbs + nouns the user would say (deploy/tune, grid, spread, inventory,
+  and the controller names it owns).
+- State the boundary when two agents are close ("…NOT controller backtesting").
 
-An agent keeps its own domain memory (`manage_memory`) and reusable playbooks
-(`manage_skill`/`agents/{slug}/skills/`) — the agent OWNS skills; it is not itself a skill.
-A new agent also reads the **shared** library (`agents/_shared/skills/`) from birth, so it
-gets `routine_cookbook` and friends for free — write only what is specific to its domain,
-and target it explicitly with `manage_skill(..., agent="<slug>")`.
+**Generic vs specific loops.** GENERIC (default): pair/connector come at launch via
+`trading_context`; the instructions say "the configured trading pair". SPECIFIC: baked in
+(an ETH/BTC ratio play, or a folder written for one market).
 
-**Editing & deleting:** read the current brain with `manage_agents(action="get",
-agent_slug=…)`, edit with `manage_agents(action="update", agent_slug=…, instructions=…)`.
-`manage_agents(action="delete", agent_slug=…)` refuses while the agent still owns
-loops — delete those first (`manage_loops(action="delete", loop_id=…)`).
+**Memory & skills.** Each agent owns its memory (`manage_memory`) and skills; it also
+reads the shared library (`routine_cookbook`, `controller_sources`, `loop_builder`,
+`backtest_flow`, …) from birth — write only what is specific to its domain, always with
+`agent="<slug>"`.
+
+**Editing & deleting.** Read with `manage_agents(action="get", agent_slug=…)`, edit with
+`manage_agents(action="update", agent_slug=…, instructions=…)`.
+`manage_agents(action="delete", agent_slug=…)` refuses while the agent owns loops (delete
+them first with `manage_loops(action="delete", loop_id=…)`) and always for a shipped agent.
 
 ## Rules
-- **Minimal first.** Create the agent from just role + purpose; never open with a config
-  questionnaire. Layer routines and loops on only when the user wants them.
-- After creating, immediately steer to a **`delegate(action="ask")`** to prove it's
-  alive before anything else.
-- Only the step label as a header. Be direct; status as key: value.
-- Every agent is delegable (always set `when_to_consult` — it is the routing hint).
-- **Never invent an `agent_key` or a `server_name`.** Both default to "follow the
-  operator" — pass either one only when the user named it. A guessed model or a
-  helpfully-filled server pin fails on someone else's install, long after creation
-  reported success.
-- Create the AGENT.md FIRST — routines and loops require an existing agent_slug.
-- **One routine per background delegation.** Never bundle 2+ routines in one `delegate`
-  call — always split and sequence them. If handed too much work as the background
-  worker, commit what you have and instruct the user to trigger a follow-up.
-- One routine per analysis task; run it and show the output before moving on.
-- A loop doesn't have to trade — it can report or watch. Always include risk limits when
-  it can trade, and dry-run before going live.
-- Guide one step at a time and offer concrete proposals.
+- **From scratch: minimal first.** Role + purpose, then prove it with an `ask`; routines
+  and a loop only when the user wants them.
+- **From a folder: inventory → review → discuss → plan → build.** Nothing is written before
+  the plan is approved; every file ends up mapped or listed as not imported, with a reason.
+- Create the agent FIRST — controllers, routines, skills and loops hang off its slug.
+- **Never invent an `agent_key` or a `server_name`.**
+- Capital comes from the user, never from a sample config.
+- Controllers: folder is the source of truth; never `overwrite` a drifted server copy
+  without showing the diff and impact and getting a go-ahead.
+- **One routine per background delegation**; never write routine code yourself.
+- A loop doesn't have to trade. When it can: risk limits always, dry run first, the user
+  says when it goes live.
+- One step at a time, with concrete proposals.
