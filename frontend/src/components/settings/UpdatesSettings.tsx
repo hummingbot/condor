@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { RELAUNCH_KEY, useRelaunch } from "@/hooks/useRelaunch";
+import { formatRelativeTime } from "@/lib/formatters";
 import {
   type Block,
   type ComponentStatus,
@@ -556,6 +557,7 @@ function FinishedView({
   isDismissing: boolean;
 }) {
   const ok = run.state === "succeeded";
+  const when = run.ended ?? run.started ?? null;
   // From the same query the shell's banner reads, so the two cannot disagree
   // about whether the relaunch has happened.
   const { data: relaunch } = useRelaunch();
@@ -578,6 +580,20 @@ function FinishedView({
           {ok
             ? `Updated ${run.components.join(", ")}`
             : `Update of ${run.components.join(", ")} failed`}
+          {/* The journal outlives the process, so this panel can be showing a
+              run from last week — and without a time a week-old failure and a
+              two-minute-old one read identically. `ended` is the moment that
+              matters; `started` covers a run that never reached one. The exact
+              stamp is on hover rather than inline, because the question this
+              answers is "is this still relevant", not "when exactly". */}
+          {when !== null && (
+            <span
+              className="ml-auto shrink-0 font-normal text-[11px] text-[var(--color-text-muted)]"
+              title={new Date(when * 1000).toLocaleString()}
+            >
+              {formatRelativeTime(when)}
+            </span>
+          )}
         </h3>
         {run.error && (
           <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">{run.error}</p>
