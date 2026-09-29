@@ -479,3 +479,58 @@ def test_hummingbot_api_check_fails_when_env_exists_but_config_does_not(
 
     checks = doctor.check_hummingbot_api()
     assert checks[0].state == doctor.FAIL
+
+
+# ── The dashboard-port check reads the bind it was given (macOS lsof) ──
+
+
+def test_a_loopback_bind_is_not_reported_as_public():
+    """``lsof -sTCP:LISTEN`` prints the state as its own trailing token.
+
+    NAME is ``TCP 127.0.0.1:8088 (LISTEN)``, so the last column is
+    ``(LISTEN)``. Taking it and splitting on "(" produced the empty string,
+    which counted as a wildcard — so on any host without ``ss`` (macOS, and
+    WSL without iproute2) a loopback-only dashboard was reported as reachable
+    on all interfaces, and in local mode that is a FAIL whose remedy is to
+    unset a variable nobody set.
+    """
+    import socket
+
+    from condor.doctor import _is_public_bind, _listening_binds
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    try:
+        binds = _listening_binds(sock.getsockname()[1])
+        assert binds, "nothing parsed out of the listener listing"
+        assert all(not _is_public_bind(b) for b in binds), binds
+        assert all(b.startswith("127.0.0.1:") for b in binds), binds
+    finally:
+        sock.close()
+
+
+def test_a_wildcard_bind_is_still_reported_as_public():
+    """The check has to keep catching the thing it exists for."""
+    import socket
+
+    from condor.doctor import _is_public_bind, _listening_binds
+
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 0))
+    sock.listen(1)
+    try:
+        binds = _listening_binds(sock.getsockname()[1])
+        assert binds and any(_is_public_bind(b) for b in binds), binds
+    finally:
+        sock.close()
+
+
+def test_an_unparseable_bind_is_unknown_rather_than_public():
+    """A bind this code could not read is not evidence of exposure."""
+    from condor.doctor import _is_public_bind
+
+    assert _is_public_bind("") is False
+    assert _is_public_bind("0.0.0.0:8088") is True
+    assert _is_public_bind("[::]:8088") is True

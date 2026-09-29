@@ -317,8 +317,17 @@ def _listening_binds(port: int) -> list[str]:
             binds = []
             for line in proc.stdout.splitlines()[1:]:  # skip header row
                 cols = line.split()
+                # ``-sTCP:LISTEN`` makes lsof print the state as its own
+                # trailing token, so NAME is ``TCP 127.0.0.1:8088 (LISTEN)``
+                # and the last column is ``(LISTEN)`` -- not an address at all.
+                # Taking it and splitting on "(" yielded the empty string,
+                # which ``_is_public_bind`` used to read as a wildcard: every
+                # loopback listener on a host without ``ss`` reported as bound
+                # to all interfaces.
+                if cols and cols[-1].startswith("("):
+                    cols = cols[:-1]
                 if cols:
-                    binds.append(cols[-1].split("(")[0])
+                    binds.append(cols[-1])
             return binds
         except Exception:
             pass
@@ -357,8 +366,15 @@ def _bind_host(addr: str) -> str:
 
 
 def _is_public_bind(addr: str) -> bool:
+    """Whether ``addr`` is a wildcard bind — reachable from off this machine.
+
+    The empty string is deliberately *not* a wildcard. It is what a bind this
+    code failed to parse looks like, and answering True for it turns a parsing
+    bug into a security warning about a port that may well be on loopback.
+    Unknown is not public; a bind nobody could read is reported by nothing.
+    """
     host = _bind_host(addr)
-    return host in ("0.0.0.0", "*", "::", "[::]", "")
+    return host in ("0.0.0.0", "*", "::", "[::]")
 
 
 def check_dashboard_port() -> list[Check]:
