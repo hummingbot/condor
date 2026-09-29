@@ -372,3 +372,59 @@ def test_nothing_running_is_not_a_conflict(monkeypatch):
 def test_an_unlabelled_container_is_not_a_conflict(monkeypatch):
     """Docker prints `<no value>` for a label that is not set."""
     assert _owner_probe(monkeypatch, "<no value>", "/srv/mine") is None
+
+
+# ── V13: a daemon that is down is not a missing image ──
+
+
+def _facet_with_docker(*, daemon_up, identity=(None, None)):
+    """`_image_facet` with the daemon's liveness and the inspect result pinned."""
+    with patch.multiple(
+        "utils.updater",
+        compose_service=AsyncMock(return_value=_DEFAULT_SERVICE),
+        local_image_identity=AsyncMock(return_value=identity),
+        registry_image_digest=AsyncMock(return_value=REMOTE),
+        docker_running=AsyncMock(return_value=daemon_up),
+    ):
+        return asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
+
+
+def test_a_stopped_daemon_is_not_reported_as_a_missing_image():
+    """Reported from a live dashboard while Docker Desktop was restarting.
+
+    `docker image inspect` is the only probe here that needs the daemon —
+    `compose config` merges files locally and `imagetools inspect` asks the
+    registry — so a daemon that is down reaches the `local is None` branch
+    with everything else looking healthy. It read "it has never been pulled by
+    tag", about an image that was sitting on disk the whole time.
+    """
+    facet, _ = _facet_with_docker(daemon_up=False)
+    assert facet.error_code == "docker-unavailable"
+    assert "Docker is not answering" in facet.error
+    assert "never been pulled" not in facet.error
+    # The registry answered even with the daemon down, so keep what we learned.
+    assert facet.available == "sha256:62d70399"
+
+
+def test_a_running_daemon_with_no_such_image_still_says_so():
+    """The fix must not swallow the case it was carved out of."""
+    facet, _ = _facet_with_docker(daemon_up=True)
+    assert facet.error_code == "image-absent"
+    assert "never been pulled or built" in facet.error
+
+
+def test_the_daemon_is_not_probed_when_the_image_is_there():
+    """One extra command, and only on the error path."""
+
+    def boom(*a, **kw):  # pragma: no cover - reached only on regression
+        raise AssertionError("docker_running must not run on the happy path")
+
+    with patch.multiple(
+        "utils.updater",
+        compose_service=AsyncMock(return_value=_DEFAULT_SERVICE),
+        local_image_identity=AsyncMock(return_value=(IMAGE_ID, LOCAL)),
+        registry_image_digest=AsyncMock(return_value=LOCAL),
+        docker_running=boom,
+    ):
+        facet, _ = asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
+    assert facet.up_to_date is True and facet.error is None

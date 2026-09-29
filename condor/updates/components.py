@@ -281,6 +281,30 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
     )
 
     if local_id is None:
+        # "inspect failed" is two answers, and only one of them is about the
+        # image. `docker image inspect` is the sole probe here that needs the
+        # daemon -- `compose config` parses locally and `imagetools inspect`
+        # asks the registry -- so a daemon that is down or restarting reaches
+        # exactly this branch with everything else looking fine. Reported as a
+        # missing image, that reads as "you have never deployed", about a
+        # container that is running.
+        if not await updater.docker_running():
+            return (
+                Facet(
+                    kind="image",
+                    current="unknown",
+                    available=_short_digest(remote),
+                    up_to_date=False,
+                    error_code="docker-unavailable",
+                    error=(
+                        "Docker is not answering, so the running image cannot "
+                        "be read. Start Docker (or wait for it to finish "
+                        "restarting) and check again — nothing is wrong with "
+                        "the image."
+                    ),
+                ),
+                mode,
+            )
         return (
             Facet(
                 kind="image",

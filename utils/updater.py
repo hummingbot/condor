@@ -998,6 +998,31 @@ async def compose_service(repo_dir: str, service: str) -> dict | None:
     return definition if isinstance(definition, dict) else None
 
 
+async def docker_running() -> bool:
+    """Whether the Docker daemon answers at all.
+
+    Needed because nothing else in this module can stand in for it, which is
+    how a stopped daemon came to be reported as a missing image. Measured with
+    Docker Desktop mid-restart:
+
+    * ``docker compose config`` exits **0** -- it merges files locally and
+      never opens the socket, so the "is Docker running?" guard on the compose
+      probe does not fire;
+    * ``docker buildx imagetools inspect`` exits **0** -- it asks the registry
+      directly, so the *available* digest still resolves;
+    * ``docker image inspect`` is the only one that needs the daemon, so it
+      alone fails -- and its failure used to be read as "this image has never
+      been pulled".
+
+    The result: a daemon that was merely restarting produced "it has never
+    been pulled by tag", about an image sitting on disk the whole time.
+    """
+    rc, _ = await _run_cmd(
+        "docker", "version", "--format", "{{.Server.Version}}", timeout=20
+    )
+    return rc == 0
+
+
 async def local_image_identity(image_ref: str) -> tuple[str | None, str | None]:
     """``(image id, registry digest)`` for the local copy of ``image_ref``.
 
