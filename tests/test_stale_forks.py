@@ -214,3 +214,30 @@ def test_nothing_is_overridden_on_an_untouched_install(shipped):
     from condor.layering import locally_overridden
 
     assert locally_overridden(["agents/scout/AGENT.md", "main.py"]) == []
+
+
+# ── The report names which library each item came from ──
+
+
+def test_two_agents_with_the_same_filename_are_told_apart(shipped):
+    """``rel`` alone renders every forked playbook as a bare ``AGENT.md``.
+
+    Nine agents ship, so an install that has customized more than one is the
+    ordinary case — and "(AGENT.md, AGENT.md, AGENT.md)" names none of them.
+    """
+    from condor.layering import all_stale_forks
+
+    other = _write(
+        stock_agent_home("brigado") / "AGENT.md",
+        AGENT_MD.format(name="Brigado", body="Hold overnight."),
+    )
+    for slug in ("scout", "brigado"):
+        fork_if_stock(slug, "AGENT.md")
+    # Upstream rewrites both.
+    for path, body in ((shipped, "UPSTREAM scout."), (other, "UPSTREAM brigado.")):
+        path.write_text(AGENT_MD.format(name="x", body=body), "utf-8")
+
+    labels = sorted(f.label for f in all_stale_forks())
+    assert labels == ["brigado/AGENT.md", "scout/AGENT.md"]
+    # ``rel`` keeps its meaning — relative to the library it belongs to.
+    assert {f.rel for f in all_stale_forks()} == {"AGENT.md"}

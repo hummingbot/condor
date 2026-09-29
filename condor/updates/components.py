@@ -886,7 +886,7 @@ def _stale_fork_warning() -> Warning | None:
         # routine's .py cannot hold a stamp, and a file the agent created under
         # a name upstream later shipped never had one to take. Either way the
         # local copy wins and upstream's is unreachable.
-        shown = ", ".join(f.rel for f in shadowing[:_STALE_FORK_CAP])
+        shown = ", ".join(f.label for f in shadowing[:_STALE_FORK_CAP])
         if len(shadowing) > _STALE_FORK_CAP:
             shown += f", and {len(shadowing) - _STALE_FORK_CAP} more"
         parts.append(
@@ -897,7 +897,7 @@ def _stale_fork_warning() -> Warning | None:
             "yours if you meant to keep both."
         )
     if moved:
-        shown = ", ".join(f.rel for f in moved[:_STALE_FORK_CAP])
+        shown = ", ".join(f.label for f in moved[:_STALE_FORK_CAP])
         if len(moved) > _STALE_FORK_CAP:
             shown += f", and {len(moved) - _STALE_FORK_CAP} more"
         parts.append(
@@ -907,7 +907,7 @@ def _stale_fork_warning() -> Warning | None:
             "will not reach your agents."
         )
     if retired:
-        shown = ", ".join(f.rel for f in retired[:_STALE_FORK_CAP])
+        shown = ", ".join(f.label for f in retired[:_STALE_FORK_CAP])
         if len(retired) > _STALE_FORK_CAP:
             shown += f", and {len(retired) - _STALE_FORK_CAP} more"
         parts.append(

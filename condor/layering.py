@@ -248,6 +248,19 @@ class StaleFork:
     """The digest of the stock file at fork time; ``""`` when never stamped."""
     stock_digest: str | None
     """The stock file's digest now; ``None`` when it no longer exists."""
+    owner: str = ""
+    """Which library it belongs to -- an agent slug, or ``_shared``."""
+
+    @property
+    def label(self) -> str:
+        """What a message should show: the item qualified by its library.
+
+        :attr:`rel` is relative to *one* library's root, so three agents with a
+        customized playbook each render as a bare ``AGENT.md`` and the reader
+        cannot tell which is which. Nine agents ship, so that is the ordinary
+        case rather than an edge one.
+        """
+        return f"{self.owner}/{self.rel}" if self.owner else self.rel
 
     @property
     def retired(self) -> bool:
@@ -302,6 +315,9 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
     if not local.is_dir():
         return []
 
+    # Read off the resolved path rather than from ``agent_slug``, which is None
+    # for the chat agent and would leave its items unqualified.
+    owner = local.name
     out: list[StaleFork] = []
     for path in sorted(local.rglob("*")):
         if not path.is_file():
@@ -318,14 +334,14 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
             # ordinary file the agent authored, which was never a fork of
             # anything and has nothing to be stale against.
             if forked_from:
-                out.append(StaleFork(path, str(rel), forked_from, None))
+                out.append(StaleFork(path, str(rel), forked_from, None, owner))
             continue
 
         now = content_digest(counterpart)
         if forked_from:
             if now == forked_from or _legacy_digest(counterpart) == forked_from:
                 continue
-            out.append(StaleFork(path, str(rel), forked_from, now))
+            out.append(StaleFork(path, str(rel), forked_from, now, owner))
             continue
 
         # No stamp, but stock ships this exact path, so the local copy is
@@ -333,7 +349,7 @@ def stale_forks(agent_slug: str | None) -> list[StaleFork]:
         # -- nothing to report. Different content means upstream's version is
         # unreachable and nothing recorded that it ever matched.
         if now != content_digest(path):
-            out.append(StaleFork(path, str(rel), "", now))
+            out.append(StaleFork(path, str(rel), "", now, owner))
     return out
 
 
