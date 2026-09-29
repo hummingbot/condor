@@ -53,10 +53,14 @@ install: setup
 	@$(MAKE) setup-chrome
 	@-$(MAKE) doctor
 
+# Bounded, and says which way it failed. The bare `python -c` this replaces had
+# no timeout and sent stderr to /dev/null, so a stalled download sat on
+# "Setting up Chrome..." for ever with nothing to read and no way to finish the
+# install. See condor/setup_chrome.py; it always exits 0, because charts are
+# optional and an optional renderer must not fail an install.
 setup-chrome:
 	@echo "Setting up Chrome for chart rendering..."
-	@uv run python -c "import kaleido; kaleido.get_chrome_sync()" 2>/dev/null || \
-		echo "Chrome setup skipped (not required for basic usage)"
+	@uv run python -m condor.setup_chrome || true
 
 doctor:
 	@bash -c ' \
