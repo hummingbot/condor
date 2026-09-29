@@ -443,3 +443,35 @@ def test_relaunch_refuses_when_there_is_nothing_to_apply(as_user, admin):
 
     assert response.status_code == 409
     assert called == [], "a restart was requested with nothing pending"
+
+
+def test_the_403_names_the_role_as_config_yml_spells_it(monkeypatch):
+    """`get_user_role` returns the enum, and interpolating it renders
+    "UserRole.USER" — a string that appears nowhere in config.yml, so the
+    reader cannot search for it and the value they are told to change looks
+    nothing like the one on disk."""
+    from enum import Enum
+
+    from fastapi import HTTPException
+
+    from condor.web import auth as auth_module
+
+    class UserRole(str, Enum):
+        USER = "user"
+
+    class FakeCM:
+        def is_admin(self, _uid):
+            return False
+
+        def get_user_role(self, _uid):
+            return UserRole.USER
+
+    monkeypatch.setattr(auth_module, "get_config_manager", lambda: FakeCM())
+
+    with pytest.raises(HTTPException) as exc:
+        auth_module.require_admin(
+            auth_module.WebUser(id=7, username="u", first_name="U", role="user")
+        )
+
+    assert "'user'" in exc.value.detail
+    assert "UserRole" not in exc.value.detail

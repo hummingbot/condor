@@ -153,7 +153,12 @@ def require_admin(user: WebUser) -> None:
         # Best effort: naming the role is a courtesy, and a gate must never
         # fail open (or crash) because the courtesy could not be paid.
         try:
-            role = get_config_manager().get_user_role(user.id) or ""
+            found = get_config_manager().get_user_role(user.id)
+            # ``get_user_role`` hands back the enum, and interpolating that
+            # renders "UserRole.USER" — a name that appears nowhere in
+            # config.yml, so the reader cannot search for it and the value it
+            # tells them to change looks nothing like the one on disk.
+            role = str(getattr(found, "value", found) or "")
         except Exception:  # noqa: BLE001
             role = ""
         detail = "Admin access required"
