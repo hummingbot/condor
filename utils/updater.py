@@ -1159,6 +1159,37 @@ async def compose_pull(repo_dir: str, service: str) -> tuple[bool, str]:
     return True, output
 
 
+async def compose_stack_owner(repo_dir: str, service: str) -> str | None:
+    """The checkout the running containers were deployed from, or ``None``.
+
+    Compose records the project's working directory on every container it
+    creates, which is the only thing that can answer "is this stack ours".
+
+    It has to be asked. ``container_name:`` is fixed for every service in
+    hummingbot-api's compose file, so two checkouts are one stack as far as
+    Docker is concerned: Compose matches the existing containers by name,
+    reports ``Recreate``, and the second checkout takes over the first one's
+    containers *and its postgres volume*. No error, no warning. The Makefile
+    gained a guard for ``make deploy``; an update never goes through the
+    Makefile, so it needs the same question asked here.
+
+    ``None`` means nothing is running under that name, or Docker could not be
+    asked -- neither of which is evidence of a conflict.
+    """
+    rc, out = await _run_cmd(
+        "docker",
+        "inspect",
+        service,
+        "--format",
+        '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}',
+        timeout=30,
+    )
+    owner = (out or "").strip()
+    if rc != 0 or not owner or owner == "<no value>":
+        return None
+    return owner if os.path.normpath(owner) != os.path.normpath(repo_dir) else None
+
+
 async def compose_up(repo_dir: str) -> tuple[bool, str]:
     """Recreate the stack on whatever images are now on disk."""
     rc, output = await _run_cmd(

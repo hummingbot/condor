@@ -330,3 +330,45 @@ def test_docker_being_down_is_an_error_not_a_verdict():
 @pytest.mark.parametrize("digest", ["", None, "not-a-digest"])
 def test_short_digest_survives_junk(digest):
     assert components._short_digest(digest) in ("", "not-a-digest")
+
+
+# ── V12: an update must not adopt another checkout's stack ──
+
+
+def _owner_probe(monkeypatch, label, repo_dir):
+    """Stub `docker inspect` returning the compose working-dir label."""
+    from utils import updater as u
+
+    async def fake(*args, **kwargs):
+        return (0, label) if label is not None else (1, "")
+
+    monkeypatch.setattr(u, "_run_cmd", fake)
+    return asyncio.run(u.compose_stack_owner(repo_dir, "hummingbot-api"))
+
+
+def test_containers_from_another_checkout_are_reported(monkeypatch):
+    """`container_name:` is fixed, so Compose matches by name across projects.
+
+    It does not treat that as an error — it prints `Recreate` and the second
+    checkout takes over the first's containers and its postgres volume.
+    Condor points at a directory; Compose acts on a project.
+    """
+    owner = _owner_probe(monkeypatch, "/srv/other-checkout", "/srv/mine")
+    assert owner == "/srv/other-checkout"
+
+
+def test_our_own_containers_are_not_a_conflict(monkeypatch):
+    assert _owner_probe(monkeypatch, "/srv/mine", "/srv/mine") is None
+
+
+def test_a_trailing_slash_is_not_a_different_checkout(monkeypatch):
+    assert _owner_probe(monkeypatch, "/srv/mine/", "/srv/mine") is None
+
+
+def test_nothing_running_is_not_a_conflict(monkeypatch):
+    assert _owner_probe(monkeypatch, None, "/srv/mine") is None
+
+
+def test_an_unlabelled_container_is_not_a_conflict(monkeypatch):
+    """Docker prints `<no value>` for a label that is not set."""
+    assert _owner_probe(monkeypatch, "<no value>", "/srv/mine") is None

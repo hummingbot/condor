@@ -585,6 +585,18 @@ async def _update_hb_api(run: Run) -> bool:
 
     step = await _begin(run, f"{prefix}.up")
     if step is not None:
+        # Re-asked here, not just at preflight: adopting another checkout's
+        # containers takes its database with them, and the screen the operator
+        # confirmed on may be minutes old.
+        owner = await updater.compose_stack_owner(component.repo_dir, component.service)
+        if owner is not None:
+            message = (
+                f"The {component.service} containers belong to {owner}, not to "
+                f"{component.repo_dir}. Refusing to recreate them from here."
+            )
+            await _finish(run, step, FAILED, message)
+            await _fail(run, message)
+            return False
         ok, output = await updater.compose_up(component.repo_dir)
         await _finish(run, step, OK if ok else FAILED, output)
         if not ok:

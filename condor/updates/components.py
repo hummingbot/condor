@@ -1022,6 +1022,28 @@ async def preflight(component_keys: list[str]) -> Preflight:
             steps.extend(_steps_for(key, current))
 
     if HUMMINGBOT_API in selected:
+        hb = known[HUMMINGBOT_API]
+        owner = await updater.compose_stack_owner(hb.repo_dir, HB_SERVICE)
+        if owner is not None:
+            # Recreating from here would adopt another checkout's containers
+            # and its postgres volume, which Compose does without complaint --
+            # it matches on the fixed `container_name:` and reports `Recreate`.
+            # Condor points at a *directory*; Compose acts on a *project*, and
+            # they are not the same thing when two checkouts share a basename.
+            blocks.append(
+                Block(
+                    component=HUMMINGBOT_API,
+                    code="foreign-stack",
+                    message=(
+                        f"The {HB_SERVICE} containers on this host were "
+                        f"deployed from {owner}, not from {hb.repo_dir}. "
+                        "Recreating them from here would take that stack over, "
+                        "along with its database. Point HUMMINGBOT_API_DIR at "
+                        "the checkout that owns them, or stop that stack first."
+                    ),
+                    resolutions=["cancel"],
+                )
+            )
         executor_warning = await _executor_warning()
         if executor_warning is not None:
             warnings.append(executor_warning)
