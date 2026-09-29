@@ -178,3 +178,31 @@ def test_a_genuine_transport_failure_is_not_mistaken_for_a_missing_branch():
         "fatal: unable to access 'https://...': Could not resolve host: github.com"
     )
     assert not updater.is_missing_remote_ref("")
+
+
+@pytest.mark.asyncio
+async def test_a_default_branch_with_a_slash_keeps_its_prefix(cloned, tmp_path):
+    """`rsplit("/", 1)` on the ref silently renames `fix/x` to `x`.
+
+    Branch names contain slashes routinely. Taking the last segment made
+    `image_tracks_this_checkout` compare `fix/x != x` and skip the image with
+    a wrong reason, and put a branch that does not exist into the advice
+    `no-upstream-branch` prints.
+    """
+    _git("checkout", "-q", "-b", "fix/slashed", cwd=cloned)
+    _git("push", "-q", "origin", "fix/slashed", cwd=cloned)
+    # Point the remote's HEAD at the slashed branch, as `remote set-head` does.
+    _git(
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/fix/slashed",
+        cwd=cloned,
+    )
+
+    assert await updater.remote_default_branch(str(cloned)) == "fix/slashed"
+
+
+@pytest.mark.asyncio
+async def test_no_remote_head_is_unknown_not_a_guess(cloned):
+    _git("symbolic-ref", "-d", "refs/remotes/origin/HEAD", cwd=cloned)
+    assert await updater.remote_default_branch(str(cloned)) is None

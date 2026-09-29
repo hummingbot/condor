@@ -149,8 +149,14 @@ async def remote_default_branch(repo_dir: str = CONDOR_DIR) -> str | None:
     )
     if rc != 0 or not out:
         return None
-    # refs/remotes/origin/main -> main
-    return out.strip().rsplit("/", 1)[-1] or None
+    # refs/remotes/origin/main -> main, and refs/remotes/origin/fix/x -> fix/x.
+    # Not rsplit("/", 1): a branch name may contain slashes, and taking the last
+    # segment silently renames `fix/x` to `x` -- which made the comparison in
+    # image_tracks_this_checkout never match on such a default, and put a branch
+    # that does not exist into the advice `no-upstream-branch` prints.
+    prefix = "refs/remotes/origin/"
+    ref = out.strip()
+    return ref[len(prefix) :] if ref.startswith(prefix) else None
 
 
 async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
