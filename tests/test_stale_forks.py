@@ -241,3 +241,52 @@ def test_two_agents_with_the_same_filename_are_told_apart(shipped):
     assert labels == ["brigado/AGENT.md", "scout/AGENT.md"]
     # ``rel`` keeps its meaning — relative to the library it belongs to.
     assert {f.rel for f in all_stale_forks()} == {"AGENT.md"}
+
+
+# ── The shared library is scanned too ──
+
+
+@pytest.mark.parametrize(
+    ("rel", "body"),
+    [
+        # A skill: markdown, so it could carry a stamp — this one does not,
+        # because a hand copy is how these actually get customized.
+        (("skills", "charting", "SKILL.md"), "---\nname: Charting\n---\n\n{tag}\n"),
+        # A routine: .py cannot hold frontmatter, so it never has a stamp.
+        (("routines", "backtest_chart.py"), "# {tag}\n"),
+        # A controller: the shape FEAT-126 added, same layering rule.
+        (("controllers", "pmm_v1", "pmm_v1.py"), "# {tag}\n"),
+    ],
+)
+def test_a_customized_shared_item_is_reported(rel, body):
+    """``_shared`` is read by every agent but is not an agent.
+
+    ``iter_agent_slugs`` is built on ``_is_agent_dir``, which rejects a leading
+    underscore — so the shared skills, routines and controllers were the one
+    tree that no scan ever reached, and a customized one diverged in silence.
+    """
+    from condor.layering import all_stale_forks
+    from condor.memory.paths import local_agents_root, stock_agents_root
+
+    shipped = _write(stock_agents_root().joinpath("_shared", *rel), body.format(tag="shipped"))
+    _write(local_agents_root().joinpath("_shared", *rel), body.format(tag="mine"))
+
+    # Identical-but-for-my-edit already differs, so it reports immediately;
+    # what matters is that an upstream rewrite keeps reporting it.
+    shipped.write_text(body.format(tag="UPSTREAM rewrote this"), "utf-8")
+
+    stale = [f for f in all_stale_forks() if f.owner == "_shared"]
+    assert [f.label for f in stale] == ["_shared/" + "/".join(rel)]
+    assert stale[0].unprovenanced is True
+
+
+def test_an_identical_shared_copy_is_not_reported():
+    """Copying is not diverging — the same rule the per-agent scan applies."""
+    from condor.layering import all_stale_forks
+    from condor.memory.paths import local_agents_root, stock_agents_root
+
+    text = "---\nname: Charting\n---\n\nSame.\n"
+    _write(stock_agents_root() / "_shared" / "skills" / "charting" / "SKILL.md", text)
+    _write(local_agents_root() / "_shared" / "skills" / "charting" / "SKILL.md", text)
+
+    assert [f for f in all_stale_forks() if f.owner == "_shared"] == []

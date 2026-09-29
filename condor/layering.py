@@ -397,13 +397,20 @@ def locally_overridden(rel_paths: list[str]) -> list[str]:
     return out
 
 
+#: The library every agent reads *under* its own — published skills, routines
+#: and controllers. Not an agent, so ``iter_agent_slugs`` never yields it:
+#: ``_is_agent_dir`` rejects a leading underscore, which is what kept three
+#: whole trees out of the scan below.
+SHARED_LIBRARY = "_shared"
+
+
 def all_stale_forks() -> list[StaleFork]:
     """:func:`stale_forks` across every agent this install has, plus the shared root."""
     from condor.memory.paths import iter_agent_slugs
 
     out: list[StaleFork] = []
     seen: set[Path] = set()
-    for slug in [None, *iter_agent_slugs()]:
+    for slug in [None, SHARED_LIBRARY, *iter_agent_slugs()]:
         for fork in stale_forks(slug):
             if fork.path in seen:
                 continue
