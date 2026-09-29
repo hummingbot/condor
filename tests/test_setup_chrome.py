@@ -130,3 +130,29 @@ def test_downloaded_bytes_tolerates_a_missing_directory(tmp_path):
     assert setup_chrome.downloaded_bytes(tmp_path / "nope") == 0
     (tmp_path / "a").write_bytes(b"x" * 10)
     assert setup_chrome.downloaded_bytes(tmp_path) == 10
+
+
+def test_no_size_signal_means_no_stall_verdict(tmp_path, monkeypatch):
+    """Without a download root the counter is pinned at 0 forever.
+
+    `last_change` then never moves and the stall branch fires on a download
+    that is progressing fine — killing it and blaming a proxy.
+    """
+    proc = _FakeProc()
+    monkeypatch.setattr(setup_chrome, "chrome_path", lambda: tmp_path / "absent")
+    monkeypatch.setattr(setup_chrome, "_download_root", lambda: None)
+    monkeypatch.setattr(setup_chrome.subprocess, "Popen", lambda *a, **kw: proc)
+    monkeypatch.setattr(setup_chrome.time, "sleep", lambda _s: None)
+    clock = {"t": 0.0}
+
+    def monotonic():
+        clock["t"] += setup_chrome._POLL
+        return clock["t"]
+
+    monkeypatch.setattr(setup_chrome.time, "monotonic", monotonic)
+
+    ok, message = setup_chrome.fetch(timeout=60, stall=10)
+
+    assert ok is False
+    assert "Stalled" not in message, message
+    assert "Gave up after 60s" in message, "the ceiling should be what stops it"

@@ -428,3 +428,24 @@ def test_the_daemon_is_not_probed_when_the_image_is_there():
     ):
         facet, _ = asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
     assert facet.up_to_date is True and facet.error is None
+
+
+def test_a_symlinked_checkout_is_not_a_foreign_stack(monkeypatch, tmp_path):
+    """Compose records the *resolved* directory; `normpath` does not resolve.
+
+    A checkout reached through a symlink — macOS `/tmp` is one, and symlinked
+    project roots are common — compared unequal to itself, so the guard
+    refused the operator's own update naming the same directory back at them.
+    """
+    from utils import updater as u
+
+    real = tmp_path / "checkout"
+    real.mkdir()
+    link = tmp_path / "via-symlink"
+    link.symlink_to(real)
+
+    async def fake(*args, **kwargs):
+        return (0, str(real))
+
+    monkeypatch.setattr(u, "_run_cmd", fake)
+    assert asyncio.run(u.compose_stack_owner(str(link), "hummingbot-api")) is None

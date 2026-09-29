@@ -2,7 +2,7 @@ import { RotateCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { useRelaunch } from "@/hooks/useRelaunch";
-import { errorStatus } from "@/lib/api";
+import { isForbidden } from "@/lib/admin-api";
 import { updatesApi } from "@/lib/updates-api";
 
 /**
@@ -92,7 +92,7 @@ function RelaunchStrip({ data }: { data: Relaunch }) {
       // happen. Polling then finds the same server still answering, reloads,
       // and the banner starts counting again: a reload loop on a seat that
       // can never end it. Say so and stop instead.
-      if (errorStatus(err) === 403) {
+      if (isForbidden(err)) {
         setPhase("denied");
         return;
       }

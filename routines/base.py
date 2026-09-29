@@ -701,9 +701,14 @@ def assistant_routines(
         # of ``routines/`` made those disappear from it too.
         found = {
             **discover_routines(force_reload=force_reload),
+            # No ``agent_slug``: that would stamp these ``source="agent:condor"``,
+            # and the chat's local layer is the writable half of the *general*
+            # library, not a separate agent's. The stamp is load-bearing --
+            # the MCP tool renames an ``agent:`` routine to ``<slug>/<name>``
+            # and labels it agent-scoped with the specialist slug, which is
+            # empty for the chat -- so the bare name and ``global`` are right.
             **_merged_from(
                 (assistant_routines_dir(CHAT_SLUG),),
-                agent_slug=CHAT_SLUG,
                 force_reload=force_reload,
             ),
         }

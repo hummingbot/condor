@@ -1294,7 +1294,10 @@ async def compose_stack_owner(repo_dir: str, service: str) -> str | None:
     owner = (out or "").strip()
     if rc != 0 or not owner or owner == "<no value>":
         return None
-    return owner if os.path.normpath(owner) != os.path.normpath(repo_dir) else None
+    # ``realpath``, not ``normpath``: Compose records the *resolved* directory,
+    # and a checkout reached through a symlink (macOS ``/tmp`` is one) would
+    # otherwise compare unequal to itself and block the operator's own update.
+    return owner if os.path.realpath(owner) != os.path.realpath(repo_dir) else None
 
 
 async def compose_up(repo_dir: str) -> tuple[bool, str]:

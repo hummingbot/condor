@@ -242,3 +242,32 @@ def test_the_shipped_library_is_still_there_beside_it(monkeypatch, tmp_path):
 
     found = assistant_routines(None, force_reload=True)
     assert len(found) > 5, f"the general library disappeared: {sorted(found)}"
+
+
+def test_a_chat_authored_routine_keeps_the_general_librarys_source(
+    monkeypatch, tmp_path
+):
+    """`agent_slug` stamps `source="agent:<slug>"`, and that is load-bearing.
+
+    The MCP tool renames an `agent:` routine to `<slug>/<name>` and labels it
+    agent-scoped with the specialist slug — empty for the chat. The chat's
+    local layer is the writable half of the *general* library, so its
+    routines carry the same bare name and `global` source as the rest of it.
+    """
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "local"))
+
+    from routines.base import assistant_routines, assistant_routines_dir
+
+    target = assistant_routines_dir(None)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "authored.py").write_text(
+        "from pydantic import BaseModel\n"
+        "class Config(BaseModel):\n"
+        '    """mine"""\n'
+        "async def run(config, context):\n"
+        '    return "ok"\n',
+        encoding="utf-8",
+    )
+
+    found = assistant_routines(None, force_reload=True)
+    assert found["authored"].source == "global", found["authored"].source

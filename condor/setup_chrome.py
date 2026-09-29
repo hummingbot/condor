@@ -101,7 +101,11 @@ def fetch(timeout: int = TIMEOUT, stall: int = STALL) -> tuple[bool, str]:
         if now - last_report >= _REPORT_EVERY and seen:
             print(f"  … {_mb(seen)} downloaded", flush=True)
             last_report = now
-        if now - last_change >= stall:
+        # A stall verdict needs a size to watch. Without a download root the
+        # counter is pinned at 0, `last_change` never moves, and this would
+        # kill a download that is progressing perfectly well -- then blame a
+        # proxy for it. The ceiling below still bounds the wait.
+        if root is not None and now - last_change >= stall:
             proc.kill()
             proc.wait()
             return False, (
