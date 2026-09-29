@@ -138,7 +138,9 @@ async def test_an_untracked_checkout_is_not_offered_an_image_pull(
 
     monkeypatch.setattr(updater, "compose_service", _service)
     monkeypatch.setattr(
-        updater, "local_image_digest", lambda *a, **k: _val("sha256:aaa")
+        updater,
+        "local_image_identity",
+        lambda *a, **k: _val(("sha256:id", "sha256:aaa")),
     )
     monkeypatch.setattr(
         updater, "registry_image_digest", lambda *a, **k: _val("sha256:bbb")

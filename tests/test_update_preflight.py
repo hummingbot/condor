@@ -240,12 +240,20 @@ REMOTE = "sha256:62d70399bf8e80d491ee7e11edacd0b740a6bfc60a1025140e4f8e6b8f597e0
 _DEFAULT_SERVICE = {"image": "hummingbot/hummingbot-api:latest"}
 
 
-def _facet(*, service=_DEFAULT_SERVICE, local=LOCAL, remote=REMOTE):
-    """``service=None`` stands for ``docker compose config`` having failed."""
+IMAGE_ID = "sha256:943773e318e028d8a303e7c2237586fbd0d96e3ba46b902b215dc3799264bb54"
+
+
+def _facet(*, service=_DEFAULT_SERVICE, local=LOCAL, remote=REMOTE, image_id=IMAGE_ID):
+    """``service=None`` stands for ``docker compose config`` having failed.
+
+    ``image_id=None`` is "no such image here"; ``local=None`` with an id is an
+    image that is present but carries no registry digest — a local build under
+    the classic image store.
+    """
     with patch.multiple(
         "utils.updater",
         compose_service=AsyncMock(return_value=service),
-        local_image_digest=AsyncMock(return_value=local),
+        local_image_identity=AsyncMock(return_value=(image_id, local)),
         registry_image_digest=AsyncMock(return_value=remote),
     ):
         return asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
@@ -274,12 +282,29 @@ def test_an_unreachable_registry_never_claims_up_to_date():
     assert facet.available is None
 
 
-def test_an_image_with_no_local_digest_is_unknown_not_behind():
-    """Loaded from a tarball: there is nothing comparable to compare."""
-    facet, _ = _facet(local=None)
+def test_an_image_that_is_not_here_at_all_is_unknown_not_behind():
+    """Nothing to compare, and nothing to run either."""
+    facet, _ = _facet(local=None, image_id=None)
     assert facet.up_to_date is False
     assert facet.current == "unknown"
-    assert facet.error and "never been pulled" in facet.error
+    assert facet.error_code == "image-absent"
+    assert facet.error and "never been pulled or built" in facet.error
+
+
+def test_an_image_present_without_a_registry_digest_is_the_operators_own():
+    """`make build` under the classic image store leaves `RepoDigests` empty.
+
+    That store is still the default on Docker Engine, so this is the ordinary
+    shape of an operator running their own build — not an error, and above all
+    not a reason to block the whole update. It used to raise
+    ``registry-unreachable`` while the registry was answering fine.
+    """
+    facet, _ = _facet(local=None)
+    assert facet.error is None, "a local build is not a failure"
+    assert facet.up_to_date is True
+    assert facet.behind == 0
+    assert facet.current == "sha256:943773e3"
+    assert facet.detail and "Built here" in facet.detail[0]
 
 
 def test_a_hand_added_build_key_no_longer_means_a_second_mode():

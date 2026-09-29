@@ -61,6 +61,14 @@ class Facet:
     up_to_date: bool = True
     detail: list[str] = field(default_factory=list)
     error: str | None = None
+    error_code: str = ""
+    """Which failure this is, for a surface that has to act on it.
+
+    Set beside every ``error``. The alternative was matching on the message
+    text, which read ``"compose" in image.error`` and quietly filed everything
+    else -- an image that was never pulled, a service with no image at all --
+    under ``registry-unreachable``, naming a cause that had not happened.
+    """
 
     def to_wire(self) -> dict[str, Any]:
         return asdict(self)
@@ -238,6 +246,7 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
                 kind="image",
                 current="unknown",
                 up_to_date=False,
+                error_code="docker-unavailable",
                 error=(
                     "Could not read the compose file — is Docker running? "
                     "(docker compose config failed)"
@@ -260,27 +269,51 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
                 kind="image",
                 current="unknown",
                 up_to_date=False,
+                error_code="no-image-declared",
                 error=f"The {service} service declares neither an image nor a build.",
             ),
             mode,
         )
 
-    local, remote = await asyncio.gather(
-        updater.local_image_digest(image_ref),
+    (local_id, local), remote = await asyncio.gather(
+        updater.local_image_identity(image_ref),
         updater.registry_image_digest(image_ref),
     )
 
-    if local is None:
+    if local_id is None:
         return (
             Facet(
                 kind="image",
                 current="unknown",
                 available=_short_digest(remote),
                 up_to_date=False,
+                error_code="image-absent",
                 error=(
-                    f"No local digest for {image_ref} — it has never been pulled "
-                    "by tag, so there is nothing to compare."
+                    f"No local copy of {image_ref} — it has never been pulled "
+                    "or built here, so there is nothing to compare."
                 ),
+            ),
+            mode,
+        )
+
+    if local is None:
+        # Present, but carrying no registry digest. Under the classic image
+        # store -- still the default on Docker Engine -- that is exactly what
+        # `make build` leaves behind, and the check below that would have
+        # caught it (`registry_has_digest`) never runs, because it needs a
+        # digest to ask about. Reported as the operator's own image, the same
+        # answer the containerd store reaches by the other route, rather than
+        # as an error that blocks the whole update.
+        return (
+            Facet(
+                kind="image",
+                current=_short_digest(local_id),
+                behind=0,
+                detail=[
+                    "Built here, or loaded from a tarball: it carries no "
+                    "registry digest, so it is not comparable to the published "
+                    "tag. Rebuild it yourself to pick up changes."
+                ],
             ),
             mode,
         )
@@ -290,6 +323,7 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
                 kind="image",
                 current=_short_digest(local),
                 up_to_date=False,
+                error_code="registry-unreachable",
                 error=(
                     f"Could not reach the registry for {image_ref}; "
                     "the running version is known, the available one is not."
@@ -980,11 +1014,7 @@ async def preflight(component_keys: list[str]) -> Preflight:
                 blocks.append(
                     Block(
                         component=key,
-                        code=(
-                            "docker-unavailable"
-                            if "compose" in image.error
-                            else "registry-unreachable"
-                        ),
+                        code=image.error_code or "registry-unreachable",
                         message=image.error,
                         resolutions=["cancel"],
                     )

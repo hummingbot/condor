@@ -896,13 +896,54 @@ async def compose_service(repo_dir: str, service: str) -> dict | None:
     return definition if isinstance(definition, dict) else None
 
 
+async def local_image_identity(image_ref: str) -> tuple[str | None, str | None]:
+    """``(image id, registry digest)`` for the local copy of ``image_ref``.
+
+    Two questions that had been collapsed into one, and they have different
+    answers on the two image stores Docker ships.
+
+    ``RepoDigests[0]`` is index-level when the image was pulled by tag, which
+    makes it directly comparable to what the registry reports. But a *locally
+    built* image has one only under the containerd image store; under the
+    classic (overlay2) store -- still the default on Docker Engine, which is
+    where this runs in production -- ``RepoDigests`` is simply ``[]``. So
+    "no registry digest" does not mean "no image": it is exactly the shape an
+    operator's own ``make build`` leaves behind.
+
+    The image id answers "is it here at all", because ``docker image inspect``
+    fails outright when it is not. ``(None, None)`` therefore means absent,
+    and ``(id, None)`` means present with no registry identity -- built here,
+    or loaded from a tarball. Neither is "behind".
+    """
+    rc, out = await _run_cmd(
+        "docker",
+        "image",
+        "inspect",
+        image_ref,
+        "--format",
+        "{{.Id}}\t{{json .RepoDigests}}",
+        timeout=30,
+    )
+    if rc != 0 or not out:
+        return None, None
+    image_id, _, raw = out.partition("\t")
+    image_id = image_id.strip() or None
+    try:
+        digests = json.loads(raw)
+    except ValueError:
+        return image_id, None
+    if not isinstance(digests, list) or not digests:
+        return image_id, None
+    first = str(digests[0])
+    return image_id, (first.split("@", 1)[1] if "@" in first else None)
+
+
 async def local_image_digest(image_ref: str) -> str | None:
     """The registry digest of the local copy of ``image_ref``, or None.
 
-    ``RepoDigests[0]`` is index-level when the image was pulled by tag, which
-    makes it directly comparable to what the registry reports. An image loaded
-    from a tarball has no RepoDigest at all -- that is "unknown", never
-    "behind".
+    Kept as the narrow question for callers that only want the comparable
+    digest; :func:`local_image_identity` is the one that can also say whether
+    the image is present at all.
     """
     rc, out = await _run_cmd(
         "docker",
