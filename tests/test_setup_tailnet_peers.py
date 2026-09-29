@@ -23,7 +23,9 @@ import pytest
 SETUP = Path(__file__).resolve().parent.parent / "setup-environment.sh"
 
 
-def run_peers(tmp_path: Path, status_output: str, want: str = "hummingbot-api") -> list[str]:
+def run_peers(
+    tmp_path: Path, status_output: str, want: str = "hummingbot-api"
+) -> list[str]:
     """Return `tailnet_api_peers <want>` over a stubbed `tailscale status`."""
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir(exist_ok=True)
