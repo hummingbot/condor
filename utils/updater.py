@@ -479,10 +479,30 @@ async def stash_paths(repo_dir: str, paths: list[str]) -> tuple[bool, str]:
 STASH_MESSAGE = "condor /update"
 
 
+async def update_stash_ref(repo_dir: str = CONDOR_DIR) -> str | None:
+    """``stash@{n}`` of the newest stash *we* made, or ``None``.
+
+    Addressed by name, never by position. ``stash apply``/``drop`` default to
+    ``stash@{0}``, and the stack reorders every time anyone stashes anything --
+    so "a condor stash exists somewhere" plus "act on the top one" applied and
+    then **dropped** the operator's own stash, restored unrelated work into the
+    tree nobody asked for, left ours parked, and reported success.
+    """
+    rc, listing = await _run_git(
+        "stash", "list", "--format=%gd%x00%gs", repo_dir=repo_dir
+    )
+    if rc != 0:
+        return None
+    for line in listing.splitlines():
+        ref, _, subject = line.partition("\0")
+        if STASH_MESSAGE in subject:
+            return ref.strip()
+    return None
+
+
 async def has_update_stash(repo_dir: str = CONDOR_DIR) -> bool:
     """Whether work parked by a previous update is still sitting in a stash."""
-    rc, listing = await _run_git("stash", "list", repo_dir=repo_dir)
-    return rc == 0 and STASH_MESSAGE in listing
+    return await update_stash_ref(repo_dir) is not None
 
 
 async def _stash_paths_at(repo_dir: str, ref: str = "stash@{0}") -> list[str]:
@@ -569,13 +589,16 @@ async def stash_pop(repo_dir: str) -> tuple[bool, str]:
     run the command that just failed (it fails again: "needs merge"). Hence
     ``apply`` and an explicit drop: apply can be undone, pop cannot.
     """
-    if not await has_update_stash(repo_dir):
+    ref = await update_stash_ref(repo_dir)
+    if ref is None:
         return True, "Nothing of ours was stashed."
 
-    paths = await _stash_paths_at(repo_dir)
-    rc, out = await _run_git("stash", "apply", repo_dir=repo_dir)
+    paths = await _stash_paths_at(repo_dir, ref)
+    rc, out = await _run_git("stash", "apply", ref, repo_dir=repo_dir)
     if rc == 0:
-        await _run_git("stash", "drop", repo_dir=repo_dir)
+        # Same ref, and nothing between the two can renumber it: ``apply`` does
+        # not pop, and this is the only thing touching the stack right now.
+        await _run_git("stash", "drop", ref, repo_dir=repo_dir)
         return True, "Restored the work that was stashed before the update."
 
     undone = await _undo_partial_apply(repo_dir, paths)
@@ -623,6 +646,19 @@ async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool,
             continue
         # ``agents/scout/AGENT.md`` -> ``<local>/scout/AGENT.md``
         target = local_root / Path(rel).relative_to("agents")
+        if target.exists():
+            # The product already has its own version of this item, and the
+            # checkout has a second, separately made edit. ``shutil.move``
+            # silently replaces the first with the second -- one customization
+            # destroyed while the message says both were kept. Refuse instead:
+            # only the operator can say which of the two they meant.
+            return False, (
+                f"You already have your own {rel} in {target.parent}, and the "
+                "copy in the checkout has been edited separately. Keeping the "
+                "checkout's version would overwrite the one already in use, so "
+                "nothing was moved — compare the two and delete the one you do "
+                "not want, then run the update again."
+            )
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))
@@ -634,9 +670,22 @@ async def move_to_local_root(repo_dir: str, rel_paths: list[str]) -> tuple[bool,
         return True, "Nothing to move."
 
     # The tracked copies go back to HEAD so the fast-forward is unobstructed.
-    rc, out = await _run_git("checkout", "HEAD", "--", *moved, repo_dir=repo_dir)
-    if rc != 0:
-        return False, f"Moved your edits, but could not reset the tracked files:\n{out}"
+    # Only the tracked ones: `keep-mine` is offered for an `untracked-conflict`
+    # too, and `checkout HEAD -- <path>` fails on a path HEAD has never heard
+    # of -- which reported the whole resolution as failed after it had in fact
+    # moved the file. An untracked path needs no reset; moving it *was* the
+    # resolution.
+    tracked: list[str] = []
+    for rel in moved:
+        rc, _ = await _run_git("cat-file", "-e", f"HEAD:{rel}", repo_dir=repo_dir)
+        if rc == 0:
+            tracked.append(rel)
+    if tracked:
+        rc, out = await _run_git("checkout", "HEAD", "--", *tracked, repo_dir=repo_dir)
+        if rc != 0:
+            return False, (
+                f"Moved your edits, but could not reset the tracked files:\n{out}"
+            )
 
     return True, (
         f"Kept your version of {len(moved)} file(s), moved into .condor/agents "

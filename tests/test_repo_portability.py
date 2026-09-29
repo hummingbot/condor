@@ -53,25 +53,33 @@ def test_agent_content_is_pinned_to_lf():
 
 
 def test_no_tracked_file_has_crlf_endings():
-    """`* text=auto` normalizes on commit; this catches one that slipped in."""
+    """`* text=auto` normalizes on commit; this catches one that slipped in.
+
+    Asked of the *index*, not the working tree. `text=auto` guarantees LF in
+    what git stores, and says nothing about what it materializes: a checkout
+    with `core.autocrlf=true` — the Windows default, and inherited by a WSL2
+    clone under /mnt/c — writes CRLF into the working tree for exactly the
+    files this is meant to pass. Reading bytes off disk there fails every
+    ordinary `.py` and `.tsx` and reports it as a portability defect, which is
+    the opposite of what this test is for.
+
+    `git ls-files --eol` reports both, as `i/<eol> w/<eol>`. `i/crlf` is a
+    file committed with CRLF, which is the thing worth catching.
+    """
+    proc = subprocess.run(
+        ["git", "ls-files", "--eol", "-z"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     offenders = []
-    for rel in _tracked_files():
-        path = _REPO_ROOT / rel
-        # Binary files have no line endings to normalize; .gitattributes marks
-        # them, and this list mirrors it.
-        if not path.is_file() or path.suffix in {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".ico",
-            ".woff",
-            ".woff2",
-        }:
+    for entry in proc.stdout.split("\0"):
+        if not entry.strip():
             continue
-        try:
-            if b"\r\n" in path.read_bytes():
-                offenders.append(rel)
-        except OSError:
-            continue
-    assert not offenders, f"CRLF in tracked files: {offenders}"
+        # "i/crlf  w/crlf  attr/            \tpath/to/file"
+        fields, _, rel = entry.partition("\t")
+        index_eol = fields.split()[0] if fields.split() else ""
+        if index_eol == "i/crlf":
+            offenders.append(rel)
+    assert not offenders, f"CRLF committed in: {offenders}"

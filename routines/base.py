@@ -692,7 +692,21 @@ def assistant_routines(
     is told, never about what a person may do.
     """
     if not agent_slug or agent_slug == CHAT_SLUG:
-        found = discover_routines(force_reload=force_reload)
+        # The chat's own local layer shadows the general library, exactly as an
+        # agent's does below. Without this the chat wrote routines it could not
+        # then see: FEAT-115 moved its *write* target to
+        # ``<local>/condor/routines`` while discovery still read only the root
+        # library and the shared one, so an authored routine never reached the
+        # catalog -- and the migration that lifts previously untracked ones out
+        # of ``routines/`` made those disappear from it too.
+        found = {
+            **discover_routines(force_reload=force_reload),
+            **_merged_from(
+                (assistant_routines_dir(CHAT_SLUG),),
+                agent_slug=CHAT_SLUG,
+                force_reload=force_reload,
+            ),
+        }
     else:
         shared = _merged_from(shared_routines_roots(), force_reload=force_reload)
         own = _merged_from(

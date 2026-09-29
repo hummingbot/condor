@@ -204,3 +204,41 @@ def test_a_routine_the_chat_invented_is_not_reported():
     (local_dir / "my_own_idea.py").write_text("# mine alone\n", "utf-8")
 
     assert [f for f in all_stale_forks() if f.rel.endswith("my_own_idea.py")] == []
+
+
+def test_a_routine_the_chat_authors_is_discoverable(monkeypatch, tmp_path):
+    """FEAT-115 moved the chat's *write* target; discovery did not follow.
+
+    `assistant_routines` sends the chat through `discover_routines`, which
+    reads the root library and the shared one — not `<local>/condor/routines`,
+    where the chat now writes. So a routine the agent authored never reached
+    the catalog, and the migration that lifts previously untracked ones out of
+    `routines/` made those vanish from it too.
+    """
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "local"))
+
+    from routines.base import assistant_routines, assistant_routines_dir
+
+    target = assistant_routines_dir(None)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "chat_authored.py").write_text(
+        "from pydantic import BaseModel\n"
+        "class Config(BaseModel):\n"
+        '    """One the chat wrote"""\n'
+        "async def run(config, context):\n"
+        '    return "ok"\n',
+        encoding="utf-8",
+    )
+
+    found = assistant_routines(None, force_reload=True)
+    assert "chat_authored" in found, sorted(found)
+
+
+def test_the_shipped_library_is_still_there_beside_it(monkeypatch, tmp_path):
+    """FEAT-033's carve-out: the general catalog must not shrink."""
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "local"))
+
+    from routines.base import assistant_routines
+
+    found = assistant_routines(None, force_reload=True)
+    assert len(found) > 5, f"the general library disappeared: {sorted(found)}"

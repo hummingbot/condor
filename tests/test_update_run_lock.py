@@ -10,6 +10,8 @@ from __future__ import annotations
 import fcntl
 import os
 
+import pytest
+
 from condor.paths import runtime_root
 from condor.updates.run import _acquire_run_lock, _release_run_lock
 
@@ -59,3 +61,28 @@ def test_the_lock_is_rewritten_rather_than_appended():
         assert (runtime_root() / "update.lock").read_text().strip() == str(os.getpid())
     finally:
         _release_run_lock(second)
+
+
+def test_a_failure_before_the_task_exists_releases_the_lock():
+    """`_execute`'s finally is the only release, and there is no `_execute` yet.
+
+    `check()` shells out to git and docker, so it can raise for reasons that
+    have nothing to do with this checkout — and the lock was then held by a
+    process that was not updating, locking out every other process on the
+    checkout until it exited.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from condor.updates import run as run_module
+
+    with patch.object(
+        run_module.components, "check", AsyncMock(side_effect=OSError("no git"))
+    ):
+        with pytest.raises(OSError):
+            asyncio.run(run_module.start(["condor"]))
+
+    assert run_module._lock_handle is None, "the lock outlived the failed setup"
+    # And the next attempt is not refused by our own stale handle.
+    assert _acquire_run_lock() is not None
+    _release_run_lock(_acquire_run_lock())

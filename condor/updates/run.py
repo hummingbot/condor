@@ -474,19 +474,30 @@ async def start(
                     "same repo."
                 )
 
-        selected = [k for k in components.keys() if k in set(component_keys)]
-        statuses = {s.key: s for s in await components.check()}
+        # From here to the task existing, nothing else will release the lock:
+        # `_execute`'s finally clause is the only place that does, and there is
+        # no `_execute` yet. `check()` shells out to git and docker, so it can
+        # raise for reasons that have nothing to do with this checkout -- and
+        # the lock would then be held by a process that is not updating, and
+        # not released until it exits.
+        try:
+            selected = [k for k in components.keys() if k in set(component_keys)]
+            statuses = {s.key: s for s in await components.check()}
 
-        run = Run(
-            id=f"u-{int(time.time())}",
-            started=time.time(),
-            actor={"user_id": actor_user_id, "chat_id": actor_chat_id},
-            components=selected,
-            steps=_plan(selected, statuses),
-        )
-        _current = run
-        _task = asyncio.create_task(_execute(run, resolutions or {}))
-        return run
+            run = Run(
+                id=f"u-{int(time.time())}",
+                started=time.time(),
+                actor={"user_id": actor_user_id, "chat_id": actor_chat_id},
+                components=selected,
+                steps=_plan(selected, statuses),
+            )
+            _current = run
+            _task = asyncio.create_task(_execute(run, resolutions or {}))
+            return run
+        except BaseException:
+            _release_run_lock(_lock_handle)
+            _lock_handle = None
+            raise
 
 
 async def _begin(run: Run, key: str) -> Step | None:

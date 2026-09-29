@@ -304,3 +304,84 @@ async def test_a_clean_checkout_gets_no_stash_warning(repo, monkeypatch):
     )
     preflight = await components.preflight([components.CONDOR])
     assert "stashed-work" not in [w.code for w in preflight.warnings]
+
+
+# ── Review findings on the resolutions themselves ──
+
+
+@pytest.mark.asyncio
+async def test_our_stash_is_found_by_name_not_by_position(stashed):
+    """`stash apply`/`drop` default to `stash@{0}`, and the stack reorders.
+
+    With an operator stash pushed after ours, "a condor stash exists
+    somewhere" plus "act on the top one" applied *and dropped* theirs,
+    restored unrelated work into the tree nobody asked for, left ours parked,
+    and reported success.
+    """
+    repo, agent, bystander = stashed
+    # Park something the update does not touch, so the replay applies cleanly
+    # and the drop is reached — that is where the wrong entry was destroyed.
+    _git("checkout", "--", "agents/scout/AGENT.md", cwd=repo)
+    (repo / "agents" / "scout" / "notes.md").write_text("my notes\n")
+    await updater.stash_paths(str(repo), ["agents/scout/notes.md"])
+
+    bystander.write_text("operator's own edit\n")
+    _git("stash", "push", "-u", "-m", "my wip", "--", bystander.name, cwd=repo)
+    assert (
+        await updater.update_stash_ref(str(repo)) == "stash@{1}"
+    ), "ours is not on top"
+
+    moved, output = await updater.fast_forward(str(repo))
+    assert moved, output
+    restored, message = await updater.stash_pop(str(repo))
+    assert restored, message
+
+    listing = subprocess.run(
+        ["git", "stash", "list"], cwd=repo, capture_output=True, text=True, env=ENV
+    ).stdout
+    assert "my wip" in listing, "the operator's stash was consumed"
+    assert "condor /update" not in listing, "ours should have been dropped"
+    assert (repo / "agents" / "scout" / "notes.md").read_text() == "my notes\n"
+    # Their work stayed parked rather than being dumped into the tree.
+    assert not bystander.exists() or bystander.read_text() != "operator's own edit\n"
+
+
+@pytest.mark.asyncio
+async def test_keep_mine_refuses_to_overwrite_an_existing_local_copy(repo, tmp_path):
+    """Edited through the product *and* in the checkout: two customizations.
+
+    `shutil.move` replaced the first with the second and reported that the
+    version was kept — one of them destroyed, silently.
+    """
+    from condor.paths import local_agents_root
+
+    local = local_agents_root() / "scout"
+    local.mkdir(parents=True, exist_ok=True)
+    (local / "AGENT.md").write_text("MADE THROUGH THE PRODUCT\n")
+    (repo / "agents" / "scout" / "AGENT.md").write_text("# Scout v1\nEditor tweak.\n")
+
+    ok, message = await updater.move_to_local_root(str(repo), ["agents/scout/AGENT.md"])
+
+    assert ok is False
+    assert (local / "AGENT.md").read_text() == "MADE THROUGH THE PRODUCT\n"
+    assert "already have your own" in message
+    # And the checkout copy is still there to compare against.
+    assert (repo / "agents" / "scout" / "AGENT.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_keep_mine_on_an_untracked_file_reports_success(repo):
+    """`keep-mine` is offered for an `untracked-conflict` too.
+
+    `checkout HEAD -- <path>` fails on a path HEAD never had, so the whole
+    resolution reported failure *after* moving the file. Nothing needs
+    resetting for an untracked path — moving it was the resolution.
+    """
+    (repo / "agents" / "scout" / "invented.md").write_text("mine alone\n")
+
+    ok, message = await updater.move_to_local_root(
+        str(repo), ["agents/scout/invented.md"]
+    )
+
+    assert ok is True, message
+    assert not (repo / "agents" / "scout" / "invented.md").exists()

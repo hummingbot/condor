@@ -2,6 +2,7 @@ import { RotateCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { useRelaunch } from "@/hooks/useRelaunch";
+import { errorStatus } from "@/lib/api";
 import { updatesApi } from "@/lib/updates-api";
 
 /**
@@ -33,7 +34,7 @@ const COUNTDOWN_SECONDS = 5;
 const RECONNECT_TIMEOUT_MS = 90_000;
 const RECONNECT_INTERVAL_MS = 1_000;
 
-type Phase = "counting" | "restarting" | "cancelled" | "stuck";
+type Phase = "counting" | "restarting" | "cancelled" | "stuck" | "denied";
 
 type Relaunch = {
   from_commit?: string;
@@ -84,10 +85,17 @@ function RelaunchStrip({ data }: { data: Relaunch }) {
     setPhase("restarting");
     try {
       await updatesApi.relaunch();
-    } catch {
-      // The request is *expected* not to answer: the process handling it tears
-      // down and execs, so the socket usually closes first. A failure here says
-      // nothing about whether the restart is happening — the reconnect decides.
+    } catch (err) {
+      // A dropped connection says nothing: the process handling this request
+      // tears down and execs, so the socket usually closes before the reply.
+      // A *403* is different — it means the restart was refused and will not
+      // happen. Polling then finds the same server still answering, reloads,
+      // and the banner starts counting again: a reload loop on a seat that
+      // can never end it. Say so and stop instead.
+      if (errorStatus(err) === 403) {
+        setPhase("denied");
+        return;
+      }
     }
     waitForServer();
   }, [waitForServer]);
@@ -150,6 +158,20 @@ function RelaunchStrip({ data }: { data: Relaunch }) {
             </span>
           </>
         )}
+        {phase === "denied" && (
+          <>
+            <strong className="font-semibold">
+              This seat cannot restart Condor.
+            </strong>{" "}
+            <span className="text-[var(--color-text-muted)]">
+              The update is on disk, but applying it needs the admin role — the
+              request was refused. Give this user{" "}
+              <span className="font-mono">role: admin</span> in{" "}
+              <span className="font-mono">config.yml</span>, or run{" "}
+              <span className="font-mono">make restart</span> on the host.
+            </span>
+          </>
+        )}
         {phase === "cancelled" && (
           <>
             <strong className="font-semibold">Condor has been updated.</strong>{" "}
@@ -176,7 +198,7 @@ function RelaunchStrip({ data }: { data: Relaunch }) {
         </button>
       )}
 
-      {(phase === "cancelled" || phase === "stuck") && (
+      {(phase === "cancelled" || phase === "stuck" || phase === "denied") && (
         <button
           onClick={() => void relaunchNow()}
           className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-yellow)]/20 px-3 py-1 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-yellow)]/30"
