@@ -534,3 +534,82 @@ def test_an_unparseable_bind_is_unknown_rather_than_public():
     assert _is_public_bind("") is False
     assert _is_public_bind("0.0.0.0:8088") is True
     assert _is_public_bind("[::]:8088") is True
+
+
+# ── The id the dashboard signs in as must be able to administer (V10) ──
+
+
+def _admin_checks(tmp_path, monkeypatch, *, admin_id, users, env_lines=None):
+    import condor.doctor as doctor_module
+
+    env = tmp_path / ".env"
+    env.write_text("\n".join(env_lines or [f"ADMIN_USER_ID={admin_id}"]) + "\n")
+    monkeypatch.setattr(doctor_module, "ENV_PATH", env)
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", admin_id)
+    monkeypatch.setattr("utils.config.LOCAL_MODE", True)
+    return doctor_module._check_admin_can_administer({"users": users})
+
+
+def test_a_matching_admin_passes_quietly(tmp_path, monkeypatch):
+    assert (
+        _admin_checks(tmp_path, monkeypatch, admin_id=1, users={1: {"role": "admin"}})
+        == []
+    )
+
+
+def test_an_id_config_yml_calls_a_user_is_reported(tmp_path, monkeypatch):
+    """Two files have to agree about one number, and nothing checked that.
+
+    `.env` decides who the dashboard *is* — local mode signs in as
+    `ADMIN_USER_ID` with no password — and `config.yml` decides what that id
+    may *do*. Disagree and every admin route answers 403: no Updates tab, and
+    the "Updates available" notification links to a tab that is not rendered.
+    The old check asked only whether the variable was set, so an install in
+    exactly this state reported `ADMIN_USER_ID` green.
+    """
+    checks = _admin_checks(
+        tmp_path,
+        monkeypatch,
+        admin_id=777,
+        users={1: {"role": "admin"}, 777: {"role": "user"}},
+    )
+    assert [c.name for c in checks] == ["Admin access"]
+    detail = checks[0].detail
+    assert "777" in detail and "'user'" in detail
+    assert "role: admin" in detail, "the remedy has to name the knob"
+
+
+def test_an_id_config_yml_has_never_heard_of_is_reported(tmp_path, monkeypatch):
+    checks = _admin_checks(
+        tmp_path, monkeypatch, admin_id=999, users={1: {"role": "admin"}}
+    )
+    assert [c.name for c in checks] == ["Admin access"]
+    assert "no user 999" in checks[0].detail
+
+
+def test_a_duplicated_assignment_is_named_on_its_own(tmp_path, monkeypatch):
+    """`.env` is read by three parsers and the last assignment wins in all of
+    them, so a second line is silently authoritative and the first is the one
+    people read."""
+    checks = _admin_checks(
+        tmp_path,
+        monkeypatch,
+        admin_id=777,
+        users={777: {"role": "admin"}},
+        env_lines=["ADMIN_USER_ID=1", "OTHER=x", "ADMIN_USER_ID=777"],
+    )
+    assert [c.name for c in checks] == ["ADMIN_USER_ID (duplicate)"]
+    assert "the last one wins (777)" in checks[0].detail
+
+
+def test_one_assignment_and_a_good_role_says_nothing(tmp_path, monkeypatch):
+    assert (
+        _admin_checks(
+            tmp_path,
+            monkeypatch,
+            admin_id=777,
+            users={777: {"role": "admin"}},
+            env_lines=["ADMIN_USER_ID=777", "OTHER=x"],
+        )
+        == []
+    )
