@@ -134,6 +134,51 @@ def get_executor_fees(executor: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _quote_size(
+    ex: Dict[str, Any],
+    cfg: Dict[str, Any],
+    custom_info: Dict[str, Any],
+    entry_price: float,
+    current_price: float,
+) -> float:
+    """An executor's size in QUOTE currency -- the row's ``amount``.
+
+    Each executor type sizes itself in a different field and a different unit:
+
+    - grid: ``total_amount_quote``, already quote.
+    - dca: the ``amounts_quote`` ladder, already quote.
+    - position / order: ``amount`` in BASE currency, priced at the entry (or the
+      order's limit ``price``, or the live price for a market order) -- the same
+      base-times-price rule the risk gate prices a create with
+      (``condor.agents.risk._planned_amount_quote``), so the book it reads next
+      tick agrees with what it approved.
+    - lp: ``custom_info.total_value_quote``, the position's current value.
+
+    A base ``amount`` with no price to value it at falls back to the quote the
+    executor reports as filled, and otherwise to 0: it is never returned as-is.
+    Summed as exposure, a base figure made 2.9 LTC read as $2.90, so a $0.70
+    loss on a ~$200 position read as a 24% drawdown and tripped the kill switch.
+    """
+    total = float(cfg.get("total_amount_quote") or 0)
+    if total > 0:
+        return total
+    ladder = cfg.get("amounts_quote")
+    if isinstance(ladder, list) and ladder:
+        try:
+            total = sum(float(v or 0) for v in ladder)
+        except (TypeError, ValueError):
+            total = 0.0
+        if total > 0:
+            return total
+    base = float(cfg.get("amount") or 0)
+    if base > 0:
+        price = entry_price or float(cfg.get("price") or 0) or current_price
+        if price > 0:
+            return base * price
+        return float(ex.get("filled_amount_quote") or 0)
+    return float(custom_info.get("total_value_quote") or 0)
+
+
 def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
     """Canonical display row for one raw executor.
 
@@ -192,9 +237,7 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
             current_price = _candidate
             break
 
-    amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
-    if amount <= 0:
-        amount = float(custom_info.get("total_value_quote") or 0)
+    amount = _quote_size(ex, cfg, custom_info, entry_price, current_price)
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
