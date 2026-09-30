@@ -92,11 +92,13 @@ For prompt-visible policy, the Agent requires all of the following:
 
 `server_name`, `frequency_sec`, and the serialized `risk_limits` document are launch-time
 inputs and need not be repeated in `[CURRENT CONFIG]`. Before a live mutation, require
-`[RISK STATE]` to be `ACTIVE`, its position-size limit to be at least
+`[RISK STATE]` to report `Risk Check: passed`, its position-size limit to be at least
 `total_amount_quote`, and its open-Executor limit to be at least one. The dashboard must
 preserve all configured risk-limit fields when it applies visible start-dialog overrides.
 The Strategy's generic drawdown limits stay disabled at `-1`; the controller owns this
 session's take-profit, stop-loss, and time-limit exits.
+`Risk Check: BLOCKED`, a missing verdict, or an unrecognized verdict requires `HOLD`.
+This verdict describes the current tick's risk gate, not whether the session is running.
 
 Before config creation, make this exact balance-only call:
 
@@ -112,8 +114,16 @@ as_distribution: false
 refresh: true
 ```
 
-It must show available canonical USDC at least `total_amount_quote` and available SOL at
-least `min_sol_reserve`. Balances prove only funding feasibility. The configured
+It must show available USDC at least `total_amount_quote` and available SOL at
+least `min_sol_reserve`. Use the `available` column of the exact `USDC` and `SOL`
+rows returned by this account/network-scoped call. Require finite, nonnegative
+values; missing, malformed, ambiguous, or insufficient balances require `HOLD`.
+The portfolio output identifies balances by symbol and does not report mint addresses.
+Do not require mint addresses in this response or treat it as canonical-mint proof.
+Keep `quote_token_mint` pinned to the canonical USDC mint in the complete controller
+config and exact readback. Before swaps or LP creation, the controller resolves configured
+mint identities, verifies pool token orientation, refreshes balances, and enforces its
+capital preflight and SOL reserve. Balances prove only funding feasibility. The configured
 `account_name` is the exclusive HAPI credential boundary for this bot; the operator is
 responsible for assigning every other bot a different account. A fresh session owns no
 prior runtime: global namespace/account matches and Condor-injected Executors from older
@@ -133,10 +143,10 @@ identity, exclusion, or risk limit, and it cannot override `risk_profile`.
 Dry run and run once are observation-and-proposal only. In loop mode, mutation is allowed
 only after the current tick proves all of the following:
 
-1. valid prompt-visible config and an `ACTIVE` risk state with enough position capacity;
+1. valid prompt-visible config and `Risk Check: passed` with enough position capacity;
 2. a readable, identity-consistent session result with no namespace or account conflict
    and no unresolved prior mutation;
-3. refreshed canonical-USDC and SOL funding for a new session;
+3. refreshed available USDC and SOL funding for a new session;
 4. the pinned V2 controller is available through `manage_controllers(describe)`; and
 5. an admission scan returns at least `min_positions` eligible pools.
 

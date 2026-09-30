@@ -534,7 +534,7 @@ def test_default_example_and_optional_runtime_files_match_the_compact_shape():
         assert limits["max_drawdown_pct"] == -1
         assert limits["shutdown_drawdown_pct"] == -1
 
-    assert "[RISK STATE]` to be `ACTIVE`" in _prose(STRATEGY_PATH)
+    assert "[RISK STATE]` to report `Risk Check: passed`" in _prose(STRATEGY_PATH)
     if LEARNINGS_PATH.exists():
         assert LEARNINGS_PATH.read_text().strip() == ""
 
@@ -566,8 +566,13 @@ def test_config_validation_and_funding_gates_are_explicit():
         "integer `time_limit_minutes` with `5 < time_limit_minutes <= 525600`",
         "five-minute terminal-PnL grace remains below the session lifetime",
         "position-size limit to be at least `total_amount_quote`",
-        "available canonical USDC at least `total_amount_quote",
+        "available USDC at least `total_amount_quote",
         "available SOL at least `min_sol_reserve",
+        "missing, malformed, ambiguous, or insufficient balances require `HOLD`",
+        "Do not require mint addresses in this response",
+        "Keep `quote_token_mint` pinned to the canonical USDC mint",
+        "the controller resolves configured mint identities",
+        "capital preflight and SOL reserve",
         "fresh session owns no prior runtime",
         "global namespace/account matches and Condor-injected Executors from older "
         "sessions are outside its authority",
@@ -577,6 +582,20 @@ def test_config_validation_and_funding_gates_are_explicit():
     )
     for phrase in required:
         assert phrase.casefold() in strategy.casefold()
+
+
+def test_risk_admission_matches_condors_current_tick_prompt():
+    risk_block = _prompt("loop").split("[RISK STATE]\n", 1)[1].split("\n\n", 1)[0]
+    assert "Risk Check: passed" in risk_block
+    assert "Status: ACTIVE" not in risk_block
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    assert "`Risk Check: passed`" in agent and "`Risk Check: passed`" in strategy
+    assert (
+        "`Risk Check: BLOCKED`, a missing verdict, or an unrecognized verdict "
+        "requires `HOLD`"
+    ) in strategy
+    assert "[RISK STATE]` to be `ACTIVE`" not in strategy
 
 
 def test_prompt_modes_preserve_the_strategy_action_boundary():
@@ -1785,9 +1804,9 @@ def test_live_loop_admission_checks_are_explicit():
     prose = (_prose(AGENT_PATH) + " " + _prose(STRATEGY_PATH)).casefold()
     for phrase in (
         "dry run and run once are observation-and-proposal only",
-        "valid prompt-visible config and an `active` risk state",
+        "valid prompt-visible config and `risk check: passed`",
         "no namespace or account conflict",
-        "refreshed canonical-usdc and sol funding",
+        "refreshed available usdc and sol funding",
         "pinned v2 controller is available",
         "at least `min_positions` eligible pools",
         "missing evidence causes `hold`",

@@ -50,7 +50,8 @@ older Agent sessions. They are display-only for this Strategy. Never copy a gene
 config name, runtime instance, Executor, position, or pending operation from them; never
 pass an injected identity to the session reader; and never derive ownership, conflict,
 adoption, `INHERITED_RESOURCE`, or lifecycle state from their presence or absence. Continue
-to obey the generic risk engine's `ACTIVE`/blocked status and configured limits.
+to obey the generic risk engine's `Risk Check: passed`/`Risk Check: BLOCKED` verdict
+and configured limits.
 
 Infer execution mode once:
 
@@ -117,9 +118,10 @@ Tool availability is not action authority:
   pull, deletion, and sample uploads are maintenance operations outside this trading
   loop and have no standing trading authorization. A source-check failure blocks new
   deployment, never supervision or the existing owned bot's exit and archive.
-- `get_portfolio_overview`: read refreshed canonical-USDC and SOL balances only for
-  new-session funding feasibility. Never infer LP ownership, attributable inventory, or
-  PnL.
+- `get_portfolio_overview`: read refreshed available USDC and SOL balances only for
+  new-session funding feasibility. Its symbol-based output is a funding preflight;
+  the controller verifies canonical token identities before execution. Never infer
+  LP ownership, attributable inventory, or PnL.
 - `manage_controllers`: allow controller-schema `describe`; loop-only create-new
   config `upsert` with `target="config"` and `confirm_override=false`; and exact
   config-name `describe` immediately after that upsert. Never mutate controller code,
