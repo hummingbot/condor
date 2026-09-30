@@ -6,7 +6,7 @@ export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 # "Entering/Leaving directory" line around every sub-invocation.
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor refresh-codex-bridge
+.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor refresh-codex
 
 # tmux session Condor runs in
 SESSION := condor
@@ -26,7 +26,7 @@ help:
 	@echo ""
 	@echo "  make setup       - Interactive setup wizard"
 	@echo "  make pick-model  - Choose the AI model Condor thinks with"
-	@echo "  make refresh-codex-bridge - Update the Codex ACP bridge and its bundled CLI"
+	@echo "  make refresh-codex - Update the Codex ACP bridge and its bundled CLI"
 	@echo "  make install     - Setup + install all dependencies"
 	@echo "  make run         - Start Condor in the '$(SESSION)' tmux session"
 	@echo "  make run-fg      - Run in the foreground (debugging)"
@@ -44,7 +44,7 @@ setup:
 pick-model:
 	uv run python -m condor.setup_llm
 
-refresh-codex-bridge:
+refresh-codex:
 	npm install -g @agentclientprotocol/codex-acp@latest
 	npm list -g @agentclientprotocol/codex-acp @openai/codex --depth=1
 	@echo "Start a new Codex session in Condor to use the updated bridge."
