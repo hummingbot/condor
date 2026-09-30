@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 
 import { api } from "@/lib/api";
 
@@ -28,4 +29,23 @@ export function useRelaunch() {
     // banner on screen with no way back.
     retry: true,
   });
+}
+
+/** Refresh an open tab once the relaunched server answers with the new build. */
+export function useReloadAfterRelaunch() {
+  const query = useRelaunch();
+  const sawRequired = useRef(false);
+  const reloaded = useRef(false);
+
+  useEffect(() => {
+    if (!query.isSuccess) return;
+    if (query.data.required) {
+      sawRequired.current = true;
+    } else if (sawRequired.current && !reloaded.current) {
+      reloaded.current = true;
+      window.location.reload();
+    }
+  }, [query.data, query.isSuccess]);
+
+  return query;
 }

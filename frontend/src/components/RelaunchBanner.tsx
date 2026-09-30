@@ -1,7 +1,7 @@
 import { RotateCw } from "lucide-react";
 import { useState } from "react";
 
-import { useRelaunch } from "@/hooks/useRelaunch";
+import { useReloadAfterRelaunch } from "@/hooks/useRelaunch";
 
 /**
  * "You updated; the running Condor is still the old one."
@@ -10,7 +10,7 @@ import { useRelaunch } from "@/hooks/useRelaunch";
  * the top of its own process tree, and re-execing races whatever started it
  * into a second copy on the same port (`condor/updates/run.py`). What that
  * trade buys is safety; what it costs is a window where the dashboard bundle in
- * the browser is newer than the API answering it. This strip is what makes that
+ * an open tab is older than the updated files on disk. This strip makes that
  * window legible instead of just weird, so it rides above every page rather
  * than living in Settings where only the person who ran the update would see it.
  *
@@ -19,7 +19,7 @@ import { useRelaunch } from "@/hooks/useRelaunch";
  * nobody is told about any more.
  */
 export function RelaunchBanner() {
-  const { data } = useRelaunch();
+  const { data } = useReloadAfterRelaunch();
   const [showHow, setShowHow] = useState(false);
 
   if (!data?.required) return null;
