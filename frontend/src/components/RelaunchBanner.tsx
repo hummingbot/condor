@@ -1,5 +1,5 @@
 import { RotateCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useRelaunch } from "@/hooks/useRelaunch";
 import { isForbidden } from "@/lib/admin-api";
@@ -42,12 +42,61 @@ type Relaunch = {
 };
 
 /**
- * Gate only. The countdown lives in `RelaunchStrip`, which is mounted the
- * moment a relaunch becomes required — so its opening phase is its *initial*
- * state rather than something an effect has to set after the first render.
+ * Reload at most once per page.
+ *
+ * Two independent things can conclude the same relaunch — the fast poll the
+ * initiating tab runs, and the shared query every tab is already polling — and
+ * whichever arrives first is right. The loser must not then reload the page it
+ * just replaced.
+ */
+let reloaded = false;
+
+function reloadOnce() {
+  if (reloaded) return;
+  reloaded = true;
+  window.location.reload();
+}
+
+/**
+ * Pick up the new bundle in a tab that did not ask for the relaunch.
+ *
+ * `RelaunchStrip` only reloads the tab it was driven from: the countdown and
+ * the button both live there, and the poll starts when one of them fires. Every
+ * other open tab — a second admin's, one that pressed Cancel, one whose seat
+ * cannot restart at all, or any tab at all when the relaunch came from
+ * Telegram's button or a `make restart` on the host — would instead watch
+ * `required` go false, unmount the strip, and carry on serving the bundle it
+ * booted with, with nothing left on screen to say so.
+ *
+ * `required` going true → false is the signal, and it is exact: the flag is a
+ * process global set once and never cleared (`condor/updates/run.py`), so the
+ * only process that can answer false is one that never set it. That is the
+ * successor, and the bundle on disk is its own.
+ *
+ * Called above the early return, because the transition to watch for is the
+ * same moment the strip stops being rendered.
+ */
+function useReloadOnRelaunch(required: boolean | undefined) {
+  const sawRequired = useRef(false);
+  useEffect(() => {
+    if (required === undefined) return;
+    if (required) sawRequired.current = true;
+    else if (sawRequired.current) reloadOnce();
+  }, [required]);
+}
+
+/**
+ * Gate, and the one thing that has to outlive the gate.
+ *
+ * The countdown lives in `RelaunchStrip`, which is mounted the moment a
+ * relaunch becomes required — so its opening phase is its *initial* state
+ * rather than something an effect has to set after the first render. The
+ * reload watcher cannot live down there with it: it fires on the transition
+ * that unmounts it.
  */
 export function RelaunchBanner() {
-  const { data } = useRelaunch();
+  const { data, isSuccess } = useRelaunch();
+  useReloadOnRelaunch(isSuccess ? data?.required : undefined);
   if (!data?.required) return null;
   return <RelaunchStrip data={data} />;
 }
@@ -65,9 +114,22 @@ function RelaunchStrip({ data }: { data: Relaunch }) {
     const tick = async () => {
       try {
         const res = await fetch("/api/v1/meta/relaunch", { cache: "no-store" });
+        // Answering is not the signal. SIGTERM only *starts* the shutdown:
+        // uvicorn drains in-flight requests and `teardown()` flushes
+        // persistence, agent loops and MCP children, which routinely outlasts
+        // the first tick here. The dying process answers 200 for all of it, and
+        // reloading against it serves the new bundle — already swapped onto
+        // disk by the build step — from the old API. `required` is the flag
+        // that cannot lie: set once per process and never cleared, so only the
+        // successor answers false.
         if (res.ok) {
-          window.location.reload();
-          return;
+          const body = (await res.json().catch(() => null)) as {
+            required?: boolean;
+          } | null;
+          if (body?.required === false) {
+            reloadOnce();
+            return;
+          }
         }
       } catch {
         // Expected for most of the window — the server is not listening yet.
