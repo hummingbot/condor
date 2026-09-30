@@ -20,7 +20,7 @@ type Data = { required: boolean; from_commit?: string; target_commit?: string };
 let data: Data | undefined;
 
 vi.mock("@/hooks/useRelaunch", () => ({
-  useRelaunch: () => ({ data, isSuccess: data !== undefined }),
+  useReloadAfterRelaunch: () => ({ data, isSuccess: data !== undefined }),
 }));
 
 const relaunch = vi.fn(async () => ({ relaunching: true }));
@@ -81,28 +81,6 @@ afterEach(() => {
   container.remove();
   vi.unstubAllGlobals();
   vi.useRealTimers();
-});
-
-describe("a tab that did not ask for the relaunch", () => {
-  it("reloads when the successor answers, though it never ran the countdown", async () => {
-    data = { required: true };
-    await render();
-    expect(reload).not.toHaveBeenCalled();
-
-    // Somebody else applied it: the other admin's tab, Telegram's button, or a
-    // `make restart` on the host. This tab only ever sees the flag go out.
-    data = { required: false };
-    await render();
-
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not reload on a flag that was false the whole time", async () => {
-    data = { required: false };
-    await render();
-    await render();
-    expect(reload).not.toHaveBeenCalled();
-  });
 });
 
 describe("the tab that did ask", () => {

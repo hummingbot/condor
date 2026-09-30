@@ -1,7 +1,7 @@
 import { RotateCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { useRelaunch } from "@/hooks/useRelaunch";
+import { useReloadAfterRelaunch } from "@/hooks/useRelaunch";
 import { isForbidden } from "@/lib/admin-api";
 import { updatesApi } from "@/lib/updates-api";
 
@@ -58,45 +58,18 @@ function reloadOnce() {
 }
 
 /**
- * Pick up the new bundle in a tab that did not ask for the relaunch.
+ * Gate only. The countdown lives in `RelaunchStrip`, which is mounted the
+ * moment a relaunch becomes required — so its opening phase is its *initial*
+ * state rather than something an effect has to set after the first render.
  *
- * `RelaunchStrip` only reloads the tab it was driven from: the countdown and
- * the button both live there, and the poll starts when one of them fires. Every
- * other open tab — a second admin's, one that pressed Cancel, one whose seat
- * cannot restart at all, or any tab at all when the relaunch came from
- * Telegram's button or a `make restart` on the host — would instead watch
- * `required` go false, unmount the strip, and carry on serving the bundle it
- * booted with, with nothing left on screen to say so.
- *
- * `required` going true → false is the signal, and it is exact: the flag is a
- * process global set once and never cleared (`condor/updates/run.py`), so the
- * only process that can answer false is one that never set it. That is the
- * successor, and the bundle on disk is its own.
- *
- * Called above the early return, because the transition to watch for is the
- * same moment the strip stops being rendered.
- */
-function useReloadOnRelaunch(required: boolean | undefined) {
-  const sawRequired = useRef(false);
-  useEffect(() => {
-    if (required === undefined) return;
-    if (required) sawRequired.current = true;
-    else if (sawRequired.current) reloadOnce();
-  }, [required]);
-}
-
-/**
- * Gate, and the one thing that has to outlive the gate.
- *
- * The countdown lives in `RelaunchStrip`, which is mounted the moment a
- * relaunch becomes required — so its opening phase is its *initial* state
- * rather than something an effect has to set after the first render. The
- * reload watcher cannot live down there with it: it fires on the transition
- * that unmounts it.
+ * `useReloadAfterRelaunch` is the plain query plus the reload every *other*
+ * tab depends on — the second admin's, one that pressed Cancel, one whose seat
+ * cannot restart at all, and all of them when the relaunch came from Telegram
+ * or a `make restart`. It is called here rather than in the strip because the
+ * transition it waits for is the one that stops the strip being rendered.
  */
 export function RelaunchBanner() {
-  const { data, isSuccess } = useRelaunch();
-  useReloadOnRelaunch(isSuccess ? data?.required : undefined);
+  const { data } = useReloadAfterRelaunch();
   if (!data?.required) return null;
   return <RelaunchStrip data={data} />;
 }
