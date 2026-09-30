@@ -188,11 +188,18 @@ def acp_login_state(base: str) -> bool | None:
     return None  # copilot and anything new: no documented on-disk marker
 
 
+def _npx_package(parts: list[str]) -> str:
+    """Package spec after the boolean flags in Condor's npx commands."""
+    return next((part for part in parts[1:] if not part.startswith("-")), "")
+
+
 def install_command(cmd: str) -> str:
     """How to install the CLI behind an ACP command line."""
-    parts = cmd.split()
+    parts = shlex.split(cmd)
     if len(parts) > 1 and parts[0] == "npx":
-        return f"npm install -g {parts[1]}"
+        package = _npx_package(parts)
+        if package:
+            return f"npm install -g {shlex.quote(package)}"
     if parts and parts[0] in _BARE_INSTALL:
         return _BARE_INSTALL[parts[0]]
     return f"install `{cmd.split()[0] if parts else cmd}` and put it on PATH"
@@ -275,11 +282,14 @@ def acp_bridges() -> list[dict]:
     npx_packages = npx_packages_installed()
     out: list[dict] = []
     for base, cmd in ACP_COMMANDS.items():
-        parts = cmd.split()
+        parts = shlex.split(cmd)
         if not parts:
             available = False
         elif parts[0] == "npx":
-            available = parts[1] in npx_packages if len(parts) > 1 else False
+            # A latest tag is resolved online at launch; local presence only
+            # proves the package is installed, not that it is already current.
+            package = _npx_package(parts).removesuffix("@latest")
+            available = package in npx_packages
         else:
             available = shutil.which(parts[0]) is not None
         out.append(

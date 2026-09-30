@@ -154,6 +154,19 @@ def test_acp_bridges_surface_login_state(monkeypatch):
     assert by_key["gemini"]["logged_in"] is False
 
 
+def test_codex_latest_bridge_readiness_parses_flags_and_tag(monkeypatch):
+    package = "@agentclientprotocol/codex-acp"
+    monkeypatch.setattr(readiness, "acp_login_state", lambda base: True)
+    monkeypatch.setattr(readiness, "npx_packages_installed", lambda: {package})
+    bridge = next(row for row in readiness.acp_bridges() if row["agent_key"] == "codex")
+    assert bridge["available"] is True
+    assert bridge["logged_in"] is True
+    assert (
+        readiness.install_command(bridge["command"])
+        == f"npm install -g {package}@latest"
+    )
+
+
 def test_install_command_names_the_package():
     assert readiness.install_command("npx @google/gemini-cli --acp") == (
         "npm install -g @google/gemini-cli"

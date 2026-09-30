@@ -294,7 +294,7 @@ ACP_COMMANDS: dict[str, str] = {
     "claude-acp": "claude-agent-acp",  # model-configurable form: claude-acp:<model>
     "gemini": "npx @google/gemini-cli --acp",
     "copilot": "npx @github/copilot --acp --stdio",
-    "codex": "npx @agentclientprotocol/codex-acp",
+    "codex": "npx --yes --prefer-online @agentclientprotocol/codex-acp@latest",
 }
 
 # Session markers Claude Code exports into the shells it spawns. If the bot was
