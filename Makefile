@@ -6,7 +6,7 @@ export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 # "Entering/Leaving directory" line around every sub-invocation.
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor
+.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor refresh-codex
 
 # tmux session Condor runs in
 SESSION := condor
@@ -24,24 +24,40 @@ endef
 help:
 	@echo "Condor - Available Commands"
 	@echo ""
-	@echo "  make setup       - Interactive setup wizard"
-	@echo "  make pick-model  - Choose the AI model Condor thinks with"
-	@echo "  make install     - Setup + install all dependencies"
-	@echo "  make run         - Start Condor in the '$(SESSION)' tmux session"
-	@echo "  make run-fg      - Run in the foreground (debugging)"
-	@echo "  make logs        - Attach to the session (detach: Ctrl+B then D)"
-	@echo "  make stop        - Stop Condor"
-	@echo "  make restart     - Stop and start again"
-	@echo "  make status      - Is Condor running?"
-	@echo "  make doctor      - Verify dependencies, config, and Hummingbot API access"
-	@echo "  make test        - Run tests"
-	@echo "  make lint        - Run black + isort"
+	@echo "  make setup          - Interactive setup wizard"
+	@echo "  make pick-model     - Choose the AI model Condor thinks with"
+	@echo "  make refresh-codex  - Update the Codex ACP bridge and its bundled CLI"
+	@echo "  make install        - Setup + install all dependencies"
+	@echo "  make run            - Start Condor in the '$(SESSION)' tmux session"
+	@echo "  make run-fg         - Run in the foreground (debugging)"
+	@echo "  make logs           - Attach to the session (detach: Ctrl+B then D)"
+	@echo "  make stop           - Stop Condor"
+	@echo "  make restart        - Stop and start again"
+	@echo "  make status         - Is Condor running?"
+	@echo "  make doctor         - Verify dependencies, config, and Hummingbot API access"
+	@echo "  make test           - Run tests"
+	@echo "  make lint           - Run black + isort"
 
 setup:
 	@chmod +x setup-environment.sh && ./setup-environment.sh
 
 pick-model:
 	uv run python -m condor.setup_llm
+
+refresh-codex:
+	@if ! command -v npm >/dev/null 2>&1; then \
+		export NVM_DIR="$$HOME/.nvm"; \
+		if [ -s "$$NVM_DIR/nvm.sh" ]; then \
+			. "$$NVM_DIR/nvm.sh"; \
+		fi; \
+	fi; \
+	command -v npm >/dev/null 2>&1 || { \
+		echo "npm not found. Install Node.js or configure nvm."; \
+		exit 1; \
+	}; \
+	npm install -g @agentclientprotocol/codex-acp@latest && \
+	npm list -g @agentclientprotocol/codex-acp @openai/codex --depth=1 && \
+	echo "Start a new Codex session in Condor to use the updated bridge."
 
 install: setup
 	uv sync --dev
