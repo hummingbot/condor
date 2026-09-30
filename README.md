@@ -99,6 +99,7 @@ The following applies after **Install Condor**. If you used **Install only Hummi
 - In Telegram, use **`/servers`** for Hummingbot API URLs and auth, **`/keys`** for exchange credentials, and **`/gateway`** for DEX setup (or **`/start`** for the setup shortcuts) so commands like `/portfolio` and `/trade` can reach your stack.
 - If Condor and the API are on **different machines**, install [Tailscale](https://tailscale.com/download) on the Condor host and add the API in **`/servers`** with host **`hummingbot-api`** (not a public IP). See [Secure Connection via Tailscale](#secure-connection-via-tailscale) below.
 - **Check the install:** `make doctor` re-verifies dependencies, `.env`/`config.yml`, the AI model, the dashboard's network binding, Tailscale, and whether every configured Hummingbot API server is actually reachable and authenticating. Run it any time something stops working — it is read-only.
+- **Refresh Codex:** If a newer model fails because the Codex ACP bridge is outdated, run `make refresh-codex-bridge` to update the bridge and its bundled Codex CLI, then start a new Codex session in Condor. Existing sessions keep the bridge they already started.
 - If something fails, see **Troubleshooting** below.
 
 ## Local mode (no Telegram)
