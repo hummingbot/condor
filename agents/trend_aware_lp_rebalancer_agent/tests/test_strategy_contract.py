@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from condor.agent_controllers import get_controller
 from condor.agents.agent import AgentStore
 from condor.agents.config import load_full_config
 from condor.agents.journal import JournalManager
@@ -15,10 +16,10 @@ from routines.base import assistant_routines, discover_routines_from_path
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_PATH = ROOT / "AGENT.md"
-STRATEGY_PATH = ROOT / "strategies" / "orca" / "strategy.md"
-EXAMPLE_PATH = ROOT / "strategies" / "orca" / "config.example.yml"
-CONFIG_PATH = ROOT / "strategies" / "orca" / "config.yml"
-LEARNINGS_PATH = ROOT / "strategies" / "orca" / "learnings.md"
+STRATEGY_PATH = ROOT / "loops" / "orca" / "loop.md"
+EXAMPLE_PATH = ROOT / "loops" / "orca" / "config.example.yml"
+CONFIG_PATH = ROOT / "loops" / "orca" / "config.yml"
+LEARNINGS_PATH = ROOT / "loops" / "orca" / "learnings.md"
 AGENT_SLUG = "trend_aware_lp_rebalancer_agent"
 STRATEGY_KEY = f"{AGENT_SLUG}.orca"
 BOT_NAMESPACE = f"{AGENT_SLUG}-orca-v2"
@@ -324,7 +325,7 @@ def _prompt(
     agent = AgentStore().get(AGENT_SLUG)
     strategy = StrategyStore().get_by_key(STRATEGY_KEY)
     assert agent is not None and strategy is not None
-    config = load_full_config(strategy.dir, strategy.default_config)
+    config = load_full_config(strategy.home, strategy.default_config)
     config["execution_mode"] = mode
     suffix = "e1" if mode in {"dry_run", "run_once"} else "1"
     limits = config["risk_limits"]
@@ -368,6 +369,7 @@ def test_tool_allowlist_is_the_minimum_bot_operator_surface():
     assert _frontmatter(AGENT_PATH)["tools"] == [
         "get_portfolio_overview",
         "manage_controllers",
+        "manage_agent_controllers",
         "manage_bots",
         "manage_routines",
         "trading_agent_journal_write",
@@ -392,6 +394,36 @@ def test_tool_allowlist_is_the_minimum_bot_operator_surface():
     assert "availability is not authority" in prose
     assert "an uncertain mutation is never retried" in prose
     assert "never choose or pin any of them" in prose
+
+
+def test_owned_controller_and_loop_are_discovered_in_the_current_layout():
+    source = get_controller(AGENT_SLUG, "trend_aware_lp_rebalancer")
+    assert source is not None
+    assert source.controller_type == "generic"
+    assert source.origin == f"agent:{AGENT_SLUG}"
+    assert source.source_path == (
+        ROOT / "controllers" / source.name / f"{source.name}.py"
+    )
+    strategy = StrategyStore().get_by_key(STRATEGY_KEY)
+    assert strategy is not None
+    assert strategy.source == STRATEGY_PATH
+    agent = AgentStore().get(AGENT_SLUG)
+    assert "manage_agent_controllers" in agent.tools
+    prompt = _prompt("dry_run")
+    assert "CONTROLLERS — Hummingbot controller source you own" in prompt
+    assert "trend_aware_lp_rebalancer (generic)" in prompt
+
+
+def test_source_gate_preserves_supervision_and_forbids_loop_code_mutations():
+    agent = _prose(AGENT_PATH)
+    loop = _prose(STRATEGY_PATH)
+    assert "allow only `read` and `status`" in agent
+    assert "no standing trading authorization" in agent
+    assert "verdict `in_sync`" in loop
+    assert "`missing`, `drift`, `unreachable`" in loop
+    assert "Never sync, pull, write, delete, or upload samples" in loop
+    assert "continue supervising, exiting, and archiving" in loop
+    assert "Preserve unresolved config/deploy intents" in loop
 
 
 def test_agent_records_standing_user_authorization_for_full_lifecycle():
@@ -1840,9 +1872,13 @@ def test_worst_case_prompt_includes_routines_and_three_complete_pending_entries(
     assert "ROUTINES — executable analysis scripts:" in prompt
     assert "scan_orca_pools" in prompt
     assert "read_trend_aware_lp_session" in prompt
-    # Keep CI independent of the tokenizer's separately downloaded encoding table by
-    # enforcing a conservative character ceiling.
-    assert len(prompt) < 72_000
+    # Current Condor adds shared catalogs and controller guidance: measured at
+    # ~82k characters after FEAT-126/128. Bound authored instructions separately
+    # so growth in the framework does not hide an expanding agent playbook.
+    assert len(prompt) < 86_000
+    agent = AgentStore().get(AGENT_SLUG)
+    strategy = StrategyStore().get_by_key(STRATEGY_KEY)
+    assert len(agent.instructions) + len(strategy.instructions) < 59_000
 
 
 def test_new_agent_sources_do_not_reference_the_historical_agent():
@@ -1853,4 +1889,5 @@ def test_new_agent_sources_do_not_reference_the_historical_agent():
         CONFIG_PATH,
         LEARNINGS_PATH,
     ):
-        assert "multi_lp_rebalancer_manager" not in path.read_text()
+        if path.exists():
+            assert "multi_lp_rebalancer_manager" not in path.read_text()

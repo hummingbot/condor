@@ -469,6 +469,24 @@ budget even when fewer than `max_positions` are selected.
 
 ## Controller config and naming
 
+Before creating a new session config and again before submitting a deployment, check
+the owned controller against the selected server:
+
+```yaml
+tool: manage_agent_controllers
+action: status
+name: trend_aware_lp_rebalancer
+```
+
+Require exactly the expected `generic/trend_aware_lp_rebalancer` entry with server
+verdict `in_sync`. `missing`, `drift`, `unreachable`, an error, or a malformed result
+means `HOLD` for new deployment. Never sync, pull, write, delete, or upload samples
+from this loop; maintenance must resolve the source discrepancy. Preserve unresolved
+config/deploy intents and reconcile them read-only rather than creating a replacement.
+This gate applies only to new deployment: continue supervising, exiting, and archiving
+an existing owned generation using its exact schema-3 telemetry. The server's source
+status cannot establish which class a running bot loaded.
+
 Before the first config mutation, use exactly this read-only controller-schema discovery
 call:
 

@@ -2008,8 +2008,7 @@ def test_real_report_builder_preserves_complete_evidence_and_redacts_secrets(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path))
     reports.reset_last_report_id()
     payload = reader._unavailable_payload(_config(include_archive_record=True), "none")
     payload.update(
@@ -2121,8 +2120,7 @@ def test_real_store_snapshot_truncation_preserves_complete_native_report(
     monkeypatch.setattr(reader, "_get_client", get_client)
     monkeypatch.setattr(reader, "_routine_result", verbose_routine_result)
     monkeypatch.setattr(reader, "_save_report", REAL_SAVE_REPORT)
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     reports.reset_last_report_id()
 
     routine = RoutineInfo(

@@ -1650,8 +1650,7 @@ def test_real_store_snapshot_truncation_preserves_complete_native_report(
     ]
     _install_discovery(monkeypatch, records)
     monkeypatch.setattr(scan, "_save_report", ORIGINAL_SAVE_REPORT)
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(reports, "INDEX_FILE", tmp_path / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     reports.reset_last_report_id()
     monkeypatch.setattr(
         scan,

@@ -5,6 +5,7 @@ agent_key: codex
 tools:
 - get_portfolio_overview
 - manage_controllers
+- manage_agent_controllers
 - manage_bots
 - manage_routines
 - trading_agent_journal_write
@@ -110,6 +111,12 @@ and scanner result. Missing or contradictory evidence makes the affected tick `H
 
 Tool availability is not action authority:
 
+- `manage_agent_controllers`: allow only `read` and `status` for
+  `name="trend_aware_lp_rebalancer"` in your own library. Before a new deployment,
+  require the selected server to report `in_sync`. Controller source writes, sync,
+  pull, deletion, and sample uploads are maintenance operations outside this trading
+  loop and have no standing trading authorization. A source-check failure blocks new
+  deployment, never supervision or the existing owned bot's exit and archive.
 - `get_portfolio_overview`: read refreshed canonical-USDC and SOL balances only for
   new-session funding feasibility. Never infer LP ownership, attributable inventory, or
   PnL.
@@ -145,6 +152,24 @@ versions. Never choose or pin any of them.
 The generic Condor prompt may preload broader tools and suggest a retry. The Strategy
 rules are stricter. Availability is not authority, and an uncertain mutation is never
 retried.
+
+## Controller source and loop
+
+Your authored tick playbook is `loops/orca/loop.md`; its loop ID remains
+`trend_aware_lp_rebalancer_agent.orca`. The controller source of truth is
+`controllers/trend_aware_lp_rebalancer/trend_aware_lp_rebalancer.py`, with its contract
+in the adjacent `CONTROLLER.md`. Hummingbot API holds a synchronized copy; running
+bots retain the code they loaded at deployment. Do not infer a running bot's code or
+terminal state from a successful source comparison.
+
+The generic CONTROLLERS index may suggest syncing missing code. Your trading policy
+instead requires `HOLD` for new deployment until maintenance restores `in_sync`.
+Continue generating each session's complete controller config from fresh selected
+pools and frozen loop config; no static sample authorizes trading.
+
+Condor stop/pause ends or suspends ticks; it does not prove LP closure. Generic
+shutdown policies do not replace this loop's controller-driven exit and terminal
+archive evidence. Do not use them as an alternate LP liquidation path.
 
 ## Mutation outcomes
 
