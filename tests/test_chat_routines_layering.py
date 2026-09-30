@@ -271,3 +271,104 @@ def test_a_chat_authored_routine_keeps_the_general_librarys_source(
 
     found = assistant_routines(None, force_reload=True)
     assert found["authored"].source == "global", found["authored"].source
+
+
+def test_an_authored_routine_can_actually_be_run(monkeypatch, tmp_path):
+    """Listable is not runnable, and the catalog was only half the story.
+
+    `RoutineStore._resolve_routine` starts a run through `get_routine`, which
+    reads `discover_routines`. Adding the chat's local layer to
+    `assistant_routines` alone put the routine in the catalog and left the
+    resolver unable to find it, so starting it failed.
+    """
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "local"))
+
+    from routines.base import assistant_routines, assistant_routines_dir, get_routine
+
+    target = assistant_routines_dir(None)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "brand_new.py").write_text(
+        "from pydantic import BaseModel\n"
+        "class Config(BaseModel):\n"
+        '    """LOCAL-ONLY"""\n'
+        "async def run(config, context):\n"
+        '    return "ok"\n',
+        encoding="utf-8",
+    )
+
+    assert "brand_new" in assistant_routines(None, force_reload=True)
+    resolved = get_routine("brand_new")
+    assert resolved is not None, "in the catalog but the resolver cannot find it"
+    assert resolved.description == "LOCAL-ONLY"
+
+
+def test_a_local_override_runs_instead_of_the_shipped_routine(monkeypatch, tmp_path):
+    """Shadowing that the catalog shows but the resolver ignores is worse than
+    no shadowing: the operator reads one description and runs other code."""
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "local"))
+
+    from routines.base import (
+        assistant_routines,
+        assistant_routines_dir,
+        get_routine,
+        library_dir,
+    )
+
+    shipped = sorted(
+        p.stem for p in library_dir().glob("*.py") if p.stem not in ("__init__", "base")
+    )[0]
+    target = assistant_routines_dir(None)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / f"{shipped}.py").write_text(
+        "from pydantic import BaseModel\n"
+        "class Config(BaseModel):\n"
+        '    """LOCAL-OVERRIDE"""\n'
+        "async def run(config, context):\n"
+        '    return "ok"\n',
+        encoding="utf-8",
+    )
+
+    catalog = assistant_routines(None, force_reload=True)
+    assert catalog[shipped].description == "LOCAL-OVERRIDE"
+    assert (
+        get_routine(shipped).description == "LOCAL-OVERRIDE"
+    ), "the catalog shows the override while the resolver runs the shipped one"
+
+
+def test_a_removed_local_override_stops_shadowing(monkeypatch, tmp_path):
+    """The mtime shortcut restores a root file by stem from the cache.
+
+    Once the chat's local layer can shadow a root stem, that cached entry may
+    be the override — so reusing it resurrects a local routine after its file
+    is gone, and the shipped one stays unreachable.
+    """
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "local"))
+
+    from routines import base
+    from routines.base import assistant_routines_dir, get_routine, library_dir
+
+    monkeypatch.setattr(base, "_routines_cache", None)
+    monkeypatch.setattr(base, "_root_routines_cache", None)
+
+    shipped = sorted(
+        p.stem for p in library_dir().glob("*.py") if p.stem not in ("__init__", "base")
+    )[0]
+    shipped_desc = get_routine(shipped).description
+
+    target = assistant_routines_dir(None)
+    target.mkdir(parents=True, exist_ok=True)
+    override = target / f"{shipped}.py"
+    override.write_text(
+        "from pydantic import BaseModel\n"
+        "class Config(BaseModel):\n"
+        '    """LOCAL-OVERRIDE"""\n'
+        "async def run(config, context):\n"
+        '    return "ok"\n',
+        encoding="utf-8",
+    )
+    assert get_routine(shipped).description == "LOCAL-OVERRIDE"
+
+    override.unlink()
+    assert (
+        get_routine(shipped).description == shipped_desc
+    ), "the deleted override is still being served from cache"
