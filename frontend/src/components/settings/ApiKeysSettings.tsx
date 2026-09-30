@@ -605,7 +605,7 @@ export function ApiKeysSettings() {
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
           Wallets
         </h3>
-        {walletsError ? (
+        {walletsError || walletsData?.gateway_available === false ? (
           <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs text-[var(--color-text-muted)]">
             Gateway is not reachable — start it from the Gateway tab to manage wallets.
           </p>
