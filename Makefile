@@ -45,9 +45,19 @@ pick-model:
 	uv run python -m condor.setup_llm
 
 refresh-codex:
-	npm install -g @agentclientprotocol/codex-acp@latest
-	npm list -g @agentclientprotocol/codex-acp @openai/codex --depth=1
-	@echo "Start a new Codex session in Condor to use the updated bridge."
+	@if ! command -v npm >/dev/null 2>&1; then \
+		export NVM_DIR="$$HOME/.nvm"; \
+		if [ -s "$$NVM_DIR/nvm.sh" ]; then \
+			. "$$NVM_DIR/nvm.sh"; \
+		fi; \
+	fi; \
+	command -v npm >/dev/null 2>&1 || { \
+		echo "npm not found. Install Node.js or configure nvm."; \
+		exit 1; \
+	}; \
+	npm install -g @agentclientprotocol/codex-acp@latest && \
+	npm list -g @agentclientprotocol/codex-acp @openai/codex --depth=1 && \
+	echo "Start a new Codex session in Condor to use the updated bridge."
 
 install: setup
 	uv sync --dev
