@@ -1936,7 +1936,7 @@ def _tool_cards(slug: str, allowlist: list[str]) -> list[ToolCard]:
     ``condor.runtime.toolsets.seat_tools`` is the single place that knows what a
     seat mounts, so the panel asks it rather than re-deriving the rings here.
     It reads the two ``profiles.py`` leaf modules — never ``server.py``, whose
-    import parses argv and builds a ``FastMCP`` singleton.
+    import parses argv and builds a ``MCPServer`` singleton.
     """
     from condor.runtime.toolsets import canonical_tool_name, seat_tools
 

@@ -132,7 +132,7 @@ def _chat_mcp_tools() -> tuple[str, ...]:
     Names come from ``mcp_servers.*.profiles`` for the same reason
     :func:`toolsets.seat_tools` reads them there: those are leaf string modules,
     the definition site of each ring, and importing a ``server.py`` to ask would
-    parse argv and build a ``FastMCP`` singleton as a side effect. The import is
+    parse argv and build a ``MCPServer`` singleton as a side effect. The import is
     function-local to keep that dependency off ``context``'s import path.
 
     The tick seat keeps its own, deliberately narrower list in

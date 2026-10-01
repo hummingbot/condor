@@ -188,7 +188,7 @@ _NULL_SAFE_MODEL_CLS: Any = None
 
 
 def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
-    """Build an OpenAIModel that never sends an assistant ``content: null``.
+    """Build an OpenAIChatModel that never sends an assistant ``content: null``.
 
     Ollama's OpenAI-compatible ``/v1/chat/completions`` endpoint rejects any
     message whose ``content`` is null with ``invalid message content type:
@@ -203,9 +203,9 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
     """
     global _NULL_SAFE_MODEL_CLS
     if _NULL_SAFE_MODEL_CLS is None:
-        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.models.openai import OpenAIChatModel
 
-        class _NullContentSafeOpenAIModel(OpenAIModel):
+        class _NullContentSafeOpenAIChatModel(OpenAIChatModel):
             async def _map_messages(self, *args: Any, **kwargs: Any) -> Any:
                 mapped = await super()._map_messages(*args, **kwargs)
                 for msg in mapped:
@@ -217,7 +217,7 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
                         msg["content"] = ""
                 return mapped
 
-        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIModel
+        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIChatModel
 
     return _NULL_SAFE_MODEL_CLS(model_id, provider=provider)
 

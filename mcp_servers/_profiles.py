@@ -11,10 +11,10 @@ here — say, refusing a mute that would empty a profile — lands on both seats
 once instead of drifting between two copies.
 
 A leaf module on purpose. It must import neither ``server.py`` (importing one
-parses argv and builds a ``FastMCP`` singleton as a side effect) nor anything
+parses argv and builds a ``MCPServer`` singleton as a side effect) nor anything
 that builds one — ``mcp_servers/hummingbot_api/__init__.py`` lazy-loads ``main``
 precisely so that the tables stay reachable without waking a server. Hence the
-``FastMCP`` annotation below is a type-checking import only.
+``MCPServer`` annotation below is a type-checking import only.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, never imported at runtime
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
 
 def parse_profile_flags(default_profile: str) -> tuple[str, tuple[str, ...]]:
@@ -102,7 +102,7 @@ def resolve_profiles(
 
 
 def register_tools(
-    server: FastMCP,
+    server: MCPServer,
     tool_profiles: Mapping[str, tuple],
     profile: str,
     muted: Iterable[str] = (),

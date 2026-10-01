@@ -203,7 +203,7 @@ def test_the_declared_tool_lets_a_model_pass_a_budget():
     from mcp_servers.condor import server
 
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
-    schema = tools["delegate"].inputSchema
+    schema = tools["delegate"].input_schema
 
     assert "timeout_sec" in schema["properties"]
     doc = server.delegate.__doc__ or ""

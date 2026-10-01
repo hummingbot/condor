@@ -128,7 +128,7 @@ def seat_tools(agent_slug: str | None, tick: bool = False) -> list[dict[str, Any
 
     Names come from ``mcp_servers.*.profiles`` rather than from the servers
     themselves on purpose: importing either ``server.py`` parses argv and builds
-    a ``FastMCP`` singleton, neither of which a web request has any business
+    a ``MCPServer`` singleton, neither of which a web request has any business
     doing. ``server.py`` resolves the same names against its own functions at
     import, so a table that drifts fails there, loudly, and not here.
 

@@ -155,12 +155,12 @@ def test_stop_survives_a_lifecycle_task_cancelled_from_outside():
 
 _SERVER_SCRIPT = """
 import os, sys
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 with open(sys.argv[1], "w") as f:
     f.write(str(os.getpid()))
 
-mcp = FastMCP("probe")
+mcp = MCPServer("probe")
 
 @mcp.tool()
 def ping() -> str:
