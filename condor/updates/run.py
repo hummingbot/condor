@@ -1,14 +1,23 @@
 """One update run: its steps, its journal, and who is watching it.
 
-A Condor update ends one step short of running the new code. It used to
-``exec`` the process at the end, and that is the one part of an update Condor
-cannot do safely: it is almost never the top of its own process tree. Started
-through ``make run``, a shell wrapper or a supervisor, re-execing races the
-parent into bringing a *second* Condor up on the same port, against the same
-config and the same Telegram token. So the run stops at the last safe point —
-code on disk, dependencies synced, dashboard rebuilt — records that a relaunch
-is owed (:func:`relaunch_pending`), and lets a human do the one thing a human
-is better placed to do. The surfaces turn that record into a banner.
+A Condor update ends one step short of running the new code: code on disk,
+dependencies synced, dashboard rebuilt, and a record that a relaunch is owed
+(:func:`relaunch_pending`), which the surfaces turn into a banner.
+
+The reason is *when*, not whether. This used to say that exec'ing was the one
+part of an update Condor could not do safely — that, started under ``make
+run``, a shell wrapper or a supervisor, it would race the parent into a second
+Condor on the same port. That is not what the code does.
+:func:`utils.updater.request_restart` raises SIGTERM rather than exec'ing, so
+``teardown()`` runs and ``main()`` execs only once the loop is gone; the exec
+replaces the process image in place, keeping the pid, the parent and the
+controlling terminal, and the listening socket is non-inheritable (PEP 446), so
+there is no second copy and nothing to rebind around.
+
+What a run genuinely cannot choose is the moment. Bots are trading, positions
+are open, and a chat session may be mid-answer — so the run finishes its work
+and hands the timing to whoever is watching. Both surfaces offer the button
+that takes it.
 
 The durable record is still the contract: every step transition is one
 ``atomic_write_json`` to ``data/update_run.json``, and both surfaces read that

@@ -5,12 +5,11 @@ builds it before starting, but /update only pulled, so pulled frontend commits
 kept serving the previous ``frontend/dist``. These tests pin that the build runs
 exactly when it is needed.
 
-The restart is now the admin's, not Condor's: the pipeline ends with the new
-code on disk and a relaunch owed, because exec'ing a process that is almost
-never the top of its own tree races whatever started it into a second copy.
-What survives here is the manual path — ``request_restart`` is still reachable
-from ``/update``'s own button, and it must still go through the normal shutdown
-rather than a bare ``os.execv`` that would skip ``teardown()``.
+The restart is the admin's, not Condor's: the pipeline ends with the new code
+on disk and a relaunch owed, because the moment to interrupt a running bot is
+not the pipeline's to pick. The restart itself is ordinary, and these pin that
+it stays so — ``request_restart`` signals rather than exec'ing, so the shutdown
+runs in full instead of a bare ``os.execv`` skipping ``teardown()``.
 
 The pipeline moved out of the Telegram handler and into :mod:`condor.updates.run`
 (FEAT-070), so these drive the engine instead — but they patch the same
@@ -78,6 +77,12 @@ def _stub_pipeline(**overrides):
         frontend_needs_build=AsyncMock(return_value=True),
         build_frontend=AsyncMock(return_value=(True, "built in 297ms")),
         get_current_branch=AsyncMock(return_value="main"),
+        # Both shell out for real if left alone -- `stash_pop` to git in this
+        # very checkout, `run_doctor` to `uv run python -m condor.doctor` -- so
+        # they are stubbed to defaults the pipeline reads as "nothing to do"
+        # and "healthy". The arms that matter get them overridden per test.
+        stash_pop=AsyncMock(return_value=(True, "Nothing of ours to restore.")),
+        run_doctor=AsyncMock(return_value=(True, "All checks passed.")),
         # Still patched, still never called: the assertion that it is not is the
         # point (see ``test_the_pipeline_ends_without_restarting_the_process``).
         request_restart=AsyncMock(),
@@ -276,6 +281,32 @@ def test_the_pipeline_ends_without_restarting_the_process():
         "old_sha",
         "new_sha",
     )
+
+
+def test_an_unhappy_doctor_warns_without_failing_the_update():
+    """The doctor reads the install; it does not get a vote on whether it landed.
+
+    By the time it runs the code is on disk, dependencies are synced and the
+    bundle is rebuilt. Failing the run on its verdict would report all of that
+    as not having happened, and would withhold the relaunch that is the only
+    way to *reach* the new code — including the fix for whatever the doctor is
+    complaining about. So: warned, succeeded, and still owed.
+    """
+    ok, run, _watcher, _steps = _run_condor(
+        run_doctor=AsyncMock(return_value=(False, "Chrome is not installed."))
+    )
+    assert ok is True
+
+    doctor = next(s for s in run.steps if s.key.endswith(".doctor"))
+    assert doctor.state == update_run.WARNED
+    assert "Chrome" in (doctor.output_tail or "")
+
+    assert not any(s.state == update_run.FAILED for s in run.steps)
+    assert run.error is None
+
+    pending = update_run.relaunch_pending()
+    assert pending is not None, "a warned run still owes the relaunch"
+    assert pending["target_commit"] == "new_sha"
 
 
 def test_update_does_not_build_when_the_frontend_is_untouched():

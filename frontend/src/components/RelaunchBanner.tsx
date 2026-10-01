@@ -233,7 +233,13 @@ function RelaunchStrip({ data }: { data: Relaunch }) {
         </button>
       )}
 
-      {(phase === "cancelled" || phase === "stuck" || phase === "denied") && (
+      {/*
+        Not in `denied`. The button posts the same request to the same seat,
+        which will refuse it the same way — an offer that cannot be taken, under
+        a sentence explaining that it cannot. What that seat has to do instead
+        is in the message, and neither half of it is a button.
+      */}
+      {(phase === "cancelled" || phase === "stuck") && (
         <button
           onClick={() => void relaunchNow()}
           className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-yellow)]/20 px-3 py-1 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-yellow)]/30"

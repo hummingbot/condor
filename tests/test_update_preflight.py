@@ -243,18 +243,33 @@ _DEFAULT_SERVICE = {"image": "hummingbot/hummingbot-api:latest"}
 IMAGE_ID = "sha256:943773e318e028d8a303e7c2237586fbd0d96e3ba46b902b215dc3799264bb54"
 
 
-def _facet(*, service=_DEFAULT_SERVICE, local=LOCAL, remote=REMOTE, image_id=IMAGE_ID):
+def _facet(
+    *,
+    service=_DEFAULT_SERVICE,
+    local=LOCAL,
+    remote=REMOTE,
+    image_id=IMAGE_ID,
+    published=True,
+):
     """``service=None`` stands for ``docker compose config`` having failed.
 
     ``image_id=None`` is "no such image here"; ``local=None`` with an id is an
     image that is present but carries no registry digest — a local build under
     the classic image store.
+
+    ``published`` is what the registry says about the *local* digest, and it is
+    stubbed rather than left to the real call: ``registry_has_digest`` shells
+    out to ``docker buildx imagetools inspect``, so an unstubbed facet test
+    reached the network, took around thirteen seconds, and agreed with its own
+    assertion only because the registry happened to answer one of the two ways
+    that lead to the same branch.
     """
     with patch.multiple(
         "utils.updater",
         compose_service=AsyncMock(return_value=service),
         local_image_identity=AsyncMock(return_value=(image_id, local)),
         registry_image_digest=AsyncMock(return_value=remote),
+        registry_has_digest=AsyncMock(return_value=published),
     ):
         return asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
 
@@ -273,6 +288,43 @@ def test_a_newer_published_image_is_reported_as_behind():
     assert facet.up_to_date is False
     assert (facet.current, facet.available) == ("sha256:4ae0104d", "sha256:62d70399")
     assert facet.behind == 1
+
+
+def test_an_image_the_registry_never_published_is_the_operators_own():
+    """A `make build` over the published tag, as the containerd store leaves it.
+
+    Same tag, a RepoDigest like any other, and a digest the registry has never
+    heard of. Offering to pull here would overwrite the only copy of a build
+    that exists nowhere else.
+    """
+    facet, _ = _facet(published=False)
+    assert facet.up_to_date is True
+    assert facet.behind == 0
+    assert facet.available is None
+    assert facet.error is None
+    assert any("Built locally" in d for d in facet.detail)
+
+
+def test_an_inconclusive_origin_probe_offers_nothing_and_says_why():
+    """Neither "behind" nor "built here" — the probe failed, so neither is known.
+
+    The two wrong answers are not symmetric: one overwrites the operator's
+    build, the other hides a real update. This blocks instead, which is what an
+    ``error`` on the image facet does.
+    """
+    facet, _ = _facet(published=None)
+    assert facet.behind == 0, "an unknown origin is not evidence of being behind"
+    assert facet.up_to_date is False
+    assert facet.error_code == "image-origin-unknown"
+    assert facet.error and "either" in facet.error
+
+
+def test_a_digest_the_registry_does_publish_is_simply_behind():
+    """The ordinary case, pinned explicitly rather than by what the network did."""
+    facet, _ = _facet(published=True)
+    assert facet.up_to_date is False
+    assert facet.behind == 1
+    assert facet.error is None
 
 
 def test_an_unreachable_registry_never_claims_up_to_date():

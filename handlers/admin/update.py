@@ -331,9 +331,10 @@ def _run_keyboard(run) -> InlineKeyboardMarkup | None:
     if run.live:
         return None
     rows = []
-    # Offered, never taken automatically: an in-process restart is an ``execv``
-    # that can race whatever started Condor into a second copy of it, so it is
-    # only ever something the admin chooses (see :mod:`condor.updates.run`).
+    # Offered, never taken automatically. Not because restarting is unsafe --
+    # ``request_restart`` signals rather than exec's, so teardown runs and the
+    # exec replaces this process in place -- but because the moment belongs to
+    # whoever is watching the bots (see :mod:`condor.updates.run`).
     # Only when there is something to apply. The failed-run arm used to be here
     # too, which put a Restart Now button directly beneath the engine's own
     # "dependencies failed -- fix it before restarting": pressing it booted the

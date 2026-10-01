@@ -12,12 +12,14 @@ would come back.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from condor.web.app import _adopt_orphaned_bundle
+import condor.web.app as web_app
+from condor.web.app import _adopt_orphaned_bundle, create_app
 from utils import updater
 
 # ── the build script ──
@@ -148,3 +150,67 @@ def test_an_ordinary_docker_failure_is_passed_through_unchanged():
         updater._explain_docker_failure(1, "no such image", "docker compose pull")
         == "no such image"
     )
+
+
+# ── what a browser gets mid-swap ──
+
+
+def test_a_missing_bundle_answers_503_rather_than_an_opaque_500():
+    """The window the swap narrowed, and what is served inside it.
+
+    ``index.html`` absent is a real state: a build is mid-swap, or one failed.
+    Starlette raises inside ``FileResponse`` on a missing path, which reaches
+    the browser as a 500 indistinguishable from a crashed backend — so a
+    reader reloading during a build was told Condor was broken. 503 says the
+    true thing, and says the API is fine.
+    """
+    dist = Path(web_app.__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    index = dist / "index.html"
+    assets = dist / "assets"
+
+    made_dist = not dist.is_dir()
+    made_assets = not assets.is_dir()
+    if made_dist:
+        dist.mkdir(parents=True)
+    if made_assets:
+        # StaticFiles refuses to mount a directory that is not there.
+        assets.mkdir(parents=True)
+    moved = index.exists()
+    aside = dist / "index.html.pytest-aside"
+    if moved:
+        index.rename(aside)
+    try:
+        with TestClient(create_app()) as client:
+            res = client.get("/settings")
+        assert res.status_code == 503, "a missing bundle is not a server error"
+        assert "rebuilt" in res.text
+        assert "API is unaffected" in res.text
+        # And it must not be cached, or the browser keeps the outage after the
+        # build finishes.
+        assert "no-cache" in res.headers.get("cache-control", "")
+    finally:
+        if moved:
+            aside.rename(index)
+        if made_assets:
+            assets.rmdir()
+        if made_dist:
+            dist.rmdir()
+
+
+# ── and the other place that builds it ──
+
+
+def test_make_build_frontend_swaps_too_rather_than_emptying_in_place():
+    """`make run` and `make restart` stop Condor first; this target does not.
+
+    It is public, and a Condor started any other way — ``run-fg``, a
+    supervisor, a second checkout — is still serving out of ``dist`` while it
+    runs. An in-place build would empty that directory under it, which is
+    exactly C1, reintroduced by the path the updater does not take.
+    """
+    makefile = (Path(__file__).resolve().parent.parent / "Makefile").read_text()
+    target = makefile.split("\nbuild-frontend:", 1)[1].split("\n\n", 1)[0]
+
+    assert "--outDir dist.new" in target, "builds straight into the served dir"
+    assert "rm -rf dist.new" in target, "an interrupted run left a stale scratch dir"
+    assert target.index("mv dist dist.old") < target.index("mv dist.new dist")

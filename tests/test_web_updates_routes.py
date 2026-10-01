@@ -30,6 +30,11 @@ ROUTES = [
     ("post", "/api/v1/updates/start", {"components": ["condor"]}),
     ("get", "/api/v1/updates/run", None),
     ("post", "/api/v1/updates/dismiss", {"run_id": "u-1"}),
+    # Last in the list and first in consequence: this one restarts the process.
+    # It answers 409 for an admin with nothing pending, which is why it belongs
+    # here rather than only in the relaunch tests — the gate runs first, so the
+    # refusal a non-admin gets is 403 either way.
+    ("post", "/api/v1/updates/relaunch", None),
 ]
 
 
@@ -84,7 +89,7 @@ def clean_run_state():
 
 @pytest.mark.parametrize("method,path,body", ROUTES)
 def test_every_route_refuses_a_non_admin(as_user, admin, method, path, body):
-    """A logged-in non-admin gets 403 from all six, not just the mutating ones."""
+    """A logged-in non-admin gets 403 from every one, not just the mutating ones."""
     client = as_user(999)
     res = getattr(client, method)(path, **({"json": body} if body else {}))
     assert res.status_code == 403, f"{method} {path} let a non-admin through"

@@ -371,6 +371,35 @@ async def _image_facet(repo_dir: str, service: str) -> tuple[Facet, str]:
     # tell the two apart (a build gets a RepoDigest too, from the containerd
     # image store). Asking the registry whether it holds *this* digest can.
     published = await updater.registry_has_digest(image_ref, local)
+    if published is None:
+        # Neither answer, and the two it sits between are not symmetric. Call it
+        # a pull and we offer to overwrite what may be an operator's `make
+        # build` -- work that only exists on this host. Call it a build and we
+        # hide a real update behind a silent "up to date". So it is neither:
+        # the probe failed, that is a fact about the probe, and it blocks with
+        # the reason rather than guessing. `registry_has_digest` is deliberate
+        # about this -- None is "could not ask", reached when the registry
+        # answered something other than "not found", typically a rate limit or
+        # an auth error. Retrying is the remedy, and a block says so where an
+        # offer would not.
+        return (
+            Facet(
+                kind="image",
+                current=_short_digest(local),
+                available=_short_digest(remote),
+                up_to_date=False,
+                error_code="image-origin-unknown",
+                error=(
+                    f"{image_ref} is running a digest the published tag does "
+                    "not resolve to, and the registry would not say whether it "
+                    "published that digest — so this is either an out-of-date "
+                    "pull or an image built here, and the two want opposite "
+                    "things. Check again in a moment; if it persists, the "
+                    "registry is rate-limiting or refusing the lookup."
+                ),
+            ),
+            mode,
+        )
     if published is False:
         return (
             Facet(

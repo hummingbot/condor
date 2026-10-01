@@ -27,7 +27,10 @@ const relaunch = vi.fn(async () => ({ relaunching: true }));
 vi.mock("@/lib/updates-api", () => ({
   updatesApi: { relaunch: () => relaunch() },
 }));
-vi.mock("@/lib/admin-api", () => ({ isForbidden: () => false }));
+
+/** Flipped per test: a 403 is the one rejection that means "and it never will". */
+let forbidden = false;
+vi.mock("@/lib/admin-api", () => ({ isForbidden: () => forbidden }));
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -64,6 +67,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   relaunch.mockClear();
+  forbidden = false;
   reload = vi.fn();
   Object.defineProperty(window, "location", {
     configurable: true,
@@ -118,5 +122,41 @@ describe("the tab that did ask", () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a seat that may not restart", () => {
+  it("says so once, and does not poll or reload after the refusal", async () => {
+    // Without this the 403 looked like any other dropped connection: poll,
+    // find the same server still answering, reload, count down, post again —
+    // a reload loop on a seat that can never end it.
+    forbidden = true;
+    relaunch.mockRejectedValueOnce(new Error("Forbidden"));
+    data = { required: true };
+    await render();
+
+    answers({ required: true });
+    await runCountdown();
+    expect(relaunch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("cannot restart Condor");
+  });
+
+  it("offers no Restart now button, which would be refused the same way", async () => {
+    forbidden = true;
+    relaunch.mockRejectedValueOnce(new Error("Forbidden"));
+    data = { required: true };
+    await render();
+    await runCountdown();
+
+    const labels = [...container.querySelectorAll("button")].map(
+      (b) => b.textContent,
+    );
+    expect(labels).not.toContain("Restart now");
   });
 });
