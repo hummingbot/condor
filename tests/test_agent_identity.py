@@ -261,18 +261,18 @@ def test_pydantic_ai_mcp_servers_ask_for_their_instructions():
 
     seen: dict = {}
 
-    def _record(command, **kwargs):
+    def _record(transport, **kwargs):
         seen.update(kwargs)
         raise _Stop  # abort start() before anything is spawned
 
-    original = mcp_module.MCPServerStdio
-    mcp_module.MCPServerStdio = _record
+    original = mcp_module.MCPToolset
+    mcp_module.MCPToolset = _record
     try:
         client = _make_client(mcp_servers=[{"command": "condor-mcp", "args": []}])
         with pytest.raises(_Stop):
             asyncio.run(client.start())
     finally:
-        mcp_module.MCPServerStdio = original
+        mcp_module.MCPToolset = original
 
     assert seen["include_instructions"] is True
 
