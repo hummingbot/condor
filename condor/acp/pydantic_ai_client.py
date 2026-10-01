@@ -16,7 +16,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 from urllib.parse import urlparse
 
 from .client import (
@@ -1069,9 +1069,69 @@ class PydanticAIClient:
         hardcoded list of model ids is a maintenance burden that would go stale
         faster than the providers ship. A model that cannot see says so in its
         own error, which reaches the user as the turn's error (FEAT-098).
+
+        The run itself lives in a task this client owns (:meth:`_run_turn`);
+        this generator only relays its events. A consumer may stop reading at
+        any ``yield`` (a WS drop, a page reload, a cancelled prompt task), and
+        pydantic-ai's run cannot be unwound from a generator that is being
+        closed — its cancel scopes must exit in the task that entered them,
+        the same constraint ``_run_mcp_lifecycle`` exists for. Cancelling the
+        owned task instead ends the turn in order, so the request slot comes
+        back when the reader leaves rather than when this generator is
+        collected (CORR-714).
         """
         assert self._agent is not None, "Client not started"
 
+        # None marks the end of the turn; the task puts it however it ends.
+        events: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
+        turn = asyncio.create_task(self._run_turn(text, images, events))
+        try:
+            while (event := await events.get()) is not None:
+                yield event
+                # The reader is back for more: let the turn take its next step.
+                events.task_done()
+        finally:
+            turn.cancel()
+            try:
+                await turn
+            except asyncio.CancelledError:
+                # The turn's cancellation is ours to absorb -- only re-raise
+                # when it is *this* task being cancelled.
+                if not turn.cancelled():
+                    raise
+
+    async def _run_turn(
+        self,
+        text: str,
+        images: list | None,
+        events: asyncio.Queue[ACPEvent | None],
+    ) -> None:
+        """Run one turn start to finish, handing its events to ``events``.
+
+        Each event waits for the reader to come back for the next one, so the
+        run advances in step with its consumer exactly as it did when
+        ``prompt_stream`` was the run: ``abort_prompt`` still stops it at the
+        step the reader has reached. ``PromptDone`` is the exception — nothing
+        follows it, and waiting there would keep the slot for a reader that
+        (rightly) stops at it.
+        """
+
+        async def emit(event: ACPEvent) -> None:
+            events.put_nowait(event)
+            if not isinstance(event, PromptDone):
+                await events.join()
+
+        try:
+            await self._run_turn_steps(text, images, emit)
+        finally:
+            events.put_nowait(None)
+
+    async def _run_turn_steps(
+        self,
+        text: str,
+        images: list | None,
+        emit: Callable[[ACPEvent], Awaitable[None]],
+    ) -> None:
         # Serialize requests: local inference servers (LM Studio, Ollama) process
         # one request at a time. Without this, concurrent ticks race to connect
         # and the losing ticks ConnectTimeout against a busy server. Cloud
@@ -1111,13 +1171,16 @@ class PydanticAIClient:
 
                         if isinstance(node, ModelRequestNode):
                             elapsed = time.monotonic() - start_time
-                            yield Heartbeat(elapsed_seconds=elapsed)
+                            await emit(Heartbeat(elapsed_seconds=elapsed))
                             for event in self._tool_return_events(node, blocked_ids):
-                                yield event
+                                await emit(event)
 
                         elif isinstance(node, CallToolsNode):
-                            async for event in self._response_events(node, blocked_ids):
-                                yield event
+                            async with contextlib.aclosing(
+                                self._response_events(node, blocked_ids)
+                            ) as response_events:
+                                async for event in response_events:
+                                    await emit(event)
 
                     # Accumulate messages so the next prompt_stream() call sees
                     # this turn's context via message_history. An aborted run
@@ -1129,15 +1192,17 @@ class PydanticAIClient:
                     elif aborted:
                         self._message_history.extend(run.new_messages())
 
-                yield PromptDone(stop_reason="cancelled" if aborted else "end_turn")
+                await emit(
+                    PromptDone(stop_reason="cancelled" if aborted else "end_turn")
+                )
 
             except asyncio.TimeoutError:
-                yield PromptDone(stop_reason="timeout")
+                await emit(PromptDone(stop_reason="timeout"))
             except Exception as e:
                 log.exception("PydanticAI prompt error: %s", e)
                 await self._mark_dead_if_transport_closed(e)
-                yield TextChunk(text=self._format_error(e))
-                yield PromptDone(stop_reason="error")
+                await emit(TextChunk(text=self._format_error(e)))
+                await emit(PromptDone(stop_reason="error"))
 
     @contextlib.asynccontextmanager
     async def _usage_counted(self, run: Any) -> AsyncIterator[None]:
@@ -1146,9 +1211,9 @@ class PydanticAIClient:
         On the way out of the run, not beside the history accumulation: a
         finished run, a stopped one and one that raised all spent their
         requests, and so does one whose consumer walked away mid-answer (a WS
-        drop, a page reload), which closes this generator at a ``yield`` and
-        never reaches the lines after the node loop. The run is still open
-        here, so ``PromptDone`` — yielded after this exits — already sees the
+        drop, a page reload), which cancels the turn at an ``emit`` and never
+        reaches the lines after the node loop. The run is still open
+        here, so ``PromptDone`` — emitted after this exits — already sees the
         turn's tokens.
         """
         try:
