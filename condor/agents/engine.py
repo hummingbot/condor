@@ -647,6 +647,16 @@ class TickEngine:
         risk_state.total_exposure = float(
             self._last_skill_data.get("total_exposure", 0.0) or 0.0
         )
+        # A pending order nothing could price is exposure of unknown size, not
+        # zero: the book cannot size a create, so it refuses them like any
+        # other missing metric while every brake still passes.
+        unpriced = self._last_skill_data.get("unpriced_exposure") or []
+        if unpriced:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                f"no price for pending executor(s) {', '.join(unpriced)}, "
+                "so their exposure is unknown"
+            )
         self._apply_drift_verdict(risk_state, drift_result)
 
         # Hard kill-switch: escalate to an emergency winddown before the soft

@@ -158,6 +158,8 @@ def _quote_size(
     executor reports as filled, and otherwise to 0: it is never returned as-is.
     Summed as exposure, a base figure made 2.9 LTC read as $2.90, so a $0.70
     loss on a ~$200 position read as a 24% drawdown and tripped the kill switch.
+    That 0 means "not priced here", not "no exposure": the agents' executors
+    provider, which has a client, prices such a row at the live price.
     """
     total = float(cfg.get("total_amount_quote") or 0)
     if total > 0:
