@@ -176,7 +176,7 @@ class TrendAwareLPRebalancerConfig(ControllerConfigBase):
         json_schema_extra=IMMUTABLE,
     )
 
-    min_sol_reserve: Decimal = Field(default=Decimal("0.02"), ge=ZERO, json_schema_extra=IMMUTABLE)
+    min_sol_reserve: Decimal = Field(default=Decimal("0.1"), ge=ZERO, json_schema_extra=IMMUTABLE)
     cleanup_min_quote_value: Decimal = Field(default=Decimal("0.01"), ge=ZERO, json_schema_extra=IMMUTABLE)
     rebalance_cooldown_minutes: int = Field(default=5, ge=0, le=1440, json_schema_extra=IMMUTABLE)
     max_consecutive_controller_failures: int = Field(default=3, ge=1, le=10, json_schema_extra=IMMUTABLE)
@@ -729,8 +729,21 @@ class TrendAwareLPRebalancer(ControllerBase):
             (executor.timestamp for executor in self._position_lp_executors(position_id)),
             default=float("-inf"),
         )
+        latest_preparation_timestamp = max(
+            (
+                order.timestamp
+                for order in self._position_order_executors(position_id)
+                if self._order_role(order).startswith(PREPARE_ROLE)
+                and order.is_done
+                and not self._order_failed(order)
+                and self._decimal(order.custom_info.get("executed_amount_base")) > 0
+            ),
+            default=float("-inf"),
+        )
+        # A new preparation starts a new inventory cycle before its LP opens.
+        inventory_cycle_started_at = max(latest_lp_timestamp, latest_preparation_timestamp)
         return any(
-            order.timestamp >= latest_lp_timestamp
+            order.timestamp >= inventory_cycle_started_at
             and order.is_done
             and not self._order_failed(order)
             and self._decimal(order.custom_info.get("executed_amount_base")) > 0
@@ -1275,6 +1288,10 @@ class TrendAwareLPRebalancer(ControllerBase):
 
     def _position_value_quote(self, position_id: str) -> Optional[Decimal]:
         if not self._capital_preflight_passed:
+            return None
+        if self._balance_refresh_required:
+            # Settled swaps or LP operations changed inventory. Wait for fresh
+            # balances before reporting PnL or evaluating profit/loss exits.
             return None
         if not self._ownership_checked_by_position[position_id] or self._ownership_errors[position_id]:
             return None

@@ -26,9 +26,25 @@ before terminal archive. API archive confirmation is a separate step.
 
 ## Configuration contract
 
-The complete session config and fixed defaults are specified in `loops/orca/loop.md`.
-`loops/orca/config.example.yml` configures the Agent loop, not this controller.
-Each deployment gets a unique session-generated config; there are no static styles.
+The complete session config and fixed defaults are specified in
+[`loops/orca/loop.md`](../../loops/orca/loop.md).
+[`loops/orca/config.example.yml`](../../loops/orca/config.example.yml) matches the
+loop's `default_config` and configures the Agent loop. Each deployment gets a unique
+session-generated controller config; there are no static styles.
+
+The Agent copies these values from the current loop config into each deployment.
+The loop example and controller model use the same defaults:
+
+| Loop config | Controller config | Default |
+|---|---|---|
+| `min_sol_reserve` | `min_sol_reserve` | 0.1 SOL |
+| `take_profit_ratio` | `controller_take_profit_ratio` | 0.05 (5%) |
+| `stop_loss_ratio` | `controller_stop_loss_ratio` | 0.05 (5%) |
+| `time_limit_minutes` | `controller_time_limit_minutes` | 720 minutes (12 hours) |
+
+The current loop config supplies the session budget and overrides these defaults
+when the operator sets different values. Controller ratios use fractions, while
+position formation fields ending in `_pct` use percentages.
 
 | Fields | Meaning and constraints |
 |---|---|
@@ -39,13 +55,13 @@ Each deployment gets a unique session-generated config; there are no static styl
 | Position identity | `position_id`, `trading_pair`, `pool_address`, `base_token_mint`, `allocation_pct`; preserve after deployment. |
 | Position formation | `market_trend` (`UP`, `SIDEWAYS`, `DOWN`), `position_width_pct`, `downside_offset_pct`, `rebalance_threshold_pct`; updates configure the next formation, not the active LP. |
 | `lp_sizing_buffer_pct` | Default 2; at least 2 and below 10. |
-| `min_sol_reserve` | Nonnegative SOL reserve; provided by the loop config. |
+| `min_sol_reserve` | Default 0.1 SOL; nonnegative; copied from the current loop config. |
 | `cleanup_min_quote_value` | Default 0.01 USDC. |
 | `rebalance_cooldown_minutes` | Default 5; 0–1440. |
 | `max_consecutive_controller_failures` | Default 3; 1–10. |
 | `failure_retry_backoff_seconds` | Default 30; 0–3600. |
-| `controller_take_profit_ratio`, `controller_stop_loss_ratio` | Positive ratios at most 1; provided by the loop config. |
-| `controller_time_limit_minutes` | Positive integer at most 525600; provided by the loop config. |
+| `controller_take_profit_ratio`, `controller_stop_loss_ratio` | Default 0.05 (5%) each; positive ratios at most 1; copied from the current loop config. |
+| `controller_time_limit_minutes` | Default 720 minutes (12 hours); positive integer at most 525600; copied from the current loop config. |
 | `controller_pnl_grace_period_minutes` | Default 5; strictly below the session time limit. |
 | `exit_requested`, `exit_reason` | Initially false/`none`; operator early exit uses true/`operator`. |
 | `candles_config`, `initial_positions`, `manual_kill_switch` | Loop sends `[]`, `[]`, false; initial inventory adoption is unsupported. |

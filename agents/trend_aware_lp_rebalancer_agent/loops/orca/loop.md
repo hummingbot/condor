@@ -14,13 +14,13 @@ default_config:
   account_name: master_account
   total_amount_quote: 9
   min_positions: 1
-  max_positions: 3
+  max_positions: 10
   min_position_amount_quote: 1
   min_sol_reserve: 0.1
   risk_profile: balanced
   min_pool_tvl_usd: 10000
   min_fee_productivity_bps_per_day: 2
-  candidate_scan_limit: 6
+  candidate_scan_limit: 10
   excluded_base_mints: []
   excluded_pool_addresses: []
   take_profit_ratio: 0.05
@@ -28,7 +28,7 @@ default_config:
   time_limit_minutes: 720
   risk_limits:
     max_position_size_quote: 9
-    max_open_executors: 5
+    max_open_executors: 999
     max_drawdown_pct: -1
     shutdown_drawdown_pct: -1
 default_trading_context: ''
