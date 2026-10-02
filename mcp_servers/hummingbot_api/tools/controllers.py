@@ -8,6 +8,8 @@ configurations, including exploration, modification, and bot deployment.
 import asyncio
 from typing import Any, Literal
 
+from mcp_servers.hummingbot_api.exceptions import ToolError
+
 # Internal/auto-managed fields that should be skipped during schema validation
 _SKIP_FIELDS = {
     "id",
@@ -563,14 +565,23 @@ async def deploy_bot(
     Returns:
         Dictionary containing deployment results
     """
-    result = await client.bot_orchestration.deploy_v2_controllers(
-        instance_name=bot_name,
-        controllers_config=controllers_config,
-        credentials_profile=account_name,
-        max_global_drawdown_quote=max_global_drawdown_quote,
-        max_controller_drawdown_quote=max_controller_drawdown_quote,
-        image=image,
-    )
+    try:
+        result = await client.bot_orchestration.deploy_v2_controllers(
+            instance_name=bot_name,
+            controllers_config=controllers_config,
+            credentials_profile=account_name,
+            max_global_drawdown_quote=max_global_drawdown_quote,
+            max_controller_drawdown_quote=max_controller_drawdown_quote,
+            image=image,
+        )
+    except TimeoutError as exc:
+        raise ToolError(
+            f"Deployment request for bot '{bot_name}' timed out ({type(exc).__name__}). "
+            "Outcome unknown: the API may have created the bot. "
+            "Reconcile this bot's status and controller configs "
+            f"{controllers_config!r} on account '{account_name}' before retrying. "
+            "No deployment retry was attempted."
+        ) from exc
 
     return {
         "bot_name": bot_name,

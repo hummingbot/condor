@@ -616,7 +616,9 @@ async def manage_bots(
     multi-strategy bots with centralized risk management.
 
     Actions:
-    - deploy: Deploy a new bot with controller configurations (requires bot_name + controllers_config)
+    - deploy: Deploy a new bot with controller configurations (requires bot_name + controllers_config).
+      Allows at least 120 seconds for creation. A timeout means the outcome is unknown;
+      reconcile this bot's status/config before attempting another deployment.
     - status: Get status of all active bots (no additional params needed)
     - logs: Get detailed logs for a specific bot (requires bot_name)
     - stop_bot: Stop and archive a bot forever (requires bot_name)
@@ -645,25 +647,26 @@ async def manage_bots(
         config_data: New configuration data (required for update_config). Must include 'controller_type' and 'controller_name'.
         confirm_override: Required True if overwriting existing config in a running bot (update_config only).
     """
-    client = await hummingbot_client.get_client()
-
     if action == "deploy":
         if not bot_name:
             return "Error: 'bot_name' is required for deploy action"
         if not controllers_config:
             return "Error: 'controllers_config' is required for deploy action"
-        result = await controllers_tools.deploy_bot(
-            client=client,
-            bot_name=bot_name,
-            controllers_config=controllers_config,
-            account_name=account_name,
-            max_global_drawdown_quote=max_global_drawdown_quote,
-            max_controller_drawdown_quote=max_controller_drawdown_quote,
-            image=image,
-        )
+        async with hummingbot_client.deployment_client() as client:
+            result = await controllers_tools.deploy_bot(
+                client=client,
+                bot_name=bot_name,
+                controllers_config=controllers_config,
+                account_name=account_name,
+                max_global_drawdown_quote=max_global_drawdown_quote,
+                max_controller_drawdown_quote=max_controller_drawdown_quote,
+                image=image,
+            )
         return result["message"]
 
-    elif action == "status":
+    client = await hummingbot_client.get_client()
+
+    if action == "status":
         result = await bot_management_tools.get_active_bots_status(client)
         return (
             f"Active Bots Status Summary:\n"
