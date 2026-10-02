@@ -68,6 +68,12 @@ export function useLpPositions(server: string | null): {
   label: (pos: LpPosition) => string;
   /** The venue as the pool row names it — a fallback for a missing `provider`. */
   dexId: (pos: LpPosition) => string;
+  /**
+   * The USD price of the position's quote token, or `null` when the pool row
+   * did not carry one — the caller then leaves the figure in quote units rather
+   * than stamping it with a dollar it may not be.
+   */
+  quoteUsd: (pos: LpPosition) => number | null;
   isLoading: boolean;
 } {
   const { data: executors = [], isLoading } = useQuery({
@@ -137,5 +143,13 @@ export function useLpPositions(server: string | null): {
     [pools],
   );
 
-  return { positions, label, dexId, isLoading };
+  // The pool's own `quote_token_price_usd` prices the executor's quote-
+  // denominated figures (SOL on an X-SOL range) in dollars, so the cards need
+  // no rates query of their own. Absent for a pool that did not resolve.
+  const quoteUsd = useMemo(
+    () => (pos: LpPosition) => pools[pos.poolAddress]?.quote_token_price_usd ?? null,
+    [pools],
+  );
+
+  return { positions, label, dexId, quoteUsd, isLoading };
 }

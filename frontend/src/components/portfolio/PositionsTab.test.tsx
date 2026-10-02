@@ -97,6 +97,7 @@ function lpPosition(over: Partial<LpPosition> = {}): LpPosition {
     poolAddress: "Pool123456",
     provider: "meteora",
     pair: "SOL-USDC",
+    quote: "USDC",
     state: "IN_RANGE",
     lowerPrice: 132.1,
     upperPrice: 147.9,
@@ -267,6 +268,16 @@ describe("liquidity", () => {
   it("names an out-of-range position, which is the row the section exists for", async () => {
     await render({ lpPositions: [lpPosition({ state: "OUT_OF_RANGE" })] });
     expect(document.querySelector("[data-lp-row]")!.textContent).toContain("Out of range");
+  });
+
+  it("renders the range's money in the display currency, not a bare dollar", async () => {
+    // valueQuote/feesQuote/pnl are quote-denominated (SOL); the row must run
+    // through the page's rate seam rather than stamp them with a `$`.
+    await render({ lpPositions: [lpPosition()] });
+
+    const row = document.querySelector("[data-lp-row]")!.textContent!;
+    expect(row).toContain("€");
+    expect(row).not.toContain("$");
   });
 });
 
