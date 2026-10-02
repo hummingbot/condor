@@ -1,9 +1,9 @@
 import { ArrowRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { feeAmount, lpStateStyle } from "./lp-position";
+import { lpFees, lpPnl, lpStateStyle, lpValue } from "./lp-position";
 import { useLpPositions } from "@/hooks/useLpPositions";
-import { formatPnl, formatUsd, pnlColor } from "@/lib/formatters";
+import { pnlColor } from "@/lib/formatters";
 
 /**
  * The LP positions you already hold, above the pools you might enter.
@@ -21,7 +21,7 @@ import { formatPnl, formatUsd, pnlColor } from "@/lib/formatters";
  */
 export function LpPositions({ server }: { server: string }) {
   const navigate = useNavigate();
-  const { positions, label, dexId } = useLpPositions(server);
+  const { positions, label, dexId, quoteUsd } = useLpPositions(server);
 
   if (!positions.length) return null;
 
@@ -39,6 +39,7 @@ export function LpPositions({ server }: { server: string }) {
       <div className="flex gap-2 overflow-x-auto p-3">
         {positions.map((pos) => {
           const state = lpStateStyle(pos.state);
+          const rate = quoteUsd(pos);
           return (
             <button
               key={pos.id}
@@ -65,16 +66,16 @@ export function LpPositions({ server }: { server: string }) {
 
               <div className="flex items-baseline justify-between gap-2 text-xs tabular-nums">
                 <span>
-                  {pos.valueQuote === null ? "—" : formatUsd(pos.valueQuote)}
+                  {pos.valueQuote === null ? "—" : lpValue(pos.valueQuote, rate, pos.quote)}
                 </span>
                 <span style={{ color: pnlColor(pos.pnl) }}>
-                  {formatPnl(pos.pnl)}
+                  {lpPnl(pos.pnl, rate, pos.quote)}
                 </span>
               </div>
 
               {pos.feesQuote !== null && (
                 <div className="text-[10px] text-[var(--color-text-muted)]">
-                  {feeAmount(pos.feesQuote)} fees
+                  {lpFees(pos.feesQuote, rate, pos.quote)} fees
                 </div>
               )}
             </button>
