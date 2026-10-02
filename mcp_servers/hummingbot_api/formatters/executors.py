@@ -209,9 +209,17 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
         if realized_buy is not None and realized_sell is not None:
             output += f"Buy Volume: {format_currency(realized_buy)} | Sell Volume: {format_currency(realized_sell)}\n"
 
-    cum_fees = get_field(executor, "cum_fees_quote", default=None)
-    if cum_fees is not None and cum_fees != "N/A":
-        output += f"Cumulative Fees: {format_currency(cum_fees)}\n"
+    # An LP executor's ``cum_fees_quote`` is the on-chain transaction cost, never
+    # its fee income (that is ``custom_info.fees_earned_quote``), so LP has no fallback.
+    executor_type = get_field(executor, "type", "executor_type", default="unknown")
+    if executor_type == "lp_executor":
+        fees_earned = custom_info.get("fees_earned_quote")
+        if fees_earned is not None and fees_earned != "N/A":
+            output += f"Fees Earned: {format_currency(fees_earned)}\n"
+    else:
+        cum_fees = get_field(executor, "cum_fees_quote", default=None)
+        if cum_fees is not None and cum_fees != "N/A":
+            output += f"Fees Paid: {format_currency(cum_fees)}\n"
 
     output += "\n"
 
