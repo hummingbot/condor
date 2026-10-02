@@ -20,6 +20,45 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+async def _price_pending_rows(client: Any, running: list[dict]) -> list[str]:
+    """Value the running rows the row builder could not, at the live price.
+
+    A market order still pending at the next tick reports no entry, no limit
+    price and no fill, so ``build_executor_row`` -- pure, no client -- sizes it
+    at 0. The risk gate priced that same create at the live price before
+    approving it (``condor.agents.risk._planned_amount_quote``); dropping it
+    from the book one tick later let a second create through a position cap the
+    two together exceed. So it is priced here the way the gate priced it.
+
+    Rows are updated in place. Returns the ids that still have no price: their
+    exposure is unknown, not zero, and the caller must say so.
+    """
+    from condor.fetchers.market_data import fetch_current_price
+
+    prices: dict[tuple[str, str], float] = {}
+    unpriced: list[str] = []
+    for row in running:
+        if row.get("amount", 0) > 0:
+            continue
+        try:
+            base = float((row.get("config") or {}).get("amount") or 0)
+        except (TypeError, ValueError):
+            base = 0.0
+        if base <= 0:
+            continue
+        market = (row.get("connector") or "", row.get("pair") or "")
+        if market not in prices:
+            try:
+                prices[market] = float(await fetch_current_price(client, *market) or 0)
+            except (TypeError, ValueError):
+                prices[market] = 0.0
+        if prices[market] > 0:
+            row["amount"] = base * prices[market]
+        else:
+            unpriced.append(row.get("id") or "?")
+    return unpriced
+
+
 class ExecutorsProvider(BaseProvider):
     name = "executors"
     is_core = True
@@ -139,6 +178,13 @@ class ExecutorsProvider(BaseProvider):
                 "concluding this session is break-even."
             )
 
+        unpriced = await _price_pending_rows(client, running)
+        if unpriced:
+            lines.append(
+                f"  ⚠️ No price for pending executor(s) {', '.join(unpriced)} — "
+                "their exposure is unknown, so new positions are refused until "
+                "they fill or a price is available."
+            )
         total_exposure = sum(r.get("amount", 0) for r in running)
 
         return ProviderResult(
@@ -153,6 +199,7 @@ class ExecutorsProvider(BaseProvider):
                 "total_volume": perf.volume,
                 "total_fees": perf.fees,
                 "total_exposure": total_exposure,
+                "unpriced_exposure": unpriced,
                 "open_count": perf.open_count,
                 "closed_count": perf.closed_count,
                 "win_rate": perf.win_rate,
