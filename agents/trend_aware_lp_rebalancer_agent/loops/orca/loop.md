@@ -163,7 +163,7 @@ observation/proposal only. Loop mode may mutate after the live admission checks 
 
 ### Session reader
 
-Run `read_trend_aware_lp_session` exactly once at the start of every tick with:
+Run `read_trend_aware_lp_session` once at the start of every tick with:
 
 - `namespace`: the exact configured namespace root;
 - `account_name`: the expected HAPI account;
@@ -187,6 +187,8 @@ when older resources remain open. Nonmatching namespace/account resources and in
 `[CORE DATA]` are not ownership or conflict evidence. The reader does not choose lifecycle
 state or action.
 Formatted `manage_bots(status)`, logs, reports, and partial names are not substitutes.
+Formation retuning permits one final read for changed formations only;
+never for unresolved mutations.
 
 ### Orca scanner
 
@@ -237,7 +239,7 @@ In loop mode, use this priority order:
 1. Infer mode and validate the frozen config.
 2. Recover the exact generation and complete pending operation from the current-session
    journal.
-3. Run the session reader once and derive one Agent lifecycle state.
+3. Run the session reader once at tick start and derive one Agent lifecycle state.
 4. Reconcile pending work first. A temporary read failure with one known pending identity
    retains that pending state and ends mutation work for the tick. During a known
    formation update, an exact live config that contains the intended update while
@@ -252,6 +254,7 @@ In loop mode, use this priority order:
    the current runtime lacks a proven live instruction channel. Otherwise refresh every
    configured pool, then choose documented adverse-event exit, formation update, or
    `HOLD`. Serious adverse-event exit takes priority over formation retuning.
+   Before a formation intent, apply Formation retuning's final session check.
 7. If `VACANT`, refresh funding, run one admission scan, and either `HOLD` or select
    one complete session.
 8. Only for a selected `VACANT` session, submit one create-only config upsert. Parse the
@@ -735,19 +738,29 @@ value. Its required top-level `FAULTED` state derives `QUARANTINED` with the exi
 
 ## Formation retuning
 
-Every `RUNNING` tick calls one targeted refresh for all configured pools; do not wait
-for cooldown. Controller exit takes priority. If a formation update is unresolved, do
-not send another.
+Refresh all configured pools once per `RUNNING` tick, without cooldown. Exit takes
+priority; unresolved formation updates block new submissions.
 
 Compare `market_trend`, `position_width_pct`, `downside_offset_pct`, and
 `rebalance_threshold_pct` with each position's `formation.next` after Decimal
-normalization. Exact matches cause no config write. For one or more valid changes, start
-from the complete live config returned by the session reader, change only those four
-fields for changed positions, preserve all identities, allocations, policy, defaults, and
-unaffected values, then submit one atomic full-config update.
+normalization. Exact matches cause no config write. For valid changes after scanning,
+run `read_trend_aware_lp_session` again before journaling intent. Use exact current
+namespace, account, generation, config name, and runtime; repeat identity, liveness,
+and schema-3 freshness checks:
 
-Before journaling the update, copy both the exact old four-field values and the intended
-new values for every changed position into `previous_position_formations` and
+- `EXITING` or `EXITED`: follow Canonical shutdown; no formation intent or update.
+- `FAULTED` or identity/ownership/schema conflict: `QUARANTINED`.
+- Missing, stale, invalid, or unavailable evidence without conflict: `HOLD`.
+- `RUNNING` with `exit_requested: true`: `HOLD` awaiting acknowledgment.
+
+Require fresh `RUNNING` and live config `exit_requested: false`. Rebuild from this
+read's complete live config and `formation.next`; change only those four fields and
+preserve all other values. Recompare: matches mean `HOLD` without intent. Otherwise
+journal exact intent and submit one full-config update. No analysis between final read
+and journal/update.
+
+Record this final read's exact old and intended four-field values per changed position
+in `previous_position_formations` and
 `intended_position_formations`. Propagation lag is valid only when telemetry matches those
 recorded previous values exactly; any third value is a schema contradiction.
 

@@ -614,7 +614,7 @@ def _trend_and_formation(
         else base_width
     )
     downside_offset = width * Decimal("0.25") if market_trend == "DOWN" else Decimal(0)
-    threshold = min(max(width * Decimal("0.25"), Decimal("0.25")), Decimal("5"))
+    threshold = min(max(width * Decimal("0.15"), Decimal("0.15")), Decimal("5"))
     result.update(
         {
             "position_width_pct": width,

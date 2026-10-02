@@ -712,16 +712,16 @@ def test_timestamp_overflow_is_contained_per_candidate_and_refresh_row(monkeypat
 @pytest.mark.parametrize(
     ("profile", "change", "history", "width", "offset", "threshold"),
     [
-        ("conservative", "0", ["10"] * 8, Decimal("4"), Decimal("0"), Decimal("1")),
-        ("balanced", "0", ["10"] * 8, Decimal("2"), Decimal("0"), Decimal("0.5")),
-        ("high_yield", "0", ["10"] * 8, Decimal("1"), Decimal("0"), Decimal("0.25")),
+        ("conservative", "0", ["10"] * 8, Decimal("4"), Decimal("0"), Decimal("0.6")),
+        ("balanced", "0", ["10"] * 8, Decimal("2"), Decimal("0"), Decimal("0.3")),
+        ("high_yield", "0", ["10"] * 8, Decimal("1"), Decimal("0"), Decimal("0.15")),
         (
             "balanced",
             "-0.50",
             ["10", "9", "8", "7", "6", "5", "4", "3"],
             Decimal("12"),
             Decimal("3"),
-            Decimal("3"),
+            Decimal("1.8"),
         ),
     ],
 )
@@ -750,9 +750,10 @@ def test_downtrend_widening_is_visible_before_the_profile_maximum_cap():
     assert formation["market_trend"] == "DOWN"
     assert formation["position_width_pct"] == Decimal("3.750")
     assert formation["downside_offset_pct"] == Decimal("0.93750")
+    assert formation["rebalance_threshold_pct"] == Decimal("0.56250")
 
 
-def test_up_and_sideways_use_unskewed_width_and_threshold_max_is_five():
+def test_up_and_sideways_use_unskewed_width_and_max_profile_width():
     sideways, sideways_reason = scan._trend_and_formation(
         _record(change_24h="0", history=["10"] * 8), "balanced"
     )
@@ -784,7 +785,7 @@ def test_up_and_sideways_use_unskewed_width_and_threshold_max_is_five():
             Decimal("12"),
         )
     assert maximum["position_width_pct"] == Decimal("20")
-    assert maximum["rebalance_threshold_pct"] == Decimal("5")
+    assert maximum["rebalance_threshold_pct"] == Decimal("3")
 
 
 def test_admission_technical_gates_and_usdc_orientation(monkeypatch):

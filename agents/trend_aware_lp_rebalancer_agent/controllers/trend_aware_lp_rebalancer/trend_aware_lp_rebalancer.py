@@ -5,6 +5,7 @@ and keeps each allocation's inventory isolated. Executor history is the
 attribution ledger; wallet balances are only a canonical readiness ceiling.
 """
 
+import inspect
 import logging
 import re
 from decimal import Decimal, InvalidOperation
@@ -13,6 +14,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 
 from hummingbot.client.config.config_data_types import BaseClientModel
 from hummingbot.core.data_type.common import MarketDict, TradeType
+from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
@@ -35,6 +37,12 @@ LP_POSITION_REFRESH_INTERVAL_SECONDS = 15.0
 LP_POOL_INFO_REFRESH_INTERVAL_SECONDS = 60.0
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOLANA_ADDRESS = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+# These Gateway codes establish failed execution or rejection before broadcast.
+# Generic FAILED order state and transport/confirmation timeouts do not.
+SWAP_NO_EFFECT_ERROR_CODES = frozenset({
+    "TRANSACTION_FAILED", "SIMULATION_FAILED", "INSUFFICIENT_BALANCE",
+    "SLIPPAGE_EXCEEDED", "NO_ROUTE_FOUND",
+})
 
 
 class MarketTrend(str, Enum):
@@ -308,6 +316,7 @@ class TrendAwareLPRebalancer(ControllerBase):
         self._lp_close_directions: Dict[str, str] = {}
         self._pending_create_ids: set[str] = set()
         self._pending_create_positions: Dict[str, str] = {}
+        self._pending_create_started_at: Dict[str, float] = {}
         self._stop_requested_ids: set[str] = set()
         self._runtime_exit_reason: ExitReason = ExitReason.NONE
         self._controller_started_at = self._now()
@@ -335,6 +344,8 @@ class TrendAwareLPRebalancer(ControllerBase):
         self._gateway_read_failure_count = 0
         self._gateway_read_error: Optional[str] = None
         self._gateway_outage_started_at: Optional[float] = None
+        self._gateway_pending_swap_receipts: Dict[str, Dict] = {}
+        self._gateway_terminal_swap_failures: Dict[str, str] = {}
         self._manual_kill_switch_translated = kill_switch_translated
         self.market_data_provider.initialize_rate_sources(
             [
@@ -346,6 +357,177 @@ class TrendAwareLPRebalancer(ControllerBase):
             self.logger().warning(
                 "Translated manual_kill_switch=true into the controller-native operator exit path"
             )
+
+    def start(self):
+        connector = self.market_data_provider.get_connector(self.config.connector_name)
+        self._install_gateway_polling_guard(connector)
+        super().start()
+
+    def _install_gateway_polling_guard(self, connector):
+        """Guard this connector instance; native swap receipts still publish fills.
+
+        Gateway's status fallback pairs filtered hashes with unfiltered orders and
+        synthesizes swap fills from their NaN market-order prices. Polling one
+        hashed order at a time avoids misassociation; swaps with invalid prices
+        must await the native realized-amount receipt instead of that fallback.
+        Keep the guard for the connector's lifetime, including bot shutdown.
+        """
+        original_poll = getattr(connector, "update_order_status", None)
+        original_failure = getattr(connector, "_handle_operation_failure", None)
+        owner = getattr(original_poll, "_trend_aware_lp_polling_owner", None)
+        if owner is self:
+            return
+        if owner is not None:
+            raise RuntimeError("Gateway polling guard already belongs to another controller")
+        if (
+            not inspect.iscoroutinefunction(original_poll)
+            or not callable(original_failure)
+            or not callable(getattr(connector, "get_order", None))
+        ):
+            raise RuntimeError("Gateway connector does not support the controller polling guard")
+
+        def guarded_failure(order_id, trading_pair, operation_name, error):
+            order = connector.get_order(order_id)
+            if order is not None and order.trade_type != TradeType.RANGE:
+                pending = self._remember_pending_swap(order)
+                code = getattr(error, "code", None)
+                pending["last_error_code"] = code if isinstance(code, str) else "UNCLASSIFIED"
+                # No positive/unknown execution can be retired as a no-effect failure.
+                base = self._decimal(order.executed_amount_base, Decimal("NaN"))
+                quote = self._decimal(order.executed_amount_quote, Decimal("NaN"))
+                if isinstance(code, str) and code in SWAP_NO_EFFECT_ERROR_CODES and base == ZERO and quote == ZERO:
+                    self._gateway_terminal_swap_failures[order_id] = code
+            # Preserve native failure events, bookkeeping, and executor behavior.
+            return original_failure(order_id, trading_pair, operation_name, error)
+
+        async def guarded_poll(tracked_orders):
+            self._reconcile_gateway_swap_receipts(connector)
+            for order in tracked_orders:
+                # LP closes have amount=0, so is_done can be true while OPEN.
+                if not order.is_open:
+                    continue
+                # Native FAILED-state publication may lag its failure callback.
+                if order.client_order_id in self._gateway_terminal_swap_failures:
+                    continue
+                price = self._decimal(order.price, Decimal("NaN"))
+                if order.trade_type != TradeType.RANGE and not price.is_finite():
+                    self._remember_pending_swap(order)
+                    continue
+                if not order.exchange_order_id:
+                    continue
+                await original_poll([order])
+            self._reconcile_gateway_swap_receipts(connector)
+
+        guarded_poll._trend_aware_lp_polling_owner = self
+        connector._handle_operation_failure = guarded_failure
+        connector.update_order_status = guarded_poll
+
+    def _remember_pending_swap(self, order) -> Dict:
+        order_id = order.client_order_id
+        if order_id not in self._gateway_pending_swap_receipts:
+            self.logger().warning(
+                f"Gateway swap {order_id} requires an authoritative outcome; "
+                "status polling will not synthesize a fill. Wallet changes alone do not prove execution."
+            )
+            self._trigger_balance_update()
+            self._gateway_pending_swap_receipts[order_id] = {
+                "order_id": order_id,
+                "trading_pair": order.trading_pair,
+                "trade_type": order.trade_type.name,
+                "transaction_hash": order.exchange_order_id,
+                "first_seen_at": self._now(),
+                "last_error_code": None,
+            }
+        pending = self._gateway_pending_swap_receipts[order_id]
+        if order.exchange_order_id:
+            pending["transaction_hash"] = order.exchange_order_id
+        return pending
+
+    @staticmethod
+    def _valid_swap_amounts(base, quote) -> bool:
+        base = TrendAwareLPRebalancer._decimal(base, Decimal("NaN"))
+        quote = TrendAwareLPRebalancer._decimal(quote, Decimal("NaN"))
+        return base.is_finite() and quote.is_finite() and base > ZERO and quote > ZERO
+
+    def _executor_has_swap_receipt(self, pending: Dict) -> bool:
+        """Use only a completed native receipt for this exact order and controller."""
+        for executor in self._order_executors():
+            if (
+                not executor.is_done or self._order_failed(executor)
+                or getattr(executor, "controller_id", None) != self.config.id
+                or getattr(executor.config, "connector_name", None) != self.config.connector_name
+                or getattr(executor.config, "trading_pair", None) != pending["trading_pair"]
+                or self._position_id_for_order(executor) not in self._positions
+            ):
+                continue
+            receipts = executor.custom_info.get("held_position_orders", [])
+            if not isinstance(receipts, list):
+                continue
+            for receipt in receipts:
+                if not isinstance(receipt, dict):
+                    continue
+                signature = receipt.get("exchange_order_id")
+                if (
+                    receipt.get("client_order_id") == pending["order_id"]
+                    and receipt.get("trading_pair") == pending["trading_pair"]
+                    and receipt.get("trade_type") == pending["trade_type"]
+                    and receipt.get("trade_type") == executor.config.side.name
+                    and receipt.get("last_state") == str(OrderState.FILLED.value)
+                    and isinstance(signature, str) and bool(signature)
+                    and (not pending["transaction_hash"] or signature == pending["transaction_hash"])
+                    and self._valid_swap_amounts(
+                        receipt.get("executed_amount_base"), receipt.get("executed_amount_quote")
+                    )
+                ):
+                    return True
+        return False
+
+    def _reconcile_gateway_swap_receipts(self, connector):
+        """Release after a complete native fill or an authoritative no-effect failure.
+
+        After cache expiry, an exact completed Executor receipt can prove the fill.
+        An absent order or changed wallet balance alone is insufficient: a concurrent
+        LP close can return the same quote token. Missing receipts remain blocked.
+        """
+        for order_id in list(self._gateway_pending_swap_receipts):
+            pending = self._gateway_pending_swap_receipts[order_id]
+            order = connector.get_order(order_id)
+            no_effect = order_id in self._gateway_terminal_swap_failures and (
+                order is None or (
+                    self._decimal(order.executed_amount_base, Decimal("NaN")) == ZERO
+                    and self._decimal(order.executed_amount_quote, Decimal("NaN")) == ZERO
+                )
+            )
+            filled = order is not None and order.current_state == OrderState.FILLED and self._valid_swap_amounts(
+                order.executed_amount_base, order.executed_amount_quote
+            )
+            recorded_fill = order is None and self._executor_has_swap_receipt(pending)
+            if no_effect or filled or recorded_fill:
+                del self._gateway_pending_swap_receipts[order_id]
+                self._trigger_balance_update()
+
+    def _reconcile_pending_creates(self):
+        for executor in self.executors_info:
+            if getattr(executor, "controller_id", None) != self.config.id:
+                continue
+            self._pending_create_ids.discard(executor.id)
+            self._pending_create_positions.pop(executor.id, None)
+            self._pending_create_started_at.pop(executor.id, None)
+
+    def _pending_creation_payload(self) -> List[Dict]:
+        now = self._now()
+        return [
+            {
+                "executor_id": executor_id,
+                "position_id": self._pending_create_positions.get(executor_id),
+                "age_seconds": max(0.0, now - self._pending_create_started_at.get(executor_id, now)),
+                "requires_reconciliation": (
+                    now - self._pending_create_started_at.get(executor_id, now)
+                    >= self.config.failure_retry_backoff_seconds
+                ),
+            }
+            for executor_id in sorted(self._pending_create_ids)
+        ]
 
     def update_config(self, new_config: ControllerConfigBase):
         if not isinstance(new_config, TrendAwareLPRebalancerConfig):
@@ -832,9 +1014,7 @@ class TrendAwareLPRebalancer(ControllerBase):
         return owned
 
     def _needs_manual_close_recovery(self, executor: ExecutorInfo) -> bool:
-        recoverable_terminal = self._lp_failed(executor) or (
-            self._close_retries_exhausted(executor) and executor.id in self._stop_requested_ids
-        )
+        recoverable_terminal = self._lp_failed(executor) or self._close_retries_exhausted(executor)
         return (
             executor.is_done
             and recoverable_terminal
@@ -1007,6 +1187,8 @@ class TrendAwareLPRebalancer(ControllerBase):
         self._trigger_balance_update()
 
     async def update_processed_data(self):
+        self._reconcile_pending_creates()
+        self._latch_configured_exit()
         self._check_restart_history()
         if self._balance_refresh_required:
             self._wallet_bases = dict.fromkeys(self._positions)
@@ -1032,6 +1214,7 @@ class TrendAwareLPRebalancer(ControllerBase):
         balances_refreshed = False
         try:
             connector = self.market_data_provider.get_connector(self.config.connector_name)
+            self._reconcile_gateway_swap_receipts(connector)
             if not await self._register_tokens(connector):
                 return
             recovery_candidate = self._manual_close_recovery_candidate()
@@ -1066,7 +1249,8 @@ class TrendAwareLPRebalancer(ControllerBase):
                     self._ownership_checked_by_position = dict.fromkeys(self._positions, False)
                     self._record_gateway_read_failure("positions_owned", exc)
                     return
-            await self._recover_failed_lp(connector)
+            if not self._gateway_pending_swap_receipts and not self._invalid_swap_receipt():
+                await self._recover_failed_lp(connector)
             if self._gateway_read_backoff_active():
                 return
             if self._balance_refresh_required:
@@ -1287,6 +1471,8 @@ class TrendAwareLPRebalancer(ControllerBase):
         return failures >= self.config.max_consecutive_controller_failures
 
     def _position_value_quote(self, position_id: str) -> Optional[Decimal]:
+        if self._gateway_pending_swap_receipts or self._invalid_swap_receipt(position_id):
+            return None
         if not self._capital_preflight_passed:
             return None
         if self._balance_refresh_required:
@@ -1418,8 +1604,11 @@ class TrendAwareLPRebalancer(ControllerBase):
         return not executor.custom_info.get("position_address") or state in {"NOT_ACTIVE", "OPENING"}
 
     def _latch_configured_exit(self):
-        if self._runtime_exit_reason == ExitReason.NONE and self.config.exit_requested:
-            self._runtime_exit_reason = self.config.exit_reason
+        if self._runtime_exit_reason == ExitReason.NONE:
+            if self.config.exit_requested:
+                self._runtime_exit_reason = self.config.exit_reason
+            elif self._now() - self._controller_started_at >= self.config.controller_time_limit_minutes * 60:
+                self._runtime_exit_reason = ExitReason.TIME_LIMIT
 
     def _effective_exit_reason(self) -> ExitReason:
         self._latch_configured_exit()
@@ -1427,9 +1616,6 @@ class TrendAwareLPRebalancer(ControllerBase):
             return self._runtime_exit_reason
         now = self._now()
         lifetime = now - self._controller_started_at
-        if lifetime >= self.config.controller_time_limit_minutes * 60:
-            self._runtime_exit_reason = ExitReason.TIME_LIMIT
-            return self._runtime_exit_reason
         grace = self.config.controller_pnl_grace_period_minutes * 60
         if lifetime < grace:
             return ExitReason.NONE
@@ -1462,6 +1648,7 @@ class TrendAwareLPRebalancer(ControllerBase):
         )
         self._pending_create_ids.add(config.id)
         self._pending_create_positions[config.id] = position_id
+        self._pending_create_started_at[config.id] = self._now()
         return CreateExecutorAction(controller_id=self.config.id, executor_config=config)
 
     def _position_bounds(
@@ -1518,6 +1705,7 @@ class TrendAwareLPRebalancer(ControllerBase):
         )
         self._pending_create_ids.add(config.id)
         self._pending_create_positions[config.id] = position_id
+        self._pending_create_started_at[config.id] = self._now()
         return CreateExecutorAction(controller_id=self.config.id, executor_config=config)
 
     def _successful_preparation_in_current_generation(self, position_id: str) -> bool:
@@ -1726,9 +1914,22 @@ class TrendAwareLPRebalancer(ControllerBase):
         self._log_session_transition()
         return actions
 
+    def _invalid_swap_receipt(self, position_id: Optional[str] = None) -> Optional[str]:
+        for order in self._order_executors():
+            if position_id is not None and self._position_id_for_order(order) != position_id:
+                continue
+            if not order.is_done or self._order_failed(order):
+                continue
+            amount = self._decimal(order.custom_info.get("executed_amount_base"), Decimal("NaN"))
+            price = self._decimal(order.custom_info.get("average_executed_price"), Decimal("NaN"))
+            if not amount.is_finite() or not price.is_finite() or amount <= ZERO or price <= ZERO:
+                return order.id
+        return None
+
     def _determine_executor_actions(self) -> List[ExecutorAction]:
         """Serialize controller mutations while allowing one live LP per configured pool."""
         self._latch_configured_exit()
+        self._reconcile_pending_creates()
         if not self._tokens_ready:
             self._lifecycle_state = LifecycleState.BLOCKED
             self._readiness_state = ReadinessState.BLOCKED_TOKEN_REGISTRATION
@@ -1737,9 +1938,6 @@ class TrendAwareLPRebalancer(ControllerBase):
             self._lifecycle_state = LifecycleState.RECOVERING
             self._readiness_state = ReadinessState.BLOCKED_OWNERSHIP_UNAVAILABLE
             return []
-        self._pending_create_ids.difference_update(executor.id for executor in self.executors_info)
-        for executor in self.executors_info:
-            self._pending_create_positions.pop(executor.id, None)
         for executor in self._active_lps():
             self._observe_close_direction(executor)
 
@@ -1773,6 +1971,11 @@ class TrendAwareLPRebalancer(ControllerBase):
 
         lp_balance_changed = self._lp_balance_transition_requires_refresh()
         settled_order_changed = self._newly_settled_order_requires_refresh()
+
+        if self._gateway_pending_swap_receipts or self._invalid_swap_receipt():
+            self._lifecycle_state = LifecycleState.RECOVERING
+            self._readiness_state = ReadinessState.WAITING_FOR_SETTLEMENT
+            return []
 
         active_orders = self._active_orders()
         if active_orders:
@@ -2084,6 +2287,14 @@ class TrendAwareLPRebalancer(ControllerBase):
         return "ABSENT"
 
     def _position_error(self, position_id: str) -> Optional[str]:
+        if any(item["position_id"] == position_id and item["requires_reconciliation"]
+               for item in self._pending_creation_payload()):
+            return "EXECUTOR_CREATION_RECONCILIATION_REQUIRED"
+        if self._invalid_swap_receipt(position_id) or any(
+            order.custom_info.get("order_id") in self._gateway_pending_swap_receipts
+            for order in self._position_order_executors(position_id)
+        ):
+            return "SWAP_RECEIPT_UNAVAILABLE"
         if self._restart_quarantined:
             return (
                 "REUSED_CONTROLLER_ID"
@@ -2249,15 +2460,56 @@ class TrendAwareLPRebalancer(ControllerBase):
         manual_retry_at = self._manual_recovery_retry_after.get(executor_id, 0.0) if executor_id else 0.0
         next_retry_at = max(self._gateway_read_retry_after, manual_retry_at)
         manual_error = self._manual_recovery_errors.get(executor_id) if executor_id else None
+        pending_creates = self._pending_creation_payload()
+        invalid_swap_executor_id = self._invalid_swap_receipt()
+        pending_swaps = list(self._gateway_pending_swap_receipts.values())
+        swap_error = next((item["last_error_code"] for item in pending_swaps if item.get("last_error_code")), None)
 
         if (self._fault_reason or "").startswith("manual_recovery_exhausted:"):
             state = "MANUAL_CLOSE_EXHAUSTED"
         elif self._gateway_read_error is not None:
             state = "WAITING_FOR_GATEWAY"
+        elif pending_swaps or invalid_swap_executor_id:
+            state = "WAITING_FOR_SWAP_RECEIPT"
+        elif pending_creates:
+            state = (
+                "EXECUTOR_CREATION_RECONCILIATION_REQUIRED"
+                if any(item["requires_reconciliation"] for item in pending_creates)
+                else "WAITING_FOR_EXECUTOR_ACK"
+            )
         elif executor is not None:
             state = "RECONCILING_POSITION"
         else:
             state = "IDLE"
+
+        exit_blockers = []
+        if self._runtime_exit_reason != ExitReason.NONE:
+            exit_blockers.extend({"kind": "SWAP_RECEIPT", "order_id": item["order_id"],
+                                  "trading_pair": item["trading_pair"]} for item in pending_swaps)
+            exit_blockers.extend({"kind": "EXECUTOR_ACK", "executor_id": item["executor_id"],
+                                  "position_id": item["position_id"]} for item in pending_creates)
+            if invalid_swap_executor_id:
+                exit_blockers.append({"kind": "INVALID_SWAP_RECEIPT", "executor_id": invalid_swap_executor_id})
+            exit_blockers.extend({"kind": "ACTIVE_SWAP", "executor_id": order.id} for order in self._active_orders())
+            exit_blockers.extend({"kind": "LP_SETTLEMENT", "executor_id": lp.id}
+                                 for lp in self._in_flight_lps())
+            exit_blockers.extend({"kind": "LP_OWNERSHIP", "position_id": position_id,
+                                  "ownership_state": self._ownership_state(position_id)}
+                                 for position_id in self._positions
+                                 if self._ownership_state(position_id) != "ABSENT")
+            for position_id in self._positions:
+                base, _ = self._inventory_ledger(position_id)
+                if base > ZERO and (
+                    self._pool_prices[position_id] is None or self._material_base(base, position_id)
+                ):
+                    exit_blockers.append({"kind": "INVENTORY_CLEANUP", "position_id": position_id,
+                                          "base_amount": str(base)})
+            if self._balance_refresh_required:
+                exit_blockers.append({"kind": "BALANCE_REFRESH"})
+            if self._gateway_read_error is not None:
+                exit_blockers.append({"kind": "GATEWAY_READ", "error": self._gateway_read_error})
+            if not self._tokens_ready:
+                exit_blockers.append({"kind": "TOKEN_REGISTRATION"})
 
         return {
             "state": state,
@@ -2265,10 +2517,15 @@ class TrendAwareLPRebalancer(ControllerBase):
             "executor_id": executor_id,
             "manual_close_attempts": self._manual_recovery_attempts.get(executor_id, 0) if executor_id else 0,
             "next_retry_at": next_retry_at if next_retry_at > self._now() else None,
-            "last_error": self._gateway_read_error or manual_error,
+            "last_error": self._gateway_read_error or manual_error or swap_error,
+            "pending_swaps": pending_swaps,
+            "pending_creates": pending_creates,
+            "invalid_swap_executor_id": invalid_swap_executor_id,
+            "exit_blockers": exit_blockers,
         }
 
     def get_custom_info(self) -> dict:
+        self._latch_configured_exit()
         exit_reason = self._runtime_exit_reason
         lifecycle_state = self._session_lifecycle_state(exit_reason)
 

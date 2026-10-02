@@ -76,7 +76,8 @@ the normal diff/impact preview and authorization; never overwrite blindly.
 The trading loop only reads source/status. A successful sync changes the server copy,
 not the class already loaded by a running bot. New bots use the new server source;
 existing bots must finish their controller-owned lifecycle before a planned redeploy.
-Controller behavior tests remain in Hummingbot API.
+Controller lifecycle tests remain in Hummingbot API. Agent-local polling-guard tests
+are in `tests/test_controller_gateway_polling.py` and require a Hummingbot environment.
 
 ## Failure handling
 
@@ -85,3 +86,43 @@ readiness. Stale or malformed telemetry cannot establish lifecycle progress. Amb
 mutations require reconciliation, not resubmission. Controller faults and unresolved
 cleanup require the loop's quarantine/exit handling; stopping Condor ticks or applying
 a generic shutdown policy does not establish LP closure or cleanup.
+
+At startup, this controller installs a polling guard on its bot's Gateway connector
+instance. It polls hashed orders individually and leaves market swaps with non-finite
+order prices to the native realized-amount swap receipt handler. This prevents a peer
+LP confirmation from completing the wrong swap and prevents synthetic NaN fills.
+The connector must belong to this controller; a second controller cannot reuse its
+guard. The guard stays installed during shutdown and does not edit Hummingbot files.
+
+Missing swap receipts report `recovery.state: WAITING_FOR_SWAP_RECEIPT` and
+`recovery.pending_swaps`, block new controller mutations and leave PnL unavailable.
+Fresh wallet balances are readiness/reconciliation evidence, not inferred fills:
+concurrent LP closes can change the same USDC balance. A native `FILLED` order with
+finite positive executed base and quote amounts releases its pending receipt. After
+the connector order cache expires, a completed owned Executor's exact serialized
+order receipt can establish the same outcome; aggregate amounts cannot. Controller,
+connector, pair, side, order ID, and known transaction hash must match.
+
+The guard also observes native operation-failure callbacks. Structured Gateway codes
+`TRANSACTION_FAILED`, `SIMULATION_FAILED`, `INSUFFICIENT_BALANCE`, `SLIPPAGE_EXCEEDED`,
+and `NO_ROUTE_FOUND` release only the exact failed order with zero executed amounts
+and request fresh balances. Native failure handling and retries remain unchanged.
+Timeouts, unclassified errors, malformed amounts, and missing receipts stay blocked;
+error-message text and wallet changes cannot establish a fill or authorize a retry.
+This guard does not repair accounting already contaminated before startup.
+
+Pending Executor creation reports `WAITING_FOR_EXECUTOR_ACK` with exact IDs in
+`recovery.pending_creates`. After `failure_retry_backoff_seconds`, it reports
+`EXECUTOR_CREATION_RECONCILIATION_REQUIRED`. This interval is a diagnostic grace
+period: it never clears the hold or resubmits a create. A matching Executor report
+clears the acknowledgment hold, including when other readiness gates are blocked.
+
+An exhausted autonomous LP close (`hold_reason: close_retries_exhausted`) enters the
+same bounded recovery path as a failed controller-requested close. Recovery checks
+the exact on-chain position and ownership before submitting any close; unavailable
+or conflicting evidence cannot authorize a close.
+
+Operator and controller time-limit exits latch even while settlement is blocked.
+`recovery.exit_blockers` identifies pending orders, creation acknowledgments, active
+Executors, and unresolved ownership. An exit request does not bypass an uncertain
+swap or establish that positions have closed.

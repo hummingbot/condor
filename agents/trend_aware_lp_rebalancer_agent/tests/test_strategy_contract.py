@@ -1490,6 +1490,44 @@ def test_running_formation_refresh_preserves_active_position():
     assert "The update does not change the active LP" in formation
 
 
+def test_formation_update_requires_final_session_check_before_intent():
+    strategy = _prose(STRATEGY_PATH)
+    reader = strategy.split("### Session reader", 1)[1].split("### Orca scanner", 1)[0]
+    tick = strategy.split("## Canonical loop tick", 1)[1].split("## Journal continuity", 1)[0]
+    formation = strategy.split("## Formation retuning", 1)[1].split(
+        "## Controller exit and bot archive", 1
+    )[0]
+
+    assert "exactly once" not in reader
+    assert "Formation retuning permits one final read for changed formations only" in reader
+    assert "never for unresolved mutations." in reader
+    assert "Before a formation intent, apply Formation retuning's final session check." in tick
+
+    recheck = formation.index("run `read_trend_aware_lp_session` again before journaling intent.")
+    rebuild = formation.index("Rebuild from this read's complete live config and `formation.next`")
+    submit = formation.index("Otherwise journal exact intent and submit one full-config update.")
+    assert recheck < rebuild < submit
+    for requirement in (
+        "For valid changes after scanning",
+        "exact current namespace, account, generation, config name, and runtime",
+        "repeat identity, liveness, and schema-3 freshness checks",
+        "`EXITING` or `EXITED`: follow Canonical shutdown; no formation intent or update.",
+        "`FAULTED` or identity/ownership/schema conflict: `QUARANTINED`.",
+        "Missing, stale, invalid, or unavailable evidence without conflict: `HOLD`.",
+        "`RUNNING` with `exit_requested: true`: `HOLD` awaiting acknowledgment.",
+        "Require fresh `RUNNING` and live config `exit_requested: false`.",
+        "preserve all other values",
+        "Recompare: matches mean `HOLD` without intent.",
+        "Record this final read's exact old and intended four-field values per changed position",
+        "No analysis between final read and journal/update.",
+    ):
+        assert requirement in formation
+
+    # Exercise the real Agent/Strategy stores and prompt builder, not a copied prompt.
+    prompt = " ".join(_prompt("loop").split())
+    assert formation in prompt
+
+
 def test_formation_propagation_lag_and_exit_priority_are_exact():
     strategy = _prose(STRATEGY_PATH)
     tick = strategy.split("## Canonical loop tick", 1)[1].split(
