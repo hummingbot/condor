@@ -80,13 +80,11 @@ def test_start_gives_up_on_an_agent_that_never_answers(monkeypatch):
 class _NeverReadyAgent:
     """A pydantic-ai agent whose MCP servers never finish coming up."""
 
-    @contextlib.asynccontextmanager
-    async def _ctx(self):
+    async def __aenter__(self):
         await asyncio.Event().wait()  # never entered
-        yield  # pragma: no cover
 
-    def run_mcp_servers(self):
-        return self._ctx()
+    async def __aexit__(self, *exc_info):  # pragma: no cover
+        return None
 
 
 def test_pydantic_ai_start_gives_up_on_mcp_servers_that_never_come_up(monkeypatch):

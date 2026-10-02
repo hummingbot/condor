@@ -9,7 +9,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_servers._profiles import make_resolver
 from mcp_servers._profiles import register_tools as _register_tools
@@ -66,8 +66,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hummingbot-mcp")
 
-# Initialize FastMCP server
-mcp = FastMCP("hummingbot-mcp")
+# Initialize MCPServer server
+mcp = MCPServer("hummingbot-mcp")
 
 
 # Server Management Tools
@@ -2203,7 +2203,7 @@ async def explore_geckoterminal(
 # The rings themselves — which tool sits in which one, and why — moved to
 # ``profiles.py`` as plain name strings (FEAT-091), because the web process has
 # to read them to draw a switch per tool and cannot import *this* module to ask:
-# importing it parses argv and builds the ``FastMCP`` singleton. Here the names
+# importing it parses argv and builds the ``MCPServer`` singleton. Here the names
 # are resolved back into functions, at import, which is what keeps the table and
 # the functions provably in step.
 
@@ -2219,7 +2219,7 @@ TOOL_PROFILES: dict[str, tuple] = resolve_profiles(globals(), PROFILE_TOOLS)
 
 
 def register_tools(
-    server: FastMCP,
+    server: MCPServer,
     profile: str = DEFAULT_TOOL_PROFILE,
     muted: Iterable[str] = (),
 ) -> None:
@@ -2281,7 +2281,7 @@ async def _run():
         "💡 Use 'configure_server' tool to view or update the API server connection"
     )
 
-    # Run the server with FastMCP
+    # Run the server with MCPServer
     # Connection to API will happen lazily on first tool use
     try:
         await mcp.run_stdio_async()

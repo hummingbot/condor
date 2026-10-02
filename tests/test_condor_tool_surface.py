@@ -168,7 +168,7 @@ def _manage_routines_calls(text: str) -> list[str]:
 def test_no_committed_playbook_targets_a_routine_by_strategy_id():
     """Routines are per-agent: playbooks must say ``agent=``, never the dead alias.
 
-    FastMCP's argument model has no ``extra="forbid"``, so a stray
+    MCPServer's argument model has no ``extra="forbid"``, so a stray
     ``strategy_id=`` is dropped in silence — the owning agent's own tick still
     resolves via CONDOR_AGENT_SLUG while every other seat gets 'routine not
     found'. Nothing but this guard notices the drift.
@@ -315,7 +315,7 @@ def test_the_agent_builder_skill_calls_only_registered_tools():
     """CORR-306: the routing rule sends every agent-building request here.
 
     A skill naming a dead TOOL fails harder than READ-290's dead *parameter*:
-    FastMCP silently drops an unknown kwarg, but an unknown tool name is an
+    MCPServer silently drops an unknown kwarg, but an unknown tool name is an
     error at the host. The skill was migrated to ``manage_agents`` /
     ``manage_loops`` for create/list/start, while its edit-and-repair
     paragraph still said ``update_agent`` / ``delete_agent`` / ``get_agent`` /

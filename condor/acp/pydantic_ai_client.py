@@ -16,7 +16,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 from urllib.parse import urlparse
 
 from .client import (
@@ -32,6 +32,10 @@ from .client import (
 from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
+
+# pydantic-ai 2.x prints an ASCII banner on stderr once per process. Every
+# pydantic-ai import in this module is deferred, so this runs ahead of them all.
+os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 
 # Model prefix → pydantic-ai model string mapping
@@ -65,8 +69,12 @@ _SERVER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 
 # How often the MCP lifecycle task checks its stdio transports for a dead
 # server between shutdown checks (CORR-332). A killed subprocess never raises
-# out of ``run_mcp_servers()``; it only closes the session's streams.
+# out of the agent's context; it only closes the session's streams.
 MCP_TRANSPORT_POLL_SECONDS = 2.0
+
+# How long one liveness ping may take before the server is assumed to be busy
+# rather than gone. A dead transport answers at once, with an error.
+MCP_PING_TIMEOUT_SECONDS = 5.0
 
 
 def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
@@ -188,7 +196,7 @@ _NULL_SAFE_MODEL_CLS: Any = None
 
 
 def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
-    """Build an OpenAIModel that never sends an assistant ``content: null``.
+    """Build an OpenAIChatModel that never sends an assistant ``content: null``.
 
     Ollama's OpenAI-compatible ``/v1/chat/completions`` endpoint rejects any
     message whose ``content`` is null with ``invalid message content type:
@@ -203,9 +211,9 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
     """
     global _NULL_SAFE_MODEL_CLS
     if _NULL_SAFE_MODEL_CLS is None:
-        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.models.openai import OpenAIChatModel
 
-        class _NullContentSafeOpenAIModel(OpenAIModel):
+        class _NullContentSafeOpenAIChatModel(OpenAIChatModel):
             async def _map_messages(self, *args: Any, **kwargs: Any) -> Any:
                 mapped = await super()._map_messages(*args, **kwargs)
                 for msg in mapped:
@@ -217,7 +225,7 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
                         msg["content"] = ""
                 return mapped
 
-        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIModel
+        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIChatModel
 
     return _NULL_SAFE_MODEL_CLS(model_id, provider=provider)
 
@@ -359,20 +367,42 @@ def gated_toolset_cls() -> Any:
     return _GATED_TOOLSET_CLS
 
 
-def _dead_transport(servers: list[Any]) -> str | None:
-    """Label of the first MCP server whose session streams are closed, if any.
+def _server_label(server: Any) -> str:
+    """The command an MCP toolset spawned, for a log line a human can act on."""
+    transport = getattr(getattr(server, "client", None), "transport", None)
+    return getattr(transport, "command", None) or repr(server)
 
-    When an MCP subprocess dies, the stdio reader hits EOF and the MCP
-    session's receive loop closes both of its streams. Nothing raises until
-    the next request (``anyio.ClosedResourceError``), so a closed stream is
-    the only signal there is (CORR-332). ``_closed`` is anyio's memory-stream
-    flag; a server that has not opened its streams reads as healthy.
+
+async def _dead_transport(servers: list[Any]) -> str | None:
+    """Label of the first MCP server whose transport is closed, if any.
+
+    When an MCP subprocess dies nothing raises until the next request, and the
+    toolset goes on reporting itself running and connected — so the only honest
+    signal is to send one (CORR-332). The request is a ``ping``, and what counts
+    is *who* answers it: a dead transport fails it locally with
+    ``CONNECTION_CLOSED``, while a live server answers — with a result, or with
+    a JSON-RPC error of its own (an MCP SDK 2.x server has no ``ping`` method
+    and says so). Any answer from the far side is proof of life.
+
+    A *timeout* is read as healthy on purpose: a server busy inside a slow tool
+    must not be torn down. A server that has not opened its client reads as
+    healthy too.
     """
+    from mcp.types import CONNECTION_CLOSED
+
     for server in servers:
-        for attr in ("_read_stream", "_write_stream"):
-            stream = getattr(server, attr, None)
-            if stream is not None and getattr(stream, "_closed", False):
-                return getattr(server, "command", None) or repr(server)
+        client = getattr(server, "client", None)
+        if client is None:
+            continue
+        try:
+            await asyncio.wait_for(client.ping(), MCP_PING_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            continue  # busy, not dead
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code is not None and code != CONNECTION_CLOSED:
+                continue  # the server answered, if only to refuse
+            return _server_label(server)
     return None
 
 
@@ -381,7 +411,7 @@ class PydanticAIClient:
 
     Mirrors ACPClient's interface: start() → prompt_stream() → stop().
     MCP servers are launched as stdio subprocesses, same as ACP does,
-    but tools are consumed via pydantic-ai's MCPServerStdio integration.
+    but tools are consumed via pydantic-ai's MCPToolset integration.
 
     Model resolution:
       - "ollama:llama3.1"  → uses ollama provider (localhost:11434)
@@ -689,12 +719,13 @@ class PydanticAIClient:
     async def start(self) -> None:
         """Initialize MCP servers and create the pydantic-ai agent."""
         from pydantic_ai import Agent
-        from pydantic_ai.mcp import MCPServerStdio
+        from pydantic_ai.capabilities import PrepareTools
+        from pydantic_ai.mcp import MCPToolset, StdioTransport
 
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
-            # StdioServerParameters requires list[str]; YAML/config may yield ints
+            # StdioTransport requires list[str]; YAML/config may yield ints
             # (e.g. numeric hummingbot passwords) that only surface with pydantic-ai
             # backends (lmstudio:/ollama:/openrouter:), not ACP agents.
             args = [str(a) for a in srv_config.get("args", [])]
@@ -709,11 +740,12 @@ class PydanticAIClient:
                 if isinstance(env_entry, dict):
                     env[str(env_entry["name"])] = str(env_entry["value"])
 
-            mcp_server = MCPServerStdio(
-                command,
-                args=args,
-                env=env,
-                timeout=30,
+            mcp_server = MCPToolset(
+                # keep_alive=False: with the default the subprocess outlives
+                # the agent's context, and every stopped session would leak one
+                # Python process per server.
+                StdioTransport(command, args, env=env, keep_alive=False),
+                init_timeout=30,
                 # pydantic-ai drops a server's ``instructions`` by default; the
                 # ACP host forwards them, so ask for them here too or the condor
                 # server's routing rules never reach a pydantic-ai model.
@@ -724,12 +756,14 @@ class PydanticAIClient:
             self._mcp_servers.append(mcp_server)
 
         model = await self._build_model()
-        prepare = self._prepare_tools if self.allowed_tools else None
+        capabilities = (
+            [PrepareTools(self._prepare_tools)] if self.allowed_tools else None
+        )
         self._agent = Agent(
             model,
             instructions=self.system_prompt or None,
             toolsets=self._gate_toolsets(toolsets),
-            prepare_tools=prepare,
+            capabilities=capabilities,
         )
 
         # Resolve the global semaphore for this server's base URL so all client
@@ -848,7 +882,7 @@ class PydanticAIClient:
         """
         servers = list(self._mcp_servers)
         try:
-            async with self._agent.run_mcp_servers():
+            async with self._agent:
                 self._ready_event.set()
                 while not self._shutdown_event.is_set():
                     with contextlib.suppress(asyncio.TimeoutError):
@@ -856,7 +890,7 @@ class PydanticAIClient:
                             self._shutdown_event.wait(),
                             timeout=MCP_TRANSPORT_POLL_SECONDS,
                         )
-                    dead = _dead_transport(servers)
+                    dead = await _dead_transport(servers)
                     if dead is not None and not self._shutdown_event.is_set():
                         raise ConnectionError(f"MCP server transport closed: {dead}")
         except asyncio.CancelledError as exc:
@@ -884,14 +918,14 @@ class PydanticAIClient:
                 self._lifecycle_error = exc
             self._teardown_after_lifecycle_failure()
 
-    def _mark_dead_if_transport_closed(self, exc: BaseException) -> None:
+    async def _mark_dead_if_transport_closed(self, exc: BaseException) -> None:
         """A turn failed: if an MCP transport is gone, the client is dead.
 
         The prompt usually meets a killed subprocess before the lifecycle
         task's next poll does, so don't leave ``alive`` True in between. The
         lifecycle task still exits on its next poll and closes the servers.
         """
-        dead = _dead_transport(self._mcp_servers)
+        dead = await _dead_transport(list(self._mcp_servers))
         if dead is None or self._lifecycle_error is not None:
             return
         log.error(
@@ -1027,7 +1061,7 @@ class PydanticAIClient:
         Uses pydantic-ai's streaming run with MCP tools.
         Tool calls go through the permission callback for risk checking.
         MCP servers are already running (started in start()), so we
-        call iter() directly without run_mcp_servers().
+        call iter() directly without entering the agent again.
 
         ``images`` become ``BinaryContent`` parts ahead of the text, the same
         order the ACP path uses. Forwarded optimistically: unlike ACP there is
@@ -1035,9 +1069,69 @@ class PydanticAIClient:
         hardcoded list of model ids is a maintenance burden that would go stale
         faster than the providers ship. A model that cannot see says so in its
         own error, which reaches the user as the turn's error (FEAT-098).
+
+        The run itself lives in a task this client owns (:meth:`_run_turn`);
+        this generator only relays its events. A consumer may stop reading at
+        any ``yield`` (a WS drop, a page reload, a cancelled prompt task), and
+        pydantic-ai's run cannot be unwound from a generator that is being
+        closed — its cancel scopes must exit in the task that entered them,
+        the same constraint ``_run_mcp_lifecycle`` exists for. Cancelling the
+        owned task instead ends the turn in order, so the request slot comes
+        back when the reader leaves rather than when this generator is
+        collected (CORR-714).
         """
         assert self._agent is not None, "Client not started"
 
+        # None marks the end of the turn; the task puts it however it ends.
+        events: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
+        turn = asyncio.create_task(self._run_turn(text, images, events))
+        try:
+            while (event := await events.get()) is not None:
+                yield event
+                # The reader is back for more: let the turn take its next step.
+                events.task_done()
+        finally:
+            turn.cancel()
+            try:
+                await turn
+            except asyncio.CancelledError:
+                # The turn's cancellation is ours to absorb -- only re-raise
+                # when it is *this* task being cancelled.
+                if not turn.cancelled():
+                    raise
+
+    async def _run_turn(
+        self,
+        text: str,
+        images: list | None,
+        events: asyncio.Queue[ACPEvent | None],
+    ) -> None:
+        """Run one turn start to finish, handing its events to ``events``.
+
+        Each event waits for the reader to come back for the next one, so the
+        run advances in step with its consumer exactly as it did when
+        ``prompt_stream`` was the run: ``abort_prompt`` still stops it at the
+        step the reader has reached. ``PromptDone`` is the exception — nothing
+        follows it, and waiting there would keep the slot for a reader that
+        (rightly) stops at it.
+        """
+
+        async def emit(event: ACPEvent) -> None:
+            events.put_nowait(event)
+            if not isinstance(event, PromptDone):
+                await events.join()
+
+        try:
+            await self._run_turn_steps(text, images, emit)
+        finally:
+            events.put_nowait(None)
+
+    async def _run_turn_steps(
+        self,
+        text: str,
+        images: list | None,
+        emit: Callable[[ACPEvent], Awaitable[None]],
+    ) -> None:
         # Serialize requests: local inference servers (LM Studio, Ollama) process
         # one request at a time. Without this, concurrent ticks race to connect
         # and the losing ticks ConnectTimeout against a busy server. Cloud
@@ -1071,22 +1165,22 @@ class PydanticAIClient:
                             break
 
                         if isinstance(node, End):
-                            # Final result -- extract text from the result
-                            if hasattr(node, "data") and node.data:
-                                result_data = node.data
-                                if hasattr(result_data, "data"):
-                                    yield TextChunk(text=str(result_data.data))
+                            # Nothing to project: the final text already went
+                            # out as the last CallToolsNode's TextPart.
                             break
 
                         if isinstance(node, ModelRequestNode):
                             elapsed = time.monotonic() - start_time
-                            yield Heartbeat(elapsed_seconds=elapsed)
+                            await emit(Heartbeat(elapsed_seconds=elapsed))
                             for event in self._tool_return_events(node, blocked_ids):
-                                yield event
+                                await emit(event)
 
                         elif isinstance(node, CallToolsNode):
-                            async for event in self._response_events(node, blocked_ids):
-                                yield event
+                            async with contextlib.aclosing(
+                                self._response_events(node, blocked_ids)
+                            ) as response_events:
+                                async for event in response_events:
+                                    await emit(event)
 
                     # Accumulate messages so the next prompt_stream() call sees
                     # this turn's context via message_history. An aborted run
@@ -1098,15 +1192,17 @@ class PydanticAIClient:
                     elif aborted:
                         self._message_history.extend(run.new_messages())
 
-                yield PromptDone(stop_reason="cancelled" if aborted else "end_turn")
+                await emit(
+                    PromptDone(stop_reason="cancelled" if aborted else "end_turn")
+                )
 
             except asyncio.TimeoutError:
-                yield PromptDone(stop_reason="timeout")
+                await emit(PromptDone(stop_reason="timeout"))
             except Exception as e:
                 log.exception("PydanticAI prompt error: %s", e)
-                self._mark_dead_if_transport_closed(e)
-                yield TextChunk(text=self._format_error(e))
-                yield PromptDone(stop_reason="error")
+                await self._mark_dead_if_transport_closed(e)
+                await emit(TextChunk(text=self._format_error(e)))
+                await emit(PromptDone(stop_reason="error"))
 
     @contextlib.asynccontextmanager
     async def _usage_counted(self, run: Any) -> AsyncIterator[None]:
@@ -1115,9 +1211,9 @@ class PydanticAIClient:
         On the way out of the run, not beside the history accumulation: a
         finished run, a stopped one and one that raised all spent their
         requests, and so does one whose consumer walked away mid-answer (a WS
-        drop, a page reload), which closes this generator at a ``yield`` and
-        never reaches the lines after the node loop. The run is still open
-        here, so ``PromptDone`` — yielded after this exits — already sees the
+        drop, a page reload), which cancels the turn at an ``emit`` and never
+        reaches the lines after the node loop. The run is still open
+        here, so ``PromptDone`` — emitted after this exits — already sees the
         turn's tokens.
         """
         try:
@@ -1141,7 +1237,7 @@ class PydanticAIClient:
         try:
             from pydantic_ai.messages import ModelResponse
 
-            ru = run.usage()
+            ru = run.usage
             new_messages = (
                 run.result.new_messages()
                 if run.result is not None
