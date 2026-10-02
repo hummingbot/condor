@@ -71,19 +71,26 @@ export function resolveSymbol(rates: RateTable, currency: DisplayCurrency): stri
 }
 
 /**
- * The symbol of a value that could *not* be converted. It is still in quote
- * units, so it keeps the quote's own symbol — `$` for a quote the dashboard
- * has no symbol for. Relabelling it with the display currency would not be a
- * formatting detail; it would be a wrong number on screen.
+ * How a value that could *not* be converted must be labelled. It is still in
+ * quote units, so it carries the *quote's* own label and never the display
+ * currency's. A quote the dashboard has a symbol for (USDT, BTC, BRL, EUR) —
+ * or a USD-pegged stablecoin, which *is* a dollar — is prefixed with that
+ * symbol. Any other quote (SOL, ETH, …) has no symbol, so it keeps its own
+ * ticker, *suffixed*: a 0.163 SOL range stamped `$0.16` is the mislabelling
+ * this rule exists to prevent, not a rounding detail.
  */
-function quoteSymbol(quote?: string): string {
-  return CURRENCY_SYMBOLS[normalizeQuote(quote) as DisplayCurrency] || "$";
+function quoteLabel(quote?: string): { label: string; prefix: boolean } {
+  const q = normalizeQuote(quote);
+  const symbol = CURRENCY_SYMBOLS[q as DisplayCurrency];
+  if (symbol) return { label: symbol, prefix: true };
+  if (STABLECOINS.has(q)) return { label: "$", prefix: true };
+  return { label: q, prefix: false };
 }
 
 /**
  * `fmt` bound to a rate table and a display currency: converts and labels with
  * the display currency, or leaves the value in quote units under the quote's
- * symbol with the `⚠` marker.
+ * own label (see `quoteLabel`) with the `⚠` marker.
  */
 export function formatWithRate(
   fmt: (val: number, symbol?: string) => string,
@@ -92,8 +99,8 @@ export function formatWithRate(
 ): (val: number, quote?: string) => string {
   return (val: number, quote?: string): string => {
     const rate = rateFor(rates, currency, quote);
-    return rate != null
-      ? fmt(val / rate, CURRENCY_SYMBOLS[currency])
-      : `${fmt(val, quoteSymbol(quote))} ⚠`;
+    if (rate != null) return fmt(val / rate, CURRENCY_SYMBOLS[currency]);
+    const { label, prefix } = quoteLabel(quote);
+    return prefix ? `${fmt(val, label)} ⚠` : `${fmt(val, "")} ${label} ⚠`;
   };
 }
