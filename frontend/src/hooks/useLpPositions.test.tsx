@@ -70,6 +70,20 @@ function Harness() {
   return null;
 }
 
+/** Renders the USD price the hook resolved for each range, in its own order. */
+function PriceProbe() {
+  const { positions, quoteUsd } = useLpPositions("srv");
+  return (
+    <div>
+      {positions.map((p) => (
+        <span key={p.poolAddress} data-pool={p.poolAddress}>
+          {quoteUsd(p) ?? "none"}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 let container: HTMLDivElement;
 let root: Root;
 let client: QueryClient;
@@ -189,5 +203,39 @@ describe("useLpPositions", () => {
 
     await poll([executor("1", "base", "pool-a", 900)]);
     expect(getDexPoolsByAddress).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads a portfolio past 30 ranges in batches, pricing the ones a single request would drop", async () => {
+    // GeckoTerminal takes 30 addresses per request, so 31 ranges must become two
+    // requests — the old code sliced to the first 30 and left the rest unpriced.
+    const many = Array.from({ length: 31 }, (_, i) =>
+      executor(`e${i}`, "solana", `pool-${i}`, 1000 - i),
+    );
+    getExecutors.mockResolvedValue(many);
+    getDexPoolsByAddress.mockImplementation(
+      async (_server: string, _network: string, addresses: string[]) => ({
+        pools: addresses.map((address) => ({ address, quote_token_price_usd: 2.5 })),
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <PriceProbe />
+        </QueryClientProvider>,
+      );
+    });
+    await settle();
+    await settle();
+
+    // No request carries more than 30 addresses, and every range is asked for.
+    const batches = getDexPoolsByAddress.mock.calls.map((c) => (c[2] as string[]).length);
+    expect([...batches].sort((a, b) => a - b)).toEqual([1, 30]);
+    const asked = getDexPoolsByAddress.mock.calls.flatMap((c) => c[2] as string[]);
+    expect(new Set(asked).size).toBe(31);
+
+    // The 31st range — the one the slice dropped — shows its USD price rather
+    // than falling back to quote units.
+    expect(document.querySelector('[data-pool="pool-30"]')?.textContent).toBe("2.5");
   });
 });

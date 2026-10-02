@@ -534,6 +534,7 @@ export function DexPool() {
           <LpPositionBar
             executors={executors}
             currentPrice={currentPrice}
+            quoteUsd={pool.quote_token_price_usd ?? null}
             selectedExecutorId={selectedExecutorId}
             onSelect={(id) => setSelectedExecutorId((prev) => (prev === id ? null : id))}
           />

@@ -22,6 +22,8 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ConsolidatedPosition, ExecutorInfo } from "@/lib/api";
+import { formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { formatWithRate } from "@/lib/rates";
 import type { LpPosition } from "@/components/dex/lp-position";
 import { useLpPositions } from "@/hooks/useLpPositions";
 import { PositionsTab } from "./PositionsTab";
@@ -97,6 +99,7 @@ function lpPosition(over: Partial<LpPosition> = {}): LpPosition {
     poolAddress: "Pool123456",
     provider: "meteora",
     pair: "SOL-USDC",
+    quote: "USDC",
     state: "IN_RANGE",
     lowerPrice: 132.1,
     upperPrice: 147.9,
@@ -132,6 +135,9 @@ interface RenderOpts {
   holds?: ConsolidatedPosition[];
   lpPositions?: LpPosition[];
   isLoading?: boolean;
+  /** Override the euro stand-in to exercise the real rate seam's fallback. */
+  formatValue?: (val: number, quote?: string) => string;
+  formatPnlValue?: (val: number, quote?: string) => string;
 }
 
 async function render(opts: RenderOpts = {}) {
@@ -150,8 +156,8 @@ async function render(opts: RenderOpts = {}) {
             isLoading={opts.isLoading ?? false}
             // Halve the value, so a row that skipped conversion is visible.
             convert={(value) => ({ value: value / 2, converted: true })}
-            formatValue={(val) => fmtValue(val / 2)}
-            formatPnlValue={(val) => fmtPnl(val / 2)}
+            formatValue={opts.formatValue ?? ((val) => fmtValue(val / 2))}
+            formatPnlValue={opts.formatPnlValue ?? ((val) => fmtPnl(val / 2))}
           />
         </MemoryRouter>
       </QueryClientProvider>,
@@ -267,6 +273,31 @@ describe("liquidity", () => {
   it("names an out-of-range position, which is the row the section exists for", async () => {
     await render({ lpPositions: [lpPosition({ state: "OUT_OF_RANGE" })] });
     expect(document.querySelector("[data-lp-row]")!.textContent).toContain("Out of range");
+  });
+
+  it("renders the range's money in the display currency, not a bare dollar", async () => {
+    // valueQuote/feesQuote/pnl are quote-denominated (SOL); the row must run
+    // through the page's rate seam rather than stamp them with a `$`.
+    await render({ lpPositions: [lpPosition()] });
+
+    const row = document.querySelector("[data-lp-row]")!.textContent!;
+    expect(row).toContain("€");
+    expect(row).not.toContain("$");
+  });
+
+  it("labels an unconvertible SOL range with SOL, not a dollar", async () => {
+    // P1: with no rate path for SOL the seam must not stamp the quote-
+    // denominated figure `$` — it keeps the quote's own ticker.
+    const rates = {}; // no path for SOL → the fallback branch
+    await render({
+      lpPositions: [lpPosition({ pair: "TOKEN-SOL", quote: "SOL" })],
+      formatValue: (val, quote) => formatWithRate(formatCurrencyVolume, rates, "EUR")(val, quote),
+      formatPnlValue: (val, quote) => formatWithRate(formatCurrencyPnl, rates, "EUR")(val, quote),
+    });
+
+    const row = document.querySelector("[data-lp-row]")!.textContent!;
+    expect(row).toContain("SOL ⚠");
+    expect(row).not.toContain("$");
   });
 });
 

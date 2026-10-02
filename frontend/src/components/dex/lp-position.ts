@@ -1,5 +1,5 @@
 import { type ExecutorInfo } from "@/lib/api";
-import { formatUsd } from "@/lib/formatters";
+import { formatCurrencyPnl, formatUsd } from "@/lib/formatters";
 
 import { num } from "./format";
 
@@ -28,6 +28,11 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+/** The quote a position's money figures are denominated in — its pair's. */
+export function positionQuote(pair: string): string {
+  return (pair.split("-")[1] || "USDT").trim().toUpperCase();
+}
+
 /**
  * One open LP position, flattened out of the executor that holds it.
  *
@@ -43,6 +48,11 @@ export interface LpPosition {
   poolAddress: string;
   provider: string;
   pair: string;
+  /**
+   * The quote asset the money figures below are denominated in — the pair's
+   * quote, which is also what the executor's `*_quote` fields are measured in.
+   */
+  quote: string;
   /** `IN_RANGE`, `OUT_OF_RANGE`, … as the connector reports it. */
   state: string;
   /** On-chain bounds when the venue reports them, else the requested ones. */
@@ -70,6 +80,7 @@ export function readLpPosition(ex: ExecutorInfo): LpPosition | null {
     poolAddress,
     provider: str(config.lp_provider),
     pair: ex.trading_pair,
+    quote: positionQuote(ex.trading_pair),
     state: str(custom.state),
     lowerPrice: num(custom.lower_price) ?? num(config.lower_price),
     upperPrice: num(custom.upper_price) ?? num(config.upper_price),
@@ -84,6 +95,47 @@ export function readLpPosition(ex: ExecutorInfo): LpPosition | null {
 export function feeAmount(val: number): string {
   if (val !== 0 && Math.abs(val) < 0.01) return `$${val.toPrecision(2)}`;
   return formatUsd(val);
+}
+
+/**
+ * The USD price of one unit of a position's quote token, or `null` when it is
+ * unknown. The /dex surfaces read it off the pool row they already fetch
+ * (`quote_token_price_usd`), so pricing a range costs no rate lookup of its own.
+ */
+export type QuoteUsd = number | null;
+
+/** A quote-denominated amount under the quote's own symbol, rate unknown. */
+function inQuote(amount: number, quote: string): string {
+  const s =
+    amount === 0 ? "0" : amount.toLocaleString("en-US", { maximumSignificantDigits: 4 });
+  return `${s} ${quote}`;
+}
+
+/**
+ * An LP money figure in USD when the quote's dollar price is known, else left in
+ * quote units under the quote's own symbol.
+ *
+ * `total_value_quote`, `fees_earned_quote` and `net_pnl_quote` are all
+ * denominated in the pair's *quote* — SOL on an `X-SOL` range — but the cards
+ * used to prefix every one of them with a `$`. That mislabelled, rather than
+ * merely rounded, the whole figure: a 0.163 SOL range worth about $20 read as
+ * "$0.16". Converting needs the pool's own USD price, which both /dex callers
+ * already hold; when it is missing the number is left in SOL and *labelled*
+ * SOL rather than a dollar it is not.
+ */
+export function lpValue(amount: number, quoteUsd: QuoteUsd, quote: string): string {
+  return quoteUsd != null && quoteUsd > 0 ? formatUsd(amount * quoteUsd) : inQuote(amount, quote);
+}
+
+export function lpPnl(amount: number, quoteUsd: QuoteUsd, quote: string): string {
+  if (quoteUsd != null && quoteUsd > 0) return formatCurrencyPnl(amount * quoteUsd);
+  return (amount >= 0 ? "+" : "") + inQuote(amount, quote);
+}
+
+export function lpFees(amount: number, quoteUsd: QuoteUsd, quote: string): string {
+  return quoteUsd != null && quoteUsd > 0
+    ? feeAmount(amount * quoteUsd)
+    : inQuote(amount, quote);
 }
 
 /** In range is earning; out of range is not, and is the thing worth spotting. */

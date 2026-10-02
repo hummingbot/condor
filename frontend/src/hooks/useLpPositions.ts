@@ -12,8 +12,20 @@ import {
 import { api, type PoolSummary } from "@/lib/api";
 import { isExecutorActive } from "@/lib/formatters";
 
-/** GeckoTerminal's multi-pool endpoint, which the labels come from, caps here. */
-const MAX_LABELLED_POOLS = 30;
+/**
+ * GeckoTerminal takes at most 30 addresses per request, so a larger portfolio is
+ * read as several requests rather than truncated. The backend splits on the same
+ * bound (`fetch_pools_by_addresses`); chunking here too, instead of sending every
+ * address in one `addresses=` list, is what keeps the request URL short.
+ */
+const POOLS_PER_REQUEST = 30;
+
+/** `items` split into consecutive runs of at most `size`. */
+function batches<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 /**
  * The pool-label query key as a *set*, not as a ranking.
@@ -68,6 +80,12 @@ export function useLpPositions(server: string | null): {
   label: (pos: LpPosition) => string;
   /** The venue as the pool row names it — a fallback for a missing `provider`. */
   dexId: (pos: LpPosition) => string;
+  /**
+   * The USD price of the position's quote token, or `null` when the pool row
+   * did not carry one — the caller then leaves the figure in quote units rather
+   * than stamping it with a dollar it may not be.
+   */
+  quoteUsd: (pos: LpPosition) => number | null;
   isLoading: boolean;
 } {
   const { data: executors = [], isLoading } = useQuery({
@@ -100,7 +118,7 @@ export function useLpPositions(server: string | null): {
   // not silently fall back to mint addresses.
   const byNetwork = useMemo(() => {
     const groups: Record<string, string[]> = {};
-    for (const pos of positions.slice(0, MAX_LABELLED_POOLS)) {
+    for (const pos of positions) {
       const list = (groups[pos.network] ??= []);
       if (!list.includes(pos.poolAddress)) list.push(pos.poolAddress);
     }
@@ -111,11 +129,13 @@ export function useLpPositions(server: string | null): {
     queryKey: ["dex-lp-pools", server, lpPoolsKey(byNetwork)],
     queryFn: async () => {
       const entries = await Promise.all(
-        Object.entries(byNetwork).map(([network, addresses]) =>
-          api
-            .getDexPoolsByAddress(server!, network, addresses)
-            .then((r) => r.pools)
-            .catch(() => [] as PoolSummary[]),
+        Object.entries(byNetwork).flatMap(([network, addresses]) =>
+          batches(addresses, POOLS_PER_REQUEST).map((batch) =>
+            api
+              .getDexPoolsByAddress(server!, network, batch)
+              .then((r) => r.pools)
+              .catch(() => [] as PoolSummary[]),
+          ),
         ),
       );
       const map: Record<string, PoolSummary> = {};
@@ -137,5 +157,13 @@ export function useLpPositions(server: string | null): {
     [pools],
   );
 
-  return { positions, label, dexId, isLoading };
+  // The pool's own `quote_token_price_usd` prices the executor's quote-
+  // denominated figures (SOL on an X-SOL range) in dollars, so the cards need
+  // no rates query of their own. Absent for a pool that did not resolve.
+  const quoteUsd = useMemo(
+    () => (pos: LpPosition) => pools[pos.poolAddress]?.quote_token_price_usd ?? null,
+    [pools],
+  );
+
+  return { positions, label, dexId, quoteUsd, isLoading };
 }
