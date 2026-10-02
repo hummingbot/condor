@@ -77,9 +77,19 @@ describe("formatWithRate", () => {
     expect(out).not.toContain("€");
   });
 
-  it("falls back to $ for a quote it has no symbol for", () => {
+  it("keeps a stablecoin's $ even before a rate lands", () => {
+    // USDC has no display symbol of its own, but it *is* a dollar: suffixing
+    // the common X-USDC row "USDC" would only mislabel it the other way.
     const fmt = formatWithRate(formatCurrency, {}, "EUR");
-    expect(fmt(500, "PLN")).toBe(`${formatCurrency(500, "$")} ⚠`);
+    expect(fmt(500, "USDC")).toBe(`${formatCurrency(500, "$")} ⚠`);
+  });
+
+  it("labels a quote it has no symbol for with the quote's own ticker", () => {
+    // 0.163 SOL read `$0.16 ⚠` — a dollar it is not. The ticker goes *after*
+    // the number, where the /dex surfaces already put it.
+    const fmt = formatWithRate(formatCurrency, {}, "EUR");
+    expect(fmt(500, "PLN")).toBe("500.00 PLN ⚠");
+    expect(fmt(0.163, "SOL")).toBe("0.16 SOL ⚠");
   });
 
   it("leaves the unconverted value untouched — only its label changes", () => {
