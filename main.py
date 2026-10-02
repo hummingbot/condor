@@ -1255,6 +1255,14 @@ async def _run_dual(application: Application) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
+    # The boot got this far, so a later crash should take the tmux session with
+    # it again -- otherwise `make status` would report a dead Condor as running.
+    # exec_restart() turned this on so that a failed handover stayed readable;
+    # this is the other half, mirroring what the Makefile does after its probe.
+    from utils.updater import set_tmux_remain_on_exit
+
+    set_tmux_remain_on_exit(False)
+
     # Run uvicorn as a task
     web_task = asyncio.create_task(server.serve())
     stop_task = asyncio.create_task(shutdown_event.wait())

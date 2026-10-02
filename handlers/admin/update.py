@@ -33,6 +33,8 @@ _STEP_GLYPH = {
     "ok": "✓",
     "failed": "✗",
     "skipped": "–",
+    # Ran, did not fail the update, but the output is worth reading.
+    "warned": "!",
 }
 
 
@@ -329,10 +331,15 @@ def _run_keyboard(run) -> InlineKeyboardMarkup | None:
     if run.live:
         return None
     rows = []
-    # Offered, never taken automatically: an in-process restart is an ``execv``
-    # that can race whatever started Condor into a second copy of it, so it is
-    # only ever something the admin chooses (see :mod:`condor.updates.run`).
-    if run.state == "failed" or updates.relaunch_pending() is not None:
+    # Offered, never taken automatically. Not because restarting is unsafe --
+    # ``request_restart`` signals rather than exec's, so teardown runs and the
+    # exec replaces this process in place -- but because the moment belongs to
+    # whoever is watching the bots (see :mod:`condor.updates.run`).
+    # Only when there is something to apply. The failed-run arm used to be here
+    # too, which put a Restart Now button directly beneath the engine's own
+    # "dependencies failed -- fix it before restarting": pressing it booted the
+    # new code against the old venv.
+    if updates.relaunch_pending() is not None:
         rows.append(
             [InlineKeyboardButton("Restart Now", callback_data="admin:update_restart")]
         )

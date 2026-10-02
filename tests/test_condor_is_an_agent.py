@@ -44,20 +44,30 @@ def registry(tmp_path, monkeypatch):
 # ── Carve-out 1: the chat's routine library does not move ──
 
 
-def test_chat_routines_dir_is_the_repo_root_library():
-    """A falsy slug AND ``"condor"`` both resolve the general library.
+def test_the_chat_still_reads_the_repo_root_library():
+    """A falsy slug AND ``"condor"`` both still *read* the general library.
 
     Condor is an ordinary ``agents/`` entry now, so the naive
     ``agents/<slug>/routines`` rule would point the chat at
     ``agents/condor/routines`` — a dir that does not exist, so every routine
-    would vanish from the catalog without a single error.
+    would vanish from the catalog without a single error. That is what this
+    carve-out protects, and it is about **reads**.
+
+    The chat's *write* target did move, to the gitignored local root: writing
+    into the repo-root library meant the chat agent edited files upstream also
+    maintains, which the next update then conflicted on. The shipped root
+    remains the read fallback, so the catalog is as full as it ever was.
     """
-    from routines.base import assistant_routines_dir
+    from routines.base import assistant_routines_dir, assistant_routines_dirs
 
     general = _REPO_ROOT / "routines"
-    assert assistant_routines_dir(None) == general
-    assert assistant_routines_dir("") == general
-    assert assistant_routines_dir(CHAT_SLUG) == general
+    for slug in (None, "", CHAT_SLUG):
+        assert general in assistant_routines_dirs(slug), "the catalog would empty"
+        # And writes land somewhere git has never heard of.
+        assert assistant_routines_dir(slug) != general
+
+    # The guarantee in the terms that actually matter: routines to list.
+    assert list(general.glob("*.py")), "the shipped catalog reads as empty"
 
 
 def test_a_specialist_still_owns_an_isolated_routines_dir():

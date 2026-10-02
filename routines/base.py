@@ -22,6 +22,7 @@ from condor.memory.paths import (
     agent_home_layers,
     shared_routines_roots,
 )
+from condor.paths import local_agents_root
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +42,24 @@ def library_dir() -> Path:
 def assistant_routines_dir(agent_slug: str | None) -> Path:
     """The **writable** routines dir of an assistant — the one it owns.
 
-    There is a single home for the general library — the repo-root ``routines/``,
-    owned by the chat ``condor``. A trading agent / domain expert owns
-    ``<local>/<slug>/routines``.
+    Every assistant writes under the local agent root, the chat included:
 
-    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) → ``routines``
+    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) →
+      ``<local>/condor/routines``
     - trading agent / domain expert (slug) → ``<local>/<slug>/routines``
 
-    The explicit ``"condor"`` carve-out is load-bearing (FEAT-033): Condor is now
-    an ordinary entry under the agent roots, so threading its slug through
-    naively would relocate the general library to ``<slug>/routines`` and empty
-    the catalog — silently, since a missing dir simply lists nothing.
+    The chat used to write into the repo-root ``routines/`` instead, which is
+    tracked and actively maintained upstream (13 files, 48 commits touching them
+    over 60) — so asking the chat agent to improve a shipped routine edited a
+    file upstream also edits, and the next update that touched it raised a
+    dirty-conflict whose escapes were lossy.
+
+    The explicit ``"condor"`` carve-out that remains is still load-bearing
+    (FEAT-033): Condor is an ordinary entry under the agent roots, so threading
+    its slug through naively would relocate the general *library* as well and
+    empty the catalog — silently, since a missing dir simply lists nothing. That
+    is why only the write target moves here, and the shipped root stays as the
+    read fallback in :func:`assistant_routines_dirs`.
 
     This is what an assistant may **write**, not everything it may run: since
     FEAT-038 every assistant also *reads* the shared library, and since FEAT-115
@@ -63,18 +71,21 @@ def assistant_routines_dir(agent_slug: str | None) -> Path:
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return agent_home_layers(agent_slug)[0] / "routines"
-    return _PROJECT_ROOT / "routines"
+    return local_agents_root() / CHAT_SLUG / "routines"
 
 
 def assistant_routines_dirs(agent_slug: str | None) -> tuple[Path, ...]:
     """An assistant's own routine dirs in **read** order: local, then stock.
 
-    The chat's general library is the repo-root ``routines/`` and has no second
-    layer — it is not under either agent root.
+    The chat now has two layers like every other assistant: a writable local one
+    under the agent root, and the shipped ``routines/`` as the read fallback. The
+    fallback is what keeps FEAT-033's carve-out satisfied — the general library
+    stays fully visible, which is the thing that would break silently if the
+    slug were simply threaded through.
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return tuple(home / "routines" for home in agent_home_layers(agent_slug))
-    return (_PROJECT_ROOT / "routines",)
+    return (local_agents_root() / CHAT_SLUG / "routines", _PROJECT_ROOT / "routines")
 
 
 @dataclass
@@ -302,6 +313,11 @@ def check_config_defaults(config_class: type[BaseModel]) -> None:
 
 
 _routines_cache: dict[str, "RoutineInfo"] | None = None
+#: The root library alone, before the shared and local layers merge over it.
+#: Kept apart because the mtime shortcut below restores a *root* file by
+#: stem, and the merged dict may hold a layer that shadowed that stem --
+#: restoring which resurrects an override after its file is gone.
+_root_routines_cache: dict[str, "RoutineInfo"] | None = None
 
 # {stem: mtime} of every file seen on the last scan of routines/ — including
 # files that failed to load, so a broken routine isn't re-executed on every
@@ -446,10 +462,15 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     Returns:
         Dict mapping routine name to RoutineInfo
     """
-    global _routines_cache
+    global _routines_cache, _root_routines_cache
 
-    fresh_start = force_reload or _routines_cache is None
-    prev_routines = {} if fresh_start else _routines_cache
+    # Either being cleared means "rescan": `_routines_cache = None` is the
+    # invalidation every existing caller already uses, and it must keep
+    # working now that the root layer has a cache of its own.
+    fresh_start = (
+        force_reload or _routines_cache is None or _root_routines_cache is None
+    )
+    prev_routines = {} if fresh_start else _root_routines_cache
     prev_mtimes = {} if fresh_start else _routines_mtimes
 
     routines_dir = library_dir()
@@ -521,10 +542,24 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     # within the shared library the local root shadows the shipped one (the same
     # rule again, on the second axis). Each root keeps its own mtime cache in
     # ``_path_caches``, so hot-reload behaves identically for every half.
-    routines = {**shared, **routines}
+    #
+    # ``<local>/condor/routines`` shadows both. It is where FEAT-115 moved the
+    # chat's *writes*, so it has to be part of the general library rather than
+    # bolted onto the catalog: `get_routine` -- and through it
+    # `RoutineStore._resolve_routine`, which is what actually starts a run --
+    # reads this function. Adding the layer only to `assistant_routines` made
+    # an authored routine listable but not runnable, and made a local override
+    # of a shipped name run the shipped code.
+    own = _merged_from((assistant_routines_dir(CHAT_SLUG),), force_reload=force_reload)
+    # Held separately from the merge: the mtime shortcut above restores a root
+    # file by stem, and `routines` after this line may hold a layer that
+    # shadowed that stem.
+    root_only = routines
+    routines = {**shared, **root_only, **own}
 
     _routines_mtimes.clear()
     _routines_mtimes.update(scanned_mtimes)
+    _root_routines_cache = root_only
     _routines_cache = routines
     return routines
 
@@ -681,6 +716,9 @@ def assistant_routines(
     is told, never about what a person may do.
     """
     if not agent_slug or agent_slug == CHAT_SLUG:
+        # ``discover_routines`` now includes the chat's own local layer, so
+        # this is the general library again and every reader of it -- the
+        # catalog here, `get_routine`, the resolver behind a run -- agrees.
         found = discover_routines(force_reload=force_reload)
     else:
         shared = _merged_from(shared_routines_roots(), force_reload=force_reload)

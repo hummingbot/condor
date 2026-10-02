@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from condor.telemetry.taps import web_tap
@@ -62,6 +63,8 @@ def _build_cors_origins() -> list[str]:
 # The SPA shell and every unhashed file beside it: revalidate on each load.
 # Cheap — a 304 — and the only thing that guarantees a refresh is looking at the
 # build that is actually installed.
+log = logging.getLogger(__name__)
+
 _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
 
 
@@ -79,6 +82,39 @@ class _HashedAssets(StaticFiles):
         response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
+
+
+def _adopt_orphaned_bundle(dist: Path) -> None:
+    """Put a bundle back at ``dist`` if the swap was interrupted mid-rename.
+
+    ``build_frontend`` builds into ``dist.new`` and swaps:
+    ``mv dist dist.old && mv dist.new dist``. Killed between those two renames
+    — a reboot, an OOM kill, a restart — the tree has a perfectly good
+    ``dist.new`` and ``dist.old`` and no ``dist``. That matters more than the
+    window suggests, because the static mount *and* the SPA fallback both sit
+    inside a single ``dist.is_dir()`` evaluated once here at startup: with no
+    ``dist`` Condor comes up serving the API and a bare 404 at ``/``, and
+    nothing recovers it without a human.
+
+    ``dist.new`` is preferred: the build that produced it had already succeeded,
+    so it is the newer of the two.
+    """
+    if dist.is_dir():
+        return
+    for candidate in (dist.with_name("dist.new"), dist.with_name("dist.old")):
+        if not candidate.is_dir():
+            continue
+        try:
+            candidate.rename(dist)
+        except OSError:
+            log.warning("Could not adopt %s as the dashboard bundle", candidate)
+            continue
+        log.warning(
+            "Dashboard bundle was missing; adopted %s. A frontend build was "
+            "interrupted mid-swap.",
+            candidate.name,
+        )
+        return
 
 
 def create_app() -> FastAPI:
@@ -143,6 +179,7 @@ def create_app() -> FastAPI:
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    _adopt_orphaned_bundle(dist)
     if dist.is_dir():
         index_html = dist / "index.html"
         dist_root = dist.resolve()
@@ -189,6 +226,18 @@ def create_app() -> FastAPI:
             # stale *build*: a reader who refreshed the chat got a UI from
             # before the routine library existed — its "Browse all" gone and
             # `/routines` back in the nav — with no way to tell it was old.
+            if not index_html.exists():
+                # The bundle is mid-swap, or a build left it absent. Starlette
+                # raises inside FileResponse on a missing path, which surfaces
+                # as an opaque 500 that nothing upstream can tell from a crash.
+                # 503 is what this actually is, and it says so.
+                return PlainTextResponse(
+                    "The dashboard bundle is not in place — it is being "
+                    "rebuilt, or a build failed. The API is unaffected. Retry "
+                    "in a moment, or run `make restart` if it persists.",
+                    status_code=503,
+                    headers=_NO_CACHE,
+                )
             return FileResponse(index_html, headers=_NO_CACHE)
 
     return app

@@ -36,7 +36,8 @@ export interface ComponentStatus {
   key: string;
   name: string;
   facets: Partial<Record<"repo" | "image", Facet>>;
-  mode: "image" | "source" | null;
+  /** Always "image": hummingbot-api is deployed from the published image. */
+  mode: "image" | null;
   up_to_date: boolean;
 }
 
@@ -66,7 +67,14 @@ export interface Preflight {
   ok: boolean;
 }
 
-export type StepState = "pending" | "running" | "ok" | "failed" | "skipped";
+export type StepState =
+  | "pending"
+  | "running"
+  | "ok"
+  /** Ran, did not fail the update, but the output is worth reading. */
+  | "warned"
+  | "failed"
+  | "skipped";
 
 export interface Step {
   key: string;
@@ -146,6 +154,20 @@ export const updatesApi = {
       method: "POST",
       body: JSON.stringify({ run_id: runId }),
     }),
+
+  /**
+   * Apply a finished update by restarting Condor in place.
+   *
+   * The request is expected not to answer: the process handling it tears down
+   * and execs. 202 if it does answer, a network error if the socket closes
+   * first — both mean the same thing, so callers treat a failure here as
+   * "probably restarting" and let the reconnect decide.
+   */
+  relaunch: () =>
+    adminFetch<{ relaunching: boolean; target_commit: string }>(
+      "/api/v1/updates/relaunch",
+      { method: "POST" },
+    ),
 
   /** Trigger the update. Answers immediately with the run to watch. */
   start: (components: string[]) =>

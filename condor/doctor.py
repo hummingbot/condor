@@ -176,6 +176,81 @@ def check_dependencies() -> list[Check]:
 _PLACEHOLDER_CREDENTIALS = {"admin", "password", "changeme", ""}
 
 
+def _check_admin_can_administer(data: dict | None) -> list[Check]:
+    """Whether ``ADMIN_USER_ID`` is an id ``config.yml`` treats as an admin.
+
+    Two files have to agree about one number and nothing checked that they
+    did. ``.env`` decides who the dashboard *is* -- local mode logs in as
+    ``ADMIN_USER_ID`` with no password -- while ``config.yml`` decides what
+    that id may *do*. Disagree and every admin route answers 403: the Updates
+    tab is not rendered, the "Updates available" notification links to a tab
+    that is not there, and clicking it lands on Servers with nothing said.
+
+    Nothing was wrong enough to notice. The old check asked only whether the
+    variable was set, so an install in exactly this state reported
+    ``ADMIN_USER_ID`` green on the very value that had no rights.
+
+    A duplicated key is worth naming on its own: ``.env`` is read by three
+    parsers and the last assignment wins in all of them, so a second line is
+    silently authoritative and the first is the one people read.
+    """
+    from utils.config import ADMIN_USER_ID, LOCAL_MODE
+
+    admin_id = str(ADMIN_USER_ID or "").strip()
+    if not admin_id or not isinstance(data, dict):
+        return []
+
+    duplicates: list[Check] = []
+    if ENV_PATH.exists():
+        try:
+            assignments = [
+                line
+                for line in ENV_PATH.read_text(encoding="utf-8").splitlines()
+                if re.match(r"^\s*(export\s+)?ADMIN_USER_ID\s*=", line)
+            ]
+        except OSError:
+            assignments = []
+        if len(assignments) > 1:
+            duplicates.append(
+                Check(
+                    "ADMIN_USER_ID (duplicate)",
+                    FAIL,
+                    f"{len(assignments)} assignments in .env — the last one wins "
+                    f"({admin_id}), the others are dead. Delete all but one.",
+                )
+            )
+
+    users = data.get("users") or {}
+    role = ""
+    for key, record in users.items():
+        if str(key) == admin_id and isinstance(record, dict):
+            role = str(record.get("role") or "")
+            break
+
+    if role.lower() == "admin":
+        return duplicates
+
+    if not role:
+        detail = (
+            f"config.yml has no user {admin_id}, so the dashboard logs in as an "
+            "id with no role at all and every admin route answers 403."
+        )
+    else:
+        detail = (
+            f"config.yml gives user {admin_id} the role '{role}', not 'admin', "
+            "so every admin route answers 403 — no Updates tab, and the "
+            "'Updates available' notice links to a tab that is not rendered."
+        )
+    where = "the dashboard signs in as this id" if LOCAL_MODE else "this id"
+    return duplicates + [
+        Check(
+            "Admin access",
+            FAIL,
+            f"{detail} Set `users.{admin_id}.role: admin` in config.yml " f"({where}).",
+        )
+    ]
+
+
 def _check_placeholder_credentials(data: object) -> list[Check]:
     if not isinstance(data, dict):
         return []
@@ -262,6 +337,7 @@ def check_config() -> list[Check]:
 
             data = yaml.safe_load(config_yml.read_text(encoding="utf-8"))
             checks.append(Check("config.yml", OK, "present and parses"))
+            checks.extend(_check_admin_can_administer(data))
             checks.extend(_check_placeholder_credentials(data))
         except Exception as e:
             checks.append(Check("config.yml", FAIL, f"failed to parse: {e}"))
@@ -317,8 +393,17 @@ def _listening_binds(port: int) -> list[str]:
             binds = []
             for line in proc.stdout.splitlines()[1:]:  # skip header row
                 cols = line.split()
+                # ``-sTCP:LISTEN`` makes lsof print the state as its own
+                # trailing token, so NAME is ``TCP 127.0.0.1:8088 (LISTEN)``
+                # and the last column is ``(LISTEN)`` -- not an address at all.
+                # Taking it and splitting on "(" yielded the empty string,
+                # which ``_is_public_bind`` used to read as a wildcard: every
+                # loopback listener on a host without ``ss`` reported as bound
+                # to all interfaces.
+                if cols and cols[-1].startswith("("):
+                    cols = cols[:-1]
                 if cols:
-                    binds.append(cols[-1].split("(")[0])
+                    binds.append(cols[-1])
             return binds
         except Exception:
             pass
@@ -357,8 +442,15 @@ def _bind_host(addr: str) -> str:
 
 
 def _is_public_bind(addr: str) -> bool:
+    """Whether ``addr`` is a wildcard bind — reachable from off this machine.
+
+    The empty string is deliberately *not* a wildcard. It is what a bind this
+    code failed to parse looks like, and answering True for it turns a parsing
+    bug into a security warning about a port that may well be on loopback.
+    Unknown is not public; a bind nobody could read is reported by nothing.
+    """
     host = _bind_host(addr)
-    return host in ("0.0.0.0", "*", "::", "[::]", "")
+    return host in ("0.0.0.0", "*", "::", "[::]")
 
 
 def check_dashboard_port() -> list[Check]:
