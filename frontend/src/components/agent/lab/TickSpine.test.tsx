@@ -216,15 +216,18 @@ describe("a beat is an address", () => {
 
 describe("hovering a beat opens its card", () => {
   const card = () => document.querySelector<HTMLElement>("[data-beat-card]");
-  const hover = (el: HTMLElement) =>
+  // jsdom has no PointerEvent; React keys its handlers on the event *type*.
+  const hover = (el: HTMLElement, clientX = 0) =>
     act(() => {
-      el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      el.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX }));
     });
-  const unhover = (el: HTMLElement) =>
+  const unhover = () =>
     act(() => {
-      el.dispatchEvent(
-        new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
-      );
+      document
+        .querySelector('[data-testid="tick-spine"]')!
+        .dispatchEvent(
+          new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }),
+        );
     });
 
   it("shows the tick's time, journal line and every deed with its error", async () => {
@@ -249,9 +252,33 @@ describe("hovering a beat opens its card", () => {
     const deeds = [...c.querySelectorAll("[data-beat-card-deed]")].map((d) => d.textContent);
     expect(deeds).toEqual(["✓Deploy bot 'brl_mm'", "✗Stop executor abcnot found"]);
 
-    unhover(beats()[0]);
+    unhover();
     expect(card()).toBeNull();
     expect(beats()[0].dataset.beatHovered).toBeUndefined();
+  });
+
+  it("keeps the nearest beat while the pointer crosses a gap", async () => {
+    JOURNAL = journal([
+      { tick: 1, actions: 0 },
+      { tick: 2, actions: 0 },
+    ]);
+    await render();
+
+    // jsdom lays nothing out: place the two beats by hand, 8px apart.
+    const place = (el: HTMLElement, left: number) => {
+      el.getBoundingClientRect = () =>
+        ({ left, right: left + 8, width: 8, top: 0, bottom: 20, height: 20 }) as DOMRect;
+    };
+    place(beats()[0], 100);
+    place(beats()[1], 116);
+    const strip = document.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+
+    hover(strip, 109); // in the gap, nearer beat 1's centre (104) than beat 2's (120)
+    expect(card()!.dataset.beatCard).toBe("1");
+    hover(strip, 113); // past the midpoint
+    expect(card()!.dataset.beatCard).toBe("2");
+    hover(strip, 300); // well past the last beat
+    expect(card()).toBeNull();
   });
 
   it("caps a busy tick's deeds and says how many more", async () => {

@@ -100,6 +100,39 @@ export function TickSpine({
   const showCard = (tick: number, el: HTMLElement) =>
     setHovered({ tick, rect: el.getBoundingClientRect() });
   const hideCard = () => setHovered(null);
+
+  // Hover is tracked on the strip, not per beat: a pointer in the gap between
+  // two beats keeps the nearest one rather than dropping the hover, so sliding
+  // along the row never flickers through "nothing". Only pointer input moves
+  // it — the reflow a growing beat causes must not feed back into the choice.
+  const trackPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === "touch") return;
+    const target = e.target instanceof Element ? e.target.closest<HTMLElement>("[data-beat]") : null;
+    let el = target;
+    if (!el) {
+      let best = Infinity;
+      for (const b of e.currentTarget.querySelectorAll<HTMLElement>("[data-beat]")) {
+        const r = b.getBoundingClientRect();
+        const d = Math.abs(e.clientX - (r.left + r.width / 2));
+        if (d < best) {
+          best = d;
+          el = b;
+        }
+      }
+      // Past the last beat's half-gap (the RUN button, the trailing note) is
+      // not "near a beat".
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (e.clientX < r.left - BEAT_GAP || e.clientX > r.right + BEAT_GAP) el = null;
+      }
+    }
+    if (!el) {
+      if (hovered) hideCard();
+      return;
+    }
+    const tick = Number(el.dataset.beat);
+    if (hovered?.tick !== tick) showCard(tick, el);
+  };
   const hoveredEntry = hovered
     ? ticks.find((t) => t.tick === hovered.tick) ?? null
     : null;
@@ -123,6 +156,8 @@ export function TickSpine({
     <div
       ref={stripRef}
       data-testid="tick-spine"
+      onPointerMove={trackPointer}
+      onPointerLeave={hideCard}
       onScroll={
         bare
           ? (e) => {
@@ -134,13 +169,13 @@ export function TickSpine({
             }
           : undefined
       }
-      className={`flex items-center ${
-        // Each beat's button is taller than its bar, which is the room the
-        // hovered or selected bar's ring needs — an `overflow-x-auto` box would
-        // otherwise clip it (its overflow-y goes auto too).
+      className={`flex items-center gap-2 ${
+        // The fixed height is room for a hovered beat and its ring, which an
+        // `overflow-x-auto` box would otherwise clip (its overflow-y goes auto
+        // too); the horizontal padding is the same room for the end beats.
         bare
-          ? "min-w-0 flex-nowrap overflow-x-auto py-0.5 [scrollbar-width:thin]"
-          : "flex-wrap border-b border-[var(--color-border)]/60 px-4 py-1"
+          ? "h-9 min-w-0 flex-nowrap overflow-x-auto px-1 [scrollbar-width:thin]"
+          : "min-h-9 flex-wrap border-b border-[var(--color-border)]/60 px-4 py-1"
       }`}
     >
       <button
@@ -179,32 +214,24 @@ export function TickSpine({
             data-beat-state={state}
             aria-label={`#${entry.tick} — ${title}`}
             onClick={() => onSelectTick(entry.tick)}
-            onMouseEnter={(e) => showCard(entry.tick, e.currentTarget)}
-            onMouseLeave={hideCard}
             onFocus={(e) => showCard(entry.tick, e.currentTarget)}
             onBlur={hideCard}
             data-beat-hovered={isHovered || undefined}
             data-beat-selected={isSelected || undefined}
-            // The button is the target and the bar is drawn inside it: the
-            // targets sit edge to edge (no dead gap to slip through) while the
-            // bars keep room between them. Hovering grows only the bar and
-            // gives it a contour — the button keeps its width, so nothing
-            // reflows and the neighbours stay where the pointer expects them.
-            className="group flex h-8 w-4 shrink-0 items-center justify-center"
-          >
-            <span
-              aria-hidden
-              className={`rounded-sm transition-all duration-100 ${BEAT_CLASS[state]} ${
-                isHovered ? "h-6 w-3" : "h-5 w-2"
-              } ${
-                isSelected
-                  ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
-                  : isHovered
-                    ? "ring-2 ring-[var(--color-text)] ring-offset-1 ring-offset-[var(--color-bg)]"
-                    : ""
-              }`}
-            />
-          </button>
+            // Dock-style: the hovered beat's real width and height animate, so
+            // its neighbours slide over to make room and the gap between beats
+            // stays fixed — a `scale()` would overlap them instead. Box-shadow
+            // rings are not transformed, so the contour stays a clean 2px.
+            className={`shrink-0 rounded-sm transition-[width,height] duration-200 ease-[cubic-bezier(.22,.8,.25,1)] motion-reduce:transition-none ${BEAT_CLASS[state]} ${
+              isHovered ? "h-[26px] w-[14px]" : "h-5 w-2"
+            } ${
+              isSelected
+                ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
+                : isHovered
+                  ? "ring-2 ring-[var(--color-text)] ring-offset-1 ring-offset-[var(--color-bg)]"
+                  : ""
+            }`}
+          />
         );
       })}
       {!hasActionsLog && (
@@ -242,6 +269,8 @@ const STATE_TEXT: Record<BeatState, string> = {
   unlogged: "text-[var(--color-text-muted)]",
 };
 
+/** The strip's fixed gap between beats (`gap-2`), in px. */
+const BEAT_GAP = 8;
 const CARD_WIDTH = 320;
 const CARD_GAP = 6;
 const CARD_EDGE = 8;
