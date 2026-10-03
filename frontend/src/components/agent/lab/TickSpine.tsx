@@ -134,13 +134,13 @@ export function TickSpine({
             }
           : undefined
       }
-      className={`flex items-center gap-1 ${
-        // The vertical padding is room for the selected beat's ring, which an
-        // `overflow-x-auto` box would otherwise clip (its overflow-y goes auto
-        // too); the horizontal is the same room for the first and last beat.
+      className={`flex items-center ${
+        // Each beat's button is taller than its bar, which is the room the
+        // hovered or selected bar's ring needs — an `overflow-x-auto` box would
+        // otherwise clip it (its overflow-y goes auto too).
         bare
-          ? "min-w-0 flex-nowrap overflow-x-auto px-1 py-2 [scrollbar-width:thin]"
-          : "flex-wrap border-b border-[var(--color-border)]/60 px-4 py-2"
+          ? "min-w-0 flex-nowrap overflow-x-auto py-0.5 [scrollbar-width:thin]"
+          : "flex-wrap border-b border-[var(--color-border)]/60 px-4 py-1"
       }`}
     >
       <button
@@ -169,6 +169,8 @@ export function TickSpine({
           deeds.map((d) => d.summary).join(" · ") ||
           entry.summary ||
           BEAT_TITLES[state];
+        const isHovered = hovered?.tick === entry.tick;
+        const isSelected = selectedTick === entry.tick;
         return (
           <button
             key={entry.tick}
@@ -181,19 +183,28 @@ export function TickSpine({
             onMouseLeave={hideCard}
             onFocus={(e) => showCard(entry.tick, e.currentTarget)}
             onBlur={hideCard}
-            data-beat-hovered={hovered?.tick === entry.tick || undefined}
-            // The beat under the pointer (or focus) grows to twice its width,
-            // which covers the gaps beside it: a wider target is harder to slip
-            // off onto a neighbour. A transform, not a width, so nothing
+            data-beat-hovered={isHovered || undefined}
+            data-beat-selected={isSelected || undefined}
+            // The button is the target and the bar is drawn inside it: the
+            // targets sit edge to edge (no dead gap to slip through) while the
+            // bars keep room between them. Hovering grows only the bar and
+            // gives it a contour — the button keeps its width, so nothing
             // reflows and the neighbours stay where the pointer expects them.
-            className={`relative h-5 w-2 shrink-0 rounded-sm transition-transform duration-100 ${BEAT_CLASS[state]} ${
-              hovered?.tick === entry.tick ? "z-10 scale-x-200 scale-y-120" : ""
-            } ${
-              selectedTick === entry.tick
-                ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
-                : ""
-            }`}
-          />
+            className="group flex h-8 w-4 shrink-0 items-center justify-center"
+          >
+            <span
+              aria-hidden
+              className={`rounded-sm transition-all duration-100 ${BEAT_CLASS[state]} ${
+                isHovered ? "h-6 w-3" : "h-5 w-2"
+              } ${
+                isSelected
+                  ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
+                  : isHovered
+                    ? "ring-2 ring-[var(--color-text)] ring-offset-1 ring-offset-[var(--color-bg)]"
+                    : ""
+              }`}
+            />
+          </button>
         );
       })}
       {!hasActionsLog && (
