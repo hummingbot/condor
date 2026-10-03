@@ -95,6 +95,37 @@ def test_an_id_matches_its_strategy_slug_under_every_agent():
     assert matched["ghost"] == []
 
 
+def test_a_mapped_id_names_only_its_run_keys():
+    owners = [
+        _owner("alice", "grid_a"),
+        _owner("bob", "grid_a"),
+        _owner("bob", "mm_b"),
+    ]
+
+    matched = monitor.match_owners(
+        ["race-grid", "grid_a", "unfilled"],
+        owners,
+        {"race-grid": ["bob.grid_a", "bob.mm_b"], "unfilled": []},
+    )
+
+    assert [o.run_key for o in matched["race-grid"]] == ["bob.grid_a", "bob.mm_b"]
+    assert [o.run_key for o in matched["grid_a"]] == ["alice.grid_a", "bob.grid_a"]
+    assert matched["unfilled"] == []
+
+
+def test_the_agent_map_reads_a_key_or_a_list_and_rejects_anything_else(tmp_path):
+    path = tmp_path / "agents.yml"
+    path.write_text("churn: stable.churn_supervisor\nfleet: [a.mm, b.mm]\n")
+    assert monitor.load_agent_map(path) == {
+        "churn": ["stable.churn_supervisor"],
+        "fleet": ["a.mm", "b.mm"],
+    }
+
+    path.write_text("churn: {key: stable.churn_supervisor}\n")
+    with pytest.raises(RuntimeError, match="churn must map"):
+        monitor.load_agent_map(path)
+
+
 def test_totals_sum_an_owners_sessions_and_attach_its_bots_once(monkeypatch):
     calls = {}
 

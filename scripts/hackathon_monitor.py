@@ -20,6 +20,14 @@ baseline is subtracted from every later post, so the race counts from its start
 and not from each strategy's first test run. It is kept in the state file and
 survives a restart; without one the lifetime figures are posted as they are.
 
+When a Condor strategy's slug differs from the race id, name it in an agent map:
+a YAML file of race agent id → Condor run keys (``agent.strategy``). An id in
+the map is measured by those keys only; any other id is matched by slug. The
+file is re-read every minute, so an edit takes effect without a restart::
+
+    churn: [stable_churn_operator.stable_churn_supervisor]
+    adaptive-orca-lp: [alice.orca_lp, bob.orca_lp]
+
 Environment (``.env`` is read):
 
 - ``HACKATHON_API_URL``    base URL of the race site, e.g. ``https://example.org``
@@ -27,6 +35,8 @@ Environment (``.env`` is read):
 - ``HACKATHON_SLUG``       defaults to ``agent-builders-cup-1``
 - ``HACKATHON_SERVERS``    comma-separated Condor server names; defaults to
   every server in ``config.yml``
+- ``HACKATHON_AGENT_MAP``  path of the agent map; none by default. Start from
+  ``scripts/hackathon_agents.example.yml``, which lists the field
 
 An agent's figure is the sum over all of those servers. A server that stops
 answering keeps contributing the last figure it gave (remembered in the state
@@ -149,22 +159,51 @@ async def post_race_data(
 # ── Who is who ──
 
 
-def match_owners(agent_ids: Iterable[str], owners: Iterable[Any]) -> dict[str, list]:
+def load_agent_map(path: Path) -> dict[str, list[str]]:
+    """Race agent id → Condor run keys, from the runner's YAML file."""
+    import yaml
+
+    raw = yaml.safe_load(path.read_text())
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"{path}: expected a mapping of agent id to run keys")
+    agent_map: dict[str, list[str]] = {}
+    for agent_id, keys in raw.items():
+        if isinstance(keys, str):
+            keys = [keys]
+        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+            raise RuntimeError(
+                f"{path}: {agent_id} must map to a run key or a list of them"
+            )
+        agent_map[str(agent_id)] = keys
+    return agent_map
+
+
+def match_owners(
+    agent_ids: Iterable[str],
+    owners: Iterable[Any],
+    agent_map: dict[str, list[str]] | None = None,
+) -> dict[str, list]:
     """Each race agent id → the Condor strategies it names.
 
-    The id is a strategy slug, so it can match under more than one agent; all of
-    them count. A full run key (``agent.strategy``) is accepted too. Pseudo-runs
+    An id in ``agent_map`` names exactly the run keys listed there. Any other id
+    is a strategy slug, so it can match under more than one agent; all of them
+    count. A full run key (``agent.strategy``) is accepted too. Pseudo-runs
     (chat, delegation) have an empty namespace and are never a race agent.
     """
     owners = [owner for owner in owners if owner.namespace]
-    return {
-        agent_id: [
-            owner
-            for owner in owners
-            if agent_id in (owner.strategy_slug, owner.run_key)
-        ]
-        for agent_id in agent_ids
-    }
+    agent_map = agent_map or {}
+    matched: dict[str, list] = {}
+    for agent_id in agent_ids:
+        if agent_id in agent_map:
+            keys = agent_map[agent_id]
+            matched[agent_id] = [owner for owner in owners if owner.run_key in keys]
+        else:
+            matched[agent_id] = [
+                owner
+                for owner in owners
+                if agent_id in (owner.strategy_slug, owner.run_key)
+            ]
+    return matched
 
 
 async def collect_totals(
@@ -373,10 +412,23 @@ class Monitor:
         from condor.agents.fleet_map import build_fleet_map
         from config_manager import get_config_manager
 
-        matched = match_owners(self.agent_ids, build_fleet_map())
-        unmatched = [agent_id for agent_id, owners in matched.items() if not owners]
-        if unmatched:
-            log.warning("No strategy with slug: %s", ", ".join(unmatched))
+        agent_map = load_agent_map(self.args.agent_map) if self.args.agent_map else {}
+        matched = match_owners(self.agent_ids, build_fleet_map(), agent_map)
+        for agent_id, owners in matched.items():
+            if owners:
+                continue
+            if agent_id in agent_map:
+                log.warning(
+                    "%s: no Condor strategy with run key %s",
+                    agent_id,
+                    ", ".join(agent_map[agent_id]) or "(none listed)",
+                )
+            else:
+                log.warning(
+                    "%s: no Condor strategy with that slug; map it to a run key "
+                    "in the agent map",
+                    agent_id,
+                )
 
         names = distinct_servers(get_config_manager().list_servers(), self.args.servers)
         answers = await asyncio.gather(
@@ -468,6 +520,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--interval", type=float, default=DEFAULT_INTERVAL)
     parser.add_argument("--state", default=DEFAULT_STATE)
+    parser.add_argument(
+        "--agent-map",
+        type=Path,
+        default=env.get("HACKATHON_AGENT_MAP") or None,
+        help="YAML of race agent id -> Condor run keys, for slugs that differ",
+    )
     parser.add_argument("--once", action="store_true", help="one tick, then exit")
     parser.add_argument(
         "--dry-run", action="store_true", help="print the payload instead of posting"
@@ -484,6 +542,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("set HACKATHON_API_TOKEN or pass --token")
     state = Path(args.state.format(slug=args.slug))
     args.servers = [name.strip() for name in args.servers.split(",") if name.strip()]
+    if args.agent_map:
+        args.agent_map = Path(args.agent_map)
+        if not args.agent_map.is_file():
+            parser.error(f"agent map {args.agent_map} does not exist")
+        load_agent_map(args.agent_map)
     if args.start_race and load_baseline(state) is not None:
         parser.error(f"{state} already holds a baseline; delete it to restart the race")
     if args.start_race and args.dry_run:

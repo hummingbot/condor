@@ -1,0 +1,44 @@
+# Agent map for scripts/hackathon_monitor.py (HACKATHON_AGENT_MAP).
+#
+# Race agent id (the strategy slug the leaderboard uses) -> the Condor run keys
+# (`agent.strategy`) whose bots and executors make up that agent. Copy this
+# file, check every key against the strategies installed on this host:
+#
+#   uv run python -c "from condor.agents.strategy import StrategyStore; [print(s.key) for s in StrategyStore().list_all()]"
+#
+# and fill in the empty ones. An id mapped to [] is measured as nothing and
+# logged every minute until it is filled.
+#
+# The 14 agents of agent-builders-cup-1 as of 2026-10-03. Keys were read from
+# each submission's AGENT.md / loops/<slug>/loop.md and assume the agent was
+# installed under its own folder name.
+
+# xrpl
+aegis-defensive-market-making: [aegis.aegis_operator]
+delta-raptor-volume-hunting-market-maker: [delta_raptor.rlusd_xrp_maker]
+
+# botcamp
+churn: [stable_churn_operator.stable_churn_supervisor]
+# Submitted as a Hummingbot controller (mm_at_the_touch.py), not a Condor agent.
+cohort-13-market-making-at-the-touch: []
+
+# bitget
+quad-threat: [quad_threat_orchestrator.orchestrate]
+midas-market-maker-w-adverse-selection-detection-dynamic-hedging-position-sizing-self-correcting-logic: [midas.midas_hybrid_operator]
+
+# gate
+gateforum-multi-agent-research-decision-trader: [gateforum.gateforum_debate_operator]
+self-improving-market-making-fleet: [market_making_cup.mm_cup_operator]
+
+# orca
+# Submitted as a Hummingbot controller (adaptive_orca_lp), not a Condor agent.
+adaptive-orca-lp: []
+trend-aware-lp-rebalancer-agent: [trend_aware_lp_rebalancer_agent.orca]
+
+# meteora
+regime-switch-lp: [regime_switch_lp.regime_operator]
+jev-decision-maker-at-meteora: [jev.jev_desk]
+
+# derive
+flyby-long-volatility-collector-desk: [flyby.flyby_operator]
+theta-covered-call-hedge-desk: [theta.theta_funding_desk]
