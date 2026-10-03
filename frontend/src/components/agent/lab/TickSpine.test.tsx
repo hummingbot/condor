@@ -237,6 +237,7 @@ describe("hovering a beat opens its card", () => {
 
     expect(card()).toBeNull();
     hover(beats()[0]);
+    expect(beats()[0].dataset.beatHovered).toBe("true");
 
     const c = card()!;
     expect(c.dataset.beatCard).toBe("4");
@@ -250,6 +251,7 @@ describe("hovering a beat opens its card", () => {
 
     unhover(beats()[0]);
     expect(card()).toBeNull();
+    expect(beats()[0].dataset.beatHovered).toBeUndefined();
   });
 
   it("caps a busy tick's deeds and says how many more", async () => {

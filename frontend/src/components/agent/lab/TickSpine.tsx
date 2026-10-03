@@ -181,7 +181,14 @@ export function TickSpine({
             onMouseLeave={hideCard}
             onFocus={(e) => showCard(entry.tick, e.currentTarget)}
             onBlur={hideCard}
-            className={`h-5 w-2 shrink-0 rounded-sm transition-all hover:scale-y-110 ${BEAT_CLASS[state]} ${
+            data-beat-hovered={hovered?.tick === entry.tick || undefined}
+            // The beat under the pointer (or focus) grows to twice its width,
+            // which covers the gaps beside it: a wider target is harder to slip
+            // off onto a neighbour. A transform, not a width, so nothing
+            // reflows and the neighbours stay where the pointer expects them.
+            className={`relative h-5 w-2 shrink-0 rounded-sm transition-transform duration-100 ${BEAT_CLASS[state]} ${
+              hovered?.tick === entry.tick ? "z-10 scale-x-200 scale-y-120" : ""
+            } ${
               selectedTick === entry.tick
                 ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
                 : ""
