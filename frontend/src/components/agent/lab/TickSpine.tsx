@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import {
   BEAT_TITLES,
@@ -7,8 +8,9 @@ import {
   beatState,
   type BeatState,
 } from "@/components/agent/lab/runs";
+import type { AgentActionRow } from "@/lib/agent-attribution";
 import { api } from "@/lib/api";
-import { parseJournal } from "@/lib/parse-agent";
+import { parseJournal, type TickEntry } from "@/lib/parse-agent";
 
 /**
  * The run's ticks, as its navigation.
@@ -26,6 +28,11 @@ import { parseJournal } from "@/lib/parse-agent";
  * section tabs rather than a row of its own, so it brings no border or padding
  * and never wraps — a long session scrolls sideways instead, and opens on its
  * newest beat, which is the one a reader came for.
+ *
+ * Hovering (or focusing) a beat opens a card with what the tick did: its time,
+ * its state, the journal's line and every deed with its error. The card is
+ * portalled and fixed-positioned because the strip is a sideways scroller,
+ * whose `overflow` would clip anything drawn inside it.
  */
 const BEAT_CLASS: Record<BeatState, string> = {
   failed: "bg-[var(--color-red)]",
@@ -87,6 +94,48 @@ export function TickSpine({
   const stripRef = useRef<HTMLDivElement>(null);
   const atEnd = useRef(true);
   const beatCount = ticks.length;
+
+  // The beat under the pointer (or keyboard focus), with where it is on screen.
+  const [hovered, setHovered] = useState<{ tick: number; rect: DOMRect } | null>(null);
+  const showCard = (tick: number, el: HTMLElement) =>
+    setHovered({ tick, rect: el.getBoundingClientRect() });
+  const hideCard = () => setHovered(null);
+
+  // Hit targets stay fixed while their visual children animate. In a gap,
+  // choose the nearest target on the same row, never the moving visual shape.
+  const trackPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === "touch") return;
+    const target = e.target instanceof Element ? e.target.closest<HTMLElement>("[data-beat]") : null;
+    let el = target;
+    if (!el) {
+      let best = Infinity;
+      for (const b of e.currentTarget.querySelectorAll<HTMLElement>("[data-beat]")) {
+        const r = b.getBoundingClientRect();
+        if (e.clientY < r.top - BEAT_GAP || e.clientY > r.bottom + BEAT_GAP) continue;
+        const d = Math.abs(e.clientX - (r.left + r.width / 2));
+        if (d < best) {
+          best = d;
+          el = b;
+        }
+      }
+      // Past the last beat's half-gap (the RUN button, the trailing note) is
+      // not "near a beat".
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (e.clientX < r.left - BEAT_GAP || e.clientX > r.right + BEAT_GAP) el = null;
+      }
+    }
+    if (!el) {
+      if (hovered) hideCard();
+      return;
+    }
+    const tick = Number(el.dataset.beat);
+    if (hovered?.tick !== tick) showCard(tick, el);
+  };
+  const hoveredIndex = hovered ? ticks.findIndex((t) => t.tick === hovered.tick) : -1;
+  const hoveredEntry = hovered
+    ? ticks.find((t) => t.tick === hovered.tick) ?? null
+    : null;
   useEffect(() => {
     const el = stripRef.current;
     if (bare && el && atEnd.current) el.scrollLeft = el.scrollWidth;
@@ -107,9 +156,13 @@ export function TickSpine({
     <div
       ref={stripRef}
       data-testid="tick-spine"
+      onPointerMove={trackPointer}
+      onPointerLeave={hideCard}
       onScroll={
         bare
           ? (e) => {
+              // The card is pinned to where the beat *was*; a scroll moves it.
+              hideCard();
               const el = e.currentTarget;
               atEnd.current =
                 el.scrollLeft + el.clientWidth >= el.scrollWidth - 4;
@@ -117,12 +170,11 @@ export function TickSpine({
           : undefined
       }
       className={`flex items-center gap-1 ${
-        // The vertical padding is room for the selected beat's ring, which an
-        // `overflow-x-auto` box would otherwise clip (its overflow-y goes auto
-        // too); the horizontal is the same room for the first and last beat.
+        // Reserve room for the visual growth, neighbour offsets and rings so
+        // neither the scroll width nor wrapping changes when a tick expands.
         bare
-          ? "min-w-0 flex-nowrap overflow-x-auto px-1 py-2 [scrollbar-width:thin]"
-          : "flex-wrap border-b border-[var(--color-border)]/60 px-4 py-2"
+          ? "h-9 min-w-0 flex-nowrap overflow-x-auto px-1.5 [scrollbar-width:thin]"
+          : "min-h-9 flex-wrap border-b border-[var(--color-border)]/60 px-4 py-1"
       }`}
     >
       <button
@@ -137,7 +189,7 @@ export function TickSpine({
       >
         Run
       </button>
-      {ticks.map((entry) => {
+      {ticks.map((entry, index) => {
         const deeds = byTick.get(entry.tick) ?? [];
         const state = beatState({
           actions: deeds,
@@ -151,20 +203,42 @@ export function TickSpine({
           deeds.map((d) => d.summary).join(" · ") ||
           entry.summary ||
           BEAT_TITLES[state];
+        const isHovered = hovered?.tick === entry.tick;
+        const isSelected = selectedTick === entry.tick;
+        // Split the extra 6px of width equally to either side of the hovered
+        // tick. Visual neighbours move by 3px to keep their original 4px gap.
+        const offset = hoveredIndex < 0 || index === hoveredIndex
+          ? 0
+          : index < hoveredIndex ? -3 : 3;
         return (
           <button
             key={entry.tick}
             type="button"
             data-beat={entry.tick}
             data-beat-state={state}
-            title={`#${entry.tick} — ${title}`}
+            aria-label={`#${entry.tick} — ${title}`}
             onClick={() => onSelectTick(entry.tick)}
-            className={`h-5 w-2 shrink-0 rounded-sm transition-all hover:scale-y-110 ${BEAT_CLASS[state]} ${
-              selectedTick === entry.tick
-                ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
-                : ""
-            }`}
-          />
+            onFocus={(e) => showCard(entry.tick, e.currentTarget)}
+            onBlur={hideCard}
+            data-beat-hovered={isHovered || undefined}
+            data-beat-selected={isSelected || undefined}
+            className="relative h-5 w-2 shrink-0 rounded-sm outline-none"
+          >
+            <span
+              aria-hidden="true"
+              data-beat-visual
+              style={{ transform: `translate(calc(-50% + ${offset}px), -50%)` }}
+              className={`pointer-events-none absolute left-1/2 top-1/2 rounded-sm ${BEAT_CLASS[state]} ${
+                isHovered ? "h-[26px] w-[14px]" : "h-5 w-2"
+              } ${
+                isSelected
+                  ? "ring-2 ring-[var(--color-primary)] ring-offset-1 ring-offset-[var(--color-bg)]"
+                  : isHovered
+                    ? "ring-2 ring-[var(--color-text)] ring-offset-1 ring-offset-[var(--color-bg)]"
+                    : ""
+              }`}
+            />
+          </button>
         );
       })}
       {!hasActionsLog && (
@@ -172,6 +246,140 @@ export function TickSpine({
           no action log for this run
         </span>
       )}
+      {hovered && hoveredEntry && (
+        <BeatCard
+          entry={hoveredEntry}
+          deeds={byTick.get(hoveredEntry.tick) ?? []}
+          state={beatState({
+            actions: byTick.get(hoveredEntry.tick) ?? [],
+            journalActions: hoveredEntry.actions,
+            hasActionsLog,
+          })}
+          anchor={hovered.rect}
+        />
+      )}
     </div>
+  );
+}
+
+const STATE_LABEL: Record<BeatState, string> = {
+  failed: "Action failed",
+  ok: "Actions ran",
+  idle: "No actions",
+  unlogged: "Not logged",
+};
+
+const STATE_TEXT: Record<BeatState, string> = {
+  failed: "text-[var(--color-red)]",
+  ok: "text-[var(--color-green)]",
+  idle: "text-[var(--color-text-muted)]",
+  unlogged: "text-[var(--color-text-muted)]",
+};
+
+/** The strip's fixed gap between beats (`gap-1`), in px. */
+const BEAT_GAP = 4;
+const CARD_WIDTH = 320;
+const CARD_GAP = 6;
+const CARD_EDGE = 8;
+/** Past this many deeds the card says how many more rather than growing. */
+const MAX_DEEDS = 6;
+/** Below this much room under the beat the card opens above it instead. */
+const CARD_MIN_ROOM = 240;
+
+/**
+ * One beat's detail, over the page.
+ *
+ * `pointer-events-none` so it never takes the hover that keeps it up — the
+ * beat under it stays the thing you click.
+ */
+function BeatCard({
+  entry,
+  deeds,
+  state,
+  anchor,
+}: {
+  entry: TickEntry;
+  deeds: AgentActionRow[];
+  state: BeatState;
+  anchor: DOMRect;
+}) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const left = Math.max(
+    CARD_EDGE,
+    Math.min(
+      anchor.left + anchor.width / 2 - CARD_WIDTH / 2,
+      vw - CARD_WIDTH - CARD_EDGE,
+    ),
+  );
+  const above = vh - anchor.bottom < CARD_MIN_ROOM && anchor.top > vh - anchor.bottom;
+  const position = above
+    ? { left, bottom: vh - anchor.top + CARD_GAP }
+    : { left, top: anchor.bottom + CARD_GAP };
+  const shown = deeds.slice(0, MAX_DEEDS);
+
+  return createPortal(
+    <div
+      role="tooltip"
+      data-beat-card={entry.tick}
+      style={{ position: "fixed", width: CARD_WIDTH, ...position }}
+      className="pointer-events-none z-[60] space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs text-[var(--color-text)] shadow-lg"
+    >
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-sm font-bold">#{entry.tick}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]">
+          {entry.timestamp}
+        </span>
+        <span
+          className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${STATE_TEXT[state]}`}
+        >
+          {STATE_LABEL[state]}
+        </span>
+      </div>
+
+      {entry.summary ? (
+        <p data-beat-card-summary className="line-clamp-4 leading-snug">
+          {entry.summary}
+        </p>
+      ) : (
+        <p className="text-[var(--color-text-muted)]">No summary written</p>
+      )}
+
+      {shown.length > 0 && (
+        <ul className="space-y-1 border-t border-[var(--color-border)] pt-2">
+          {shown.map((d, i) => (
+            <li key={i} data-beat-card-deed className="flex gap-1.5 leading-snug">
+              <span
+                className={`shrink-0 font-bold ${
+                  d.ok ? "text-[var(--color-green)]" : "text-[var(--color-red)]"
+                }`}
+              >
+                {d.ok ? "✓" : "✗"}
+              </span>
+              <span className="min-w-0">
+                <span className="line-clamp-2">{d.summary}</span>
+                {!d.ok && d.error && (
+                  <span className="line-clamp-2 text-[var(--color-red)]">{d.error}</span>
+                )}
+              </span>
+            </li>
+          ))}
+          {deeds.length > shown.length && (
+            <li className="text-[var(--color-text-muted)]">
+              +{deeds.length - shown.length} more
+            </li>
+          )}
+        </ul>
+      )}
+
+      {state === "unlogged" && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">{BEAT_TITLES.unlogged}</p>
+      )}
+
+      <p className="border-t border-[var(--color-border)] pt-1.5 text-[10px] text-[var(--color-text-muted)]">
+        Click to open this tick
+      </p>
+    </div>,
+    document.body,
   );
 }

@@ -145,8 +145,12 @@ export function patchReplaces(patch: WorkspaceUrlPatch): boolean {
 export interface WorkspaceUrlAdapter {
   /** What the URL says — {@link parseWorkspace}, memoized. */
   url: WorkspaceUrl;
-  /** Move it. See {@link applyWorkspacePatch}. */
-  set: (patch: WorkspaceUrlPatch) => void;
+  /**
+   * Move it. See {@link applyWorkspacePatch}. `replace` overrides
+   * {@link patchReplaces} — stepping tick to tick inside the overlay is one
+   * reading, so Back still leaves the overlay in one press.
+   */
+  set: (patch: WorkspaceUrlPatch, options?: { replace?: boolean }) => void;
 }
 
 /** Bind the grammar to a host's `useSearchParams`. */
@@ -159,9 +163,9 @@ export function useWorkspaceUrl(
 ): WorkspaceUrlAdapter {
   const url = useMemo(() => parseWorkspace(params), [params]);
   const set = useCallback(
-    (patch: WorkspaceUrlPatch) =>
+    (patch: WorkspaceUrlPatch, options?: { replace?: boolean }) =>
       setParams(applyWorkspacePatch(params, patch), {
-        replace: patchReplaces(patch),
+        replace: options?.replace ?? patchReplaces(patch),
       }),
     [params, setParams],
   );

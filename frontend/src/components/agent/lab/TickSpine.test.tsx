@@ -210,7 +210,188 @@ describe("a beat is an address", () => {
     ACTIONS = [deed({ tick: 4, summary: "Deploy bot 'brl_mm'" })];
     await render();
 
-    expect(beats()[0].title).toBe("#4 — Deploy bot 'brl_mm'");
+    expect(beats()[0].getAttribute("aria-label")).toBe("#4 — Deploy bot 'brl_mm'");
+  });
+});
+
+describe("hovering a beat opens its card", () => {
+  const card = () => document.querySelector<HTMLElement>("[data-beat-card]");
+  // jsdom has no PointerEvent; React keys its handlers on the event *type*.
+  const hover = (el: HTMLElement, clientX = 0, clientY = 0) =>
+    act(() => {
+      el.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX, clientY }));
+    });
+  // jsdom has no layout; these rectangles can also simulate an animation frame.
+  const place = (el: HTMLElement, left: number, width = 8, top = 0) => {
+    el.getBoundingClientRect = () =>
+      ({ left, right: left + width, width, top, bottom: top + 20, height: 20 }) as DOMRect;
+  };
+  const unhover = () =>
+    act(() => {
+      document
+        .querySelector('[data-testid="tick-spine"]')!
+        .dispatchEvent(
+          new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }),
+        );
+    });
+
+  it("shows the tick's time, journal line and every deed with its error", async () => {
+    JOURNAL = journal([{ tick: 4, actions: 2, summary: "Fleet healthy, drift 1%" }]);
+    ACTIONS = [
+      deed({ tick: 4, summary: "Deploy bot 'brl_mm'" }),
+      deed({ tick: 4, summary: "Stop executor abc", ok: false, error: "not found" }),
+    ];
+    await render();
+
+    expect(card()).toBeNull();
+    hover(beats()[0]);
+    expect(beats()[0].dataset.beatHovered).toBe("true");
+
+    const c = card()!;
+    expect(c.dataset.beatCard).toBe("4");
+    expect(c.textContent).toContain("2026-08-06 22:04");
+    expect(c.textContent).toContain("Action failed");
+    expect(c.querySelector("[data-beat-card-summary]")!.textContent).toBe(
+      "Fleet healthy, drift 1%",
+    );
+    const deeds = [...c.querySelectorAll("[data-beat-card-deed]")].map((d) => d.textContent);
+    expect(deeds).toEqual(["✓Deploy bot 'brl_mm'", "✗Stop executor abcnot found"]);
+
+    unhover();
+    expect(card()).toBeNull();
+    expect(beats()[0].dataset.beatHovered).toBeUndefined();
+  });
+
+  it("keeps the nearest beat while the pointer crosses a gap", async () => {
+    JOURNAL = journal([
+      { tick: 1, actions: 0 },
+      { tick: 2, actions: 0 },
+    ]);
+    await render();
+
+    // The visible gap and hover tolerance both use 4px.
+    place(beats()[0], 100);
+    place(beats()[1], 112);
+    const strip = document.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+
+    hover(strip, 109); // nearer beat 1's centre (104) than beat 2's (116)
+    expect(card()!.dataset.beatCard).toBe("1");
+    hover(strip, 111); // past the midpoint
+    expect(card()!.dataset.beatCard).toBe("2");
+    hover(strip, 300); // well past the last beat
+    expect(card()).toBeNull();
+  });
+
+  it("does not retarget when layout changes underneath a stationary cursor", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }, { tick: 2, actions: 0 }]);
+    await render();
+    const [first, second] = beats();
+    place(first, 100);
+    place(second, 112);
+    const strip = container.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+
+    hover(strip, 114);
+    expect(card()!.dataset.beatCard).toBe("2");
+    // Only the visual shapes move during animation, never their hit targets.
+    place(first.querySelector<HTMLElement>("[data-beat-visual]")!, 104, 14);
+    place(second.querySelector<HTMLElement>("[data-beat-visual]")!, 122, 14);
+    hover(strip, 114);
+    expect(card()!.dataset.beatCard).toBe("2");
+
+    unhover();
+    hover(strip, 114); // re-entry uses the same stable boundaries
+    expect(card()!.dataset.beatCard).toBe("2");
+  });
+
+  it("uses stable boundaries throughout rightward and leftward sweeps", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }, { tick: 2, actions: 0 }, { tick: 3, actions: 0 }]);
+    await render();
+    beats().forEach((beat, i) => place(beat, 100 + i * 12));
+    const strip = container.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+    const targets = beats().map((beat) => beat.className);
+    const sweep = [
+      [104, "1"], [109, "1"], [111, "2"], [117, "2"], [123, "3"], [128, "3"],
+      [123, "3"], [121, "2"], [116, "2"], [111, "2"], [109, "1"], [104, "1"],
+    ] as const;
+    for (const [x, tick] of sweep) {
+      hover(strip, x);
+      expect(card()!.dataset.beatCard).toBe(tick);
+      expect(beats().map((beat) => beat.className)).toEqual(targets);
+    }
+  });
+
+  it("grows the visual in both dimensions and offsets neighbours within fixed slots", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }, { tick: 2, actions: 0 }, { tick: 3, actions: 0 }]);
+    await render();
+    const [first, second, third] = beats();
+    const visuals = beats().map((beat) => beat.querySelector<HTMLElement>("[data-beat-visual]")!);
+
+    hover(second);
+    expect(second.className).toContain("h-5 w-2");
+    expect(visuals[1].className).toContain("h-[26px] w-[14px]");
+    expect(visuals[0].style.transform).toContain("-3px");
+    expect(visuals[2].style.transform).toContain("3px");
+
+    hover(first);
+    expect(visuals[1].style.transform).toContain("3px");
+    hover(third);
+    expect(visuals[1].style.transform).toContain("-3px");
+    unhover();
+    expect(visuals.every((visual) => visual.style.transform.includes("0px"))).toBe(true);
+  });
+
+  it("allows changing wrapped rows regardless of horizontal direction", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }, { tick: 2, actions: 0 }]);
+    await render();
+    const [first, second] = beats();
+    place(first, 100);
+    place(second, 100, 8, 30);
+    const strip = container.querySelector<HTMLElement>('[data-testid="tick-spine"]')!;
+
+    hover(strip, 106, 10);
+    hover(strip, 104, 40); // moving left, but onto the next row
+    expect(card()!.dataset.beatCard).toBe("2");
+  });
+
+  it("caps a busy tick's deeds and says how many more", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 9 }]);
+    ACTIONS = Array.from({ length: 9 }, (_, i) => deed({ tick: 1, summary: `deed ${i}` }));
+    await render();
+
+    hover(beats()[0]);
+    expect(card()!.querySelectorAll("[data-beat-card-deed]")).toHaveLength(6);
+    expect(card()!.textContent).toContain("+3 more");
+  });
+
+  it("says a pre-log tick is unrecorded rather than empty", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }]);
+    await render({ hasActionsLog: false });
+
+    hover(beats()[0]);
+    expect(card()!.textContent).toContain("Not logged");
+    expect(card()!.textContent).toContain("no action log for this run");
+  });
+
+  it("opens on keyboard focus too", async () => {
+    JOURNAL = journal([{ tick: 3, actions: 0 }]);
+    await render();
+
+    act(() => beats()[0].focus());
+    expect(card()!.dataset.beatCard).toBe("3");
+  });
+
+  it("lets pointer input resume after keyboard focus moves elsewhere", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }, { tick: 2, actions: 0 }]);
+    await render();
+    const [first, second] = beats();
+    place(first, 100);
+    place(second, 112);
+
+    hover(first, 102);
+    act(() => second.focus());
+    expect(card()!.dataset.beatCard).toBe("2");
+    hover(first, 104);
+    expect(card()!.dataset.beatCard).toBe("1");
   });
 });
 
