@@ -31,8 +31,7 @@ gateforum-multi-agent-research-decision-trader: [gateforum.gateforum_debate_oper
 self-improving-market-making-fleet: [market_making_cup.mm_cup_operator]
 
 # orca
-# Submitted as a Hummingbot controller (adaptive_orca_lp), not a Condor agent.
-adaptive-orca-lp: []
+adaptive-orca-lp-agent: [adaptive_orca_lp.adaptive_lp_controller_loop]
 trend-aware-lp-rebalancer-agent: [trend_aware_lp_rebalancer_agent.orca]
 
 # meteora
