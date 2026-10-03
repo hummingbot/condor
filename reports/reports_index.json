@@ -1,17 +1,5 @@
 [
   {
-    "id": "4fa748",
-    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s4_20261002T134020Z",
-    "filename": "20261002_135122_trend_aware_lp_session_trend_aware_lp_re_4fa748.html",
-    "created_at": "2026-10-02T13:51:22.656697+00:00",
-    "source_type": "routine",
-    "source_name": "read_trend_aware_lp_session",
-    "tags": [],
-    "subject": "",
-    "agent": "trend_aware_lp_rebalancer_agent",
-    "user_id": 1684711897
-  },
-  {
     "id": "a9ce90",
     "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s4_20261002T134020Z",
     "filename": "20261002_135445_trend_aware_lp_session_trend_aware_lp_re_a9ce90.html",
@@ -1311,6 +1299,18 @@
       "liquidity-provision",
       "pool-evidence"
     ],
+    "subject": "",
+    "agent": "trend_aware_lp_rebalancer_agent",
+    "user_id": 1684711897
+  },
+  {
+    "id": "ac2449",
+    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s8_20261003T080220Z",
+    "filename": "20261003_094251_trend_aware_lp_session_trend_aware_lp_re_ac2449.html",
+    "created_at": "2026-10-03T09:42:51.878331+00:00",
+    "source_type": "routine",
+    "source_name": "read_trend_aware_lp_session",
+    "tags": [],
     "subject": "",
     "agent": "trend_aware_lp_rebalancer_agent",
     "user_id": 1684711897
