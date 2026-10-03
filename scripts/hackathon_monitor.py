@@ -87,26 +87,28 @@ def race_url(base_url: str, slug: str) -> str:
 
 
 def parse_agent_ids(payload: Any) -> list[str]:
-    """The agent ids out of the GET response, whatever it wraps them in.
+    """The agent ids out of the GET response, in race order.
 
-    Accepts a bare list or an object holding one under ``agents`` /
-    ``agent_ids`` / ``data``, with entries that are either the id itself or an
-    object carrying ``agent_id``. Order is kept and duplicates dropped.
+    The site answers ``{"data": {"agents": [{"agent_id": ...}, ...]}}``; any
+    other shape is an error rather than an empty field.
     """
-    items: Any = payload
-    if isinstance(payload, dict):
-        for key in ("agents", "agent_ids", "data"):
-            if isinstance(payload.get(key), list):
-                items = payload[key]
-                break
-    if not isinstance(items, list):
-        return []
-    ids: list[str] = []
-    for item in items:
-        value = item.get("agent_id") if isinstance(item, dict) else item
-        if isinstance(value, str) and value and value not in ids:
-            ids.append(value)
-    return ids
+    try:
+        return [agent["agent_id"] for agent in payload["data"]["agents"]]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Unexpected race-data response: {json.dumps(payload)[:300]}"
+        ) from exc
+
+
+def parse_post_result(payload: Any) -> tuple[int, list[str]]:
+    """``(accepted, unknown ids)`` out of the POST response."""
+    try:
+        data = payload["data"]
+        return data["accepted"], data["unknown"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Unexpected race-data POST response: {json.dumps(payload)[:300]}"
+        ) from exc
 
 
 def build_payload(
@@ -134,11 +136,14 @@ async def fetch_agent_ids(session: Any, url: str) -> list[str]:
         return parse_agent_ids(await response.json())
 
 
-async def post_race_data(session: Any, url: str, payload: dict[str, Any]) -> None:
+async def post_race_data(
+    session: Any, url: str, payload: dict[str, Any]
+) -> tuple[int, list[str]]:
     async with session.post(url, json=payload) as response:
         if response.status >= 400:
             body = (await response.text())[:300]
             raise RuntimeError(f"POST {url} answered {response.status}: {body}")
+        return parse_post_result(await response.json())
 
 
 # ── Who is who ──
@@ -418,13 +423,20 @@ class Monitor:
         if self.args.dry_run:
             print(json.dumps(payload, indent=2))
             return
-        await post_race_data(self.session, self.url, payload)
+        accepted, unknown = await post_race_data(self.session, self.url, payload)
         self.posted = True
         log.info(
-            "Posted %d agents (%s)",
+            "Posted %d agents, %d accepted (%s)",
             len(payload["agents"]),
+            accepted,
             "since race start" if baseline is not None else "lifetime, no baseline",
         )
+        if unknown:
+            log.warning(
+                "The site does not know %d agent ids: %s",
+                len(unknown),
+                ", ".join(unknown),
+            )
 
     async def run(self) -> None:
         while True:

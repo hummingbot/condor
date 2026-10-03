@@ -34,23 +34,48 @@ def test_the_race_url_is_built_from_the_base_and_the_slug():
     )
 
 
+# What GET /api/hackathons/[slug]/race-data answers on the site.
+RACE_DATA_RESPONSE = {
+    "data": {
+        "hackathon": "agent-builders-cup-1",
+        "race_start": "2026-10-05T00:00:00.000Z",
+        "race_end": "2026-10-12T00:00:00.000Z",
+        "agents": [
+            {
+                "agent_id": "grid_a",
+                "strategy_title": "Grid A",
+                "team": {"slug": "orca", "name": "Orca"},
+                "driver": "Alice",
+            },
+            {
+                "agent_id": "mm_b",
+                "strategy_title": "MM B",
+                "team": {"slug": "gate", "name": "Gate"},
+                "driver": "Bob",
+            },
+        ],
+    }
+}
+
+
+def test_agent_ids_are_read_from_the_race_data_response():
+    assert monitor.parse_agent_ids(RACE_DATA_RESPONSE) == ["grid_a", "mm_b"]
+
+
 @pytest.mark.parametrize(
-    "payload",
-    [
-        ["grid_a", "mm_b"],
-        {"agents": ["grid_a", "mm_b"]},
-        {"agents": [{"agent_id": "grid_a"}, {"agent_id": "mm_b", "name": "B"}]},
-        {"agent_ids": ["grid_a", "mm_b", "grid_a"]},
-        {"data": [{"agent_id": "grid_a"}, {"agent_id": "mm_b"}]},
-    ],
+    "payload", [{"agents": [{"agent_id": "grid_a"}]}, {"error": "nope"}, None]
 )
-def test_agent_ids_are_read_from_any_reasonable_shape(payload):
-    assert monitor.parse_agent_ids(payload) == ["grid_a", "mm_b"]
+def test_any_other_agent_list_shape_is_an_error(payload):
+    with pytest.raises(RuntimeError, match="Unexpected race-data response"):
+        monitor.parse_agent_ids(payload)
 
 
-def test_an_unreadable_agent_list_is_empty_not_an_error():
-    assert monitor.parse_agent_ids({"error": "nope"}) == []
-    assert monitor.parse_agent_ids(None) == []
+def test_the_post_result_gives_accepted_and_unknown_ids():
+    assert monitor.parse_post_result(
+        {"data": {"accepted": 1, "unknown": ["typo_c"]}}
+    ) == (1, ["typo_c"])
+    with pytest.raises(RuntimeError, match="Unexpected race-data POST response"):
+        monitor.parse_post_result({"accepted": 1})
 
 
 def test_an_id_matches_its_strategy_slug_under_every_agent():
