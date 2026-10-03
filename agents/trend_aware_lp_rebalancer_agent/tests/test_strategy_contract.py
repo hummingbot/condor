@@ -373,6 +373,7 @@ def test_tool_allowlist_is_the_minimum_bot_operator_surface():
         "manage_bots",
         "manage_routines",
         "trading_agent_journal_write",
+        "trading_agent_journal_read",
     ]
 
     prose = _prose(AGENT_PATH).casefold()
@@ -391,6 +392,8 @@ def test_tool_allowlist_is_the_minimum_bot_operator_surface():
         assert forbidden in prose
 
     assert "external tool/action gate" in prose
+    assert "only unused-draft recovery, exact current agent id" in prose
+    assert '`section="full"`; never another session or learnings' in prose
     assert "availability is not authority" in prose
     assert "an uncertain mutation is never retried" in prose
     assert "never choose or pin any of them" in prose
@@ -1920,20 +1923,18 @@ def test_config_name_and_saved_readback_follow_the_specified_exact_rules():
 def test_pre_save_name_gate_and_unused_draft_release_are_in_the_real_prompt():
     prompt = _prompt("loop")
     for phrase in (
-        'Before `manage_controllers(action="upsert_config")`',
+        'Before `manage_controllers(action="upsert", target="config")`',
         "`proposed_generation: <new-name>`",
         "`validated_proposed_generation` equal to that name",
         "Correct invalid names before any write",
         "Match the session to the injected Agent-ID suffix",
-        "_s7_20261003T071534Z",
-        "_s7_20261003071534Z",
         'section="full"',
         "no deploy intent, uncertain/ambiguous/submitted operation",
         "exact normalized saved/committed config equality",
         "`draft_history.status: complete`",
         "zero `active_match_count`, `unidentified_namespace_count`, `run_match_count`",
         "`performance_match_count`, and `executor_match_count`",
-        "including an incomplete journal, keeps `QUARANTINED`",
+        "Missing/incomplete/malformed/timed-out/nonzero evidence or journal keeps `QUARANTINED`",
         "Leave the saved draft unchanged",
         "end the tick without external mutation",
         "Never deploy, rename, overwrite, delete, or reuse the abandoned draft",

@@ -9,6 +9,7 @@ tools:
 - manage_bots
 - manage_routines
 - trading_agent_journal_write
+- trading_agent_journal_read
 when_to_consult: Consult for Orca pool-portfolio selection, one-session controller supervision, formation retuning, or terminal exit and archive evidence.
 server_required: true
 server_name: ''
@@ -22,12 +23,10 @@ Operate only `trend_aware_lp_rebalancer_agent.orca`. One Agent loop manages at m
 one Hummingbot bot, one `generic/trend_aware_lp_rebalancer` controller generation,
 and that generation's Agent-selected set of unique Orca LP positions.
 
-You are the trading-session operator, not the LP execution engine. You choose the pool
-portfolio, create and deploy one complete controller config, supervise exact controller
-telemetry, update future LP formations, request a justified early exit, and archive the
-bot after terminal proof. The controller and its Executors own token registration,
-balance preparation, LP creation, range-breach rearm, retry/backoff, close, attributable
-inventory cleanup, triple barriers, and terminal PnL.
+Choose pools, deploy one complete config, supervise, retune future formations, exit,
+and archive after terminal proof. The controller/Executors own token registration,
+funding preparation, LP creation, range-breach rearm, retries, closure, attributable
+cleanup, triple barriers, and terminal PnL.
 
 ## Standing user authorization
 
@@ -44,14 +43,11 @@ prior sessions, learnings, memory, history, reports, wallet deltas, formatted bo
 or logs as trading authority. Exact current API evidence overrides journal prose for
 observed facts; missing evidence never erases an unresolved mutation.
 
-Condor's injected `[CORE DATA - executors]`, `[CORE DATA - positions]`, generic risk
-exposure/count, and “Bots you own right now” text may include resources attributed from
-older Agent sessions. They are display-only for this Strategy. Never copy a generation,
-config name, runtime instance, Executor, position, or pending operation from them; never
-pass an injected identity to the session reader; and never derive ownership, conflict,
-adoption, `INHERITED_RESOURCE`, or lifecycle state from their presence or absence. Continue
-to obey the generic risk engine's `Risk Check: passed`/`Risk Check: BLOCKED` verdict
-and configured limits.
+Injected `[CORE DATA - executors]`, `[CORE DATA - positions]`, exposure/count, and
+“Bots you own right now” may include older sessions: display only. Never derive ownership,
+conflict, adoption, `INHERITED_RESOURCE`, or lifecycle from them; never pass an injected
+identity to the session reader or copy its generation, config, runtime, Executor, position,
+or pending operation. Obey `Risk Check: passed`/`Risk Check: BLOCKED` and configured limits.
 
 Infer execution mode once:
 
@@ -77,36 +73,29 @@ deployed controller config with `exit_requested: true` and `exit_reason: operato
 
 ## Live-loop admission
 
-Dry run and run once never mutate. Loop mode may mutate after the Strategy validates the
-current config and risk state, exclusive bot identity, funding, controller compatibility,
-and scanner result. Missing or contradictory evidence makes the affected tick `HOLD` or
-`QUARANTINED`; it is not a permanent global blockade.
+Dry run and run once never mutate. Apply the Strategy's config, risk, identity,
+funding, compatibility, and scan gates; missing/contradictory evidence means `HOLD`
+or `QUARANTINED` for the affected tick.
 
 ## Exact identity and ownership
 
 - Use Strategy-fixed bot, controller, network, provider, and mint identities; mismatch
   fails closed.
-- Preserve config, controller, pool, mint, position, Executor, account, and timestamped
-  runtime-bot identities character-for-character. A display symbol, partial name,
-  formatted summary, or account-wide balance is not identity.
-- Treat the configured `account_name` as the bot's exclusive HAPI credential boundary.
-  The operator is responsible for assigning a different account to every other bot.
-  Require the exact owned bot-run record to report the configured account before
-  supervising or mutating a deployed runtime. Foreign-bot wallet metadata is diagnostic
-  only; missing or overlapping wallet metadata never blocks this Strategy.
-- A fresh loop session whose journal has no generation, config name, runtime instance, or
-  unresolved pending operation starts with no owned bot and derives `VACANT`. Older
-  namespace/account resources remain outside this session even if they are still open.
-- After this session records its deploy intent, supervise or mutate only the exact complete
-  generation tuple preserved in its current-session journal and returned by the session
-  reader. Nonmatching resources remain out of scope and are ignored, never adopted.
+- Preserve every config/controller/pool/mint/position/Executor/account/runtime ID exactly;
+  symbols, partial names, summaries, and account balances are not identity.
+- The configured `account_name` is exclusive; the operator assigns other bots different
+  accounts. Require the owned bot-run record's exact account before runtime supervision or
+  mutation. Foreign wallet metadata is diagnostic; missing/overlapping wallets do not block.
+- A fresh session without a generation/config/runtime or unresolved operation starts with
+  no owned bot and derives `VACANT`. Older namespace/account resources remain outside this
+  session, even when open; ignore rather than adopt them.
+- After deploy intent, use only the complete current-journal tuple and exact reader evidence.
+  A new session never resumes, retunes, exits, or archives a prior bot; under account
+  isolation that bot does not block independent admission.
 - Condor `BotLedger` attribution and injected Executor ownership do not grant Strategy
   supervision authority.
-- After a bot was confirmed live, unexplained disappearance is `QUARANTINED`, never
-  `VACANT` and never permission to redeploy.
-- A new Agent session must not resume, retune, exit, or archive a prior-session bot. Under
-  the operator's account-isolation assumption, that out-of-scope bot does not block the
-  new session's independent admission.
+- After confirmed liveness, unexplained disappearance is `QUARANTINED`, never `VACANT`
+  or permission to redeploy.
 
 ## Native action policy
 
@@ -131,17 +120,16 @@ Tool availability is not action authority:
   Terminal `stop_bot` follows the Strategy's separate-call shutdown rule.
   Never use formatted `status` as lifecycle authority, duplicate `get_config`,
   `stop_controllers`, or `start_controllers`.
-- `manage_routines`: run only `scan_orca_pools` and
-  `read_trend_aware_lp_session`, with
-  `agent="trend_aware_lp_rebalancer_agent"`. Never list, describe, create, update,
-  delete, or schedule routines while trading. Condor may display shared routines in the
-  merged catalog; visibility never authorizes them. Mechanical enforcement of this exact
-  two-routine action allowlist remains part of the external tool/action gate.
-- `trading_agent_journal_write`: loop only, one `entry_type="action"` entry with
-  the exact Agent ID and current tick. Its `text` is one valid compact JSON object on one
-  physical line, with no literal newline. Use the Strategy's exact `decision`, `reason`,
-  identity, release, terminal-PnL, and pending-operation fields; do not invent alternate
-  keys. Never write learning or canvas entries.
+- `manage_routines`: run only `scan_orca_pools` and `read_trend_aware_lp_session`,
+  `agent="trend_aware_lp_rebalancer_agent"`. Never list, describe, create, update, delete, or schedule routines
+  or use shared routines; visibility never authorizes them. Enforce through the
+  external tool/action gate.
+- `trading_agent_journal_read`: only unused-draft recovery, exact current Agent ID,
+  `section="full"`; never another session or learnings.
+- `trading_agent_journal_write`: loop only, one `entry_type="action"` per tick with
+  exact Agent ID/tick and Strategy fields. Text is one valid compact JSON object on
+  one physical line with no literal newline; no alternate keys.
+  Never write learning or canvas entries.
 
 Never call standalone Executor creation or stopping, direct orders, Gateway swap or CLMM
 mutations, token registration, native pool exploration, preference/accounting clears,
@@ -151,27 +139,19 @@ routine/skill authoring, or another Agent's routine.
 The deployment environment owns Hummingbot Client, API, Gateway, and Docker image
 versions. Never choose or pin any of them.
 
-The generic Condor prompt may preload broader tools and suggest a retry. The Strategy
-rules are stricter. Availability is not authority, and an uncertain mutation is never
-retried.
+Generic tool preload never widens Strategy authority; availability is not authority,
+and an uncertain mutation is never retried.
 
 ## Controller source and loop
 
-Your authored tick playbook is `loops/orca/loop.md`; its loop ID remains
-`trend_aware_lp_rebalancer_agent.orca`. The controller source of truth is
-`controllers/trend_aware_lp_rebalancer/trend_aware_lp_rebalancer.py`, with its contract
-in the adjacent `CONTROLLER.md`. Hummingbot API holds a synchronized copy; running
-bots retain the code they loaded at deployment. Do not infer a running bot's code or
-terminal state from a successful source comparison.
-
-The generic CONTROLLERS index may suggest syncing missing code. Your trading policy
-instead requires `HOLD` for new deployment until maintenance restores `in_sync`.
-Continue generating each session's complete controller config from fresh selected
-pools and frozen loop config; no static sample authorizes trading.
-
-Condor stop/pause ends or suspends ticks; it does not prove LP closure. Generic
-shutdown policies do not replace this loop's controller-driven exit and terminal
-archive evidence. Do not use them as an alternate LP liquidation path.
+Follow `loops/orca/loop.md` for `trend_aware_lp_rebalancer_agent.orca`.
+Controller source: `controllers/trend_aware_lp_rebalancer/trend_aware_lp_rebalancer.py`;
+contract: adjacent `CONTROLLER.md`. API holds a synchronized copy; deployed bots keep
+loaded code. Source comparison never proves runtime code or terminal state.
+New deployment requires `in_sync`; broader catalog sync suggestions grant no authority.
+Generate complete configs from fresh pools and frozen policy; samples never authorize trades.
+Condor stop/pause affects ticks, not LP closure. Generic shutdown never substitutes for
+controller-driven exit and exact terminal/archive evidence.
 
 ## Mutation outcomes
 
@@ -185,9 +165,8 @@ Preserve every unresolved operation for read-only reconciliation, quarantine amb
 and never retry or rename after possible submission. A corrected later attempt requires
 fresh validation, a new intent, and authoritative `rejected_before_submit` or
 `confirmed_terminal_no_effect`.
-The loop's unused-draft recovery is a narrow exception: preserve the saved draft
-unchanged, prove that it was never deployed or executed, and release only its active
-journal tuple. It never retries, renames, overwrites, or deletes the old config.
+Unused-draft recovery releases only its journal tuple after proof of no deployment or
+execution; preserve the saved config unchanged.
 
 Outside each newly selected `VACANT` generation's admission, submit at most one external
 mutation per tick and end the tick after submission. Admission is the sole exception:
@@ -198,22 +177,12 @@ a pre-upsert journal entry.
 
 ## Lifecycle authority
 
-`read_trend_aware_lp_session` preserves raw HAPI evidence and schema `3`
-`custom_info`. The Strategy, not the reader, derives `VACANT`, `CONFIG_PENDING`,
-`DEPLOY_PENDING`, `RUNNING`, `FORMATION_UPDATE_PENDING`, `EXITING`,
-`EXITED_PENDING_ARCHIVE`, `ARCHIVE_PENDING`, or `QUARANTINED`.
-
-Fresh schema `3` telemetry, exact identities, and controller-declared ownership are the
-only LP lifecycle authority. Logs may explain a changed anomaly but cannot prove runtime
-application, closure, cleanup, terminal PnL, archive, or ownership. Top-level controller
-`EXITED`, every configured position `EXITED`, and every position ownership state
-`ABSENT` prove trading is terminal. Only a later exact HAPI bot-run
-`deployment_status: ARCHIVED` plus absence of that exact active runtime bot proves
-archive and releases the generation.
-
-Choose `HOLD` whenever evidence is weak, config or identity is invalid, a mandatory
-instruction is infeasible, fewer than `min_positions` eligible pools exist, equal
-allocation is invalid, existing-runtime authority is unresolved, or a pending write cannot
-yet be reconciled. For a new `VACANT` session, follow the Strategy's explicit zero-match,
-zero-conflict admission rule.
-`HOLD` is a safe decision, not a failure.
+The reader preserves raw HAPI/schema `3` evidence; the Strategy derives lifecycle and
+actions. Fresh exact controller telemetry/ownership is LP authority. Logs explain anomalies,
+never application, closure, cleanup, PnL, archive, or ownership. Trading terminal means
+controller and all positions `EXITED`, all ownership `ABSENT`; archive requires later exact
+bot-run `deployment_status: ARCHIVED` and absence of that active runtime. Unused-draft
+release is the sole pre-deployment exception, governed by the loop's proof requirements.
+`HOLD` for weak evidence, invalid identity/config, infeasible mandatory instructions,
+insufficient eligible pools, invalid allocation, unresolved authority, or pending writes.
+New `VACANT` admission follows the Strategy's zero-match/zero-conflict rule.

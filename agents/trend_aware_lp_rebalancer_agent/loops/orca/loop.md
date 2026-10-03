@@ -174,8 +174,8 @@ Run `read_trend_aware_lp_session` once at the start of every tick with:
 - `expected_runtime_instance`: exact timestamped runtime bot after it is known,
   otherwise null;
 - `include_archive_record: true` only while reconciling archive;
-- `include_draft_history: true` only for the unused-draft recovery below;
-- `proposed_generation`: omit except for the pre-save naming check below;
+- `include_draft_history: true` only for unused-draft recovery;
+- `proposed_generation`: only for pre-save validation;
 - `timeout_seconds`: 1 through 30, normally 15.
 
 Require `mutation: false` and exact structured status `complete`, `degraded`, or
@@ -191,8 +191,7 @@ state or action.
 Formatted `manage_bots(status)`, logs, reports, and partial names are not substitutes.
 Formation retuning permits one final read for changed formations only;
 never for unresolved mutations.
-Unused-draft recovery permits one additional read with `include_draft_history: true`;
-ordinary empty `bot_run_matches` without that read do not prove unused history.
+Only `include_draft_history: true` proves unused history; one extra read is allowed.
 
 ### Orca scanner
 
@@ -542,13 +541,11 @@ active. A proven pre-submit name collision ends the tick and permits a newly tim
 generation on a later tick. Possible submission never permits rename or overwrite. Never
 reuse an ID after any Executor history.
 
-Before `manage_controllers(action="upsert_config")`, call the reader with current
-namespace/account, null expected identities, and `proposed_generation: <new-name>`.
-Require readable evidence and `validated_proposed_generation` equal to that name;
-the reader validates prefix, positive session, literal `T`/`Z`, and real UTC timestamp.
-Match the session to the injected Agent-ID suffix. `_s7_20261003T071534Z` is valid;
-`_s7_20261003071534Z` is invalid. Correct invalid names before any write; unreadable
-evidence means `HOLD`. After upsert, preserve identity except for unused-draft release.
+Before `manage_controllers(action="upsert", target="config")`, call the reader with current
+namespace/account, null identities, `proposed_generation: <new-name>`; require readable
+evidence and `validated_proposed_generation` equal to that name.
+Match the session to the injected Agent-ID suffix. Correct invalid names before any write;
+`HOLD` if unreadable. After upsert, preserve the ID except for unused-draft release.
 
 Build one complete config mechanically:
 
@@ -717,26 +714,22 @@ State behavior:
   logs only when the code changes or a human explicitly asks. A transient read failure may
   clear when exact current evidence returns. Identity conflict, unexplained disappearance,
   `FAULTED`, or archive error requires manual recovery.
-  The sole automatic exception is the proven unused naming draft below.
 
 ### Unused-draft recovery
 
-Only a name-format `CONFIG_MISMATCH` qualifies. Require current namespace/session prefix
-and identical generation/config/saved ID. Use `trading_agent_journal_read` with the exact
-current Agent ID and `section="full"`: confirmed creation, complete committed config,
-and no deploy intent, uncertain/ambiguous/submitted operation, or runtime ever for that ID.
-
-Read that ID with `include_draft_history: true`, null runtime. Require readable,
-conflict-free evidence, exact normalized saved/committed config equality, and
-`draft_history.status: complete`. Require zero `active_match_count`,
-`unidentified_namespace_count`, `run_match_count`, `performance_match_count`, and
-`executor_match_count`. Missing, malformed, truncated, timed-out, or nonzero evidence,
-including an incomplete journal, keeps `QUARANTINED`.
-
+Only name-format `CONFIG_MISMATCH` qualifies: current namespace/session prefix;
+generation=config=saved ID. Read the exact current Agent's full journal
+(`trading_agent_journal_read`, `section="full"`): confirmed creation, complete committed
+config; no deploy intent, uncertain/ambiguous/submitted operation, or runtime ever.
+Read that ID with `include_draft_history: true`, null runtime. Require conflict-free,
+readable evidence, exact normalized saved/committed config equality, and
+`draft_history.status: complete`; zero `active_match_count`, `unidentified_namespace_count`,
+`run_match_count`, `performance_match_count`, and `executor_match_count`.
+Missing/incomplete/malformed/timed-out/nonzero evidence or journal keeps `QUARANTINED`.
 Leave the saved draft unchanged. Journal `VACANT`/`HOLD`, null active identities/anomaly,
-old tuple in `released_session` with null runtime, and pending `kind: none`; end the tick
-without external mutation. Later, admit afresh and validate a new name. Never deploy,
-rename, overwrite, delete, or reuse the abandoned draft.
+old tuple in `released_session` (null runtime), pending `kind: none`; end the tick without
+external mutation. Later admit afresh with a validated new name. Never deploy, rename,
+overwrite, delete, or reuse the abandoned draft.
 
 Do not invent `CONFIG_READY`, generic `UPDATE_PENDING`, slots, Agent retry timers, or
 progress timeouts. Fresh controller liveness remains authoritative while positions are

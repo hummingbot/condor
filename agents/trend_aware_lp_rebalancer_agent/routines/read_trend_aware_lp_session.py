@@ -211,7 +211,9 @@ class Config(BaseModel):
                 re.escape(self.namespace) + r"_s[1-9][0-9]*_(\d{8}T\d{6}Z)",
                 self.proposed_generation,
             )
-            if match is None:
+            if match is None or not re.fullmatch(
+                r"[A-Za-z0-9_-]+", self.proposed_generation
+            ):
                 raise ValueError(
                     "proposed_generation must be namespace_sN_YYYYMMDDTHHMMSSZ"
                 )
@@ -807,9 +809,16 @@ def _draft_history(config: Config, results: dict[str, Any], active: dict) -> dic
     run_matches = 0
     for row in runs:
         deployment = row.get("deployment_config")
+        if isinstance(deployment, str):
+            try:
+                deployment = json.loads(deployment)
+            except ValueError as exc:
+                raise ValueError(
+                    "draft run history has invalid deployment JSON"
+                ) from exc
         if not isinstance(deployment, dict):
             raise ValueError("draft run history lacks deployment config evidence")
-        controllers = deployment.get("controllers_config", [])
+        controllers = deployment.get("controllers_config")
         if not isinstance(controllers, list) or any(
             not isinstance(name, str) for name in controllers
         ):
@@ -840,7 +849,8 @@ def _draft_history(config: Config, results: dict[str, Any], active: dict) -> dic
             and (
                 pagination.get("has_more") is not False
                 or pagination.get("next_cursor") is not None
-                or pagination.get("total_count") != 0
+                or type(pagination.get("total_count")) is not int
+                or pagination["total_count"] != 0
             )
         )
     ):

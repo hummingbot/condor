@@ -361,6 +361,15 @@ def test_pre_save_generation_validation_rejects_malformed_names(suffix):
         )
 
 
+def test_pre_save_generation_rejects_api_unsafe_namespace():
+    with pytest.raises(ValidationError, match="proposed_generation"):
+        reader.Config(
+            namespace="agent.orca",
+            account_name="master_account",
+            proposed_generation="agent.orca_s7_20261003T071534Z",
+        )
+
+
 def test_pre_save_generation_check_does_not_read_a_nonexistent_saved_config(
     monkeypatch,
 ):
@@ -418,13 +427,18 @@ def _draft_client(*, runs=None, performance=None, executors=None, active=None):
     return client
 
 
-def test_draft_history_checks_all_accounts_and_retains_saved_identity(monkeypatch):
+@pytest.mark.parametrize("serialized", [False, True])
+def test_draft_history_checks_all_accounts_and_retains_saved_identity(
+    monkeypatch, serialized
+):
     unrelated = {
         "config_name": "other",
         "deployment_config": {
             "controllers_config": ["other.yml"],
         },
     }
+    if serialized:
+        unrelated["deployment_config"] = json.dumps(unrelated["deployment_config"])
     client = _draft_client(
         runs={
             "status": "success",
@@ -462,16 +476,19 @@ def test_draft_history_checks_all_accounts_and_retains_saved_identity(monkeypatc
     }
 
 
-@pytest.mark.parametrize("source", ["run", "performance", "executor", "active_unknown"])
+@pytest.mark.parametrize(
+    "source", ["run", "run_json", "performance", "executor", "active_unknown"]
+)
 def test_draft_history_retains_disqualifying_use_evidence(monkeypatch, source):
     changes = {}
     field = {
         "run": "run_match_count",
+        "run_json": "run_match_count",
         "performance": "performance_match_count",
         "executor": "executor_match_count",
         "active_unknown": "unidentified_namespace_count",
     }[source]
-    if source == "run":
+    if source in {"run", "run_json"}:
         changes["runs"] = {
             "status": "success",
             "limit": reader.DRAFT_HISTORY_LIMIT,
@@ -484,6 +501,9 @@ def test_draft_history_retains_disqualifying_use_evidence(monkeypatch, source):
                 }
             ],
         }
+        if source == "run_json":
+            row = changes["runs"]["data"][0]
+            row["deployment_config"] = json.dumps(row["deployment_config"])
     elif source == "performance":
         changes["performance"] = {
             "status": "success",
@@ -532,6 +552,29 @@ def test_draft_history_retains_disqualifying_use_evidence(monkeypatch, source):
                 "limit": 1000,
                 "offset": 0,
                 "data": [{"deployment_config": None}],
+            },
+        ),
+        *[
+            (
+                "draft_runs",
+                {
+                    "status": "success",
+                    "limit": 1000,
+                    "offset": 0,
+                    "data": [{"deployment_config": deployment}],
+                },
+            )
+            for deployment in ({}, "{}", "broken", "[]")
+        ],
+        (
+            "draft_executors",
+            {
+                "data": [],
+                "pagination": {
+                    "has_more": False,
+                    "next_cursor": None,
+                    "total_count": False,
+                },
             },
         ),
         ("draft_performance", {"status": "success", "data": [{}]}),
