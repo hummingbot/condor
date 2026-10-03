@@ -210,7 +210,73 @@ describe("a beat is an address", () => {
     ACTIONS = [deed({ tick: 4, summary: "Deploy bot 'brl_mm'" })];
     await render();
 
-    expect(beats()[0].title).toBe("#4 — Deploy bot 'brl_mm'");
+    expect(beats()[0].getAttribute("aria-label")).toBe("#4 — Deploy bot 'brl_mm'");
+  });
+});
+
+describe("hovering a beat opens its card", () => {
+  const card = () => document.querySelector<HTMLElement>("[data-beat-card]");
+  const hover = (el: HTMLElement) =>
+    act(() => {
+      el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+  const unhover = (el: HTMLElement) =>
+    act(() => {
+      el.dispatchEvent(
+        new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
+      );
+    });
+
+  it("shows the tick's time, journal line and every deed with its error", async () => {
+    JOURNAL = journal([{ tick: 4, actions: 2, summary: "Fleet healthy, drift 1%" }]);
+    ACTIONS = [
+      deed({ tick: 4, summary: "Deploy bot 'brl_mm'" }),
+      deed({ tick: 4, summary: "Stop executor abc", ok: false, error: "not found" }),
+    ];
+    await render();
+
+    expect(card()).toBeNull();
+    hover(beats()[0]);
+
+    const c = card()!;
+    expect(c.dataset.beatCard).toBe("4");
+    expect(c.textContent).toContain("2026-08-06 22:04");
+    expect(c.textContent).toContain("Action failed");
+    expect(c.querySelector("[data-beat-card-summary]")!.textContent).toBe(
+      "Fleet healthy, drift 1%",
+    );
+    const deeds = [...c.querySelectorAll("[data-beat-card-deed]")].map((d) => d.textContent);
+    expect(deeds).toEqual(["✓Deploy bot 'brl_mm'", "✗Stop executor abcnot found"]);
+
+    unhover(beats()[0]);
+    expect(card()).toBeNull();
+  });
+
+  it("caps a busy tick's deeds and says how many more", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 9 }]);
+    ACTIONS = Array.from({ length: 9 }, (_, i) => deed({ tick: 1, summary: `deed ${i}` }));
+    await render();
+
+    hover(beats()[0]);
+    expect(card()!.querySelectorAll("[data-beat-card-deed]")).toHaveLength(6);
+    expect(card()!.textContent).toContain("+3 more");
+  });
+
+  it("says a pre-log tick is unrecorded rather than empty", async () => {
+    JOURNAL = journal([{ tick: 1, actions: 0 }]);
+    await render({ hasActionsLog: false });
+
+    hover(beats()[0]);
+    expect(card()!.textContent).toContain("Not logged");
+    expect(card()!.textContent).toContain("no action log for this run");
+  });
+
+  it("opens on keyboard focus too", async () => {
+    JOURNAL = journal([{ tick: 3, actions: 0 }]);
+    await render();
+
+    act(() => beats()[0].focus());
+    expect(card()!.dataset.beatCard).toBe("3");
   });
 });
 
