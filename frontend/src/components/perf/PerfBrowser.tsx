@@ -67,7 +67,6 @@ import {
   isExecutorActive,
   pnlColor,
   shortBotName,
-  toMs,
 } from "@/lib/formatters";
 import {
   ancestorChain,
@@ -82,8 +81,6 @@ import {
   emptyScopeNode,
   foldLeaves,
   indexTree,
-  leafFromExecutor,
-  leafFromTerminatedController,
   matchesGrain,
   parsePopulation,
   resolveScope,
@@ -96,7 +93,13 @@ import {
   type Population,
   type PerfLeaf,
 } from "@/lib/perf-tree";
-import { botsByController, quoteConverter, runningLeaves } from "@/lib/perf-population";
+import {
+  botsByController,
+  latestRunByBot,
+  quoteConverter,
+  runningLeaves,
+  terminatedLeaves,
+} from "@/lib/perf-population";
 import {
   collapseGrouping,
   DEFAULT_GROUPING,
@@ -123,7 +126,6 @@ import type { ConvertFn } from "@/lib/rates";
 import { unavailableLabel } from "@/lib/strategy-unavailable";
 import { useViewFacts } from "@/lib/viewFacts";
 import {
-  attributionIndex,
   loopFacts,
   loopStatus,
   ownerOf,
@@ -826,14 +828,7 @@ export function PerfBrowser({
    * practice; where it is not, the most recent run wins, which is the one the
    * finished controllers on screen belong to.
    */
-  const runByBot = useMemo(() => {
-    const latest = new Map<string, BotRunInfo>();
-    for (const run of runs) {
-      const seen = latest.get(run.bot_name);
-      if (!seen || (run.created_at ?? "") > (seen.created_at ?? "")) latest.set(run.bot_name, run);
-    }
-    return latest;
-  }, [runs]);
+  const runByBot = useMemo(() => latestRunByBot(runs), [runs]);
 
   /**
    * The instant a terminated fold reaches back to, hoisted out of `leavesFor`
@@ -877,80 +872,25 @@ export function PerfBrowser({
    */
   const leavesFor = useCallback(
     (which: Population): PerfLeaf[] => {
-      const all: PerfLeaf[] = [];
-      /**
-       * The run a record belongs to **and how we know**: the two links the
-       * runtime enforces — the bot's namespace, and the session id a standalone
-       * executor is tagged with — then, only if neither answers, the record
-       * Condor kept of its own deeds (`lib/agent-attribution`, FEAT-096/106).
-       *
-       * Bot name first: a controller is attributed through its bot, and an
-       * executor working under one inherits that answer, so the `controller_id`
-       * fallback is left to the executor nobody claims — which is exactly the
-       * agent-created one, whose `controller_id` *is* its session's agent id.
-       *
-       * Built once per fold rather than per record (PERF-331): the owner list
-       * is fixed for the whole call, and the terminated population below walks
-       * every executor the fleet has ever had.
-       */
-      const agentOf = attributionIndex(owners, deeds);
-      /**
-       * The bot a *closed* executor hung under, by the run that opened it.
-       *
-       * Asked at the executor's own start time, which is the instant the
-       * question is about: a position that outlived its bot's stop still
-       * belongs to the run that opened it. Falls through to the live fleet for
-       * an executor of a bot that is still deployed — it has no closed run
-       * window to sit in — and to `(unattached)` for one that belongs to no
-       * run at all, which on a real server is every hand-opened position.
-       */
-      const closedBotOf = (ex: ExecutorInfo, startedAt: number | null) => {
-        if (!ex.controller_id) return UNATTACHED_BOT;
-        const at = startedAt ?? (ex.close_timestamp > 0 ? toMs(ex.close_timestamp) : null);
-        const owner = at === null ? null : attribute(ex.controller_id, at);
-        return owner ?? botByController.get(ex.controller_id) ?? UNATTACHED_BOT;
-      };
       if (which === "running") {
-        // Shared with the workspace's Money view rather than written twice
-        // (FEAT-109): that view has to report the same number this browser
-        // reports at `?scope=agent:{runKey}`, and two copies of the
+        // Shared with the workspace's Money view and the execution dock rather
+        // than written again (FEAT-109): each has to report the same number this
+        // browser reports at `?scope=agent:{runKey}`, and copies of the
         // construction would make them agree by coincidence.
-        all.push(
-          ...runningLeaves({ controllers, executors, owners, deeds, botByController }),
-        );
-      } else {
-        // The window applies to what has finished, and is measured from each
-        // record's *end*: a period called "the last week" is the trading that
-        // stopped in it, not the trading that started in it.
-        for (const ex of executors) {
-          if (isExecutorActive(ex.status)) continue;
-          const started = ex.timestamp > 0 ? toMs(ex.timestamp) : null;
-          const bot = closedBotOf(ex, started);
-          const att = agentOf(bot, ex.controller_id);
-          const leaf = leafFromExecutor(ex, bot, att.runKey, att.how);
-          if (windowCutoff && leaf.endedAt !== null && leaf.endedAt < windowCutoff) continue;
-          all.push(leaf);
-        }
-        // The controllers those runs left behind. This is the spine of the
-        // terminated tree, exactly as the live controllers are the spine of the
-        // running one: a controller record covers every executor it ever ran,
-        // including the ones that closed long before the bounded executor walk
-        // reaches, so a finished bot reports what it actually did rather than
-        // whatever fraction of its executors is still in the table.
-        for (const ctrl of terminatedControllers) {
-          const att = agentOf(ctrl.bot_name, "");
-          const leaf = leafFromTerminatedController(
-            ctrl,
-            runByBot.get(ctrl.bot_name),
-            att.runKey,
-            att.how,
-          );
-          if (windowCutoff && leaf.endedAt !== null && leaf.endedAt < windowCutoff) continue;
-          all.push(leaf);
-        }
+        return runningLeaves({ controllers, executors, owners, deeds, botByController });
       }
-
-      return all;
+      // Shared with the execution dock's per-agent history for the same reason.
+      return terminatedLeaves({
+        executors,
+        terminatedControllers,
+        runs,
+        owners,
+        deeds,
+        botByController,
+        windowCutoff,
+        attribute,
+        runByBot,
+      });
     },
     [
       controllers,
@@ -959,6 +899,7 @@ export function PerfBrowser({
       terminatedControllers,
       botByController,
       attribute,
+      runs,
       owners,
       deeds,
       windowCutoff,

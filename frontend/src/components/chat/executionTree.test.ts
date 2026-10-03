@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AUTO_OPEN_AGENTS,
+  HISTORY_SUFFIX,
   executionCounts,
   executionRows,
   openRows,
@@ -294,5 +295,102 @@ describe("the header's counts", () => {
     ]);
 
     expect(executionCounts(rows)).toEqual({ controllers: 3, paused: 1 });
+  });
+});
+
+describe("an agent's history", () => {
+  const live = [
+    leaf({ id: "c1", bot: "race-live", agent: "race.mm", how: "namespace", realized: 10, unrealized: 5, net: 15, volume: 1000 }),
+  ];
+  // A stopped bot: its final snapshot still carries a frozen 30 unrealized.
+  const stoppedCtrl = leaf({
+    id: "c0",
+    bot: "race-old",
+    agent: "race.mm",
+    how: "namespace",
+    realized: 40,
+    unrealized: 30,
+    net: 70,
+    volume: 5000,
+    running: false,
+    status: "stopped",
+    endedAt: NOW - 600_000,
+  });
+  // A standalone executor the agent's session opened and closed.
+  const closedExec = leaf({
+    id: "e9",
+    kind: "executor",
+    controllerId: "",
+    bot: "race.mm_s3",
+    agent: "race.mm",
+    how: "session",
+    realized: -4,
+    net: -4,
+    volume: 200,
+    running: false,
+    status: "terminated",
+    endedAt: NOW - 60_000,
+  });
+  const rowsWith = (history: PerfLeaf[], leaves: PerfLeaf[] = live) =>
+    executionRows({ leaves, history, deeds: null, agents: [], owners: [CONDOR_UI], convert, now: NOW });
+
+  it("credits the agent with its stopped bots and closed executors, under one history row", () => {
+    const rows = rowsWith([stoppedCtrl, closedExec]);
+    const agentRow = rows.find((r) => r.kind === "agent")!;
+    const history = rows.find((r) => r.kind === "history")!;
+
+    expect(history.id).toBe(`agent:race.mm${HISTORY_SUFFIX}`);
+    expect(history.parentId).toBe("agent:race.mm");
+    expect(history.label).toBe("History · 1 stopped bot, 1 closed executor");
+    // Realized only for the stopped bot: its last mark is not money.
+    expect(history.totals.net).toBe(36);
+    expect(history.totals.unrealized).toBe(0);
+    // The agent is live + history, and its rows still add up to it.
+    expect(agentRow.totals.net).toBe(15 + 36);
+    expect(agentRow.totals.volume).toBe(6200);
+    const children = rows.filter((r) => r.parentId === agentRow.id);
+    expect(children.reduce((n, r) => n + r.totals.net, 0)).toBe(agentRow.totals.net);
+  });
+
+  it("draws no row for a finished controller or a bot with nothing live under it", () => {
+    const rows = rowsWith([stoppedCtrl]);
+    expect(rows.map((r) => r.kind)).toEqual(["agent", "controller", "history"]);
+    expect(executionCounts(rows)).toEqual({ controllers: 1, paused: 0 });
+  });
+
+  it("keeps an agent that stopped everything on the panel", () => {
+    const rows = rowsWith([stoppedCtrl], []);
+    expect(rows.map((r) => [r.kind, r.totals.net])).toEqual([
+      ["agent", 40],
+      ["history", 40],
+    ]);
+  });
+
+  it("does not count a live controller's closed executor twice", () => {
+    // The controller record already covers every executor it ever ran.
+    const closedUnderLive = leaf({
+      id: "e1",
+      kind: "executor",
+      controllerId: "c1",
+      bot: "race-live",
+      agent: "race.mm",
+      how: "namespace",
+      realized: 3,
+      net: 3,
+      running: false,
+      status: "terminated",
+    });
+    const rows = rowsWith([closedUnderLive]);
+    expect(rows.find((r) => r.kind === "agent")!.totals.net).toBe(15);
+    expect(rows.some((r) => r.kind === "history")).toBe(false);
+  });
+
+  it("leaves unowned and pseudo-run history out", () => {
+    const rows = rowsWith([
+      leaf({ ...closedExec, id: "e2", agent: "", how: "none", bot: "main" }),
+      leaf({ ...closedExec, id: "e3", agent: "condor.ui", how: "deed", bot: "main" }),
+    ]);
+    expect(rows.map((r) => r.kind)).toEqual(["agent", "controller"]);
+    expect(rows[0].totals.net).toBe(15);
   });
 });
