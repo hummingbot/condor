@@ -1,41 +1,5 @@
 [
   {
-    "id": "853ca9",
-    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s4_20261002T121334Z",
-    "filename": "20261002_122845_trend_aware_lp_session_trend_aware_lp_re_853ca9.html",
-    "created_at": "2026-10-02T12:28:45.484374+00:00",
-    "source_type": "routine",
-    "source_name": "read_trend_aware_lp_session",
-    "tags": [],
-    "subject": "",
-    "agent": "trend_aware_lp_rebalancer_agent",
-    "user_id": 1684711897
-  },
-  {
-    "id": "e7922a",
-    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s4_20261002T121334Z",
-    "filename": "20261002_123137_trend_aware_lp_session_trend_aware_lp_re_e7922a.html",
-    "created_at": "2026-10-02T12:31:37.076127+00:00",
-    "source_type": "routine",
-    "source_name": "read_trend_aware_lp_session",
-    "tags": [],
-    "subject": "",
-    "agent": "trend_aware_lp_rebalancer_agent",
-    "user_id": 1684711897
-  },
-  {
-    "id": "199094",
-    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s4_20261002T121334Z",
-    "filename": "20261002_123424_trend_aware_lp_session_trend_aware_lp_re_199094.html",
-    "created_at": "2026-10-02T12:34:24.118070+00:00",
-    "source_type": "routine",
-    "source_name": "read_trend_aware_lp_session",
-    "tags": [],
-    "subject": "",
-    "agent": "trend_aware_lp_rebalancer_agent",
-    "user_id": 1684711897
-  },
-  {
     "id": "d66d9d",
     "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s4_20261002T121334Z",
     "filename": "20261002_123703_trend_aware_lp_session_trend_aware_lp_re_d66d9d.html",
@@ -1300,6 +1264,46 @@
     "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s6_20261003T060148Z",
     "filename": "20261003_070615_trend_aware_lp_session_trend_aware_lp_re_620e08.html",
     "created_at": "2026-10-03T07:06:15.923140+00:00",
+    "source_type": "routine",
+    "source_name": "read_trend_aware_lp_session",
+    "tags": [],
+    "subject": "",
+    "agent": "trend_aware_lp_rebalancer_agent",
+    "user_id": 1684711897
+  },
+  {
+    "id": "f5f32d",
+    "title": "Trend-Aware LP Session — vacant",
+    "filename": "20261003_071433_trend_aware_lp_session_vacant_f5f32d.html",
+    "created_at": "2026-10-03T07:14:33.240939+00:00",
+    "source_type": "routine",
+    "source_name": "read_trend_aware_lp_session",
+    "tags": [],
+    "subject": "",
+    "agent": "trend_aware_lp_rebalancer_agent",
+    "user_id": 1684711897
+  },
+  {
+    "id": "4726a5",
+    "title": "Orca Pool Scanner — Admission",
+    "filename": "20261003_071459_orca_pool_scanner_admission_4726a5.html",
+    "created_at": "2026-10-03T07:14:59.198252+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "orca",
+      "liquidity-provision",
+      "pool-evidence"
+    ],
+    "subject": "",
+    "agent": "trend_aware_lp_rebalancer_agent",
+    "user_id": 1684711897
+  },
+  {
+    "id": "9014e1",
+    "title": "Trend-Aware LP Session — trend_aware_lp_rebalancer_agent-orca-v2_s7_20261003071534Z",
+    "filename": "20261003_072313_trend_aware_lp_session_trend_aware_lp_re_9014e1.html",
+    "created_at": "2026-10-03T07:23:13.371078+00:00",
     "source_type": "routine",
     "source_name": "read_trend_aware_lp_session",
     "tags": [],
