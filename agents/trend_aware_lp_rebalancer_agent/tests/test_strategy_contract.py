@@ -1337,7 +1337,10 @@ def test_archive_stop_uses_a_separate_tool_boundary_after_journal_success():
     strategy = STRATEGY_PATH.read_text()
     exit_flow = strategy.split("## Controller exit and bot archive", 1)[1]
 
-    assert "Terminal `stop_bot` follows the Strategy's separate-call shutdown rule." in agent
+    assert (
+        "Terminal `stop_bot` follows the Strategy's separate-call shutdown rule."
+        in agent
+    )
     assert "Call the journal tool alone; its success must return" in exit_flow
     assert "Both may occur in the same tick." in exit_flow
     assert "new direct\n   tool call containing only" in exit_flow
@@ -1349,14 +1352,19 @@ def test_archive_stop_uses_a_separate_tool_boundary_after_journal_success():
 
 
 def test_archive_retry_requires_proven_pre_submit_rejection_and_correction():
-    states = STRATEGY_PATH.read_text().split("State behavior:", 1)[1].split(
-        "## Schema 3 supervision", 1
-    )[0]
+    states = (
+        STRATEGY_PATH.read_text()
+        .split("State behavior:", 1)[1]
+        .split("## Schema 3 supervision", 1)[0]
+    )
 
     assert "never repeat a submitted,\n  uncertain, or ambiguous request" in states
     assert "pre-dispatch rejection is\n  `rejected_before_submit`" in states
     assert "such as batched to standalone" in states
-    assert "An unchanged standalone rejection requires\n  explicit operator approval." in states
+    assert (
+        "An unchanged standalone rejection requires\n  explicit operator approval."
+        in states
+    )
 
 
 def test_pool_selection_and_equal_allocation_policy_are_complete():
@@ -1493,19 +1501,33 @@ def test_running_formation_refresh_preserves_active_position():
 def test_formation_update_requires_final_session_check_before_intent():
     strategy = _prose(STRATEGY_PATH)
     reader = strategy.split("### Session reader", 1)[1].split("### Orca scanner", 1)[0]
-    tick = strategy.split("## Canonical loop tick", 1)[1].split("## Journal continuity", 1)[0]
+    tick = strategy.split("## Canonical loop tick", 1)[1].split(
+        "## Journal continuity", 1
+    )[0]
     formation = strategy.split("## Formation retuning", 1)[1].split(
         "## Controller exit and bot archive", 1
     )[0]
 
     assert "exactly once" not in reader
-    assert "Formation retuning permits one final read for changed formations only" in reader
+    assert (
+        "Formation retuning permits one final read for changed formations only"
+        in reader
+    )
     assert "never for unresolved mutations." in reader
-    assert "Before a formation intent, apply Formation retuning's final session check." in tick
+    assert (
+        "Before a formation intent, apply Formation retuning's final session check."
+        in tick
+    )
 
-    recheck = formation.index("run `read_trend_aware_lp_session` again before journaling intent.")
-    rebuild = formation.index("Rebuild from this read's complete live config and `formation.next`")
-    submit = formation.index("Otherwise journal exact intent and submit one full-config update.")
+    recheck = formation.index(
+        "run `read_trend_aware_lp_session` again before journaling intent."
+    )
+    rebuild = formation.index(
+        "Rebuild from this read's complete live config and `formation.next`"
+    )
+    submit = formation.index(
+        "Otherwise journal exact intent and submit one full-config update."
+    )
     assert recheck < rebuild < submit
     for requirement in (
         "For valid changes after scanning",
@@ -1553,15 +1575,21 @@ def test_formation_propagation_lag_and_exit_priority_are_exact():
         "Identity-consistent controller `EXITING` or `EXITED` overrides deploy/formation pending work."
         in strategy
     )
-    assert "During close supervision, preserve an unresolved formation update." in exit_flow
-    assert "Before terminal proof, record an applied update as `confirmed`." in exit_flow
+    assert (
+        "During close supervision, preserve an unresolved formation update."
+        in exit_flow
+    )
+    assert (
+        "Before terminal proof, record an applied update as `confirmed`." in exit_flow
+    )
     assert (
         "At first terminal proof, retain `confirmed` or `confirmed_terminal_no_effect` "
         "in the `EXITED_PENDING_ARCHIVE` decision. Replace it with the archive intent on "
-        "the later archive tick."
-        in exit_flow
+        "the later archive tick." in exit_flow
     )
-    assert "A formation mismatch never relaxes archive evidence requirements." in exit_flow
+    assert (
+        "A formation mismatch never relaxes archive evidence requirements." in exit_flow
+    )
 
     fields = {
         "market_trend",
@@ -1747,9 +1775,7 @@ def test_archive_confirmation_releases_identity_without_losing_terminal_pnl():
         "`decision: ARCHIVE_CONFIRMED`, null active "
         "identity and pending fields, and the exact old identity in `released_session`."
     ) in exit_flow
-    assert (
-        "immediately continue through complete `VACANT` admission." in exit_flow
-    )
+    assert "immediately continue through complete `VACANT` admission." in exit_flow
     assert "Do not start admission in this reconciliation tick." not in exit_flow
 
 
@@ -1889,6 +1915,30 @@ def test_config_name_and_saved_readback_follow_the_specified_exact_rules():
         "missing, duplicated, truncated, unparseable, or mismatched block"
         in config_section
     )
+
+
+def test_pre_save_name_gate_and_unused_draft_release_are_in_the_real_prompt():
+    prompt = _prompt("loop")
+    for phrase in (
+        'Before `manage_controllers(action="upsert_config")`',
+        "`proposed_generation: <new-name>`",
+        "`validated_proposed_generation` equal to that name",
+        "Correct invalid names before any write",
+        "Match the session to the injected Agent-ID suffix",
+        "_s7_20261003T071534Z",
+        "_s7_20261003071534Z",
+        'section="full"',
+        "no deploy intent, uncertain/ambiguous/submitted operation",
+        "exact normalized saved/committed config equality",
+        "`draft_history.status: complete`",
+        "zero `active_match_count`, `unidentified_namespace_count`, `run_match_count`",
+        "`performance_match_count`, and `executor_match_count`",
+        "including an incomplete journal, keeps `QUARANTINED`",
+        "Leave the saved draft unchanged",
+        "end the tick without external mutation",
+        "Never deploy, rename, overwrite, delete, or reuse the abandoned draft",
+    ):
+        assert phrase in " ".join(prompt.split())
 
 
 def test_authoritative_recent_decisions_require_one_canonical_action_line():

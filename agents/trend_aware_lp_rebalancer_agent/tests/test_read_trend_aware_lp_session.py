@@ -341,6 +341,236 @@ def test_saved_config_path_uses_exact_read_and_preserves_complete_config(monkeyp
     assert client.bot_orchestration.calls == [("active",)]
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "_s7_20261003071534Z",
+        "_s7_20261003T071534",
+        "_s0_20261003T071534Z",
+        "_s7_20260230T071534Z",
+        "_s7_20261003T251534Z",
+    ],
+)
+def test_pre_save_generation_validation_rejects_malformed_names(suffix):
+    with pytest.raises(ValidationError, match="proposed_generation"):
+        _config(
+            expected_generation=None,
+            expected_config_name=None,
+            expected_runtime_instance=None,
+            proposed_generation=NAMESPACE + suffix,
+        )
+
+
+def test_pre_save_generation_check_does_not_read_a_nonexistent_saved_config(
+    monkeypatch,
+):
+    proposed = NAMESPACE + "_s7_20261003T071534Z"
+    client = _client(active={"status": "success", "data": {}}, wallets=[])
+    payload = _payload(
+        _run(
+            monkeypatch,
+            client,
+            _config(
+                expected_generation=None,
+                expected_config_name=None,
+                expected_runtime_instance=None,
+                proposed_generation=proposed,
+            ),
+        )
+    )
+    assert payload["validated_proposed_generation"] == proposed
+    assert payload["status"] == "degraded"
+    assert payload["config"] is None
+    assert client.controllers.calls == []
+    assert client.bot_orchestration.calls == [("active",)]
+
+
+def _draft_client(*, runs=None, performance=None, executors=None, active=None):
+    client = _client(
+        active=active or {"status": "success", "data": {}},
+        saved={"id": GENERATION},
+        wallets=[],
+        runs={"status": "success", "data": []} if runs is None else runs,
+    )
+    if runs is None:
+        client.bot_orchestration.runs.update(limit=reader.DRAFT_HISTORY_LIMIT, offset=0)
+
+    async def latest():
+        return {"status": "success", "data": []} if performance is None else performance
+
+    async def search(**kwargs):
+        assert kwargs == {"controller_ids": [GENERATION], "limit": 1}
+        return (
+            {
+                "data": [],
+                "pagination": {
+                    "has_more": False,
+                    "next_cursor": None,
+                    "total_count": 0,
+                },
+            }
+            if executors is None
+            else executors
+        )
+
+    client.bot_orchestration.get_latest_controller_performance = latest
+    client.executors = SimpleNamespace(search_executors=search)
+    return client
+
+
+def test_draft_history_checks_all_accounts_and_retains_saved_identity(monkeypatch):
+    unrelated = {
+        "config_name": "other",
+        "deployment_config": {
+            "controllers_config": ["other.yml"],
+        },
+    }
+    client = _draft_client(
+        runs={
+            "status": "success",
+            "data": [unrelated],
+            "limit": reader.DRAFT_HISTORY_LIMIT,
+            "offset": 0,
+        }
+    )
+    payload = _payload(
+        _run(
+            monkeypatch,
+            client,
+            _config(
+                expected_runtime_instance=None,
+                include_draft_history=True,
+            ),
+        )
+    )
+    assert payload["draft_history"] == {
+        "status": "complete",
+        "active_match_count": 0,
+        "unidentified_namespace_count": 0,
+        "run_match_count": 0,
+        "performance_match_count": 0,
+        "executor_match_count": 0,
+    }
+    assert payload["config"] == {"id": GENERATION}
+    run_call = next(
+        call[1] for call in client.bot_orchestration.calls if call[0] == "runs"
+    )
+    assert run_call == {
+        "limit": reader.DRAFT_HISTORY_LIMIT,
+        "offset": 0,
+        "include_final_status": False,
+    }
+
+
+@pytest.mark.parametrize("source", ["run", "performance", "executor", "active_unknown"])
+def test_draft_history_retains_disqualifying_use_evidence(monkeypatch, source):
+    changes = {}
+    field = {
+        "run": "run_match_count",
+        "performance": "performance_match_count",
+        "executor": "executor_match_count",
+        "active_unknown": "unidentified_namespace_count",
+    }[source]
+    if source == "run":
+        changes["runs"] = {
+            "status": "success",
+            "limit": reader.DRAFT_HISTORY_LIMIT,
+            "offset": 0,
+            "data": [
+                {
+                    "config_name": "v2_with_controllers",
+                    "account_name": "foreign",
+                    "deployment_config": {"controllers_config": [GENERATION + ".yml"]},
+                }
+            ],
+        }
+    elif source == "performance":
+        changes["performance"] = {
+            "status": "success",
+            "data": [{"controller_id": GENERATION}],
+        }
+    elif source == "executor":
+        changes["executors"] = {
+            "data": [{"controller_id": GENERATION}],
+            "pagination": {"has_more": True},
+        }
+    else:
+        changes["active"] = {
+            "status": "success",
+            "data": {RUNTIME: {"status": "running"}},
+        }
+    payload = _payload(
+        _run(
+            monkeypatch,
+            _draft_client(**changes),
+            _config(
+                expected_runtime_instance=None,
+                include_draft_history=True,
+            ),
+        )
+    )
+    assert payload["draft_history"][field] == 1
+
+
+@pytest.mark.parametrize(
+    "source,value",
+    [
+        ("draft_runs", TimeoutError("private failure")),
+        (
+            "draft_runs",
+            {
+                "status": "success",
+                "limit": 1000,
+                "offset": 0,
+                "data": [{"deployment_config": {}}] * 1000,
+            },
+        ),
+        (
+            "draft_runs",
+            {
+                "status": "success",
+                "limit": 1000,
+                "offset": 0,
+                "data": [{"deployment_config": None}],
+            },
+        ),
+        ("draft_performance", {"status": "success", "data": [{}]}),
+        ("draft_executors", {"data": [], "pagination": {"has_more": True}}),
+        ("draft_executors", {"status": "error", "data": []}),
+    ],
+)
+def test_incomplete_draft_history_never_proves_absence(source, value):
+    config = _config(expected_runtime_instance=None, include_draft_history=True)
+    results = {
+        "active_status": {"status": "success", "data": {}},
+        "saved_config": {"id": GENERATION},
+        "gateway_wallets": [],
+        "draft_runs": {
+            "status": "success",
+            "limit": reader.DRAFT_HISTORY_LIMIT,
+            "offset": 0,
+            "data": [],
+        },
+        "draft_performance": {"status": "success", "data": []},
+        "draft_executors": {
+            "data": [],
+            "pagination": {"has_more": False, "next_cursor": None, "total_count": 0},
+        },
+    }
+    results[source] = value
+    payload = reader._canonical_payload(config, results)
+    assert payload["status"] == "unavailable"
+    assert payload["draft_history"] == {"status": "unavailable"}
+    assert payload["errors"]
+
+
+def test_draft_history_inputs_cannot_change_a_known_runtime_identity():
+    with pytest.raises(ValidationError, match="no runtime instance"):
+        _config(include_draft_history=True)
+    with pytest.raises(ValidationError, match="vacant identity tuple"):
+        _config(proposed_generation=GENERATION)
+
+
 def test_runtime_path_preserves_schema_three_and_always_fetches_bot_runs(monkeypatch):
     custom_info = _custom_info()
     live = [_live_config()]
@@ -560,7 +790,9 @@ def test_other_namespaced_bot_is_ignored_when_exact_runtime_is_selected(monkeypa
     payload = _payload(_run(monkeypatch, client))
 
     assert [row["runtime_instance"] for row in payload["active_matches"]] == [RUNTIME]
-    assert all(row["runtime_instance"] != other for row in payload["namespace_conflicts"])
+    assert all(
+        row["runtime_instance"] != other for row in payload["namespace_conflicts"]
+    )
     assert payload["status"] == "unavailable"
 
 

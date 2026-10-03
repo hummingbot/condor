@@ -29,6 +29,7 @@ from routines.base import RoutineResult
 
 CATEGORY = "Trend-Aware LP Session"
 MAX_AGENT_RESULT_BYTES = 1_000_000
+DRAFT_HISTORY_LIMIT = 1_000
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _RUNTIME_SUFFIX = re.compile(r"^\d{8}-\d{6}$")
@@ -149,7 +150,11 @@ class Config(BaseModel):
     expected_runtime_instance: StrictStr | None = Field(
         default=None, min_length=1, max_length=255
     )
+    proposed_generation: StrictStr | None = Field(
+        default=None, min_length=1, max_length=251
+    )
     include_archive_record: StrictBool = False
+    include_draft_history: StrictBool = False
     timeout_seconds: StrictInt = Field(default=15, ge=1, le=30)
 
     @field_validator(
@@ -158,6 +163,7 @@ class Config(BaseModel):
         "expected_generation",
         "expected_config_name",
         "expected_runtime_instance",
+        "proposed_generation",
     )
     @classmethod
     def validate_identity(cls, value: str | None) -> str | None:
@@ -192,6 +198,29 @@ class Config(BaseModel):
             raise ValueError(
                 "include_archive_record requires expected_runtime_instance"
             )
+        if self.include_draft_history and (
+            not generation_set or self.expected_runtime_instance is not None
+        ):
+            raise ValueError(
+                "include_draft_history requires an exact generation and no runtime instance"
+            )
+        if self.proposed_generation is not None:
+            if generation_set:
+                raise ValueError("proposed_generation requires a vacant identity tuple")
+            match = re.fullmatch(
+                re.escape(self.namespace) + r"_s[1-9][0-9]*_(\d{8}T\d{6}Z)",
+                self.proposed_generation,
+            )
+            if match is None:
+                raise ValueError(
+                    "proposed_generation must be namespace_sN_YYYYMMDDTHHMMSSZ"
+                )
+            try:
+                datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ")
+            except ValueError as exc:
+                raise ValueError(
+                    "proposed_generation has an invalid UTC timestamp"
+                ) from exc
         return self
 
 
@@ -691,6 +720,18 @@ async def _read_sources(config: Config, context: Any) -> dict[str, Any]:
         "active_status": client.bot_orchestration.get_active_bots_status(),
         "gateway_wallets": client.accounts.list_gateway_wallets(),
     }
+    if config.include_draft_history:
+        # No bot-name/account filter: a deployment may have a timestamped name
+        # or have used this controller ID under a different account.
+        calls["draft_runs"] = client.bot_orchestration.get_bot_runs(
+            limit=DRAFT_HISTORY_LIMIT, offset=0, include_final_status=False
+        )
+        calls["draft_performance"] = (
+            client.bot_orchestration.get_latest_controller_performance()
+        )
+        calls["draft_executors"] = client.executors.search_executors(
+            controller_ids=[config.expected_generation], limit=1
+        )
     if config.expected_runtime_instance is None:
         if config.expected_config_name is not None:
             calls["saved_config"] = client.controllers.get_controller_config(
@@ -734,6 +775,95 @@ def _source_error(source: str, value: Any) -> str | None:
     return None
 
 
+def _draft_history(config: Config, results: dict[str, Any], active: dict) -> dict:
+    """Return counts only after every history source proves a complete read."""
+    generation = config.expected_generation
+    runs_response = results.get("draft_runs")
+    performance_response = results.get("draft_performance")
+    executors_response = results.get("draft_executors")
+    for source, response in (
+        ("draft_runs", runs_response),
+        ("draft_performance", performance_response),
+        ("draft_executors", executors_response),
+    ):
+        error = _source_error(source, response)
+        if error:
+            raise ValueError(error)
+        if not isinstance(response, dict) or response.get("status") == "error":
+            raise ValueError(f"{source} response is unavailable")
+
+    runs = _response_data(runs_response, "draft_runs")
+    # HAPI's `total` is the current page size, not the universe size. A full
+    # page cannot prove absence; fail closed rather than scanning unboundedly.
+    if (
+        runs_response.get("status") != "success"
+        or runs_response.get("limit") != DRAFT_HISTORY_LIMIT
+        or runs_response.get("offset") != 0
+        or not isinstance(runs, list)
+        or len(runs) >= DRAFT_HISTORY_LIMIT
+        or any(not isinstance(row, dict) for row in runs)
+    ):
+        raise ValueError("draft run history is malformed or incomplete")
+    run_matches = 0
+    for row in runs:
+        deployment = row.get("deployment_config")
+        if not isinstance(deployment, dict):
+            raise ValueError("draft run history lacks deployment config evidence")
+        controllers = deployment.get("controllers_config", [])
+        if not isinstance(controllers, list) or any(
+            not isinstance(name, str) for name in controllers
+        ):
+            raise ValueError("draft run history has malformed controller identities")
+        if row.get("config_name") == generation or any(
+            name.removesuffix(".yml") == generation for name in controllers
+        ):
+            run_matches += 1
+
+    performance = _response_data(performance_response, "draft_performance")
+    if (
+        performance_response.get("status") != "success"
+        or not isinstance(performance, list)
+        or any(
+            not isinstance(row, dict) or not isinstance(row.get("controller_id"), str)
+            for row in performance
+        )
+    ):
+        raise ValueError("draft performance history is malformed")
+    executors = _response_data(executors_response, "draft_executors")
+    pagination = executors_response.get("pagination")
+    if (
+        not isinstance(executors, list)
+        or any(not isinstance(row, dict) for row in executors)
+        or not isinstance(pagination, dict)
+        or (
+            not executors
+            and (
+                pagination.get("has_more") is not False
+                or pagination.get("next_cursor") is not None
+                or pagination.get("total_count") != 0
+            )
+        )
+    ):
+        raise ValueError("draft executor history is malformed or incomplete")
+    return {
+        "status": "complete",
+        "active_match_count": sum(
+            generation in _performance(bot) for bot in active.values()
+        ),
+        "unidentified_namespace_count": sum(
+            _in_namespace(name, config.namespace) and not _performance(bot)
+            for name, bot in active.items()
+        ),
+        "run_match_count": run_matches,
+        "performance_match_count": sum(
+            row["controller_id"] == generation for row in performance
+        ),
+        # The query is controller-ID scoped. Any row disqualifies the draft;
+        # there is no need to fetch further pages after finding one.
+        "executor_match_count": len(executors),
+    }
+
+
 def _canonical_payload(config: Config, results: dict[str, Any]) -> dict[str, Any]:
     observed_at = datetime.now(timezone.utc)
     payload: dict[str, Any] = {
@@ -741,6 +871,7 @@ def _canonical_payload(config: Config, results: dict[str, Any]) -> dict[str, Any
         "observed_at": observed_at.isoformat(),
         "mutation": False,
         "report_error": None,
+        "validated_proposed_generation": config.proposed_generation,
         "expected": {
             "namespace": config.namespace,
             "account_name": config.account_name,
@@ -761,6 +892,7 @@ def _canonical_payload(config: Config, results: dict[str, Any]) -> dict[str, Any
         "custom_info": None,
         "bot_run_matches": [],
         "archive_record": None,
+        "draft_history": None,
         "errors": [],
         "warnings": [],
     }
@@ -1011,6 +1143,16 @@ def _canonical_payload(config: Config, results: dict[str, Any]) -> dict[str, Any
                 payload["errors"].append(str(exc))
                 required_failure = True
 
+    if config.include_draft_history:
+        try:
+            if not active_status_readable:
+                raise ValueError("draft history requires readable active status")
+            payload["draft_history"] = _draft_history(config, results, active_data)
+        except ValueError as exc:
+            payload["draft_history"] = {"status": "unavailable"}
+            payload["errors"].append(str(exc))
+            required_failure = True
+
     for runtime, account in observed_accounts:
         if account != config.account_name:
             payload["account_conflicts"].append(
@@ -1148,6 +1290,7 @@ def _unavailable_payload(config: Config, error: str) -> dict[str, Any]:
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "mutation": False,
         "report_error": None,
+        "validated_proposed_generation": None,
         "expected": {
             "namespace": config.namespace,
             "account_name": config.account_name,
@@ -1168,6 +1311,7 @@ def _unavailable_payload(config: Config, error: str) -> dict[str, Any]:
         "custom_info": None,
         "bot_run_matches": [],
         "archive_record": None,
+        "draft_history": None,
         "errors": [error],
         "warnings": [],
     }

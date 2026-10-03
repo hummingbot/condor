@@ -185,6 +185,9 @@ Preserve every unresolved operation for read-only reconciliation, quarantine amb
 and never retry or rename after possible submission. A corrected later attempt requires
 fresh validation, a new intent, and authoritative `rejected_before_submit` or
 `confirmed_terminal_no_effect`.
+The loop's unused-draft recovery is a narrow exception: preserve the saved draft
+unchanged, prove that it was never deployed or executed, and release only its active
+journal tuple. It never retries, renames, overwrites, or deletes the old config.
 
 Outside each newly selected `VACANT` generation's admission, submit at most one external
 mutation per tick and end the tick after submission. Admission is the sole exception:
