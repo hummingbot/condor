@@ -101,9 +101,19 @@ export function useFleetData(
     population,
     enabled = true,
     history = true,
+    terminated = population === "terminated",
   }: {
     population: Population;
     enabled?: boolean;
+    /**
+     * Whether to read what has finished — the runs and the controllers they
+     * left behind — alongside the live fleet.
+     *
+     * Follows the population by default: `/bots` reads it only on its
+     * Terminated side. The execution dock folds the running population *and*
+     * credits each agent with its stopped bots, so it asks for both.
+     */
+    terminated?: boolean;
     /**
      * Whether to walk the fleet's performance history (ARCH-324).
      *
@@ -310,7 +320,7 @@ export function useFleetData(
   const { data: runsData } = useQuery({
     queryKey: ["bot-runs", server],
     queryFn: () => api.getBotRuns(server!, { limit: 200 }),
-    enabled: on && population === "terminated",
+    enabled: on && terminated,
     refetchInterval: 30_000,
   });
 
@@ -325,7 +335,7 @@ export function useFleetData(
   const { data: terminatedData } = useQuery({
     queryKey: ["terminated-controllers", server],
     queryFn: () => api.getTerminatedControllers(server!),
-    enabled: on && population === "terminated",
+    enabled: on && terminated,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });

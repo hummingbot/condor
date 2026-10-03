@@ -36,7 +36,12 @@ import {
   pnlColor,
   shortBotName,
 } from "@/lib/formatters";
-import { quoteConverter, runningLeaves } from "@/lib/perf-population";
+import {
+  botsByController,
+  quoteConverter,
+  runningLeaves,
+  terminatedLeaves,
+} from "@/lib/perf-population";
 import { UNATTACHED_BOT, controllerNodeId, type PerfLeaf } from "@/lib/perf-tree";
 import { agentsQuery } from "@/lib/queryClient";
 
@@ -177,7 +182,10 @@ export function DockExecution({
   // and the caches are shared rather than doubled, and a reader with the
   // browser open pays nothing for this panel. No history walk: this folds, it
   // does not chart, and the walk costs a paged request per controller.
-  const fleet = useFleetData(server, { population: "running", history: false });
+  // `terminated: true` adds the runs and the controllers they left behind, under
+  // the keys `/bots`' Terminated side already holds: an agent row is credited
+  // with what its stopped bots made, not only with what is trading now.
+  const fleet = useFleetData(server, { population: "running", history: false, terminated: true });
 
   // The shared roster (key and cadence: `agentsQuery`), so the agent rows'
   // liveness arrives with a request nobody made for them.
@@ -248,12 +256,50 @@ export function DockExecution({
     return [...controllers, ...all.filter((leaf) => leaf.kind !== "controller")];
   }, [fleet.controllers, fleet.executors, fleet.owners, fleet.deeds]);
 
+  /**
+   * Everything that has finished on this server — `terminatedLeaves`, the
+   * construction `/bots?population=terminated` folds, with no period window.
+   *
+   * `executionRows` keeps only what is credited to an agent and folds it into
+   * that agent's row, so an agent that stopped a bot or closed an executor keeps
+   * the money it made. The live half still moves on every socket frame; this
+   * half changes only when something stops.
+   */
+  const history = useMemo(
+    () =>
+      terminatedLeaves({
+        executors: fleet.executors,
+        terminatedControllers: fleet.terminatedControllers,
+        runs: fleet.runs,
+        owners: fleet.owners,
+        deeds: fleet.deeds,
+        botByController: botsByController(fleet.controllers),
+      }),
+    [
+      fleet.executors,
+      fleet.terminatedControllers,
+      fleet.runs,
+      fleet.owners,
+      fleet.deeds,
+      fleet.controllers,
+    ],
+  );
+
   const convert = useMemo(() => quoteConverter(fleet.convert), [fleet.convert]);
   const currencySymbol = fleet.currencySymbol ?? "$";
 
   const rows = useMemo(
-    () => executionRows({ leaves, deeds: fleet.deeds, agents, owners: fleet.owners, convert, now }),
-    [leaves, fleet.deeds, agents, fleet.owners, convert, now],
+    () =>
+      executionRows({
+        leaves,
+        history,
+        deeds: fleet.deeds,
+        agents,
+        owners: fleet.owners,
+        convert,
+        now,
+      }),
+    [leaves, history, fleet.deeds, agents, fleet.owners, convert, now],
   );
 
   // Only what the reader has actually clicked; the default for everything else
@@ -334,7 +380,9 @@ export function DockExecution({
     );
   }
 
-  if (!deployedCount && !unattached) {
+  // An agent that has stopped everything still has a row — its history is on
+  // this server — so the empty sentence is for a server with no rows at all.
+  if (!deployedCount && !unattached && rows.length === 0) {
     return (
       <div className="flex flex-col">
         <p className="px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
@@ -446,6 +494,17 @@ export function DockExecution({
                     open={open.has(row.id)}
                     onToggle={() => toggle(row.id)}
                     onOpenAgent={onOpenAgent}
+                  />
+                ) : row.kind === "history" ? (
+                  <HistoryRow
+                    row={row}
+                    symbol={currencySymbol}
+                    capped={fleet.paging.capped}
+                    onOpen={() =>
+                      navigate(
+                        `/bots?population=terminated&scope=${encodeURIComponent(row.parentId ?? "")}`,
+                      )
+                    }
                   />
                 ) : (
                   <tr>
@@ -574,7 +633,7 @@ function AgentRow({
    */
   const total = (value: number, what: string, pnl: boolean) => (
     <td
-      title={`${row.label} — ${what}, summed over its controllers on this server`}
+      title={`${row.label} — ${what} on this server: its live controllers plus every bot it stopped and executor it closed`}
       className={`whitespace-nowrap px-1.5 pt-1.5 text-right align-top font-mono font-semibold tabular-nums ${
         pnl ? "" : "text-[var(--color-text-muted)]"
       }`}
@@ -676,6 +735,68 @@ function AgentRow({
       {total(row.totals.realized, "realized PnL", true)}
       {total(row.totals.unrealized, "unrealized PnL", true)}
       {total(row.totals.net, "net PnL", true)}
+      <td />
+    </tr>
+  );
+}
+
+/**
+ * What an agent has already finished on this server: its stopped bots and its
+ * closed executors, as one line under the agent.
+ *
+ * One row and not a tree, because nothing in it can be paused or started — the
+ * terminated browser is where it is read in full, and the row opens it there.
+ * Its figures are the ones its agent's totals include, so the rows beneath an
+ * agent still add up to it.
+ */
+function HistoryRow({
+  row,
+  symbol,
+  capped,
+  onOpen,
+}: {
+  row: ExecutionRow;
+  symbol: string;
+  /** The bounded executor walk stopped early, so older closed executors are missing. */
+  capped: boolean;
+  onOpen: () => void;
+}) {
+  const cell = "whitespace-nowrap px-1.5 py-0.5 text-right font-mono tabular-nums";
+  const pnl = (value: number) => (
+    <td className={cell} style={{ color: pnlColor(value) }}>
+      {formatCurrencyPnl(value, symbol)}
+    </td>
+  );
+  const described = `${row.label} — realized PnL only: a stopped bot's last open position is not counted${
+    capped ? ". Older closed executors are past the loaded page and are missing" : ""
+  }`;
+  return (
+    <tr
+      data-history-row={row.id}
+      role="button"
+      tabIndex={0}
+      aria-label={described}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        onOpen();
+      }}
+      className="cursor-pointer text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)]"
+    >
+      <td
+        colSpan={4}
+        title={described}
+        className="truncate py-0.5 pr-1.5 italic"
+        style={{ paddingLeft: 12 + row.depth * 10 }}
+      >
+        {row.label}
+        {capped ? " +" : ""}
+      </td>
+      <td className={cell}>{formatCompactVolume(row.totals.volume, symbol)}</td>
+      {pnl(row.totals.realized)}
+      {pnl(row.totals.unrealized)}
+      {pnl(row.totals.net)}
       <td />
     </tr>
   );

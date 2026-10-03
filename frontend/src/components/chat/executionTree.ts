@@ -12,6 +12,13 @@
 // the ledger* rather than dropped. So the agent rows partition the panel's
 // total by construction, which is the property the fold discipline rests on.
 //
+// **An agent's money is everything it ever deployed.** The live rows are what
+// is trading now, but an agent row's totals also carry the bots it stopped and
+// the executors that closed — the same lifetime figure the race monitor posts
+// (`scripts/hackathon_monitor.py`) — under one `history` row per agent, so the
+// rows beneath an agent still add up to it. Stopping a bot moves its money from
+// a controller row to the history row; it never takes it off the agent.
+//
 // Nothing here fetches and nothing here renders (the ARCH-300 split), so every
 // judgement below — which rows exist, which level collapses, which agent a run
 // key belongs to — is reachable from a test rather than only from a rendered
@@ -50,7 +57,8 @@ const GROUPING = ["agent", "bot"] as const;
 export const AUTO_OPEN_AGENTS = 3;
 
 /**
- * One line of the panel — an agent, a bot, or a controller.
+ * One line of the panel — an agent, a bot, a controller, or what an agent has
+ * already finished.
  *
  * Executors are deliberately not rows: they are counted on the controller that
  * is running them, exactly as they were before this feature, and a third
@@ -58,9 +66,12 @@ export const AUTO_OPEN_AGENTS = 3;
  * still in every `leaves` above them, so nothing is missing from a total.
  */
 export interface ExecutionRow {
-  /** `agent:{runKey}` / `bot:{name}` / a controller node id — the browser's own ids. */
+  /**
+   * `agent:{runKey}` / `bot:{name}` / a controller node id — the browser's own
+   * ids — or `{agent id}::history` for the finished records under an agent.
+   */
   id: string;
-  kind: "agent" | "bot" | "controller";
+  kind: "agent" | "bot" | "controller" | "history";
   label: string;
   depth: 0 | 1 | 2;
   /** The row this one hangs under, `null` at the top — what {@link visibleRows} walks. */
@@ -76,7 +87,15 @@ export interface ExecutionRow {
 }
 
 export interface ExecutionInput {
+  /** The running population — what is trading now, and what draws a row. */
   leaves: readonly PerfLeaf[];
+  /**
+   * The terminated population (`terminatedLeaves`): stopped bots' controllers
+   * and closed executors. Only what is credited to a real agent is kept — see
+   * {@link agentHistory} — and it is folded into that agent's row, never drawn
+   * as rows of its own.
+   */
+  history?: readonly PerfLeaf[];
   deeds: DeedIndex | null;
   /** `["agents"]`, for turning a run key into an agent somebody can open. */
   agents: readonly AgentSummary[];
@@ -95,6 +114,37 @@ export interface ExecutionInput {
 
 const AGENT_PREFIX = AXIS_PREFIX.agent;
 
+/** The suffix a history row's id carries after its agent's id. */
+export const HISTORY_SUFFIX = "::history";
+
+/**
+ * The finished records an agent row is credited with.
+ *
+ * **Only an agent's.** A pseudo-run (a chat, a delegation, the dashboard) and an
+ * unowned record keep their live rows and nothing else: the terminated side of
+ * a real server holds every hand-opened position it has ever had, and this
+ * panel is read for what the agents did, not for the archive.
+ *
+ * **A stopped controller counts what it realized, not its last mark.** Its
+ * final snapshot outlives the bot, so the unrealized PnL in it is a frozen mark
+ * on a book nobody is quoting any more, not money ([[CORR-633]]). This is the
+ * rule the server-side aggregator (`_merge_stopped_instance`) applies, and so
+ * the race monitor, so the dock and the race board cannot disagree about a
+ * stopped bot. A closed executor's PnL is already all realized.
+ */
+export function agentHistory(history: readonly PerfLeaf[]): PerfLeaf[] {
+  const out: PerfLeaf[] = [];
+  for (const leaf of history) {
+    if (!leaf.agent || isPseudoRunKey(leaf.agent)) continue;
+    out.push(
+      leaf.kind === "controller"
+        ? { ...leaf, unrealized: 0, net: leaf.realized, positions: [] }
+        : leaf,
+    );
+  }
+  return out;
+}
+
 /**
  * Every row the panel can draw, parents before their children.
  *
@@ -106,9 +156,18 @@ const AGENT_PREFIX = AXIS_PREFIX.agent;
  */
 export function executionRows(input: ExecutionInput): ExecutionRow[] {
   const { leaves, deeds, agents, owners, convert, now } = input;
-  const tree = buildTree([...leaves], "All", { grouping: [...GROUPING], deeds });
+  const history = agentHistory(input.history ?? []);
+  // One tree over both populations, live first so live agents keep the top of
+  // the panel. `buildTree`'s spine rule is what keeps this from double
+  // counting: a closed executor of a live controller hangs under that
+  // controller's node, whose spine is the controller record — which already
+  // covers every executor it ever ran.
+  const tree = buildTree([...leaves, ...history], "All", { grouping: [...GROUPING], deeds });
   const bySlug = new Map(agents.map((agent) => [agent.slug, agent]));
-  const fold = (node: PerfNode) => foldLeaves(node.leaves, convert, now);
+  const live = new Set(leaves);
+  const isLive = (leaf: PerfLeaf) => live.has(leaf);
+  const foldOf = (spine: PerfLeaf[]) => foldLeaves(spine, convert, now);
+  const fold = (node: PerfNode) => foldOf(node.leaves.filter(isLive));
 
   /**
    * A controller node, as a row — or nothing.
@@ -125,7 +184,9 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
     parentId: string,
   ): ExecutionRow | null => {
     const leaf = node.leaves[0];
-    if (!leaf || leaf.kind !== "controller") return null;
+    // A finished controller is in the tree only to be folded into its agent;
+    // its row would be a controller nothing is running.
+    if (!leaf || leaf.kind !== "controller" || !isLive(leaf)) return null;
     return {
       id: node.id,
       kind: "controller",
@@ -154,7 +215,9 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
     // — the sidebar's own rule, per owner rather than per fleet: a fleet
     // running one bot must not spend a chevron saying so, and neither must an
     // agent that does.
-    const botLevel = distinguishes(agentNode.leaves, "bot", deeds);
+    const liveSpine = agentNode.leaves.filter(isLive);
+    const finished = agentNode.leaves.filter((leaf) => !isLive(leaf));
+    const botLevel = distinguishes(liveSpine, "bot", deeds);
 
     const under: ExecutionRow[] = [];
     for (const child of agentNode.children) {
@@ -164,6 +227,8 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
         continue;
       }
       if (child.kind !== "bot") continue;
+      // A bot that only has finished records under it is history, not a row.
+      if (!child.leaves.some(isLive)) continue;
       const controllers = child.children
         .map((c) => controllerRow(c, botLevel ? 2 : 1, botLevel ? child.id : agentNode.id))
         .filter((row): row is ExecutionRow => row !== null);
@@ -179,9 +244,22 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
         parentId: agentNode.id,
         hasChildren: controllers.length > 0,
         totals: fold(child),
-        leaves: child.leaves,
+        leaves: child.leaves.filter(isLive),
       });
       under.push(...controllers);
+    }
+
+    if (finished.length > 0) {
+      under.push({
+        id: `${agentNode.id}${HISTORY_SUFFIX}`,
+        kind: "history",
+        label: historyLabel(finished),
+        depth: 1,
+        parentId: agentNode.id,
+        hasChildren: false,
+        totals: foldOf(finished),
+        leaves: finished,
+      });
     }
 
     rows.push({
@@ -200,7 +278,8 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
       depth: 0,
       parentId: null,
       hasChildren: under.length > 0,
-      totals: fold(agentNode),
+      // The whole spine, finished records included: what this agent has made.
+      totals: foldOf(agentNode.leaves),
       leaves: agentNode.leaves,
       ...(claimed ? { agent: { slug: claimed.slug, name: claimed.name } } : {}),
     });
@@ -208,6 +287,26 @@ export function executionRows(input: ExecutionInput): ExecutionRow[] {
   }
 
   return rows;
+}
+
+/**
+ * What a history row says it holds: `"History · 2 stopped bots, 14 closed executors"`.
+ *
+ * Bots rather than controllers, because a stop is something done to a bot — and
+ * the executors counted are the ones filed under no finished controller (the
+ * agent's own standalone ones), since a controller's record already covers its.
+ */
+export function historyLabel(finished: readonly PerfLeaf[]): string {
+  const bots = new Set<string>();
+  let executors = 0;
+  for (const leaf of finished) {
+    if (leaf.kind === "controller") bots.add(leaf.bot);
+    else executors += 1;
+  }
+  const parts: string[] = [];
+  if (bots.size) parts.push(`${bots.size} stopped bot${bots.size === 1 ? "" : "s"}`);
+  if (executors) parts.push(`${executors} closed executor${executors === 1 ? "" : "s"}`);
+  return `History · ${parts.join(", ")}`;
 }
 
 /**
