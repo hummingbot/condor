@@ -1,0 +1,25 @@
+{
+  "source_checked": "2026-09-05",
+  "google_post": "https://research.google/blog/a-connectomics-milestone-mapping-the-complete-male-fruit-fly-brain/",
+  "datasets": {
+    "malecns_v1": {
+      "sex": "male",
+      "release": "MaleCNS v1.0",
+      "coverage": "brain_and_ventral_nerve_cord",
+      "source": "https://male-cns.janelia.org/download/",
+      "paper": "https://doi.org/10.1016/j.cell.2026.08.015",
+      "node_policy": "Every entry with an assigned superclass, including uncertain tbc classes; exclude explicit Glia status; no restriction to Traced status or typed cells.",
+      "edge_policy": "All released edges between retained entries; no additional weight threshold or removal of self-connections.",
+      "upstream_filters": [
+        "Published pre/post synapse confidence threshold 0.5",
+        "Only annotated neuronal entries become simulation nodes; other segmentation objects remain in raw data"
+      ],
+      "upstream_autapses_excluded": false,
+      "files": {
+        "annotations.feather": "https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/body-annotations-male-cns-v1.0-minconf-0.5.feather",
+        "neurotransmitters.feather": "https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/body-neurotransmitters-male-cns-v1.0.feather",
+        "edges.feather": "https://storage.googleapis.com/flyem-male-cns/v1.0/connectome-data/flat-connectome/connectome-weights-male-cns-v1.0-minconf-0.5.feather"
+      }
+    }
+  }
+}
