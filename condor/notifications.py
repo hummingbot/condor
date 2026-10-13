@@ -228,6 +228,9 @@ async def clear(user_id: int) -> None:
     Takes the write lock so a notice recorded mid-clear is not resurrected (or
     lost) by the two writes racing. Scoped like :func:`mark_read`: other users'
     buckets are left untouched.
+
+    A failed write raises rather than being swallowed: unlike a read flag, a
+    clear the user was told succeeded would quietly come back on the next poll.
     """
     if not user_id:
         return
@@ -237,10 +240,7 @@ async def clear(user_id: int) -> None:
         if key not in data:
             return
         del data[key]
-        try:
-            _write_all(data)
-        except Exception:  # noqa: BLE001
-            log.warning("Could not clear notifications for %s", user_id, exc_info=True)
+        _write_all(data)
 
 
 def user_for_chat(chat_id: Any) -> int | None:

@@ -50,10 +50,6 @@ export function NotificationBell() {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   // Clearing deletes the history for good, so it takes a second click.
   const [confirmingClear, setConfirmingClear] = useState(false);
-  const close = useCallback(() => {
-    setOpen(false);
-    setConfirmingClear(false);
-  }, []);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -100,25 +96,50 @@ export function NotificationBell() {
   });
 
   const clearAll = useMutation({
-    mutationFn: () => api.clearNotifications(),
+    mutationFn: async () => {
+      // A poll already in flight was read before the delete; letting it land
+      // afterwards would put the cleared history straight back.
+      await queryClient.cancelQueries({ queryKey: NOTIFICATIONS_KEY });
+      return api.clearNotifications();
+    },
     onSuccess: () => {
       queryClient.setQueryData<NotificationsResponse>(NOTIFICATIONS_KEY, { items: [], unread: 0 });
       setConfirmingClear(false);
+      // The empty list is a guess; the store is the answer. A notice recorded
+      // just after the delete may already have been pushed and then wiped by
+      // the line above, so re-read rather than leave the guess standing.
+      void queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY });
     },
   });
 
+  // Every way out of the dropdown disarms the confirm, so a reopened bell never
+  // shows a Clear that deletes on its first click.
+  const resetClear = clearAll.reset;
+  const close = useCallback(() => {
+    setOpen(false);
+    setConfirmingClear(false);
+    resetClear();
+  }, [resetClear]);
+
+  const cancelClear = () => {
+    setConfirmingClear(false);
+    clearAll.reset();
+  };
+
   const toggle = () => {
-    const next = !open;
-    setOpen(next);
-    if (!next) setConfirmingClear(false);
+    if (open) {
+      close();
+      return;
+    }
+    setOpen(true);
     // Opening the list *is* reading it. The badge is there to pull the user in,
     // so leaving it lit after they looked would train them to ignore it.
-    if (next && unread > 0) markRead.mutate(undefined);
+    if (unread > 0) markRead.mutate(undefined);
   };
 
   const openItem = (n: AppNotification) => {
     if (!n.link) return;
-    setOpen(false);
+    close();
     navigate(n.link);
   };
 
@@ -166,7 +187,7 @@ export function NotificationBell() {
                   Clear
                 </button>
                 <button
-                  onClick={() => setConfirmingClear(false)}
+                  onClick={cancelClear}
                   disabled={clearAll.isPending}
                   className="text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
                 >
@@ -184,6 +205,12 @@ export function NotificationBell() {
               </button>
             ))}
         </div>
+
+        {clearAll.isError && (
+          <div role="alert" className="px-3 pb-1.5 text-[10px] text-[var(--color-red)]">
+            Couldn't clear notifications. Try again.
+          </div>
+        )}
 
         {items.length === 0 && (
           <div className="px-3 py-6 text-center text-xs text-[var(--color-text-muted)]">

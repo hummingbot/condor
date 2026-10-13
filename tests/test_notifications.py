@@ -135,6 +135,29 @@ def test_clear_empties_only_own_bucket(store):
     assert [n.text for n in list_for(USER_B)] == ["B1"]
 
 
+def test_clear_failure_is_reported_and_keeps_history(store, monkeypatch):
+    """A clear that could not be written must not report success."""
+    from fastapi import HTTPException
+
+    from condor.web.routes.notifications import clear_notifications
+
+    asyncio.run(record(USER_A, "kept"))
+
+    def broken(_data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(notifications, "_write_all", broken)
+
+    with pytest.raises(OSError):
+        asyncio.run(notifications.clear(USER_A))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(clear_notifications(user=WebUser(id=USER_A, role="user")))
+
+    assert exc.value.status_code == 500
+    assert "disk full" not in exc.value.detail
+    assert [n.text for n in list_for(USER_A)] == ["kept"]
+
+
 def test_no_user_records_nothing(store):
     """A producer with nobody behind it is not an error."""
     assert asyncio.run(record(0, "orphan")) is None
