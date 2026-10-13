@@ -133,12 +133,16 @@ class GuardScope:
         now = time.monotonic()
         if now <= self.deadline:
             return False
-        if self._interrupted_at is None:
+        # Handling *any* exception counts: the interruption itself, the
+        # CancelledError of a snippet that timed out while awaiting (wait_for
+        # cut it, not this guard), and the GeneratorExit a suspended
+        # generator's ``finally`` runs under.
+        if sys.exception() is None:
             return True
-        # Handling *any* exception counts: the interruption itself, and also
-        # the GeneratorExit a suspended generator's ``finally`` runs under.
-        cleaning_up = sys.exception() is not None
-        return not cleaning_up or now - self._interrupted_at >= INTERRUPT_GRACE
+        # The grace runs from this guard's own interruption, or from the
+        # deadline when something else (wait_for) did the interrupting.
+        since = self._interrupted_at or self.deadline
+        return now - since >= INTERRUPT_GRACE
 
 
 _SCOPE: contextvars.ContextVar[GuardScope | None] = contextvars.ContextVar(

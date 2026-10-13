@@ -131,6 +131,37 @@ def test_a_task_the_snippet_left_running_is_stopped_with_it(store):
 
 
 _CLEANUP_SHAPES = {
+    # Timed out while awaiting: wait_for cancels it, not the guard, and the
+    # cleanup runs under the CancelledError — past the deadline all the same.
+    "await-finally": (
+        "await lock.acquire()\n"
+        "try:\n"
+        "    await asyncio.sleep(100)\n"
+        "finally:\n"
+        "    lock.release()\n"
+        "    print('cleanup ran')\n"
+    ),
+    "await-async-with": (
+        "class Held:\n"
+        "    async def __aenter__(self):\n"
+        "        await lock.acquire()\n"
+        "    async def __aexit__(self, *exc):\n"
+        "        lock.release()\n"
+        "        print('cleanup ran')\n"
+        "async with Held():\n"
+        "    await asyncio.sleep(100)\n"
+    ),
+    "await-finally-does-io": (
+        "import os, tempfile\n"
+        "await lock.acquire()\n"
+        "try:\n"
+        "    await asyncio.sleep(100)\n"
+        "finally:\n"
+        "    open(os.path.join(tempfile.gettempdir(), 'guard_io.txt'), 'w').close()\n"
+        "    lock.release()\n"
+        "    print('cleanup ran')\n"
+    ),
+    # Busy on the main thread: the guard itself interrupts it.
     "finally": (
         "await lock.acquire()\n"
         "try:\n"
@@ -190,7 +221,10 @@ _CLEANUP_SHAPES = {
 @pytest.mark.parametrize("shape", list(_CLEANUP_SHAPES))
 def test_cleanup_still_runs_after_a_timeout(store, shape):
     """Code handling the interruption gets to run: a lock it holds is released."""
-    code = "import builtins\nlock = builtins._guard_lock\n" + _CLEANUP_SHAPES[shape]
+    code = (
+        "import asyncio, builtins\nlock = builtins._guard_lock\n"
+        + _CLEANUP_SHAPES[shape]
+    )
 
     async def main():
         builtins._guard_lock = asyncio.Lock()
