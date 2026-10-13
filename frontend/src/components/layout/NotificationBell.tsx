@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Bot, CheckCheck, Terminal, Workflow, Zap } from "lucide-react";
+import { Bell, Bot, Loader2, Terminal, Trash2, Workflow, Zap } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
@@ -48,7 +48,12 @@ export function NotificationBell() {
   const { token } = useAuth();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const close = useCallback(() => setOpen(false), []);
+  // Clearing deletes the history for good, so it takes a second click.
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const close = useCallback(() => {
+    setOpen(false);
+    setConfirmingClear(false);
+  }, []);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -72,7 +77,7 @@ export function NotificationBell() {
   // The dock icon carries the same number as the bell (FEAT-082). Not a second
   // source of truth: it is a second render of the count this component already
   // holds, so it cannot drift from what the dropdown shows, and it follows the
-  // bell through the poll, a live socket write and marking everything read.
+  // bell through the poll, a live socket write, marking read and clearing.
   useEffect(() => setAppBadge(unread), [unread]);
 
   // A click on an OS notification lands here too (FEAT-083). `sw.js` focuses
@@ -94,9 +99,18 @@ export function NotificationBell() {
     },
   });
 
+  const clearAll = useMutation({
+    mutationFn: () => api.clearNotifications(),
+    onSuccess: () => {
+      queryClient.setQueryData<NotificationsResponse>(NOTIFICATIONS_KEY, { items: [], unread: 0 });
+      setConfirmingClear(false);
+    },
+  });
+
   const toggle = () => {
     const next = !open;
     setOpen(next);
+    if (!next) setConfirmingClear(false);
     // Opening the list *is* reading it. The badge is there to pull the user in,
     // so leaving it lit after they looked would train them to ignore it.
     if (next && unread > 0) markRead.mutate(undefined);
@@ -138,16 +152,37 @@ export function NotificationBell() {
           <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
             Notifications
           </span>
-          {items.length > 0 && (
-            <button
-              onClick={() => markRead.mutate(undefined)}
-              className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
-              title="Mark all as read"
-            >
-              <CheckCheck className="h-3 w-3" />
-              Mark all read
-            </button>
-          )}
+          {items.length > 0 &&
+            (confirmingClear ? (
+              <span className="flex items-center gap-2 text-[10px]">
+                <span className="text-[var(--color-text-muted)]">Clear all?</span>
+                <button
+                  onClick={() => clearAll.mutate()}
+                  disabled={clearAll.isPending}
+                  className="flex items-center gap-1 font-medium text-[var(--color-red)] hover:underline disabled:opacity-50"
+                  title="Permanently delete all notifications"
+                >
+                  {clearAll.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+                  Clear
+                </button>
+                <button
+                  onClick={() => setConfirmingClear(false)}
+                  disabled={clearAll.isPending}
+                  className="text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                >
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={() => setConfirmingClear(true)}
+                className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-accent)]"
+                title="Clear all notifications"
+              >
+                <Trash2 className="h-3 w-3" />
+                Clear all
+              </button>
+            ))}
         </div>
 
         {items.length === 0 && (

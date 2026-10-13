@@ -222,6 +222,27 @@ def mark_read(user_id: int, ids: list[str] | None = None) -> int:
     return sum(1 for raw in items if isinstance(raw, dict) and not raw.get("read"))
 
 
+async def clear(user_id: int) -> None:
+    """Delete every notification in ``user_id``'s bucket.
+
+    Takes the write lock so a notice recorded mid-clear is not resurrected (or
+    lost) by the two writes racing. Scoped like :func:`mark_read`: other users'
+    buckets are left untouched.
+    """
+    if not user_id:
+        return
+    key = str(int(user_id))
+    async with _write_lock:
+        data = _read_all()
+        if key not in data:
+            return
+        del data[key]
+        try:
+            _write_all(data)
+        except Exception:  # noqa: BLE001
+            log.warning("Could not clear notifications for %s", user_id, exc_info=True)
+
+
 def user_for_chat(chat_id: Any) -> int | None:
     """The dashboard user behind a Telegram chat id, or None if there is none.
 

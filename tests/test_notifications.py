@@ -121,6 +121,20 @@ def test_mark_read_all_and_by_id(store):
     assert unread_count(USER_A) == 0
 
 
+def test_clear_empties_only_own_bucket(store):
+    async def go():
+        await record(USER_A, "A1")
+        await record(USER_A, "A2")
+        await record(USER_B, "B1")
+        await notifications.clear(USER_A)
+
+    asyncio.run(go())
+
+    assert list_for(USER_A) == []
+    assert unread_count(USER_A) == 0
+    assert [n.text for n in list_for(USER_B)] == ["B1"]
+
+
 def test_no_user_records_nothing(store):
     """A producer with nobody behind it is not an error."""
     assert asyncio.run(record(0, "orphan")) is None
