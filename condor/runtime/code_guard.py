@@ -14,12 +14,14 @@ What it does is turn the mistakes we have actually seen into an error on the
 offending line instead of a dead process:
 
 * **A deadline that can interrupt synchronous code.** Two hooks raise
-  :class:`CodeRunDeadline` once a guarded run is past its budget: a
-  ``sys.monitoring`` LINE/JUMP callback on the snippet's own code objects (a
-  ``while True`` loop, however tight) and an audit hook on everything the
-  snippet calls (any syscall: file I/O, ``scandir``, sockets). It is a
-  ``BaseException`` so ``except Exception`` in the snippet cannot swallow it,
-  and it fires again on the next line if ``except BaseException`` does.
+  :class:`CodeRunDeadline` once a guarded run is past its budget:
+  ``sys.monitoring`` on the snippet's own code objects (a ``while True`` loop,
+  however tight) and an audit hook on everything the snippet calls (any
+  syscall: file I/O, ``scandir``, sockets). It is a ``BaseException`` so
+  ``except Exception`` in the snippet cannot swallow it. Code that is handling
+  an exception — a ``finally``, an ``except``, a ``with`` exit — may run for up
+  to :data:`INTERRUPT_GRACE` seconds, so cleanup can release what it holds;
+  everything else is interrupted again, so a loop that swallows it still ends.
 * **A short policy list**, enforced through the same audit hook: no listing of
   ``/``, ``/proc``, ``/sys`` or ``/dev``; no ``input()`` (there is no stdin);
   no signalling Condor's own process; no ``time.sleep`` longer than
@@ -30,6 +32,10 @@ offending line instead of a dead process:
 * **``SystemExit`` / ``KeyboardInterrupt`` containment** (:func:`contain_exit`).
   asyncio re-raises both out of the event loop, so a bare ``exit()`` in a
   snippet used to shut Condor down with exit code 0.
+
+A run Condor starts on a snippet's behalf to outlive it — a background routine
+from ``start_routine`` — must be spawned in :func:`detached_context`; otherwise
+its task inherits the snippet's scope and is cut when the snippet's run ends.
 
 Everything is scoped by a :class:`ContextVar`, so only code running in a guarded
 run's context — its own task and any task it spawned — is affected; the rest of
@@ -46,6 +52,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import contextvars
+import dis
 import functools
 import logging
 import os
@@ -56,6 +63,11 @@ from types import CodeType
 from typing import Iterator
 
 logger = logging.getLogger(__name__)
+
+# How long code handling a deadline interruption (a ``finally``, an ``except``,
+# a ``with`` exit) may run before it is interrupted too. Long enough to release
+# a lock or close a file; short enough that a cleanup that hangs is still cut.
+INTERRUPT_GRACE = 2.0
 
 # The longest ``time.sleep`` a guarded run may make. Every second of it is a
 # second the whole event loop — dashboard, agents, Telegram — stands still.
@@ -93,12 +105,40 @@ class GuardScope:
     label: str
     deadline: float | None = None
     budget: float | None = field(default=None, repr=False)
+    _interrupted_at: float | None = field(default=None, repr=False)
 
     def expire(self) -> None:
         self.deadline = time.monotonic()
 
-    def past_deadline(self) -> bool:
-        return self.deadline is not None and time.monotonic() > self.deadline
+    def should_interrupt(self) -> bool:
+        """True when the run is past its deadline and is not cleaning up.
+
+        Raising on every line after the deadline meant a ``finally`` never got
+        to run its first line, and a lock it held stayed held for everyone else.
+        So code that is handling the interruption is spared — for a while. The
+        test is the exception being handled, not a timer: the first raise can
+        land in C code that swallows it, and a timer started then would spend
+        the cleanup window on the very loop it was meant to stop.
+        """
+        if not self.interrupt_due():
+            return False
+        if self._interrupted_at is None:
+            self._interrupted_at = time.monotonic()
+        return True
+
+    def interrupt_due(self) -> bool:
+        """:meth:`should_interrupt` without recording that it happened."""
+        if self.deadline is None:
+            return False
+        now = time.monotonic()
+        if now <= self.deadline:
+            return False
+        if self._interrupted_at is None:
+            return True
+        # Handling *any* exception counts: the interruption itself, and also
+        # the GeneratorExit a suspended generator's ``finally`` runs under.
+        cleaning_up = sys.exception() is not None
+        return not cleaning_up or now - self._interrupted_at >= INTERRUPT_GRACE
 
 
 _SCOPE: contextvars.ContextVar[GuardScope | None] = contextvars.ContextVar(
@@ -203,7 +243,7 @@ def _audit(event: str, args) -> None:
     scope = _SCOPE.get()
     if scope is None:
         return
-    if scope.past_deadline():
+    if scope.should_interrupt():
         raise _deadline(scope, f"at {event}")
     check = _POLICY.get(event)
     if check is not None:
@@ -217,16 +257,94 @@ _original_sleep = time.sleep
 def _guarded_sleep(secs):
     scope = _SCOPE.get()
     if scope is not None:
-        if scope.past_deadline():
+        if scope.should_interrupt():
             raise _deadline(scope, "at time.sleep")
         _check_sleep(secs)
     return _original_sleep(secs)
 
 
-def _on_line(code: CodeType, _offset: int, *_rest) -> None:
+_WATCHED = 0  # set by install(): LINE | JUMP
+
+# Where an exception enters a handler. The exception is not yet marked as being
+# handled there, so an interruption at this instruction would look like one
+# outside any cleanup and bypass the handler — a ``with`` block's ``__exit__``
+# never ran, and the lock it would have released stayed held.
+_HANDLER_ENTRY = dis.opmap["PUSH_EXC_INFO"]
+
+
+def _arm(code: CodeType) -> None:
+    sys.monitoring.set_local_events(
+        _tool_id, code, _WATCHED | sys.monitoring.events.INSTRUCTION
+    )
+
+
+def _on_line(code: CodeType, _line: int) -> None:
+    """Arm :func:`_on_instruction` for ``code`` when an interruption is due.
+
+    Neither this nor :func:`_on_jump` raises. Snippet code is only ever
+    interrupted from :func:`_on_instruction`, the one place that knows exactly
+    which instruction is next — and on CPython 3.12 that matters: raised from a
+    JUMP callback, on a compiler-generated instruction or on a handler's first
+    instruction, the exception skips the ``finally``/``except``/``__exit__`` it
+    should have run.
+    """
     scope = _SCOPE.get()
-    if scope is not None and scope.past_deadline():
-        raise _deadline(scope, f"in {code.co_name}")
+    if scope is not None and scope.interrupt_due():
+        _arm(code)
+
+
+def _on_jump(code: CodeType, _src: int, _dst: int) -> None:
+    """As :func:`_on_line`. Needed because LINE does not reliably fire inside a
+    one-line loop, and a backward jump always does."""
+    scope = _SCOPE.get()
+    if scope is not None and scope.interrupt_due():
+        _arm(code)
+
+
+_unsafe: dict[CodeType, frozenset[int]] = {}
+
+
+def _safe_to_raise(code: CodeType, offset: int) -> bool:
+    """Whether raising at ``offset`` lands inside the frame's exception table.
+
+    Not at a compiler-generated instruction (no source line — a loop's
+    back-edge, the shuffling around a handler) and not at a handler's entry.
+    """
+    unsafe = _unsafe.get(code)
+    if unsafe is None:
+        lineless = {
+            off
+            for start, end, line in code.co_lines()
+            if line is None
+            for off in range(start, end, 2)
+        }
+        raw = code.co_code
+        entries = {off for off in range(0, len(raw), 2) if raw[off] == _HANDLER_ENTRY}
+        unsafe = frozenset(lineless | entries)
+        if len(_unsafe) > 256:  # snippets are throwaway; so is this cache
+            _unsafe.clear()
+        _unsafe[code] = unsafe
+    return offset not in unsafe
+
+
+def _on_instruction(code: CodeType, offset: int) -> None:
+    """Interrupt at the first instruction where it is safe to, then disarm.
+
+    Stays armed while the interruption is not due — the run is cleaning up —
+    so the moment cleanup ends, or its grace runs out, is not missed in a
+    tight loop. Disarmed before raising, so it cannot fire again on the
+    handler the exception is about to enter.
+    """
+    scope = _SCOPE.get()
+    if scope is None or not scope.interrupt_due():
+        if scope is None:
+            sys.monitoring.set_local_events(_tool_id, code, _WATCHED)
+        return
+    if not _safe_to_raise(code, offset):
+        return
+    sys.monitoring.set_local_events(_tool_id, code, _WATCHED)
+    scope.should_interrupt()  # records the interruption
+    raise _deadline(scope, f"in {code.co_name}")
 
 
 def install() -> None:
@@ -235,7 +353,7 @@ def install() -> None:
     An audit hook can never be removed, which is why :func:`_audit` returns on
     its first line for everything outside a guarded run.
     """
-    global _installed, _tool_id
+    global _installed, _tool_id, _WATCHED
     if _installed:
         return
     sys.addaudithook(_audit)
@@ -247,8 +365,13 @@ def install() -> None:
         for tool_id in _TOOL_IDS:
             if monitoring.get_tool(tool_id) is None:
                 monitoring.use_tool_id(tool_id, _TOOL_NAME)
-                monitoring.register_callback(tool_id, monitoring.events.LINE, _on_line)
-                monitoring.register_callback(tool_id, monitoring.events.JUMP, _on_line)
+                events = monitoring.events
+                monitoring.register_callback(tool_id, events.LINE, _on_line)
+                monitoring.register_callback(tool_id, events.JUMP, _on_jump)
+                monitoring.register_callback(
+                    tool_id, events.INSTRUCTION, _on_instruction
+                )
+                _WATCHED = events.LINE | events.JUMP
                 _tool_id = tool_id
                 break
         else:
@@ -267,18 +390,17 @@ def _code_objects(code: CodeType) -> Iterator[CodeType]:
 
 
 def _watch_lines(code: CodeType) -> None:
-    """Fire :func:`_on_line` on every line and backward jump of ``code``.
+    """Watch every line and jump of ``code`` for a passed deadline.
 
     Only the snippet's own code objects — the functions, lambdas and
     comprehensions it defines included — so library code it calls runs at full
-    speed. JUMP as well as LINE because a one-line loop body never changes
-    line, and LINE alone never fires inside ``while True: pass``.
+    speed. INSTRUCTION events are armed per code object only once an
+    interruption is due (see :func:`_on_jump`), never before.
     """
     if _tool_id is None:
         return
-    events = sys.monitoring.events.LINE | sys.monitoring.events.JUMP
     for obj in _code_objects(code):
-        sys.monitoring.set_local_events(_tool_id, obj, events)
+        sys.monitoring.set_local_events(_tool_id, obj, _WATCHED)
 
 
 @contextlib.contextmanager
@@ -310,6 +432,19 @@ def routine_scope(label: str) -> GuardScope:
     if parent is not None:
         return GuardScope(label=label, deadline=parent.deadline, budget=parent.budget)
     return GuardScope(label=label)
+
+
+def detached_context() -> contextvars.Context:
+    """A copy of the current context with no guard scope in it.
+
+    For ``asyncio.create_task(..., context=detached_context())`` wherever Condor
+    starts a run meant to outlive its caller. Without it, a background routine
+    started from a snippet carried that snippet's deadline and was cut — at its
+    next I/O, past ``except Exception`` — once the snippet finished.
+    """
+    context = contextvars.copy_context()
+    context.run(_SCOPE.set, None)
+    return context
 
 
 @contextlib.contextmanager

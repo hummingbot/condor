@@ -130,6 +130,163 @@ def test_a_task_the_snippet_left_running_is_stopped_with_it(store):
     assert isinstance(orphan.exception(), code_guard.CodeRunDeadline)
 
 
+_CLEANUP_SHAPES = {
+    "finally": (
+        "await lock.acquire()\n"
+        "try:\n"
+        "    while True:\n"
+        "        pass\n"
+        "finally:\n"
+        "    lock.release()\n"
+        "    print('cleanup ran')\n"
+    ),
+    "one-line-loop": (
+        "await lock.acquire()\n"
+        "try:\n"
+        "    while True: pass\n"
+        "finally:\n"
+        "    lock.release()\n"
+        "    print('cleanup ran')\n"
+    ),
+    "loop-in-function": (
+        "def spin():\n"
+        "    n = 0\n"
+        "    while True:\n"
+        "        n += 1\n"
+        "await lock.acquire()\n"
+        "try:\n"
+        "    spin()\n"
+        "finally:\n"
+        "    lock.release()\n"
+        "    print('cleanup ran')\n"
+    ),
+    "except": (
+        "await lock.acquire()\n"
+        "try:\n"
+        "    while True:\n"
+        "        pass\n"
+        "except BaseException:\n"
+        "    lock.release()\n"
+        "    print('cleanup ran')\n"
+        "    raise\n"
+    ),
+    "with": (
+        "import contextlib\n"
+        "@contextlib.contextmanager\n"
+        "def held():\n"
+        "    try:\n"
+        "        yield\n"
+        "    finally:\n"
+        "        lock.release()\n"
+        "        print('cleanup ran')\n"
+        "await lock.acquire()\n"
+        "with held():\n"
+        "    while True:\n"
+        "        pass\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", list(_CLEANUP_SHAPES))
+def test_cleanup_still_runs_after_a_timeout(store, shape):
+    """Code handling the interruption gets to run: a lock it holds is released."""
+    code = "import builtins\nlock = builtins._guard_lock\n" + _CLEANUP_SHAPES[shape]
+
+    async def main():
+        builtins._guard_lock = asyncio.Lock()
+        out = await code_runner.execute_code(code, timeout=1)
+        return out, builtins._guard_lock.locked()
+
+    try:
+        out, still_locked = asyncio.run(main())
+    finally:
+        vars(builtins).pop("_guard_lock", None)
+
+    assert out["status"] == "timeout"
+    assert out["stdout"] == "cleanup ran\n"
+    assert not still_locked
+
+
+def test_a_cleanup_that_hangs_is_cut_after_its_grace(store):
+    code = (
+        "try:\n    while True:\n        pass\nfinally:\n    while True:\n        pass\n"
+    )
+    started = time.monotonic()
+    out, ticks_after = run_alongside(code, timeout=1)
+
+    assert out["status"] == "timeout"
+    assert time.monotonic() - started < 1 + code_guard.INTERRUPT_GRACE + 2
+    assert ticks_after > 0
+
+
+def test_a_snippet_that_swallows_the_interruption_is_still_cut(store):
+    """The cleanup window is granted once, not per interruption."""
+    code = (
+        "while True:\n"
+        "    try:\n"
+        "        while True:\n"
+        "            pass\n"
+        "    except BaseException:\n"
+        "        pass\n"
+    )
+    started = time.monotonic()
+    out, ticks_after = run_alongside(code, timeout=1)
+
+    assert out["status"] == "timeout"
+    assert time.monotonic() - started < 1 + code_guard.INTERRUPT_GRACE + 2
+    assert ticks_after > 0
+
+
+def test_a_background_routine_outlives_the_snippet_that_started_it(store, monkeypatch):
+    """start_routine is a real background run: no snippet deadline, no orphan cut."""
+    from pydantic import BaseModel
+
+    from condor import routine_store
+    from condor.routine_store import RoutineStore
+    from routines.base import RoutineInfo
+
+    class Config(BaseModel):
+        """A test routine."""
+
+    async def slow(config, context):
+        await asyncio.sleep(1.5)  # past the 1s snippet budget, and its expiry
+        os.listdir(".")  # an audited call: the guard would cut it here
+        return "finished"
+
+    routines = RoutineStore()
+    monkeypatch.setattr(routine_store, "_store", routines)
+    monkeypatch.setattr(
+        routine_store,
+        "get_routine",
+        {"slow": RoutineInfo(name="slow", config_class=Config, run_fn=slow)}.get,
+    )
+
+    async def _quiet(self, *a, **kw):
+        return None
+
+    monkeypatch.setattr(RoutineStore, "_fire_hooks", _quiet)
+    monkeypatch.setattr(RoutineStore, "_report_run", _quiet)
+
+    async def main():
+        out = await code_runner.execute_code(
+            "from condor import primitives\n"
+            "result = await primitives.start_routine('slow')\n",
+            timeout=1,
+        )
+        for _ in range(100):
+            meta = routines.get_instance(out["result"])
+            if meta and meta["status"] != "running":
+                return out, meta
+            await asyncio.sleep(0.05)
+        return out, routines.get_instance(out["result"])
+
+    out, meta = asyncio.run(main())
+
+    assert out["status"] == "ok"
+    assert meta["status"] == "completed"
+    assert "finished" in str(meta.get("result_summary") or meta)
+
+
 # ── the freeze that started this ──
 
 
