@@ -1255,6 +1255,13 @@ async def _run_dual(application: Application) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
+    # Everything runs on this one loop, so a block anywhere is a freeze
+    # everywhere; the watchdog logs the stuck stack instead of leaving silence.
+    from condor.runtime import code_guard, loop_watchdog
+
+    code_guard.install()
+    loop_watchdog.start(loop)
+
     # Run uvicorn as a task
     web_task = asyncio.create_task(server.serve())
     stop_task = asyncio.create_task(shutdown_event.wait())

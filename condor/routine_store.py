@@ -43,6 +43,7 @@ from condor.memory.paths import (
     iter_agent_slugs,
     shared_routines_roots,
 )
+from condor.runtime import code_guard
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
@@ -764,6 +765,11 @@ class RoutineStore:
                     source_name=base_name,
                 ),
                 primitives.bind_context(ctx),
+                # Routines are agent-written code on the main loop too: the
+                # same policy as run_code, and exit() is an error, not a
+                # shutdown (condor/runtime/code_guard.py).
+                code_guard.guarded(code_guard.routine_scope(instance_id)),
+                code_guard.contain_exit(),
             ):
                 cfg = routine.config_class(**config)
                 raw = await routine.run_fn(cfg, ctx)
