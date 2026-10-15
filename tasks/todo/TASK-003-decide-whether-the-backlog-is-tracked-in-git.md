@@ -112,3 +112,16 @@ and does not need re-deriving.
 
 `tasks/` being trackable is why this item could be filed at all; a doc about the
 untrackable backlog could not itself have been committed into it.
+
+## Update 2026-10-15 — route (c), per cluster
+
+A third route exists that reverses nothing repo-wide. `create_plan`'s ignore
+check is `git check-ignore` without `--no-index`, which skips tracked files, and
+a tracked file's `git mv` into an ignored `done/` commits normally (verified in a
+scratch repo). So the 21 Agent Builder Cup docs were force-added
+(`git add -f`) on `ws/issues-of-agent-builder-cup` only; `.gitignore:186-187`
+are unchanged. That satisfies the last acceptance criterion for this cluster.
+On `merge_workstream` the 21 docs land on main as tracked files under `done/`;
+`git rm --cached` them afterwards if main should stay doc-free.
+
+The repo-wide decision (a) or (b) is still open, so this item stays blocked.
