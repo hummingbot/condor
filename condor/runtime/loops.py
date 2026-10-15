@@ -49,6 +49,35 @@ class InterruptedRun:
 
 
 @dataclass
+class OrphanedExecutor:
+    """One executor still RUNNING under a session that is not alive (CORR-726).
+
+    Deliberately not the same thing as ``list_orphaned_positions`` reports: that
+    is a *terminated* executor whose on-chain position was stranded, and the
+    only recovery is to close the position by hand. This one is still running —
+    still polling, still spending — and the recovery is for a live session of
+    the same strategy to adopt and stop it.
+    """
+
+    executor_id: str
+    controller_id: str
+    agent_slug: str
+    strategy_slug: str
+    session_num: int
+    pair: str = ""
+    kind: str = ""
+    chat_id: int = 0
+
+    @property
+    def label(self) -> str:
+        return (
+            f"{self.executor_id} ({self.kind or 'executor'} {self.pair or '?'}) "
+            f"left running by {self.agent_slug}.{self.strategy_slug} "
+            f"session {self.session_num}"
+        )
+
+
+@dataclass
 class ReconcileReport:
     """What the boot pass found and did."""
 
@@ -61,6 +90,9 @@ class ReconcileReport:
     errors: list[str] = field(default_factory=list)
     delegations: int = 0
     orphan_state: int = 0
+    # Executors the previous process's sessions left running with nobody to
+    # operate them (CORR-726).
+    orphaned_executors: list[OrphanedExecutor] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -68,12 +100,24 @@ class ReconcileReport:
 
     def summary(self) -> str:
         """One message for the owner, not N."""
-        if not self.interrupted:
+        lines: list[str] = []
+        if self.interrupted:
+            lines.append(
+                f"Found {len(self.interrupted)} interrupted run(s) after restart:"
+            )
+            for run in self.interrupted:
+                suffix = " — restarted" if run.restarted else ""
+                lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        if self.orphaned_executors:
+            if lines:
+                lines.append("")
+            lines.append(
+                f"⚠️ {len(self.orphaned_executors)} executor(s) still RUNNING with "
+                "no live session — they keep trading and polling until stopped:"
+            )
+            lines.extend(f"• {o.label}" for o in self.orphaned_executors)
+        if not lines:
             return ""
-        lines = [f"Found {len(self.interrupted)} interrupted run(s) after restart:"]
-        for run in self.interrupted:
-            suffix = " — restarted" if run.restarted else ""
-            lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
         if self.errors:
             lines.append("")
             lines.extend(f"⚠️ {e}" for e in self.errors)
@@ -203,8 +247,17 @@ class LoopSupervisor:
         Either way the session opting into ``restart_on_boot`` gets a *new*
         session started. An old session number is never resurrected: its
         journal is closed history.
+
+        Settling the *session* is not settling what it was operating: a
+        graceful stop keeps positions and executors running by design, so every
+        strategy touched here is then scanned for executors still RUNNING under
+        a session that is gone (CORR-726). They are reported, never stopped —
+        winding a position down is an emergency action, not a boot chore — so
+        that the owner hears about an orphan instead of discovering it as an
+        unexplained RPC bill.
         """
         report = ReconcileReport()
+        settled: dict[tuple[str, str], dict] = {}
 
         for session_dir, status, crashed in self._sessions_to_settle(agents_root):
             run = InterruptedRun(
@@ -214,6 +267,7 @@ class LoopSupervisor:
                 last_tick=int(status.get("tick", 0) or 0),
                 session_dir=session_dir,
             )
+            settled.setdefault((run.agent_slug, run.strategy_slug), status)
 
             if crashed:
                 self._mark_interrupted(session_dir, status, run)
@@ -235,6 +289,10 @@ class LoopSupervisor:
                     log.exception("Could not restart %s", run.label)
                     report.errors.append(f"{run.label}: restart failed ({exc})")
 
+        # After the restarts above, so a session this boot brought back counts
+        # as a live owner and its own executors are not reported as orphaned.
+        report.orphaned_executors = await self._scan_orphaned_executors(settled)
+
         report.delegations = self._reconcile_delegations(agents_root)
 
         # Forget state belonging to strategies that no longer exist.
@@ -245,16 +303,90 @@ class LoopSupervisor:
         except Exception:
             log.warning("State cleanup failed during boot", exc_info=True)
 
-        if report.total or report.resumed or report.delegations:
+        if (
+            report.total
+            or report.resumed
+            or report.delegations
+            or report.orphaned_executors
+        ):
             log.warning(
                 "Boot reconciliation: %d interrupted, %d restarted, "
-                "%d resumed, %d delegations",
+                "%d resumed, %d delegations, %d orphaned executors",
                 report.total,
                 len(report.restarted),
                 len(report.resumed),
                 report.delegations,
+                len(report.orphaned_executors),
             )
         return report
+
+    async def _scan_orphaned_executors(
+        self, settled: dict[tuple[str, str], dict], client_factory=None
+    ) -> list[OrphanedExecutor]:
+        """Executors of the settled strategies still RUNNING under a dead session.
+
+        One API read per strategy, best-effort: a server that cannot be reached
+        or has no client configured costs this boot its orphan report and
+        nothing else — the sweep must never be able to hold up startup or
+        change what the rest of reconciliation did.
+
+        ``client_factory`` takes a session status dict and returns an API
+        client (or ``None``); tests pass their own, and the default resolves
+        the server the way every other boot-time consumer of a status file
+        does, through the owner's accessible servers.
+        """
+        if not settled:
+            return []
+
+        from condor.agents.executor_adoption import (
+            lineage_session_num,
+            orphaned_running_rows,
+        )
+        from condor.fetchers.executors import build_executor_row, fetch_all_executors
+
+        factory = client_factory or _client_for_status
+        found: list[OrphanedExecutor] = []
+        for (agent_slug, strategy_slug), status in sorted(settled.items()):
+            try:
+                client = await factory(status)
+                if client is None:
+                    continue
+                # The API's own executor status, not a ``LoopState``: the two
+                # vocabularies are unrelated and only this one filters the search.
+                rows = await fetch_all_executors(client, status="RUNNING")
+            except Exception:
+                log.warning(
+                    "Orphaned-executor scan failed for %s.%s",
+                    agent_slug,
+                    strategy_slug,
+                    exc_info=True,
+                )
+                continue
+
+            live = {
+                int(getattr(e, "session_num", 0) or 0)
+                for e in self.for_strategy(agent_slug, strategy_slug)
+            }
+            for row in orphaned_running_rows(rows, agent_slug, strategy_slug, live):
+                built = build_executor_row(row)
+                found.append(
+                    OrphanedExecutor(
+                        executor_id=built["id"],
+                        controller_id=built["controller_id"],
+                        agent_slug=agent_slug,
+                        strategy_slug=strategy_slug,
+                        session_num=lineage_session_num(
+                            built["controller_id"], agent_slug, strategy_slug
+                        )
+                        or 0,
+                        pair=built["pair"],
+                        kind=built["type"],
+                        chat_id=int(status.get("chat_id") or 0),
+                    )
+                )
+        for orphan in found:
+            log.warning("Boot reconciliation: orphaned executor %s", orphan.label)
+        return found
 
     def _reconcile_delegations(self, agents_root: Path | None = None) -> int:
         """Mark delegations the previous process was still running as interrupted.
@@ -443,6 +575,25 @@ class LoopSupervisor:
         await engine.start()
         log.info("Restarted %s as session %s", engine.agent_id, engine.session_num)
         return True
+
+
+async def _client_for_status(status: dict):
+    """An API client for the server the session in ``status`` was trading on.
+
+    Resolved through the owner's accessible servers, the same route a chat
+    takes — the status file records the ``chat_id`` and ``user_id`` and nothing
+    about the server, and the config may well have moved since. ``None`` when
+    nothing can be resolved, which the caller reads as "no orphan report for
+    this strategy", never as "no orphans".
+    """
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    chat_id = int(status.get("chat_id") or 0)
+    user_id = int(status.get("user_id") or 0)
+    if chat_id:
+        return await cm.get_client_for_chat(chat_id, user_id or None)
+    return await cm.get_client()
 
 
 # Process-global supervisor. Not in main.py's reload list: it holds live engines.

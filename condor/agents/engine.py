@@ -169,6 +169,14 @@ class TickEngine:
     # pass. Whether adoption is *settled* is read off the ledger itself, by the
     # ``_adoption_done`` property — never latched by a pass having run (CORR-724).
     _adoption_deploys: set[str] = field(default_factory=set, init=False, repr=False)
+    # Executor rows a dead session of this same strategy left RUNNING (CORR-726).
+    # Merged into ``_executor_owners`` so the stop gate's existing membership
+    # test lets this session close them, and shown in the prompt so it knows
+    # their ids at all. Re-derived every tick, so one whose owner came back is
+    # dropped again.
+    _adopted_executors: list[dict[str, Any]] = field(
+        default_factory=list, init=False, repr=False
+    )
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
     # What the risk gate refused, and why. The gate appends during the tick
     # (condor.agents.risk.RefusalLog); the tick drains it into the journal and
@@ -612,6 +620,12 @@ class TickEngine:
         # live bot must be taken over rather than orphaned and redeployed.
         await self._adopt_running_bots(client)
 
+        # And the executors a dead session of this same strategy left running
+        # (CORR-726). Every tick, not just the first: a sibling session can end
+        # at any point in this one's life, and a graceful stop leaves its
+        # executors behind by design.
+        await self._adopt_running_executors(client)
+
         # Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
             client,
@@ -642,6 +656,9 @@ class TickEngine:
         core_data_summaries: dict[str, str] = {
             name: result.summary for name, result in skill_results.items()
         }
+        adopted_summary = self._adopted_executors_summary()
+        if adopted_summary:
+            core_data_summaries["adopted_executors"] = adopted_summary
 
         # Risk state (experiments pass None — returns clean state)
         risk_state = self.risk.get_state(self.journal or _NullTracker())
@@ -1200,6 +1217,101 @@ class TickEngine:
                 "TickEngine %s adopted bots: %s", self.agent_id, ", ".join(adopted)
             )
 
+    def _live_session_nums(self) -> set[int] | None:
+        """Session numbers of this strategy the supervisor holds engines for.
+
+        ``None`` when the registry cannot be trusted to answer: this engine is
+        not in it, which in a real run only happens before ``start()``. Adoption
+        reads that as "do not adopt" rather than "nothing is alive" — the whole
+        safety of the pass rests on knowing which siblings are still running.
+        """
+        try:
+            engines = _supervisor().for_strategy(self.agent.slug, self.strategy.slug)
+        except Exception:  # pragma: no cover - the registry is a plain dict
+            log.warning("TickEngine %s: supervisor unreadable", self.agent_id)
+            return None
+        nums = {int(getattr(e, "session_num", 0) or 0) for e in engines}
+        if self.session_num not in nums:
+            return None
+        return nums
+
+    async def _adopt_running_executors(self, client) -> None:
+        """Take over the executors a dead session of this strategy left RUNNING.
+
+        The gap :meth:`_adopt_running_bots` closes for bots, closed for
+        executors (CORR-726). An executor's ``controller_id`` is the *session*
+        tag, and a graceful ``stop()`` deliberately leaves positions and
+        executors running, so the ordinary restart hands the next session a
+        book it cannot touch: ``_stop_refusal`` refuses every id outside this
+        tick's own snapshot. Feeding the orphans into that snapshot is the whole
+        fix — the gate itself is left exactly as it is, because widening it
+        would also allow stopping a *live* sibling's position.
+
+        Conservative on three counts: same agent and strategy, owner session not
+        alive in the supervisor, and RUNNING. Re-derived every tick rather than
+        latched, so an id stops being adopted the moment its owner is back, and
+        best-effort: a failed read owns nothing this tick and is retried on the
+        next, never fatal.
+        """
+        self._adopted_executors = []
+        if self.is_experiment:
+            return
+        live = self._live_session_nums()
+        if live is None:
+            return
+
+        from condor.fetchers.executors import build_executor_row, fetch_all_executors
+
+        from .executor_adoption import orphaned_running_rows
+
+        try:
+            rows = await fetch_all_executors(client, status="RUNNING")
+        except Exception:
+            log.warning(
+                "TickEngine %s: executor adoption deferred (the API did not "
+                "answer the running-executor search)",
+                self.agent_id,
+                exc_info=True,
+            )
+            return
+
+        orphans = orphaned_running_rows(rows, self.agent.slug, self.strategy.slug, live)
+        if not orphans:
+            return
+        built = [row for row in map(build_executor_row, orphans) if row["id"]]
+        self._adopted_executors = built
+        log.warning(
+            "TickEngine %s adopted %d orphaned executor(s) from dead session(s): %s",
+            self.agent_id,
+            len(built),
+            ", ".join(f"{row['id']} ({row['controller_id']})" for row in built),
+        )
+
+    def _adopted_executors_summary(self) -> str:
+        """The adopted orphans as a prompt section, or ``""`` when there are none.
+
+        Without this the agent is told it has no executors while an inherited
+        one is live and spending: the executors provider only reports rows under
+        this session's own tag and the bots its ledger owns, so an adopted
+        orphan appears nowhere else in the prompt — and an id the model never
+        sees is one it can never stop.
+        """
+        rows = self._adopted_executors
+        if not rows:
+            return ""
+        lines = [
+            f"ADOPTED from a previous session ({len(rows)}) — these are YOURS to "
+            "monitor and close. A previous session of this strategy opened them "
+            "and is no longer running; stop_executor() on these ids is allowed.",
+        ]
+        for row in rows:
+            lines.append(
+                f"  {row.get('id')} {row.get('pair') or '?'} "
+                f"{row.get('type') or 'executor'} ${row.get('pnl', 0.0):+.2f} "
+                f"(opened by {row.get('controller_id') or '?'})"
+            )
+        return "\n".join(lines)
+
     async def _pnl_series(self) -> list[dict]:
         """This session's realized curve for the live report, or ``[]``.
 
@@ -1351,6 +1463,12 @@ class TickEngine:
         is the full set (the session's own tag plus every row of the bots its
         ledger owns), with the RUNNING-only ``executors`` as the fallback for a
         provider result that carries no full set.
+
+        Plus whatever this tick adopted from a dead session of this same
+        strategy (:meth:`_adopt_running_executors`, CORR-726). Those rows are
+        ours by inheritance and by nothing the provider can see — it fetches
+        under this session's own tag — so they are added here rather than
+        by widening the gate itself.
         """
         rows = (
             self._last_skill_data.get("all_executors")
@@ -1358,7 +1476,11 @@ class TickEngine:
             or []
         )
         if not isinstance(rows, list):
-            return {}
+            rows = []
+        # ``getattr``: the gate is also built for stand-in engines that carry
+        # only ``_last_skill_data`` (tests, and the shutdown path's
+        # SimpleNamespace), the same convention ``_finish`` documents.
+        rows = list(rows) + list(getattr(self, "_adopted_executors", None) or [])
         owners: dict[str, str] = {}
         for row in rows:
             if not isinstance(row, dict):
