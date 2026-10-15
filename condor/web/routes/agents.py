@@ -3881,6 +3881,89 @@ async def get_session_report(
     return {"report": ReportSummary(**reports[0]).model_dump() if reports else None}
 
 
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/closeout")
+async def get_session_closeout(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
+):
+    """What this session's stop closed and what it left (FEAT-134).
+
+    One read of ``sessions/session_{N}/closeout.json`` — **no Hummingbot API
+    call** — because the venue was read once, when the stop happened, and that
+    reading is the artifact. Re-deriving it now would answer a different
+    question (what is open *today*), which is the question
+    ``POST .../close-out`` is for.
+
+    ``{"closeout": null}`` rather than 404 for a session that is still running
+    or that stopped before this report existed: having no close-out is a normal
+    state, not an error the caller should have to tell apart from a missing
+    session.
+    """
+    from condor.agents.closeout import read_closeout
+
+    strategy = _get_strategy(slug, sslug)
+    session_dir = find_session_dir(strategy.home, session_num)
+    if not session_dir:
+        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
+    return {"closeout": read_closeout(session_dir)}
+
+
+@router.post("/{slug}/strategies/{sslug}/close-out")
+async def close_out_strategy(
+    slug: str,
+    sslug: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Close everything this strategy's lineage still holds, and report it.
+
+    The post-mortem door #273 needed: it takes the strategy rather than a live
+    engine, so it works on an agent that is **already stopped** — which is when
+    the operator actually goes looking, and which is why it cannot be a variant
+    of ``/stop`` or ``/shutdown`` (both 404 without a running engine).
+
+    Scoped to the lineage, so a previous session's executor is closed too
+    instead of being refused by the per-session stop gate (CORR-726). It stops
+    the live executors per ``shutdown.md``, sweeps the resting orders, then reads
+    the venue — so the report describes the state it left, not the one it found.
+
+    Refused while someone else's loop is running this strategy (SEC-638): the
+    close-out would be flattening *that* owner's live run. Its own owner's live
+    run is allowed, since the lineage is theirs either way and ``_finish`` will
+    emit its own report on top.
+    """
+    from condor.agents.closeout import close_out_agent
+    from condor.agents.journal import iter_session_dirs
+    from condor.agents.shutdown import load_shutdown_policy
+
+    strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
+
+    resolved = await _get_client_for_strategy(
+        strategy.home, strategy.default_config, _strategy_principal(strategy, user)
+    )
+    if resolved.client is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No Hummingbot API client for this strategy ({resolved.unavailable})",
+        )
+
+    policy, _body = load_shutdown_policy(strategy)
+    # The newest session, so the record lands beside the journal it belongs
+    # with. A strategy that has never run has nowhere to file it, and the
+    # report is still returned to the caller.
+    sessions = iter_session_dirs(strategy.home)
+    report = await close_out_agent(
+        resolved.client,
+        slug,
+        strategy.slug,
+        policy=policy,
+        session_dir=sessions[-1][1] if sessions else None,
+    )
+    return {"closeout": report.to_dict()}
+
+
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/actions")
 async def list_session_actions(
     slug: str,

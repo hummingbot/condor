@@ -245,6 +245,11 @@ class TickEngine:
     _cancel_outcome: "CancelOutcome | None" = field(
         default=None, init=False, repr=False
     )
+    # The close-out report this run's teardown recorded (FEAT-134). None until
+    # _finish has run, which is also how a caller tells a run that has not
+    # stopped yet from one whose report could not be built -- the latter is a
+    # report carrying an ``error``, never an absent one.
+    _closeout: "CloseoutReport | None" = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -464,6 +469,18 @@ class TickEngine:
                 getattr(self, "agent_id", "?"),
             )
 
+    async def _emit_closeout(self) -> None:
+        """Record what this run closed and what it left (FEAT-134). Never raises.
+
+        A thin delegation: :func:`condor.agents.closeout.emit_closeout` owns the
+        reads, the timeout and the catch, so the teardown holds no policy of its
+        own. Imported lazily, like the sweep above it, to keep the venue-read
+        module off the engine's import path.
+        """
+        from .closeout import emit_closeout
+
+        await emit_closeout(self)
+
     async def _finish(self, final_state: str, reason: str) -> None:
         """End this run: the ONE teardown every exit path goes through.
 
@@ -491,6 +508,18 @@ class TickEngine:
             sweep = getattr(self, "_cancel_resting_orders", None)
             if sweep is not None:
                 await sweep()
+            # The close-out report (FEAT-134), last and best-effort: the stop's
+            # own work is done by here, so a report that fails or hangs can
+            # neither fail nor delay it -- emit_closeout catches everything and
+            # caps itself. Here and not in run_shutdown/stop(), because this is
+            # the one teardown every exit path reaches, so one call site covers
+            # the graceful stop, the emergency winddown, an error, and the stop
+            # half of a restart. Before the ``finally`` below, which closes the
+            # journal the report is recorded in. ``getattr`` for the same reason
+            # the sweep above uses it.
+            emit = getattr(self, "_emit_closeout", None)
+            if emit is not None:
+                await emit()
         finally:
             # Close the ownership window before the journal: from here on this
             # session operates nothing, so a bot left running must stop accruing
