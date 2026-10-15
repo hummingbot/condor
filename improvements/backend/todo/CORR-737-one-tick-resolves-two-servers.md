@@ -82,7 +82,7 @@ measurements say that is not the normal case:
   `{config, trading_context}` (`frontend/src/lib/api.ts:3437-3446`), so
   `StartStrategyRequest.chat_id` keeps its default `0`
   (`condor/web/routes/agents.py:840`) and reaches the engine as `chat_id=0`
-  (`agents.py:3140`). The data leg then reads the *owner's own* chat default
+  (`agents.py:3159`). The data leg then reads the *owner's own* chat default
   while the tools leg finds nothing under `0` and falls to `accessible[0]`.
 
 That **corrects the finding as handed**, which said a web launch agrees because
@@ -248,9 +248,16 @@ and currently false) and `agent_builder/SKILL.md:286` says an empty
 
 ## Notes
 
-Filed from a finding handed over by CORR-729's ship run, at `b38a3206`; HEAD was
-`d8f2bf31` (CORR-729's own closing commit) for the whole of this run and did not
-move, so every reading above holds at that sha.
+Filed from a finding handed over by CORR-729's ship run, at `b38a3206`. Every
+reading was taken at `d8f2bf31` (CORR-729's own closing commit); HEAD then moved
+to `77b2e26c` (the running plan closing CORR-732) just before this doc was
+committed. `git diff --name-only d8f2bf31 77b2e26c` touches six files, of which
+this doc cites three: the `chat_id: int = 0` default
+(`condor/web/routes/agents.py:840`), `set_chat_default_server(user.id, ...)`
+(`settings.py:146`) and `startStrategy` (`api.ts:3437-3446`) all hold at both
+shas, and the one anchor that moved — `chat_id=req.chat_id` in `_start`, `:3140`
+to `:3159` — is cited above at the later sha. Every other reading is in a file
+neither commit touched.
 
 The divergence pre-dates CORR-729: at `b38a3206^` the engine already used
 `get_effective_server(self.user_id)` while the toolset used
