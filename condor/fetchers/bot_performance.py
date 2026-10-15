@@ -1136,6 +1136,49 @@ def _cum_at(
     return (chosen[1], chosen[2], chosen[3], chosen[4])
 
 
+def _reset_offsets(
+    history: list[tuple[float, float, float, float, float]],
+    start: float,
+    end: float,
+) -> tuple[float, float, float]:
+    """Volume, trades and fees that counter resets inside ``(start, end]`` hide.
+
+    Differencing a cumulative counter is only the volume generated while that
+    counter keeps counting. A bot restart — or a new instance deployed under
+    the same name, which the history walk cannot tell apart — starts volume,
+    trade count and fees again from zero, so a row sitting *below* its
+    predecessor did not trade a negative amount: it opened a new segment, and
+    everything it reports was traded after the reset.
+
+    Plain differencing cancels exactly the value standing immediately before
+    each drop, so the sum of those values is what restores the figure. Returning
+    it as an offset rather than re-summing the window keeps a monotonic
+    history's arithmetic bit-for-bit what it was: no reset, no offset
+    ([[CORR-731]]).
+
+    Realized PnL is deliberately not corrected. It falls whenever a position
+    closes at a loss, so a drop there is a measurement, not a reset, and
+    offsetting it would invent profit.
+    """
+    v_lost = t_lost = f_lost = 0.0
+    prev: tuple[float, float, float] | None = None
+    for row in history:
+        if row[0] > end:
+            break
+        cur = (row[2], row[3], row[4])
+        # Rows at or before ``start`` are the baseline ``_cum_at(start)`` reads,
+        # so a reset among them belongs to the window that ended there.
+        if prev is not None and row[0] > start:
+            if cur[0] < prev[0]:
+                v_lost += prev[0]
+            if cur[1] < prev[1]:
+                t_lost += prev[1]
+            if cur[2] < prev[2]:
+                f_lost += prev[2]
+        prev = cur
+    return v_lost, t_lost, f_lost
+
+
 def slice_history(
     histories: list[list[tuple[float, float, float, float, float]]],
     start: float,
@@ -1147,15 +1190,21 @@ def slice_history(
     an instance that lies wholly outside the window, and exact for partial overlap.
     Because session windows tile the timeline, summing every session's slice
     reproduces each instance's full cumulative with no double counting.
+
+    That differencing holds only while the cumulative is monotonic, so each
+    instance's volume, trades and fees also carry what
+    :func:`_reset_offsets` found a restart had hidden. A monotonic history is
+    untouched by that term and slices exactly as it always did.
     """
     realized = volume = trades = fees = 0.0
     for h in histories:
         r_e, v_e, t_e, f_e = _cum_at(h, end)
         r_s, v_s, t_s, f_s = _cum_at(h, start)
+        v_lost, t_lost, f_lost = _reset_offsets(h, start, end)
         realized += r_e - r_s
-        volume += v_e - v_s
-        trades += t_e - t_s
-        fees += f_e - f_s
+        volume += v_e - v_s + v_lost
+        trades += t_e - t_s + t_lost
+        fees += f_e - f_s + f_lost
     return realized, volume, trades, fees
 
 
@@ -1183,6 +1232,10 @@ def slice_history_series(
     carried: list[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * len(
         histories
     )
+    # ``_reset_offsets(h, start, t)`` accumulated as the cursor goes: each row is
+    # stepped over exactly once across every stamp, so the offset is carried
+    # forward rather than recomputed per stamp.
+    lost: list[tuple[float, float, float]] = [(0.0, 0.0, 0.0)] * len(histories)
 
     out: list[tuple[float, float, float, float, float]] = []
     for t in stamps:
@@ -1191,16 +1244,27 @@ def slice_history_series(
             j = cursors[i]
             while j + 1 < len(h) and h[j + 1][0] <= t:
                 j += 1
+                if j >= 1 and h[j][0] > start:
+                    prev, cur = h[j - 1], h[j]
+                    v_l, t_l, f_l = lost[i]
+                    if cur[2] < prev[2]:
+                        v_l += prev[2]
+                    if cur[3] < prev[3]:
+                        t_l += prev[3]
+                    if cur[4] < prev[4]:
+                        f_l += prev[4]
+                    lost[i] = (v_l, t_l, f_l)
             if j != cursors[i]:
                 cursors[i] = j
                 row = h[j]
                 carried[i] = (row[1], row[2], row[3], row[4])
             r_e, v_e, t_e, f_e = carried[i]
             r_s, v_s, t_s, f_s = bases[i]
+            v_l, t_l, f_l = lost[i]
             realized += r_e - r_s
-            volume += v_e - v_s
-            trades += t_e - t_s
-            fees += f_e - f_s
+            volume += v_e - v_s + v_l
+            trades += t_e - t_s + t_l
+            fees += f_e - f_s + f_l
         out.append((t, realized, volume, trades, fees))
     return out
 

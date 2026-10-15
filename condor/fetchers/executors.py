@@ -116,12 +116,38 @@ def get_executor_pnl(executor: Dict[str, Any]) -> float:
     return 0.0
 
 
+#: The only fields that mean *traded volume* — the quote value of the fills an
+#: executor has actually done. The list is an allow-list on purpose: a position
+#: field looks just as numeric, and an executor carries several that are signed.
+#: Grid, for one, reports ``position_size_base`` as ``executed − close_executed``
+#: and ``position_size_quote`` priced off it, so both go negative once the close
+#: order fills past the opens. Reading one of those as volume is how a negative
+#: volume reached an agent's journal ([[CORR-731]]).
+TRADED_VOLUME_KEYS = ("filled_amount_quote", "volume_traded", "total_volume")
+
+
 def get_executor_volume(executor: Dict[str, Any]) -> float:
-    """Extract filled/traded volume from an executor response."""
-    for key in ("filled_amount_quote", "volume_traded", "total_volume"):
+    """Extract filled/traded volume from an executor response.
+
+    Reads only :data:`TRADED_VOLUME_KEYS`, and as a magnitude: volume is a sum
+    of fills, so the sign of whatever arrived in the field is never information
+    about it. A backend that hands back a signed figure yields that trade's
+    size, not a negative volume that the surfaces above would then total
+    ([[CORR-731]]).
+    """
+    for key in TRADED_VOLUME_KEYS:
         val = executor.get(key)
         if val is not None and val != 0:
-            return float(val)
+            try:
+                return abs(float(val))
+            except (TypeError, ValueError):
+                logger.debug(
+                    "executor %s: %s is not a number: %r",
+                    executor.get("id") or executor.get("executor_id") or "?",
+                    key,
+                    val,
+                )
+                return 0.0
     return 0.0
 
 

@@ -32,6 +32,8 @@ from condor.fsutil import atomic_write_text
 from condor.memory.paths import safe_slug
 from condor.paths import local_agents_root
 
+from .volume_render import format_volume_usd
+
 log = logging.getLogger(__name__)
 
 MAX_LEARNINGS = 20
@@ -932,8 +934,13 @@ class JournalManager:
         position_size: float,
     ) -> None:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        # A negative volume is not a reading, so it is written as a flagged data
+        # error rather than as a figure ([[CORR-731]]). The flag deliberately
+        # carries no ``$``, which is what keeps ``_parse_snapshot_line`` from
+        # reading it back as a number.
+        volume = format_volume_usd(total_volume, source="journal snapshot")
         entry = (
-            f"- {now} | pnl=${total_pnl:+.2f} | volume=${total_volume:,.0f} "
+            f"- {now} | pnl=${total_pnl:+.2f} | volume={volume} "
             f"| open={open_count} | exposure=${position_size:.2f}"
         )
         self._append_bounded("Snapshots", entry, MAX_SNAPSHOT_LINES)
@@ -1130,16 +1137,24 @@ def _parse_snapshot_line(line: str) -> dict[str, Any]:
     entry: dict[str, Any] = {}
     for part in line[2:].split(" | "):
         part = part.strip()
-        if part.startswith("pnl=$"):
-            entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
-        elif part.startswith("volume=$"):
-            entry["volume"] = float(part.replace("volume=$", "").replace(",", ""))
-        elif part.startswith("exposure=$"):
-            entry["exposure"] = float(part.replace("exposure=$", ""))
-        elif part.startswith("open="):
-            entry["open"] = int(part.replace("open=", ""))
-        elif re.match(r"\d{4}-\d{2}-\d{2}", part):
-            entry["timestamp"] = part
+        try:
+            if part.startswith("pnl=$"):
+                entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
+            elif part.startswith("volume=$"):
+                entry["volume"] = float(part.replace("volume=$", "").replace(",", ""))
+            elif part.startswith("exposure=$"):
+                entry["exposure"] = float(part.replace("exposure=$", ""))
+            elif part.startswith("open="):
+                entry["open"] = int(part.replace("open=", ""))
+            elif re.match(r"\d{4}-\d{2}-\d{2}", part):
+                entry["timestamp"] = part
+        except ValueError:
+            # A field written as a flagged data error, or a hand-edited line.
+            # The key stays absent, which readers already treat as "not here";
+            # raising would take every snapshot with it, and with them the
+            # drawdown guard ([[CORR-731]]).
+            log.debug("snapshot field is not a number: %r", part)
+            continue
     return entry
 
 

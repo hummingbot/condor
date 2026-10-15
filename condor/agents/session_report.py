@@ -32,6 +32,7 @@ from condor.reports import store
 from condor.reports.builder import LiveReport
 
 from . import canvas as canvas_mod
+from .volume_render import format_volume_usd
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +110,10 @@ class SessionReport:
         )
         b.kpi("Realized", f"${float(info.get('realized_pnl', 0.0) or 0.0):,.2f}")
         b.kpi("Unrealized", f"${float(info.get('unrealized_pnl', 0.0) or 0.0):,.2f}")
-        b.kpi("Volume", f"${float(info.get('total_volume', 0.0) or 0.0):,.0f}")
+        b.kpi(
+            "Volume",
+            format_volume_usd(info.get("total_volume"), source="session report KPI"),
+        )
         b.kpi("Open Executors", str(info.get("open_executors", 0)))
         b.kpi("Ticks", str(info.get("tick_count", 0)))
 
@@ -177,7 +181,10 @@ class SessionReport:
                     "Controller": c.get("controller_id", "") or "—",
                     "Realized": f"${float(c.get('realized_pnl_quote', 0) or 0):,.2f}",
                     "Unrealized": f"${float(c.get('unrealized_pnl_quote', 0) or 0):,.2f}",
-                    "Volume": f"${float(c.get('volume_traded', 0) or 0):,.0f}",
+                    "Volume": format_volume_usd(
+                        c.get("volume_traded"),
+                        source=f"session report controller {bot or '?'}",
+                    ),
                     "Closes": (
                         ", ".join(
                             f"{k.replace('CloseType.', '').replace('_', ' ').lower()}"
@@ -278,7 +285,9 @@ class SessionReport:
                     "Status": ex.get("status", ""),
                     "Amount": f"${float(ex.get('amount', 0) or 0):,.2f}",
                     "PnL": f"${float(ex.get('pnl', 0) or 0):,.2f}",
-                    "Volume": f"${float(ex.get('volume', 0) or 0):,.0f}",
+                    "Volume": format_volume_usd(
+                        ex.get("volume"), source="session report executor"
+                    ),
                 }
             )
         b.table(rows)
