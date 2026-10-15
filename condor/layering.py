@@ -249,10 +249,12 @@ def clear_fork_stamp(path: Path) -> None:
 
 # ── Publishing: the one sanctioned write into the shipped library ──
 
-# What a published agent consists of. An allowlist rather than a denylist, and
-# deliberately: a whole-directory copy would drag ``store/``, ``sessions/`` and
-# the mute set into the tracked tree, which is the exact wound this feature
-# closed. Anything not named here is this install's, not the library's.
+# Runtime output, by name at any depth. The half of the publishing contract that
+# names what this install accumulated: a whole-directory copy would drag
+# ``store/``, ``sessions/`` and the mute set into the tracked tree, which is the
+# exact wound this feature closed. The other half is :func:`_root_library_dirs`,
+# which decides the root positively, so a name nobody listed here is still not
+# library content when it sits in a folder the layout never defined.
 _RUNTIME_NAMES = frozenset(
     {
         "store",
@@ -270,8 +272,35 @@ _RUNTIME_NAMES = frozenset(
         # The dot only hides the *directory*; the files in it are plain names,
         # which the dotfile check below would let through.
         ".server_backups",
+        # Compiled bytecode of an agent's own routines. Matched at any depth
+        # because it appears *under* an allowed directory
+        # (``routines/__pycache__/``), and the name is reserved by Python, so no
+        # library item can legitimately claim it ([[CORR-720]]).
+        "__pycache__",
     }
 )
+
+
+def _root_library_dirs() -> frozenset[str]:
+    """The root directories the agent layout defines — nothing else is library.
+
+    The other half of the contract above, and the half that makes it true
+    rather than aspirational: ``_RUNTIME_NAMES`` can only name runtime
+    output somebody already thought of, and an agent that invents a root folder
+    — a routine keeping its own ``state/``, say — invents a name no denylist
+    holds ([[CORR-720]]). At the root the layout *is* a closed set, so it is
+    stated as one, each entry named by the module that owns it.
+
+    Imported inside the function because :mod:`condor.agents.strategy` imports
+    this module, so naming ``LOOPS_DIRNAME`` at module scope would be a cycle.
+    """
+    from condor.agent_controllers import CONTROLLERS_DIRNAME
+    from condor.agents.strategy import LOOPS_DIRNAME
+    from condor.memory.paths import ROUTINES_DIRNAME, SKILLS_DIRNAME
+
+    return frozenset(
+        {CONTROLLERS_DIRNAME, LOOPS_DIRNAME, ROUTINES_DIRNAME, SKILLS_DIRNAME}
+    )
 
 
 def publishable_files(home: Path, path: str = "") -> list[Path]:
@@ -280,6 +309,13 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
     ``path`` narrows to one file or folder (``skills/recon``,
     ``loops/grid``); empty takes the whole agent. The runtime filter applies
     either way, so naming a folder cannot smuggle a store out.
+
+    Two rules, because the layout is only closed at one level. A root
+    *directory* must be one the layout defines (:func:`_root_library_dirs`); a
+    root *file*, and any name at any depth, must not be runtime output
+    (``_RUNTIME_NAMES``). Matching ``state`` at the root rather than by name is
+    what keeps a ``skills/state/`` playbook publishable while an agent's root
+    ``state/`` folder is not.
     """
     rel_parts = tuple(part for part in path.split("/") if part and part != "..")
     base = home.joinpath(*rel_parts)
@@ -289,11 +325,14 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
         return []
 
     found: list[Path] = []
+    root_dirs = _root_library_dirs()
     for candidate in sorted(base.rglob("*")):
         if not candidate.is_file() or candidate.name.startswith("."):
             continue
         rel = candidate.relative_to(home)
         if any(part in _RUNTIME_NAMES for part in rel.parts):
+            continue
+        if len(rel.parts) > 1 and rel.parts[0] not in root_dirs:
             continue
         found.append(rel)
     return found

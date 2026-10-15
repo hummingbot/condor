@@ -67,6 +67,16 @@ CHAT_SLUG = "condor"
 # legacy flat sibling. One rule, used by every walker of either root.
 DEFAULTS_DIRNAME = "_defaults"
 
+# The two library directories of an agent home this module resolves. Named
+# rather than spelled out at each use because the set of root directories the
+# layout defines is itself a rule — :func:`condor.layering.publishable_files`
+# reads it to decide that a root folder nobody defined is this install's
+# ([[CORR-720]]). ``controllers`` and ``loops`` are named by the modules that
+# own them (:data:`condor.agent_controllers.CONTROLLERS_DIRNAME`,
+# :data:`condor.agents.strategy.LOOPS_DIRNAME`).
+SKILLS_DIRNAME = "skills"
+ROUTINES_DIRNAME = "routines"
+
 
 def _is_agent_dir(path: Path) -> bool:
     return path.is_dir() and not path.name.startswith("_") and path.name != "strategies"
@@ -267,14 +277,14 @@ def shared_skills_root() -> Path:
     skips ``_``-prefixed dirs, the same convention that already hides
     ``agents/_defaults``. Only Condor may write here (see :class:`SkillStore`).
     """
-    return local_agents_root() / "_shared" / "skills"
+    return local_agents_root() / "_shared" / SKILLS_DIRNAME
 
 
 def shared_skills_roots() -> tuple[Path, Path]:
     """``(local, stock)`` shared skill libraries — read order."""
     return (
-        local_agents_root() / "_shared" / "skills",
-        stock_agents_root() / "_shared" / "skills",
+        local_agents_root() / "_shared" / SKILLS_DIRNAME,
+        stock_agents_root() / "_shared" / SKILLS_DIRNAME,
     )
 
 
@@ -290,14 +300,14 @@ def shared_routines_root() -> Path:
     never surfaces as an agent-owned ``_shared/<name>`` — it is part of the
     general library, un-prefixed. See :func:`routines.base.assistant_routines`.
     """
-    return local_agents_root() / "_shared" / "routines"
+    return local_agents_root() / "_shared" / ROUTINES_DIRNAME
 
 
 def shared_routines_roots() -> tuple[Path, Path]:
     """``(local, stock)`` shared routine libraries — read order."""
     return (
-        local_agents_root() / "_shared" / "routines",
-        stock_agents_root() / "_shared" / "routines",
+        local_agents_root() / "_shared" / ROUTINES_DIRNAME,
+        stock_agents_root() / "_shared" / ROUTINES_DIRNAME,
     )
 
 
@@ -340,13 +350,13 @@ def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
     Merged into the agent's [SKILLS]/[DOMAIN SKILLS] index alongside its learned
     skills. See :mod:`condor.memory.skills`.
     """
-    return agent_home(agent_slug) / "skills"
+    return agent_home(agent_slug) / SKILLS_DIRNAME
 
 
 def builtin_skills_roots(agent_slug: str | None = None) -> tuple[Path, Path]:
     """``(local, stock)`` own-skill libraries for an agent — read order."""
     local, stock = agent_home_layers(agent_slug)
-    return local / "skills", stock / "skills"
+    return local / SKILLS_DIRNAME, stock / SKILLS_DIRNAME
 
 
 def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
