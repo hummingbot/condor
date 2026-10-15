@@ -279,6 +279,14 @@ does.
   (`handlers/bots/controller_handlers.py:702,877`, `handlers/bots/menu.py:1704`)
   edit a Hummingbot **bot controller** config, a different object. FEAT-131
   lives on `main` and not on this branch, so it was cited rather than amended.
+- **`frontend/src/lib/api.ts` is the hottest file on this branch** — seven open
+  docs declare it (FEAT-133, FEAT-135, FEAT-136, FEAT-137, FEAT-138, FEAT-141
+  and this one, plus [[CORR-737]]), and FEAT-135's chunk was editing it in the
+  shared checkout while this doc was being filed. Real file overlap for plan
+  ordering; commit with a pathspec.
+  `frontend/src/components/agent/workspace/PlaybookView.tsx` is declared by no
+  other doc on this branch (FEAT-131 and SEC-715 mention it in prose but declare
+  `AgentControls.tsx`), so the card itself is uncontended.
 - **No post-merge task is owed.** Every criterion above is observable in the
   implementing session with `vitest` and the two mocked gates; none needs the
   live stack, a port the running install holds, or a service restart, so none of
