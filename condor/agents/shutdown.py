@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from condor.fetchers.tracked_positions import fetch_tracked_positions
@@ -202,16 +203,21 @@ async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
 
 
 async def _deterministic_baseline(
-    engine: Any, client: Any, policy: ShutdownPolicy
+    engine: Any, client: Any, policy: ShutdownPolicy, running: list[dict] | None = None
 ) -> tuple[int, list[str]]:
     """Stop this session's executors with ``keep_position`` per policy.
 
     Each stop is isolated so one failure never aborts the rest. Returns
     ``(stopped_count, failures)``.
+
+    ``running`` lets the caller hand in the rows it already read, so the
+    winddown pays for one executor refresh and the order sweep that follows
+    scopes itself to the same rows this stop acted on.
     """
     from condor.fetchers.executors import describe_executor_error, stop_executor
 
-    running = await _get_running_executors(engine, client)
+    if running is None:
+        running = await _get_running_executors(engine, client)
     targets = [ex for ex in running if ex.get("id") or ex.get("executor_id")]
 
     async def _stop_one(ex: dict) -> str | None:
@@ -271,17 +277,259 @@ async def _verify_and_retry(
     return [p for p in positions if not _should_remain_open(p, policy)]
 
 
+# ---------------------------------------------------------------------------
+# cancel_open_orders -- executed, not described
+# ---------------------------------------------------------------------------
+#
+# The policy flag used to reach only the LLM context, as the sentence
+# ``cancel_open_orders=True``. Nothing in the code had ever cancelled an order,
+# so a stop that reported success could leave resting orders on the venue and
+# the only thing standing between the operator and that was whether a model
+# happened to act on a sentence (CORR-727, hummingbot/condor#273). It is
+# executed here instead, deterministically and before the cleanup pass, and the
+# sentence now reports what the execution achieved.
+#
+# Scope is this session's own markets -- the ``(connector, trading_pair)`` of the
+# executors the winddown just acted on -- because that is as narrow as the API
+# allows: an active-order row carries its account, connector and pair and no
+# controller or executor id. Orders outside those markets belong to someone else
+# and are never touched.
+
+#: Executor types whose exposure is a gateway/CLMM position rather than an
+#: order-book order: there is no order to cancel and ``/trading`` does not reach
+#: the venue at all. A market held only by these records the policy as *not
+#: carried out* rather than as swept clean.
+_NO_CANCEL_PATH_TYPES = frozenset({"lp"})
+
+#: Order statuses still resting on the venue. ``PENDING_CANCEL`` is deliberately
+#: absent: a cancel is already in flight for it, and re-issuing one would read as
+#: this sweep's own success.
+_RESTING_STATUSES = frozenset({"OPEN", "SUBMITTED", "PARTIALLY_FILLED"})
+
+#: One page is the whole sweep -- these are in-flight orders of a handful of
+#: markets, not order history.
+_ORDER_SCAN_LIMIT = 500
+
+
+@dataclass
+class CancelOutcome:
+    """What the ``cancel_open_orders`` policy actually did, not what it asked for.
+
+    ``requested`` is the configured flag; everything else is observed. The
+    distinction is the whole point of CORR-727: a policy that could not be
+    carried out has to say so instead of reading as done.
+    """
+
+    requested: bool = False
+    #: Orders this sweep issued a cancel for, as ``connector pair order_id``.
+    cancelled: list[str] = field(default_factory=list)
+    #: Orders whose cancel was refused -- left resting on the venue.
+    failed: list[str] = field(default_factory=list)
+    #: Markets the policy cannot be carried out on, as ``connector pair``.
+    unsupported: list[str] = field(default_factory=list)
+    #: Set when the active-order read itself failed, so nothing is known about
+    #: what is resting. Not the same as "nothing was resting".
+    unknown: str = ""
+
+    @property
+    def carried_out(self) -> bool:
+        """True only when the whole policy was executed over the whole scope."""
+        if not self.requested:
+            return False
+        return not (self.failed or self.unsupported or self.unknown)
+
+    def describe(self) -> str:
+        """One line, in the executed past tense, for context/journal/notify."""
+        if not self.requested:
+            return "cancel_open_orders=false: no order cancel was attempted."
+        parts = [f"cancelled {len(self.cancelled)} resting order(s)"]
+        if self.failed:
+            parts.append(f"{len(self.failed)} LEFT RESTING (cancel failed)")
+        if self.unsupported:
+            parts.append(
+                f"NOT carried out on {len(self.unsupported)} market(s) with no "
+                f"cancel path: {', '.join(self.unsupported)}"
+            )
+        if self.unknown:
+            parts.append(f"open orders UNKNOWN ({self.unknown})")
+        return "cancel_open_orders=true, executed: " + "; ".join(parts) + "."
+
+
+def _market_key(connector: Any, pair: Any) -> tuple[str, str]:
+    """Case-folded ``(connector, pair)`` -- the API spells both inconsistently."""
+    return (str(connector or "").strip().lower(), str(pair or "").strip().upper())
+
+
+def _cancel_scope(executors: list[dict]) -> tuple[set[tuple[str, str]], list[str]]:
+    """The markets to sweep, and the ones the policy cannot be carried out on.
+
+    A market is unsupported only when *every* executor this session ran there is
+    gateway/CLMM: a connector that also carries an order-book executor has a
+    cancel path, and its resting orders are in scope.
+    """
+    from condor.fetchers.executors import get_executor_type
+
+    cancellable: set[tuple[str, str]] = set()
+    no_path: dict[tuple[str, str], str] = {}
+    for ex in executors:
+        connector = ex.get("connector") or ex.get("connector_name") or ""
+        pair = ex.get("pair") or ex.get("trading_pair") or ""
+        if not connector or not pair:
+            continue
+        key = _market_key(connector, pair)
+        if get_executor_type(ex) in _NO_CANCEL_PATH_TYPES:
+            no_path.setdefault(key, f"{connector} {pair}")
+        else:
+            cancellable.add(key)
+    unsupported = sorted(
+        label for key, label in no_path.items() if key not in cancellable
+    )
+    return cancellable, unsupported
+
+
+def _is_resting(order: dict) -> bool:
+    return str(order.get("status") or "").strip().upper() in _RESTING_STATUSES
+
+
+def _order_id(order: dict) -> str:
+    return str(order.get("order_id") or order.get("client_order_id") or "").strip()
+
+
+async def cancel_resting_orders(
+    engine: Any, client: Any, policy: ShutdownPolicy, executors: list[dict]
+) -> CancelOutcome:
+    """Cancel this session's resting orders when the policy asks for it.
+
+    Deterministic -- no LLM turn is involved -- and it never raises: a stop has
+    to finish even when every cancel is refused, so a refusal is recorded as an
+    order left behind and the caller reports it. ``executors`` are this session's
+    rows, and they are the whole scope (see the module comment above).
+
+    A controller-mode session is reported as unsupported rather than swept: its
+    orders live inside the bot's own Hummingbot instance, which the API's
+    ``/trading`` routes neither list nor cancel -- stopping the bot with
+    ``skip_order_cancellation=False`` is that path, and it is not this stop.
+    """
+    outcome = CancelOutcome(requested=bool(policy.cancel_open_orders))
+    if not outcome.requested:
+        return outcome
+
+    cancellable, outcome.unsupported = _cancel_scope(executors)
+
+    bases: list[str] = []
+    ledger = getattr(engine, "ledger", None)
+    if ledger is not None:
+        try:
+            bases = list(ledger.bases())
+        except Exception:
+            bases = []
+    if bases:
+        # Controller mode: the whole session trades inside its bots' own
+        # Hummingbot instances, so none of its orders are in ``/trading`` and
+        # the executor rows above describe the bots' controllers, not anything
+        # the API holds. Sweeping that scope would reach only orders that are
+        # somebody else's. Record it and stop.
+        outcome.unsupported = sorted(
+            set(outcome.unsupported) | {f"bot {b} (own instance)" for b in bases}
+        )
+        return outcome
+
+    if not cancellable:
+        return outcome
+
+    trading = getattr(client, "trading", None)
+    if trading is None or not hasattr(trading, "cancel_order"):
+        outcome.unknown = "this API client exposes no order-cancel route"
+        return outcome
+
+    try:
+        from condor.fetchers.orders import fetch_active_orders
+
+        # Narrowed server-side to this session's markets. Not just for cost: the
+        # backend returns the first ``limit`` of *every* account's in-flight
+        # orders, so an unfiltered read on a busy server can page this session's
+        # orders out and read as an empty book.
+        orders = await fetch_active_orders(
+            client,
+            limit=str(_ORDER_SCAN_LIMIT),
+            strict=True,
+            connector_names=sorted({c for c, _ in cancellable}),
+            trading_pairs=sorted({p for _, p in cancellable}),
+        )
+    except Exception as e:
+        # A failed read is not an empty book: say the open orders are unknown
+        # rather than reporting a clean sweep. The message is read back by the
+        # operator and by the cleanup pass, so keep the raw exception (which
+        # embeds the backend URL) out of it.
+        log.exception("shutdown: could not read active orders")
+        outcome.unknown = f"active-order read failed ({type(e).__name__})"
+        return outcome
+
+    targets = [
+        o
+        for o in orders
+        if isinstance(o, dict)
+        and _is_resting(o)
+        and _order_id(o)
+        and _market_key(o.get("connector_name"), o.get("trading_pair")) in cancellable
+    ]
+
+    from condor.fetchers.executors import describe_executor_error
+
+    async def _cancel_one(order: dict) -> tuple[str, str | None]:
+        label = (
+            f"{order.get('connector_name') or '?'} "
+            f"{order.get('trading_pair') or '?'} {_order_id(order)}"
+        )
+        try:
+            await trading.cancel_order(
+                account_name=str(order.get("account_name") or "master_account"),
+                connector_name=str(order.get("connector_name") or ""),
+                client_order_id=_order_id(order),
+            )
+        except Exception as e:
+            _, message = describe_executor_error(e)
+            return label, message
+        return label, None
+
+    if len(orders) >= _ORDER_SCAN_LIMIT:
+        # The page was full, so there may be resting orders past it that this
+        # sweep never saw. Say so rather than letting the cancels below read as
+        # the whole book.
+        outcome.unknown = (
+            f"the active-order read filled its {_ORDER_SCAN_LIMIT}-row page, so "
+            "orders past it were not swept"
+        )
+
+    # Every cancel goes out at once, for the same reason the stops do (PERF-668):
+    # on a hanging API a serial loop would not even send the last order's cancel
+    # until the earlier ones had each hit the client timeout.
+    results = await asyncio.gather(*(_cancel_one(o) for o in targets))
+    for label, error in results:
+        if error is None:
+            outcome.cancelled.append(label)
+        else:
+            outcome.failed.append(f"{label}: {error}")
+    return outcome
+
+
 def _build_llm_context(
     policy: ShutdownPolicy,
     running: list[dict],
     positions: list[dict],
     failures: list[str],
+    cancel: CancelOutcome | None = None,
 ) -> str:
-    """Post-baseline state handed to the LLM cleanup pass."""
+    """Post-baseline state handed to the LLM cleanup pass.
+
+    The order line is derived from ``cancel`` -- what the sweep executed -- and
+    not from ``policy.cancel_open_orders``, so the context cannot claim an
+    action the code did not take (CORR-727).
+    """
     lines = [
         "An emergency shutdown was triggered. The deterministic winddown has ALREADY run.",
-        f"Policy: on_kill_switch={policy.on_kill_switch}, "
-        f"cancel_open_orders={policy.cancel_open_orders}.",
+        f"Policy: on_kill_switch={policy.on_kill_switch}.",
+        (cancel or CancelOutcome()).describe(),
         "",
         f"Executors still running after the baseline stop ({len(running)}):",
     ]
@@ -308,6 +556,7 @@ async def _run_llm_cleanup(
     policy: ShutdownPolicy,
     body: str,
     failures: list[str],
+    cancel: CancelOutcome | None = None,
 ) -> None:
     """Best-effort LLM nuance pass on top of the guaranteed deterministic floor.
 
@@ -330,7 +579,7 @@ async def _run_llm_cleanup(
             _get_running_executors(engine, client),
             _fetch_positions(client, engine.agent_id),
         )
-        context = _build_llm_context(policy, running, positions, failures)
+        context = _build_llm_context(policy, running, positions, failures, cancel)
         cleanup_timeout = resolve_tick_timeout(
             strategy=engine.config.get("tick_timeout_sec")
         )
@@ -386,9 +635,11 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     1. Load the resolved policy + body; journal ``shutdown_start``.
     2. Deterministic baseline: stop this session's executors with ``keep_position``
        per policy (the guaranteed floor).
-    3. Verify: re-query positions, retry the close once, and loudly alert the user
+    3. Execute ``cancel_open_orders`` over this session's markets, and record what
+       it achieved -- including where it could not be carried out (CORR-727).
+    4. Verify: re-query positions, retry the close once, and loudly alert the user
        if anything the policy said to close is still open.
-    4. Journal ``shutdown_done``.
+    5. Journal ``shutdown_done``.
 
     The caller (:meth:`TickEngine._run_shutdown`) owns the idempotency guard and
     the self-stop; this function performs the winddown itself and never raises for
@@ -425,10 +676,19 @@ async def run_shutdown(engine: Any, reason: str) -> None:
                 engine.journal.record_tick("shutdown failed (no client): " + reason)
         return
 
-    stopped, failures = await _deterministic_baseline(engine, client, policy)
+    # One executor refresh for the whole winddown: the stop acts on these rows
+    # and the order sweep scopes itself to the same markets.
+    running = await _get_running_executors(engine, client)
+    stopped, failures = await _deterministic_baseline(engine, client, policy, running)
+
+    # The policy's own order cancel, executed before anything is told about it.
+    # Recorded on the engine so ``TickEngine._finish`` does not sweep a second
+    # time on its way out.
+    cancel = await cancel_resting_orders(engine, client, policy, running)
+    engine._cancel_outcome = cancel
 
     # LLM nuance pass on top of the guaranteed floor (best-effort, bounded).
-    await _run_llm_cleanup(engine, client, policy, body, failures)
+    await _run_llm_cleanup(engine, client, policy, body, failures, cancel)
 
     stranded = await _verify_and_retry(engine, client, policy)
 
@@ -447,6 +707,8 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         )
     if failures:
         msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
+    if cancel.failed or cancel.unsupported or cancel.unknown:
+        msg += f"\n⚠️ {cancel.describe()}"
     await engine._notify(msg)
 
     if engine.journal:
@@ -454,6 +716,12 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         # Both journal.md updates of this winddown go into one batch, so the file
         # is rewritten once instead of twice (PERF-136 idiom, PERF-173).
         with engine.journal.batch():
+            if cancel.requested:
+                engine.journal.append_action(
+                    engine.journal.tick_count + 1,
+                    "cancel_open_orders",
+                    cancel.describe(),
+                )
             engine.journal.append_action(
                 engine.journal.tick_count + 1,
                 "shutdown_done",

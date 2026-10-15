@@ -204,6 +204,12 @@ class TickEngine:
     # Set by _finish(): the run's teardown has happened, so any later exit path
     # (a stop() after the loop self-completed) is a no-op.
     _finished: bool = field(default=False, init=False, repr=False)
+    # What the shutdown policy's order cancel achieved (CORR-727). None until a
+    # sweep has run; a winddown sets it before its cleanup pass, which is how
+    # _finish knows not to sweep the same orders a second time on the way out.
+    _cancel_outcome: "CancelOutcome | None" = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -361,6 +367,68 @@ class TickEngine:
             )
         self._active_client = None
 
+    async def _cancel_resting_orders(self) -> None:
+        """Execute ``cancel_open_orders`` for this run's end. Never raises.
+
+        Lives in :meth:`_finish` because that is the one teardown every exit path
+        goes through -- a graceful stop, a completed run, an error and a winddown
+        all end here. A winddown has already swept before its cleanup pass and
+        left its :class:`~condor.agents.shutdown.CancelOutcome` on the engine, so
+        this sees it and does not sweep twice.
+
+        A ``dry_run`` is skipped: the risk gate refuses every mutating call in
+        that mode, so the session cannot have placed an order to cancel.
+
+        ``getattr`` throughout, and a blanket ``except``: ``_finish`` is driven in
+        tests by ``SimpleNamespace`` stand-ins that carry neither a strategy nor a
+        client, and a teardown must finish either way.
+        """
+        if getattr(self, "_cancel_outcome", None) is not None:
+            return
+        from .config import is_experiment_mode
+        from .shutdown import cancel_resting_orders, load_shutdown_policy
+
+        try:
+            config = getattr(self, "config", None) or {}
+            if is_experiment_mode(str(config.get("execution_mode") or "")):
+                return
+            strategy = getattr(self, "strategy", None)
+            if strategy is None:
+                return
+            policy, _ = load_shutdown_policy(strategy)
+            if not policy.cancel_open_orders:
+                return
+            client = await self._get_client()
+            if client is None:
+                log.warning(
+                    "TickEngine %s: could not reach the API to cancel resting "
+                    "orders; any open order is STILL RESTING",
+                    self.agent_id,
+                )
+                return
+            # ``all_executors``, not just the running ones: an executor that
+            # already terminated can be exactly the one that left an order
+            # resting, and its market has to stay in scope.
+            skill_data = self._last_skill_data or {}
+            executors = list(skill_data.get("all_executors") or []) or list(
+                skill_data.get("executors") or []
+            )
+            outcome = await cancel_resting_orders(self, client, policy, executors)
+            self._cancel_outcome = outcome
+            if self.journal:
+                self.journal.append_action(
+                    self.journal.tick_count + 1,
+                    "cancel_open_orders",
+                    outcome.describe(),
+                )
+            if outcome.failed or outcome.unsupported or outcome.unknown:
+                log.warning("TickEngine %s: %s", self.agent_id, outcome.describe())
+        except Exception:
+            log.exception(
+                "TickEngine %s: could not cancel resting orders on stop",
+                getattr(self, "agent_id", "?"),
+            )
+
     async def _finish(self, final_state: str, reason: str) -> None:
         """End this run: the ONE teardown every exit path goes through.
 
@@ -379,6 +447,15 @@ class TickEngine:
         self._running = False
         try:
             await self._reap_client()
+            # The shutdown policy's order cancel, on EVERY exit path. A graceful
+            # stop keeps positions but must not leave resting orders behind, and
+            # until CORR-727 the flag only ever reached the LLM context as a
+            # sentence -- so a stop's claim rested on whether a model acted on it.
+            # ``getattr`` for the same reason the ones above it are: a stand-in
+            # driven through the lifecycle methods carries only what it binds.
+            sweep = getattr(self, "_cancel_resting_orders", None)
+            if sweep is not None:
+                await sweep()
         finally:
             # Close the ownership window before the journal: from here on this
             # session operates nothing, so a bot left running must stop accruing
