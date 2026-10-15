@@ -236,6 +236,14 @@ class TickEngine:
     _active_client: "ACPClient | PydanticAIClient | None" = field(
         default=None, init=False, repr=False
     )
+    # What the adapter said it is on, read off the last started client
+    # ([[FEAT-136]]). The requested pin is ``agent_key``'s suffix; this is the
+    # answer, which is what makes it an audit rather than an echo: a bridge that
+    # could not match the pin keeps its own default and says so in
+    # ``active_model_id``, and before this the only record of that was a log
+    # line. Empty for a backend with no adapter to ask (pydantic-ai, where the
+    # key *is* the model) and until the first tick has started a client.
+    _active_model_id: str = field(default="", init=False, repr=False)
     # Set by _finish(): the run's teardown has happened, so any later exit path
     # (a stop() after the loop self-completed) is a no-op.
     _finished: bool = field(default=False, init=False, repr=False)
@@ -1040,6 +1048,11 @@ class TickEngine:
         stop_reason = "end_turn"
 
         await acp_client.start()
+        # The handshake has just resolved the model, so this is where the
+        # adapter's own answer is readable ([[FEAT-136]]). Kept on the engine
+        # rather than read off the client, which is torn down at the end of
+        # every tick — the status that reports it is served between ticks.
+        self._active_model_id = getattr(acp_client, "active_model_id", "") or ""
         # Wall-clock budget for this tick's agent session. Comes from the shared
         # policy (10 min default, CONDOR_TIMEOUT_TICK_DEFAULT) unless the run
         # config sets ``tick_timeout_sec`` -- a slower model or a tick that does
@@ -1899,6 +1912,11 @@ class TickEngine:
                 strategy=self.config.get("tick_timeout_sec"),
             ),
             "server_name": self.config.get("server_name", ""),
+            # The third pin, beside ``server_name`` and ``agent_key`` below.
+            # Carried so an effective-vs-file diff covers the whole pin set
+            # rather than the two thirds of it a status happened to report
+            # ([[FEAT-136]]).
+            "model_base_url": self.config.get("model_base_url", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": (
@@ -1911,6 +1929,10 @@ class TickEngine:
                 )
             ),
             "agent_key": self._agent_key(),
+            # The pin above is what was asked for; this is what the adapter
+            # answered ([[FEAT-136]]). They differ exactly when a pin did not
+            # apply, which is what a pin audit before a race start looks for.
+            "active_model_id": self._active_model_id,
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,

@@ -26,6 +26,10 @@ export interface AppEnv {
   os: string;
   arch: string;
   in_docker: boolean;
+  /** Unix seconds the backend process started (FEAT-136). */
+  process_started_at?: number;
+  /** The id the backend stamps its status files with (FEAT-136). */
+  boot_id?: string;
 }
 
 const MAX_ENTRIES = 8;
@@ -229,6 +233,16 @@ export function buildDiagnostics(opts: {
       ? `Condor ${env.version} (${env.branch}) · Python ${env.python} · ${env.os}/${env.arch}${env.in_docker ? " · docker" : ""}`
       : "Condor version: unavailable",
   );
+  // Which process, beside which commit (FEAT-136). A report that says the
+  // config was edited and nothing happened is answered by a start time older
+  // than the edit, and that used to take reading the server's logs.
+  if (env?.process_started_at) {
+    lines.push(
+      `Process: started ${new Date(env.process_started_at * 1000).toISOString()}${
+        env.boot_id ? ` · boot ${env.boot_id.slice(0, 8)}` : ""
+      }`,
+    );
+  }
   lines.push(`Page: ${page.page}  [${page.route}]`);
 
   if (kind === "feature") return fence(lines.join("\n"));

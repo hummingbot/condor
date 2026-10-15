@@ -46,6 +46,62 @@ def pin_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+#: What an effective-vs-file diff compares: the fields a session pins, plus the
+#: risk limits it is enforcing. Deliberately not every key — a cosmetic edit to
+#: ``trading_context`` must not badge a running session as drifted — and
+#: deliberately a set this module already owns, so the drift set and the overlay
+#: set cannot diverge (CORR-728).
+DRIFT_FIELDS: tuple[str, ...] = (*PIN_FIELDS, "risk_limits")
+
+
+def _comparable(value: Any) -> Any:
+    """``value`` as something comparable: a pydantic model as its dict."""
+    dump = getattr(value, "model_dump", None)
+    return dump() if callable(dump) else value
+
+
+def config_drift(
+    running: Mapping[str, Any], on_disk: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Which of :data:`DRIFT_FIELDS` a running session no longer shares with the file.
+
+    ``{field: {"running": <what the process holds>, "file": <what config.yml
+    says now>}}``, empty when the two agree. Both values, not a boolean: what
+    an operator needs is what a restart would change, and a badge that only
+    says "drifted" sends them back to the logs this exists to replace.
+
+    A dict field (``risk_limits``) is compared per sub-key and reported dotted
+    (``risk_limits.max_leverage``), so one changed limit reads as one changed
+    limit rather than as two blobs to diff by eye.
+
+    A field ``running`` does not carry at all is skipped rather than reported
+    as drifted against the file: that is a caller who did not read it, not a
+    session that disagrees.
+
+    An engine copies its config at start and nothing swaps it mid-tick on
+    purpose (CORR-732), so this is the only way to see a session still trading
+    on a pin the file has since changed, short of reading the logs.
+    """
+    drift: dict[str, dict[str, Any]] = {}
+    for name in DRIFT_FIELDS:
+        if name not in running:
+            continue
+        live = _comparable(running.get(name))
+        filed = _comparable(on_disk.get(name))
+        if isinstance(live, dict) or isinstance(filed, dict):
+            live_d = live if isinstance(live, dict) else {}
+            file_d = filed if isinstance(filed, dict) else {}
+            for key in sorted(set(live_d) | set(file_d)):
+                if live_d.get(key) != file_d.get(key):
+                    drift[f"{name}.{key}"] = {
+                        "running": live_d.get(key),
+                        "file": file_d.get(key),
+                    }
+        elif live != filed:
+            drift[name] = {"running": live, "file": filed}
+    return drift
+
+
 def load_session_pins(session_dir: Path) -> dict[str, Any]:
     """The pins a session recorded in its own ``config.yml``.
 

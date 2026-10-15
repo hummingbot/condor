@@ -768,6 +768,12 @@ export interface DeployBotRequest {
 
 // ── Agents ──
 
+/** One drifted config field: what the process holds, and what the file says now. */
+export interface ConfigDrift {
+  running: unknown;
+  file: unknown;
+}
+
 export interface RunningInstance {
   agent_id: string;
   session_num: number;
@@ -791,6 +797,21 @@ export interface RunningInstance {
   tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
+  /**
+   * The model the *adapter* says this session is on — not the `agent_key` pin
+   * above (FEAT-136). A bridge that could not match the pin keeps its own
+   * default, and the two then differ, which is what a pin audit looks for.
+   * `""` for a backend with no adapter to ask, and before the first tick.
+   * Optional so an older backend reads as "not reported".
+   */
+  active_model_id?: string;
+  /**
+   * Which pins/limits this process holds that `config.yml` no longer says
+   * (FEAT-136). Keyed by field — `risk_limits` is reported per sub-key, dotted
+   * — with both values, so the reader sees what a restart would change rather
+   * than only that something would. Absent/empty = the two agree.
+   */
+  config_drift?: Record<string, ConfigDrift>;
   // ── The loop's pulse ──
   // The engine has always computed these; the wire model dropped them, so a
   // strategy view could say "running" and nothing about when it last ran.
@@ -2220,6 +2241,14 @@ export interface AppEnvResponse {
   os: string;
   arch: string;
   in_docker: boolean;
+  /**
+   * Which *process*, not just which code (FEAT-136). Unix seconds this backend
+   * started, and the id it stamps its status files with — together they say
+   * whether it has been restarted since a config was edited. Optional so an
+   * older backend reads as "not reported".
+   */
+  process_started_at?: number;
+  boot_id?: string;
 }
 
 /**

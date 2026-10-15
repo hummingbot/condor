@@ -199,6 +199,56 @@ export function tickCountdownLabel(due: number): string {
   return due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`;
 }
 
+/**
+ * The drifted fields of a live engine, as one line per field (FEAT-136).
+ *
+ * The backend sends both values precisely so a reader does not have to go back
+ * to the file; this only words them. Empty array = the process and the file
+ * agree, which is what a badge should read off rather than a boolean nobody
+ * computed.
+ */
+export function driftLines(live: RunningInstance | null): string[] {
+  const drift = live?.config_drift;
+  if (!drift) return [];
+  return Object.entries(drift).map(
+    ([field, both]) =>
+      `${field}: running ${describeValue(both?.running)} · file ${describeValue(both?.file)}`,
+  );
+}
+
+/** A drift value as text. `""` has to read as empty, not as nothing at all. */
+function describeValue(value: unknown): string {
+  if (value === null || value === undefined) return "unset";
+  if (value === "") return '""';
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+/**
+ * The model this session is on, and whether its pin took (FEAT-136).
+ *
+ * `agent_key` carries the *requested* pin as a suffix (`claude-acp:opus`);
+ * `active_model_id` is what the adapter answered. A pin that did not apply
+ * leaves the adapter on its own default, and before this the only record of
+ * that was a log line — so the mismatch is the whole point of showing it.
+ *
+ * `null` when there is no adapter answer to report: a pydantic-ai backend has
+ * no adapter to ask, and an ACP session has none until its first tick.
+ */
+export function effectiveModel(
+  live: RunningInstance | null,
+): { active: string; requested: string; mismatch: boolean } | null {
+  const active = live?.active_model_id ?? "";
+  if (!active) return null;
+  const requested = (live?.agent_key ?? "").split(":").slice(1).join(":");
+  // Mirrors the backend's own alias matching (`resolve_model_id`): a pin of
+  // "opus" is honoured by "claude-opus-4-8", so only a pair that shares no
+  // substring either way is a pin that did not take.
+  const a = active.toLowerCase();
+  const r = requested.toLowerCase();
+  const mismatch = !!r && !a.includes(r) && !r.includes(a);
+  return { active, requested, mismatch };
+}
+
 /** Running, then paused, then everything idle — the sort's first key. */
 function loopRank(live: RunningInstance | null): number {
   if (!live) return 2;

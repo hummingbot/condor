@@ -148,6 +148,19 @@ class RunningInstance(BaseModel):
     tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
+    #: ── Effective vs file ([[FEAT-136]]) ──
+    #: The model the *adapter* says this session is on, which is not the
+    #: ``agent_key`` pin above: a bridge that could not match the pin keeps its
+    #: own default. Empty for a backend with no adapter to ask, and before the
+    #: first tick has started a client.
+    active_model_id: str = ""
+    #: Which pins/limits this process holds that ``config.yml`` no longer says,
+    #: as ``{field: {"running": ..., "file": ...}}`` — empty when they agree.
+    #: An engine copies its config at start and nothing swaps it mid-tick
+    #: (CORR-732), so without this the only route to "is it still running the
+    #: config I edited" was the logs. Only computed by callers that loaded the
+    #: file; a status-only caller leaves it empty, which reads as "no drift".
+    config_drift: dict[str, Any] = {}
     # ── The loop's pulse ──
     # The engine has computed all of this since it was written; the model just
     # never carried it, so every strategy view could say a loop was "running"
@@ -1316,11 +1329,14 @@ _INSTANCE_PERF_FIELDS = {
 }
 
 
-def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
+def _instance_from_engine(
+    engine, perf_by_id: dict, file_config: dict | None = None
+) -> RunningInstance:
     # The same two reads the fleet band makes per live engine — a cached
     # summary read and a tail of actions.jsonl — reused rather than re-derived,
     # so "what the loop last did" cannot mean two different things in two
     # places. Both swallow their own errors and return empty.
+    from condor.agents.config import config_drift
     from condor.agents.fleet_map import read_last_action, read_last_did
 
     info = engine.get_info()
@@ -1343,8 +1359,14 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         frequency_sec=info.get("frequency_sec", 60),
         tick_timeout_sec=info.get("tick_timeout_sec", 600),
         agent_key=info.get("agent_key", ""),
+        active_model_id=info.get("active_model_id", "") or "",
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
+        # The engine's own view against the file as it stands now. Computed here
+        # because this is the one place both sides are already in hand, so no
+        # caller re-implements the diff and they cannot drift apart
+        # ([[FEAT-136]]).
+        config_drift=config_drift(info, file_config) if file_config else {},
         last_tick_at=float(info.get("last_tick_at", 0.0) or 0.0),
         last_reading_at=float(info.get("last_reading_at", 0.0) or 0.0),
         last_successful_action_at=float(
@@ -1362,6 +1384,7 @@ def _strategy_live_state(
     run_key: str,
     engines: list,
     perf_by_id: dict | None = None,
+    file_config: dict | None = None,
 ) -> tuple[str, str, int, list[RunningInstance]]:
     """A strategy's headline ``(status, agent_id, tick_count, instances)``.
 
@@ -1373,10 +1396,18 @@ def _strategy_live_state(
     ``instances`` is only built when ``perf_by_id`` is given: each one costs a
     journal summary read and an ``actions.jsonl`` tail per engine, which a
     status-only caller (the brain panel) must not pay — it gets ``[]``.
+
+    ``file_config`` is the strategy's config as it stands on disk; pass it and
+    each instance carries its effective-vs-file drift ([[FEAT-136]]). Only
+    ``get_strategy`` does: it already returns that config as the response's
+    ``config``, so the diff costs it no extra read. The list and card views omit
+    it rather than loading a config per strategy for a badge their rows do not
+    draw, and read as "no drift" — which is why the badge lives on the detail
+    view that can actually tell.
     """
     instances: list[RunningInstance] = []
     if perf_by_id is not None:
-        instances = [_instance_from_engine(e, perf_by_id) for e in engines]
+        instances = [_instance_from_engine(e, perf_by_id, file_config) for e in engines]
 
     if engines:
         if instances:
@@ -2848,7 +2879,7 @@ async def get_strategy(
     engines = _get_engines_for(slug, sslug)
     # StrategyDetail carries no tick_count; the instances do.
     status, agent_id, _ticks, instances = _strategy_live_state(
-        strategy_dir, run_key, engines, perf_by_id
+        strategy_dir, run_key, engines, perf_by_id, config_dict
     )
 
     return StrategyDetail(

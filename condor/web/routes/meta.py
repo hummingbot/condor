@@ -2,9 +2,10 @@
 
 ``/env`` exists for a single reason: a bug report that does not say which commit
 it came from costs a round trip to find out. The fields are the same ones the
-telemetry context already computes for its own envelope — a short commit, a
-branch, a runtime — so nothing new is collected here, it is only shown to the
-logged-in user who is about to paste it into an issue.
+install already computes for itself — a short commit, a branch, a runtime, and
+the identity of this *process* (when it started and its boot id, [[FEAT-136]]) —
+so nothing new is collected here, it is only shown to the logged-in user who is
+about to paste it into an issue.
 
 ``/relaunch`` answers the other half of the same question. A Condor update lands
 the new code and rebuilds the dashboard bundle, but deliberately does not exec
@@ -19,6 +20,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from condor import updates
+from condor.runtime.registry_file import BOOT_ID
 from condor.telemetry import context
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -42,6 +44,13 @@ async def get_env(user: WebUser = Depends(get_current_user)) -> dict:
         "os": app["os"],
         "arch": app["arch"],
         "in_docker": app["in_docker"],
+        # Which *process*, not just which code ([[FEAT-136]]). A session that
+        # reads its config at start keeps it for the life of this process, so
+        # "has it been restarted since I edited that" is the question behind
+        # most of GitHub #275 — and the two values that answer it were written
+        # only to status.json and the telemetry envelope.
+        "process_started_at": context.process_started_at(),
+        "boot_id": BOOT_ID,
     }
 
 
