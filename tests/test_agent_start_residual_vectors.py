@@ -220,6 +220,9 @@ class FakeEngine:
     async def start(self):
         return None
 
+    async def wait_first_tick(self, timeout):
+        return ""  # the route waits for a first tick (CORR-728); this one ticks
+
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, cm):

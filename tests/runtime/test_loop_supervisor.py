@@ -240,7 +240,9 @@ def test_reconcile_restart_is_opt_in(tmp_path, monkeypatch):
 
     called = []
     monkeypatch.setattr(
-        supervisor, "_restart", lambda status: called.append(status) or True
+        supervisor,
+        "_restart",
+        lambda status, session_dir=None: called.append(status) or True,
     )
 
     report = asyncio.run(supervisor.reconcile_boot(agents_root=tmp_path))
@@ -257,7 +259,7 @@ def test_reconcile_restart_opt_in_starts_new_session(tmp_path, monkeypatch):
 
     started = []
 
-    async def fake_restart(status):
+    async def fake_restart(status, session_dir=None):
         started.append(status["agent_slug"])
         return True
 
@@ -278,7 +280,7 @@ def test_reconcile_restart_failure_is_reported_not_fatal(tmp_path, monkeypatch):
     session_dir = _seed_session(tmp_path, restart_on_boot=True)
     supervisor = LoopSupervisor()
 
-    async def boom(status):
+    async def boom(status, session_dir=None):
         raise RuntimeError("config no longer valid")
 
     monkeypatch.setattr(supervisor, "_restart", boom)
@@ -324,6 +326,10 @@ def _run_real_restart(tmp_path, monkeypatch, supervisor):
 
     async def _inert_loop(self):
         ticked.append(self.agent_id)
+        # The run came up; only the tick *body* is inert. ``_restart`` waits for
+        # the first tick before it reports success (CORR-728), and the real
+        # ``_loop`` is what settles that.
+        self._note_first_tick("")
 
     monkeypatch.setattr(TickEngine, "_loop", _inert_loop)
 

@@ -110,6 +110,34 @@ agents/
 
 `auto_approve_with_risk_check(...)` is wired in as the ACP permission callback. Every tool call the LLM tries to make is intercepted: trading-side tools are checked against `RiskLimits` (max exposure, max drawdown, max open executors); read-only tools are auto-approved. The agent literally cannot exceed its limits — the framework refuses on its behalf.
 
+### What survives a restart
+
+A restart never resurrects a session: `LoopSupervisor._restart` (`condor/runtime/loops.py`) always mints a **fresh session number**, because the dead session's journal is closed history. What it carries across is this (CORR-728):
+
+| | Survives a restart | Where it comes from |
+|---|---|---|
+| Strategy config (`frequency_sec`, `risk_limits`, `total_amount_quote`, `trading_context`…) | ✅ as it stands **now** | re-read through `load_full_config`, so an edit made while the session was dead takes effect — that is the point of re-reading rather than replaying |
+| **Pins** — `server_name`, `agent_key`, `model_base_url` | ✅ as the dead run had them | overlaid from the dead session's recorded pins; the one definition of the set is `PIN_FIELDS` in `condor/agents/config.py` |
+| `restart_on_boot` | ✅ forced on | a run that came back is still opted in |
+| Scratch state (`condor.runtime.state`) | ✅ | keyed on (agent, strategy), not on the session |
+| Memory, learnings, skills | ✅ | they hang off the Agent/strategy folder |
+| Journal, canvas, session report, tick count | ❌ new session | `sessions/session_{N+1}/`, starting at tick 1 |
+| Open executors and bots | ✅ still running | the venue never heard about the restart; the new session **adopts** them on its first tick (`_adopt_running_bots`, `_adopt_running_executors`). An executor whose strategy did not come back is reported as orphaned, never stopped |
+
+A restart makes the same up-front checks a start does — an unknown pinned server and an unrunnable model are refused rather than started — replaces any live engine for the strategy instead of adding a second one to it, and reports success only once the new run has a first tick to its name.
+
+#### The five places a pin can live
+
+This is why "it came back on the wrong server" was hard to reason about. One `server_name` (or `agent_key`) can be written in five places, and the *first* of these that is set wins:
+
+1. **The start request** — `config` in the `POST /agents/{slug}/strategies/{sslug}/start` body (the Start-session form, `control_agent(start)`, a delegation). Persisted to `sessions/session_N/config.yml` and nowhere else, which is why a restart that only re-read the strategy config lost it.
+2. **The strategy's saved `config.yml`** — `agents/{slug}/loops/{sslug}/config.yml`, what the config editor writes.
+3. **The strategy's `loop.md` frontmatter** — `default_config:`, and `agent_key:` for the model.
+4. **The Agent's `AGENT.md` frontmatter** — `agent_key:`, the Agent's default model for every playbook it owns.
+5. **The `AgentConfig` field default** — `server_name: "local"`, `agent_key: ""` (meaning "the runtime's default model"). An unresolvable *inherited* server name is not an error: the engine falls through to the owner's accessible servers.
+
+A sixth copy is written, never read as a source of truth: `status.json` next to the session journal carries a `pins` snapshot, rewritten every tick, and that is what `_restart` reads first (falling back to `sessions/session_N/config.yml` for sessions recorded before the snapshot existed).
+
 ---
 
 ## 3. The executor / position-hold pattern in detail

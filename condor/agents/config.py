@@ -6,6 +6,7 @@ in the agent directory, editable via key=value messages or web UI.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +24,45 @@ EXPERIMENT_MODES: frozenset[str] = frozenset({"dry_run", "run_once"})
 def is_experiment_mode(mode: str) -> bool:
     """True for an execution mode that runs as an experiment (dry_run/run_once)."""
     return mode in EXPERIMENT_MODES
+
+
+# The fields a *session* pins rather than inherits: the Hummingbot API server it
+# trades on and the LLM it thinks with. One definition, because a restart has to
+# carry exactly these across from the dead session while re-reading everything
+# else from the strategy's config as it stands now (CORR-728) — and a set that
+# is re-guessed per call site is a set that diverges.
+PIN_FIELDS: tuple[str, ...] = ("server_name", "agent_key", "model_base_url")
+
+
+def pin_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Just the pins of ``config``, for recording and for overlaying.
+
+    An empty pin is dropped, not recorded as empty: "" means *inherit* for
+    ``agent_key`` and ``model_base_url``, so carrying it over as a value would
+    pin the absence of a pin and shadow a strategy default set since.
+    """
+    return {
+        name: config[name] for name in PIN_FIELDS if config.get(name) not in (None, "")
+    }
+
+
+def load_session_pins(session_dir: Path) -> dict[str, Any]:
+    """The pins a session recorded in its own ``config.yml``.
+
+    The per-session copy ``save_full_config`` writes at session creation is the
+    only place a start request's overrides land, so it is what a restart reads
+    for a session whose status file predates the recorded snapshot. Unreadable
+    or absent reads as "no pins", never as an error: the restart still happens,
+    on the strategy's config.
+    """
+    path = Path(session_dir) / "config.yml"
+    try:
+        saved = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return {}
+    if not isinstance(saved, dict):
+        return {}
+    return pin_snapshot(saved)
 
 
 class RiskLimitsConfig(BaseModel):

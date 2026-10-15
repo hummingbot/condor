@@ -3139,6 +3139,28 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         user_id=user_id,
     )
     await new_engine.start()
+
+    # "Started" used to mean "a task was created": a run whose very first tick
+    # died answered success, and the operator found out from the session page
+    # much later (CORR-728). Wait for the tick, bounded — a tick can honestly
+    # take minutes, so one still in flight at the bound counts as came-up and
+    # only a tick that failed, or a run that ended before ticking, is a failure.
+    # Imported at call time so a test can shorten the bound.
+    from condor.agents.engine import FIRST_TICK_WAIT_SEC
+
+    problem = await new_engine.wait_first_tick(FIRST_TICK_WAIT_SEC)
+    if problem:
+        # Nothing is left ticking behind a reported failure: a loop running on
+        # after "could not start" is the same untruth in the other direction,
+        # and an operator who retries would then be starting a second session.
+        await new_engine.stop()
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Session {new_engine.session_num} was created but could not "
+                f"run ({problem}); it has been stopped"
+            ),
+        )
     return {
         "started": True,
         "strategy": strategy.slug,

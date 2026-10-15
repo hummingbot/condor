@@ -114,6 +114,14 @@ def resolve_agent_key(config: dict[str, Any], strategy, agent) -> str:
     return config.get("agent_key") or strategy.agent_key or agent.agent_key
 
 
+# How long a caller that just started a run waits for its first tick before it
+# answers (CORR-728). Short on purpose: a tick can honestly take minutes, so
+# what this bound has to tell apart is "the run came up" from "it died on the
+# way up", and dying is immediate. A tick still in flight at the bound counts
+# as came-up — see ``TickEngine.wait_first_tick``.
+FIRST_TICK_WAIT_SEC = 20.0
+
+
 def get_engine(agent_id: str) -> TickEngine | None:
     return _supervisor().get(agent_id)
 
@@ -158,6 +166,18 @@ class TickEngine:
     )
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
+    # The first tick's two moments, so a caller that started this run can report
+    # what the run did instead of that a task was created (CORR-728).
+    # ``_first_tick_arrived`` is set as the tick is entered; ``_first_tick_done``
+    # once it has returned, with ``_first_tick_error`` saying how. A loop that
+    # ends before ticking sets both on its way out, so no waiter hangs.
+    _first_tick_arrived: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False
+    )
+    _first_tick_done: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False
+    )
+    _first_tick_error: str = field(default="", init=False, repr=False)
     # Set once an experiment tick has written its own dry-run file.
     _experiment_written: bool = field(default=False, init=False)
     # The block the owner was last told about, so a block lasting many ticks is
@@ -559,9 +579,53 @@ class TickEngine:
     async def _loop(self) -> None:
         freq = self.config.get("frequency_sec", 60)
         mode = self.config.get("execution_mode", "loop")
+        try:
+            await self._run_ticks(freq, mode)
+        finally:
+            # A run that ended before any tick still has to release whoever is
+            # waiting on its first one — with the truth, not with silence.
+            self._note_first_tick(
+                self._last_error or "the run ended before its first tick"
+            )
+
+    def _note_first_tick(self, error: str) -> None:
+        """Record how the first tick went, once. Later ticks change nothing."""
+        if self._first_tick_done.is_set():
+            return
+        self._first_tick_error = error
+        self._first_tick_done.set()
+
+    async def wait_first_tick(self, timeout: float) -> str:
+        """Wait for this run's first tick. ``""`` when the run is answerable.
+
+        A start that reports success on ``create_task`` alone says "running"
+        for a run that died on its first tick where nobody was watching
+        (CORR-728). Waiting here is what makes the answer a fact.
+
+        Returns ``""`` when the first tick completed cleanly, or is still in
+        flight at the bound — a tick that arrived and is thinking is a run that
+        came back, and a tick can honestly take minutes, so the bound must not
+        hold a request for one. Otherwise a reason fit to show a human: the
+        first tick raised, or the run ended (or never started one) before it.
+        """
+        try:
+            # ``asyncio.timeout``, the same shape as the tick budget in
+            # ``_run_model`` — and the one timeout idiom this file uses
+            # (READ-672).
+            async with asyncio.timeout(timeout):
+                await self._first_tick_done.wait()
+        except TimeoutError:
+            if self._first_tick_arrived.is_set():
+                return ""
+            return f"no tick had started {timeout:.0f}s after the run was created"
+        return self._first_tick_error
+
+    async def _run_ticks(self, freq: int, mode: str) -> None:
+        """The tick loop itself; ``_loop`` wraps it to settle the first tick."""
         while self._running:
             if not self._paused:
                 tick_error = ""
+                self._first_tick_arrived.set()
                 try:
                     await self._tick()
                     self._last_error = ""
@@ -583,6 +647,8 @@ class TickEngine:
                         await self._notify(
                             f"Agent {self.agent_id} tick error: {tick_error}"
                         )
+
+                self._note_first_tick(tick_error)
 
                 # A shutdown that started *inside* the tick (the hard risk
                 # kill-switch) already ran its winddown, wrote the terminal

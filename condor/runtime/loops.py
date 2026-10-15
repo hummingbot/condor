@@ -14,6 +14,7 @@ to mark the session interrupted and tell the user.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -164,6 +165,10 @@ class LoopSupervisor:
 
     def record(self, engine, state: str) -> None:
         """Write this engine's current state next to its journal."""
+        # Imported here, not at module scope: this module is deliberately
+        # importable without the agent stack behind ``condor.agents``.
+        from condor.agents.config import pin_snapshot
+
         session_dir = getattr(engine, "session_dir", None)
         if session_dir is None:
             return  # experiments have no session dir, by design
@@ -183,6 +188,11 @@ class LoopSupervisor:
             user_id=getattr(engine, "user_id", 0),
             tick=getattr(journal, "tick_count", 0) if journal else 0,
             restart_on_boot=bool(engine.config.get("restart_on_boot", False)),
+            # What this run was pinned to, so a restart can bring back the same
+            # server and the same model instead of whatever the strategy config
+            # happens to inherit now (CORR-728). Re-written every tick, so it
+            # stays the freshest copy of the pins on disk.
+            pins=pin_snapshot(engine.config),
         )
 
     def record_tick(self, engine) -> None:
@@ -246,7 +256,9 @@ class LoopSupervisor:
 
         Either way the session opting into ``restart_on_boot`` gets a *new*
         session started. An old session number is never resurrected: its
-        journal is closed history.
+        journal is closed history. One restart per strategy, replacing any live
+        engine rather than adding to it, and each one reported only once it has
+        a first tick to its name (CORR-728).
 
         Settling the *session* is not settling what it was operating: a
         graceful stop keeps positions and executors running by design, so every
@@ -258,6 +270,11 @@ class LoopSupervisor:
         """
         report = ReconcileReport()
         settled: dict[tuple[str, str], dict] = {}
+        # One restart per strategy per boot. Two settled sessions of one
+        # strategy both opted in would otherwise restart twice — the second
+        # replacing the first the moment it had been built (CORR-728).
+        restarted_keys: set[tuple[str, str]] = set()
+        pending: list[tuple[InterruptedRun, bool, asyncio.Task]] = []
 
         for session_dir, status, crashed in self._sessions_to_settle(agents_root):
             run = InterruptedRun(
@@ -279,15 +296,29 @@ class LoopSupervisor:
                 # SUSPENDED file for every later boot to try again.
                 write_status(session_dir, state=LoopState.STOPPED, boot_id=BOOT_ID)
 
-            if status.get("restart_on_boot"):
-                try:
-                    if await self._restart(status):
-                        run.restarted = True
-                        bucket = report.restarted if crashed else report.resumed
-                        bucket.append(run)
-                except Exception as exc:  # noqa: BLE001 - reported, never fatal
-                    log.exception("Could not restart %s", run.label)
-                    report.errors.append(f"{run.label}: restart failed ({exc})")
+            key = (run.agent_slug, run.strategy_slug)
+            if status.get("restart_on_boot") and key not in restarted_keys:
+                restarted_keys.add(key)
+                # Started as a task, settled below: each restart waits for its
+                # own first tick (CORR-728), and this pass runs inside startup,
+                # so a fleet's waits have to overlap rather than add up.
+                pending.append(
+                    (
+                        run,
+                        crashed,
+                        asyncio.create_task(self._restart(status, session_dir)),
+                    )
+                )
+
+        for run, crashed, task in pending:
+            try:
+                if await task:
+                    run.restarted = True
+                    bucket = report.restarted if crashed else report.resumed
+                    bucket.append(run)
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                log.exception("Could not restart %s", run.label)
+                report.errors.append(f"{run.label}: restart failed ({exc})")
 
         # After the restarts above, so a session this boot brought back counts
         # as a live owner and its own executors are not reported as orphaned.
@@ -544,11 +575,24 @@ class LoopSupervisor:
         )
         return fallback
 
-    async def _restart(self, status: dict) -> bool:
-        """Start a fresh session for an opted-in run. Returns True if started."""
+    async def _restart(self, status: dict, session_dir: Path | None = None) -> bool:
+        """Start a fresh session for an opted-in run. Returns True if started.
+
+        A restart has to be the same thing a start is, or "restarted" means
+        something weaker than the operator read it as (CORR-728). So this
+        rebuilds the config from disk *and* carries the dead session's pins
+        across, makes the checks the start route makes, replaces any live engine
+        for the strategy instead of adding to it, and reports only once the run
+        has a first tick to its name.
+
+        Raises ``RuntimeError`` when the restart is refused or its first tick
+        failed: ``reconcile_boot`` turns that into a line the owner reads, which
+        is the point — a server name that no longer exists has to be said out
+        loud, not resolved to something else.
+        """
         from condor.agents.agent import AgentStore
         from condor.agents.config import load_full_config
-        from condor.agents.engine import TickEngine
+        from condor.agents.engine import FIRST_TICK_WAIT_SEC, TickEngine
         from condor.agents.strategy import StrategyStore
 
         agent = AgentStore().get(status.get("agent_slug", ""))
@@ -564,17 +608,111 @@ class LoopSupervisor:
         # last run misbehaved. load_full_config raises if it no longer validates.
         config = load_full_config(strategy.home, strategy.default_config)
         config["restart_on_boot"] = True
+        # The dead session's *pins* are not the dead session's *config*: the
+        # revalidation above is what the user edited, while the server and the
+        # model were chosen for this run and live nowhere the strategy config
+        # can see them. Overlaid, so a restart comes back where it was.
+        pins = _pins_of(status, session_dir)
+        config.update(pins)
+
+        user_id = self._owner_of(status, agent, strategy)
+        await self._check_restartable(
+            config, strategy, agent, user_id, pinned_server="server_name" in pins
+        )
+
+        # A restart replaces its predecessor. Adding to it gave one strategy two
+        # engines sharing one LLM budget, which is the fleet-wide tick
+        # contention the race saw.
+        for live in self.for_strategy(agent.slug, strategy.slug):
+            log.warning(
+                "Restart of %s.%s replaces live engine %s",
+                agent.slug,
+                strategy.slug,
+                live.agent_id,
+            )
+            await live.stop()
 
         engine = TickEngine(
             agent=agent,
             strategy=strategy,
             config=config,
             chat_id=status.get("chat_id") or 0,
-            user_id=self._owner_of(status, agent, strategy),
+            user_id=user_id,
         )
         await engine.start()
+        problem = await engine.wait_first_tick(FIRST_TICK_WAIT_SEC)
+        if problem:
+            # Nothing is left running under a restart that reported a failure:
+            # an engine ticking on behind a "restart failed" line is the same
+            # lie in the other direction.
+            await engine.stop()
+            raise RuntimeError(f"first tick failed: {problem}")
         log.info("Restarted %s as session %s", engine.agent_id, engine.session_num)
         return True
+
+    @staticmethod
+    async def _check_restartable(
+        config: dict, strategy, agent, user_id: int, *, pinned_server: bool
+    ) -> None:
+        """The start route's own up-front checks, before a restart commits.
+
+        ``_start`` refuses an unknown server with a 404 and a model that cannot
+        run with a 422 (``condor/web/routes/agents.py``); a restart used to make
+        neither check, so a pin naming a server deleted since came back as a run
+        that could not trade. Raises ``RuntimeError`` with the same reason the
+        route reports.
+
+        ``pinned_server`` is the route's ``asked_for_it``: a name this run chose
+        must resolve, while an inherited one that does not resolve is left alone
+        — the engine then falls through to the owner's accessible servers, which
+        is scoped already and is what ``_start`` allows too.
+
+        Deliberately not the route's ``check_server_access``: the run already
+        passed it when it was started, the owner here comes off the status file
+        rather than a request, and ``_resolve_server`` scopes the credentials to
+        that owner anyway.
+        """
+        from condor.agents.engine import resolve_agent_key
+        from condor.runtime.llm_client import agent_key_error
+        from config_manager import get_config_manager
+
+        server_name = config.get("server_name")
+        if (
+            server_name
+            and pinned_server
+            and not get_config_manager().get_server(server_name)
+        ):
+            raise RuntimeError(f"server '{server_name}' no longer exists")
+
+        agent_key = resolve_agent_key(config, strategy, agent)
+        problem = await agent_key_error(
+            agent_key,
+            user_id=user_id or None,
+            base_url_override=config.get("model_base_url") or None,
+        )
+        if problem:
+            raise RuntimeError(f"model '{agent_key}' cannot run: {problem}")
+
+
+def _pins_of(status: dict, session_dir: Path | None) -> dict[str, Any]:
+    """What the dead session was pinned to: server, model, model base URL.
+
+    The recorded snapshot first — ``record`` rewrites it every tick, so it is
+    the freshest copy — then the session's own ``config.yml``, which is where a
+    start request's overrides land and the only copy a session written before
+    the snapshot existed has. Empty when neither knows, which leaves the
+    strategy config's own values standing.
+    """
+    from condor.agents.config import load_session_pins, pin_snapshot
+
+    recorded = status.get("pins")
+    if isinstance(recorded, dict):
+        pins = pin_snapshot(recorded)
+        if pins:
+            return pins
+    if session_dir is not None:
+        return load_session_pins(session_dir)
+    return {}
 
 
 async def _client_for_status(status: dict):
