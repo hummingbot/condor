@@ -95,7 +95,14 @@ class RiskLimitsConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    server_name: str = Field(default="local", description="Hummingbot API server name")
+    # Empty, not ``"local"``: a default that is a concrete server *name* is not
+    # an absent setting — it was a name that then fell through the resolution
+    # chain, so "no server configured" and "configured for the server called
+    # local" were the same state and an install whose server is named anything
+    # else silently traded wherever resolution landed (CORR-729). Empty means
+    # unset, and resolution chooses; a config that really names ``local`` still
+    # says so on disk and is honoured as the explicit setting it is.
+    server_name: str = Field(default="", description="Hummingbot API server name")
     agent_key: str = Field(
         default="",
         description="LLM model to use (e.g. 'claude-code', 'ollama:llama3.1'). Empty = use strategy default.",

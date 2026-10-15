@@ -937,9 +937,9 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
     place the rollup was computed from, or the two numbers are about two
     fleets (ARCH-324).
 
-    Empty is a real state, not a missing one: ``AgentConfig`` defaults to
-    ``"local"``, so an empty string is a strategy that explicitly declared no
-    server — and the caller is expected to say so rather than substitute one.
+    Empty is a real state, not a missing one: ``AgentConfig`` defaults to ``""``
+    (CORR-729), so an empty string is a strategy that names no server — and the
+    caller is expected to say so rather than substitute one.
     """
     from condor.agents.config import load_full_config
 
@@ -3086,10 +3086,12 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     # request body is a free-form dict, so without this gate any authenticated
     # user could start a live loop on another user's stored credentials — the
     # same check the config pin and delegate already apply. A name the
-    # body asked for is held to it strictly; an inherited one (strategy default,
-    # or the "local" that AgentConfig fills in) only matters when it resolves to
-    # a real server, since otherwise the engine falls through to the caller's
-    # own accessible servers, which is scoped already.
+    # body asked for is held to it strictly; an inherited one (a strategy
+    # default) only matters when it resolves to a real server, since otherwise
+    # the engine falls through to the caller's own accessible servers, which is
+    # scoped already. ``asked_for_it`` is also what pins the engine, so a name
+    # the body chose keeps resolving to that server for the life of the loop
+    # (CORR-729).
     cm = get_config_manager()
     server_name = config_dict.get("server_name")
     asked_for_it = bool(req.config and req.config.get("server_name"))
@@ -3137,6 +3139,10 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         config=config_dict,
         chat_id=req.chat_id,
         user_id=user_id,
+        # The same distinction this route's server gate draws, carried into the
+        # run: a name the body asked for must keep resolving to that server for
+        # the life of the loop, never to another one (CORR-729).
+        server_pinned=asked_for_it,
     )
     await new_engine.start()
 

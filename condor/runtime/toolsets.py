@@ -328,6 +328,8 @@ def build_mcp_servers_for_session(
     ask_target: bool = False,
     tick: bool = False,
     session_key: str = "",
+    server_pinned: bool = False,
+    server_required: bool = False,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -340,6 +342,14 @@ def build_mcp_servers_for_session(
     from the user's preferences, then from the first accessible server. Each
     candidate must exist *and* be reachable by ``user_id`` — a name this user
     has no grant on resolves to the next candidate, never to its credentials.
+
+    ``server_pinned`` says ``server_name`` was *chosen* for this run rather than
+    inherited, and ``server_required`` that the seat cannot run without a
+    server; both raise ``ServerUnavailable`` instead of degrading quietly. The
+    rule itself is ``config_manager.resolve_stored_server`` — shared with
+    ``TickEngine._resolve_server``, which used to open-code the same chain
+    (CORR-729). Neither flag set is the previous lenient behaviour, which is why
+    a chat whose user has no grants still gets a serverless session.
 
     ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
     own stores (``agents/{slug}/``). Without it the tools target the chat
@@ -367,8 +377,7 @@ def build_mcp_servers_for_session(
     from config_manager import (
         ServerPermission,
         get_config_manager,
-        get_effective_server,
-        may_use_stored_server,
+        resolve_stored_server,
     )
 
     cm = get_config_manager()
@@ -387,20 +396,17 @@ def build_mcp_servers_for_session(
     # subprocess env below. ``chat_id`` is not a principal — ``chat_defaults``
     # is a global map keyed by chat, so a caller who can name someone else's
     # chat could name their server too (SEC-178, the SEC-164 shape). The subject
-    # is always ``user_id``, the authenticated owner of the run; the same
-    # predicate guards TickEngine._resolve_server.
-    def usable(name: str | None) -> bool:
-        return may_use_stored_server(cm, user_id, name)
-
-    def candidates():
-        # Lazy on purpose: resolving the chat default writes back into
-        # ``user_data``, so it must not run when a pin already answered.
-        yield server_name
-        yield get_effective_server(chat_id, user_data)
-        accessible = cm.get_accessible_servers(user_id)
-        yield accessible[0] if accessible else None
-
-    server_name = next((name for name in candidates() if usable(name)), None)
+    # is always ``user_id``, the authenticated owner of the run; the same rule
+    # resolves TickEngine._resolve_server.
+    server_name = resolve_stored_server(
+        cm,
+        user_id,
+        server_name,
+        pinned=server_pinned,
+        required=server_required,
+        chat_id=chat_id,
+        user_data=user_data,
+    )
 
     # The admin ring belongs to the server's owner (SEC-252). ``full`` is the
     # only profile that mounts ADMIN_TOOLS on mcp-hummingbot — configure_server
@@ -451,6 +457,9 @@ def build_mcp_servers_for_session(
         ),
     }
 
+    # Only a seat that did not declare ``server_required`` reaches either of
+    # these: the resolver above raises for one that did, rather than handing
+    # back a trading agent with no trading tools (CORR-729).
     if not server_name:
         log.warning(
             "No accessible server for user %s (chat %s) — "
@@ -462,6 +471,14 @@ def build_mcp_servers_for_session(
 
     server = cm.get_server(server_name)
     if not server:
+        if server_required:
+            from config_manager import ServerUnavailable
+
+            raise ServerUnavailable(
+                f"server '{server_name}' resolved for user {user_id} but is not "
+                "in the servers config",
+                server_name,
+            )
         log.warning(
             "Server '%s' resolved for user %s but not found in servers config — "
             "agent will start without mcp-hummingbot",

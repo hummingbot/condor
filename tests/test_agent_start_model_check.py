@@ -46,7 +46,8 @@ class FakeConfigManager:
 class FakeEngine:
     spawned: list[dict] = []
 
-    def __init__(self, agent, strategy, config, chat_id, user_id):
+    def __init__(self, agent, strategy, config, chat_id, user_id, server_pinned=False):
+        self.server_pinned = server_pinned
         self.agent_id = "brigado.scalp_e1"
         self.session_num = 1
         FakeEngine.spawned.append(config)

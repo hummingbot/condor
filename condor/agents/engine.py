@@ -137,6 +137,12 @@ class TickEngine:
     config: dict[str, Any]
     chat_id: int
     user_id: int
+    # Whether ``config["server_name"]`` was *chosen* for this run rather than
+    # inherited from the strategy's config: the start route's ``asked_for_it``,
+    # a restart's carried pin. A chosen name must resolve or the run refuses
+    # (CORR-729); an inherited one still falls through to the owner's own
+    # servers, which is what ``_start`` and ``_check_restartable`` allow.
+    server_pinned: bool = False
 
     # Derived identity (set in __post_init__)
     agent_id: str = field(init=False)
@@ -712,17 +718,22 @@ class TickEngine:
         """One tick, in three phases: gather, run the model, persist.
 
         Each phase is its own method so it can be read and tested on its own.
-        The tick ends early only when there is no API client or the gather
-        phase returns ``None`` (a hard shutdown or a risk block); past that,
-        the model always runs and its outcome is always persisted.
+        The tick ends early only when the gather phase returns ``None`` (a hard
+        shutdown or a risk block); past that, the model always runs and its
+        outcome is always persisted.
+
+        No API client is a *failure*, not an early return: a trading loop with
+        nothing to trade through can do nothing at all, and journalling it and
+        returning cleanly reported the run as ticking (CORR-729). Raising hands
+        the reason to ``_run_ticks``, which journals it, tells the owner once per
+        distinct error, and — on the first tick — makes the start or restart that
+        created this run report the failure instead of "started".
         """
         self._last_tick_at = time.time()
 
         client = await self._get_client()
         if not client:
-            if self.journal:
-                self.journal.append_error("No API client available")
-            return
+            raise RuntimeError("No API client available")
 
         ctx = await self._gather_tick_context(client)
         if ctx is None:
@@ -1654,30 +1665,31 @@ class TickEngine:
           and in a private Telegram chat, where chat id == user id.
         * a name that matched nothing at start stays unusable. The loop is
           long-running, so a configured ``server_name`` that resolved to
-          nothing — the ``"local"`` ``AgentConfig`` fills in, typically — must
-          not silently bind to whatever another user creates under that name
-          later.
+          nothing must not silently bind to whatever another user creates under
+          that name later.
 
         Falls back to the subject's accessible servers, as before, so a run
         with no server configured still works.
+
+        The chain itself is ``config_manager.resolve_stored_server``, shared with
+        the toolset builder, which open-coded the same three steps (CORR-729).
+        ``server_pinned`` is what this run *asked for* — the start route's
+        ``asked_for_it``, a restart's carried pin — and a pinned name raises
+        ``ServerUnavailable`` rather than resolving to a different server. An
+        inherited ``server_name`` keeps falling through, which is the leniency
+        ``_start`` and ``_check_restartable`` deliberately allow.
         """
-        from config_manager import (
-            get_config_manager,
-            get_effective_server,
-            may_use_stored_server,
-        )
+        from config_manager import get_config_manager, resolve_stored_server
 
         cm = get_config_manager()
 
-        def usable(name: str | None) -> bool:
-            return may_use_stored_server(cm, self.user_id, name)
-
-        server_name = self.config.get("server_name")
-        if not usable(server_name):
-            server_name = get_effective_server(self.user_id)
-        if not usable(server_name):
-            accessible = cm.get_accessible_servers(self.user_id)
-            server_name = accessible[0] if accessible else None
+        server_name = resolve_stored_server(
+            cm,
+            self.user_id,
+            self.config.get("server_name"),
+            pinned=self.server_pinned,
+            chat_id=self.user_id,
+        )
         if not server_name:
             return None, None
 
@@ -1685,7 +1697,15 @@ class TickEngine:
         return server_name, server
 
     async def _get_client(self):
-        """Get the Hummingbot API client for this agent."""
+        """Get the Hummingbot API client for this agent.
+
+        ``ServerUnavailable`` is deliberately not swallowed: a pinned server
+        that cannot be used is the one failure here that no retry fixes and that
+        the operator has to be told about by name (CORR-729). Every other
+        failure stays best-effort — ``None``, and the caller decides.
+        """
+        from config_manager import ServerUnavailable
+
         try:
             server_name, server = self._resolve_server()
             if not server:
@@ -1706,6 +1726,8 @@ class TickEngine:
 
             cm = get_config_manager()
             return await cm.get_client(server_name)
+        except ServerUnavailable:
+            raise
         except Exception:
             log.exception("Failed to get API client for agent %s", self.agent_id)
             return None
@@ -1850,12 +1872,16 @@ def build_gated_client(
     # tick=True narrows both subprocesses to the loop profile (FEAT-066).
     # This seat runs unattended behind an auto-approving permission callback,
     # so what it can reach at all is decided here, by what gets mounted.
+    # ``server_required``: a tick with no mcp-hummingbot is a trading agent with
+    # no trading tools, which used to be started on a log line (CORR-729).
     mcp_servers = toolsets.build_mcp_servers_for_session(
         engine.user_id,
         engine.chat_id,
         server_name=engine.config.get("server_name"),
         agent_slug=engine.agent.slug,
         tick=True,
+        server_pinned=engine.server_pinned,
+        server_required=True,
     )
     permission_cb = auto_approve_with_risk_check(
         engine.risk,

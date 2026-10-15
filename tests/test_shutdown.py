@@ -605,6 +605,9 @@ def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
     engine.agent = SimpleNamespace(slug="acme", tools=[], instructions="You are acme.")
     engine.user_id = 7
     engine.chat_id = 99
+    # What ``build_gated_client`` reads to decide whether the run's server name
+    # was chosen or inherited (CORR-729). Inherited, as a strategy config's is.
+    engine.server_pinned = False
     # What the tick's gate reads off the engine (SEC-631).
     engine.risk = RiskEngine()
     engine.journal.get_drawdown_pct = lambda: 0.0

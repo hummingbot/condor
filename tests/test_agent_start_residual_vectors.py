@@ -114,11 +114,14 @@ class StubEngine:
     _resolve_server = TickEngine._resolve_server
     _get_client = TickEngine._get_client
 
-    def __init__(self, *, config=None, chat_id=0, user_id=USER.id):
+    def __init__(self, *, config=None, chat_id=0, user_id=USER.id, server_pinned=False):
         self.config = config or {}
         self.chat_id = chat_id
         self.user_id = user_id
         self.agent_id = "brigado.scalp_1"
+        # An inherited ``server_name`` by default, which is what every vector
+        # below is about; the pinned case is CORR-729's own module.
+        self.server_pinned = server_pinned
 
 
 def test_a_foreign_chat_id_does_not_inherit_that_chats_default_server(cm):
@@ -210,12 +213,15 @@ class FakeEngine:
     """Stands in for TickEngine: records every spawn, never touches the network."""
 
     spawned: list[dict] = []
+    pinned: list[bool] = []
 
-    def __init__(self, agent, strategy, config, chat_id, user_id):
+    def __init__(self, agent, strategy, config, chat_id, user_id, server_pinned=False):
         self.config = config
         self.agent_id = "agent-1"
         self.session_num = 1
+        self.server_pinned = server_pinned
         FakeEngine.spawned.append(config)
+        FakeEngine.pinned.append(server_pinned)
 
     async def start(self):
         return None
@@ -229,6 +235,7 @@ def env(tmp_path, monkeypatch, cm):
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(engine_module, "TickEngine", FakeEngine)
     FakeEngine.spawned = []
+    FakeEngine.pinned = []
     AgentStore().create(name="Brigado", description="BRL market making")
     StrategyStore().create(agent_slug="brigado", name="Scalp")
     return tmp_path
@@ -268,15 +275,18 @@ def test_the_refusal_tells_a_stranger_nothing_about_which_names_exist(env):
 
 
 def test_an_inherited_name_that_matches_nothing_still_falls_through(env):
-    """The ``local`` AgentConfig fills in is not a request to use ``local``.
+    """A strategy default is not a request to use that server.
 
     Only a name the *body* asked for is held to existence; the inherited
-    default keeps the accessible-servers fallback SEC-149 preserved.
+    default keeps the accessible-servers fallback SEC-149 preserved — and the
+    loop it starts stays lenient too (CORR-729), since the route's own rule has
+    to be the one the long-running resolver applies.
     """
     res = _start(ADMIN)
 
     assert res.status_code == 200
     assert len(FakeEngine.spawned) == 1
+    assert FakeEngine.pinned == [False]
 
 
 def test_starting_on_a_server_the_caller_owns_still_works(env):
@@ -285,3 +295,6 @@ def test_starting_on_a_server_the_caller_owns_still_works(env):
 
     assert res.status_code == 200
     assert [c["server_name"] for c in FakeEngine.spawned] == [MINE]
+    # Asked for by the body, so the run is pinned to it for its whole life and
+    # cannot drift onto another server later (CORR-729).
+    assert FakeEngine.pinned == [True]

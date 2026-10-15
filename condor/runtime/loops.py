@@ -614,10 +614,15 @@ class LoopSupervisor:
         # can see them. Overlaid, so a restart comes back where it was.
         pins = _pins_of(status, session_dir)
         config.update(pins)
+        # A pin the dead session carried is a name *chosen* for this run, so it
+        # is held to the same bar a start request's is — here and, through
+        # ``server_pinned`` below, for the whole life of the restarted loop
+        # (CORR-729).
+        pinned_server = "server_name" in pins
 
         user_id = self._owner_of(status, agent, strategy)
         await self._check_restartable(
-            config, strategy, agent, user_id, pinned_server="server_name" in pins
+            config, strategy, agent, user_id, pinned_server=pinned_server
         )
 
         # A restart replaces its predecessor. Adding to it gave one strategy two
@@ -638,6 +643,7 @@ class LoopSupervisor:
             config=config,
             chat_id=status.get("chat_id") or 0,
             user_id=user_id,
+            server_pinned=pinned_server,
         )
         await engine.start()
         problem = await engine.wait_first_tick(FIRST_TICK_WAIT_SEC)

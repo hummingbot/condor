@@ -124,19 +124,31 @@ class RecordingEngine:
     """
 
     built: list[dict] = []
+    pinned: list[bool] = []
     first_tick_problem = ""
     supervisor: "LoopSupervisor | None" = None
 
-    def __init__(self, agent, strategy, config, chat_id, user_id, session_num=2):
+    def __init__(
+        self,
+        agent,
+        strategy,
+        config,
+        chat_id,
+        user_id,
+        session_num=2,
+        server_pinned=False,
+    ):
         self.agent = agent
         self.strategy = strategy
         self.config = config
+        self.server_pinned = server_pinned
         self.agent_id = f"{agent.slug}.{strategy.slug}_{session_num}"
         self.session_num = session_num
         self.session_dir = None  # nothing for ``record`` to write
         self.started = False
         self.stopped = False
         RecordingEngine.built.append(config)
+        RecordingEngine.pinned.append(server_pinned)
 
     async def start(self):
         self.started = True
@@ -162,6 +174,7 @@ def strategy_on_disk(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(engine_module, "TickEngine", RecordingEngine)
     RecordingEngine.built = []
+    RecordingEngine.pinned = []
     RecordingEngine.first_tick_problem = ""
     RecordingEngine.supervisor = None
     AgentStore().create(name="Brigado", description="BRL market making")
@@ -283,15 +296,28 @@ def test_an_inherited_server_name_that_resolves_to_nothing_still_restarts(
 ):
     """``_start``'s own rule: only a name this run *chose* must resolve.
 
-    An inherited one (the strategy default, or the ``"local"`` AgentConfig
-    fills in) falls through to the owner's accessible servers, which is scoped
-    already — refusing it here would strand every install that never saved a
-    server called "local".
+    An inherited one (a strategy default) falls through to the owner's
+    accessible servers, which is scoped already — refusing it here would strand
+    every install whose strategies name a server that has since been renamed.
     """
     save_full_config(strategy_on_disk.home, {"server_name": "local"})
 
     assert asyncio.run(supervisor._restart(_status()))
     assert RecordingEngine.built[-1]["server_name"] == "local"
+    assert RecordingEngine.pinned[-1] is False, "inherited, so the loop stays lenient"
+
+
+def test_a_carried_pin_pins_the_restarted_loop_too(strategy_on_disk, supervisor):
+    """CORR-729: the restart's own distinction has to outlive the restart.
+
+    ``_check_restartable`` holds a carried pin to existence once, up front; the
+    loop then runs for days, and without this flag ``_resolve_server`` would go
+    back to dropping that name for whatever else the chain reached.
+    """
+    assert asyncio.run(supervisor._restart(_status(pins={"server_name": "mine-prod"})))
+
+    assert RecordingEngine.built[-1]["server_name"] == "mine-prod"
+    assert RecordingEngine.pinned[-1] is True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -478,10 +504,11 @@ class RouteEngine:
     problem = ""
     last: "RouteEngine | None" = None
 
-    def __init__(self, agent, strategy, config, chat_id, user_id):
+    def __init__(self, agent, strategy, config, chat_id, user_id, server_pinned=False):
         self.agent_id = "brigado.scalp_3"
         self.session_num = 3
         self.stopped = False
+        self.server_pinned = server_pinned
         RouteEngine.last = self
 
     async def start(self):
