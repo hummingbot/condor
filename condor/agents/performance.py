@@ -64,6 +64,11 @@ class AgentPerformance:
     # no cumulative fee column leaves bot-mode fees derivable only from open
     # positions, so a flat bot sums to 0.0 — which is "unknown", not "free".
     fees_known: bool = True
+    # False when the orchestrator's active-bots listing did not answer, so the
+    # open book was resolved from the unfiltered snapshot: it may still hold a
+    # stopped instance's frozen unrealized PnL and positions. "Unverified", not
+    # wrong — the same shape as ``fees_known`` ([[CORR-723]]).
+    liveness_known: bool = True
     # Owned bases that resolved to no instance at all — neither running nor
     # archived. Their contribution is unknown, not zero, and the two must not
     # render alike: a session whose bot has vanished reporting "$0.00" reads as
@@ -185,11 +190,18 @@ def _merge_bot_perf(
     the bot snapshot reports how many positions closed but not how each one ended,
     so a bot-mode agent has no per-trade outcome to derive one from.
     """
-    from condor.agents.attribution import apply_fee_fallback, fold_sliced_window
+    from condor.agents.attribution import (
+        apply_fee_fallback,
+        apply_liveness,
+        fold_sliced_window,
+    )
     from condor.fetchers.bot_performance import bot_executor_rows
 
     rows = bot_executor_rows(bot)
     open_rows = [r for r in rows if r["status"] == "RUNNING"]
+    # Unfiltered because liveness was unknown: the book is folded as before, and
+    # only its certainty is recorded ([[CORR-723]]).
+    apply_liveness(perf, bot)
 
     if window is None:
         # Lifetime aggregate, folded through the same shared rule as a window so

@@ -175,6 +175,15 @@ def test_live_names_keep_a_stopped_instance_out_of_the_resolved_book():
     assert resolve_bots(agg, ["b"], live_names=set()) == {}
     # None is "unknown": unfiltered, as the two-arg call.
     assert resolve_bots(agg, ["b"], live_names=None) == resolve_bots(agg, ["b"])
+    # …and it says so, so the figure can render as unverified (CORR-723). The
+    # aggregate is still the unfiltered sum CORR-633 pinned.
+    unknown = resolve_bots(agg, ["b"], live_names=None)["b"]
+    assert unknown["liveness_unknown"] is True
+    assert unknown["unrealized_pnl_quote"] == 9.0
+    # A listing that answered leaves no marker, and never stamps the snapshot.
+    assert "liveness_unknown" not in resolve_bots(agg, ["b"], live_names={"b-2"})["b"]
+    assert "liveness_unknown" not in agg["b-1"]
+    assert "liveness_unknown" not in agg["b-2"]
 
 
 def test_a_session_without_windows_keeps_its_stopped_deploys_realized_pnl():
@@ -265,6 +274,27 @@ def test_flat_bot_reports_no_executor_rows_but_a_full_controller_breakdown():
     assert round(perf.realized_pnl, 2) == -0.76
     assert len(perf.controllers) == 3
     assert perf.close_type_counts == {"CloseType.EARLY_STOP": 2}
+
+
+def test_an_unanswered_liveness_listing_leaves_the_book_unverified():
+    # CORR-723: a read keeps the unfiltered fallback (showing a figure that may be
+    # too high beats zeroing every open book), but stops discarding the fact that
+    # nothing confirmed it. Same shape as fees_known: only the certainty moves.
+    _client, perf = _perf_for_three_deploys()  # _FakeClient has no active listing
+    assert perf.liveness_known is False
+    assert perf.volume == 772.0
+
+    client, _ = _perf_for_three_deploys()
+
+    async def _active():
+        return {"data": {"b-20260807-045821": {}}}
+
+    client.get_active_bots_status = _active
+    clear_snapshot_cache()
+    confirmed = asyncio.run(fetch_agent_performance(client, "agent_1", bot_names=["b"]))
+    assert confirmed.liveness_known is True
+    # And it survives the trip to the wire, which is the half this file exists for.
+    assert AgentPerformanceModel.from_perf(perf, session_num=1).liveness_known is False
 
 
 def test_volume_without_a_fee_column_reads_as_unknown_not_free():

@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 # ``perf`` is duck-typed over the attribute vocabulary the two consumers share:
 # the agents-side ``AgentPerformance`` dataclass and the web's
 # ``AgentPerformanceModel`` both carry realized_pnl / unrealized_pnl / total_pnl /
-# volume / fees / fees_known / trade_count / closed_count.
+# volume / fees / fees_known / liveness_known / trade_count / closed_count.
 
 
 def fold_sliced_window(perf: Any, window: tuple[float, float, float, float]) -> None:
@@ -98,6 +98,20 @@ def apply_fee_fallback(perf: Any, sliced_fees: float, bot: dict[str, Any]) -> No
         return
     perf.fees += live - sliced_fees
     perf.fees_known = False
+
+
+def apply_liveness(perf: Any, bot: dict[str, Any]) -> None:
+    """Carry ``resolve_bots``'s unknown-liveness marker onto ``perf``.
+
+    An aggregate resolved with unknown liveness is unfiltered, so it may still
+    carry a stopped instance's frozen unrealized PnL and positions. The figure
+    stands — showing it is better than zeroing every open book — but only as
+    unverified, exactly the shape ``fees_known`` has ([[CORR-723]]). Shared by
+    both read surfaces so the rollup and the agent's own view cannot disagree
+    about whether what they rendered was confirmed live.
+    """
+    if bot.get("liveness_unknown"):
+        perf.liveness_known = False
 
 
 # ── Session ownership resolution ──
@@ -393,6 +407,9 @@ async def apply_bot_mode_pnl(
             continue
         operator = by_num[num]
         b_rows = bot_executor_rows(bot)
+        # Unknown liveness leaves the aggregate unfiltered, so this open book may
+        # be a stopped instance's frozen mark: attributed, but not as confirmed.
+        apply_liveness(operator, bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
         # Top the operator up to the fallback figure: when the whole sliced fee
         # column is zero, the live open-position fees are the only ones there are

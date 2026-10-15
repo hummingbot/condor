@@ -275,6 +275,9 @@ class AgentPerformanceModel(BaseModel):
     controllers: list[dict[str, Any]] = []
     close_type_counts: dict[str, int] = {}
     fees_known: bool = True
+    # Whether the open book above was confirmed live; see AgentPerformance. The
+    # rollup sets it too — it reads the same resolved aggregates (CORR-723).
+    liveness_known: bool = True
     # Each owned base's (realized, volume, trades, fees) over this session's own
     # ownership window — what the deployment ledger's bot rows read (CORR-661).
     base_windows: dict[str, tuple[float, float, float, float]] = {}

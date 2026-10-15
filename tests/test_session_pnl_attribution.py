@@ -1131,6 +1131,7 @@ def _every_field_perf():
         controllers=[{"id": "ctrl-1"}],
         close_type_counts={"CloseType.TAKE_PROFIT": 2},
         fees_known=False,
+        liveness_known=False,
         unresolved_bases=["gone-bot"],
         base_windows={"bot-a": (1.5, 900.0, 3.0, 0.75)},
         pnl_series=[{"timestamp": "2026-07-01T00:00:00+00:00", "pnl": 1.5}],
@@ -1510,6 +1511,46 @@ def test_a_client_without_the_listing_is_unknown_liveness():
         bot_orchestration = object()
 
     assert asyncio.run(fetch_live_instance_names(_Bare())) is None
+
+
+def test_checked_liveness_tells_unknown_from_an_empty_server():
+    """CORR-723: the flat helper collapses two outcomes that license opposites."""
+    from condor.fetchers.bot_performance import (
+        clear_live_names_cache,
+        fetch_live_instance_names_checked,
+    )
+
+    class _Answering:
+        def __init__(self, answer):
+            self._answer = answer
+            self.bot_orchestration = self
+
+        async def get_active_bots_status(self):
+            if isinstance(self._answer, Exception):
+                raise self._answer
+            return self._answer
+
+    class _Bare:
+        bot_orchestration = object()
+
+    def run(client):
+        return asyncio.run(fetch_live_instance_names_checked(client))
+
+    clear_live_names_cache()
+    try:
+        # Unknown: no names to filter with, and the caller is told so.
+        assert run(_Bare()) == (set(), False)
+        assert run(_Answering(RuntimeError("down"))) == (set(), False)
+        assert run(_Answering({"status": "error"})) == (set(), False)
+        assert run(_Answering("<html>nope</html>")) == (set(), False)
+        # Answered: an empty server is a fact, not a failure.
+        assert run(_Answering([])) == (set(), True)
+        assert run(_Answering({"status": "success", "data": {"b-1": {}}})) == (
+            {"b-1"},
+            True,
+        )
+    finally:
+        clear_live_names_cache()
 
 
 def test_live_names_are_cached_per_server_but_a_failure_is_not():

@@ -445,7 +445,14 @@ def test_engine_adopts_a_live_bot_in_its_namespace(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
-    asyncio.run(engine._adopt_running_bots(object()))
+    # Both are running: the namespace, not liveness, is what decides here.
+    client = _FakeClient(
+        [
+            {"bot_name": f"{NS}-btc-20260731-101500"},
+            {"bot_name": "someone-elses-bot-20260731-101500"},
+        ]
+    )
+    asyncio.run(engine._adopt_running_bots(client))
 
     assert engine.ledger.bases() == [f"{NS}-btc"]
     assert engine.ledger.owned()[0].origin == "adopted"
@@ -490,7 +497,13 @@ def test_engine_recovers_a_fleet_from_its_own_action_log(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
-    asyncio.run(engine._adopt_running_bots(object()))
+    client = _FakeClient(
+        [
+            {"bot_name": "pmm-king-btcbrl-20260903-181000"},
+            {"bot_name": "someone-elses-bot-20260731-101500"},
+        ]
+    )
+    asyncio.run(engine._adopt_running_bots(client))
 
     assert engine.ledger.bases() == ["pmm-king-btcbrl"]
     assert (engine.session_dir / "owned_bots.json").exists()
@@ -520,9 +533,13 @@ def test_engine_adopts_nothing_from_a_log_with_no_deploys(tmp_path, monkeypatch)
         return {"someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"}}
 
     monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
-    asyncio.run(engine._adopt_running_bots(object()))
+    # Listed as running, so what is left out is left out on the rule, not on
+    # a deferral (CORR-723).
+    client = _FakeClient([{"bot_name": "someone-elses-bot-20260731-101500"}])
+    asyncio.run(engine._adopt_running_bots(client))
 
     assert engine.ledger.bases() == []
+    assert engine._adoption_done
 
 
 def test_engine_adoption_failure_is_non_fatal_and_retried(tmp_path, monkeypatch):
@@ -591,23 +608,60 @@ def test_adoption_skips_a_stopped_bot_in_the_namespace(tmp_path, monkeypatch):
     assert engine._adoption_done
 
 
-def test_adoption_keeps_the_whole_snapshot_when_liveness_is_unknown(
-    tmp_path, monkeypatch
-):
-    """An unanswered orchestrator must not silently adopt nothing.
+def test_adoption_defers_when_liveness_is_unknown_and_retries(tmp_path, monkeypatch):
+    """An unanswered orchestrator must adopt nothing and come back next tick.
 
-    ``fetch_live_instance_names`` returns ``None`` rather than an empty set when
-    it cannot tell, and the filter then leaves the snapshot alone — the behaviour
-    that predates the filter.
+    Adoption is not a read: it opens an ownership window starting now and
+    licenses stop/resume on whatever it claims. So unknown liveness fails closed
+    (CORR-723) — unlike the read surfaces, which keep the unfiltered fallback —
+    and the deferral is the same best-effort retry a failed snapshot gets.
     """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
     _two_in_namespace_bots(monkeypatch)
 
-    client = _FakeClient(RuntimeError("bot status unavailable"))
-    asyncio.run(engine._adopt_running_bots(client))
+    asyncio.run(engine._adopt_running_bots(_FakeClient(RuntimeError("unavailable"))))
 
-    assert sorted(engine.ledger.bases()) == [f"{NS}-btc", f"{NS}-eth"]
+    assert engine.ledger.bases() == []
+    assert not engine._adoption_done
+
+    # Next tick, the orchestrator answers: only the instance it lists is adopted.
+    asyncio.run(
+        engine._adopt_running_bots(
+            _FakeClient([{"bot_name": f"{NS}-btc-20260731-101500"}])
+        )
+    )
+
+    assert engine.ledger.bases() == [f"{NS}-btc"]
     assert engine._adoption_done
+
+
+def test_adoption_defers_when_the_listing_is_an_error_payload(tmp_path, monkeypatch):
+    """``{"status": "error"}`` flattens to no bots, which is unknown, not empty.
+
+    The quieter path to the same fallback: nothing raises, so without
+    ``_is_bots_listing`` feeding the fail-closed branch this would read as an
+    empty server and adopt the whole snapshot unfiltered.
+    """
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
+    _two_in_namespace_bots(monkeypatch)
+
+    asyncio.run(engine._adopt_running_bots(_FakeClient({"status": "error"})))
+
+    assert engine.ledger.bases() == []
+    assert not engine._adoption_done
+
+
+def test_adoption_adopts_nothing_when_the_server_is_genuinely_empty(
+    tmp_path, monkeypatch
+):
+    """An empty *answer* is not unknown: nothing is live, and that is final."""
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
+    _two_in_namespace_bots(monkeypatch)
+
+    asyncio.run(engine._adopt_running_bots(_FakeClient([])))
+
+    assert engine.ledger.bases() == []
+    assert engine._adoption_done  # answered — no point retrying every tick
 
 
 def test_tick_blocks_a_foreign_bot_and_journals_it(tmp_path, monkeypatch):
@@ -759,7 +813,13 @@ def test_adoption_skips_a_disowned_bot_in_the_namespace(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
-    asyncio.run(engine._adopt_running_bots(object()))
+    client = _FakeClient(
+        [
+            {"bot_name": f"{NS}-btc-20260731-101500"},
+            {"bot_name": f"{NS}-eth-20260731-101500"},
+        ]
+    )
+    asyncio.run(engine._adopt_running_bots(client))
 
     assert engine.ledger.bases() == [f"{NS}-eth"]
 

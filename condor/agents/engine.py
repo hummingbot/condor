@@ -1096,12 +1096,18 @@ class TickEngine:
         names are filtered through the orchestrator's live listing first
         (CORR-699), or a restart would adopt every bot the strategy has ever run
         and open an ownership window, starting now, on bots that are dead.
+
+        Adoption is not a read: it opens an ownership window starting now and
+        makes every later stop/resume/redeploy target a real bot. So an *unknown*
+        liveness defers the whole pass rather than falling back to the unfiltered
+        snapshot — the one failure this function used not to route through its own
+        best-effort contract (CORR-723). The read surfaces keep the fallback.
         """
         if self._adoption_done or self.ledger is None:
             return
         from condor.fetchers.bot_performance import (
             fetch_all_bot_performance,
-            fetch_live_instance_names,
+            fetch_live_instance_names_checked,
         )
 
         try:
@@ -1110,11 +1116,18 @@ class TickEngine:
             log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
             return
 
-        # Liveness is best-effort in the same way the rest of the function is:
-        # ``None`` means the orchestrator did not answer, and an unknown liveness
-        # must not silently adopt nothing — it leaves the snapshot unfiltered,
-        # exactly as before this filter existed.
-        live = await fetch_live_instance_names(client)
+        # Fail closed: an unanswered orchestrator means nothing here is known to
+        # be running, and adopting on the unfiltered snapshot would open an
+        # ownership window on bots that may be dead. Deferring costs a tick and
+        # is the same best-effort contract the snapshot failure above uses.
+        live, live_known = await fetch_live_instance_names_checked(client)
+        if not live_known:
+            log.warning(
+                "TickEngine %s: bot adoption deferred (liveness unknown — the "
+                "orchestrator did not answer the active-bots listing)",
+                self.agent_id,
+            )
+            return
 
         from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
 
@@ -1143,7 +1156,7 @@ class TickEngine:
 
         now = time.time()
         for instance_name in all_perf:
-            if live is not None and instance_name not in live:
+            if instance_name not in live:
                 continue
             base = strip_deploy_suffix(instance_name)
             if base in disowned:

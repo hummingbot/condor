@@ -416,8 +416,14 @@ def resolve_bots(
     Realized PnL from stopped instances comes through :func:`fetch_base_histories`,
     whose universe includes archived names. Bases with no live instance are absent
     from the result.
+
+    An unfiltered aggregate may therefore include a stopped instance's frozen
+    book, so each one is stamped ``liveness_unknown: True`` — the marker that
+    lets a consumer render the figure as unverified instead of as confirmed-live
+    ([[CORR-723]]). Absent means the liveness listing answered.
     """
     out: dict[str, dict] = {}
+    unknown = live_names is None
     for base, insts in partition_instances(all_bot_perf, bases).items():
         live = [
             i
@@ -429,7 +435,12 @@ def resolve_bots(
         # Name-bearer first: _merge_instance_aggregates keeps bots[0]'s bot_name.
         head = base if base in live else live[-1]
         ordered = [all_bot_perf[head]] + [all_bot_perf[i] for i in live if i != head]
-        out[base] = _merge_instance_aggregates(ordered)
+        agg = _merge_instance_aggregates(ordered)
+        if unknown:
+            # Copied: a single-instance merge hands back the snapshot's own dict,
+            # and this marker belongs to the resolution, not to the cached bot.
+            agg = {**agg, "liveness_unknown": True}
+        out[base] = agg
     return out
 
 
@@ -538,24 +549,49 @@ async def fetch_live_instance_names(client: Any) -> set[str] | None:
     without the listing, or a response that is not a listing yields ``None`` —
     never an empty set — so the caller keeps its unfiltered behaviour instead of
     silently zeroing every bot's open book. A failure is not cached.
+
+    That fallback is right for a *read*, which would rather show a figure that is
+    too high than zero every open book. A consequential action cannot infer the
+    difference from ``None``: it takes :func:`fetch_live_instance_names_checked`
+    and fails closed on unknown ([[CORR-723]]).
+    """
+    names, known = await fetch_live_instance_names_checked(client)
+    return names if known else None
+
+
+async def fetch_live_instance_names_checked(client: Any) -> tuple[set[str], bool]:
+    """:func:`fetch_live_instance_names` with its three outcomes kept apart.
+
+    Returns ``(names, known)``. ``known=False`` is "the orchestrator did not
+    answer" — a call that raised, a client without the listing, or a response
+    that is not one (:func:`_is_bots_listing`); ``names`` is then empty and must
+    not be used as a filter. ``known=True`` with an empty set is the *answer*
+    "nothing is running on this server".
+
+    The flat :func:`fetch_live_instance_names` collapses the first two into
+    ``None``, which is all a read surface needs. Anything that opens an ownership
+    window or licenses a lifecycle action needs them apart, because "unknown" and
+    "nothing is live" license opposite behaviour ([[CORR-723]]). A failure is not
+    cached.
     """
     from condor.fetchers.bots import extract_bots_list
 
     key = _server_key(client)
     entry = _live_names_cache.get(key) if key else None
     if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
-        return entry[1]
+        return entry[1], True
     try:
         result = await client.bot_orchestration.get_active_bots_status()
     except Exception as e:
         logger.debug("fetch_live_instance_names failed: %s", e)
-        return None
+        return set(), False
     if not _is_bots_listing(result):
-        return None
+        logger.debug("fetch_live_instance_names: not a bots listing: %r", result)
+        return set(), False
     names = {str(b["bot_name"]) for b in extract_bots_list(result) if b.get("bot_name")}
     if key:
         _live_names_cache[key] = (time.monotonic(), names)
-    return names
+    return names, True
 
 
 async def fetch_bot_universe(client: Any) -> tuple[dict[str, dict], list[str]]:
