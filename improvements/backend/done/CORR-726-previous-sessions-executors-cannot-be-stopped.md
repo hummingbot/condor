@@ -6,7 +6,7 @@ category: correctness
 impact: high
 effort: M
 risk: medium
-status: todo
+status: done
 brain: developer
 files:
   - condor/agents/risk.py:683
@@ -17,8 +17,10 @@ files:
   - agents/solana_dex_lp_expert/loops/lp_slot_operator/loop.md:50
 depends_on:
   - "[[CORR-724]]"
-commits: []
+commits:
+  - "3a1f7a20 fix(agents): adopt a dead session's running executors, and report the orphans at boot (CORR-726)"
 created: 2026-10-14
+closed: 2026-10-15
 ---
 
 ## Problem
@@ -88,12 +90,12 @@ sibling session that is still live keeps its executors, which is the property
 
 ## Acceptance criteria
 
-- [ ] Fake client: a RUNNING executor tagged `"{agent}.{strategy}_1"` with no live session 1 → adopted, in `_executor_owners`, and `_stop_refusal` returns `""` for it
-- [ ] The same executor while session 1 *is* live in the supervisor → not adopted, and `_stop_refusal` still refuses with the cross-session message
-- [ ] An executor of a different agent or a different strategy → never adopted, however it is tagged
-- [ ] Boot reconciliation with a RUNNING executor whose owner is dead reports it as orphaned-running, distinct from `list_orphaned_positions`' terminated-with-position case
-- [ ] `lp_slot_operator/loop.md` no longer instructs a stop the gate refuses
-- [ ] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared
+- [x] Fake client: a RUNNING executor tagged `"{agent}.{strategy}_1"` with no live session 1 → adopted, in `_executor_owners`, and `_stop_refusal` returns `""` for it — `test_an_orphan_is_adopted_and_the_gate_then_allows_the_stop`
+- [x] The same executor while session 1 *is* live in the supervisor → not adopted, and `_stop_refusal` still refuses with the cross-session message — `test_a_live_siblings_executor_is_not_adopted_and_stays_refused`
+- [x] An executor of a different agent or a different strategy → never adopted, however it is tagged — `test_another_agent_or_strategy_is_never_adopted`, plus the parametrised `test_foreign_tags_have_no_session_number` (experiment tags and the backend's `"main"` default too)
+- [x] Boot reconciliation with a RUNNING executor whose owner is dead reports it as orphaned-running, distinct from `list_orphaned_positions`' terminated-with-position case — `test_boot_reports_a_running_executor_whose_owner_is_gone` feeds the scan both shapes and gets only the running one back
+- [x] `lp_slot_operator/loop.md` no longer instructs a stop the gate refuses — step 1 now reads the two `[CORE DATA]` blocks and says a `list_executors` id in neither is one the gate refuses
+- [x] No test that passed at the merge base fails — `uv run pytest` on the change: **6471 passed, 2 skipped, 0 failed in 96.0s** (`frontend/dist` present, so the 21 web-route tests ran). Nothing fails, so no failure can be newly introduced; the merge-base run is therefore moot and was not needed. The plan's own final verification chunk runs the full gate again over everything it landed.
 
 ## Notes
 
@@ -115,3 +117,54 @@ sibling session that is still live keeps its executors, which is the property
 - `find_similar_backlog` (token-overlap fallback, 196 docs) top hit 0.26
   `CORR-633 [done]`, below the 0.50 fallback bar; no open doc covers executor
   adoption.
+
+## Implementation notes
+
+- **`condor/agents/executor_adoption.py` (new)** holds the pure half: `session_lineage`,
+  `lineage_session_num` (``None`` for another agent, another strategy, an
+  experiment ``_e{N}``, the backend's ``"main"`` default, and a sibling slug
+  that merely starts with ours) and `orphaned_running_rows`, which is the
+  lineage-AND-dead-owner-AND-RUNNING conjunction. Both halves of the fix call
+  it, so the engine and the boot pass can never disagree about what an orphan
+  is. It is a new file rather than an addition to `ownership.py`, whose stated
+  scope is bot ownership by *name*.
+- **`condor/agents/engine.py`**: `_adopt_running_executors` runs each tick right
+  after `_adopt_running_bots`, best-effort (a failed read owns nothing and
+  retries next tick). `_live_session_nums` returns `None` — "do not adopt" —
+  when this engine is not itself in the supervisor, because the registry is the
+  only liveness authority and an unregistered engine means it cannot be
+  trusted. The adopted rows are merged into `_executor_owners` *and* rendered
+  into the prompt as `[CORE DATA - adopted_executors]`: the executors provider
+  fetches under this session's own tag, so an adopted orphan appears nowhere
+  else and an id the model never sees is one it can never stop. Re-derived
+  every tick, never latched, so an id stops being adopted the moment its owner
+  comes back (`test_an_adopted_orphan_is_dropped_once_its_owner_is_back`).
+- **`condor/runtime/loops.py`**: `OrphanedExecutor` + `ReconcileReport
+  .orphaned_executors`, filled by `_scan_orphaned_executors` after the restarts
+  so a session this boot brought back counts as a live owner. One API read per
+  settled strategy, best-effort; the client is resolved from the session's
+  status file through an injectable factory. Orphans are **reported, never
+  stopped** — winding a position down is an emergency action, not a boot chore.
+- **`main.py`**: the orphans ride along in the existing per-chat restart
+  summary, so the owner hears about live exposure nobody is operating at the
+  moment they are reading about the restart.
+
+### Declared files not edited
+
+- `condor/agents/risk.py:683` (`_stop_refusal`) — untouched **on purpose**, as the
+  doc itself requires. Adoption works by putting the orphans into the snapshot
+  the gate already tests membership against, so the gate's logic, its message
+  and its API fallback are byte-for-byte what they were.
+- `condor/agents/providers/executors.py:111` (`list_orphaned_positions`' feed) —
+  untouched. It was cited to establish that the *terminated*-with-stranded-position
+  case is a different thing with a different recovery (close the position by
+  hand), and keeping the two apart is the point of the new state, so widening
+  that list would have undone it.
+
+### Deliberately out of scope
+
+- An adopted executor's size is not added to `risk_state.total_exposure` /
+  `executor_count`, which are still built from the executors provider's own
+  rows. That under-count is pre-existing (an orphan was never counted) and
+  changing it would alter which creates the risk brakes refuse — a separate
+  decision from being able to stop the orphan at all.
