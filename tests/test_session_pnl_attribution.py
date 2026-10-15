@@ -1141,6 +1141,9 @@ def _every_field_perf():
         lifetime_volume=1400.0,
         lifetime_instances=["bot-a-1", "bot-a-2"],
         pnl_series=[{"timestamp": "2026-07-01T00:00:00+00:00", "pnl": 1.5}],
+        # Not the "ok" default, so a model that dropped the field would still
+        # fail the equality below ([[FEAT-137]]).
+        reading="empty",
     )
 
 

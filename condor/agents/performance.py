@@ -112,6 +112,18 @@ class AgentPerformance:
     # provider, so the session report does not walk every instance's history a
     # second time) gets one, and only when its inputs match the standalone fetch.
     pnl_series: list[dict[str, Any]] | None = None
+    # Whether this fetch obtained a *reading* at all -- ``ok`` / ``empty`` /
+    # ``missing``, [[CORR-725]]'s tri-state rolled up to the agent ([[FEAT-137]]).
+    # The same shape as ``fees_known`` and ``liveness_known``: the certainty
+    # travels beside the figures instead of changing their type.
+    #
+    # ``ok`` for an executor-only agent, and that is not a guess: its book comes
+    # from the executor table, which either answered (this object exists) or
+    # raised (the provider reports the error and no reading at all). A bot-mode
+    # agent's is the best of its live bots' states, so one controller reporting
+    # is enough and a fleet whose every controller returns an empty performance
+    # object reads ``empty`` -- which is GitHub #272's failure exactly.
+    reading: str = "ok"
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
@@ -513,6 +525,7 @@ async def fetch_agent_performance_batch(
             session_scope,
         )
         from condor.fetchers.bot_performance import (
+            _best_reading,
             fetch_bot_universe_checked,
             fetch_live_instance_names,
             partition_instances,
@@ -529,6 +542,12 @@ async def fetch_agent_performance_batch(
         live_names = await fetch_live_instance_names(client)
         now = time.time()
         for aid, bases in wanted.items():
+            # A bot-mode agent's reading is its bots', so it starts from the
+            # bottom of the tri-state and is raised by each bot that reports
+            # ([[FEAT-137]]). Left at the ``ok`` default it would say "read fine"
+            # for a fleet that returned nothing, which is the very confusion
+            # [[CORR-725]] exists to end.
+            out[aid].reading = "missing"
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
@@ -583,6 +602,13 @@ async def fetch_agent_performance_batch(
             for base in bases:
                 bot = live.get(base)
                 window = owned.get(base)
+                # One bot reporting is enough ([[FEAT-137]]). Read off the LIVE
+                # aggregate only: a stopped instance's frozen snapshot is not
+                # this tick obtaining a reading, it is last week's.
+                if bot:
+                    out[aid].reading = _best_reading(
+                        out[aid].reading, str(bot.get("reading") or "missing")
+                    )
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)

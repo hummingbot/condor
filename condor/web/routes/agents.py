@@ -156,6 +156,12 @@ class RunningInstance(BaseModel):
     # two surfaces describe one loop in one vocabulary.
     #: Unix seconds the current tick started, 0 before the first one.
     last_tick_at: float = 0.0
+    #: ── Quiet or dead ([[FEAT-137]]) ──
+    #: ``last_tick_at`` is set at tick *start*, so it advances on a tick whose
+    #: every call failed. These two advance only on an outcome: a reading that
+    #: said something, and a mutating call that worked. 0 = never.
+    last_reading_at: float = 0.0
+    last_successful_action_at: float = 0.0
     #: 0 = unbounded; otherwise the tick this session stops at.
     max_ticks: int = 0
     #: What the loop last *said* — the journal's `Last action:` line.
@@ -301,6 +307,11 @@ class AgentPerformanceModel(BaseModel):
     # Only the tick's executors provider asks for the curve (PERF-639); the routes
     # serve it from fetch_agent_pnl_series, so this stays null on the wire.
     pnl_series: list[dict] | None = None
+    # Whether these figures are a reading at all — ``ok`` / ``empty`` /
+    # ``missing`` ([[CORR-725]]'s tri-state, rolled up to the agent). Carried
+    # for the same reason ``fees_known`` is: the numbers above are 0.0 in all
+    # three cases and only this says which of them is "flat" ([[FEAT-137]]).
+    reading: str = "ok"
 
     @classmethod
     def from_perf(cls, perf: AgentPerformance, **overrides) -> AgentPerformanceModel:
@@ -647,6 +658,10 @@ class LiveLoopModel(BaseModel):
     tick_count: int = 0
     last_tick_at: float = 0.0
     frequency_sec: int = 60
+    #: Outcomes rather than attempts, beside the tick-start stamp above
+    #: ([[FEAT-137]]); see ``condor.agents.fleet_map.LiveLoop``.
+    last_reading_at: float = 0.0
+    last_successful_action_at: float = 0.0
     last_action: str = ""
     #: What the loop last *did* — one ``AgentAction`` row, or null. See
     #: ``condor.agents.actions``; the band shows it above ``last_action``.
@@ -1331,6 +1346,10 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
         last_tick_at=float(info.get("last_tick_at", 0.0) or 0.0),
+        last_reading_at=float(info.get("last_reading_at", 0.0) or 0.0),
+        last_successful_action_at=float(
+            info.get("last_successful_action_at", 0.0) or 0.0
+        ),
         max_ticks=int(info.get("max_ticks", 0) or 0),
         last_action=read_last_action(getattr(engine, "journal", None)),
         last_did=read_last_did(engine),

@@ -796,6 +796,14 @@ export interface RunningInstance {
   // strategy view could say "running" and nothing about when it last ran.
   /** Unix seconds the current tick started. 0 before the first one. */
   last_tick_at: number;
+  /**
+   * Quiet or dead (FEAT-137). `last_tick_at` is stamped at tick *start*, so it
+   * advances on a tick whose every call failed; these two advance only on an
+   * outcome — a reading that said something, and a mutating call that worked.
+   * 0 = never. Optional so an older backend reads as "never".
+   */
+  last_reading_at?: number;
+  last_successful_action_at?: number;
   /** 0 = unbounded; otherwise the tick this session stops at. */
   max_ticks: number;
   /** What the loop last *said* — the journal's `Last action:` line. */
@@ -878,6 +886,9 @@ interface FleetOwnerWire {
     tick_count: number;
     last_tick_at: number;
     frequency_sec: number;
+    /** Outcomes rather than attempts (FEAT-137); see `RunningInstance`. */
+    last_reading_at?: number;
+    last_successful_action_at?: number;
     last_action: string;
     last_did: AgentActionRow | null;
     last_error: string;
@@ -1015,6 +1026,14 @@ export interface AgentPerformance {
   lifetime_volume?: number | null;
   /** The instances the lifetime-scoped figures were summed over. */
   lifetime_instances?: string[];
+  /**
+   * Whether these figures are a reading at all (FEAT-137, on CORR-725's
+   * tri-state): `ok` is a controller that reported, `empty` one that answered
+   * and said nothing, `missing` no performance object at all. All three print
+   * 0.0 for every number above, so this is the only thing that tells a flat bot
+   * from a dead one. Absent from an older backend, which reads as `ok`.
+   */
+  reading?: "ok" | "empty" | "missing";
 }
 
 /** One controller of one bot instance a session operated. */
@@ -3121,6 +3140,8 @@ export const api = {
             tickCount: owner.live.tick_count,
             lastTickAt: owner.live.last_tick_at,
             frequencySec: owner.live.frequency_sec,
+            lastReadingAt: owner.live.last_reading_at ?? 0,
+            lastSuccessfulActionAt: owner.live.last_successful_action_at ?? 0,
             lastAction: owner.live.last_action,
             lastDid: owner.live.last_did ?? null,
             lastError: owner.live.last_error,

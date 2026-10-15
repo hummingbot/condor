@@ -171,6 +171,15 @@ class TickEngine:
         default=None, init=False, repr=False
     )
     _last_tick_at: float = field(default=0.0, init=False)
+    # ── Liveness, as outcomes rather than attempts ([[FEAT-137]]) ──
+    # ``_last_tick_at`` above is set at tick *start*, so it advances even when
+    # every call in the tick failed: a session whose model is broken looks
+    # exactly as fresh as a healthy one, which is GitHub #272's failure mode.
+    # These two are stamped only where the outcome is known -- a reading that
+    # said something, and a mutating call that worked -- and are persisted
+    # through ``LoopSupervisor.record_tick`` so they survive the process.
+    _last_reading_at: float = field(default=0.0, init=False)
+    _last_successful_action_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     # The first tick's two moments, so a caller that started this run can report
     # what the run did instead of that a task was created (CORR-728).
@@ -806,6 +815,15 @@ class TickEngine:
         if drift_result:
             self._last_skill_data["drift"] = drift_result.data
 
+        # This tick obtained a reading ([[FEAT-137]]). ``ok`` only: ``empty`` is
+        # a controller that answered and said nothing and ``missing`` is no
+        # performance object at all ([[CORR-725]]), and a key that is absent
+        # altogether is the provider's own error path. All three leave the stamp
+        # where it was, which is what lets a reader tell a market maker that is
+        # merely quiet from one whose strategy died.
+        if str(self._last_skill_data.get("reading") or "") == "ok":
+            self._last_reading_at = time.time()
+
         # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
             name: result.summary for name, result in skill_results.items()
@@ -1122,6 +1140,15 @@ class TickEngine:
         tick_actions = actions_mod.actions_from_tool_calls(
             tool_calls, tick=self.journal.tick_count + 1, at=time.time()
         )
+
+        # When it last did something that *worked* ([[FEAT-137]]). Read off the
+        # same rows, so the stamp and the log can never disagree about what the
+        # session did, and only ever moved forward: a tick whose every call
+        # failed leaves it where the last successful one put it, where
+        # ``_last_tick_at`` would have advanced.
+        effect_at = actions_mod.last_effect_at(tick_actions)
+        if effect_at > self._last_successful_action_at:
+            self._last_successful_action_at = effect_at
 
         # And what it took ownership of (FEAT-102). Derived from the same
         # folded list, so a deploy that is logged is a deploy that is owned.
@@ -1858,6 +1885,9 @@ class TickEngine:
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,
+            # Outcomes, beside the attempt above ([[FEAT-137]]).
+            "last_reading_at": self._last_reading_at,
+            "last_successful_action_at": self._last_successful_action_at,
             "last_error": self._last_error,
             "session_dir": str(self.session_dir) if self.session_dir else "",
             "is_experiment": self.is_experiment,

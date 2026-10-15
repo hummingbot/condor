@@ -53,6 +53,8 @@ const brigado: FleetOwner = {
     status: "running",
     tickCount: 214,
     lastTickAt: Math.floor(Date.now() / 1000),
+    lastReadingAt: 0,
+    lastSuccessfulActionAt: 0,
     frequencySec: 60,
     lastAction: "",
     lastDid: null,

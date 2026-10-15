@@ -41,6 +41,8 @@ function live(over: Partial<LiveLoop> = {}): LiveLoop {
     status: "running",
     tickCount: 3,
     lastTickAt: 0,
+    lastReadingAt: 0,
+    lastSuccessfulActionAt: 0,
     frequencySec: 30,
     lastAction: "",
     lastDid: null,

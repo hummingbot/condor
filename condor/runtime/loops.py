@@ -187,6 +187,15 @@ class LoopSupervisor:
             # restore from, and _restart cannot construct an engine at all.
             user_id=getattr(engine, "user_id", 0),
             tick=getattr(journal, "tick_count", 0) if journal else 0,
+            # When this run last obtained a reading and last did something that
+            # worked (FEAT-137). Both live in memory on the engine, so without
+            # persisting them here a restart erases the only two facts that tell
+            # a quiet strategy from a dead one — and nothing could read them at
+            # all without a live engine. Re-written every tick, like ``pins``.
+            last_reading_at=float(getattr(engine, "_last_reading_at", 0.0) or 0.0),
+            last_successful_action_at=float(
+                getattr(engine, "_last_successful_action_at", 0.0) or 0.0
+            ),
             restart_on_boot=bool(engine.config.get("restart_on_boot", False)),
             # What this run was pinned to, so a restart can bring back the same
             # server and the same model instead of whatever the strategy config

@@ -13,6 +13,7 @@ import {
   attributionOf,
   countdown,
   inNamespace,
+  livenessFacts,
   loopFacts,
   loopStatus,
   isPseudoRunKey,
@@ -252,6 +253,8 @@ describe("the loop's state", () => {
       status: "running",
       tickCount: 214,
       lastTickAt: NOW_S - 22,
+      lastReadingAt: 0,
+      lastSuccessfulActionAt: 0,
       frequencySec: 60,
       lastAction: "Spreads held.",
       lastDid: null,
@@ -282,6 +285,45 @@ describe("the loop's state", () => {
       "session 7",
       "tick 0",
       "first tick pending",
+    ]);
+  });
+
+  // ── Quiet or dead (FEAT-137) ──
+  //
+  // `lastTickAt` above advances on a tick whose every call failed, so the
+  // countdown band says a healthy-looking "next tick 38s" for a loop that has
+  // obtained nothing and done nothing for hours. These two ages are what the
+  // reader diagnoses that with.
+
+  it("says how long since the loop last read and last acted", () => {
+    const facts = livenessFacts(
+      loop({ lastReadingAt: NOW_S - 45, lastSuccessfulActionAt: NOW_S - 3860 }),
+      NOW,
+    );
+    expect(facts).toEqual(["read 45s ago", "acted 1h 04m ago"]);
+  });
+
+  it("says never rather than 1970 for a stamp that has never been set", () => {
+    // A loop that has only ever read is the normal state of a market maker
+    // between deploys, so "never acted" is an answer, not a missing value.
+    expect(livenessFacts(loop({ lastReadingAt: NOW_S - 10 }), NOW)).toEqual([
+      "read 10s ago",
+      "acted never",
+    ]);
+    expect(livenessFacts(loop(), NOW)).toEqual(["read never", "acted never"]);
+  });
+
+  it("has nothing to say about a loop that is not there", () => {
+    expect(livenessFacts(null, NOW)).toEqual([]);
+  });
+
+  it("leaves the schedule band alone — a diagnosis is not a countdown", () => {
+    // Deliberately NOT folded into `loopFacts`: that band answers "when does it
+    // tick next", and FEAT-141's fleet view wants these two without it.
+    expect(loopFacts(loop({ lastReadingAt: NOW_S - 45 }), NOW)).toEqual([
+      "session 7",
+      "tick 214",
+      "next tick 38s",
     ]);
   });
 

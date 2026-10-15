@@ -213,6 +213,13 @@ class ExecutorsProvider(BaseProvider):
                 "controllers": perf.controllers,
                 "close_type_counts": perf.close_type_counts,
                 "fees_known": perf.fees_known,
+                # Whether this tick obtained a reading at all ([[CORR-725]]'s
+                # tri-state). Present only on the success path above: a fetch
+                # that raised returns ``{"error": ...}``, so the absence of this
+                # key is itself the statement that nothing was read, and
+                # ``TickEngine`` stamps ``last_reading_at`` on ``ok`` alone
+                # ([[FEAT-137]]).
+                "reading": perf.reading,
                 # Both scopes, labelled, beside the folded totals above
                 # ([[FEAT-135]]). None = unavailable, never the other scope.
                 "session_realized_pnl": perf.session_realized_pnl,
