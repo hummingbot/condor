@@ -6,7 +6,7 @@ category: correctness
 impact: high
 effort: M
 risk: medium
-status: todo
+status: done
 brain: developer
 files:
   - condor/runtime/loops.py:415
@@ -16,8 +16,10 @@ files:
   - condor/agents/engine.py:293
   - condor/web/routes/agents.py:3074
 depends_on: []
-commits: []
+commits:
+  - "66fa8697 fix(loops): make a restart the same thing a start is (CORR-728)"
 created: 2026-10-14
+closed: 2026-10-15
 ---
 
 ## Problem
@@ -81,13 +83,13 @@ Neither waits for a first tick, so "restarted" means "a task was created".
 
 ## Acceptance criteria
 
-- [ ] A session started with a `server_name`/model override, killed and restarted, comes back on the same server and model
-- [ ] A strategy `config.yml` edited while the session was dead is still picked up on restart, so the revalidation intent at `loops.py:431` is preserved
-- [ ] `_restart` with a server name that no longer exists refuses with the same error `_start` gives, instead of starting
-- [ ] `reconcile_boot` with one live engine for a strategy does not produce a second, and `for_strategy()` reports one engine after a restart
-- [ ] `_restart` and the start route return success only after a first tick completes, and return a readable failure when the first tick does not arrive within the bound
-- [ ] One document states what survives a restart, naming all five places a pin can live
-- [ ] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared
+- [x] A session started with a `server_name`/model override, killed and restarted, comes back on the same server and model
+- [x] A strategy `config.yml` edited while the session was dead is still picked up on restart, so the revalidation intent at `loops.py:431` is preserved
+- [x] `_restart` with a server name that no longer exists refuses with the same error `_start` gives, instead of starting
+- [x] `reconcile_boot` with one live engine for a strategy does not produce a second, and `for_strategy()` reports one engine after a restart
+- [x] `_restart` and the start route return success only after a first tick completes, and return a readable failure when the first tick does not arrive within the bound
+- [x] One document states what survives a restart, naming all five places a pin can live
+- [x] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared
 
 ## Notes
 
@@ -110,3 +112,58 @@ Neither waits for a first tick, so "restarted" means "a task was created".
   pin across a restart, not about applying it. See [[TASK-002]].
 - `find_similar_backlog` (token-overlap fallback, 196 docs) top hit 0.23
   `CORR-611 [done]`, below the 0.50 fallback bar.
+
+## Notes (shipped)
+
+Implemented in `66fa8697`, verified at `49f18313` (the branch head this work
+started from).
+
+**Verification** — `uv run pytest` on the change: **6521 passed, 2 skipped, 0
+failed in 97.4s, EXIT=0**. `uv run black --check condor/ tests/` and
+`uv run isort --check-only condor/ tests/` both clean. Nothing fails on the
+change side, so no test that passed at `49f18313` can fail now; the baseline
+run was not repeated for that reason. The count is above the 6427 quoted at
+doc-write time because other items on this plan added tests and this one adds
+19 (`tests/test_restart_matches_start.py`).
+
+**Declared files not edited.** `condor/agents/engine.py:238` (the per-session
+`save_full_config`) needed no change: it already writes the only copy of the
+start request's pins, and the fix *reads* it (`load_session_pins`) as the
+fallback for a session whose status file predates the pin snapshot.
+`condor/agents/engine.py:293` (`TickEngine.start`) stayed fire-and-forget on
+purpose — several callers (Telegram, delegate, experiments) want it that way —
+so the wait is a separate `wait_first_tick` and is explicit at the two callers
+this item names. Both paths are in the touched file; the other four declared
+paths were edited directly.
+
+**Two judgement calls, recorded because the criteria are tighter than the code
+can honestly be.**
+
+1. *Success on a tick still in flight.* Criterion 5 is implemented word for
+   word — success once the first tick **completes**, a readable failure when no
+   tick **arrives** within the bound — and the state in between (arrived,
+   still thinking at the bound) is reported as success. A tick routinely takes
+   tens of seconds and may take ten minutes (`tick_timeout_sec`), so a bound
+   long enough to see every tick complete would hold an HTTP request past every
+   proxy timeout and add minutes to startup. The bound (`FIRST_TICK_WAIT_SEC`,
+   20s) only has to separate "the run came up" from "it died on the way up",
+   and dying is immediate.
+2. *Same refusal, not the same HTTP status.* Criterion 3's "the same error
+   `_start` gives": `_restart` refuses on exactly the conditions the route
+   refuses on (an unknown **pinned** server, a model `agent_key_error` rejects)
+   and reports the same reason, but as a `RuntimeError` that `reconcile_boot`
+   turns into an owner-visible line — a boot pass has no HTTP response to
+   return a 404 in. The route's `check_server_access` is deliberately not
+   repeated: the run passed it when it was started, and `_resolve_server`
+   scopes credentials to the owner off the status file anyway. An *inherited*
+   server name that resolves to nothing is still allowed through, because that
+   is what `_start` does too (it falls through to the owner's accessible
+   servers); refusing it would strand every install that never saved a server
+   called "local".
+
+**Beyond the doc, needed to keep the fix honest.** A reported failure leaves
+nothing running — both the route and `_restart` stop the engine before
+reporting — because a loop ticking on behind "could not start" is the same
+untruth in the other direction. And `reconcile_boot` starts its restarts as
+tasks so a fleet's first-tick waits overlap rather than adding up inside
+startup, which is awaited inline in `main.py`.
