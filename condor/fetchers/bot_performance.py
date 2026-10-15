@@ -1277,15 +1277,15 @@ MAX_HISTORY_INSTANCES = 24
 MAX_CONCURRENT_HISTORY_FETCHES = 10
 
 
-async def fetch_base_histories(
+async def fetch_instance_histories(
     client: Any,
     all_bot_perf: dict[str, dict],
     bases: list[str],
     earliest: float,
     now: float,
     extra_names: Iterable[str] = (),
-) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
-    """``{base: [history per deployed instance]}`` covering ``[earliest, now]``, in USD.
+) -> dict[str, dict[str, list[tuple[float, float, float, float, float]]]]:
+    """``{base: {instance: history}}`` covering ``[earliest, now]``, in USD.
 
     Every controller is restated in USD at its own quote's rate before an
     instance's controllers are summed, so a base — or a session over several
@@ -1366,9 +1366,32 @@ async def fetch_base_histories(
         inst: merge_controller_series(s, rates.rates) for inst, s in series.items()
     }
     return {
-        base: [history[k] for k in insts if k in history]
+        base: {k: history[k] for k in insts if k in history}
         for base, insts in instances_by_base.items()
     }
+
+
+async def fetch_base_histories(
+    client: Any,
+    all_bot_perf: dict[str, dict],
+    bases: list[str],
+    earliest: float,
+    now: float,
+    extra_names: Iterable[str] = (),
+) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
+    """``{base: [history per deployed instance]}`` — the keys dropped.
+
+    What every caller that only slices wants: :func:`slice_history` sums over the
+    instances of a base and does not care which is which. A caller that must name
+    the instances a figure was summed over — a scope label ([[FEAT-135]]) — takes
+    :func:`fetch_instance_histories` instead, because re-deriving the name
+    positionally from :func:`partition_instances` is wrong the moment
+    ``MAX_HISTORY_INSTANCES`` caps the fan-out.
+    """
+    by_base = await fetch_instance_histories(
+        client, all_bot_perf, bases, earliest, now, extra_names=extra_names
+    )
+    return {base: list(hs.values()) for base, hs in by_base.items()}
 
 
 def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:

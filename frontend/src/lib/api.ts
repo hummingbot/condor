@@ -991,6 +991,30 @@ export interface AgentPerformance {
   /** False when `fees` is a floor: the backend reports no cumulative fee column,
    *  so 0 means unknown rather than free. */
   fees_known?: boolean;
+  // ── Scope labelling (FEAT-135) ──
+  // `realized_pnl` and `volume` above are one number folded from both scopes,
+  // and nothing in them says which: that is how a session summary came to report
+  // $200 for a session that earned $120, $80 of it belonging to a stopped
+  // earlier generation of the same bot name (#262), while the race leaderboard
+  // needed exactly that $200. Both are reported here, each naming the instances
+  // it covers. `null`/absent = the scope is unavailable — render it as such,
+  // never as the other scope's total.
+  //
+  // There is no lifetime twin for `unrealized_pnl`, the open book or exposure:
+  // per #234 those come only from instances the active-bot inventory confirms
+  // and are never summed across generations.
+  /** Realized PnL sliced to this session's ownership window. */
+  session_realized_pnl?: number | null;
+  /** Volume sliced to this session's ownership window. */
+  session_volume?: number | null;
+  /** The instances the session-scoped figures were summed over. */
+  session_instances?: string[];
+  /** Realized PnL over every generation ever deployed under the owned bases. */
+  lifetime_realized_pnl?: number | null;
+  /** Volume over every generation ever deployed under the owned bases. */
+  lifetime_volume?: number | null;
+  /** The instances the lifetime-scoped figures were summed over. */
+  lifetime_instances?: string[];
 }
 
 /** One controller of one bot instance a session operated. */

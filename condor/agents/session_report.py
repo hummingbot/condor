@@ -84,6 +84,7 @@ class SessionReport:
         b.manual_order()
 
         self._kpis(b, info)
+        self._scopes(b, info)
         self._attribution(b, info)
         self._controllers(b, info)
         self._narrative(b, session_dir)
@@ -109,13 +110,92 @@ class SessionReport:
             trend="up" if total_pnl > 0 else "down" if total_pnl < 0 else "neutral",
         )
         b.kpi("Realized", f"${float(info.get('realized_pnl', 0.0) or 0.0):,.2f}")
-        b.kpi("Unrealized", f"${float(info.get('unrealized_pnl', 0.0) or 0.0):,.2f}")
+        # Labelled live because it has exactly one scope and never a lifetime
+        # twin: unrealized PnL is the open book of the instances running now, and
+        # summing it across generations would be adding up marks nobody holds
+        # (GitHub #234, [[FEAT-135]]).
+        b.kpi(
+            "Unrealized (live)",
+            f"${float(info.get('unrealized_pnl', 0.0) or 0.0):,.2f}",
+        )
         b.kpi(
             "Volume",
             format_volume_usd(info.get("total_volume"), source="session report KPI"),
         )
         b.kpi("Open Executors", str(info.get("open_executors", 0)))
         b.kpi("Ticks", str(info.get("tick_count", 0)))
+
+    @staticmethod
+    def _scopes(b: Any, info: dict[str, Any]) -> None:
+        """Say which window each figure covers, side by side ([[FEAT-135]]).
+
+        The KPIs above are one number folded from both scopes, and nothing in
+        them says which. That is what made a session summary report "$200" for a
+        session that earned $120 — $80 of it belonged to a stopped earlier
+        generation of the same bot name (GitHub #262) — while the race
+        leaderboard needed exactly that $200 and understated until it summed the
+        stopped generations too. Neither scope is a correction of the other, so
+        both are reported, each naming the instances it was summed over.
+
+        Absent for a session that owns no bot: a direct-executor agent's figures
+        come from rows tagged with its own ``agent_id``, which has no earlier
+        generation to fold in and so no scope to disambiguate.
+        """
+        sess_realized = info.get("session_realized_pnl")
+        sess_volume = info.get("session_volume")
+        life_realized = info.get("lifetime_realized_pnl")
+        life_volume = info.get("lifetime_volume")
+        if sess_realized is None and life_realized is None:
+            return
+
+        def _money(v: Any) -> str:
+            return "unavailable" if v is None else f"${float(v):,.2f}"
+
+        def _volume(v: Any, scope: str) -> str:
+            if v is None:
+                return "unavailable"
+            return format_volume_usd(v, source=f"session report {scope} scope")
+
+        def _instances(names: Any, empty: str) -> str:
+            got = [str(n) for n in (names or []) if n]
+            return ", ".join(f"`{n}`" for n in got) if got else empty
+
+        b.section(
+            "Scopes — this session vs the bot name's lifetime",
+            "Realized PnL and volume at both scopes, each naming the bot "
+            "instances it was summed over. **Session** is sliced to this "
+            "session's ownership window; **lifetime** covers every generation "
+            "ever deployed under the bot names it owns, stopped and archived "
+            "ones included. They are different numbers and neither corrects the "
+            "other — a cumulative leaderboard wants lifetime, this session's own "
+            "result is the session figure. 'Unavailable' means there was nothing "
+            "to compute the scope from; it is never the other scope's total. "
+            "Unrealized PnL, open positions and exposure have no lifetime "
+            "figure at all: they are the live book and are never summed across "
+            "generations.",
+        )
+        b.table(
+            [
+                {
+                    "Scope": "Session (ownership window)",
+                    "Realized": _money(sess_realized),
+                    "Volume": _volume(sess_volume, "session"),
+                    "Instances": _instances(
+                        info.get("session_instances"),
+                        "— no ownership window recorded",
+                    ),
+                },
+                {
+                    "Scope": "Lifetime (all generations)",
+                    "Realized": _money(life_realized),
+                    "Volume": _volume(life_volume, "lifetime"),
+                    "Instances": _instances(
+                        info.get("lifetime_instances"),
+                        "— no instance aggregate to sum",
+                    ),
+                },
+            ]
+        )
 
     @staticmethod
     def _attribution(b: Any, info: dict[str, Any]) -> None:

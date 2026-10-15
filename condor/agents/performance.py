@@ -84,6 +84,28 @@ class AgentPerformance:
     base_windows: dict[str, tuple[float, float, float, float]] = field(
         default_factory=dict
     )
+    # ── Scope labelling ([[FEAT-135]]) ──
+    # Realized PnL and volume at both scopes, because both are wanted and the
+    # defect was that nothing said which one a number had: GitHub #262's session
+    # summary folded earlier stopped generations in, and its race comment reports
+    # a leaderboard that understated until it summed exactly those. ``session_*``
+    # is this session's ownership window; ``lifetime_*`` is every generation ever
+    # deployed under the owned bases. ``None`` means unavailable — no window to
+    # slice, or no instance the universe knows anything about — and must never be
+    # read as the other scope's total, which is the #262 defect itself. Each pair
+    # carries the instances it was summed over, the audit trail that makes two
+    # surfaces disagreeing diagnosable. Both stay ``None`` for an executor-only agent,
+    # which owns no bot and so has no scope ambiguity to label.
+    #
+    # There is deliberately no lifetime twin for unrealized PnL, open positions or
+    # exposure: per #234 those are live-only and are never summed across
+    # generations, and a field offering one would invite that sum.
+    session_realized_pnl: float | None = None
+    session_volume: float | None = None
+    session_instances: list[str] = field(default_factory=list)
+    lifetime_realized_pnl: float | None = None
+    lifetime_volume: float | None = None
+    lifetime_instances: list[str] = field(default_factory=list)
     # The session's realized-PnL curve (:func:`fetch_agent_pnl_series`'s shape),
     # derived from the histories the window slices above were cut from. ``None``
     # means "not computed": only a caller that asks for it (the tick's executors
@@ -415,6 +437,12 @@ async def fetch_agent_performance_batch(
     are all stopped, keeps its realized slice and nothing else. A base in ``bot_names`` with no window (or no known
     ``since``) keeps the lifetime aggregate.
 
+    Both scopes are *also* reported side by side and labelled — ``session_*`` and
+    ``lifetime_*``, each with the instances it was summed over — because the
+    totals above fold them into one figure that says nothing about which it is
+    ([[FEAT-135]]). Realized PnL and volume only: unrealized PnL, the open book
+    and exposure are live-only and have no lifetime twin by design.
+
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised, or — in controller mode — whose bots' live snapshot failed;
     their entries may be partial/empty. This lets callers avoid caching a failed
@@ -479,7 +507,11 @@ async def fetch_agent_performance_batch(
     if wanted:
         import time
 
-        from condor.agents.attribution import fold_sliced_window
+        from condor.agents.attribution import (
+            fold_sliced_window,
+            lifetime_scope,
+            session_scope,
+        )
         from condor.fetchers.bot_performance import (
             fetch_bot_universe_checked,
             fetch_live_instance_names,
@@ -511,6 +543,33 @@ async def fetch_agent_performance_batch(
                 client, aid, all_bot_perf, archived, owned, now
             )
             out[aid].base_windows.update(sliced)
+            # Both scopes, each named, before anything is folded into the
+            # single-figure totals: that fold is where the two became one number
+            # nobody could tell apart ([[FEAT-135]]).
+            scoped = session_scope(sliced, histories or {}, owned, now)
+            lifetime = lifetime_scope(instances, all_bot_perf, histories, now)
+            out[aid].session_realized_pnl = scoped.realized_pnl
+            out[aid].session_volume = scoped.volume
+            out[aid].session_instances = scoped.instances
+            out[aid].lifetime_realized_pnl = lifetime.realized_pnl
+            out[aid].lifetime_volume = lifetime.volume
+            out[aid].lifetime_instances = lifetime.instances
+            # The lifetime fallback for a base with no window stays — reporting
+            # zero for a live bot would be worse — but it stops being silent: the
+            # totals below carry that base at lifetime scope, and its instances
+            # are absent from ``session_instances`` above.
+            # Only bases that actually resolved to an instance: one that resolved
+            # to nothing is already reported through ``unresolved_bases`` below,
+            # and contributes no lifetime figure to contaminate the totals with.
+            windowless = [b for b in bases if b not in sliced and instances.get(b)]
+            if windowless:
+                log.warning(
+                    "agent %s has no ownership window for %s — their LIFETIME "
+                    "realized/volume is folded into the totals, so the aggregate "
+                    "is mixed-scope; session_* reports only the windowed bases",
+                    aid,
+                    ", ".join(windowless),
+                )
             if (
                 pnl_series
                 and histories is not None
@@ -518,7 +577,9 @@ async def fetch_agent_performance_batch(
                 and any(w.is_open for w in owned.values())
             ):
                 since = min(w.since for w in owned.values())
-                out[aid].pnl_series = pnl_series_from_histories(histories, since, now)
+                out[aid].pnl_series = pnl_series_from_histories(
+                    {b: list(hs.values()) for b, hs in histories.items()}, since, now
+                )
             for base in bases:
                 bot = live.get(base)
                 window = owned.get(base)
@@ -573,7 +634,7 @@ async def _slice_owned_windows(
     now: float,
 ) -> tuple[
     dict[str, tuple[float, float, float, float]],
-    dict[str, list[list[tuple[float, float, float, float, float]]]] | None,
+    dict[str, dict[str, list[tuple[float, float, float, float, float]]]] | None,
 ]:
     """``({base: sliced (realized, volume, trades, fees)}, histories)`` per window.
 
@@ -583,18 +644,22 @@ async def _slice_owned_windows(
     no known ``since`` is left out (lifetime aggregate), and so is an empty window
     (closed at or before it opened), which the rollup skips too.
 
-    ``histories`` is the ``{base: [instance history, …]}`` the slices were cut
-    from, or ``None`` when nothing was fetched (no known ``since``, no instance
-    universe, or the fetch raised).
+    ``histories`` is the ``{base: {instance: history}}`` the slices were cut from,
+    or ``None`` when nothing was fetched (no known ``since``, no instance
+    universe, or the fetch raised). Keyed by instance because a scope has to name
+    the instances it covers ([[FEAT-135]]); the slice itself does not care.
     """
-    from condor.fetchers.bot_performance import fetch_base_histories, slice_history
+    from condor.fetchers.bot_performance import (
+        fetch_instance_histories,
+        slice_history,
+    )
 
     cut = {b: w for b, w in owned.items() if w.since > 0}
     if not cut or not (all_bot_perf or archived):
         return {}, None
     earliest = min(w.since for w in cut.values())
     try:
-        histories = await fetch_base_histories(
+        histories = await fetch_instance_histories(
             client, all_bot_perf, sorted(cut), earliest, now, extra_names=archived
         )
     except Exception as e:
@@ -607,5 +672,7 @@ async def _slice_owned_windows(
     for base, window in cut.items():
         start, stop = window.bounds(now)
         if stop > start:
-            out[base] = slice_history(histories.get(base, []), start, stop)
+            out[base] = slice_history(
+                list((histories.get(base) or {}).values()), start, stop
+            )
     return out, histories

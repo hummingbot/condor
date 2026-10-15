@@ -1827,6 +1827,16 @@ class TickEngine:
             "controllers": sd.get("controllers", []),
             "close_type_counts": sd.get("close_type_counts", {}),
             "fees_known": sd.get("fees_known", True),
+            # Which scope each figure has, and over which instances (FEAT-135).
+            # The PnL/volume above are one number folded from both scopes, so the
+            # session report renders these beside them rather than letting the
+            # fold read as a single unlabelled total.
+            "session_realized_pnl": sd.get("session_realized_pnl"),
+            "session_volume": sd.get("session_volume"),
+            "session_instances": sd.get("session_instances", []),
+            "lifetime_realized_pnl": sd.get("lifetime_realized_pnl"),
+            "lifetime_volume": sd.get("lifetime_volume"),
+            "lifetime_instances": sd.get("lifetime_instances", []),
             "frequency_sec": self.config.get("frequency_sec", 60),
             "tick_timeout_sec": resolve_tick_timeout(
                 execution_mode=self.config.get("execution_mode", "loop"),

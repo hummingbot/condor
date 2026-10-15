@@ -213,6 +213,14 @@ class ExecutorsProvider(BaseProvider):
                 "controllers": perf.controllers,
                 "close_type_counts": perf.close_type_counts,
                 "fees_known": perf.fees_known,
+                # Both scopes, labelled, beside the folded totals above
+                # ([[FEAT-135]]). None = unavailable, never the other scope.
+                "session_realized_pnl": perf.session_realized_pnl,
+                "session_volume": perf.session_volume,
+                "session_instances": perf.session_instances,
+                "lifetime_realized_pnl": perf.lifetime_realized_pnl,
+                "lifetime_volume": perf.lifetime_volume,
+                "lifetime_instances": perf.lifetime_instances,
                 # None when it could not be derived here; the engine then fetches
                 # it itself (TickEngine._pnl_series).
                 "pnl_series": perf.pnl_series,

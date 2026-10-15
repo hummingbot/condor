@@ -1134,6 +1134,12 @@ def _every_field_perf():
         liveness_known=False,
         unresolved_bases=["gone-bot"],
         base_windows={"bot-a": (1.5, 900.0, 3.0, 0.75)},
+        session_realized_pnl=1.5,
+        session_volume=900.0,
+        session_instances=["bot-a-2"],
+        lifetime_realized_pnl=2.5,
+        lifetime_volume=1400.0,
+        lifetime_instances=["bot-a-1", "bot-a-2"],
         pnl_series=[{"timestamp": "2026-07-01T00:00:00+00:00", "pnl": 1.5}],
     )
 

@@ -281,6 +281,23 @@ class AgentPerformanceModel(BaseModel):
     # Each owned base's (realized, volume, trades, fees) over this session's own
     # ownership window — what the deployment ledger's bot rows read (CORR-661).
     base_windows: dict[str, tuple[float, float, float, float]] = {}
+    # ── Scope labelling (FEAT-135) ──
+    # Realized PnL and volume at both scopes, each naming the instances it was
+    # summed over. The figures above are one number folded from both, which is
+    # how a session summary came to report "$200" for a session that earned $120
+    # (GitHub #262) while a leaderboard needed exactly that $200. null = the scope
+    # is unavailable (no ownership window to slice, or no instance aggregate to
+    # sum) and must not be rendered as the other scope's total.
+    #
+    # No lifetime twin exists for unrealized_pnl, the open book or exposure: per
+    # GitHub #234 those come only from instances the active-bot inventory confirms
+    # and are never summed across generations.
+    session_realized_pnl: float | None = None
+    session_volume: float | None = None
+    session_instances: list[str] = []
+    lifetime_realized_pnl: float | None = None
+    lifetime_volume: float | None = None
+    lifetime_instances: list[str] = []
     # Only the tick's executors provider asks for the curve (PERF-639); the routes
     # serve it from fetch_agent_pnl_series, so this stays null on the wire.
     pnl_series: list[dict] | None = None
