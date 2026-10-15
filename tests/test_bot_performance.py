@@ -24,6 +24,7 @@ from condor.fetchers.bot_performance import (
     clear_snapshot_cache,
     extract_snapshots,
     fetch_all_bot_performance,
+    resolve_bots,
 )
 
 
@@ -1556,3 +1557,93 @@ def test_pnl_series_is_empty_without_an_owned_bot():
 
     assert asyncio.run(fetch_agent_pnl_series(object(), [], since=1.0)) == []
     assert asyncio.run(fetch_agent_pnl_series(object(), ["b"], since=0.0)) == []
+
+
+# ---------------------------------------------------------------------------
+# CORR-725: a performance object that says nothing is not a flat book
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_reports_the_reading_state_tri_state():
+    """``float(perf.get(..., 0) or 0)`` makes "no data" and "flat" the same
+    number. The state travels alongside the figures so a reader can tell them
+    apart (GitHub #272: "'No reading' is unknown, not zero")."""
+    agg = _aggregate_by_bot(
+        [
+            {"bot_name": "no_perf", "controller_id": "c1"},
+            {"bot_name": "bad_perf", "controller_id": "c2", "performance": "nope"},
+            {"bot_name": "empty_perf", "controller_id": "c3", "performance": {}},
+            {
+                "bot_name": "real_perf",
+                "controller_id": "c4",
+                "performance": {"realized_pnl_quote": 0.0, "volume_traded": 0.0},
+            },
+        ]
+    )
+
+    assert agg["no_perf"]["reading"] == "missing"
+    assert agg["bad_perf"]["reading"] == "missing"
+    assert agg["empty_perf"]["reading"] == "empty"
+    # A controller that genuinely reports zeros is a reading, not an absence.
+    assert agg["real_perf"]["reading"] == "ok"
+
+    # The numeric fields are all 0.0 in every one of the four, which is exactly
+    # why the state is needed: the figures cannot carry the difference.
+    for bn in ("no_perf", "bad_perf", "empty_perf", "real_perf"):
+        bot = agg[bn]
+        assert bot["realized_pnl_quote"] == 0.0
+        assert bot["unrealized_pnl_quote"] == 0.0
+        assert bot["volume_traded"] == 0.0
+        # Per-controller too, so a reader of the rows is not back to guessing.
+        assert bot["controllers"][0]["reading"] == bot["reading"]
+
+
+def test_a_flat_shaped_snapshot_still_reads_ok():
+    """``performance`` absent is only ``missing`` when nothing was reported --
+    a snapshot carrying the fields at its top level has the data, just not
+    nested."""
+    agg = _aggregate_by_bot(
+        [{"bot_name": "flat", "controller_id": "c", "volume_traded": 500.0}]
+    )
+
+    assert agg["flat"]["reading"] == "ok"
+    assert agg["flat"]["volume_traded"] == 500.0
+
+
+def test_one_reporting_controller_lifts_the_bots_reading():
+    agg = _aggregate_by_bot(
+        [
+            {"bot_name": "mixed", "controller_id": "quiet", "performance": {}},
+            {
+                "bot_name": "mixed",
+                "controller_id": "loud",
+                "performance": {"volume_traded": 10.0},
+            },
+        ]
+    )
+
+    assert agg["mixed"]["reading"] == "ok"
+    assert [c["reading"] for c in agg["mixed"]["controllers"]] == ["empty", "ok"]
+
+
+def test_resolve_bots_carries_the_reading_across_instances():
+    """``_merge_instance_aggregates`` pools the figures of a redeployed base;
+    the reading must be pooled too, or an instance that reports would be hidden
+    behind one that does not."""
+    all_perf = _aggregate_by_bot(
+        [
+            {"bot_name": "base-1", "controller_id": "a", "performance": {}},
+            {
+                "bot_name": "base-2",
+                "controller_id": "b",
+                "performance": {"volume_traded": 3.0},
+            },
+        ]
+    )
+    all_perf["base"] = all_perf.pop("base-1")
+    all_perf["base"]["bot_name"] = "base"
+
+    resolved = resolve_bots(all_perf, ["base"], live_names={"base", "base-2"})
+
+    assert resolved["base"]["reading"] == "ok"
+    assert resolved["base"]["volume_traded"] == 3.0

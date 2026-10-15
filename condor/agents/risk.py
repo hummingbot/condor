@@ -104,6 +104,11 @@ class RiskState:
     book_trusted: bool = True
     drift_quote: float | None = None  # None = nothing priced, never 0.0
     drift_reason: str = ""
+    # Whether ``drawdown_pct`` is a reading at all ([[CORR-725]]). False when
+    # the tracker reports it has nothing on record: 0.0 is then absence, not a
+    # flat book, and it is treated like a tracker that raised rather than
+    # compared against the limits.
+    drawdown_known: bool = True
     # The limits these metrics are judged against, carried so ``to_dict`` can
     # show them to the agent. A bare ``RiskState()`` reports ``RiskLimits``'
     # own defaults; ``RiskEngine.get_state`` passes the engine's limits.
@@ -121,6 +126,7 @@ class RiskState:
             "book_trusted": self.book_trusted,
             "drift_quote": self.drift_quote,
             "drift_reason": self.drift_reason,
+            "drawdown_known": self.drawdown_known,
             # Include limits for prompt display
             "max_position_size": self.limits.max_position_size_quote,
             "max_open_executors": self.limits.max_open_executors,
@@ -275,14 +281,27 @@ class RiskEngine:
     def get_state(self, tracker: Any) -> RiskState:
         """Compute current risk metrics from tracker data.
 
-        The tracker only supplies ``get_drawdown_pct``. Exposure and the open
-        executor count come from the live executors provider, which the engine
-        sets on the returned state itself.
+        The tracker only supplies the drawdown. Exposure and the open executor
+        count come from the live executors provider, which the engine sets on
+        the returned state itself.
+
+        A tracker may report the drawdown two ways: ``get_drawdown_pct_checked``
+        returns ``(pct, known)`` and can say it has no reading on record, while
+        the flat ``get_drawdown_pct`` can only return a number. Both arrive at
+        the same fail-closed arm -- a tracker that raises and a tracker that
+        reports nothing are equally unable to tell us where the drawdown is
+        ([[CORR-725]]).
         """
         state = RiskState(limits=self.limits)
 
         try:
-            state.drawdown_pct = tracker.get_drawdown_pct()
+            checked = getattr(tracker, "get_drawdown_pct_checked", None)
+            if callable(checked):
+                state.drawdown_pct, state.drawdown_known = checked()
+            else:
+                # A tracker with no checked reading cannot report absence, so
+                # its number is taken as one: behavior unchanged for it.
+                state.drawdown_pct = tracker.get_drawdown_pct()
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
@@ -290,6 +309,18 @@ class RiskEngine:
             # pause the tick and notify instead of trading blind.
             state.is_blocked = True
             state.block_reason = f"risk state unavailable: {exc}"
+            return state
+
+        if not state.drawdown_known:
+            # The reporting path into the arm above. The drawdown the tracker
+            # would hand us here is 0.0 -- the one value that passes every
+            # limit -- so a strategy that has stopped producing readings would
+            # otherwise read as one sitting safely at zero.
+            state.is_blocked = True
+            state.block_reason = (
+                "risk state unavailable: no drawdown reading on record, "
+                "so 0.0% cannot be compared against the drawdown limits"
+            )
             return state
 
         # Check blocking conditions

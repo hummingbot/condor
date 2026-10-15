@@ -115,6 +115,11 @@ class BotSummary(BaseModel):
     bot_name: str
     status: str = "unknown"
     num_controllers: int = 0
+    # ``status: "running"`` with no controller to run: the container is up and
+    # nothing is trading ([[CORR-725]]). Carried on the wire because without
+    # the field the REST body would drop the flag the builder sets and each
+    # client would be back to re-deriving it.
+    running_without_controllers: bool = False
     error_count: int = 0
     deployed_at: Optional[str] = None
     error_logs: list[dict[str, Any]] = []

@@ -195,6 +195,9 @@ export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
+  /** `status: "running"` with no controller to run: the container is up and
+   *  nothing is trading (CORR-725). Rendered by FEAT-141. */
+  running_without_controllers?: boolean;
   error_count: number;
   deployed_at: string | null;
   error_logs: BotLogEntry[];

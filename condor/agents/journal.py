@@ -957,9 +957,28 @@ class JournalManager:
         return results
 
     def get_drawdown_pct(self) -> float:
+        return self.get_drawdown_pct_checked()[0]
+
+    def get_drawdown_pct_checked(self) -> tuple[float, bool]:
+        """The drawdown, and whether it is a reading at all.
+
+        ``known`` is False when the journal holds no snapshot even though the
+        session has already ticked. 0.0 is then the *absence* of a reading, not
+        a flat book, and a guard handed it is handed the one drawdown that
+        clears every limit ([[CORR-725]]) -- "no reading" is unknown, not zero.
+
+        Before the first tick there is nothing to have fallen from, so an empty
+        Snapshots section is the real answer and ``known`` stays True: a session
+        blocked on its own missing history could never take the tick that writes
+        the first snapshot.
+
+        A session that is genuinely flat has snapshots and reports ``True`` with
+        0.0 -- quiet and dead are told apart by whether anything was read, never
+        by the number.
+        """
         snapshots = self._parse_snapshots()
         if not snapshots:
-            return 0.0
+            return 0.0, self.tick_count == 0
         pnls = [s.get("pnl", 0) for s in snapshots]
         current = pnls[-1]
         archived_peak = self._archived_peak_pnl()
@@ -968,11 +987,11 @@ class JournalManager:
         peak = max(pnls)
         drawdown = peak - current
         if drawdown <= 0:
-            return 0.0
+            return 0.0, True
         exposure = snapshots[-1].get("exposure", 0.0)
         if exposure <= 0:
-            return 0.0
-        return drawdown / exposure * 100
+            return 0.0, True
+        return drawdown / exposure * 100, True
 
     def get_pnl_series(self) -> list[dict]:
         """PnL points still held in journal.md (at most MAX_SNAPSHOT_LINES).

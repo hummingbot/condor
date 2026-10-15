@@ -95,6 +95,53 @@ def count_trade_closes(perf: dict) -> int:
     return sum(int(v or 0) for k, v in counts.items() if k in _TRADE_CLOSE_TYPES)
 
 
+#: The fields that make a performance object a *reading*. One of them present
+#: means the controller reported something; none means the object is there but
+#: says nothing.
+_READING_FIELDS = (
+    "realized_pnl_quote",
+    "unrealized_pnl_quote",
+    "global_pnl_quote",
+    "global_pnl_pct",
+    "volume_traded",
+    "positions_summary",
+    "close_type_counts",
+)
+
+#: ``ok`` beats ``empty`` beats ``missing`` when several readings roll into one.
+_READING_RANK = {"missing": 0, "empty": 1, "ok": 2}
+
+
+def _best_reading(a: str, b: str) -> str:
+    """The stronger of two reading states: one controller reporting is enough."""
+    return a if _READING_RANK.get(a, 0) >= _READING_RANK.get(b, 0) else b
+
+
+def _reading_state(snap: dict) -> str:
+    """Whether one snapshot carries a reading -- ``ok``, ``empty`` or ``missing``.
+
+    The three are the same 0.0 to every numeric field, which is exactly the
+    confusion that cost GitHub #272 a race entry: a controller that returned an
+    empty performance object scored as a strategy sitting flat. "No reading" is
+    unknown, not zero ([[CORR-725]]), so the state travels alongside the figures
+    rather than changing their type -- existing readers keep working and a
+    reader that cares can tell absence from flat.
+
+    ``missing`` is no performance object at all (or one of the wrong type);
+    ``empty`` is an object carrying none of :data:`_READING_FIELDS`. A
+    flat-shaped snapshot, whose reading fields sit on the snapshot itself, reads
+    ``ok`` -- the data is there, just not nested.
+    """
+    raw = snap.get("performance")
+    if raw is None:
+        return "ok" if any(f in snap for f in _READING_FIELDS) else "missing"
+    if not isinstance(raw, dict):
+        return "missing"
+    if not any(f in raw for f in _READING_FIELDS):
+        return "empty"
+    return "ok"
+
+
 def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
     """Roll up per-controller snapshots into one aggregate per bot_name.
 
@@ -137,9 +184,14 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "closed_trades": 0,
                 "close_type_counts": Counter(),
                 "num_controllers": 0,
+                # Whether anything was actually read for this bot. Starts at
+                # ``missing`` and is raised by each controller that reports
+                # ([[CORR-725]]).
+                "reading": "missing",
                 "timestamp": "",
                 "controllers": [],
             }
+        reading = _reading_state(snap)
         realized = float(perf.get("realized_pnl_quote", 0) or 0)
         unrealized = float(perf.get("unrealized_pnl_quote", 0) or 0)
         volume = float(perf.get("volume_traded", 0) or 0)
@@ -162,6 +214,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
         agg[bn]["cum_fees_quote"] += fees
         agg[bn]["closed_trades"] += closes
         agg[bn]["num_controllers"] += 1
+        agg[bn]["reading"] = _best_reading(agg[bn]["reading"], reading)
         # Track the freshest snapshot timestamp so suffix-tolerant resolution can
         # pick the most recent deploy of a re-launched bot.
         ts = str(snap.get("timestamp", "") or "")
@@ -180,6 +233,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "trading_pair": pair,
                 "quote": quote_of(pair),
                 "status": str(snap.get("status", "") or ""),
+                "reading": reading,
                 "realized_pnl_quote": realized,
                 "unrealized_pnl_quote": unrealized,
                 "volume_traded": volume,
@@ -387,6 +441,9 @@ def _merge_instance_aggregates(bots: list[dict]) -> dict:
         ):
             merged[key] = (merged.get(key, 0) or 0) + (b.get(key, 0) or 0)
         merged["controllers"] += list(b.get("controllers", []))
+        merged["reading"] = _best_reading(
+            merged.get("reading", "missing"), b.get("reading", "missing")
+        )
         if str(b.get("timestamp", "")) > str(merged.get("timestamp", "")):
             merged["timestamp"] = b.get("timestamp", "")
     return merged
