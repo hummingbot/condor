@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 # Cap on how many executors a single walk accumulates (not on iterations:
 # the walker's own empty-page and cursor-progress guards end a stalled walk).
+# A cap on *history*, because nothing upstream prunes terminated executor
+# records: a host that has run many generations keeps every terminated row, so
+# a walk that asks for no status spends the whole budget on them (PERF-733).
 MAX_EXECUTORS_FETCH = 5000
 EXECUTORS_PAGE_SIZE = 500
 
@@ -377,6 +380,20 @@ async def fetch_all_executors(
     Walks the cursor until exhausted or ``max_items`` is reached. Not for the
     hot poll — each call can issue up to ``max_items / EXECUTORS_PAGE_SIZE``
     sequential requests that the SDS rate limiter cannot see.
+
+    Deliberately unfiltered by default: the history and orphan paths *want*
+    terminated rows (the period summary totals closed PnL, and a terminated
+    executor is what strands an on-chain position). ``**filters`` are bound into
+    the partial, so they reach ``search_executors`` on *every* page of the walk
+    and not just the first — which is why a caller that wants only live
+    executors passes ``status=`` rather than walking the whole history and
+    dropping the terminal rows afterwards. Terminated records are never pruned
+    upstream, so the unfiltered walk pays for history a live-only caller
+    discards, and a host with more than ``max_items`` of it would have its live
+    rows truncated away before they were ever returned (PERF-733). The API
+    filters on one status at a time, so "live" is one walk per status —
+    ``RUNNING``, plus ``SHUTTING_DOWN`` where an executor that is still
+    flattening counts as live (``providers/drift.py``).
     """
     return await collect_pages(
         partial(client.executors.search_executors, **filters),
