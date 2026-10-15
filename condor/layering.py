@@ -47,6 +47,7 @@ log = logging.getLogger(__name__)
 
 FORKED_FROM_KEY = "forked_from"
 FORKED_AT_KEY = "forked_at"
+CREATED_BY_KEY = "created_by"
 
 
 def content_digest(path: Path) -> str:
@@ -225,11 +226,20 @@ def carry_fork_stamp(path: Path, meta: dict) -> dict:
     return meta
 
 
-def clear_fork_stamp(path: Path) -> None:
-    """Drop ``forked_from``/``forked_at`` — used when publishing back into stock.
+def scrub_for_stock(path: Path) -> None:
+    """Drop this install's local facts from a file on its way into stock.
 
-    A stock file that still claims to be a fork of a stock file would make every
-    install that pulls it look forked from itself.
+    Two of them, for one reason: a shipped file must not assert something that
+    is only true on the install that published it.
+
+    * ``forked_from``/``forked_at`` — a stock file that still claims to be a
+      fork of a stock file would make every install that pulls it look forked
+      from itself.
+    * ``created_by`` — the publisher's real Telegram id, which names nobody on
+      another box, yet the admin-principal rule and the legacy-restart owner
+      fallback both still act on it ([[CORR-705]]). The stores keep recording
+      the real creator in the local layer on purpose; this is the one boundary
+      it must not cross ([[CORR-721]]).
     """
     if path.suffix != ".md":
         return
@@ -237,14 +247,20 @@ def clear_fork_stamp(path: Path) -> None:
         meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     except OSError:
         return
-    if not meta or not (FORKED_FROM_KEY in meta or FORKED_AT_KEY in meta):
+    if not meta:
+        return
+    forked = FORKED_FROM_KEY in meta or FORKED_AT_KEY in meta
+    claims_creator = meta.get(CREATED_BY_KEY, 0) not in (0, None)
+    if not (forked or claims_creator):
         return
     meta.pop(FORKED_FROM_KEY, None)
     meta.pop(FORKED_AT_KEY, None)
+    if claims_creator:
+        meta[CREATED_BY_KEY] = 0
     try:
         atomic_write_text(path, render_frontmatter(meta, body))
     except OSError:
-        log.warning("Could not clear the fork stamp on %s", path, exc_info=True)
+        log.warning("Could not scrub %s for publishing", path, exc_info=True)
 
 
 # ── Publishing: the one sanctioned write into the shipped library ──
@@ -342,9 +358,9 @@ def publish_to_stock(agent_slug: str, path: str = "") -> dict:
     """Copy this install's agent (or one item of it) into the shipped library.
 
     The inverse of :func:`fork_if_stock`, and the only write into the tracked
-    tree in the product. The fork stamp is cleared on the way in — a shipped
-    file that still claimed to be forked from a shipped file would make every
-    install that pulls it look forked from itself.
+    tree in the product. Every copy is run through :func:`scrub_for_stock` on
+    the way in, which drops the facts that are true only of this install — the
+    fork stamp and the publisher's ``created_by``.
 
     Returns the paths to commit, relative to the repo, so the maintainer can see
     what their tree now holds. Overwriting is the point here (publishing an
@@ -366,7 +382,7 @@ def publish_to_stock(agent_slug: str, path: str = "") -> dict:
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(local_home / rel, destination)
-            clear_fork_stamp(destination)
+            scrub_for_stock(destination)
         except OSError:
             log.warning("Could not publish %s/%s", agent_slug, rel, exc_info=True)
             continue

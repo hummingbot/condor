@@ -23,6 +23,7 @@ import pytest
 
 from condor.agents.agent import AgentStore
 from condor.agents.strategy import StrategyStore
+from condor.frontmatter import parse_frontmatter
 from condor.layering import FORKED_FROM_KEY
 from condor.memory.paths import (
     agent_home,
@@ -687,6 +688,51 @@ def test_publishing_clears_the_fork_stamp(stock):
     # install that pulls it look forked from itself.
     assert FORKED_FROM_KEY not in (stock / "AGENT.md").read_text()
     assert "Mine." in (stock / "AGENT.md").read_text()
+
+
+def test_publishing_zeroes_the_creator_and_leaves_the_local_copy_alone(stock):
+    """The publisher's Telegram id is a local fact — it must not ship.
+
+    It names nobody on the box that pulls the file, yet the admin-principal
+    rule and the legacy-restart owner fallback both still act on it
+    ([[CORR-705]], [[CORR-721]]). The stores go on recording the real creator
+    locally, which is deliberate.
+    """
+    from condor.layering import publish_to_stock
+
+    home = agent_home("perps")
+    _write(
+        home / "AGENT.md",
+        "---\nname: Perps\ndescription: mine\ncreated_by: 481175164\n---\n\nF.\n",
+    )
+    _write(
+        home / "loops" / "carry" / "loop.md",
+        "---\nname: Carry\ncreated_by: 481175164\n---\n\ntick\n",
+    )
+
+    assert publish_to_stock("perps")["published"] is True
+
+    shipped = stock_agent_home("perps")
+    for rel in ("AGENT.md", "loops/carry/loop.md"):
+        meta, _ = parse_frontmatter((shipped / rel).read_text())
+        assert meta["created_by"] == 0, rel
+        # The local layer keeps the operator's own id.
+        local_meta, _ = parse_frontmatter((home / rel).read_text())
+        assert local_meta["created_by"] == 481175164, rel
+
+
+def test_publishing_leaves_a_file_that_claims_nothing_untouched(stock):
+    """No creator and no fork stamp means nothing to scrub — and no rewrite."""
+    from condor.layering import publish_to_stock
+
+    home = agent_home("perps")
+    source = _write(
+        home / "AGENT.md", AGENT_MD.format(name="Perps", desc="mine", body="Funding.")
+    )
+
+    assert publish_to_stock("perps", "AGENT.md")["published"] is True
+
+    assert (stock_agent_home("perps") / "AGENT.md").read_text() == source.read_text()
 
 
 def test_publishing_is_admin_only(stock, monkeypatch):
