@@ -2260,12 +2260,21 @@ def _apply_cli_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
     parser.add_argument("--server-name")
+    # Who to attribute this process's calls to (FEAT-138). Non-secret labels,
+    # so argv is the right channel: they make a running subprocess identifiable
+    # in ``ps`` the way ``--server-name`` already does.
+    parser.add_argument("--agent-slug")
+    parser.add_argument("--caller-id")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
     if args.server_name:
         settings.server_name = args.server_name
+    if args.agent_slug:
+        settings.agent_slug = args.agent_slug
+    if args.caller_id:
+        settings.caller_id = args.caller_id
 
 
 async def _run():

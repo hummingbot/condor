@@ -10,6 +10,8 @@ import {
   driftLines,
   dueInSec,
   effectiveModel,
+  throttleLines,
+  throttledVenues,
   tickCountdownLabel,
 } from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
@@ -75,6 +77,10 @@ export function LoopBar({
   // there is one — a stopped run's drift is not a thing an operator can act on.
   const drift = driftLines(instance);
   const model = effectiveModel(instance);
+  // Which venues are refusing this session (FEAT-138). A venue condition, so it
+  // is worded as the venue's doing and sits apart from the run's own error —
+  // before this a throttled host reached the operator as a slow tick.
+  const throttled = throttledVenues(instance);
 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border)] px-4 py-1.5 text-xs">
@@ -162,6 +168,21 @@ export function LoopBar({
           >
             {model.active}
             {model.mismatch ? ` (pinned ${model.requested})` : ""}
+          </span>
+        </>
+      )}
+
+      {throttled.length > 0 && (
+        <>
+          <span className="opacity-40">·</span>
+          <span
+            data-venue-throttled
+            title={`These venues are refusing our calls — not a strategy fault:\n${throttleLines(throttled).join("\n")}`}
+            className="rounded bg-amber-400/15 px-1.5 py-0.5 font-medium text-amber-400"
+          >
+            {throttled.length === 1
+              ? `${throttled[0].venue} throttling (${throttled[0].refusals} refused)`
+              : `${throttled.length} venues throttling`}
           </span>
         </>
       )}

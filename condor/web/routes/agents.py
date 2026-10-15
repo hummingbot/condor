@@ -182,6 +182,13 @@ class RunningInstance(BaseModel):
     #: What the loop last *did* — one ``AgentAction`` row, or null.
     last_did: dict[str, Any] | None = None
     last_error: str = ""
+    #: ── Throttling ([[FEAT-138]]) ──
+    #: The venues that have refused *this* session, each as a venue/connector
+    #: condition with the attempts / successes / refusals behind it. Beside
+    #: ``last_error`` and never inside it: a throttled venue is not this agent's
+    #: failure, and reading it as one is what made it look like a strategy bug.
+    #: Empty = checked and nothing refused.
+    throttled_venues: list[dict[str, Any]] = []
 
 
 #: Why a strategy's money could not be read, or ``""`` when it could (CORR-706).
@@ -724,6 +731,50 @@ class FleetMapResponse(BaseModel):
     #: before FEAT-106, because the pseudo-runs appended to ``owners`` carry an
     #: empty namespace and so match nothing by name.
     deeds: DeedIndexModel = Field(default_factory=DeedIndexModel)
+
+
+class VenueConditionModel(BaseModel):
+    """One (host, venue) pair's call accounting ([[FEAT-138]]).
+
+    ``condition`` is ``throttled`` while the venue has refused recently, else
+    ``ok``. The counts are cumulative for this process's lifetime, so "8
+    attempts, 0 successes, 8 refusals" is reproducible from them rather than
+    from a log sample — which is the finding this exists for (GitHub #276).
+    """
+
+    host: str = ""
+    venue: str = ""
+    condition: str = "ok"
+    attempts: int = 0
+    successes: int = 0
+    refusals: int = 0
+    errors: int = 0
+    last_refusal_at: float = 0.0
+    last_reason: str = ""
+
+
+class CallerVolumeModel(BaseModel):
+    """What one (agent, session, host) spent — who consumed whose budget.
+
+    The question [[CORR-726]]'s incident could not answer: nothing showed that
+    one 1.0s poller was the sole consumer starving a host. ``agent`` empty means
+    the calls were made by a seat carrying no agent label (a chat session).
+    """
+
+    agent: str = ""
+    agent_id: str = ""
+    host: str = ""
+    attempts: int = 0
+    successes: int = 0
+    refusals: int = 0
+    errors: int = 0
+    last_refusal_at: float = 0.0
+    last_reason: str = ""
+
+
+class VenueConditionsResponse(BaseModel):
+    venues: list[VenueConditionModel] = []
+    callers: list[CallerVolumeModel] = []
 
 
 class CreateAgentRequest(BaseModel):
@@ -1376,6 +1427,7 @@ def _instance_from_engine(
         last_action=read_last_action(getattr(engine, "journal", None)),
         last_did=read_last_did(engine),
         last_error=info.get("last_error", "") or "",
+        throttled_venues=list(info.get("throttled_venues") or []),
     )
 
 
@@ -1676,6 +1728,31 @@ async def get_fleet_map(user: WebUser = Depends(get_current_user)):
             },
             since=index.since,
         ),
+    )
+
+
+@router.get("/venue-conditions", response_model=VenueConditionsResponse)
+async def get_venue_conditions(user: WebUser = Depends(get_current_user)):
+    """Which venues are refusing us, and which agent spent the host's budget.
+
+    The accounting FEAT-138 added, read off the shared call log every MCP
+    subprocess appends to (:mod:`condor.agents.throttle`). Two folds of the same
+    counters, because they answer two different questions: ``venues`` is a
+    condition of the venue (never of an agent), and ``callers`` names the agent
+    and session whose call volume consumed a host.
+
+    Makes no Hummingbot API call and no network call at all — one incremental
+    read of a local log — so a diagnostics view can poll it.
+
+    A literal path, and so registered before the ``/{slug}`` catch-all.
+    """
+    from condor.agents.throttle import ledger
+
+    book = ledger()
+    book.ingest()
+    return VenueConditionsResponse(
+        venues=[VenueConditionModel(**row) for row in book.venue_conditions()],
+        callers=[CallerVolumeModel(**row) for row in book.caller_volume()],
     )
 
 

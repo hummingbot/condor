@@ -21,6 +21,7 @@ import type {
   AgentSummary,
   RunningInstance,
   StrategySummary,
+  VenueCondition,
 } from "@/lib/api";
 import { positionQuoteValue } from "@/lib/pnl-chart";
 import type { ConvertQuote, PerfLeaf } from "@/lib/perf-tree";
@@ -247,6 +248,43 @@ export function effectiveModel(
   const r = requested.toLowerCase();
   const mismatch = !!r && !a.includes(r) && !r.includes(a);
   return { active, requested, mismatch };
+}
+
+/**
+ * The venues refusing this session right now, worst first (FEAT-138).
+ *
+ * Only the ones whose `condition` is still `throttled`: the counts stay on the
+ * payload as the record, but a venue that refused an hour ago is not something
+ * an operator can act on now. Reported as a *venue* condition and never
+ * alongside the session's errors — the agent did nothing wrong, and the whole
+ * reason throttling read as a mysterious strategy bug is that nobody drew that
+ * line (GitHub #276).
+ *
+ * Empty array for a session nothing is refusing, and for an older backend that
+ * does not send the field at all — which read the same way before this existed.
+ */
+export function throttledVenues(live: RunningInstance | null): VenueCondition[] {
+  const rows = live?.throttled_venues ?? [];
+  return rows
+    .filter((row) => row.condition === "throttled")
+    .slice()
+    .sort((a, b) => b.refusals - a.refusals || a.venue.localeCompare(b.venue));
+}
+
+/**
+ * How a throttled venue reads: what refused, and the count behind the claim.
+ *
+ * The counts are the point. "Intermittent, may recover" was what sampling the
+ * logs said about a host that had answered 0 of 8 calls, so a surface naming
+ * the venue has to print attempts and successes beside the refusals.
+ */
+export function throttleLines(venues: readonly VenueCondition[]): string[] {
+  return venues.map(
+    (v) =>
+      `${v.venue}${v.host ? ` on ${v.host}` : ""}: ${v.attempts} attempt${
+        v.attempts === 1 ? "" : "s"
+      }, ${v.successes} ok, ${v.refusals} refused`,
+  );
 }
 
 /** Running, then paused, then everything idle — the sort's first key. */

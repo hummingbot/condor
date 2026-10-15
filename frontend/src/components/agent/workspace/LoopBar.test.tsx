@@ -13,7 +13,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunningInstance } from "@/lib/api";
+import type { RunningInstance, VenueCondition } from "@/lib/api";
 import { LoopBar } from "./LoopBar";
 
 let host: HTMLDivElement;
@@ -168,5 +168,94 @@ describe("the effective model", () => {
     // back as the answer would be the audit answering itself.
     await render(bar(instance({ agent_key: "ollama:llama3.1" })));
     expect(host.querySelector("[data-effective-model]")).toBeNull();
+  });
+});
+
+/**
+ * A venue refusing us, worded as the venue's doing (FEAT-138).
+ *
+ * GitHub #276: "Throttling generally looked like a mysterious strategy bug or a
+ * vendor outage, not like what it was." The bar is where the operator is
+ * already watching the loop, so the condition has to be visible there — and it
+ * has to name the venue and the counts, because sampling the logs said one host
+ * was "intermittent" when it had answered 0 of 8 calls.
+ */
+describe("a throttled venue", () => {
+  function throttled(over: Partial<VenueCondition> = {}): VenueCondition {
+    return {
+      host: "brigado",
+      venue: "gate_io",
+      condition: "throttled",
+      attempts: 8,
+      successes: 0,
+      refusals: 8,
+      errors: 0,
+      last_refusal_at: NOW / 1000 - 5,
+      last_reason: "venue returned HTTP 429 (too many requests)",
+      ...over,
+    };
+  }
+
+  it("names the venue and the refusals it made", async () => {
+    await render(bar(instance({ throttled_venues: [throttled()] })));
+
+    const badge = host.querySelector("[data-venue-throttled]");
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain("gate_io");
+    expect(badge!.textContent).toContain("8 refused");
+  });
+
+  it("puts the counts behind the claim on the badge itself", async () => {
+    await render(bar(instance({ throttled_venues: [throttled()] })));
+
+    const title = host
+      .querySelector("[data-venue-throttled]")!
+      .getAttribute("title")!;
+    // The three numbers are the whole finding: 8 attempts, 0 ok, 8 refused is
+    // "consistently refused", not "intermittent, may recover".
+    expect(title).toContain("8 attempts, 0 ok, 8 refused");
+    expect(title).toContain("not a strategy fault");
+  });
+
+  it("says it is the venue and never the agent", async () => {
+    await render(
+      bar(instance({ throttled_venues: [throttled()], last_error: "" })),
+    );
+
+    const badge = host.querySelector("[data-venue-throttled]")!;
+    expect(badge.textContent).toContain("throttling");
+    expect(badge.textContent).not.toMatch(/error|failed/i);
+  });
+
+  it("counts the venues when more than one is refusing", async () => {
+    await render(
+      bar(
+        instance({
+          throttled_venues: [
+            throttled(),
+            throttled({ venue: "kucoin", refusals: 3 }),
+          ],
+        }),
+      ),
+    );
+
+    expect(
+      host.querySelector("[data-venue-throttled]")!.textContent,
+    ).toContain("2 venues throttling");
+  });
+
+  it("badges nothing for a venue that has stopped refusing", async () => {
+    // The counts stay on the payload as the record; the badge is for what an
+    // operator can act on now.
+    await render(
+      bar(instance({ throttled_venues: [throttled({ condition: "ok" })] })),
+    );
+
+    expect(host.querySelector("[data-venue-throttled]")).toBeNull();
+  });
+
+  it("badges nothing when the backend does not report venues at all", async () => {
+    await render(bar(instance()));
+    expect(host.querySelector("[data-venue-throttled]")).toBeNull();
   });
 });

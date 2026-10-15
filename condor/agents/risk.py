@@ -658,17 +658,41 @@ class RefusalLog:
     So the gate writes down why it said no. Same shape as ``BotLedger``'s
     violation list, and used the same way: appended here, drained by the engine
     after the tick, journaled, and shown in the next tick's prompt.
+
+    One tick has one refusal surface, so the *venue* refusing is recorded here
+    too rather than in a parallel store (FEAT-138): a 429 counted in the tool
+    path arrives with ``kind="throttle"`` and the venue it came from. The kind
+    is what keeps the two apart where it matters — a throttle refusal is a
+    venue condition and the agent did nothing wrong, while a gate refusal is a
+    decision about what the agent asked for — and reading them as one thing is
+    what made throttling look like a strategy bug (GitHub #276).
     """
+
+    #: The gate said no about this call.
+    KIND_RISK = "risk"
+    #: The venue said no about this host. Counted in the tool path, not here.
+    KIND_THROTTLE = "throttle"
 
     def __init__(self) -> None:
         self._pending: list[dict[str, Any]] = []
 
-    def note(self, tool: str, reason: str, now: float | None = None) -> None:
+    def note(
+        self,
+        tool: str,
+        reason: str,
+        now: float | None = None,
+        kind: str = KIND_RISK,
+        venue: str = "",
+        host: str = "",
+    ) -> None:
         self._pending.append(
             {
                 "tool": tool or "",
                 "reason": reason or "",
                 "at": time.time() if now is None else now,
+                "kind": kind or self.KIND_RISK,
+                "venue": venue or "",
+                "host": host or "",
             }
         )
         self._pending = self._pending[-_MAX_REFUSALS:]

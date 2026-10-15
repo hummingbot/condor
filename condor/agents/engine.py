@@ -1103,6 +1103,12 @@ class TickEngine:
         ``failure`` is set when the model turn itself failed; the tick is still
         recorded in full, marked as failed.
         """
+        # What the venue refused this tick, counted in the tool path by the MCP
+        # subprocess, folded in here so it joins the gate's own refusals in one
+        # surface (FEAT-138). Before the drain, so this tick's 429s reach the
+        # journal and the next tick's prompt instead of lagging a tick behind.
+        self._ingest_throttle_refusals()
+
         # What the gate refused this tick, taken before either branch below so a
         # dry run and a live tick both carry it. It reaches the agent through the
         # next tick's prompt; the journal entry below is for the human reading
@@ -1620,6 +1626,53 @@ class TickEngine:
                 f"namespace '{self.ledger.namespace}'",
             )
 
+    def _ingest_throttle_refusals(self) -> None:
+        """Move this session's venue refusals into the tick's refusal log.
+
+        The count is taken where the call is made — the ``hummingbot_api`` MCP
+        subprocess, the one place that sees every agent call and its status —
+        and travels back on the shared log
+        (:mod:`condor.agents.throttle`). Here it becomes a refusal like any
+        other, tagged ``throttle`` with the venue that refused, so the journal
+        and the next tick's prompt both carry it.
+
+        Deliberately *not* folded into ``_last_error``: the agent did nothing
+        wrong, and recording a throttled venue as an agent failure is what made
+        it read as a mysterious strategy bug (GitHub #276). Best-effort — an
+        unreadable log leaves the tick exactly as it was.
+        """
+        try:
+            from condor.agents.throttle import ledger
+
+            book = ledger()
+            book.ingest()
+            for event in book.drain_refusals(self.agent_id):
+                self._refusals.note(
+                    event.get("tool", "") or "a venue call",
+                    event.get("reason", "") or "the venue refused the call",
+                    now=event.get("at") or None,
+                    kind=RefusalLog.KIND_THROTTLE,
+                    venue=event.get("venue", ""),
+                    host=event.get("host", ""),
+                )
+        except Exception:  # noqa: BLE001 - accounting may never fail a tick
+            log.debug("throttle ingest failed", exc_info=True)
+
+    def _throttled_venues(self) -> list[dict[str, Any]]:
+        """The venues that have refused this session, for the status payload.
+
+        Reported as a venue/connector condition and never as this agent's
+        error, which is the whole distinction FEAT-138 exists to draw. Empty
+        when nothing has refused — and empty, not absent, so a reader can tell
+        "checked, nothing" from "no counters at all".
+        """
+        try:
+            from condor.agents.throttle import ledger
+
+            return ledger().session_venues(self.agent_id)
+        except Exception:  # noqa: BLE001
+            return []
+
     def _journal_refusals(self, tick_num: int) -> None:
         """Record what the risk gate refused this tick, and why.
 
@@ -1633,6 +1686,17 @@ class TickEngine:
         if not self._last_refusals or not self.journal:
             return
         for entry in self._last_refusals:
+            if entry.get("kind") == RefusalLog.KIND_THROTTLE:
+                # A separate label on purpose: a reader scanning the journal for
+                # why a session stalled must be able to tell "the venue refused
+                # us" from "the gate refused the agent" without reading prose.
+                venue = entry.get("venue") or "the venue"
+                self.journal.append_action(
+                    tick_num,
+                    "venue_throttled",
+                    f"{venue} refused {entry['tool']} — {entry['reason']}",
+                )
+                continue
             self.journal.append_action(
                 tick_num,
                 "risk_blocked",
@@ -1940,6 +2004,10 @@ class TickEngine:
             "last_reading_at": self._last_reading_at,
             "last_successful_action_at": self._last_successful_action_at,
             "last_error": self._last_error,
+            #: Which venues refused *this* session, with the attempts /
+            #: successes / refusals behind the claim ([[FEAT-138]]). A venue
+            #: condition, deliberately beside ``last_error`` and not inside it.
+            "throttled_venues": self._throttled_venues(),
             "session_dir": str(self.session_dir) if self.session_dir else "",
             "is_experiment": self.is_experiment,
         }
@@ -1973,6 +2041,9 @@ def build_gated_client(
         tick=True,
         server_pinned=engine.server_pinned,
         server_required=True,
+        # So a 429 this seat's tools are handed is counted against this session
+        # and not merely against the agent ([[FEAT-138]]).
+        caller_id=engine.agent_id,
     )
     permission_cb = auto_approve_with_risk_check(
         engine.risk,

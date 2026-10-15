@@ -290,6 +290,8 @@ def _hummingbot_mcp_args(
     server_name: str,
     profile: str = "full",
     muted_tools: Sequence[str] = (),
+    agent_slug: str | None = None,
+    caller_id: str = "",
 ) -> list[str]:
     """Build CLI args for the hummingbot MCP subprocess.
 
@@ -298,8 +300,20 @@ def _hummingbot_mcp_args(
     (SEC-095). Every element is a string: YAML loads unquoted numerics as int
     (e.g. ``port: 8000``), and pydantic-ai's StdioServerParameters rejects
     non-string args when starting LM Studio / other local-model sessions.
+
+    ``agent_slug`` and ``caller_id`` are who to attribute this subprocess's
+    calls to (FEAT-138): the agent that spends a host's budget, and the session
+    whose ``RefusalLog`` a venue refusal belongs in. Labels, not credentials —
+    the server stamps them on a counter and still reads no agent registry — so
+    argv is the right channel, and omitting them (a chat seat with no agent, a
+    delegation) honestly leaves the counter unattributed.
     """
     api_url = f"http://{server['host']}:{server['port']}"
+    attribution: list[str] = []
+    if agent_slug:
+        attribution += ["--agent-slug", str(agent_slug)]
+    if caller_id:
+        attribution += ["--caller-id", str(caller_id)]
     return (
         [
             "run",
@@ -313,6 +327,7 @@ def _hummingbot_mcp_args(
             "--profile",
             profile,
         ]
+        + attribution
         + _muted_tool_args(muted_tools)
         + _bot_id_args()
     )
@@ -330,6 +345,7 @@ def build_mcp_servers_for_session(
     session_key: str = "",
     server_pinned: bool = False,
     server_required: bool = False,
+    caller_id: str = "",
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -366,6 +382,13 @@ def build_mcp_servers_for_session(
 
     ``tick`` marks the unattended loop seat, which mounts the narrowest tool
     profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
+
+    ``caller_id`` is the session's own ``agent_id``, stamped onto the
+    hummingbot subprocess so a venue refusal it counts lands in *this*
+    session's ``RefusalLog`` rather than being folded across two concurrent
+    sessions of the same agent (FEAT-138). Only the tick engine has one; empty
+    everywhere else, which leaves those calls counted per agent and per venue
+    but attributed to no session.
 
     ``session_key`` is the chat seat's canonical key, and only a chat has one:
     an ask target, a delegate worker and a tick run for nobody's conversation and
@@ -491,13 +514,24 @@ def build_mcp_servers_for_session(
     # the command line, where any local `ps` recovered them (SEC-095). The
     # non-secret coordinates (url, server name) stay on argv, where they make a
     # running subprocess identifiable.
+    #
+    # The throttle log travels resolved, for the same reason the agent roots do
+    # above: a child that recomputed the default could land on a different path
+    # than its parent whenever the parent derived one from an override. Handing
+    # it over is also what keeps the counter out of ``condor`` — the MCP server
+    # imports nothing to find its log (FEAT-138).
+    from condor.agents.throttle import throttle_log_path
+
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": _hummingbot_mcp_args(server, server_name, profile, muted_tools),
+        "args": _hummingbot_mcp_args(
+            server, server_name, profile, muted_tools, agent_slug, caller_id
+        ),
         "env": _env_entries(
             HUMMINGBOT_API_USERNAME=server["username"],
             HUMMINGBOT_API_PASSWORD=server["password"],
+            CONDOR_THROTTLE_LOG=str(throttle_log_path()),
         ),
     }
 

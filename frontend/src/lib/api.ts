@@ -832,6 +832,59 @@ export interface RunningInstance {
   /** What the loop last *did* — one mutating tool call, or null. */
   last_did: AgentActionRow | null;
   last_error: string;
+  /**
+   * The venues that refused *this* session (FEAT-138) — a venue/connector
+   * condition, deliberately not folded into `last_error`. The agent did
+   * nothing wrong, and reading a throttled venue as an agent failure is what
+   * made it look like a strategy bug. Absent on an older backend; `[]` means
+   * checked and nothing refused.
+   */
+  throttled_venues?: VenueCondition[];
+}
+
+/**
+ * One (host, venue) pair's call accounting (`FEAT-138`).
+ *
+ * `condition` is `"throttled"` while the venue has refused recently, else
+ * `"ok"`. The counts are cumulative, so `attempts === successes + refusals +
+ * errors` always holds — which is what makes "8 attempts, 0 successes, 8
+ * refusals" readable off the counters instead of sampled out of the logs.
+ */
+export interface VenueCondition {
+  host: string;
+  venue: string;
+  condition: "throttled" | "ok";
+  attempts: number;
+  successes: number;
+  refusals: number;
+  errors: number;
+  last_refusal_at: number;
+  last_reason: string;
+}
+
+/**
+ * What one (agent, session, host) spent — who consumed whose budget.
+ *
+ * The question CORR-726's incident could not answer: nothing showed that one
+ * 1.0s poller was the sole consumer starving a host. `agent` empty means a
+ * seat with no agent label made the calls.
+ */
+export interface CallerVolume {
+  agent: string;
+  agent_id: string;
+  host: string;
+  attempts: number;
+  successes: number;
+  refusals: number;
+  errors: number;
+  last_refusal_at: number;
+  last_reason: string;
+}
+
+/** `GET /agents/venue-conditions` — two folds of the same counters. */
+export interface VenueConditions {
+  venues: VenueCondition[];
+  callers: CallerVolume[];
 }
 
 /**
@@ -3183,6 +3236,16 @@ export const api = {
     }
     return { owners, deeds };
   },
+
+  /**
+   * Which venues are refusing us, and which agent spent the host's budget
+   * (FEAT-138).
+   *
+   * Like `getFleetMap`, no Hummingbot call at all — one incremental read of a
+   * local log — so a diagnostics view can poll it.
+   */
+  getVenueConditions: () =>
+    apiFetch<VenueConditions>("/api/v1/agents/venue-conditions"),
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),

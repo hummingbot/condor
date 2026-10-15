@@ -424,6 +424,9 @@ def test_every_pin_is_diffable_because_the_engine_reports_all_three():
         _last_reading_at=0.0,
         _last_successful_action_at=0.0,
         _last_error="",
+        # The throttle accounting the status also carries ([[FEAT-138]]); this
+        # stub answers for every read ``get_info`` makes, by design.
+        _throttled_venues=lambda: [],
         session_dir=None,
         is_experiment=False,
     )
