@@ -975,9 +975,41 @@ async def _walk_instance_history(
             float(perf.get("cum_fees_quote", 0) or 0),
         )
     return {
-        cid: (quotes.get(cid, ""), sorted(samples.items()))
+        cid: (quotes.get(cid, ""), _drop_dead_readings(sorted(samples.items())))
         for cid, samples in by_controller.items()
     }
+
+
+_DEAD_READING = (0.0, 0.0, 0.0, 0.0)
+
+
+def _drop_dead_readings(
+    samples: list[tuple[float, tuple[float, float, float, float]]],
+) -> list[tuple[float, tuple[float, float, float, float]]]:
+    """Drop all-zero readings that follow a real one in a controller's series.
+
+    A controller whose strategy died while its bot stayed listed keeps
+    reporting, and reports 0/0: its cumulative appears to fall back to zero.
+    Every session figure is a difference of cumulatives (:func:`slice_history`),
+    so that fall read as negative volume and invented PnL for a bot adopted
+    mid-life, and erased a bot born and killed inside one session (0 − 0).
+    These figures are cumulative within an instance — a restart is a new
+    instance name — so a real reading followed by zeros is never the truth.
+    Dropping the zeros lets the forward-carry in
+    :func:`merge_controller_series` hold the last real reading, the same rule
+    the hackathon race monitor's ledger applies. Zeros *before* the first real
+    reading are a controller that has not traded yet, and are kept.
+    """
+    out: list[tuple[float, tuple[float, float, float, float]]] = []
+    traded = False
+    for epoch, values in samples:
+        if values == _DEAD_READING:
+            if traded:
+                continue
+        else:
+            traded = True
+        out.append((epoch, values))
+    return out
 
 
 def merge_controller_series(
