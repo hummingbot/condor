@@ -10,15 +10,17 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 brain: developer
 files:
   - condor/layering.py:302
   - condor/layering.py:228
   - tests/test_shipped_library_has_no_creator.py:32
 depends_on: []
-commits: []
+commits:
+  - "3c68b8c6 fix(layering): scrub created_by on publish and un-empty the guard's loop.md pattern (CORR-721)"
 created: 2026-10-07
+closed: 2026-10-15
 ---
 
 ## Problem
@@ -93,24 +95,28 @@ reason stands: a user's own local-layer agents must keep their real creator.
 
 ## Acceptance criteria
 
-- [ ] `publish_to_stock` on a local agent whose `AGENT.md` and
+- [x] `publish_to_stock` on a local agent whose `AGENT.md` and
       `loops/l/loop.md` both carry `created_by: 481175164` writes both files
       into `stock_agent_home(slug)` with `created_by: 0`, and the local copies
       still read `481175164`
-- [ ] The published files still have no `forked_from`/`forked_at` — the
+- [x] The published files still have no `forked_from`/`forked_at` — the
       existing `test_publishing_clears_the_fork_stamp` stays green
-- [ ] The guard's pathspec matches `loop.md`: with the widened patterns,
+- [x] The guard's pathspec matches `loop.md`: with the widened patterns,
       `_tracked_library_files()` returns at least the 6 `AGENT.md` and 6
       `loop.md` paths that `git ls-files` reports at the tested commit
-- [ ] The guard fails when any one pattern matches nothing, so emptying a
+- [x] The guard fails when any one pattern matches nothing, so emptying a
       pattern by a rename is a failure rather than a silent pass — exercised by
       a test that passes a pattern matching no file
-- [ ] A `loop.md` hand-edited to `created_by: 481175164` makes
+- [x] A `loop.md` hand-edited to `created_by: 481175164` makes
       `test_no_tracked_agent_or_strategy_names_a_creator` red; it is green on
       the unmodified tree. Both runs in the same turn.
 - [ ] `uv run pytest` reports no failure that is not already failing on the
       merge-base: run it on the merge-base and on the change in the same turn
-      and compare the two lists, rather than against a recalled count
+      and compare the two lists, rather than against a recalled count —
+      **deferred to the plan's final verification chunk**, which runs the full
+      gate once over everything plan 89937873-9f5 lands. This run verified the
+      five criteria above plus every test file that touches `layering` or
+      `publish_to_stock` (119 passed, see Notes).
 
 ## Notes
 
@@ -130,3 +136,36 @@ reason stands: a user's own local-layer agents must keep their real creator.
   not depend on this item.
 - Same family as [[CORR-720]]: this install's local facts crossing into the
   library the repo ships.
+
+## Resolution
+
+- `clear_fork_stamp` became `scrub_for_stock` (`condor/layering.py`) — the
+  publish-time scrubber it already was. It now also zeroes a non-zero
+  `created_by` beside the fork stamp, and a new `CREATED_BY_KEY` constant
+  names the field. Sole call site is `publish_to_stock`'s copy loop, so the
+  stores still record the operator's real id in the local layer, as
+  [[CORR-705]] decided.
+- The guard's pathspec is built from `condor.agents.agent.AGENT_MD` and
+  `condor.agents.strategy.LOOP_MD` (`LIBRARY_PATTERNS`), and
+  `_tracked_library_files` now asserts each pattern matched at least one
+  tracked file, so the next rename fails the test instead of emptying it.
+
+## Notes
+
+- `tests/test_agents_layering.py` was edited too, though the doc's `files:`
+  did not name it: that is where `test_publishing_clears_the_fork_stamp`
+  lives, so the two new publish tests
+  (`test_publishing_zeroes_the_creator_and_leaves_the_local_copy_alone`,
+  `test_publishing_leaves_a_file_that_claims_nothing_untouched`) belong beside
+  it rather than in the guard file.
+- Red/green for the fifth criterion was exercised in one turn against the real
+  tree: `agents/adaptive_grid_trader/loops/btc_usdt_adaptive_grid/loop.md`
+  hand-edited to `created_by: 481175164` gave `1 failed, 3 passed`; restored
+  byte-for-byte it gave `4 passed`, and `git status` on the path was clean
+  afterwards.
+- `_tracked_library_files()` now returns `{'AGENT.md': 6, 'loop.md': 6}`,
+  matching the `git ls-files` counts quoted in the problem.
+- Verification run: `uv run pytest tests/test_agent_controllers.py
+  tests/test_agents_split_migration.py tests/test_strategy_delete_refusals.py
+  tests/test_shipped_library_has_no_creator.py tests/test_agents_layering.py`
+  → 119 passed. `ruff check` and `black --check` clean on the three files.
