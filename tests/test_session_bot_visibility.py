@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from condor.agents.attribution import OwnershipWindow
 from condor.agents.performance import fetch_agent_performance
 from condor.fetchers.bot_performance import (
     _aggregate_by_bot,
@@ -301,6 +302,88 @@ def test_volume_without_a_fee_column_reads_as_unknown_not_free():
     _client, perf = _perf_for_three_deploys()
     assert perf.fees == 0.0
     assert perf.fees_known is False
+
+
+def _hist(ts, cum_realized, cum_volume):
+    return {
+        "timestamp": ts,
+        "performance": {
+            "realized_pnl_quote": cum_realized,
+            "volume_traded": cum_volume,
+            "close_type_counts": {},
+        },
+    }
+
+
+def _epoch(iso):
+    from datetime import datetime
+
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def _two_generations():
+    """One stopped deployment of ``b``, then the live one this session runs."""
+    old, live = "b-20260806-213931", "b-20260807-045821"
+    deployed_at = "2026-08-07T04:58:21+00:00"
+    client = _FakeClient(
+        snapshots=[
+            _snap(
+                old, "btc", realized=-0.3, volume=386.0, ts="2026-08-06T23:00:00+00:00"
+            ),
+            _snap(
+                live, "sol", realized=1.5, volume=500.0, ts="2026-08-07T09:57:00+00:00"
+            ),
+        ],
+        history={
+            old: [
+                _hist("2026-08-06T21:47:00+00:00", 0.0, 0.0),
+                _hist("2026-08-06T23:00:00+00:00", -0.3, 386.0),
+            ],
+            live: [
+                _hist(deployed_at, 0.0, 0.0),
+                _hist("2026-08-07T09:57:00+00:00", 1.5, 500.0),
+            ],
+        },
+    )
+
+    async def _active():
+        return {"data": {live: {}}}
+
+    client.get_active_bots_status = _active
+    return client, _epoch(deployed_at)
+
+
+def test_an_ownership_window_drops_a_prior_generations_volume():
+    """#262: with no window, a session reports the base's whole lifetime.
+
+    The symptom the missed adoption produced. ``windows={}`` is the state a
+    session is left in when nothing ever recorded it owning the bot it deployed
+    (CORR-724): every figure falls back to the base's lifetime aggregate, which
+    pools every deployment ever made under that name — so this session's Executor
+    State carried a stopped predecessor's $386 of volume and its $0.30 loss.
+
+    Recorded ownership is what scopes them. The window, not the file, is the
+    thing: once it exists the figures are sliced out of the controller history
+    over this session's own span, and the dead generation contributes nothing.
+    """
+    client, deployed_at = _two_generations()
+
+    lifetime = asyncio.run(fetch_agent_performance(client, "agent_1", bot_names=["b"]))
+    assert lifetime.volume == 886.0  # 500 of ours + 386 that was not
+    assert round(lifetime.realized_pnl, 2) == 1.2
+
+    owned = asyncio.run(
+        fetch_agent_performance(
+            client, "agent_1", windows={"b": OwnershipWindow(deployed_at)}
+        )
+    )
+
+    assert owned.volume == 500.0
+    assert round(owned.realized_pnl, 2) == 1.5
+    # Both deployments are still *named* — the session ran under this base — and
+    # the open book is still the live one's.
+    assert owned.bot_instances == ["b-20260806-213931", "b-20260807-045821"]
+    assert owned.bot_names == ["b-20260807-045821"]
 
 
 def test_a_lifetime_fee_column_keeps_its_figure_but_not_its_certainty():

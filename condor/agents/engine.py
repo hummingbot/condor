@@ -164,7 +164,11 @@ class TickEngine:
     # announced once instead of on every one of them.
     _last_block_reason: str = field(default="", init=False, repr=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
-    _adoption_done: bool = field(default=False, init=False, repr=False)
+    # The recorded-deploy bases the last adoption pass was matched against, so a
+    # deploy written to the action log afterwards re-opens adoption for one more
+    # pass. Whether adoption is *settled* is read off the ledger itself, by the
+    # ``_adoption_done`` property — never latched by a pass having run (CORR-724).
+    _adoption_deploys: set[str] = field(default_factory=set, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
     # What the risk gate refused, and why. The gate appends during the tick
     # (condor.agents.risk.RefusalLog); the tick drains it into the journal and
@@ -1077,10 +1081,24 @@ class TickEngine:
                 f"${limit:,.2f} limit"
             )
 
+    @property
+    def _adoption_done(self) -> bool:
+        """Adoption is settled: this session's fleet is on the ledger.
+
+        Read off the ledger rather than latched by a pass having run. The two
+        used to be the same flag, and a first pass that reached the API and
+        found nothing to adopt — an empty server, a deployment still seconds
+        away — closed adoption for the life of the session. Owning nothing is
+        not a finished state; it is what every missed deployment leaves behind,
+        and it is the state :meth:`_adopt_running_bots` exists to leave
+        (CORR-724).
+        """
+        return bool(self.ledger is not None and self.ledger.bases())
+
     async def _adopt_running_bots(self, client) -> None:
         """Record the bots already live that belong to us (FEAT-017).
 
-        Runs once, on the first tick — not in ``__post_init__``, which is sync and
+        Runs at most once per tick — not in ``__post_init__``, which is sync and
         must not do network I/O. Reaching the API is best-effort: a failure means
         "own nothing yet" and is retried on the next tick, never fatal.
 
@@ -1090,12 +1108,14 @@ class TickEngine:
         this strategy's bot, and the session that just replaced that one inherits
         it. Both rules are conservative — an unrecognised bot is left alone.
 
-        All three rules match a *name*, and the performance snapshot they are
-        matched against is not a list of what is running: it keeps every bot the
-        API ever orchestrated, a stopped one's frozen final row included. So the
-        names are filtered through the orchestrator's live listing first
-        (CORR-699), or a restart would adopt every bot the strategy has ever run
-        and open an ownership window, starting now, on bots that are dead.
+        All three rules match a *name*, and the names they are matched against are
+        the orchestrator's live listing. The controller-performance snapshot is not
+        a list of what is running — it keeps every bot the API ever orchestrated, a
+        stopped one's frozen final row included — so it was only ever usable here
+        once filtered through that listing (CORR-699), which left it with nothing
+        to add: every name it contributed that survived the filter was already in
+        the listing, and a bot that is live but has no performance row yet was
+        dropped for the lack of it (CORR-724).
 
         Adoption is not a read: it opens an ownership window starting now and
         makes every later stop/resume/redeploy target a real bot. So an *unknown*
@@ -1103,23 +1123,43 @@ class TickEngine:
         snapshot — the one failure this function used not to route through its own
         best-effort contract (CORR-723). The read surfaces keep the fallback.
         """
-        if self._adoption_done or self.ledger is None:
+        if self.ledger is None:
             return
-        from condor.fetchers.bot_performance import (
-            fetch_all_bot_performance,
-            fetch_live_instance_names_checked,
-        )
 
-        try:
-            all_perf = await fetch_all_bot_performance(client)
-        except Exception as e:
-            log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
+        from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
+
+        # A third source, as conservative as the other two: the bases this
+        # session's *own* action log records deploying (FEAT-102). Reading back
+        # what we wrote is a record, not a guess, and it is what lets a restart
+        # — or a session whose first ticks predate this feature — recover its
+        # fleet on the next tick instead of never.
+        recorded = {
+            base
+            for base in (
+                strip_deploy_suffix(name)
+                for name in actions_mod.recorded_deploy_names(self.session_dir)
+            )
+            if base
+        }
+
+        # "Nothing to adopt yet" and "adoption is finished" used to be the same
+        # state: one successful pass closed adoption for the life of the session,
+        # so a bot deployed — or first seen — on any later tick was never owned,
+        # and the session then reported its lifetime totals instead of its own
+        # window (CORR-724). A pass is worth repeating while the ledger owns
+        # nothing, and again whenever this session's action log records a deploy
+        # the last pass had not seen; a bot confirmed live on a later tick is
+        # adopted then rather than never. Still one pass per tick at most, so
+        # this stays off the hot path, and both reads below are server-cached.
+        if self._adoption_done and not recorded - self._adoption_deploys:
             return
+
+        from condor.fetchers.bot_performance import fetch_live_instance_names_checked
 
         # Fail closed: an unanswered orchestrator means nothing here is known to
         # be running, and adopting on the unfiltered snapshot would open an
         # ownership window on bots that may be dead. Deferring costs a tick and
-        # is the same best-effort contract the snapshot failure above uses.
+        # is the same best-effort contract every other failure here uses.
         live, live_known = await fetch_live_instance_names_checked(client)
         if not live_known:
             log.warning(
@@ -1129,46 +1169,35 @@ class TickEngine:
             )
             return
 
-        from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
-
         # What a person has said is *not* ours, which outranks all three sources
         # below. Every one of them is an inference from a name or a log, and a
         # mis-attributed bot is one somebody has to be able to hand back — a
         # namespace match cannot be argued with, and a recorded deploy is a
         # permanent fact that would otherwise re-claim the bot on every restart
-        # for the life of the strategy.
+        # for the life of the strategy. Re-read on every pass, so a disown taken
+        # mid-session is honoured by the next one rather than only by the next
+        # process.
         disowned = read_disowned(getattr(self.strategy, "home", None))
 
-        inherited: set[str] = set()
+        inherited: set[str] = set(recorded)
         if not self.ledger.enforced and self.session_dir is not None:
-            inherited = prior_session_bases(self.session_dir.parent)
-
-        # A third source, as conservative as the other two: the bases this
-        # session's *own* action log records deploying (FEAT-102). Reading back
-        # what we wrote is a record, not a guess, and it is what lets a restart
-        # — or a session whose first ticks predate this feature — recover its
-        # fleet on the next tick instead of never.
-        recorded = {
-            strip_deploy_suffix(name)
-            for name in actions_mod.recorded_deploy_names(self.session_dir)
-        }
-        inherited |= {base for base in recorded if base}
+            inherited |= prior_session_bases(self.session_dir.parent)
 
         now = time.time()
-        for instance_name in all_perf:
-            if instance_name not in live:
-                continue
+        held = set(self.ledger.bases())
+        for instance_name in sorted(live):
             base = strip_deploy_suffix(instance_name)
             if base in disowned:
                 continue
             if self.ledger.owns(instance_name) or base in inherited:
                 self.ledger.adopt(instance_name, now)
-        self._adoption_done = True
-        if self.ledger.bases():
+        self._adoption_deploys = recorded
+        # Only what this pass added: with adoption no longer one-shot, logging
+        # the whole book would repeat it on every tick that retries.
+        adopted = sorted(set(self.ledger.bases()) - held)
+        if adopted:
             log.info(
-                "TickEngine %s adopted bots: %s",
-                self.agent_id,
-                ", ".join(self.ledger.bases()),
+                "TickEngine %s adopted bots: %s", self.agent_id, ", ".join(adopted)
             )
 
     async def _pnl_series(self) -> list[dict]:

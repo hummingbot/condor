@@ -8,6 +8,7 @@ behavior at the tool call.
 
 import asyncio
 import json
+import time
 
 from condor.agents.ownership import (
     BotLedger,
@@ -434,17 +435,8 @@ def test_experiment_engine_ledger_writes_no_file(tmp_path, monkeypatch):
 
 
 def test_engine_adopts_a_live_bot_in_its_namespace(tmp_path, monkeypatch):
-    from condor.fetchers import bot_performance
-
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
 
-    async def _fake_perf(client):
-        return {
-            f"{NS}-btc-20260731-101500": {"bot_name": f"{NS}-btc-20260731-101500"},
-            "someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"},
-        }
-
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
     # Both are running: the namespace, not liveness, is what decides here.
     client = _FakeClient(
         [
@@ -469,7 +461,6 @@ def test_engine_recovers_a_fleet_from_its_own_action_log(tmp_path, monkeypatch):
     source.
     """
     from condor.agents.actions import AgentAction, append_actions
-    from condor.fetchers import bot_performance
 
     engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
     assert not engine.ledger.enforced
@@ -490,13 +481,6 @@ def test_engine_recovers_a_fleet_from_its_own_action_log(tmp_path, monkeypatch):
         ],
     )
 
-    async def _fake_perf(client):
-        return {
-            "pmm-king-btcbrl-20260903-181000": {"bot_name": "pmm-king-btcbrl"},
-            "someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"},
-        }
-
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
     client = _FakeClient(
         [
             {"bot_name": "pmm-king-btcbrl-20260903-181000"},
@@ -512,7 +496,6 @@ def test_engine_recovers_a_fleet_from_its_own_action_log(tmp_path, monkeypatch):
 def test_engine_adopts_nothing_from_a_log_with_no_deploys(tmp_path, monkeypatch):
     """The third source stays as conservative as the other two."""
     from condor.agents.actions import AgentAction, append_actions
-    from condor.fetchers import bot_performance
 
     engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
     append_actions(
@@ -529,46 +512,41 @@ def test_engine_adopts_nothing_from_a_log_with_no_deploys(tmp_path, monkeypatch)
         ],
     )
 
-    async def _fake_perf(client):
-        return {"someone-elses-bot-20260731-101500": {"bot_name": "someone-elses-bot"}}
-
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
     # Listed as running, so what is left out is left out on the rule, not on
     # a deferral (CORR-723).
     client = _FakeClient([{"bot_name": "someone-elses-bot-20260731-101500"}])
     asyncio.run(engine._adopt_running_bots(client))
 
     assert engine.ledger.bases() == []
-    assert engine._adoption_done
+    # Owning nothing is not a finished state (CORR-724): the pass answered, and
+    # the next tick asks again in case this session's bot has since appeared.
+    assert not engine._adoption_done
 
 
-def test_engine_adoption_failure_is_non_fatal_and_retried(tmp_path, monkeypatch):
-    from condor.fetchers import bot_performance
+def test_adoption_owns_a_live_bot_the_snapshot_never_reported(tmp_path, monkeypatch):
+    """CORR-724: the live registry is the source set, not the performance snapshot.
 
+    Adoption used to iterate ``fetch_all_bot_performance`` and keep the names the
+    orchestrator also listed, so a bot that *is* live but has no performance row
+    yet — one deployed seconds ago, or one whose controllers have not reported —
+    could not be reached by any of the three rules however well its name matched
+    the namespace. And the snapshot failing outright deferred the whole pass.
+
+    ``_FakeClient`` answers the active-bots listing and nothing else, so it has no
+    performance endpoint at all: exactly that shape, and the bot is adopted from
+    the listing alone.
+    """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
 
-    async def _boom(client):
-        raise RuntimeError("api down")
+    asyncio.run(
+        engine._adopt_running_bots(
+            _FakeClient([{"bot_name": f"{NS}-btc-20260731-101500"}])
+        )
+    )
 
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _boom)
-    asyncio.run(engine._adopt_running_bots(object()))
-
-    assert engine.ledger.bases() == []
-    assert not engine._adoption_done  # next tick tries again
-
-
-def _two_in_namespace_bots(monkeypatch):
-    """Snapshot with two bots this namespace owns, one of them long stopped."""
-    from condor.fetchers import bot_performance
-
-    async def _fake_perf(client):
-        return {
-            f"{NS}-btc-20260731-101500": {"bot_name": f"{NS}-btc-20260731-101500"},
-            f"{NS}-eth-20260101-090000": {"bot_name": f"{NS}-eth-20260101-090000"},
-        }
-
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
-    bot_performance.clear_live_names_cache()
+    assert engine.ledger.bases() == [f"{NS}-btc"]
+    assert engine.ledger.owned()[0].origin == "adopted"
+    assert engine._adoption_done
 
 
 class _Orchestrator:
@@ -592,14 +570,14 @@ class _FakeClient:
 
 
 def test_adoption_skips_a_stopped_bot_in_the_namespace(tmp_path, monkeypatch):
-    """The snapshot is every bot ever run, so adopting from it raises the dead.
+    """A name in the namespace is not enough: the orchestrator has to still list it.
 
     Both bots below carry the namespace and would be adopted on name alone
-    (CORR-699). Only the one the orchestrator still lists is running, and only
-    that one may get an ownership window opened on it now.
+    (CORR-699) — the long-stopped ``-eth`` still has a frozen performance row to
+    be found in. Only the one the orchestrator lists is running, and only that
+    one may get an ownership window opened on it now.
     """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
-    _two_in_namespace_bots(monkeypatch)
 
     client = _FakeClient([{"bot_name": f"{NS}-btc-20260731-101500"}])
     asyncio.run(engine._adopt_running_bots(client))
@@ -617,7 +595,6 @@ def test_adoption_defers_when_liveness_is_unknown_and_retries(tmp_path, monkeypa
     and the deferral is the same best-effort retry a failed snapshot gets.
     """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
-    _two_in_namespace_bots(monkeypatch)
 
     asyncio.run(engine._adopt_running_bots(_FakeClient(RuntimeError("unavailable"))))
 
@@ -643,7 +620,6 @@ def test_adoption_defers_when_the_listing_is_an_error_payload(tmp_path, monkeypa
     empty server and adopt the whole snapshot unfiltered.
     """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
-    _two_in_namespace_bots(monkeypatch)
 
     asyncio.run(engine._adopt_running_bots(_FakeClient({"status": "error"})))
 
@@ -654,14 +630,77 @@ def test_adoption_defers_when_the_listing_is_an_error_payload(tmp_path, monkeypa
 def test_adoption_adopts_nothing_when_the_server_is_genuinely_empty(
     tmp_path, monkeypatch
 ):
-    """An empty *answer* is not unknown: nothing is live, and that is final."""
+    """An empty *answer* is not unknown: nothing is live, so nothing is adopted.
+
+    It is not final either (CORR-724). This pass used to set ``_adoption_done``
+    and close adoption for the life of the session, so a session whose first tick
+    landed a second before its bot appeared never owned it — and then reported
+    the bot's lifetime totals instead of its own window.
+    """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
-    _two_in_namespace_bots(monkeypatch)
 
     asyncio.run(engine._adopt_running_bots(_FakeClient([])))
 
     assert engine.ledger.bases() == []
-    assert engine._adoption_done  # answered — no point retrying every tick
+    assert not engine._adoption_done
+
+    # Second tick: the bot is up, and adoption is still open to see it.
+    asyncio.run(
+        engine._adopt_running_bots(
+            _FakeClient([{"bot_name": f"{NS}-btc-20260731-101500"}])
+        )
+    )
+
+    assert engine.ledger.bases() == [f"{NS}-btc"]
+    assert engine._adoption_done
+
+
+def test_a_recorded_deploy_is_adopted_on_the_tick_it_turns_up_live(
+    tmp_path, monkeypatch
+):
+    """CORR-724 / #262: ownership is repaired on confirmation, not only on tick 1.
+
+    The reported shape: a deployment the engine did not recognise as one, so
+    ``note_deploy`` never wrote the ledger — while the action log recorded it
+    happening. Two earlier passes had already run and found nothing, and the
+    one-shot gate meant none ever looked again. The session then operated the bot
+    with no ownership window at all, and its figures fell back to the base's
+    lifetime totals, carrying an earlier stopped deployment's volume and PnL.
+    """
+    from condor.agents.actions import AgentAction, append_actions
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
+    instance = "pmm-king-btcbrl-20260903-181000"
+
+    # Ticks 1 and 2: the server answers, and there is nothing of ours on it.
+    for _ in range(2):
+        asyncio.run(engine._adopt_running_bots(_FakeClient([])))
+    assert engine.ledger.bases() == []
+
+    deployed_at = time.time()
+    append_actions(
+        engine.session_dir,
+        [
+            AgentAction(
+                tick=3,
+                at=deployed_at,
+                tool="manage_bots",
+                verb="manage_bots:deploy",
+                summary=f"Deploy bot '{instance}'",
+                ok=True,
+                subject=instance,
+            )
+        ],
+    )
+
+    # Tick 3: the bot this session deployed is confirmed live, and the deploy in
+    # its own log is what re-opens adoption to see it.
+    asyncio.run(engine._adopt_running_bots(_FakeClient([{"bot_name": instance}])))
+
+    assert engine.ledger.bases() == ["pmm-king-btcbrl"]
+    owned = engine.ledger.owned()[0]
+    assert owned.since >= deployed_at  # the window cannot open before the deploy
+    assert owned.until == 0.0  # and it is still open
 
 
 def test_tick_blocks_a_foreign_bot_and_journals_it(tmp_path, monkeypatch):
@@ -801,18 +840,10 @@ def test_reown_lifts_the_disown(tmp_path):
 def test_adoption_skips_a_disowned_bot_in_the_namespace(tmp_path, monkeypatch):
     """A person's answer outranks the name, which is otherwise the proof."""
     from condor.agents.ownership import disown
-    from condor.fetchers import bot_performance
 
     engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
     disown(engine.strategy.home, f"{NS}-btc")
 
-    async def _fake_perf(client):
-        return {
-            f"{NS}-btc-20260731-101500": {"bot_name": f"{NS}-btc"},
-            f"{NS}-eth-20260731-101500": {"bot_name": f"{NS}-eth"},
-        }
-
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
     client = _FakeClient(
         [
             {"bot_name": f"{NS}-btc-20260731-101500"},
@@ -834,7 +865,6 @@ def test_adoption_skips_a_disowned_bot_it_recorded_deploying(tmp_path, monkeypat
     """
     from condor.agents.actions import AgentAction, append_actions
     from condor.agents.ownership import disown
-    from condor.fetchers import bot_performance
 
     engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
     append_actions(
@@ -853,10 +883,40 @@ def test_adoption_skips_a_disowned_bot_it_recorded_deploying(tmp_path, monkeypat
     )
     disown(engine.strategy.home, "pmm-king-btcbrl")
 
-    async def _fake_perf(client):
-        return {"pmm-king-btcbrl-20260903-181000": {"bot_name": "pmm-king-btcbrl"}}
-
-    monkeypatch.setattr(bot_performance, "fetch_all_bot_performance", _fake_perf)
-    asyncio.run(engine._adopt_running_bots(object()))
+    # Listed as running, so the disowned set is what stops it — not a deferral.
+    asyncio.run(
+        engine._adopt_running_bots(
+            _FakeClient([{"bot_name": "pmm-king-btcbrl-20260903-181000"}])
+        )
+    )
 
     assert engine.ledger.bases() == []
+
+
+def test_a_disowned_bot_is_not_re_adopted_by_a_later_pass(tmp_path, monkeypatch):
+    """Adoption retries now, so the disowned set has to outrank it on every pass.
+
+    Unassigning empties the ledger, which is exactly the "owns nothing" state
+    that re-opens adoption (CORR-724) — and the bot is still live and still
+    carries the namespace, the one proof that cannot be argued with. So
+    ``read_disowned`` is re-read per pass: without that, the unassign would be
+    undone by the next tick rather than surviving until a human lifts it.
+    """
+    from condor.agents.ownership import disown
+
+    engine = _engine(tmp_path, monkeypatch, {"bot_name": NS})
+    client = _FakeClient([{"bot_name": f"{NS}-btc-20260731-101500"}])
+
+    asyncio.run(engine._adopt_running_bots(client))
+    assert engine.ledger.bases() == [f"{NS}-btc"]
+
+    # What the unclaim route does: the standing "not ours", then the live loop's
+    # own in-memory ledger, which would otherwise rewrite the file it cleared.
+    disown(engine.strategy.home, f"{NS}-btc")
+    assert engine.ledger.forget(f"{NS}-btc")
+    assert engine.ledger.bases() == []
+
+    asyncio.run(engine._adopt_running_bots(client))
+
+    assert engine.ledger.bases() == []
+    assert not engine._adoption_done
