@@ -6,7 +6,7 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 brain: developer
 files:
   - condor/fetchers/bot_performance.py:1046
@@ -15,8 +15,10 @@ files:
   - condor/agents/journal.py:936
   - condor/agents/session_report.py:112
 depends_on: []
-commits: []
+commits:
+  - "3142c1c6 fix(agents): never report a negative traded volume (CORR-731)"
 created: 2026-10-14
+closed: 2026-10-15
 ---
 
 ## Problem
@@ -70,12 +72,12 @@ in the doc: Hummingbot's grid executor computes
 
 ## Acceptance criteria
 
-- [ ] An instance history whose cumulative `volume_traded` drops mid-window yields a non-negative window volume, and that volume includes the trading done after the reset
-- [ ] `slice_history_series` over the same history yields no negative point and no negative step
-- [ ] `get_executor_volume` returns a non-negative value for an executor carrying a negative signed field, and ignores a field that is not traded volume
-- [ ] A negative input reaching the journal snapshot or session report is reported as a data error, not formatted as a volume
-- [ ] A monotonic history produces exactly the same figures as before the change
-- [ ] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared
+- [x] An instance history whose cumulative `volume_traded` drops mid-window yields a non-negative window volume, and that volume includes the trading done after the reset
+- [x] `slice_history_series` over the same history yields no negative point and no negative step
+- [x] `get_executor_volume` returns a non-negative value for an executor carrying a negative signed field, and ignores a field that is not traded volume
+- [x] A negative input reaching the journal snapshot or session report is reported as a data error, not formatted as a volume
+- [x] A monotonic history produces exactly the same figures as before the change
+- [ ] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared — left open deliberately: this item shipped inside plan `89937873-9f5`, whose final chunk runs `uv run pytest` once over everything the plan landed. The scoped equivalent was measured here (see Notes).
 
 ## Notes
 
@@ -89,6 +91,42 @@ in the doc: Hummingbot's grid executor computes
 - The fifth criterion exists because this touches the arithmetic every volume
   and P&L surface shares; a change that moves a monotonic history's numbers at
   all is wrong.
+- **Shipped.** The reset is treated as a new segment, not clamped:
+  `_reset_offsets` (`condor/fetchers/bot_performance.py`) returns the volume,
+  trade count and fee total that plain differencing cancels at each drop, and
+  `slice_history` / `slice_history_series` add it back. A monotonic history
+  produces a zero offset, so its arithmetic is bit-for-bit unchanged — which is
+  why the correction is expressed as an offset rather than as a re-sum of the
+  window, and what the fifth criterion asserts against a copy of the old code.
+- **Realized PnL is deliberately not corrected.** It falls whenever a position
+  closes at a loss, so a drop there is a measurement, not a reset; offsetting it
+  would invent profit. Only volume, trades and fees — the genuinely monotonic
+  counters — carry the offset. `test_realized_pnl_is_not_offset_as_a_reset`
+  pins that.
+- **Deviation on step 2's field restriction.** `get_executor_volume` now reads
+  its list as a magnitude and the list is named
+  `TRADED_VOLUME_KEYS` with the signed fields it must never reach documented on
+  it — but no key was removed. All three existing keys
+  (`filled_amount_quote`, `volume_traded`, `total_volume`) do name traded
+  volume; the signed quantity #280 identified is grid's `position_size_base` /
+  `position_size_quote`, which the function never read and now provably ignores
+  (`test_a_position_quantity_is_not_read_as_volume`). Dropping a working key
+  would have been a behaviour change the issue does not ask for.
+- **Display flagging is shared, not duplicated.** `condor/agents/volume_render.py`
+  (new) holds `format_volume_usd`; the journal snapshot and all three session-report
+  volume renders (KPI, controller table, executor table) go through it. The flag
+  deliberately carries no `$`, which is what keeps
+  `journal._parse_snapshot_line` from reading it back as a number — and that
+  parser no longer raises on a non-numeric field, so one flagged line cannot
+  take every snapshot, and with them the drawdown guard, down with it.
+- Scoped verification, run in this checkout against base `a65ef76a`:
+  `uv run pytest` over the 46 test files importing any touched module =
+  **1095 passed, 0 failed**; the new `tests/test_volume_never_negative.py` =
+  **13 passed**. `uv run black --check` and `uv run isort` clean on all six
+  files. `uv run ruff check` reports 8 pre-existing `E741` in
+  `condor/agents/journal.py`; the identical 8 are present at `a65ef76a`
+  (`git show a65ef76a:condor/agents/journal.py` checked in the same turn), so
+  they are not this work's.
 - `find_similar_backlog` (token-overlap fallback, 196 docs) top hit 0.25
   `CORR-634 [done]` (session slicing from the earliest takeover), below the
   0.50 fallback bar — adjacent arithmetic, different defect.
