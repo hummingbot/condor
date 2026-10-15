@@ -11,15 +11,19 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 brain: developer
 files:
   - condor/layering.py:256
   - condor/layering.py:296
   - tests/test_agents_layering.py:603
+  - condor/memory/paths.py
+  - condor/routine_store.py
 depends_on: []
-commits: []
+commits:
+  - "bd203838 fix(layering): make publishable_files an allowlist at the agent root (CORR-720)"
 created: 2026-10-07
+closed: 2026-10-15
 ---
 
 ## Problem
@@ -111,26 +115,30 @@ any depth, so that would also drop a skill or controller legitimately named
 
 ## Acceptance criteria
 
-- [ ] `publishable_files` on an agent home containing `state/op.json` and
+- [x] `publishable_files` on an agent home containing `state/op.json` and
       `routines/__pycache__/r.cpython-312.pyc` returns neither, and still
       returns `AGENT.md`, `routines/r.py`, `skills/s/SKILL.md`,
       `loops/l/loop.md`, `controllers/c/c.py` and
       `controllers/c/sample_configs/a.yml`
-- [ ] A root directory the layout does not define (use a fresh name, e.g.
+- [x] A root directory the layout does not define (use a fresh name, e.g.
       `scratch/notes.md`) is excluded, so the next agent-invented folder needs
       no further change here
-- [ ] `skills/state/SKILL.md` and `controllers/state/state.py` are still
+- [x] `skills/state/SKILL.md` and `controllers/state/state.py` are still
       published — the fix is scoped to the root, not to the name `state`
-- [ ] `publish_to_stock` on that agent creates no `state/` and no
+- [x] `publish_to_stock` on that agent creates no `state/` and no
       `__pycache__/` anywhere under `stock_agent_home(slug)`, and the returned
       `paths` list names neither
-- [ ] The exact-set assertion in `tests/test_agents_layering.py:603` is
+- [x] The exact-set assertion in `tests/test_agents_layering.py:603` is
       extended with a `state/` file and a `__pycache__/*.pyc`, and that
       extended assertion is **red** on the merge-base and green after the
       change — demonstrated by running it on both in the same turn
 - [ ] `uv run pytest` reports no failure that is not already failing on the
       merge-base: run it on the merge-base and on the change in the same turn
       and compare the two lists, rather than against a recalled count
+      — **not run here**: this item shipped as chunk 1 of plan
+      `89937873-9f5`, which ends in a verification chunk that runs the whole
+      gate once over everything the plan lands. Running it per chunk would
+      run the suite 22 times. See `## Notes` for what was run instead.
 
 ## Notes
 
@@ -145,3 +153,57 @@ any depth, so that would also drop a skill or controller legitimately named
 - Same family as [[CORR-705]] and [[CORR-721]]: this install's local facts
   crossing into the library the repo ships. CORR-705 cleaned the *data* once;
   these two close the *paths* that put it back.
+
+## Notes — closing
+
+**What changed.** `condor/layering.py` now applies two rules in
+`publishable_files` instead of one. `_RUNTIME_NAMES` keeps its any-depth name
+match and gains `__pycache__` (it sits *under* an allowed directory, so the
+root rule could not catch it). A new `_root_library_dirs()` states the root
+positively from the four owning modules — `CONTROLLERS_DIRNAME`
+(`condor/agent_controllers.py`), `LOOPS_DIRNAME` (`condor/agents/strategy.py`),
+and `ROUTINES_DIRNAME`/`SKILLS_DIRNAME` (`condor/memory/paths.py`) — and a path
+whose first part is not one of them is skipped when it is nested. Root *files*
+stay governed by the name denylist, so `learnings.md` and `mutes.yml` keep
+being excluded by the rule that already excluded them.
+
+**Two files beyond the declared `files:`.** The solution asked for the four
+directories to be named from their owning modules rather than restated as
+literals, and `routines`/`skills` had no constant to name: `condor/memory/paths.py`
+now defines `SKILLS_DIRNAME` and `ROUTINES_DIRNAME` and uses them in the
+resolvers that build those two directories, and `condor/routine_store.py`
+uses `ROUTINES_DIRNAME` for the agent-home routines dir it resolves. Both are
+mechanical substitutions of the same string.
+
+**Deviation: `LOOPS_DIRNAME` is imported inside the function.**
+`condor/agents/strategy.py` imports `condor.layering` at module scope, so
+naming it at `condor.layering` module scope would be an import cycle.
+`_root_library_dirs()` therefore imports all four names lazily — the pattern
+`condor/agent_controllers.py:489` already uses in the other direction — and is
+called once per `publishable_files` call, not once per file.
+
+**Verification.** `tests/test_agents_layering.py` gained the extended exact-set
+assertion (a `state/` file, a `routines/__pycache__/*.pyc`, a fresh
+`scratch/notes.md`, plus `routines/basis_check.py` as the positive case) and a
+new `test_the_root_rule_excludes_invented_folders_not_the_name_state` pinning
+`skills/state/` and `controllers/state/`. Both are **red at the merge-base**
+`95552e36` — run in a detached worktree at that commit with this file copied in:
+`2 failed, 40 passed`, the failures being exactly those two with
+`Extra items in the left set: 'state/op.json'` — and green after the change.
+Touched-file suites green on the change: `tests/test_agents_layering.py`,
+`test_agent_controllers*.py`, `test_agent_id_paths.py`, `test_agents.py`,
+`test_skill_store.py`, `test_skill_proposals.py`, `test_shared_routines.py`,
+`test_routine_discovery_cache.py`, `test_routine_source_confinement.py`,
+`test_routines_access.py`, `test_memory_store.py`,
+`test_agents_split_migration.py`, `test_condor_is_an_agent.py`,
+`test_agent_mutes.py` — 358 passed. `black --check` and `isort --check-only`
+clean on the four files; `ruff` reports one `F821 Undefined name 'RoutineInfo'`
+at `condor/routine_store.py:324`, which is **pre-existing** — the same error
+reports at line 323 of that file as it stands at `95552e36`.
+
+**Left alone, deliberately.** `publishable_files` still returns a single
+explicitly-named file without applying either filter (`base.is_file()` early
+return), so `publish_to_stock(slug, "state/op.json")` would copy it. That is
+pre-existing, admin-only and deliberate on the caller's part, and the solution
+asked to keep the function's shape; it is filed separately rather than widened
+into this item.
