@@ -3998,11 +3998,14 @@ export const api = {
       `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
     ),
 
+  /** `restart_required` is the API server's own answer: the key is stored, and
+   *  bots already running keep the one they started with until restarted. It
+   *  used to arrive inside the opaque `result` and be dropped (CORR-732). */
   addCredential: (
     server: string,
     data: { connector_name: string; credentials: Record<string, string> },
   ) =>
-    apiFetch<{ added: boolean }>(
+    apiFetch<{ added: boolean; restart_required: boolean }>(
       `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
       {
         method: "POST",
@@ -4011,7 +4014,7 @@ export const api = {
     ),
 
   deleteCredential: (server: string, connector: string) =>
-    apiFetch<{ deleted: boolean }>(
+    apiFetch<{ deleted: boolean; restart_required: boolean }>(
       `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
       { method: "DELETE" },
     ),

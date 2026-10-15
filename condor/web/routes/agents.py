@@ -2877,7 +2877,26 @@ async def update_strategy_config(
     )
     config_dict.update(req.config)
     save_full_config(strategy.home, config_dict)
-    return {"updated": True, "config": config_dict}
+    # The write reached the file and no running session. An engine holds the
+    # config dict it was constructed with (``TickEngine.config``) and nothing swaps
+    # it mid-tick on purpose — a live trading loop must not have its limits
+    # changed under it. ``{"updated": True}`` alone was true of the file and
+    # silent about the process, and read identically whether a session was left
+    # drifting or there was none to drift, so an operator who saw it had no way
+    # to learn the running agent still had the old config (CORR-732). The count
+    # is the answer to "how many restarts does applying this take".
+    live = len(_get_engines_for(slug, sslug))
+    return {
+        "updated": True,
+        "config": config_dict,
+        "applies_to_running": False,
+        "live_engines": live,
+        "message": (
+            f"Saved; restart {live} session{'s' if live != 1 else ''} to apply."
+            if live
+            else "Saved. No session is running, so the next one starts on it."
+        ),
+    }
 
 
 @router.delete("/{slug}/strategies/{sslug}")
