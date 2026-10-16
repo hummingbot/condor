@@ -3822,6 +3822,35 @@ export const api = {
     ),
 
   /**
+   * Rewrite a strategy's stored config — the one the *next* session starts on.
+   *
+   * The route **merges**: a key absent from `config` keeps its stored value
+   * (`agents.py` `config_dict.update(req.config)`), so a caller sends the whole
+   * mapping rather than a patch, and cannot remove a key at all.
+   *
+   * It reaches the file and no running engine — a live trading loop must not
+   * have its limits changed under it — so `live_engines` is how many restarts
+   * applying this takes and `message` says so in words (CORR-732). All five
+   * fields are typed here so a client that only reads `updated` cannot silently
+   * drop the one the operator needs.
+   */
+  updateStrategyConfig: (
+    slug: string,
+    sslug: string,
+    config: Record<string, unknown>,
+  ) =>
+    apiFetch<{
+      updated: boolean;
+      config: Record<string, unknown>;
+      applies_to_running: boolean;
+      live_engines: number;
+      message: string;
+    }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
+      { method: "PUT", body: JSON.stringify({ config }) },
+    ),
+
+  /**
    * Attribute an already-running bot to this strategy's newest session.
    *
    * The repair for a run whose ownership claim never landed — every run from
