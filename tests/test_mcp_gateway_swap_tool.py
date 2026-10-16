@@ -7,8 +7,9 @@ Nothing on the wire exposed it, so agent playbooks routed swaps through
 `manage_amm(quote_swap / execute_swap)` instead — actions that raise ToolError.
 
 The one multiplexed tool is now four (FEAT-064): `quote_swap`, `execute_swap`,
-`get_swap_status`, `search_swaps`. The free read and the capital-committing write no longer
-share a name, so the danger gate reads a name instead of sniffing an `action` string.
+`get_swap_status`, `search_swaps` — joined by `resolve_swap` (FEAT-140). The free read and
+the capital-committing write no longer share a name, so the danger gate reads a name
+instead of sniffing an `action` string.
 
 Gateway folded pool-scoped AMM swaps into the unified swap route, so this is still the ONLY
 swap surface: `quote_swap` carries the "name/type" connector form and the pool-resolution
@@ -30,7 +31,13 @@ from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 def test_the_swap_tools_are_registered_on_the_mcp_server():
     import mcp_servers.hummingbot_api.server as server
 
-    for name in ("quote_swap", "execute_swap", "get_swap_status", "search_swaps"):
+    for name in (
+        "quote_swap",
+        "execute_swap",
+        "get_swap_status",
+        "search_swaps",
+        "resolve_swap",
+    ):
         assert hasattr(server, name), (
             f"the swap implementation exists but no @mcp.tool() exposes {name} — "
             "agents have no swap surface at all"
@@ -69,6 +76,9 @@ def test_each_swap_tool_carries_only_its_own_parameters():
             "extra_params",
         },
         "get_swap_status": {"transaction_hash"},
+        # FEAT-140's exit from a swap stuck SUBMITTED. No `action`, like the
+        # rest of the family, so the danger gate reads a name.
+        "resolve_swap": {"transaction_hash", "network"},
         "search_swaps": {
             "connector",
             "network",

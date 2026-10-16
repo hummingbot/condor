@@ -128,6 +128,28 @@ SWAP_SEARCH_COLUMNS = [
 ]
 
 
+def _unverifiable_block(result: dict[str, Any]) -> str:
+    """The alert lines for swaps stuck SUBMITTED, or ``""`` (FEAT-140).
+
+    Appended to whatever the action rendered rather than replacing it: the
+    caller asked for a search or a status and still wants that answer. The
+    heading says *unverifiable* because that is what it is — the swap may have
+    landed and no status read has succeeded.
+    """
+    alerts = result.get("alerts") or []
+    if not isinstance(alerts, list) or not alerts:
+        return ""
+    lines = [f"\n\n⏳ Unverifiable swaps ({len(alerts)}):"]
+    lines += [
+        f"  • {row.get('message', '')}" for row in alerts if isinstance(row, dict)
+    ]
+    lines.append(
+        "  Resolve one with resolve_swap(transaction_hash=…) once a status read "
+        "succeeds. Do not report it as lost."
+    )
+    return "\n".join(lines)
+
+
 def format_gateway_swap_result(action: str, result: dict[str, Any]) -> str:
     """Format gateway swap action results into a human-readable string."""
     if action == "search" and isinstance(result, dict):
@@ -142,7 +164,31 @@ def format_gateway_swap_result(action: str, result: dict[str, Any]) -> str:
             f"Filters: {filters if filters else 'None'}"
         )
         builder = TableBuilder(SWAP_SEARCH_COLUMNS, empty_message="No swaps found.")
-        return builder.build_with_title(swaps, header)
+        return builder.build_with_title(swaps, header) + _unverifiable_block(result)
+
+    if action == "resolve" and isinstance(result, dict):
+        tx_hash = result.get("transaction_hash", "")
+        if not result.get("supported", False):
+            return (
+                f"Swap resolve unavailable for {truncate_address(str(tx_hash))}: "
+                f"{result.get('detail', 'this server does not offer the route')}"
+            )
+        return (
+            f"Swap resolve requested for {truncate_address(str(tx_hash))}.\n"
+            f"The server's answer: {result.get('result')}\n"
+            f"That answer is the swap's state — Condor recorded nothing of its own."
+        )
+
+    if action == "get_status" and isinstance(result, dict):
+        condition = result.get("condition") or {}
+        rendered = f"Gateway Swap Result: {result.get('result')}"
+        if isinstance(condition, dict) and condition.get("unverifiable_for"):
+            rendered += (
+                f"\nStill SUBMITTED, unverifiable for "
+                f"{condition['unverifiable_for']} (condition: "
+                f"{condition.get('condition', 'pending')})."
+            )
+        return rendered + _unverifiable_block(result)
 
     return f"Gateway Swap Result: {result}"
 

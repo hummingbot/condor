@@ -50,6 +50,7 @@ HB_TRADING = {
     "quote_swap",
     "execute_swap",
     "get_swap_status",
+    "resolve_swap",
     "search_swaps",
     "explore_geckoterminal",
 }
@@ -171,7 +172,7 @@ def test_the_split_dangerous_tools_stay_with_the_seat_that_trades():
     assert CREATE_EXECUTOR_TOOLS <= tick
     assert "execute_swap" in tick
     # …and the free half of the swap family is never gated, so it must be there.
-    assert {"quote_swap", "get_swap_status", "search_swaps"} <= tick
+    assert {"quote_swap", "get_swap_status", "search_swaps", "resolve_swap"} <= tick
 
 
 @pytest.mark.parametrize("is_dry_run", [True, False])

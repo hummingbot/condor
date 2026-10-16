@@ -777,6 +777,72 @@ class VenueConditionsResponse(BaseModel):
     callers: list[CallerVolumeModel] = []
 
 
+class StuckSwapModel(BaseModel):
+    """One swap still ``SUBMITTED``, and for how long ([[FEAT-140]]).
+
+    ``condition`` is ``unverifiable`` past the threshold and ``pending`` below
+    it — never ``failed``. Upstream holds a swap in ``SUBMITTED`` until a status
+    read *succeeds*, so a Gateway that cannot be reached keeps one here with no
+    statement about the chain either way (GitHub #278), and reporting it as lost
+    would be Condor asserting an outcome it has not observed.
+
+    ``since`` says where the clock started: ``submitted`` is the swap's own
+    recorded time, ``observed`` is Condor's first sighting of the row and can
+    only understate the duration (a restart resets it), ``unknown`` means
+    neither was available and ``unverifiable_for_seconds`` is ``None``.
+    """
+
+    transaction_hash: str = ""
+    connector: str = ""
+    network: str = ""
+    trading_pair: str = ""
+    side: str = ""
+    status: str = "SUBMITTED"
+    condition: str = "pending"
+    since: str = "unknown"
+    submitted_at: float | None = None
+    unverifiable_for_seconds: float | None = None
+    unverifiable_for: str = ""
+    threshold_seconds: float = 0.0
+    message: str = ""
+
+
+class StuckSwapsResponse(BaseModel):
+    """Every in-flight swap on one server, and which ones are alerting.
+
+    ``alerts`` is the subset of ``swaps`` past the threshold, carried separately
+    so a dashboard does not have to re-derive the threshold to know what to
+    show. ``resolvable`` is unknown until a resolve is actually attempted — the
+    capability answer comes from the server's own 404 — so it is deliberately
+    absent here rather than guessed from a version string.
+    """
+
+    server_name: str = ""
+    threshold_seconds: float = 0.0
+    swaps: list[StuckSwapModel] = []
+    alerts: list[StuckSwapModel] = []
+    server_online: bool = True
+    error_hint: str = ""
+
+
+class ResolveSwapResponse(BaseModel):
+    """What the server answered when asked to resolve a swap ([[FEAT-140]]).
+
+    ``supported=False`` with an ``error_hint`` is the normal answer from a
+    server that predates the route (``condor.fetchers.raw_api`` turns its 404
+    into a capability answer), and the same shape
+    ``PerformanceHistoryResponse`` already uses for exactly that case. Nothing
+    local changes on either branch: ``result`` is the server's verbatim answer
+    and Condor records no swap state of its own.
+    """
+
+    transaction_hash: str = ""
+    server_name: str = ""
+    supported: bool = True
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_hint: str = ""
+
+
 class CreateAgentRequest(BaseModel):
     name: str
     description: str = ""
@@ -1753,6 +1819,116 @@ async def get_venue_conditions(user: WebUser = Depends(get_current_user)):
     return VenueConditionsResponse(
         venues=[VenueConditionModel(**row) for row in book.venue_conditions()],
         callers=[CallerVolumeModel(**row) for row in book.caller_volume()],
+    )
+
+
+@router.get("/stuck-swaps", response_model=StuckSwapsResponse)
+async def get_stuck_swaps(
+    server_name: str,
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    """Swaps still ``SUBMITTED`` on one server, with how long each is unverifiable.
+
+    The diagnostic FEAT-140 adds for GitHub #278: a swap leaves ``SUBMITTED``
+    only after a status read *succeeds*, so a failing Gateway ping keeps one
+    there indefinitely and the dashboard showed an hourglass with no duration
+    and no exit. Every row says how long, and the ones past
+    :func:`condor.swap_watch.unverifiable_after_seconds` are repeated under
+    ``alerts``.
+
+    Unlike ``/venue-conditions`` this does make one API call — the swap search —
+    so it is not free to poll at a venue-condition cadence. An unreachable
+    server reads as ``server_online: false`` with the hint, never as "no stuck
+    swaps": the whole failure mode here is a server that cannot be asked.
+
+    A literal path, and so registered before the ``/{slug}`` catch-all.
+    """
+    from condor.swap_watch import unverifiable_after_seconds, watch
+
+    client = await _controller_client(user, server_name)
+    threshold = unverifiable_after_seconds()
+    try:
+        raw = await client.gateway_swap.search_swaps(
+            status="SUBMITTED", limit=max(1, min(int(limit), 1000))
+        )
+    except Exception as exc:
+        # The hint reaches a browser, so it carries the API's own message and
+        # never ``str(exc)`` — an aiohttp error stringifies with the backend's
+        # host and port in it (SEC-116).
+        from condor.fetchers.executors import describe_executor_error
+
+        log.warning("Stuck-swap search on '%s' failed: %s", server_name, exc)
+        _status, message = describe_executor_error(exc)
+        return StuckSwapsResponse(
+            server_name=server_name,
+            threshold_seconds=threshold,
+            server_online=False,
+            error_hint=f"Could not search swaps on '{server_name}': {message}",
+        )
+
+    rows = raw.get("data") or [] if isinstance(raw, dict) else raw or []
+    book = watch()
+    book.observe(rows)
+    return StuckSwapsResponse(
+        server_name=server_name,
+        threshold_seconds=threshold,
+        swaps=[StuckSwapModel(**row) for row in book.conditions(rows)],
+        alerts=[StuckSwapModel(**row) for row in book.alerts(rows)],
+    )
+
+
+@router.post("/stuck-swaps/{transaction_hash}/resolve")
+async def resolve_stuck_swap(
+    transaction_hash: str,
+    server_name: str,
+    network: str | None = None,
+    user: WebUser = Depends(get_current_user),
+) -> ResolveSwapResponse:
+    """Ask the server to resolve one stuck swap. Condor sets no swap state.
+
+    The operator half of FEAT-140's exit, over the same
+    :func:`condor.swap_watch.resolve` the ``resolve_swap`` MCP tool calls, so an
+    agent and an operator cannot resolve a swap by different routes. The server
+    reads the chain and records the outcome; the answer here is its answer.
+
+    A server that does not serve the route answers 404, which comes back as
+    ``supported: false`` and an ``error_hint`` — a capability answer, not an
+    outage — and nothing has changed anywhere. Condor never marks the swap
+    itself: it does not track swap confirmation and has no chain read, so a
+    local status would be exactly the invented fact this feature exists to
+    avoid.
+
+    A literal prefix, and so registered before the ``/{slug}`` catch-all.
+    """
+    from condor.swap_watch import SwapResolveUnsupported
+    from condor.swap_watch import resolve as resolve_swap
+
+    client = await _controller_client(user, server_name)
+    try:
+        answered = await resolve_swap(client, transaction_hash, network=network)
+    except SwapResolveUnsupported as exc:
+        return ResolveSwapResponse(
+            transaction_hash=transaction_hash,
+            server_name=server_name,
+            supported=False,
+            error_hint=(
+                f"'{server_name}' does not offer a swap resolve route ({exc}). "
+                f"Nothing was changed; the swap is still SUBMITTED and "
+                f"unverifiable."
+            ),
+        )
+    except Exception as exc:
+        from condor.web.routes._errors import upstream_error
+
+        log.warning("Resolving swap on '%s' failed: %s", server_name, exc)
+        raise upstream_error(f"Failed to resolve the swap on '{server_name}'", exc)
+
+    result = answered.get("result")
+    return ResolveSwapResponse(
+        transaction_hash=transaction_hash,
+        server_name=server_name,
+        result=result if isinstance(result, dict) else {"answer": result},
     )
 
 

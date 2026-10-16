@@ -4,29 +4,44 @@ Gateway Trading tools for Hummingbot MCP Server
 Handles DEX trading operations via Hummingbot Gateway:
 - Swap quote/execute (Router: Jupiter, 0x)
 - Swap search and status tracking
+- Resolving a swap that has been SUBMITTED and unverifiable (FEAT-140)
 """
 
 import logging
 from decimal import Decimal
 from typing import Any
 
+from condor.swap_watch import SwapResolveUnsupported
+from condor.swap_watch import resolve as resolve_stuck_swap
+from condor.swap_watch import watch
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.schemas import GatewaySwapRequest
 
 logger = logging.getLogger("hummingbot-mcp")
 
 
+def _rows(result: Any) -> list[dict[str, Any]]:
+    """The swap rows out of a search payload, whatever it is wrapped in."""
+    if isinstance(result, dict):
+        data = result.get("data")
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+    if isinstance(result, list):
+        return [row for row in result if isinstance(row, dict)]
+    return []
+
+
 async def manage_gateway_swaps(
     client: Any, request: GatewaySwapRequest
 ) -> dict[str, Any]:
     """
-    The shared implementation behind the four registered swap tools.
+    The shared implementation behind the registered swap tools.
 
     ``server.py`` registers ``quote_swap``, ``execute_swap``, ``get_swap_status`` and
-    ``search_swaps`` (FEAT-064); each builds a request with its own ``action`` and lands
-    on the matching branch below. There is no ``manage_gateway_swaps`` tool on the wire
-    any more — a swap that spends is reachable only under a name the danger gate knows
-    is dangerous.
+    ``search_swaps`` (FEAT-064), plus ``resolve_swap`` (FEAT-140); each builds a request
+    with its own ``action`` and lands on the matching branch below. There is no
+    ``manage_gateway_swaps`` tool on the wire any more — a swap that spends is reachable
+    only under a name the danger gate knows is dangerous.
 
     Actions:
     - quote: Get price quote for a swap before executing
@@ -34,6 +49,13 @@ async def manage_gateway_swaps(
     - execute_quote: Execute a quote already taken, by its quote_id (routers only)
     - search: Search swap history with various filters
     - get_status: Get status of a specific swap by transaction hash
+    - resolve: Ask the server to resolve a swap stuck SUBMITTED (FEAT-140)
+
+    ``search`` and ``get_status`` also report how long anything still ``SUBMITTED``
+    has been *unverifiable*, and alert past the threshold — a swap leaves SUBMITTED
+    only on a successful status read, so a Gateway that cannot be reached keeps one
+    there indefinitely (GitHub #278). Unverifiable is not failed: the swap may have
+    landed. ``resolve`` is the exit, and it is the server's decision, not Condor's.
 
     Supported DEX Connectors:
     - jupiter (Solana): Router for Solana swaps
@@ -188,11 +210,24 @@ async def manage_gateway_swaps(
 
         result = await client.gateway_swap.get_swap_status(request.transaction_hash)
 
-        return {
+        # How long it has been unverifiable, when it is still SUBMITTED
+        # (FEAT-140). The status read is the one place a caller is already
+        # asking "did this land", so the duration belongs in its answer rather
+        # than in a second call the caller has to know to make.
+        row = dict(result) if isinstance(result, dict) else {}
+        row.setdefault("transaction_hash", request.transaction_hash)
+        book = watch()
+        book.observe([row])
+        payload: dict[str, Any] = {
             "action": "get_status",
             "transaction_hash": request.transaction_hash,
             "result": result,
         }
+        condition = book.condition(row)
+        if condition is not None:
+            payload["condition"] = condition
+            payload["alerts"] = book.alerts([row])
+        return payload
 
     # ============================================
     # SEARCH - Search swap history
@@ -219,7 +254,16 @@ async def manage_gateway_swaps(
 
         result = await client.gateway_swap.search_swaps(**search_params)
 
-        return {
+        # Every search is also an observation: the rows it returns start (or
+        # extend) the unverifiable clock for anything still SUBMITTED, and a
+        # swap past the threshold is alerted on here rather than waiting for
+        # somebody to ask about that hash specifically (FEAT-140).
+        book = watch()
+        rows = _rows(result)
+        book.observe(rows)
+        alerts = book.alerts(rows)
+
+        payload: dict[str, Any] = {
             "action": "search",
             "filters": {
                 k: v for k, v in search_params.items() if k not in ["limit", "offset"]
@@ -229,6 +273,45 @@ async def manage_gateway_swaps(
                 "offset": search_params["offset"],
             },
             "result": result,
+        }
+        if alerts:
+            payload["alerts"] = alerts
+        return payload
+
+    # ============================================
+    # RESOLVE - Ask the server to resolve a stuck swap
+    # ============================================
+    elif request.action == "resolve":
+        if not request.transaction_hash:
+            raise ToolError("transaction_hash is required for resolve action")
+
+        try:
+            resolved = await resolve_stuck_swap(
+                client,
+                request.transaction_hash,
+                network=request.network,
+            )
+        except SwapResolveUnsupported as exc:
+            # A capability answer, not an outage and not a failure of the swap.
+            # Condor records nothing: the only thing that can resolve a swap is
+            # the server that polls the chain (FEAT-140).
+            return {
+                "action": "resolve",
+                "transaction_hash": request.transaction_hash,
+                "supported": False,
+                "detail": (
+                    f"this Hummingbot API server does not offer a resolve route "
+                    f"for swaps ({exc}). Nothing was changed. The swap is still "
+                    f"SUBMITTED and unverifiable; upgrade the API server, or read "
+                    f"the explorer and act on what the chain shows."
+                ),
+            }
+
+        return {
+            "action": "resolve",
+            "transaction_hash": request.transaction_hash,
+            "supported": True,
+            "result": resolved["result"],
         }
 
     else:
