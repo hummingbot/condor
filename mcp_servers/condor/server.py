@@ -806,6 +806,8 @@ async def manage_agents(
         "update",
         "delete",
         "publish",
+        "export",
+        "import",
         # Legacy funnel-era spellings this family still answers to.
         "list_agent_definitions",
         "create_agent",
@@ -813,6 +815,8 @@ async def manage_agents(
         "update_agent",
         "delete_agent",
         "publish_agent",
+        "export_agent",
+        "import_agent",
     ],
     agent_slug: str | None = None,
     name: str | None = None,
@@ -851,6 +855,16 @@ async def manage_agents(
       only way to author what other installs receive. It leaves the repo dirty
       on purpose — review and commit. There is no "install": a shipped agent is
       present the moment an install pulls.
+    - "export": Write the agent out as ONE portable file under data/exports/
+      (requires agent_slug), and return its path — hand that file to the user.
+      It carries the agent's library only: its store, journals, mutes, session
+      output and this install's server pin and creator id never travel.
+    - "import": Register the agent in a bundle file (requires `path`;
+      `agent_slug` renames it on the way in, which is how a name collision is
+      answered). It never overwrites an existing agent, and everything it
+      brings arrives MUTED — tell the user to read each imported routine and
+      skill before unmuting it, because an imported routine runs inside this
+      process with no sandbox. Nothing is started.
 
     Args:
         action: What to do with the agent definition.
@@ -881,10 +895,11 @@ async def manage_agents(
             loop it deploys use THIS server regardless of the chat's active
             server, and on a machine without that server the agent is broken. Do
             not fill it in with whatever server the chat happens to be on.
-        path: For "publish" only — narrow to one item of the agent, relative to
+        path: For "publish" — narrow to one item of the agent, relative to
             its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
-            mutes and session output are never published.
+            mutes and session output are never published. For "import" — the
+            bundle file to read.
 
     Returns:
         Action-specific result dict.

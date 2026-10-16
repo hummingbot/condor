@@ -57,6 +57,63 @@ function query(params: object): string {
   return q ? `?${q}` : "";
 }
 
+/** One file inside an agent bundle, as the review dialog lists it. */
+export interface AgentBundleFile {
+  path: string;
+  bytes: number;
+}
+
+/**
+ * What importing a bundle would do — or, once applied, what it did.
+ *
+ * The preview endpoint and the apply endpoint return the same shape from the
+ * same builder, so the dialog cannot show something the write does not do.
+ */
+export interface AgentImportPlan {
+  slug: string;
+  source_slug: string;
+  name: string;
+  description: string;
+  when_to_consult: string;
+  exported_at: string;
+  schema_version: number;
+  /** Everything that is not a `.py`. */
+  files: AgentBundleFile[];
+  /** The executable files, listed apart because reviewing them is the gate. */
+  executables: AgentBundleFile[];
+  total_bytes: number;
+  stamps: Record<string, string>;
+  mutes: { routines: string[]; skills: string[] };
+  agent_key: string;
+  agent_key_inherited: boolean;
+  /** The taken slug, when the bundle cannot land under the name it asked for. */
+  collision: string;
+  suggested_slug: string;
+  refusals: string[];
+  imported?: boolean;
+  next_step?: string;
+}
+
+/** `authFetch` because the body is `FormData` — see `uploadAttachment`. */
+async function postAgentBundle(
+  path: string,
+  file: File,
+  asSlug: string,
+): Promise<AgentImportPlan> {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("as_slug", asSlug);
+  const res = await authFetch(path, { method: "POST", body });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(
+      new Error(detail.detail || `Import failed: ${res.status}`),
+      { status: res.status },
+    );
+  }
+  return res.json();
+}
+
 /** A finished background task, addressed to the user rather than to a chat. */
 export interface AppNotification {
   id: string;
@@ -3456,6 +3513,34 @@ export const api = {
         method: "DELETE",
       },
     ),
+
+  // ── An agent as one file (FEAT-133) ──
+
+  /**
+   * The agent as one portable JSON file, as text.
+   *
+   * `authFetch` and not a bare `<a href>`: the endpoint is bearer-guarded like
+   * everything else here, and a link has no way to carry the header — the same
+   * reason `useAuthedImage` exists. The caller makes an object URL from this.
+   */
+  exportAgentBundle: async (slug: string): Promise<string> => {
+    const res = await authFetch(
+      `/api/v1/agents/${encodeURIComponent(slug)}/bundle`,
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Export failed: ${res.status}`);
+    }
+    return res.text();
+  },
+
+  /** What importing this bundle would do. Writes nothing on the server. */
+  previewAgentImport: (file: File, asSlug = "") =>
+    postAgentBundle("/api/v1/agents/import/preview", file, asSlug),
+
+  /** Register the agent in this bundle, with its routines and skills muted. */
+  importAgent: (file: File, asSlug = "") =>
+    postAgentBundle("/api/v1/agents/import", file, asSlug),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 

@@ -51,3 +51,13 @@ def test_notify_is_not_shadowed_by_a_slug_route():
 
 def test_agent_detail_still_matches_real_slug():
     assert _first_full_match("GET", "/agents/my-agent") == "get_agent"
+
+
+def test_import_is_a_literal_not_an_agent_slug():
+    """``/agents/import`` and its preview are literals (FEAT-133)."""
+    assert _first_full_match("POST", "/agents/import") == "import_agent"
+    assert _first_full_match("POST", "/agents/import/preview") == "preview_agent_import"
+
+
+def test_export_still_hangs_off_a_real_slug():
+    assert _first_full_match("GET", "/agents/my-agent/bundle") == "export_agent_bundle"

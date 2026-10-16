@@ -27,7 +27,7 @@ from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from condor.agents.attribution import (
@@ -2742,6 +2742,113 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
         # as a 500, which reads as a broken server rather than a rule.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": True}
+
+
+# ── An agent as one file (FEAT-133) ──
+#
+# Export is a download, so it answers raw bytes with a filename rather than a
+# model. Import is two calls onto one builder: ``/import/preview`` computes the
+# plan and writes nothing, ``/import`` writes exactly that plan. Splitting them
+# is what lets the dialog show every executable file *before* anything lands,
+# which is the only gate there is — an imported routine runs in this process.
+
+
+def _bundle_refusal(exc: Exception) -> HTTPException:
+    """A bundle refusal as HTTP: 415 for the wrong kind of file, 400 for a bad one."""
+    from condor.agents.bundle import NotJsonError
+
+    return HTTPException(
+        status_code=415 if isinstance(exc, NotJsonError) else 400, detail=str(exc)
+    )
+
+
+async def _uploaded_bundle(file: UploadFile):
+    """The parsed bundle behind a multipart upload, or the refusal to answer with.
+
+    The size cap is applied here rather than left to the HTTP layer so the MCP
+    and chat doors, which never pass through it, are held to the same bound.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    data = await file.read()
+    if len(data) > agent_bundle.MAX_BUNDLE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"That file is {len(data)} bytes, over the "
+                f"{agent_bundle.MAX_BUNDLE_BYTES}-byte bundle limit"
+            ),
+        )
+    try:
+        return agent_bundle.parse(data)
+    except ValueError as exc:
+        raise _bundle_refusal(exc) from exc
+
+
+@router.post("/import/preview")
+async def preview_agent_import(
+    file: UploadFile = File(...),
+    as_slug: str = Form(""),
+    user: WebUser = Depends(get_current_user),
+):
+    """What importing this bundle would do. Writes nothing.
+
+    Declared before ``/{slug}``-shaped routes read as a sibling, not a special
+    case: ``import`` is a literal first segment and no POST route here takes a
+    path parameter in that position.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    bundle = await _uploaded_bundle(file)
+    return agent_bundle.plan(bundle, as_slug=as_slug, user_id=user.id).summary()
+
+
+@router.post("/import")
+async def import_agent(
+    file: UploadFile = File(...),
+    as_slug: str = Form(""),
+    user: WebUser = Depends(get_current_user),
+):
+    """Register the agent in this bundle, with its code switched off.
+
+    409 on a taken slug — through the same ``_create_refusal`` that answers
+    ``POST /agents``, because this is the same rule: import creates, and never
+    replaces an agent somebody has already tuned.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    bundle = await _uploaded_bundle(file)
+    plan = agent_bundle.plan(bundle, as_slug=as_slug, user_id=user.id)
+    try:
+        return agent_bundle.apply(plan, user_id=user.id)
+    except ValueError as exc:
+        raise _create_refusal(exc) from exc
+
+
+@router.get("/{slug}/bundle")
+async def export_agent_bundle(slug: str, user: WebUser = Depends(get_current_user)):
+    """This agent as one portable file.
+
+    Bearer-guarded like everything else here, so the frontend fetches it with
+    ``authFetch`` and makes an object URL — a bare ``<a href>`` has no way to
+    carry the header, which is the same reason ``useAuthedImage`` exists.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    _get_agent(slug)
+    try:
+        bundle = agent_bundle.build(slug)
+    except ValueError as exc:
+        raise _bundle_refusal(exc) from exc
+    return Response(
+        content=agent_bundle.render(bundle),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{agent_bundle.filename_for(slug)}"'
+            )
+        },
+    )
 
 
 def _chat_member_status(member: Any) -> str | None:

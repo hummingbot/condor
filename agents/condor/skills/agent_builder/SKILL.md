@@ -42,6 +42,7 @@ Only an admin can copy a local agent into the shipped `agents/` library
 | An idea: "I want an agent for X" | **A — From scratch** (minimal first, layer on) |
 | A folder / files: instructions, controllers, configs, scripts | **B — From a folder** (inventory → discuss → build) |
 | One controller for an existing agent | skip both — follow `controller_sources` (see Controllers) |
+| A bundle someone exported (`*.condor-agent.json`) | skip both — `manage_agents(action="import", path=...)`, then review its muted routines before unmuting |
 
 Label each message with the current step, e.g. `[B2 — Discuss]`. Only the step label as a
 header; status as key: value.

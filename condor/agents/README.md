@@ -286,6 +286,41 @@ In production, agents are normally started/stopped from the Telegram `/agent` fl
 - `agents/{slug}/learnings.md` — lessons the agent has chosen to keep across sessions.
 - `agents/{slug}/dry_runs/experiment_N.md` — dry-run / run-once results.
 
+### 4.5 Moving an agent to another install
+
+An agent is a folder, which is exactly why handing one to someone else used to
+mean copying a directory and then repairing whatever was true only of the box it
+came from. It travels as **one file** instead (`condor/agents/bundle.py`,
+FEAT-133):
+
+```
+manage_agents(action="export", agent_slug="river_scalper")
+    -> data/exports/river_scalper-20261015.condor-agent.json
+manage_agents(action="import", path="…/river_scalper-20261015.condor-agent.json",
+              agent_slug="river_scalper_2")   # agent_slug renames it on the way in
+```
+
+The dashboard has the same two doors: **Export** on the agent's workspace
+header, and Settings → Condor → **Agents** for import, which previews the
+bundle before anything is written.
+
+What travels is the *library* half of the folder — the same selection
+`publish_to_stock` uses (`condor.layering.publishable_files`): `AGENT.md`,
+`skills/`, `routines/`, `controllers/`, `loops/` and any other authored file at
+the root. What stays behind is everything above that this install accumulated by
+running the agent: `store/`, `sessions/`, `dry_runs/`, `learnings.md`,
+`config.yml`, `mutes.yml`, `proposals/`. Three frontmatter fields are rewritten
+in the bundle's copy because they are facts about the exporting install, not
+about the agent: `server_name`, `created_by` and the `forked_from`/`forked_at`
+stamp.
+
+Two rules make an import safe to accept from somebody else. It **creates and
+never replaces** — a taken slug is refused with a free alternative, so a tuned
+local agent cannot be silently reset. And everything it brings **arrives muted**:
+an imported routine runs inside the Condor process with no sandbox, so the
+preview names every executable file before the write and the operator unmutes
+them one at a time after reading each. Nothing is started by an import.
+
 ---
 
 ## 5. Mental model

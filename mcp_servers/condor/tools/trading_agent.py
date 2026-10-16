@@ -1,7 +1,9 @@
 """Agent CRUD, loop CRUD, instance lifecycle, and the journal."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
+from condor.fsutil import atomic_write_text
 from mcp_servers.condor.condor_client import agent_strategy_from_agent_id, call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
@@ -220,6 +222,71 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
+def _export_agent(agent_slug: str) -> dict:
+    """Write this agent out as one portable file, and say where it landed.
+
+    Into ``data/exports/``, which is gitignored and is already this install's
+    own scratch space — the chat then offers the file with ``send_document``.
+    Not a return of the bundle text: an agent's library is tens of kilobytes of
+    JSON, and pushing that through a tool result would fill the model's context
+    with the very thing it is only meant to hand over.
+    """
+    from condor.agents import bundle as agent_bundle
+    from condor.paths import data_dir
+
+    try:
+        bundle = agent_bundle.build(agent_slug)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    text = agent_bundle.render(bundle)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    target = (
+        data_dir()
+        / "exports"
+        / f"{bundle.agent.slug}-{stamp}{agent_bundle.FILENAME_SUFFIX}"
+    )
+    atomic_write_text(target, text)
+    return {
+        "exported": True,
+        "agent_slug": bundle.agent.slug,
+        "path": str(target),
+        "bytes": len(text.encode("utf-8")),
+        "files": [f.path for f in bundle.files],
+    }
+
+
+def _import_agent(path: str, as_slug: str) -> dict:
+    """Register the agent in a bundle file, with its code switched off.
+
+    ``as_slug`` (passed as ``agent_slug``) renames it on the way in, which is
+    the answer to a collision — import creates and never replaces, because
+    updating an agent from a bundle is a different verb and conflating the two
+    is how a tuned local agent gets silently reset.
+
+    The preview is the plan this returns on refusal: every executable file is
+    named before anything is written, because an imported routine runs inside
+    the Condor process and that review is the only gate there is.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    try:
+        data = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        return {"error": f"Could not read '{path}': {exc}"}
+
+    try:
+        bundle = agent_bundle.parse(data)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    plan = agent_bundle.plan(bundle, as_slug=as_slug, user_id=settings.user_id)
+    try:
+        return agent_bundle.apply(plan, user_id=settings.user_id)
+    except ValueError as exc:
+        return {"error": str(exc), "preview": plan.summary()}
+
+
 def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
     """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
 
@@ -369,6 +436,19 @@ def _manage_agent(
         if not agent_slug:
             return {"error": "agent_slug is required"}
         return _publish_agent(agent_slug, path or "")
+
+    if action == "export_agent":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        return _export_agent(agent_slug)
+
+    if action == "import_agent":
+        if not path:
+            return {"error": "path (the bundle file to import) is required"}
+        # ``agent_slug`` is the name to land under, not one to look up: the
+        # bundle already carries its own, and this is how a collision is
+        # answered.
+        return _import_agent(path, agent_slug or "")
 
     if action == "delete_agent":
         if not agent_slug:
@@ -731,6 +811,11 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="publish", agent_slug=...)',
     ),
+    "export_agent": (
+        "manage_agents",
+        'manage_agents(action="export", agent_slug=...)',
+    ),
+    "import_agent": ("manage_agents", 'manage_agents(action="import", path=...)'),
     "list_strategies": ("manage_loops", 'manage_loops(action="list")'),
     "get_strategy": ("manage_loops", 'manage_loops(action="get", loop_id=...)'),
     "create_strategy": (
@@ -776,6 +861,8 @@ _AGENT_ACTIONS = {
     "update": "update_agent",
     "delete": "delete_agent",
     "publish": "publish_agent",
+    "export": "export_agent",
+    "import": "import_agent",
 }
 
 _STRATEGY_ACTIONS = {
