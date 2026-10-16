@@ -69,10 +69,14 @@ install: setup
 	@$(MAKE) setup-chrome
 	@-$(MAKE) doctor
 
+# Bounded, and says which way it failed. The bare `python -c` this replaces had
+# no timeout and sent stderr to /dev/null, so a stalled download sat on
+# "Setting up Chrome..." for ever with nothing to read and no way to finish the
+# install. See condor/setup_chrome.py; it always exits 0, because charts are
+# optional and an optional renderer must not fail an install.
 setup-chrome:
 	@echo "Setting up Chrome for chart rendering..."
-	@uv run python -c "import kaleido; kaleido.get_chrome_sync()" 2>/dev/null || \
-		echo "Chrome setup skipped (not required for basic usage)"
+	@uv run python -m condor.setup_chrome || true
 
 doctor:
 	@bash -c ' \
@@ -81,6 +85,13 @@ doctor:
 		uv run python -m condor.doctor \
 	'
 
+# Builds into dist.new and swaps, exactly as the in-process updater does
+# (utils/updater.build_frontend). vite's `emptyOutDir` would otherwise empty the
+# directory in place: `run` and `restart` stop Condor first, but this target is
+# public and a Condor started any other way -- `run-fg`, a supervisor, a second
+# checkout -- is left serving an empty dist for the length of the build, and a
+# build that then fails leaves it with no dashboard at all.
+#
 # Reinstall when the lockfile moved, not merely when node_modules is absent:
 # after the first boot the directory always exists, so a pull that adds a
 # dependency would otherwise build against a stale tree and fail. npm rewrites
@@ -95,7 +106,11 @@ build-frontend:
 		   [ package-lock.json -nt node_modules/.package-lock.json ]; then \
 			npm ci || exit 1; \
 		fi; \
-		npm run build \
+		rm -rf dist.new && \
+		npm run build -- --outDir dist.new --emptyOutDir && \
+		rm -rf dist.old && \
+		{ [ -d dist ] && mv dist dist.old || true; } && \
+		mv dist.new dist \
 	'
 
 # Fails early (before the frontend build) if Condor is already up

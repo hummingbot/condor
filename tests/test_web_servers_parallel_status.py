@@ -7,7 +7,6 @@ shape of the response, and that one broken server never sinks the batch.
 """
 
 import asyncio
-import time
 
 import pytest
 from fastapi import FastAPI
@@ -44,13 +43,26 @@ class FakeConfigManager:
         return self._default
 
 
-class FakeSDS:
-    """Cache always misses; each fetch sleeps like a connect timeout would."""
+#: How long a fetch waits for its siblings before deciding they are not coming.
+#: Only ever reached by a *serial* implementation, so it bounds the failure
+#: rather than the success — a concurrent one releases the moment the last
+#: fetch arrives, however loaded the machine is.
+RENDEZVOUS_TIMEOUT = 5.0
 
-    def __init__(self, statuses, delay=DELAY, raises=()):
+
+class FakeSDS:
+    """Cache always misses; each fetch sleeps like a connect timeout would.
+
+    ``rendezvous`` makes the fan-out provable instead of merely likely: every
+    fetch waits until that many are in flight at once, which a serial resolver
+    can never satisfy.
+    """
+
+    def __init__(self, statuses, delay=DELAY, raises=(), rendezvous=0):
         self._statuses = statuses
         self._delay = delay
         self._raises = set(raises)
+        self._barrier = asyncio.Barrier(rendezvous) if rendezvous else None
         self.concurrent = 0
         self.max_concurrent = 0
 
@@ -62,7 +74,10 @@ class FakeSDS:
         self.concurrent += 1
         self.max_concurrent = max(self.max_concurrent, self.concurrent)
         try:
-            await asyncio.sleep(self._delay)
+            if self._barrier is not None:
+                await asyncio.wait_for(self._barrier.wait(), RENDEZVOUS_TIMEOUT)
+            else:
+                await asyncio.sleep(self._delay)
             if name in self._raises:
                 raise RuntimeError("connection refused")
             return self._statuses[name]
@@ -87,25 +102,33 @@ def three_servers():
     }
 
 
-def test_three_slow_servers_resolve_in_one_timeout_not_three(monkeypatch):
-    """Two unreachable servers must not stack their timeouts on the third."""
+def test_three_slow_servers_are_all_in_flight_at_once(monkeypatch):
+    """Two unreachable servers must not stack their timeouts on the third.
+
+    Asserted by rendezvous rather than by the clock. The wall-clock form
+    (``elapsed < DELAY * 1.5``) measured the machine as much as the code: it
+    passed alone and failed under a loaded full-suite run, which is the worst
+    kind of red — it says nothing about the property and trains people to
+    re-run. Here every fetch blocks until all three have arrived, so a serial
+    resolver cannot reach the assertion at all and a slow one still can.
+    """
     sds = FakeSDS(
         statuses={
             "alpha": {"status": "online"},
             "bravo": None,
             "charlie": None,
-        }
+        },
+        rendezvous=3,
     )
     client = build_client(monkeypatch, FakeConfigManager(three_servers()), sds)
 
-    t0 = time.monotonic()
     resp = client.get("/servers")
-    elapsed = time.monotonic() - t0
 
     assert resp.status_code == 200
-    # Serial would be ~3x DELAY; concurrent stays well under 1.5x the slowest.
-    assert elapsed < DELAY * 1.5, f"took {elapsed:.2f}s, expected ~{DELAY:.2f}s"
-    assert sds.max_concurrent == 3
+    assert sds.max_concurrent == 3, (
+        "the three fetches never overlapped — they were resolved one after "
+        "another, so the endpoint pays the sum of the connect timeouts"
+    )
 
 
 def test_all_online_response_is_unchanged(monkeypatch):

@@ -298,7 +298,13 @@ class TestMcpTools:
 
         assert result["created"] is True
         assert "shared" not in result
-        assert (tmp_path / "routines" / "local.py").exists()
+        # The chat's own writable library, which is now the gitignored local
+        # root rather than the tracked repo-root one: what the chat agent
+        # authors must not land in a directory upstream also maintains.
+        assert (
+            paths_mod.local_agents_root() / CHAT_SLUG / "routines" / "local.py"
+        ).exists()
+        assert not (tmp_path / "routines" / "local.py").exists()
         assert not (paths_mod.shared_routines_root() / "local.py").exists()
 
     def test_agent_edit_and_delete_cannot_reach_the_shared_root(
