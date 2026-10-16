@@ -265,9 +265,11 @@ class LoopSupervisor:
 
         Either way the session opting into ``restart_on_boot`` gets a *new*
         session started. An old session number is never resurrected: its
-        journal is closed history. One restart per strategy, replacing any live
-        engine rather than adding to it, and each one reported only once it has
-        a first tick to its name (CORR-728).
+        journal is closed history. One restart per strategy — the newest
+        session that opted in, so the pins and the owner that come back are the
+        ones that were last live — replacing any live engine rather than adding
+        to it, and each one reported only once it has a first tick to its name
+        (CORR-728).
 
         Settling the *session* is not settling what it was operating: a
         graceful stop keeps positions and executors running by design, so every
@@ -279,11 +281,15 @@ class LoopSupervisor:
         """
         report = ReconcileReport()
         settled: dict[tuple[str, str], dict] = {}
-        # One restart per strategy per boot. Two settled sessions of one
-        # strategy both opted in would otherwise restart twice — the second
-        # replacing the first the moment it had been built (CORR-728).
-        restarted_keys: set[tuple[str, str]] = set()
-        pending: list[tuple[InterruptedRun, bool, asyncio.Task]] = []
+        # One restart per strategy per boot, and it is the NEWEST session that
+        # opted in. Two settled sessions of one strategy both opted in would
+        # otherwise restart twice — the second replacing the first the moment it
+        # had been built (CORR-728) — and taking the first one met made that the
+        # *oldest*, because the session directories are visited ascending by
+        # number. A strategy stopped and started again before the crash would
+        # then come back on the retired session's server and model pins and its
+        # owner, with the newer session that was actually running skipped.
+        chosen: dict[tuple[str, str], tuple[InterruptedRun, bool, Path, dict]] = {}
 
         for session_dir, status, crashed in self._sessions_to_settle(agents_root):
             run = InterruptedRun(
@@ -293,7 +299,12 @@ class LoopSupervisor:
                 last_tick=int(status.get("tick", 0) or 0),
                 session_dir=session_dir,
             )
-            settled.setdefault((run.agent_slug, run.strategy_slug), status)
+            key = (run.agent_slug, run.strategy_slug)
+            # Newest here too: this is what the orphan scan resolves its client
+            # from, so it has to be the pins of the session that was last live.
+            kept = settled.get(key)
+            if kept is None or run.session_num >= int(kept.get("session_num", 0) or 0):
+                settled[key] = status
 
             if crashed:
                 self._mark_interrupted(session_dir, status, run)
@@ -305,19 +316,19 @@ class LoopSupervisor:
                 # SUSPENDED file for every later boot to try again.
                 write_status(session_dir, state=LoopState.STOPPED, boot_id=BOOT_ID)
 
-            key = (run.agent_slug, run.strategy_slug)
-            if status.get("restart_on_boot") and key not in restarted_keys:
-                restarted_keys.add(key)
-                # Started as a task, settled below: each restart waits for its
-                # own first tick (CORR-728), and this pass runs inside startup,
-                # so a fleet's waits have to overlap rather than add up.
-                pending.append(
-                    (
-                        run,
-                        crashed,
-                        asyncio.create_task(self._restart(status, session_dir)),
-                    )
-                )
+            if status.get("restart_on_boot"):
+                held = chosen.get(key)
+                if held is None or run.session_num >= held[0].session_num:
+                    chosen[key] = (run, crashed, session_dir, status)
+
+        # Started as tasks, settled below: each restart waits for its own first
+        # tick (CORR-728), and this pass runs inside startup, so a fleet's waits
+        # have to overlap rather than add up. After the settling loop, which is
+        # also what keeps every status file written before any restart reads one.
+        pending: list[tuple[InterruptedRun, bool, asyncio.Task]] = [
+            (run, crashed, asyncio.create_task(self._restart(status, session_dir)))
+            for run, crashed, session_dir, status in chosen.values()
+        ]
 
         for run, crashed, task in pending:
             try:
@@ -733,20 +744,37 @@ def _pins_of(status: dict, session_dir: Path | None) -> dict[str, Any]:
 async def _client_for_status(status: dict):
     """An API client for the server the session in ``status`` was trading on.
 
-    Resolved through the owner's accessible servers, the same route a chat
-    takes — the status file records the ``chat_id`` and ``user_id`` and nothing
-    about the server, and the config may well have moved since. ``None`` when
-    nothing can be resolved, which the caller reads as "no orphan report for
-    this strategy", never as "no orphans".
+    The server it *recorded*, through :func:`_pins_of` — the same copy
+    ``_restart`` comes back on. A session pinned to one server would otherwise
+    be scanned on whichever the chat defaults to today, and its executors left
+    running on the pinned one reported as nothing at all: the scan would answer
+    "no orphans" about a host it never asked.
+
+    Still resolved through the owner's accessible servers, the route a chat
+    takes, so the pin narrows the search and never widens the access: a pin
+    naming a server this owner cannot reach (or that is gone) falls through to
+    the accessible list exactly as it did. ``None`` when nothing can be
+    resolved, which the caller reads as "no orphan report for this strategy",
+    never as "no orphans".
     """
     from config_manager import get_config_manager
 
     cm = get_config_manager()
     chat_id = int(status.get("chat_id") or 0)
     user_id = int(status.get("user_id") or 0)
+    # The status dict alone: this is handed one by the scan, with no session
+    # directory, and ``record`` rewrites the snapshot every tick anyway.
+    pinned = str(_pins_of(status, None).get("server_name") or "") or None
+    # A pin naming a server deleted since is dropped rather than carried: the
+    # no-chat door below raises on an unknown name, and the whole scan is
+    # best-effort — it must not cost a boot its orphan report over a stale pin.
+    if pinned and cm.get_server(pinned) is None:
+        pinned = None
     if chat_id:
-        return await cm.get_client_for_chat(chat_id, user_id or None)
-    return await cm.get_client()
+        return await cm.get_client_for_chat(
+            chat_id, user_id or None, preferred_server=pinned
+        )
+    return await cm.get_client(pinned)
 
 
 # Process-global supervisor. Not in main.py's reload list: it holds live engines.

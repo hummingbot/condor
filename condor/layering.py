@@ -319,6 +319,37 @@ def _root_library_dirs() -> frozenset[str]:
     )
 
 
+def is_library_path(rel: str) -> bool:
+    """Whether ``rel``, relative to an agent home, is library content.
+
+    The path rule of :func:`publishable_files` as a predicate, so a door that
+    takes paths from *outside* this install — :mod:`condor.agents.bundle`'s
+    import — can refuse exactly what the export skips instead of keeping a
+    second copy of the same list to drift from. That matters beyond tidiness:
+    a bundle is hand-editable JSON, so a crafted one could otherwise write
+    ``loops/<s>/sessions/session_1/status.json`` and have boot reconciliation
+    read it as a crashed session and start the loop, with no operator ever
+    pressing Start.
+
+    Both rules of the export apply, plus one the export gets from the
+    filesystem rather than from a name: a dotted *part* at any depth is
+    refused here, where ``publishable_files`` only skips dotted file names
+    (a dotted directory it meets is runtime output named in
+    ``_RUNTIME_NAMES``). Nothing an export produces is rejected by that, so
+    the round trip is unaffected.
+    """
+    parts = tuple(part for part in str(rel).split("/") if part)
+    if not parts:
+        return False
+    if any(part.startswith(".") for part in parts):
+        return False
+    if any(part in _RUNTIME_NAMES for part in parts):
+        return False
+    if len(parts) > 1 and parts[0] not in _root_library_dirs():
+        return False
+    return True
+
+
 def publishable_files(home: Path, path: str = "") -> list[Path]:
     """Every library file under ``home``, relative to it — runtime output skipped.
 

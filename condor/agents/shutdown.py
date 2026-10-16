@@ -171,8 +171,16 @@ async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
     deployed more than its configured bot winds all of them down. On any
     failure it falls back to ``engine._last_skill_data`` (already scoped to this
     session's ``agent_id`` by the last tick).
+
+    Plus whatever the tick adopted from a dead session of this same strategy
+    (CORR-726). The provider cannot see them -- it reads this session's own
+    ``controller_id`` tag -- so a guaranteed winddown scoped to it alone left
+    every inherited position open, on the one path whose whole promise is that
+    nothing is left stranded. They are already this session's to close: the
+    prompt says so and the stop gate allows their ids.
     """
     ledger = getattr(engine, "ledger", None)
+    rows: list[dict] | None = None
     try:
         results = await engine.provider_registry.run_core_providers(
             client,
@@ -184,10 +192,17 @@ async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
         )
         ex_result = results.get("executors")
         if ex_result is not None and "executors" in getattr(ex_result, "data", {}):
-            return list(ex_result.data["executors"])
+            rows = list(ex_result.data["executors"])
     except Exception:
         log.exception("shutdown: executor refresh failed; using last snapshot")
-    return list((engine._last_skill_data or {}).get("executors", []))
+    if rows is None:
+        rows = list((engine._last_skill_data or {}).get("executors", []))
+    # ``getattr``: the winddown is also driven by stand-in engines that carry
+    # only what they bind, the convention ``_finish`` documents. Adopted rows
+    # carry a foreign ``controller_id`` by definition, so they cannot duplicate
+    # a row the provider just returned.
+    adopted = getattr(engine, "_adopted_executors", None) or []
+    return rows + [row for row in adopted if isinstance(row, dict)]
 
 
 async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:

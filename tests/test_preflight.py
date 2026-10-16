@@ -520,6 +520,40 @@ def test_the_preflight_balance_verdict_is_the_create_path_verdict():
     assert "Insufficient balance on binance" in viability.detail
 
 
+def test_a_price_tick_between_the_two_reads_does_not_refuse_a_funded_start():
+    """One price, used by both halves.
+
+    The probe sized the order from a live price and ``balance_violation`` then
+    priced that amount *again*: on an account holding exactly its stated
+    capital, a tick up between the two reads invented a shortfall. 780 USDC at
+    150 is 5.2 SOL; re-priced at 151 the check demanded 785.2 USDC and refused
+    a start the account could fund. The price travels in the probe, so there is
+    only ever one read to disagree with.
+    """
+    client = _Client(rows=IN_USDC, rules=AVAX_RULES)
+    reads = []
+    ticking = iter([150.0, 151.0])
+
+    async def moving(connector_name, trading_pairs):
+        pairs = (
+            [trading_pairs] if isinstance(trading_pairs, str) else list(trading_pairs)
+        )
+        price = next(ticking, 151.0)
+        reads.append(price)
+        return {"prices": {pairs[0]: price}}
+
+    client.market_data.get_prices = moving
+
+    viability = _check(
+        _report(client, _config(capital_amount=780.0)), "order viability"
+    )
+
+    assert viability.state == PASS
+    assert "5.2 SOL buy" in viability.detail
+    # And the second price was never needed: one read, carried.
+    assert reads == [150.0]
+
+
 def test_an_order_both_the_venue_and_the_account_accept_passes():
     report = _report(_Client(rows=IN_USDC, rules=AVAX_RULES), _config())
 

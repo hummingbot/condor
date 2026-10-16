@@ -368,3 +368,184 @@ def test_the_report_summary_names_the_orphans():
     summary = report.summary()
     assert "dead-1" in summary
     assert "still RUNNING with no live session" in summary
+
+
+# ── The book and the winddown, not only the prompt ──
+
+
+def _book_engine(adopted, own_rows, own_exposure):
+    """A hand-built engine at the seam where the tick assembles its risk book.
+
+    Same construction as ``tests/test_journal_read_cache.py``: the assembly is
+    inside ``_gather_tick_context``, and what is under test is the arithmetic it
+    does, not a tick.
+    """
+    from condor.agents import engine as engine_mod
+    from condor.agents.risk import RiskEngine, RiskLimits
+
+    engine = engine_mod.TickEngine.__new__(engine_mod.TickEngine)
+    engine.agent_id = LIVE_TAG
+    engine.config = {}
+    engine.journal = None
+    engine.ledger = None
+    engine.risk = RiskEngine(RiskLimits(max_open_executors=5))
+    engine.is_experiment = False
+    engine._last_block_reason = ""
+    engine._adopted_executors = list(adopted)
+    engine._last_skill_data = {
+        "executors": list(own_rows),
+        "total_exposure": own_exposure,
+    }
+
+    async def _no_adopt(client=None):
+        return None
+
+    class _NoProviders:
+        async def run_core_providers(self, *args, **kwargs):
+            return {}
+
+    captured = {}
+
+    def _capture_prompt(core_data_summaries, risk_state, live_open_count):
+        captured["state"] = risk_state
+        captured["summaries"] = core_data_summaries
+        return "prompt"
+
+    engine._adopt_running_bots = _no_adopt
+    engine._adopt_running_executors = _no_adopt
+    engine.provider_registry = _NoProviders()
+    engine._build_prompt = _capture_prompt
+    return engine, captured
+
+
+def test_an_adopted_orphan_counts_against_the_limits():
+    """Inherited exposure is exposure.
+
+    The adopted rows reached the prompt and the stop allowlist but not the
+    book: the count and the total came from the provider alone, which reads
+    only this session's own ``controller_id``. A restarted session holding
+    three inherited executors could therefore open its whole
+    ``max_open_executors`` on top of them and never be refused.
+    """
+    engine, captured = _book_engine(
+        adopted=[{"id": "dead-1", "controller_id": DEAD_TAG, "amount": 400.0}],
+        own_rows=[{"id": "live-1"}],
+        own_exposure=100.0,
+    )
+
+    ctx = asyncio.run(engine._gather_tick_context(client=None))
+
+    assert ctx is not None
+    assert captured["state"].executor_count == 2
+    assert captured["state"].total_exposure == pytest.approx(500.0)
+    # And it is still named in the prompt, which is how the model can close it.
+    assert "dead-1" in captured["summaries"]["adopted_executors"]
+
+
+def test_a_session_with_nothing_adopted_reads_exactly_the_provider():
+    engine, captured = _book_engine(
+        adopted=[], own_rows=[{"id": "live-1"}], own_exposure=100.0
+    )
+
+    asyncio.run(engine._gather_tick_context(client=None))
+
+    assert captured["state"].executor_count == 1
+    assert captured["state"].total_exposure == pytest.approx(100.0)
+    assert "adopted_executors" not in captured["summaries"]
+
+
+def test_the_winddown_stops_an_adopted_orphan_too():
+    """The guaranteed floor has to reach inherited positions.
+
+    ``_get_running_executors`` is scoped to this session's own tag, so an
+    emergency winddown of a restarted session left every inherited position
+    open — on the one path whose whole promise is that nothing is stranded.
+    """
+    from condor.agents.shutdown import _get_running_executors
+
+    class _Providers:
+        async def run_core_providers(self, *args, **kwargs):
+            return {
+                "executors": SimpleNamespace(data={"executors": [{"id": "live-1"}]})
+            }
+
+    engine = SimpleNamespace(
+        agent_id=LIVE_TAG,
+        config={},
+        ledger=None,
+        provider_registry=_Providers(),
+        _last_skill_data={},
+        _adopted_executors=[{"id": "dead-1", "controller_id": DEAD_TAG}],
+    )
+
+    rows = asyncio.run(_get_running_executors(engine, client=None))
+
+    assert [r["id"] for r in rows] == ["live-1", "dead-1"]
+
+
+def test_the_orphan_scan_asks_the_server_the_session_was_pinned_to(monkeypatch):
+    """The scan has to look where the executors are.
+
+    ``_client_for_status`` resolved the chat's *current* client and ignored the
+    session's recorded pin, so a session pinned to server A was scanned on
+    whichever server the chat defaults to today — and its executors still
+    running on A were reported as nothing at all. The pin only narrows: it is
+    still resolved through the owner's accessible servers, the route a restart
+    takes.
+    """
+    import config_manager as cm_mod
+    from condor.runtime import loops as loops_mod
+
+    asked: dict = {}
+
+    class _CM:
+        @staticmethod
+        def get_server(name):
+            return {"name": name} if name == "pinned_box" else None
+
+        @staticmethod
+        async def get_client_for_chat(chat_id, user_id=None, preferred_server=None):
+            asked.update(
+                chat_id=chat_id, user_id=user_id, preferred_server=preferred_server
+            )
+            return "a client for " + str(preferred_server)
+
+    monkeypatch.setattr(cm_mod, "get_config_manager", lambda: _CM())
+
+    client = asyncio.run(
+        loops_mod._client_for_status(
+            {"chat_id": 5, "user_id": 7, "pins": {"server_name": "pinned_box"}}
+        )
+    )
+
+    assert client == "a client for pinned_box"
+    assert asked == {"chat_id": 5, "user_id": 7, "preferred_server": "pinned_box"}
+
+
+def test_a_pin_naming_a_deleted_server_falls_back_instead_of_failing(monkeypatch):
+    """Best-effort: a stale pin must not cost the boot its orphan report."""
+    import config_manager as cm_mod
+    from condor.runtime import loops as loops_mod
+
+    asked: dict = {}
+
+    class _CM:
+        @staticmethod
+        def get_server(name):
+            return None  # every pinned name is gone
+
+        @staticmethod
+        async def get_client_for_chat(chat_id, user_id=None, preferred_server=None):
+            asked["preferred_server"] = preferred_server
+            return "the accessible one"
+
+    monkeypatch.setattr(cm_mod, "get_config_manager", lambda: _CM())
+
+    client = asyncio.run(
+        loops_mod._client_for_status(
+            {"chat_id": 5, "user_id": 7, "pins": {"server_name": "deleted_box"}}
+        )
+    )
+
+    assert client == "the accessible one"
+    assert asked["preferred_server"] is None

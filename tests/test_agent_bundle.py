@@ -243,6 +243,48 @@ def test_a_tampered_file_is_refused_naming_its_path(traveller):
 
 
 @pytest.mark.parametrize(
+    "runtime",
+    [
+        # The one that starts a loop: boot reconciliation scans exactly this
+        # path, and a live state with ``restart_on_boot`` is all it reads
+        # before starting the strategy — no operator presses Start.
+        "loops/l/sessions/session_1/status.json",
+        "mutes.yml",  # an import deciding its own muting
+        "config.yml",  # the pins a run was started with
+        "state.json",
+        "owned_bots.json",
+        "store/user_7/note.md",
+        "state/anything.json",  # a root folder the layout never defined
+    ],
+)
+def test_a_runtime_path_is_refused_whole(traveller, runtime):
+    """Inside the directory is not enough: it has to be library content.
+
+    A bundle is hand-editable JSON, so the export's own filter
+    (``publishable_files``) protects nothing on the way in — the import door
+    has to hold the same rule, which is why both now read
+    :func:`condor.layering.is_library_path`.
+    """
+    payload = _bundle_for(traveller, as_dict=True)
+    payload["files"].append({"path": runtime, "sha256": ab._digest("{}"), "text": "{}"})
+    import_plan = ab.plan(ab.parse(json.dumps(payload)), as_slug="arrival", user_id=7)
+
+    assert any(runtime in r for r in import_plan.refusals)
+    with pytest.raises(ab.BundleError):
+        ab.apply(import_plan, user_id=7)
+    assert not agent_home("arrival").exists()
+
+
+def test_every_path_a_real_export_produces_still_lands(traveller):
+    """The round trip, so the guard above cannot quietly refuse real content."""
+    import_plan = ab.plan(_bundle_for(traveller), as_slug="arrival", user_id=7)
+
+    assert import_plan.refusals == []
+    landed = {row.path for row in import_plan.files + import_plan.executables}
+    assert landed == {p.as_posix() for p in publishable_files(traveller)}
+
+
+@pytest.mark.parametrize(
     "escape",
     ["../../../agents/condor/AGENT.md", "/etc/passwd", "skills/../../x"],
 )

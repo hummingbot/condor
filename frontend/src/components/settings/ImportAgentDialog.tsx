@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, FileCode2, FileText, Loader2, Upload } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { api, type AgentImportPlan } from "@/lib/api";
 
@@ -23,6 +23,16 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [landed, setLanded] = useState<AgentImportPlan | null>(null);
+  /**
+   * Which preview the screen belongs to.
+   *
+   * Two bundles chosen in a row are two requests, and the first one can answer
+   * second: the plan on screen would then be A's files and A's refusals while
+   * `file` is B, and Import — which submits the reviewed plan's name — would
+   * write B under a name nobody reviewed it for. Only the newest request may
+   * render, so what is shown is always what the pending import would do.
+   */
+  const latest = useRef(0);
 
   async function pick(chosen: File | null) {
     setFile(chosen);
@@ -35,24 +45,34 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   }
 
   async function review(chosen: File, slug: string) {
+    const mine = ++latest.current;
     setBusy(true);
     setError(null);
     try {
-      setPlan(await api.previewAgentImport(chosen, slug));
+      const previewed = await api.previewAgentImport(chosen, slug);
+      if (mine !== latest.current) return;
+      setPlan(previewed);
     } catch (e) {
+      if (mine !== latest.current) return;
       setPlan(null);
       setError((e as Error).message);
     } finally {
-      setBusy(false);
+      if (mine === latest.current) setBusy(false);
     }
   }
 
   async function confirm() {
-    if (!file) return;
+    if (!file || !plan) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.importAgent(file, asSlug);
+      // `plan.slug`, never the input box: the suggested name is accepted by
+      // previewing it, and the box is still empty when it was taken from the
+      // placeholder. Submitting `asSlug` there sent "" — so the server planned
+      // the colliding name again and answered 409 while this button read
+      // "Import <the free name>". The plan is what was reviewed, so the plan's
+      // name is what lands.
+      const result = await api.importAgent(file, plan.slug);
       setLanded(result);
       setFile(null);
       setPlan(null);

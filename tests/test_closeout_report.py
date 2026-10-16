@@ -697,6 +697,31 @@ def test_close_everything_refuses_without_a_lineage():
     assert "no lineage" in report.error
 
 
+def test_close_everything_cancels_an_order_a_dead_executor_left_behind(
+    tmp_path, monkeypatch
+):
+    """The stopped-agent case this action exists for.
+
+    Scoped to the live executor rows, a lineage whose executors have all
+    terminated gave the sweep no market at all: nothing was cancelled, and the
+    report then named the leftover order a few lines later without anything
+    having tried to remove it. Stops stay on the live rows — there is nothing
+    to stop on a terminated one.
+    """
+    _strategy(tmp_path, monkeypatch)
+    executors = _FakeExecutorsAPI(
+        {"RUNNING": [], "TERMINATED": [_executor("e-done", status="TERMINATED")]}
+    )
+    trading = _FakeTradingAPI(active=[_order("stranded")])
+    client = _FakeClient(executors, trading)
+
+    report = asyncio.run(close_out_agent(client, "acme", "scalper"))
+
+    assert executors.stop_calls == []
+    assert trading.cancel_calls == [("master_account", "gate_io", "stranded")]
+    assert report.of_kind(KIND_ORDER)
+
+
 # ── The record itself ──
 
 
@@ -705,6 +730,23 @@ def test_a_clean_report_says_so():
     assert report.clean is True
     assert report.summary() == "nothing to close out"
     assert "(none)" in report.render()
+
+
+def test_a_read_that_did_not_answer_costs_the_report_its_clean():
+    """A failed read returns an empty list, so it leaves no row to be
+    ``UNCONFIRMABLE``: judged on the items alone, a close-out that never
+    checked the held positions reported ``clean`` and "nothing to close out".
+    """
+    report = CloseoutReport(
+        agent_id="a",
+        lineage=LINEAGE,
+        at="now",
+        unanswered=("tracked-position read: connection reset",),
+    )
+
+    assert report.clean is False
+    assert "did not answer" in report.summary()
+    assert report.to_dict()["clean"] is False
 
 
 def test_the_rendered_report_names_every_section():

@@ -55,6 +55,7 @@ from condor.layering import (
     CREATED_BY_KEY,
     FORKED_AT_KEY,
     FORKED_FROM_KEY,
+    is_library_path,
     publishable_files,
 )
 from condor.memory.paths import CHAT_SLUG, agent_home, agent_home_layers, safe_slug
@@ -494,6 +495,16 @@ def _refuse_path(path: str) -> str:
     or NUL inside a part. The write root is always computed from the resolver
     and never joined from the bundle, so this is the second of two guards
     rather than the only one.
+
+    Staying *inside* the directory is not enough, though, because not every
+    file under an agent home is library content. Runtime state is the install's
+    own, and a bundle is hand-editable JSON: a crafted one carrying
+    ``loops/<s>/sessions/session_1/status.json`` with a live state and
+    ``restart_on_boot`` would be read by boot reconciliation as a crashed
+    session and the loop started without the operator ever choosing Start —
+    and ``mutes.yml`` would arrive deciding its own muting. So the path is
+    held to :func:`condor.layering.is_library_path`, which is the export's own
+    rule rather than a second list beside it.
     """
     if not path or path != path.strip():
         return f"'{path}' is not a usable file path"
@@ -505,6 +516,11 @@ def _refuse_path(path: str) -> str:
         return f"'{path}' would write outside the agent's own directory"
     if Path(path).is_absolute() or "\\" in path:
         return f"'{path}' would write outside the agent's own directory"
+    if not is_library_path(path):
+        return (
+            f"'{path}' is not part of an agent's library — a bundle carries "
+            "what the agent *is*, never this install's runtime state"
+        )
     return ""
 
 

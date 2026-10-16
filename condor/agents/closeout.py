@@ -200,9 +200,19 @@ class CloseoutReport:
 
     @property
     def clean(self) -> bool:
-        """True only when nothing was left behind and nothing went unconfirmed."""
-        return not self.error and not any(
-            i.outcome in (LEFT, UNCONFIRMABLE) for i in self.items
+        """True only when nothing was left behind and nothing went unconfirmed.
+
+        ``unanswered`` counts, and that is the whole of it: a read that did not
+        answer returns an empty list, so a failed tracked-position read — or an
+        order page that filled — leaves no row to carry an ``UNCONFIRMABLE``
+        outcome. Judged on the items alone, a close-out that never checked the
+        held positions reported ``clean`` and "nothing to close out", which is
+        the one sentence this report exists to stop being a guess.
+        """
+        return (
+            not self.error
+            and not self.unanswered
+            and not any(i.outcome in (LEFT, UNCONFIRMABLE) for i in self.items)
         )
 
     def summary(self) -> str:
@@ -224,6 +234,11 @@ class CloseoutReport:
         line = "; ".join(parts) or "nothing to close out"
         if self.stale_records:
             line += f"; {len(self.stale_records)} stale local row(s)"
+        # Said out loud for the same reason it costs the report its ``clean``:
+        # "nothing to close out" from a stop that could not read the positions
+        # is the sentence an operator would act on.
+        if self.unanswered:
+            line += f"; {len(self.unanswered)} read(s) did not answer"
         if self.error:
             line += f"; report incomplete ({self.error})"
         return line
@@ -1153,7 +1168,16 @@ async def close_out_agent(
     # ``None`` as the engine: ``cancel_resting_orders`` reads only its ledger,
     # and a stopped agent has none — which is also what keeps the sweep over the
     # executors' markets instead of refusing the whole scope as controller-mode.
-    cancel = await cancel_resting_orders(None, client, policy, targets)
+    #
+    # Scoped to the WHOLE lineage and not to ``targets``: an executor that has
+    # already terminated can be exactly the one that left an order resting, and
+    # that is the state this action is for. Scoped to the live rows, a stopped
+    # agent swept nothing at all — ``targets`` is empty, so ``_cancel_scope``
+    # has no market — and the report named the leftover order a few lines later
+    # without anything having tried to cancel it. The same distinction
+    # ``TickEngine._cancel_resting_orders`` draws with ``all_executors``. Stops
+    # stay on the live rows above: a terminated executor has nothing to stop.
+    cancel = await cancel_resting_orders(None, client, policy, _scope_rows(live_rows))
 
     report = await build_closeout(
         client,

@@ -275,6 +275,40 @@ def test_reconcile_restart_opt_in_starts_new_session(tmp_path, monkeypatch):
     assert "restarted" in report.summary()
 
 
+def test_reconcile_restarts_the_newest_session_that_opted_in(tmp_path, monkeypatch):
+    """Two settled sessions of one strategy: the newest is the one that returns.
+
+    Session directories are visited ascending by number, so taking the first
+    opted-in session met took the *oldest*. A strategy stopped and started
+    again before the crash has both on disk — only a boot retires a SUSPENDED
+    record, and none ran in between — so it came back on the retired session's
+    server and model pins and its owner, with the session that was actually
+    running skipped.
+    """
+    old = _seed_session(
+        tmp_path, num=1, state=LoopState.SUSPENDED, restart_on_boot=True
+    )
+    new = _seed_session(tmp_path, num=2, restart_on_boot=True)
+    for session_dir, server in ((old, "retired_box"), (new, "live_box")):
+        status = json.loads((session_dir / "status.json").read_text())
+        status["pins"] = {"server_name": server}
+        (session_dir / "status.json").write_text(json.dumps(status))
+
+    supervisor = LoopSupervisor()
+    chosen = []
+
+    async def fake_restart(status, session_dir=None):
+        chosen.append((status["session_num"], status["pins"]["server_name"]))
+        return True
+
+    monkeypatch.setattr(supervisor, "_restart", fake_restart)
+
+    asyncio.run(supervisor.reconcile_boot(agents_root=tmp_path))
+
+    # One restart per strategy still (CORR-728), and it is session 2's pins.
+    assert chosen == [(2, "live_box")]
+
+
 def test_reconcile_restart_failure_is_reported_not_fatal(tmp_path, monkeypatch):
     """A restart that blows up still leaves the run interrupted and reported."""
     session_dir = _seed_session(tmp_path, restart_on_boot=True)

@@ -109,3 +109,85 @@ def test_the_real_drawdown_still_reads_known(tmp_path):
 
     assert known is True
     assert pct == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# CORR-725, through the journal: a snapshot is not a reading by existing
+# ---------------------------------------------------------------------------
+
+
+def test_a_snapshot_with_no_reading_does_not_clear_the_drawdown(tmp_path):
+    """The hole the fix above left open.
+
+    ``_persist_tick`` writes a snapshot on every tick, so a session whose
+    performance reads stopped answering wrote ``pnl=$0.00 | exposure=$0.00``
+    and the guard read it as a flat book: ``current`` fell to zero and a zero
+    exposure returns 0.0 as *known*, which is the one drawdown that clears
+    every limit. The reading state travels on the line, so those lines are
+    subtracted instead.
+    """
+    journal = JournalManager("agent_1", session_dir=tmp_path)
+    journal.record_tick("ran")
+    journal.record_snapshot(
+        total_pnl=100.0, total_volume=1000.0, open_count=2, position_size=500.0
+    )
+    journal.record_tick("ran")
+    journal.record_snapshot(
+        total_pnl=50.0, total_volume=1200.0, open_count=2, position_size=500.0
+    )
+    assert journal.get_drawdown_pct_checked() == (pytest.approx(10.0), True)
+
+    journal.record_tick("ran")
+    journal.record_snapshot(
+        total_pnl=0.0,
+        total_volume=0.0,
+        open_count=0,
+        position_size=0.0,
+        reading="missing",
+    )
+
+    pct, known = journal.get_drawdown_pct_checked()
+    assert known is True
+    assert pct == pytest.approx(10.0)
+
+    state = RiskEngine(RiskLimits(max_drawdown_pct=5.0)).get_state(journal)
+    assert state.is_blocked
+
+
+def test_a_session_that_has_only_ever_failed_to_read_blocks(tmp_path):
+    """And when there is no real reading to fall back on, it fails closed."""
+    journal = JournalManager("agent_1", session_dir=tmp_path)
+    journal.record_tick("ran")
+    journal.record_snapshot(
+        total_pnl=0.0,
+        total_volume=0.0,
+        open_count=0,
+        position_size=0.0,
+        reading="empty",
+    )
+
+    assert journal.get_drawdown_pct_checked() == (0.0, False)
+
+    state = RiskEngine(RiskLimits(max_drawdown_pct=10.0)).get_state(journal)
+    assert state.is_blocked
+    assert "no drawdown reading" in state.block_reason
+
+
+def test_an_unread_tick_does_not_zero_the_volume_or_the_curve(tmp_path):
+    """The same zeros, read by the two other consumers of the section."""
+    journal = JournalManager("agent_1", session_dir=tmp_path)
+    journal.record_tick("ran")
+    journal.record_snapshot(
+        total_pnl=100.0, total_volume=1000.0, open_count=2, position_size=500.0
+    )
+    journal.record_tick("ran")
+    journal.record_snapshot(
+        total_pnl=0.0,
+        total_volume=0.0,
+        open_count=0,
+        position_size=0.0,
+        reading="missing",
+    )
+
+    assert journal.get_total_volume() == 1000.0
+    assert [p["pnl"] for p in journal.get_pnl_series()] == [100.0]

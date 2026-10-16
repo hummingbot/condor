@@ -150,6 +150,27 @@ describe("the 4h45m case", () => {
         .state,
     ).toBe("flagged");
   });
+
+  it("reads a session that has not acted yet as unknown, not as idle forever", () => {
+    // A fresh session adopting a healthy bot starts at 0. Read as an infinite
+    // idle time it was flagged "nothing worked for 1h" in its first second.
+    const signal = livenessSignal(bot(), loop({ lastSuccessfulActionAt: 0 }), NOW);
+    expect(signal.state).toBe("unknown");
+    expect(signal.facts).toContain("acted never");
+    expect(signal.facts.join(" ")).toContain("has not acted yet");
+  });
+
+  it("still flags a bot with nothing trading under a session that has not acted", () => {
+    // The two legs are independent: an unread idle time costs its own leg and
+    // never the container's report.
+    expect(
+      livenessSignal(
+        bot({ num_controllers: 0, running_without_controllers: true }),
+        loop({ lastSuccessfulActionAt: 0 }),
+        NOW,
+      ).state,
+    ).toBe("flagged");
+  });
 });
 
 describe("the failure bands", () => {
@@ -335,6 +356,47 @@ describe("throttling", () => {
     // The venue row is a statement about the venue, which is the whole point:
     // reading a refusal as an agent failure is what made it look like a bug.
     expect(signals[0].note).toContain("never an agent error");
+  });
+
+  it("clears a caller whose refusals are all outside the window, like the venue row", () => {
+    // `refusals` is a lifetime count, so flagging on it left the row red for
+    // the rest of the process — hours of clean calls and a finished session
+    // included — while the venue row beside it had long since cleared.
+    const [venue, caller] = throttleSignals(
+      [
+        {
+          host: "moneymaker",
+          venue: "jupiter",
+          condition: "ok",
+          attempts: 8000,
+          successes: 7000,
+          refusals: 1000,
+          errors: 0,
+          last_refusal_at: NOW_S - 7200,
+          last_reason: "429 Too Many Requests",
+        },
+      ],
+      [
+        {
+          agent: "solana_dex_lp_expert",
+          agent_id: "solana_dex_lp_expert.lp_slot_operator_3",
+          host: "moneymaker",
+          attempts: 8000,
+          successes: 7000,
+          refusals: 1000,
+          errors: 0,
+          last_refusal_at: NOW_S - 7200,
+          last_reason: "429 Too Many Requests",
+        },
+      ],
+      NOW,
+    );
+
+    expect(venue.state).toBe("ok");
+    expect(caller.state).toBe("ok");
+    // The lifetime count stays on the row as history; only the verdict moved.
+    expect(caller.value).toBe("1000 refused");
+    expect(caller.facts).toContain("last refusal 2h 00m ago");
   });
 
   it("reads no accounted call as unknown — never refused and never called look alike", () => {

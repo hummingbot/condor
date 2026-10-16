@@ -164,3 +164,82 @@ it("offers a free name for a collision and re-previews under it", async () => {
     asSlug: "traveller_2",
   });
 });
+
+it("imports under the name that was reviewed, not the empty box", async () => {
+  // Accepting the suggestion is pressing Check name with the box still empty:
+  // the name came off the placeholder. Submitting the box sent "", so the
+  // server planned the colliding name again and answered 409 while the button
+  // read "Import traveller_2".
+  reply = { ...PLAN, collision: "traveller", suggested_slug: "traveller_2" };
+  await render();
+  await choose();
+
+  reply = { ...PLAN, slug: "traveller_2", collision: "", suggested_slug: "" };
+  await act(async () => {
+    button("Check name").click();
+  });
+  expect(button("Import traveller_2").disabled).toBe(false);
+
+  await act(async () => {
+    button("Import traveller_2").click();
+  });
+
+  expect(posts.at(-1)).toEqual({
+    url: "/api/v1/agents/import",
+    asSlug: "traveller_2",
+  });
+});
+
+it("shows the newest bundle's plan when an older preview answers late", async () => {
+  // Two bundles chosen in a row: the plan on screen must belong to the one
+  // Import would write, or the dialog reviews A and lands B.
+  const slow = { ...PLAN, slug: "first", name: "First" };
+  const fast = { ...PLAN, slug: "second", name: "Second" };
+  // Held on an object: a bare `let` assigned only inside the callback below is
+  // narrowed to `never` by the time it is called.
+  const gate: { release?: () => void } = {};
+  let call = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      const body = init?.body as FormData;
+      posts.push({ url, asSlug: String(body.get("as_slug") ?? "") });
+      const which = call++ === 0 ? slow : fast;
+      if (which === slow) {
+        await new Promise<void>((resolve) => {
+          gate.release = resolve;
+        });
+      }
+      return new Response(JSON.stringify(which), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }),
+  );
+
+  await render();
+  const input = container.querySelector("input[type=file]") as HTMLInputElement;
+  const place = (name: string) => {
+    const file = new File(["{}"], name, { type: "application/json" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+  };
+
+  // Dispatched outside `act` on purpose: the first request must still be in
+  // flight when the second is made, and two overlapping `act` scopes
+  // interleave.
+  place("first.condor-agent.json");
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  place("second.condor-agent.json");
+  await act(async () => {
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(button("Import second")).toBeTruthy();
+
+  gate.release?.();
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  // The late answer for the first bundle is dropped, not rendered.
+  expect(button("Import second")).toBeTruthy();
+  expect(container.textContent).not.toContain("First");
+});

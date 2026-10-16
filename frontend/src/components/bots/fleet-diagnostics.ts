@@ -92,6 +92,16 @@ export const LOAD_PER_VCPU_FLAG = 1.0;
 /** How long without a successful action before a loop is flagged, in seconds. */
 export const IDLE_SECONDS = 3600;
 
+/**
+ * How long a refusal keeps a caller reading as throttled, in seconds.
+ *
+ * `condor/agents/throttle.py:THROTTLED_FOR_SECONDS`, which is where the venue
+ * half of these same counters gets its `condition` — the backend sends the
+ * venue rows pre-judged and the caller rows as raw counts, so the window has
+ * to be spelled once on this side for the caller row to be judged the same way.
+ */
+export const THROTTLED_SECONDS = 900;
+
 // ── What "unknown" is, as an input ──
 //
 // The three defaults a caller reaches for when a payload did not carry a
@@ -222,8 +232,9 @@ function callerLabel(caller: CallerVolume): string {
  * race's entry showed `running`, and that was true.
  *
  * `unknown` when no agent owns the bot, so there is no session whose last
- * successful action could be read. A bot nobody owns may be perfectly healthy;
- * this view cannot say, and says so.
+ * successful action could be read — or when the session that owns it has not
+ * acted yet, which is the same absence seen from the other side. A bot nobody
+ * owns may be perfectly healthy; this view cannot say, and says so.
  */
 export function livenessSignal(
   bot: BotSummary,
@@ -244,8 +255,15 @@ export function livenessSignal(
       ],
     };
   }
-  const idleFor = live.lastSuccessfulActionAt > 0 ? nowMs / 1000 - live.lastSuccessfulActionAt : Infinity;
-  const idle = idleFor >= IDLE_SECONDS;
+  // A session that has not acted *yet* has no idle duration, not an infinite
+  // one. Read as Infinity it was flagged "nothing worked for 1h" from its first
+  // second — the restart case especially, where a fresh session adopts a
+  // perfectly healthy bot and has nothing of its own to have done. There is no
+  // session start stamp on this row to date the silence against, so the leg
+  // says unknown until the session has acted once, which is this module's rule
+  // everywhere else: a reading nobody took is drawn apart from a clean one.
+  const acted = live.lastSuccessfulActionAt > 0;
+  const idle = acted && nowMs / 1000 - live.lastSuccessfulActionAt >= IDLE_SECONDS;
   const facts = [
     status,
     controllers,
@@ -253,7 +271,14 @@ export function livenessSignal(
     `acted ${age(live.lastSuccessfulActionAt, nowMs)}`,
   ];
   if (!bot.running_without_controllers && !idle) {
-    return { label: bot.bot_name, state: "ok", value: "live", facts };
+    return acted
+      ? { label: bot.bot_name, state: "ok", value: "live", facts }
+      : {
+          label: bot.bot_name,
+          state: "unknown",
+          value: UNKNOWN_VALUE,
+          facts: [...facts, "this session has not acted yet — nothing to date the silence from"],
+        };
   }
   const why: string[] = [];
   if (bot.running_without_controllers) why.push("nothing trading");
@@ -396,14 +421,23 @@ export function throttleSignals(
     });
   }
   for (const caller of callers) {
+    // `refusals` is a lifetime count, so flagging on it left the row — and the
+    // group's badge — red for the rest of the process after a single refusal,
+    // hours of clean calls and a finished session included, while the venue row
+    // beside it cleared after the window. The count is the history; what an
+    // operator can act on is whether a refusal is recent, which is the same
+    // judgement `venue.condition` already carries.
+    const refusedRecently =
+      caller.refusals > 0 && nowMs / 1000 - caller.last_refusal_at <= THROTTLED_SECONDS;
     out.push({
       label: callerLabel(caller),
-      state: caller.refusals > 0 ? "flagged" : "ok",
+      state: refusedRecently ? "flagged" : "ok",
       value: `${caller.refusals} refused`,
       facts: [
         `${caller.attempts} attempts`,
         `${caller.successes} ok`,
         `${caller.errors} errored`,
+        `last refusal ${age(caller.last_refusal_at, nowMs)}`,
         caller.agent_id ? `session ${caller.agent_id}` : "no session label",
       ],
       note: "whose call volume spent this host's budget",

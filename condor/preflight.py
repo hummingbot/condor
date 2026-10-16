@@ -718,6 +718,15 @@ async def _probe_order(client: Any, req: Requirements) -> dict[str, Any] | None:
     BUY otherwise, converted at the venue's own price through the create path's
     :func:`reference_price`. ``None`` when there is not enough stated to size
     one — there is then nothing to ask the validators.
+
+    The price that sized the order travels **in** the probe, as the
+    ``entry_price`` ``reference_price`` reads back, so the validators price the
+    amount at the price it was derived from. They would otherwise ask the venue
+    again: an account holding exactly its stated capital — 780 USDC at 150,
+    sized to 5.2 SOL — then fails its own balance check on a tick up to 151,
+    which demands 785.2 USDC. The shortfall is the two reads disagreeing, not
+    the account, and refusing a funded start over it is the false negative a
+    preflight must not have.
     """
     if not req.pairs or req.capital_amount is None:
         return None
@@ -726,6 +735,7 @@ async def _probe_order(client: Any, req: Requirements) -> dict[str, Any] | None:
     if not base or not _quote_of(pair):
         return None
 
+    price = None
     if req.capital_asset == base:
         amount, side = req.capital_amount, 2  # SELL the base it holds
     else:
@@ -734,12 +744,15 @@ async def _probe_order(client: Any, req: Requirements) -> dict[str, Any] | None:
             return None
         amount, side = req.capital_amount / price, 1  # BUY with the quote it holds
 
-    return {
+    probe = {
         "connector_name": req.connector,
         "trading_pair": pair,
         "side": side,
         "amount": amount,
     }
+    if price is not None:
+        probe["entry_price"] = price
+    return probe
 
 
 async def _check_order_viability(
