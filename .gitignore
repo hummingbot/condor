@@ -185,6 +185,7 @@ assistants/*/store/
 node_modules/
 /improvements/
 /features/
+/tasks/
 
 # Routine reports
 /reports/
