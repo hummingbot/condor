@@ -319,6 +319,29 @@ def _root_library_dirs() -> frozenset[str]:
     )
 
 
+def _is_library_path(rel: Path, root_dirs: frozenset[str]) -> bool:
+    """The layout rule of :func:`publishable_files`, in one place.
+
+    Written once because it was once written twice: the whole-agent walk
+    filtered and the named-file branch returned the path unread, so
+    ``publishable_files(home, "state/op.json")`` handed back the one file the
+    bare call refused ([[CORR-734]]). Both branches call this now, so naming a
+    path narrows *which* files are considered and never *whether* they are
+    filtered.
+
+    ``root_dirs`` is passed in rather than looked up here so
+    :func:`_root_library_dirs` is resolved once per selection and not once per
+    file ([[CORR-720]]).
+    """
+    if rel.name.startswith("."):
+        return False
+    if any(part in _RUNTIME_NAMES for part in rel.parts):
+        return False
+    if len(rel.parts) > 1 and rel.parts[0] not in root_dirs:
+        return False
+    return True
+
+
 def is_library_path(rel: str) -> bool:
     """Whether ``rel``, relative to an agent home, is library content.
 
@@ -343,19 +366,17 @@ def is_library_path(rel: str) -> bool:
         return False
     if any(part.startswith(".") for part in parts):
         return False
-    if any(part in _RUNTIME_NAMES for part in parts):
-        return False
-    if len(parts) > 1 and parts[0] not in _root_library_dirs():
-        return False
-    return True
+    return _is_library_path(Path(*parts), _root_library_dirs())
 
 
 def publishable_files(home: Path, path: str = "") -> list[Path]:
     """Every library file under ``home``, relative to it — runtime output skipped.
 
     ``path`` narrows to one file or folder (``skills/recon``,
-    ``loops/grid``); empty takes the whole agent. The runtime filter applies
-    either way, so naming a folder cannot smuggle a store out.
+    ``loops/grid``); empty takes the whole agent. It narrows which files are
+    considered and never whether they are filtered — :func:`_is_library_path`
+    judges a named file exactly as it judges one the walk found, so naming
+    either a file or a folder cannot smuggle runtime output out.
 
     Two rules, because the layout is only closed at one level. A root
     *directory* must be one the layout defines (:func:`_root_library_dirs`); a
@@ -366,22 +387,20 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
     """
     rel_parts = tuple(part for part in path.split("/") if part and part != "..")
     base = home.joinpath(*rel_parts)
+    root_dirs = _root_library_dirs()
     if base.is_file():
-        return [Path(*rel_parts)]
+        rel = Path(*rel_parts)
+        return [rel] if _is_library_path(rel, root_dirs) else []
     if not base.is_dir():
         return []
 
     found: list[Path] = []
-    root_dirs = _root_library_dirs()
     for candidate in sorted(base.rglob("*")):
-        if not candidate.is_file() or candidate.name.startswith("."):
+        if not candidate.is_file():
             continue
         rel = candidate.relative_to(home)
-        if any(part in _RUNTIME_NAMES for part in rel.parts):
-            continue
-        if len(rel.parts) > 1 and rel.parts[0] not in root_dirs:
-            continue
-        found.append(rel)
+        if _is_library_path(rel, root_dirs):
+            found.append(rel)
     return found
 
 

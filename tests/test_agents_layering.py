@@ -19,6 +19,8 @@ The three properties this file pins, in the order they matter:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from condor.agents.agent import AgentStore
@@ -672,6 +674,71 @@ def test_the_root_rule_excludes_invented_folders_not_the_name_state(stock):
         "skills/state/SKILL.md",
         "controllers/state/state.py",
     }
+
+
+def test_naming_a_file_cannot_smuggle_runtime_output_out(stock):
+    """A named path narrows what is considered, never whether it is filtered.
+
+    The whole-agent walk filtered and the named-file branch returned the path
+    unread, so the one file a bare publish refused was handed straight back
+    when the caller spelled it out ([[CORR-734]]). Both branches read the same
+    predicate now.
+    """
+    from condor.layering import publish_to_stock, publishable_files
+
+    home = agent_home("perps")
+    for rel in ("AGENT.md", "core_rules.md", "reflect.md", "shutdown.md"):
+        _write(home / rel, AGENT_MD.format(name="Perps", desc="mine", body="F."))
+    _write(
+        home / "skills" / "basis" / "SKILL.md", SKILL_MD.format(slug="basis", body="B.")
+    )
+    _write(home / "loops" / "carry" / "loop.md", "---\nname: Carry\n---\n\ntick\n")
+    _write(home / "routines" / "r.py", "def run():\n    return 1\n")
+    _write(home / "state" / "op.json", "{}")
+    _write(home / "store" / "user_7" / "audit.log", "ran")
+    _write(home / "config.yml", "model: x\n")
+    _write(home / "mutes.yml", "skills: []\n")
+    _write(home / "routines" / "__pycache__" / "x.cpython-312.pyc", "\x00")
+
+    for rel in (
+        "state/op.json",
+        "store/user_7/audit.log",
+        "config.yml",
+        "mutes.yml",
+        "routines/__pycache__/x.cpython-312.pyc",
+    ):
+        assert (home / rel).is_file(), rel
+        assert publishable_files(home, rel) == [], rel
+
+    for rel in (
+        "AGENT.md",
+        "core_rules.md",
+        "reflect.md",
+        "shutdown.md",
+        "skills/basis/SKILL.md",
+        "loops/carry/loop.md",
+        "routines/r.py",
+    ):
+        assert publishable_files(home, rel) == [Path(rel)], rel
+
+    # Positive control: the two branches now answer the same question, so the
+    # bare walk is exactly the files the named branch admits. Both sides are
+    # measured — neither is a literal set — so this stays a control as the
+    # fixture grows.
+    named = [
+        rel
+        for f in sorted(home.rglob("*"))
+        if f.is_file()
+        for rel in [f.relative_to(home)]
+        if publishable_files(home, rel.as_posix()) == [rel]
+    ]
+    assert publishable_files(home) == named
+
+    # And the caller the hole was reachable through refuses it.
+    assert publish_to_stock("perps", "state/op.json") == {
+        "error": "Nothing publishable at 'perps/state/op.json'"
+    }
+    assert not (stock_agent_home("perps") / "state").exists()
 
 
 def test_publishing_clears_the_fork_stamp(stock):
