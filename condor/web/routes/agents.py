@@ -175,6 +175,9 @@ class RunningInstance(BaseModel):
     #: said something, and a mutating call that worked. 0 = never.
     last_reading_at: float = 0.0
     last_successful_action_at: float = 0.0
+    #: How long the last completed tick took, in seconds ([[FEAT-141]]). 0 =
+    #: no tick has completed yet.
+    last_tick_duration: float = 0.0
     #: 0 = unbounded; otherwise the tick this session stops at.
     max_ticks: int = 0
     #: What the loop last *said* — the journal's `Last action:` line.
@@ -666,6 +669,50 @@ class ActionModel(BaseModel):
     error: str = ""
 
 
+class VenueConditionModel(BaseModel):
+    """One (host, venue) pair's call accounting ([[FEAT-138]]).
+
+    ``condition`` is ``throttled`` while the venue has refused recently, else
+    ``ok``. The counts are cumulative for this process's lifetime, so "8
+    attempts, 0 successes, 8 refusals" is reproducible from them rather than
+    from a log sample — which is the finding this exists for (GitHub #276).
+    """
+
+    host: str = ""
+    venue: str = ""
+    condition: str = "ok"
+    attempts: int = 0
+    successes: int = 0
+    refusals: int = 0
+    errors: int = 0
+    last_refusal_at: float = 0.0
+    last_reason: str = ""
+
+
+class CallerVolumeModel(BaseModel):
+    """What one (agent, session, host) spent — who consumed whose budget.
+
+    The question [[CORR-726]]'s incident could not answer: nothing showed that
+    one 1.0s poller was the sole consumer starving a host. ``agent`` empty means
+    the calls were made by a seat carrying no agent label (a chat session).
+    """
+
+    agent: str = ""
+    agent_id: str = ""
+    host: str = ""
+    attempts: int = 0
+    successes: int = 0
+    refusals: int = 0
+    errors: int = 0
+    last_refusal_at: float = 0.0
+    last_reason: str = ""
+
+
+class VenueConditionsResponse(BaseModel):
+    venues: list[VenueConditionModel] = []
+    callers: list[CallerVolumeModel] = []
+
+
 # ── The fleet map (FEAT-096) ──
 # The wire shape of condor.agents.fleet_map's dataclasses; see that module for
 # what each field is and why the map is cheap enough for the bots page to poll.
@@ -682,6 +729,9 @@ class LiveLoopModel(BaseModel):
     #: ([[FEAT-137]]); see ``condor.agents.fleet_map.LiveLoop``.
     last_reading_at: float = 0.0
     last_successful_action_at: float = 0.0
+    #: How long the last completed tick took ([[FEAT-141]]) — the host-capacity
+    #: signal a slow tick *is*. 0 = no tick has completed yet.
+    last_tick_duration: float = 0.0
     last_action: str = ""
     #: What the loop last *did* — one ``AgentAction`` row, or null. See
     #: ``condor.agents.actions``; the band shows it above ``last_action``.
@@ -725,56 +775,64 @@ class DeedIndexModel(BaseModel):
     since: float = 0.0
 
 
+class HostLoadModel(BaseModel):
+    """Condor's own host: 1-minute load against its vCPU count ([[FEAT-141]]).
+
+    ``available`` is ``False`` where the platform has no load average or will
+    not say how many CPUs it has. A reader renders that as *unknown* and never
+    as *ok* — the load number alone is not a reading, since 3.0 is idle on 32
+    vCPUs and on fire on 2.
+    """
+
+    available: bool = False
+    load_1m: float = 0.0
+    vcpus: int = 0
+    load_per_vcpu: float = 0.0
+
+
+class ApiLagModel(BaseModel):
+    """One server's measured round-trip, as the order-placement lag it bounds.
+
+    Read off the server-data service's own poll counters, so this is the one
+    placement-lag reading available without issuing an order. A *floor*: an
+    order cannot be placed faster than the API answers.
+    """
+
+    host: str = ""
+    status: str = "unknown"
+    last_latency_ms: float = 0.0
+    consecutive_failures: int = 0
+
+
+class FleetDiagnosticsModel(BaseModel):
+    """The signals the fleet diagnostics view needs and nothing else produced.
+
+    Carried on the fleet map rather than on a route of its own, and that is the
+    feature's defining constraint: the view must add **no** polling cost to a
+    dashboard that already polls per server, and the fleet map is the one agent
+    payload the bots page already polls while making no Hummingbot call at all.
+    Every field here is a counter already kept or a kernel reading, so the map
+    stays as cheap as it was ([[FEAT-141]]).
+    """
+
+    host: HostLoadModel = Field(default_factory=HostLoadModel)
+    api_lag: list[ApiLagModel] = []
+    #: Throttling ([[FEAT-138]]), both folds: a venue condition is never an
+    #: agent error, and a caller row names whose volume spent a host's budget.
+    venues: list[VenueConditionModel] = []
+    callers: list[CallerVolumeModel] = []
+
+
 class FleetMapResponse(BaseModel):
     owners: list[FleetOwnerModel] = []
     #: Additive: a client that ignores this field behaves exactly as it did
     #: before FEAT-106, because the pseudo-runs appended to ``owners`` carry an
     #: empty namespace and so match nothing by name.
     deeds: DeedIndexModel = Field(default_factory=DeedIndexModel)
-
-
-class VenueConditionModel(BaseModel):
-    """One (host, venue) pair's call accounting ([[FEAT-138]]).
-
-    ``condition`` is ``throttled`` while the venue has refused recently, else
-    ``ok``. The counts are cumulative for this process's lifetime, so "8
-    attempts, 0 successes, 8 refusals" is reproducible from them rather than
-    from a log sample — which is the finding this exists for (GitHub #276).
-    """
-
-    host: str = ""
-    venue: str = ""
-    condition: str = "ok"
-    attempts: int = 0
-    successes: int = 0
-    refusals: int = 0
-    errors: int = 0
-    last_refusal_at: float = 0.0
-    last_reason: str = ""
-
-
-class CallerVolumeModel(BaseModel):
-    """What one (agent, session, host) spent — who consumed whose budget.
-
-    The question [[CORR-726]]'s incident could not answer: nothing showed that
-    one 1.0s poller was the sole consumer starving a host. ``agent`` empty means
-    the calls were made by a seat carrying no agent label (a chat session).
-    """
-
-    agent: str = ""
-    agent_id: str = ""
-    host: str = ""
-    attempts: int = 0
-    successes: int = 0
-    refusals: int = 0
-    errors: int = 0
-    last_refusal_at: float = 0.0
-    last_reason: str = ""
-
-
-class VenueConditionsResponse(BaseModel):
-    venues: list[VenueConditionModel] = []
-    callers: list[CallerVolumeModel] = []
+    #: Additive the same way ([[FEAT-141]]): a client that ignores this field
+    #: gets the map it got before, and a client that reads it gets the host,
+    #: lag and throttle signals without a second poll.
+    diagnostics: FleetDiagnosticsModel = Field(default_factory=FleetDiagnosticsModel)
 
 
 class StuckSwapModel(BaseModel):
@@ -1489,6 +1547,7 @@ def _instance_from_engine(
         last_successful_action_at=float(
             info.get("last_successful_action_at", 0.0) or 0.0
         ),
+        last_tick_duration=float(info.get("last_tick_duration", 0.0) or 0.0),
         max_ticks=int(info.get("max_ticks", 0) or 0),
         last_action=read_last_action(getattr(engine, "journal", None)),
         last_did=read_last_did(engine),
@@ -1778,14 +1837,25 @@ async def get_fleet_map(user: WebUser = Depends(get_current_user)):
     Deliberately *not* part of ``GET /agents``, which fans out a performance
     fetch per session of every strategy and is the most expensive read in the
     app. This one makes **no Hummingbot API call at all** — a memoised directory
-    walk plus the in-memory loop registry — so the bots page can poll it.
+    walk, the in-memory loop registry, and (for ``diagnostics``) a kernel load
+    reading plus one incremental read of the local call log — so the bots page
+    can poll it.
 
     A literal path, and so registered before the ``/{slug}`` catch-all above.
     """
     from condor.agents.deed_index import build_deed_index
+    from condor.agents.diagnostics import api_lag, host_load
     from condor.agents.fleet_map import build_fleet_map
+    from condor.agents.throttle import ledger
 
     index = build_deed_index()
+    # The diagnostics block rides along because it costs nothing the map does
+    # not already cost: a kernel load reading, counters the poller already
+    # keeps, and one incremental read of the local call log. A separate route
+    # would have been a second poll, which is the one thing FEAT-141 may not
+    # add.
+    book = ledger()
+    book.ingest()
     return FleetMapResponse(
         owners=[FleetOwnerModel(**asdict(owner)) for owner in build_fleet_map()],
         deeds=DeedIndexModel(
@@ -1793,6 +1863,12 @@ async def get_fleet_map(user: WebUser = Depends(get_current_user)):
                 name: DeedRefModel(**asdict(ref)) for name, ref in index.bots.items()
             },
             since=index.since,
+        ),
+        diagnostics=FleetDiagnosticsModel(
+            host=HostLoadModel(**host_load()),
+            api_lag=[ApiLagModel(**row) for row in api_lag()],
+            venues=[VenueConditionModel(**row) for row in book.venue_conditions()],
+            callers=[CallerVolumeModel(**row) for row in book.caller_volume()],
         ),
     )
 

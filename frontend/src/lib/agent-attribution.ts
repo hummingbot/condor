@@ -61,6 +61,15 @@ export interface LiveLoop {
    */
   lastReadingAt: number;
   lastSuccessfulActionAt: number;
+  /**
+   * How long the last completed tick took, in **seconds** (FEAT-141). 0 = no
+   * tick has completed yet.
+   *
+   * The host-capacity signal a slow tick *is*: an oversubscribed box showed up
+   * at the race as long ticks and timeouts, never as a crash, and was read as
+   * a strategy bug.
+   */
+  lastTickDuration: number;
   /** What the agent last *said* — the journal's `Last action:` line. */
   lastAction: string;
   /**

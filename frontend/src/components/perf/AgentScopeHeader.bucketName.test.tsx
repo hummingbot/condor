@@ -55,6 +55,7 @@ const brigado: FleetOwner = {
     lastTickAt: Math.floor(Date.now() / 1000),
     lastReadingAt: 0,
     lastSuccessfulActionAt: 0,
+    lastTickDuration: 0,
     frequencySec: 60,
     lastAction: "",
     lastDid: null,

@@ -78,6 +78,11 @@ class LiveLoop:
     #: is what tells a quiet strategy from a dead one. 0 = never.
     last_reading_at: float = 0.0
     last_successful_action_at: float = 0.0
+    #: How long the last completed tick took, in seconds ([[FEAT-141]]). The
+    #: host-capacity signal a slow tick *is*: an oversubscribed box showed up at
+    #: the race as long ticks and timeouts, never as a crash. 0 = no tick has
+    #: completed yet.
+    last_tick_duration: float = 0.0
     #: The ``Last action:`` line of the journal's Summary — what the agent last
     #: *said*. Kept under its own name and meaning; what it last *did* is the
     #: separate field below, and the band shows the two as separate statements.
@@ -305,6 +310,9 @@ def _live_owners() -> dict[str, tuple[FleetOwner, LiveLoop]]:
                     ),
                     last_successful_action_at=float(
                         getattr(engine, "_last_successful_action_at", 0.0) or 0.0
+                    ),
+                    last_tick_duration=float(
+                        getattr(engine, "_last_tick_duration", 0.0) or 0.0
                     ),
                     last_action=read_last_action(journal),
                     last_did=read_last_did(engine),

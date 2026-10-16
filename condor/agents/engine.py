@@ -171,6 +171,12 @@ class TickEngine:
         default=None, init=False, repr=False
     )
     _last_tick_at: float = field(default=0.0, init=False)
+    # How long the last completed tick took, in seconds ([[FEAT-141]]). The
+    # journal has always recorded it per tick; keeping the newest one here is
+    # what lets the fleet view read it without opening a journal, and a tick
+    # that is slow because its host is oversubscribed is the symptom the race
+    # misread as a strategy bug. 0 = no tick has completed yet.
+    _last_tick_duration: float = field(default=0.0, init=False)
     # ── Liveness, as outcomes rather than attempts ([[FEAT-137]]) ──
     # ``_last_tick_at`` above is set at tick *start*, so it advances even when
     # every call in the tick failed: a session whose model is broken looks
@@ -852,11 +858,12 @@ class TickEngine:
         # A failed turn may already have run tool calls (a deploy), so it is
         # persisted like any other tick first; raising afterwards lets ``_loop``
         # journal the error, tell the owner and end a dry run as failed.
+        self._last_tick_duration = time.time() - self._last_tick_at
         await self._persist_tick(
             ctx,
             response_text,
             tool_calls,
-            time.time() - self._last_tick_at,
+            self._last_tick_duration,
             failure=failure,
         )
         if failure:
@@ -2060,6 +2067,9 @@ class TickEngine:
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,
+            # How long the last completed tick took ([[FEAT-141]]) — the host
+            # capacity reading a slow tick is the symptom of.
+            "last_tick_duration": self._last_tick_duration,
             # Outcomes, beside the attempt above ([[FEAT-137]]).
             "last_reading_at": self._last_reading_at,
             "last_successful_action_at": self._last_successful_action_at,

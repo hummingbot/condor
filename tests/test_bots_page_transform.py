@@ -144,6 +144,18 @@ GOLDEN_REST = {
     "total_volume": 1284.5,
     "server_online": True,
     "error_hint": None,
+    # The builder is pure and takes no executor rows, so the page it returns
+    # carries the *unavailable* hygiene reading ([[FEAT-141]]) — the route folds
+    # the real one from the executor cache. Unavailable rather than zeroed on
+    # purpose: a clean answer invented from a reading nobody took is CORR-725.
+    "executor_hygiene": {
+        "available": False,
+        "counted": 0,
+        "running": 0,
+        "terminated": 0,
+        "truncated": False,
+        "orphaned_running": [],
+    },
 }
 
 # Captured from the pre-refactor ws_manager._transform_bots (no enrichment).

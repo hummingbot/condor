@@ -94,6 +94,10 @@ export function Bots() {
       terminatedControllers={fleet.terminatedControllers}
       owners={fleet.owners}
       deeds={fleet.deeds}
+      // The diagnostics signals, off the two payloads the hook already polls
+      // (FEAT-141) — never a fetch of the drawer's own.
+      diagnostics={fleet.diagnostics}
+      hygiene={fleet.hygiene}
       rateFormatPnl={fleet.rateFormatPnl}
       rateFormatValue={fleet.rateFormatValue}
       rateFormatDetailed={fleet.rateFormatDetailed}

@@ -177,6 +177,8 @@ export function AgentFleet({
           terminatedControllers={fleet.terminatedControllers}
           owners={fleet.owners}
           deeds={fleet.deeds}
+          diagnostics={fleet.diagnostics}
+          hygiene={fleet.hygiene}
           rateFormatPnl={fleet.rateFormatPnl}
           rateFormatValue={fleet.rateFormatValue}
           rateFormatDetailed={fleet.rateFormatDetailed}

@@ -126,6 +126,43 @@ class BotSummary(BaseModel):
     general_logs: list[dict[str, Any]] = []
 
 
+class OrphanedExecutorInfo(BaseModel):
+    """A RUNNING executor whose owning session is gone ([[CORR-726]]).
+
+    The single most expensive defect of the Agent Builder Cup: one such LP
+    executor polled every second for 13.5h and ate a host's whole RPC budget,
+    and nothing on any screen said it existed. The session number is part of
+    the identity — the lineage is alive, that *session* is not.
+    """
+
+    executor_id: str = ""
+    controller_id: str = ""
+    agent_slug: str = ""
+    strategy_slug: str = ""
+    session_num: int = 0
+    pair: str = ""
+    kind: str = ""
+
+
+class ExecutorHygieneModel(BaseModel):
+    """One host's executor hygiene ([[FEAT-141]]).
+
+    Folded from the executor rows the poller already cached, so it costs the
+    bots payload no extra call. ``available: False`` means nothing was cached
+    and nothing was fetched for it — rendered as *unknown*, never as a clean
+    host, which is the lesson of [[CORR-725]]. ``truncated`` says the counts
+    are a floor: the cache holds the newest page, and nothing upstream prunes a
+    terminal row ([[PERF-733]]).
+    """
+
+    available: bool = False
+    counted: int = 0
+    running: int = 0
+    terminated: int = 0
+    truncated: bool = False
+    orphaned_running: list[OrphanedExecutorInfo] = []
+
+
 class BotsPageResponse(BaseModel):
     controllers: list[ControllerInfo] = []
     bots: list[BotSummary] = []
@@ -133,6 +170,10 @@ class BotsPageResponse(BaseModel):
     total_volume: float = 0.0
     server_online: bool = True
     error_hint: Optional[str] = None
+    #: Additive ([[FEAT-141]]): a client that ignores it gets the page it got
+    #: before. The default is the unavailable state, so a payload built without
+    #: the fold (an error path) reads as *unknown* rather than as a clean host.
+    executor_hygiene: ExecutorHygieneModel = Field(default_factory=ExecutorHygieneModel)
 
 
 # ── Bot Runs ──

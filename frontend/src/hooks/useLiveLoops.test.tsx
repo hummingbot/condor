@@ -43,6 +43,7 @@ function live(over: Partial<LiveLoop> = {}): LiveLoop {
     lastTickAt: 0,
     lastReadingAt: 0,
     lastSuccessfulActionAt: 0,
+    lastTickDuration: 0,
     frequencySec: 30,
     lastAction: "",
     lastDid: null,

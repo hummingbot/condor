@@ -209,12 +209,55 @@ async def enriched_bots_page(name: str, raw_status: Any) -> dict:
         enrichment = None
 
     ctrl_configs, bot_runs, latest_perf = enrichment or BotsEnrichment.empty()
-    return build_bots_page(
+    page = build_bots_page(
         raw_status,
         ctrl_configs=ctrl_configs,
         bot_runs=bot_runs,
         latest_perf=latest_perf,
     )
+    page["executor_hygiene"] = _executor_hygiene(name)
+    return page
+
+
+def _executor_hygiene(name: str) -> dict:
+    """This host's terminal-row count and its orphaned RUNNING executors.
+
+    Folded from the executor rows the poller **already** cached — a cache-only
+    read, never a fetch — because the diagnostics view may not add a poll to a
+    page that already polls per server ([[FEAT-141]]). Nothing cached means the
+    signal is reported unavailable and renders as *unknown*; a fetch here would
+    buy a clean answer at the cost of a Hummingbot round-trip on every 5s bots
+    frame.
+
+    The cache holds the newest page rather than the host's whole history
+    (``EXECUTORS_POLL_MAX``), so the counts are reported as a floor whenever it
+    is full — terminal rows are never pruned upstream ([[PERF-733]]).
+    """
+    from condor.agents.diagnostics import executor_hygiene, live_sessions_by_strategy
+    from condor.fetchers.executors import (
+        EXECUTORS_POLL_MAX,
+        extract_executors_list,
+    )
+
+    try:
+        cached = get_server_data_service().get(name, ServerDataType.EXECUTORS)
+    except Exception:
+        logger.debug("Executor hygiene unavailable for '%s'", name, exc_info=True)
+        return executor_hygiene(None)
+    if cached is None:
+        return executor_hygiene(None)
+    rows = extract_executors_list(cached)
+    try:
+        live = live_sessions_by_strategy()
+    except Exception:
+        # The registry is the only authority on which sessions are alive, so an
+        # unreadable one makes the orphan half unanswerable — and an empty map
+        # would answer it by calling every running executor an orphan. Reported
+        # unavailable instead, the same call ``executor_adoption`` makes when
+        # the registry cannot be trusted.
+        logger.debug("Executor hygiene: supervisor unreadable", exc_info=True)
+        return executor_hygiene(None)
+    return executor_hygiene(rows, live, truncated=len(rows) >= EXECUTORS_POLL_MAX)
 
 
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)

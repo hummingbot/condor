@@ -261,6 +261,42 @@ export interface BotSummary {
   general_logs: BotLogEntry[];
 }
 
+/**
+ * A RUNNING executor whose owning session is gone (CORR-726).
+ *
+ * The race's single most expensive defect: one such LP executor polled every
+ * second for 13.5h and ate a host's whole RPC budget, and nothing on any
+ * screen said it existed. The session number is part of the identity — the
+ * lineage is alive, that *session* is not.
+ */
+export interface OrphanedExecutor {
+  executor_id: string;
+  controller_id: string;
+  agent_slug: string;
+  strategy_slug: string;
+  session_num: number;
+  pair: string;
+  kind: string;
+}
+
+/**
+ * One host's executor hygiene (FEAT-141).
+ *
+ * Folded from the rows the poller already cached, so the bots payload pays no
+ * extra call for it. `available: false` means nothing was cached and nothing
+ * was fetched — drawn as *unknown*, never as a clean host. `truncated` says
+ * the counts are a floor: the cache holds the newest page, and nothing
+ * upstream prunes a terminal row (PERF-733).
+ */
+export interface ExecutorHygiene {
+  available: boolean;
+  counted: number;
+  running: number;
+  terminated: number;
+  truncated: boolean;
+  orphaned_running: OrphanedExecutor[];
+}
+
 export interface BotsPageResponse {
   controllers: ControllerInfo[];
   bots: BotSummary[];
@@ -268,6 +304,8 @@ export interface BotsPageResponse {
   total_volume: number;
   server_online?: boolean;
   error_hint?: string;
+  /** This host's executor hygiene (FEAT-141); absent on an older backend. */
+  executor_hygiene?: ExecutorHygiene;
 }
 
 export interface BotRunInfo {
@@ -1020,10 +1058,73 @@ interface FleetOwnerWire {
     /** Outcomes rather than attempts (FEAT-137); see `RunningInstance`. */
     last_reading_at?: number;
     last_successful_action_at?: number;
+    /** Seconds the last completed tick took (FEAT-141); 0 = none yet. */
+    last_tick_duration?: number;
     last_action: string;
     last_did: AgentActionRow | null;
     last_error: string;
   } | null;
+}
+
+/**
+ * Condor's own host: 1-minute load average against its vCPU count (FEAT-141).
+ *
+ * `available: false` where the platform has no load average, or will not say
+ * how many CPUs it has — rendered as *unknown* and never as *ok*. The bare
+ * load number is not a reading: 3.0 is idle on 32 vCPUs and on fire on 2.
+ */
+export interface HostLoad {
+  available: boolean;
+  load_1m: number;
+  vcpus: number;
+  load_per_vcpu: number;
+}
+
+/**
+ * One server's measured round-trip, as the order-placement lag it bounds.
+ *
+ * Read off the poll counters the data service already keeps, so it is the one
+ * placement-lag reading available without issuing an order. A *floor*: an
+ * order cannot be placed faster than the API answers.
+ */
+export interface ApiLag {
+  host: string;
+  status: string;
+  last_latency_ms: number;
+  consecutive_failures: number;
+}
+
+/**
+ * The diagnostics block that rides along on the fleet map (FEAT-141).
+ *
+ * On the map rather than on a route of its own, and that is the feature's
+ * defining constraint: the view must add no polling cost to a dashboard that
+ * already polls per server, and the map is the one agent payload `/bots`
+ * already polls while making no Hummingbot call at all.
+ */
+export interface FleetDiagnostics {
+  host: HostLoad;
+  api_lag: ApiLag[];
+  venues: VenueCondition[];
+  callers: CallerVolume[];
+}
+
+interface FleetDiagnosticsWire {
+  host?: Partial<HostLoad>;
+  api_lag?: ApiLag[];
+  venues?: VenueCondition[];
+  callers?: CallerVolume[];
+}
+
+/**
+ * `GET /agents/fleet-map` as this client reads it.
+ *
+ * The attribution join (`FleetMap`, which `lib/agent-attribution` owns and
+ * which imports nothing) plus the diagnostics block that rides along on the
+ * same response (FEAT-141).
+ */
+export interface FleetMapResult extends FleetMap {
+  diagnostics: FleetDiagnostics;
 }
 
 /**
@@ -3258,10 +3359,12 @@ export const api = {
    * session of every strategy and is the most expensive read in the app. This
    * one makes no Hummingbot call at all, which is what lets `/bots` poll it.
    */
-  getFleetMap: async (): Promise<FleetMap> => {
-    const data = await apiFetch<{ owners: FleetOwnerWire[]; deeds?: DeedIndexWire }>(
-      "/api/v1/agents/fleet-map",
-    );
+  getFleetMap: async (): Promise<FleetMapResult> => {
+    const data = await apiFetch<{
+      owners: FleetOwnerWire[];
+      deeds?: DeedIndexWire;
+      diagnostics?: FleetDiagnosticsWire;
+    }>("/api/v1/agents/fleet-map");
     const owners: FleetOwner[] = (data.owners ?? []).map((owner) => ({
       runKey: owner.run_key,
       agentSlug: owner.agent_slug,
@@ -3281,6 +3384,7 @@ export const api = {
             frequencySec: owner.live.frequency_sec,
             lastReadingAt: owner.live.last_reading_at ?? 0,
             lastSuccessfulActionAt: owner.live.last_successful_action_at ?? 0,
+            lastTickDuration: owner.live.last_tick_duration ?? 0,
             lastAction: owner.live.last_action,
             lastDid: owner.live.last_did ?? null,
             lastError: owner.live.last_error,
@@ -3291,7 +3395,24 @@ export const api = {
     for (const [name, ref] of Object.entries(data.deeds?.bots ?? {})) {
       deeds.bots[name] = { runKey: ref.run_key, runId: ref.run_id ?? "", at: ref.at ?? 0 };
     }
-    return { owners, deeds };
+    // Snake-cased through, like `VenueCondition` beside it: every field is one
+    // word or an already-wire-shaped row, so there is no casing pass to get
+    // wrong. An older backend sends no block at all and reads as the
+    // unavailable host with no rows — which the view draws as *unknown*.
+    const wire = data.diagnostics;
+    const diagnostics: FleetDiagnostics = {
+      host: {
+        available: false,
+        load_1m: 0,
+        vcpus: 0,
+        load_per_vcpu: 0,
+        ...(wire?.host ?? {}),
+      },
+      api_lag: wire?.api_lag ?? [],
+      venues: wire?.venues ?? [],
+      callers: wire?.callers ?? [],
+    };
+    return { owners, deeds, diagnostics };
   },
 
   /**

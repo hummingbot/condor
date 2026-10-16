@@ -69,6 +69,7 @@ function owner(live: Partial<LiveLoop> | null): FleetOwner {
       lastTickAt: Math.floor(Date.now() / 1000),
       lastReadingAt: 0,
       lastSuccessfulActionAt: 0,
+      lastTickDuration: 0,
       frequencySec: 60,
       lastAction: "Spreads held; BTC vol falling, widening the ask side.",
       lastDid: null,

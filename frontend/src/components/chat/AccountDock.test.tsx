@@ -473,6 +473,7 @@ describe("the desk's Loops section (FEAT-1xx)", () => {
       lastTickAt: 0,
       lastReadingAt: 0,
       lastSuccessfulActionAt: 0,
+      lastTickDuration: 0,
       frequencySec: 30,
       lastAction: "",
       lastDid: null,
