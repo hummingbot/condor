@@ -29,6 +29,12 @@ every agent tick's market read — so this grant, the per-run record in
 ``condor/code_runs.py`` and the action-log row
 (:func:`condor.runtime.danger.is_code_execution_call`) are the whole containment;
 unattended dry-run sessions refuse it outright in ``condor/agents/risk.py``.
+
+Containment against *accidents* is separate and lives in
+:mod:`condor.runtime.code_guard`: the run's timeout can interrupt synchronous
+code (a snippet that loops or walks the filesystem on the main thread used to
+freeze all of Condor), and ``exit()``, ``input()`` and a few other ways to stop
+or stall the process fail on their own line instead.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ import traceback
 import condor.reports as reports
 from condor.code_runs import CodeRun, get_code_run_store, new_run_id
 from condor.memory.paths import CHAT_SLUG
+from condor.runtime import code_guard
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +92,14 @@ class _StdoutProxy:
         buffer = _CAPTURE.get()
         if buffer is None:
             self._stream.flush()
+
+    def isatty(self):
+        # A captured run is never a terminal. Forwarding this to a real tty is
+        # how ``help()`` decided to start an interactive pager on the main
+        # thread and wait for a keypress that would never come.
+        if _CAPTURE.get() is not None:
+            return False
+        return self._stream.isatty()
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
@@ -142,6 +157,7 @@ async def _run_in_task(
     source: str,
     out: dict,
     owner_id: int = 0,
+    scope: code_guard.GuardScope | None = None,
 ):
     """The snippet itself, in its own task context.
 
@@ -153,6 +169,8 @@ async def _run_in_task(
     reads/deletes against it (SEC-196). ``bind_context`` publishes the same
     context object the snippet sees, so a ``call_routine`` inside it inherits
     this run's server and user instead of an ambient default (FEAT-052).
+    ``scope`` is the run's guard (deadline and policy); it is entered last and
+    left first, so the harness's own bookkeeping never runs under it.
     """
     from condor.primitives import bind_context
 
@@ -164,9 +182,13 @@ async def _run_in_task(
         bind_context(namespace.get("context")),
     ):
         try:
-            outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
-            if inspect.isawaitable(outcome):
-                await outcome
+            with (
+                code_guard.guarded(scope or code_guard.GuardScope(source), compiled),
+                code_guard.contain_exit(),
+            ):
+                outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
+                if inspect.isawaitable(outcome):
+                    await outcome
         finally:
             out["report_id"] = reports.get_last_report_id() or ""
 
@@ -217,6 +239,14 @@ async def execute_code(
         get_code_run_store().save(run)
         return run.to_dict()
 
+    refusal = code_guard.check_source(ast.parse(code, CODE_FILENAME))
+    if refusal:
+        run.status = "error"
+        run.error = f"Refused: {refusal}"
+        run.duration_ms = int((time.monotonic() - started) * 1000)
+        get_code_run_store().save(run)
+        return run.to_dict()
+
     # The exact context a routine gets, so the two paths cannot diverge — the
     # active server travels as a preference, which is how get_client resolves it.
     context = WebRoutineContext(
@@ -238,6 +268,11 @@ async def execute_code(
 
     _install_stdout_proxy()
     out: dict = {"report_id": ""}
+    # Started here, not with ``started``: resolving the client above is the
+    # harness's time, not the snippet's.
+    scope = code_guard.GuardScope(
+        label=run_id, deadline=time.monotonic() + timeout, budget=timeout
+    )
     task = asyncio.create_task(
         _run_in_task(
             compiled,
@@ -247,6 +282,7 @@ async def execute_code(
             label or run_id,
             out,
             owner_id=chat_id,
+            scope=scope,
         )
     )
     try:
@@ -255,6 +291,15 @@ async def execute_code(
     except (asyncio.TimeoutError, TimeoutError):
         run.status = "timeout"
         run.error = f"Timed out after {timeout:g}s"
+    except code_guard.CodeRunDeadline as e:
+        # The same outcome as above, reached by the guard instead of wait_for:
+        # the snippet was busy on the main thread and never yielded to be
+        # cancelled. The traceback is the useful part — it points at the line.
+        run.status = "timeout"
+        run.error = f"Timed out after {timeout:g}s ({e})"
+        run.traceback = _trim_traceback(
+            "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        )
     except asyncio.CancelledError:
         run.status = "timeout"
         run.error = "Cancelled"
@@ -266,6 +311,10 @@ async def execute_code(
             "".join(traceback.format_exception(type(e), e, e.__traceback__))
         )
     finally:
+        # A task the snippet spawned and never awaited still carries the scope;
+        # expiring it cuts that straggler at its next line instead of letting it
+        # run on, unowned, after its run was reported finished.
+        scope.expire()
         run.duration_ms = int((time.monotonic() - started) * 1000)
         run.stdout = buffer.getvalue()
         run.result = _render_result(namespace)

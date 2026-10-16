@@ -11,12 +11,16 @@ only thing standing between one person's finished tasks and another's.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from condor import notifications
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -46,3 +50,14 @@ async def mark_notifications_read(
 ):
     """Mark some (or all) of this user's notifications read."""
     return {"unread": notifications.mark_read(user.id, body.ids)}
+
+
+@router.delete("")
+async def clear_notifications(user: WebUser = Depends(get_current_user)):
+    """Delete all of this user's notifications."""
+    try:
+        await notifications.clear(user.id)
+    except Exception:  # noqa: BLE001 - the path belongs in the log, not the response
+        log.exception("Could not clear notifications for %s", user.id)
+        raise HTTPException(status_code=500, detail="Could not clear notifications")
+    return {"unread": 0}
