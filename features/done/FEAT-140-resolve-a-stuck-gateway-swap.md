@@ -2,20 +2,32 @@
 id: FEAT-140
 title: Resolve a Gateway swap stuck in SUBMITTED, and alert when one has been unverifiable too long
 summary: A swap leaves SUBMITTED only after a successful status read, so a failing Gateway ping, a None status, an unparseable network or an exception keeps it SUBMITTED indefinitely. Condor shows an hourglass and offers get_status and search with no resolve route, so the only fix during the race was redeploying the agent.
-status: todo
+status: done
 effort: M
 risk: medium
 brain: developer
 new_files:
+  - condor/swap_watch.py
   - tests/test_swap_resolve.py
 touched_files:
   - mcp_servers/hummingbot_api/tools/gateway_swap.py
+  - mcp_servers/hummingbot_api/server.py
+  - mcp_servers/hummingbot_api/profiles.py
+  - mcp_servers/hummingbot_api/schemas.py
+  - mcp_servers/hummingbot_api/formatters/gateway.py
   - handlers/dex/swap.py
   - condor/web/routes/agents.py
+  - condor/runtime/danger.py
   - agents/_shared/skills/operate_your_loop/SKILL.md
+  - tests/test_mcp_tool_profiles.py
+  - tests/test_mcp_gateway_swap_tool.py
+  - tests/test_dangerous_gate_names_resolve.py
+  - tests/test_acp_permission_gate.py
 depends_on: []
-commits: []
+commits:
+  - "7d13ee0d feat(dex): say how long a swap has been unverifiable, and resolve one without a redeploy (FEAT-140)"
 created: 2026-10-14
+closed: 2026-10-15
 ---
 
 ## Objective
@@ -97,12 +109,12 @@ reporting plainly when the server does not offer it.
 
 ## Acceptance criteria
 
-- [ ] A swap observed `SUBMITTED` past the threshold raises an alert reporting how long it has been unverifiable
-- [ ] The alert reads as unverifiable, not as failed
-- [ ] The resolve action against a server offering the route marks the swap per the server's answer, and Condor sets no swap state of its own
-- [ ] Against a server not offering the route, the action reports that plainly and changes nothing locally
-- [ ] The runbook names the stuck-swap recovery steps
-- [ ] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared
+- [x] A swap observed `SUBMITTED` past the threshold raises an alert reporting how long it has been unverifiable
+- [x] The alert reads as unverifiable, not as failed
+- [x] The resolve action against a server offering the route marks the swap per the server's answer, and Condor sets no swap state of its own
+- [x] Against a server not offering the route, the action reports that plainly and changes nothing locally
+- [x] The runbook names the stuck-swap recovery steps
+- [ ] No test that passed at the merge base fails - `uv run pytest` run on the merge base and on the change in the same turn, compared — **not ticked here**: this item shipped inside plan 89937873-9f5, whose final chunk runs the project's full gate once over everything the plan landed. What this run could show is below.
 
 ## Risks and notes
 
@@ -121,3 +133,65 @@ reporting plainly when the server does not offer it.
 - `find_similar_backlog` (token-overlap fallback, 196 docs) top hit 0.20
   `ARCH-012 [done]` (duplicated network display between trading and dex/swap),
   below the 0.50 fallback bar.
+
+## Notes
+
+Shipped in `7d13ee0d`.
+
+**Verification.** 1870 tests passed, 0 failed, in 26.5s — every test file that
+imports any module this item touched (`condor/web/routes/agents.py`,
+`handlers/dex/swap.py`, `mcp_servers/hummingbot_api/{server,profiles,schemas,
+formatters/gateway,tools/gateway_swap}.py`, `condor/runtime/danger.py`), plus
+`tests/test_swap_resolve.py` (48 passed) and the shared-skill and agent-route
+suites. `black` and `isort` clean on every touched path; the repo's `make lint`
+is those two and nothing else. The absolute `uv run pytest` count in the
+acceptance criteria is left to the plan's final verification chunk, which runs
+the full gate once over the whole plan — the box stays unticked rather than
+ticked on a partial measurement.
+
+**Deviations from the declared files, all additive.**
+
+1. `condor/swap_watch.py` is new and was not declared. The design says "the MCP
+   tool and the dashboard action share the one call", and three surfaces need
+   the same arithmetic (the Telegram history lines, the MCP search/status
+   results, the dashboard route). Putting it in any one of them would have made
+   the other two import it from there. It is the shape
+   `condor/agents/throttle.py` already uses for a condition folded out of
+   observations Condor already has.
+2. `mcp_servers/hummingbot_api/{server,profiles,schemas,formatters/gateway}.py`
+   were not declared. A new MCP tool cannot exist without them: `server.py`
+   holds the `@mcp.tool()` function, `profiles.py` decides which seats mount it,
+   `schemas.py` holds the `action` literal and `formatters/gateway.py` renders
+   the result. Same four-file shape every tool in the family has.
+3. `condor/runtime/danger.py` changed by one comment only, recording why
+   `resolve_swap` stays ungated beside the rest of the swap family: it signs
+   nothing and moves nothing, and a human in front of the only exit from a
+   stuck swap is a brake that does not work for an unattended seat.
+4. Four existing test files hold golden lists of the tool surface
+   (`test_mcp_tool_profiles.py`, `test_mcp_gateway_swap_tool.py`,
+   `test_dangerous_gate_names_resolve.py`, `test_acp_permission_gate.py`).
+   `resolve_swap` was added to each, which is what those lists are for.
+
+**One refinement to the design, deliberately.** The design said Condor computes
+the duration "from its own first observation". It now prefers the swap row's own
+recorded submission timestamp and falls back to the first observation, because
+the recorded time survives a Condor restart and is the honest age of the swap,
+while a first observation can only understate it. The row carries `since`
+(`submitted` / `observed` / `unknown`) so a reader knows which it got, and
+`unverifiable_for_seconds` is `None` rather than `0.0` when there is neither —
+no statement is not a duration of zero.
+
+**Criterion 3 and the upstream half.** `POST /gateway/swaps/{tx}/resolve` does
+not exist in hummingbot-api yet and is not in the pinned
+`hummingbot-api-client`, exactly as the doc anticipated. The call therefore goes
+through `condor.fetchers.raw_api`, which is the repo's one place for a route the
+pin does not wrap, and a 404 comes back as `SwapResolveUnsupported` — a
+capability answer, never an outage. So criterion 3 is verified against a
+*double* that serves the route (`tests/test_swap_resolve.py`:
+`test_resolve_asks_the_server_and_returns_the_server_s_answer`,
+`test_resolve_sets_no_swap_state_of_its_own`, and the MCP and dashboard
+variants), which pins the request shape, the pass-through of the server's answer
+and the absence of any Condor-side state. It cannot be verified against a live
+server until the upstream route lands; no spin-off task is filed for that
+because the upstream work is not in this repo and the doc already records it as
+unfiled for that reason.
