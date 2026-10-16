@@ -738,3 +738,56 @@ def test_a_pin_naming_a_deleted_server_falls_back_instead_of_failing(monkeypatch
 
     assert client == "the accessible one"
     assert asked["preferred_server"] is None
+
+
+# ── One tick asks the venue once (PERF-736) ────────────────────────────
+
+
+class _IdentifiedClient(_Client):
+    """``_Client`` with a ``base_url``, plus the surface the drift provider reads.
+
+    The adoption pass above and ``DriftProvider`` both walk the RUNNING set, and
+    adoption runs immediately before ``run_core_providers`` — so a real tick
+    asked the same question twice, microseconds apart. A ``base_url`` is what
+    tells the fetcher's cache which server it is talking to, so this is the only
+    client in this module that goes through it; every fake above is deliberately
+    unidentifiable and keeps its original call counts.
+    """
+
+    base_url = "http://perf736-host:8000"
+
+    def __init__(self, rows):
+        super().__init__(rows)
+        self.trading = self
+
+    async def get_positions_summary(self, **kwargs):
+        return {"positions": []}
+
+    async def get_positions(self, **kwargs):
+        return {"data": [], "pagination": {"has_more": False}}
+
+
+def test_one_tick_walks_the_running_set_once(tmp_path, monkeypatch):
+    """Adoption and the drift provider share one RUNNING walk, not two."""
+    from condor.agents.providers.drift import DriftProvider
+    from condor.fetchers.executors import clear_executor_cache
+
+    clear_executor_cache()
+    engine, _ = _engine(tmp_path, monkeypatch, [])
+    client = _IdentifiedClient([_row("dead-1", DEAD_TAG)])
+
+    async def _tick():
+        # The tick's own order (``TickEngine._run_tick``): adopt, then providers.
+        await engine._adopt_running_executors(client)
+        await DriftProvider().execute(client, {}, agent_id=engine.agent_id)
+
+    asyncio.run(_tick())
+    clear_executor_cache()
+
+    statuses = [call.get("status") for call in client.searches]
+    assert statuses == ["RUNNING", "SHUTTING_DOWN"], (
+        "one tick must ask for the running executors once, not twice: " f"{statuses}"
+    )
+    # And the shared answer is still the right one for the consumer that
+    # started the walk.
+    assert [r["id"] for r in engine._adopted_executors] == ["dead-1"]

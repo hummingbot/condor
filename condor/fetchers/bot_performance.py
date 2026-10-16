@@ -26,6 +26,7 @@ from typing import Any, Iterable, Mapping
 
 from condor.asyncutil import SingleFlight
 from condor.fetchers._pagination import collect_pages
+from condor.fetchers._server import _server_key
 from condor.fetchers.executors import normalize_executor_side
 from condor.quote_conversion import quote_of, resolve_client_usd_rates
 
@@ -273,17 +274,6 @@ _snapshot_cache: dict[str, tuple[float, dict[str, dict]]] = {}
 _snapshot_inflight = SingleFlight()
 _raw_snapshot_cache: dict[str, tuple[float, list[dict]]] = {}
 _raw_snapshot_inflight = SingleFlight()
-
-
-def _server_key(client: Any) -> str:
-    """Identify the API server a client talks to, or ``""`` if unidentifiable.
-
-    Keyed on ``base_url`` — never ``id(client)``, whose reuse after GC would hand
-    one server's snapshot to another. A client with no ``base_url`` (test doubles)
-    cannot be told apart from any other, so it is not cached at all rather than
-    sharing a blank key with unrelated servers.
-    """
-    return str(getattr(client, "base_url", "") or "")
 
 
 def clear_snapshot_cache() -> None:

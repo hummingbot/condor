@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from functools import partial
 from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers._pagination import collect_pages
+from condor.fetchers._server import _server_key
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +408,86 @@ def summarize_executors_by_quote(
 # API FETCHERS
 # ============================================
 
+# ── Shared walk cache ──
+# One agent tick asked the venue for its RUNNING executors twice, microseconds
+# apart and byte-identically: the adoption pass (``agents/engine.py``) walks
+# them immediately before ``run_core_providers``, and the drift provider walks
+# the same set as one of its four gathered reads. Both are right to ask every
+# tick -- a sibling session can end at any point, and the venue answers for the
+# whole account -- so the fix is to ask once, not less often (PERF-736).
+#
+# A short TTL plus in-flight coalescing, the ``bot_performance._snapshot_cache``
+# idiom: the TTL covers the two sequential calls, the coalescing covers the
+# drift provider's ``asyncio.gather`` racing a walk adoption already started.
+# The entry is stamped when the rows are *inserted*, never before the walk
+# starts, so a walk slower than the TTL cannot write an already-stale entry
+# (CORR-584). A walk that raises is never cached: the exception reaches every
+# waiter and the next call retries.
+#
+# The TTL is an order of magnitude under the fastest shipped loop cadence
+# (``frequency_sec`` 60), so no tick is ever served the previous tick's book.
+# It also collapses the boot scan's one walk per settled strategy
+# (``runtime/loops.py``) for strategies sharing a server, which is sound: the
+# rows are the same question and each strategy's own ``live`` set is applied to
+# them afterwards.
+#
+# Bounded as an LRU because the key carries the filter set, and the executors
+# route turns user-supplied filters into keys -- an unbounded dict would let a
+# scripted scroll pin arbitrarily many 500-row pages for the TTL.
+#
+# Every list handed back is shared between callers and must be treated as
+# **read-only**. Today's consumers all copy what they keep
+# (``orphaned_running_rows`` appends ``dict(row)``, ``build_executor_row``
+# returns a fresh dict, ``venue_drift.tracked_from_active`` only reads), but
+# ``providers/executors.py``'s ``_price_pending_rows`` mutates rows in place on
+# a neighbouring path, and a caller that did that to a cached list would
+# corrupt the other consumer's view of the same rows.
+_WALK_TTL = 2.0
+_WALK_CACHE_MAX = 64
+_walk_cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
+_walk_inflight = SingleFlight()
+
+
+def _walk_key(client: Any, max_items: int, filters: Dict[str, Any]) -> Optional[tuple]:
+    """Cache key for one walk, or ``None`` when this walk must not be cached.
+
+    The filter set and ``max_items`` are in the key, not just the server: the
+    executors route's unfiltered page walk and the agents' ``status="RUNNING"``
+    walk ask the same server different questions, and serving either one the
+    other's rows would be silent corruption rather than staleness. Filter values
+    go in as ``repr`` because a route filter can be a list (``executor_types``,
+    ``trading_pairs``), which is not hashable.
+
+    A client with no ``base_url`` bypasses the cache entirely, like every other
+    cache in this package: it cannot be told apart from any other client.
+    """
+    server = _server_key(client)
+    if not server:
+        return None
+    return (
+        server,
+        max_items,
+        tuple(sorted((name, repr(value)) for name, value in filters.items())),
+    )
+
+
+def clear_executor_cache() -> None:
+    """Drop every cached executor walk (tests, server reconfiguration)."""
+    _walk_cache.clear()
+    _walk_inflight.clear()
+
+
+async def _walk_executors(
+    client, max_items: int, filters: Dict[str, Any]
+) -> list[dict]:
+    """The uncached cursor walk behind :func:`fetch_all_executors`."""
+    return await collect_pages(
+        partial(client.executors.search_executors, **filters),
+        extract_executors_list,
+        page_size=EXECUTORS_PAGE_SIZE,
+        max_items=max_items,
+    )
+
 
 async def fetch_executors(client, **_kw) -> list[dict]:
     """Poll variant: the most recent page of executors, in one request.
@@ -414,8 +498,16 @@ async def fetch_executors(client, **_kw) -> list[dict]:
     single rate-limiter token SDS spends on it. Callers that need more than the
     newest page (history exports, filtered searches) call ``fetch_all_executors``
     directly with their own ``max_items``.
+
+    Deliberately *not* cached, unlike ``fetch_all_executors``: this is the only
+    caller whose cadence is the cache's own TTL, so an entry would be live for
+    about as long as the gap between two polls and roughly every second tick
+    would be served the previous tick's page -- halving the freshness of the
+    live dashboard to collapse a duplicate that does not exist, since nothing
+    else asks this question at this instant. SDS's own per-key cache is the
+    sharing layer for this path.
     """
-    return await fetch_all_executors(client, max_items=EXECUTORS_POLL_MAX)
+    return await _walk_executors(client, EXECUTORS_POLL_MAX, {})
 
 
 async def fetch_all_executors(
@@ -440,13 +532,31 @@ async def fetch_all_executors(
     filters on one status at a time, so "live" is one walk per status —
     ``RUNNING``, plus ``SHUTTING_DOWN`` where an executor that is still
     flattening counts as live (``providers/drift.py``).
+
+    Cached per ``(server, max_items, filter set)`` for ``_WALK_TTL`` seconds and
+    coalesced while in flight, so the two consumers that walk the same RUNNING
+    set in one agent tick share one walk instead of asking twice (PERF-736). An
+    unidentifiable client (no ``base_url``) bypasses the cache. **The returned
+    list is shared between callers and must be treated as read-only** -- see the
+    cache's own comment above.
     """
-    return await collect_pages(
-        partial(client.executors.search_executors, **filters),
-        extract_executors_list,
-        page_size=EXECUTORS_PAGE_SIZE,
-        max_items=max_items,
+    key = _walk_key(client, max_items, filters)
+    if key is None:
+        return await _walk_executors(client, max_items, filters)
+
+    entry = _walk_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _WALK_TTL:
+        _walk_cache.move_to_end(key)
+        return entry[1]
+
+    rows = await _walk_inflight.run(
+        key, lambda: _walk_executors(client, max_items, filters)
     )
+    _walk_cache[key] = (time.monotonic(), rows)
+    _walk_cache.move_to_end(key)
+    while len(_walk_cache) > _WALK_CACHE_MAX:
+        _walk_cache.popitem(last=False)
+    return rows
 
 
 def describe_executor_error(exc: BaseException) -> tuple[Optional[int], str]:

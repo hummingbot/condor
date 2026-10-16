@@ -10,7 +10,8 @@ from condor.asyncutil import SingleFlight
 # ``_server_key`` is the package's one rule for "which server does this client
 # talk to" (base_url, never id(client), whose reuse after GC would hand one
 # server's answer to another); shared rather than re-derived here.
-from condor.fetchers.bot_performance import _server_key, fetch_latest_snapshots
+from condor.fetchers._server import _server_key
+from condor.fetchers.bot_performance import fetch_latest_snapshots
 
 logger = logging.getLogger(__name__)
 
