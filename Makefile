@@ -35,6 +35,7 @@ help:
 	@echo "  make restart        - Stop and start again"
 	@echo "  make status         - Is Condor running?"
 	@echo "  make doctor         - Verify dependencies, config, and Hummingbot API access"
+	@echo "  make doctor AGENT=x - ...and whether agent x's loops can actually trade"
 	@echo "  make test           - Run tests"
 	@echo "  make lint           - Run black + isort"
 
@@ -74,11 +75,12 @@ setup-chrome:
 	@uv run python -c "import kaleido; kaleido.get_chrome_sync()" 2>/dev/null || \
 		echo "Chrome setup skipped (not required for basic usage)"
 
+# AGENT=slug[.loop] also runs that agent's trading preflight (FEAT-139).
 doctor:
 	@bash -c ' \
 		export NVM_DIR="$$HOME/.nvm"; \
 		[ -s "$$NVM_DIR/nvm.sh" ] && . "$$NVM_DIR/nvm.sh"; \
-		uv run python -m condor.doctor \
+		uv run python -m condor.doctor $(if $(AGENT),--agent $(AGENT),) \
 	'
 
 # Reinstall when the lockfile moved, not merely when node_modules is absent:

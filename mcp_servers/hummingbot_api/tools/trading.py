@@ -15,6 +15,23 @@ from mcp_servers.hummingbot_api.formatters import (
     format_positions_as_table,
 )
 
+POSITION_MODES = ("HEDGE", "ONEWAY")
+
+
+def normalize_position_mode(value: Any) -> str:
+    """A position mode as the API spells it, or ``""`` for anything else.
+
+    The API expects the plain enum member name (``HEDGE``/``ONEWAY``); callers
+    (and a venue's own answer) write it hyphenated, underscored or spaced. Shared
+    with :mod:`condor.preflight`, which compares the account's actual mode
+    against the one an agent requires and must not read ``one-way`` and
+    ``ONEWAY`` as a mismatch.
+    """
+    if not isinstance(value, str):
+        return ""
+    collapsed = re.sub(r"[-_\s]", "", value.upper())
+    return collapsed if collapsed in POSITION_MODES else ""
+
 
 async def set_position_mode_and_leverage(
     client: Any,
@@ -48,10 +65,8 @@ async def set_position_mode_and_leverage(
 
     # Set position mode
     if position_mode:
-        # The API expects the plain enum member name ("ONEWAY"/"HEDGE"). Accept the
-        # hyphen/underscore/space spellings callers often use and normalize them.
-        position_mode = re.sub(r"[-_\s]", "", position_mode.upper())
-        if position_mode not in ["HEDGE", "ONEWAY"]:
+        position_mode = normalize_position_mode(position_mode)
+        if not position_mode:
             raise ValueError("Invalid position mode. Must be 'HEDGE' or 'ONEWAY'")
 
         position_mode_result = await client.trading.set_position_mode(

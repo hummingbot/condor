@@ -6,6 +6,14 @@ sanity, the AI model's actual readiness, whether the web dashboard is
 sitting on a public interface it shouldn't be, and whether every configured
 Hummingbot API server is actually reachable and authenticating.
 
+``--agent SLUG[.LOOP]`` adds the per-agent *trading* preflight on top of the
+install report (`make doctor AGENT=slug`): whether that agent's loops have their
+capital in the exact asset they need, what position mode and leverage the account
+is actually in, what the venue's rules are per configured pair, and which pins a
+session would really run with. The checks themselves live in
+:mod:`condor.preflight`, which the agent start path runs too — so the section is
+a read of the same gate, not a second opinion (FEAT-139).
+
 Read-only — nothing here mutates `.env`, `config.yml`, or any running
 process. Unlike :mod:`condor.setup_llm` (which always exits 0 because a
 model can be picked later), this exits non-zero when a check actually
@@ -14,6 +22,7 @@ model can be picked later), this exits non-zero when a check actually
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import re
@@ -687,6 +696,148 @@ def check_hummingbot_api() -> list[Check]:
     return checks
 
 
+# ── Per-agent trading preflight ──────────────────────────────────────────────
+
+# The preflight's third state is "could not be checked", which maps to WARN
+# here: it must not read as a pass, and it must not fail `make install`/CI the
+# way an unmet requirement does. See :mod:`condor.preflight`.
+_PREFLIGHT_STATES = {"pass": OK, "fail": FAIL, "unknown": WARN}
+
+
+def _agent_loops(target: str):
+    """``(agent, loops)`` for ``slug`` or ``slug.loop_slug``; agent None if unknown."""
+    from condor.agents.agent import AgentStore
+    from condor.agents.strategy import StrategyStore
+
+    slug, _, sslug = target.partition(".")
+    agent = AgentStore().get(slug)
+    if agent is None:
+        return None, []
+    store = StrategyStore()
+    if sslug:
+        strategy = store.get(slug, sslug)
+        return agent, [strategy] if strategy is not None else []
+    return agent, store.list(slug)
+
+
+async def _agent_client(config: dict, user_id: int):
+    """An API client for the server this loop would run on, or ``None``.
+
+    Resolved the way the run resolves it (CORR-729's one rule) when there is a
+    user to scope credentials to. With no user — an agent whose definition names
+    no creator — only an explicitly configured server is used, because picking
+    "some reachable server" would report another server's balances as this
+    loop's.
+    """
+    from config_manager import ServerUnavailable, get_config_manager
+
+    cm = get_config_manager()
+    name = str(config.get("server_name") or "")
+    if user_id:
+        from config_manager import resolve_stored_server
+
+        try:
+            name = resolve_stored_server(cm, user_id, name, chat_id=user_id) or ""
+        except ServerUnavailable:
+            return None
+    elif name and not cm.get_server(name):
+        return None
+    if not name:
+        return None
+    try:
+        return await cm.get_client(name)
+    except Exception:
+        # No client is a reportable state, not an error: the section then says
+        # "could not be checked" for everything that needed the API, and the
+        # `Hummingbot API` section is where an unreachable server is named.
+        return None
+
+
+async def _preflight_report(config: dict, strategy, agent, user_id: int):
+    """Run the preflight for one loop, closing the client it opened.
+
+    The client is closed here for the same reason :func:`_probe_and_close` does
+    it: doctor is a one-shot process, so nothing else would ever close the
+    aiohttp session and the interpreter complains on the way out.
+    """
+    from condor.preflight import run_preflight
+
+    client = None
+    try:
+        client = await _agent_client(config, user_id)
+        return await run_preflight(
+            client,
+            config,
+            label=f"{agent.slug}.{strategy.slug}",
+            strategy=strategy,
+            agent=agent,
+            user_id=user_id,
+        )
+    finally:
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+
+def check_agent_trading(target: str) -> list[tuple[str, list[Check]]]:
+    """Whether ``target``'s loops can trade — one section each (FEAT-139).
+
+    ``target`` is an agent slug, or ``slug.loop`` for one of its loops. The
+    checks are per-agent by nature (which asset, which pairs, which account), so
+    there is no all-agents form of this section: without a loop to check against
+    there is nothing to check.
+    """
+    from condor.agents.config import load_full_config
+
+    agent, loops = _agent_loops(target)
+    if agent is None:
+        return [
+            (
+                f"Trading preflight — {target}",
+                [
+                    Check(
+                        "agent",
+                        FAIL,
+                        f"no agent with slug '{target.partition('.')[0]}' — pass "
+                        "an agent slug, or 'slug.loop' for one of its loops",
+                    )
+                ],
+            )
+        ]
+    if not loops:
+        return [
+            (
+                f"Trading preflight — {agent.slug}",
+                [
+                    Check(
+                        "loops",
+                        WARN,
+                        "this agent owns no loop yet, so it has no trading "
+                        "config to check",
+                    )
+                ],
+            )
+        ]
+
+    sections = []
+    for strategy in loops:
+        config = load_full_config(strategy.home, strategy.default_config)
+        user_id = strategy.created_by or agent.created_by or 0
+        report = asyncio.run(_preflight_report(config, strategy, agent, user_id))
+        sections.append(
+            (
+                f"Trading preflight — {agent.slug}.{strategy.slug}",
+                [
+                    Check(c.name, _PREFLIGHT_STATES.get(c.state, WARN), c.detail)
+                    for c in report.checks
+                ],
+            )
+        )
+    return sections
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -706,14 +857,42 @@ def _tally(all_checks: list[Check]) -> tuple[str, int]:
     return line, (1 if failed else 0)
 
 
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="condor doctor",
+        description="Verify Condor's install, and optionally whether one "
+        "agent's loops can actually trade.",
+    )
+    parser.add_argument(
+        "--agent",
+        metavar="SLUG[.LOOP]",
+        default="",
+        help="also run the trading preflight for this agent: capital in the "
+        "exact asset, account mode, venue rules and the pins the session will "
+        "run with. Append '.loop' to check one of its loops.",
+    )
+    parser.add_argument(
+        "--only-agent",
+        action="store_true",
+        help="skip the install checks and report only the --agent preflight",
+    )
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
-    sections = [
-        ("Dependencies", check_dependencies()),
-        ("Configuration", check_config()),
-        ("Dashboard", check_dashboard_port()),
-        ("Tailscale", check_tailscale()),
-        ("Hummingbot API", check_hummingbot_api()),
-    ]
+    args = _parse_args(argv)
+
+    sections: list[tuple[str, list[Check]]] = []
+    if not (args.only_agent and args.agent):
+        sections += [
+            ("Dependencies", check_dependencies()),
+            ("Configuration", check_config()),
+            ("Dashboard", check_dashboard_port()),
+            ("Tailscale", check_tailscale()),
+            ("Hummingbot API", check_hummingbot_api()),
+        ]
+    if args.agent:
+        sections += check_agent_trading(args.agent)
 
     width = _report_width(sections)
 

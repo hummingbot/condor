@@ -3307,7 +3307,18 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         # the life of the loop, never to another one (CORR-729).
         server_pinned=asked_for_it,
     )
-    await new_engine.start()
+    # The trading preflight (FEAT-139) runs inside ``start`` so the boot restart
+    # goes through it too; a stated requirement that does not hold answers here,
+    # before a tick, with the line the operator can act on.
+    from condor.preflight import PreflightFailed
+
+    try:
+        await new_engine.start()
+    except PreflightFailed as failed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Trading preflight failed: {failed.report.reason}",
+        )
 
     # "Started" used to mean "a task was created": a run whose very first tick
     # died answered success, and the operator found out from the session page

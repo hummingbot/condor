@@ -19,6 +19,14 @@ Two invariants every impl here shares:
 
 Signatures were verified field-by-field against ``GET /executors/types/{type}/config`` on
 a live API server. See ``mcp_servers/TOOL_STYLE.md``.
+
+The validators this module gates creates with — :func:`trading_rule_violation`,
+:func:`balance_violation` and the reads under them (:func:`balance_rows`,
+:func:`available_units`, :func:`describe_balances`, :func:`reference_price`,
+:func:`numeric_field`, :func:`usd`) — are public because :mod:`condor.preflight`
+runs the same ones ahead of a start (FEAT-139). One definition on purpose: a
+copied validator drifts from the one that actually gates orders, and then the
+preflight passes what the create path refuses.
 """
 
 import asyncio
@@ -96,19 +104,25 @@ def _amount(value: Any) -> float | None:
     return number if number > 0 else None
 
 
-def _usd(value: float) -> str:
+def usd(value: float) -> str:
     return f"${value:,.2f}"
 
 
-def _rule(rules: dict[str, Any], *names: str) -> float | None:
+def numeric_field(data: dict[str, Any], *names: str) -> float | None:
+    """The first of ``names`` ``data`` holds as a positive number.
+
+    Written for a venue's trading rules, which spell the same rule differently
+    per connector; the preflight reads position rows with it too, so it takes
+    any mapping rather than naming one.
+    """
     for name in names:
-        value = _amount(rules.get(name))
+        value = _amount(data.get(name))
         if value is not None:
             return value
     return None
 
 
-async def _price(
+async def reference_price(
     client: Any, connector: str, pair: str, config: dict[str, Any]
 ) -> float | None:
     """The config's own price if it names one, else the venue's current price."""
@@ -154,7 +168,7 @@ async def _base_amount_violation(
 
     if min_notional is None:
         return None
-    price = await _price(client, connector, pair, config)
+    price = await reference_price(client, connector, pair, config)
     if price is None:
         return None
     notional = amount * price
@@ -162,13 +176,13 @@ async def _base_amount_violation(
         return None
     base = pair.split("-")[0]
     return (
-        f"Order notional {_usd(notional)} is below {connector}'s minimum of "
-        f"{_usd(min_notional)} for {pair}. Increase the amount to at least "
+        f"Order notional {usd(notional)} is below {connector}'s minimum of "
+        f"{usd(min_notional)} for {pair}. Increase the amount to at least "
         f"{min_notional / price:.8g} {base} at a price of {price:g}."
     )
 
 
-async def _trading_rule_violation(
+async def trading_rule_violation(
     client: Any, executor_type: str, config: dict[str, Any]
 ) -> str | None:
     """Name the venue rule this config breaks, or ``None`` to let it through.
@@ -187,8 +201,8 @@ async def _trading_rule_violation(
     rules = await trading_rules_cache.get(client, connector, pair)
     if not rules:
         return None
-    min_order_size = _rule(rules, "min_order_size")
-    min_notional = _rule(rules, "min_notional_size", "min_notional")
+    min_order_size = numeric_field(rules, "min_order_size")
+    min_notional = numeric_field(rules, "min_notional_size", "min_notional")
 
     if executor_type in ("position_executor", "order_executor"):
         return await _base_amount_violation(
@@ -209,18 +223,18 @@ async def _trading_rule_violation(
         per_level = _amount(config.get("min_order_amount_quote"))
         if per_level is not None and per_level < min_notional:
             return (
-                f"Grid min_order_amount_quote {_usd(per_level)} is below "
-                f"{connector}'s minimum order notional of {_usd(min_notional)} for "
+                f"Grid min_order_amount_quote {usd(per_level)} is below "
+                f"{connector}'s minimum order notional of {usd(min_notional)} for "
                 f"{pair}. Raise min_order_amount_quote to at least "
-                f"{_usd(min_notional)}."
+                f"{usd(min_notional)}."
             )
         total = _amount(config.get("total_amount_quote"))
         if total is not None and total < min_notional:
             return (
-                f"Grid total_amount_quote {_usd(total)} is below {connector}'s "
-                f"minimum order notional of {_usd(min_notional)} for {pair} — not "
+                f"Grid total_amount_quote {usd(total)} is below {connector}'s "
+                f"minimum order notional of {usd(min_notional)} for {pair} — not "
                 f"one level could be placed. Fund the grid with at least "
-                f"{_usd(min_notional)}."
+                f"{usd(min_notional)}."
             )
         return None
 
@@ -232,9 +246,9 @@ async def _trading_rule_violation(
             value = _amount(level)
             if value is not None and value < min_notional:
                 return (
-                    f"DCA level {index} of {len(levels)} is {_usd(value)}, below "
-                    f"{connector}'s minimum order notional of {_usd(min_notional)} "
-                    f"for {pair}. Raise that level to at least {_usd(min_notional)}."
+                    f"DCA level {index} of {len(levels)} is {usd(value)}, below "
+                    f"{connector}'s minimum order notional of {usd(min_notional)} "
+                    f"for {pair}. Raise that level to at least {usd(min_notional)}."
                 )
         return None
 
@@ -242,9 +256,9 @@ async def _trading_rule_violation(
         quote_amount = _amount(config.get("quote_amount"))
         if quote_amount is not None and quote_amount < min_notional:
             return (
-                f"LP quote_amount {_usd(quote_amount)} is below {connector}'s "
-                f"minimum order notional of {_usd(min_notional)} for {pair}. Fund "
-                f"the position with at least {_usd(min_notional)}."
+                f"LP quote_amount {usd(quote_amount)} is below {connector}'s "
+                f"minimum order notional of {usd(min_notional)} for {pair}. Fund "
+                f"the position with at least {usd(min_notional)}."
             )
     return None
 
@@ -288,7 +302,7 @@ async def create_executor(
         merged_config.get("trading_pair"),
     )
 
-    violation = await _trading_rule_violation(client, executor_type, merged_config)
+    violation = await trading_rule_violation(client, executor_type, merged_config)
     if violation:
         # Refused here, not by the backend: below a venue minimum the API answers
         # with an opaque error or accepts an order that never fills.
@@ -300,7 +314,7 @@ async def create_executor(
             "formatted_output": f"Error creating {executor_type}: {violation}",
         }
 
-    shortfall = await _balance_violation(client, executor_type, merged_config, account)
+    shortfall = await balance_violation(client, executor_type, merged_config, account)
     if shortfall:
         # Without this the API accepts the config and the executor terminates
         # itself at start with INSUFFICIENT_BALANCE; refusing here creates nothing.
@@ -379,10 +393,10 @@ async def create_executor(
     elif status == "TERMINATED":
         state = (
             f"Executor already finished (close_type {close_type or 'unknown'}, "
-            f"volume {_usd(filled or 0.0)})."
+            f"volume {usd(filled or 0.0)})."
         )
     elif filled:
-        state = f"Executor {status or 'running'}; filled {_usd(filled)} so far."
+        state = f"Executor {status or 'running'}; filled {usd(filled)} so far."
     else:
         state = (
             f"Executor {status or 'running'}; nothing filled yet. The entry is "
@@ -449,7 +463,7 @@ async def _read_back(client: Any, executor_id: str) -> dict[str, Any] | None:
     return last
 
 
-async def _balance_rows(
+async def balance_rows(
     client: Any, account: str, connector: str, *, refresh: bool = False
 ) -> list[dict[str, Any]] | None:
     """The connector's balance rows, or ``None`` if they cannot be read.
@@ -479,7 +493,7 @@ async def _balance_rows(
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _available(rows: list[dict[str, Any]], token: str) -> float:
+def available_units(rows: list[dict[str, Any]], token: str) -> float:
     """Units of ``token`` free to spend; a token with no row holds nothing."""
     for row in rows:
         if str(row.get("token", "")).upper() == token.upper():
@@ -487,7 +501,7 @@ def _available(rows: list[dict[str, Any]], token: str) -> float:
     return 0.0
 
 
-def _describe_balances(connector: str, rows: list[dict[str, Any]]) -> str:
+def describe_balances(connector: str, rows: list[dict[str, Any]]) -> str:
     held = []
     for row in rows:
         units = _amount(row.get("available_units", row.get("units")))
@@ -496,7 +510,7 @@ def _describe_balances(connector: str, rows: list[dict[str, Any]]) -> str:
         value = _amount(row.get("value"))
         held.append(
             f"{row.get('token', '?')} {units:g}"
-            + (f" (~{_usd(value)})" if value is not None else "")
+            + (f" (~{usd(value)})" if value is not None else "")
         )
     if not held:
         return f"{connector} holds no available balance"
@@ -507,8 +521,8 @@ async def _balances_line(client: Any, account: str, connector: Any) -> str | Non
     """Name what the connector holds, so an unfunded executor says what is there."""
     if not isinstance(connector, str):
         return None
-    rows = await _balance_rows(client, account, connector)
-    return None if rows is None else _describe_balances(connector, rows)
+    rows = await balance_rows(client, account, connector)
+    return None if rows is None else describe_balances(connector, rows)
 
 
 def _is_buy(side: Any) -> bool | None:
@@ -537,7 +551,7 @@ async def _required_spend(
             return None
         if not buy:
             return base, amount, f"a {amount:g} {base} sell"
-        price = await _price(client, connector, pair, config)
+        price = await reference_price(client, connector, pair, config)
         if price is None:
             return None
         return quote, amount * price, f"{amount:g} {base} at {price:g}"
@@ -556,14 +570,14 @@ async def _required_spend(
     if total is None:
         return None
     if buy:
-        return quote, total, f"{_usd(total)} of {quote}"
-    price = await _price(client, connector, pair, config)
+        return quote, total, f"{usd(total)} of {quote}"
+    price = await reference_price(client, connector, pair, config)
     if price is None:
         return None
-    return base, total / price, f"{_usd(total)} of {base} at {price:g}"
+    return base, total / price, f"{usd(total)} of {base} at {price:g}"
 
 
-async def _balance_violation(
+async def balance_violation(
     client: Any, executor_type: str, config: dict[str, Any], account: str
 ) -> str | None:
     """Refuse a spot executor the account visibly cannot fund, before the POST.
@@ -588,21 +602,21 @@ async def _balance_violation(
         return None
     token, required, how = need
 
-    rows = await _balance_rows(client, account, connector)
-    if not rows or _available(rows, token) >= required:
+    rows = await balance_rows(client, account, connector)
+    if not rows or available_units(rows, token) >= required:
         # No rows at all is "unknown", not "empty": the connector may just be
         # missing from the state.
         return None
-    rows = await _balance_rows(client, account, connector, refresh=True)
+    rows = await balance_rows(client, account, connector, refresh=True)
     if not rows:
         return None
-    available = _available(rows, token)
+    available = available_units(rows, token)
     if available >= required:
         return None
     return (
         f"Insufficient balance on {connector} ({account}): this {executor_type} "
         f"needs {required:.8g} {token} ({how}) but only {available:.8g} {token} is "
-        f"available. {_describe_balances(connector, rows)}. Nothing was created. "
+        f"available. {describe_balances(connector, rows)}. Nothing was created. "
         "Fund the account or ask the user how to proceed; do not switch to another "
         "connector (a perpetual, say) without asking."
     )

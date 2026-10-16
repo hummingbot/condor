@@ -356,10 +356,70 @@ class TickEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    async def _preflight_gate(self) -> None:
+        """Refuse the start when a stated trading requirement is not met (FEAT-139).
+
+        Here rather than in the start route so that every path into a live loop
+        goes through it — the dashboard start, and the boot restart that has no
+        request to answer. Raises
+        :class:`~condor.preflight.PreflightFailed`, which the route turns into a
+        422 naming the reason and the boot pass records as a failed restart.
+
+        Two deliberate narrowings keep a working loop safe from a false
+        negative, which is the one way this check could cost more than it saves:
+
+        * a config that states no ``trading_requirements`` is not gated at all,
+          and no API read is made for it — the preflight has nothing to check
+          against, so there is nothing it could wrongly refuse;
+        * an experiment (``dry_run``/``run_once``) commits no capital under the
+          risk gate's refusals, so it is reported on by ``doctor`` but never
+          stopped by this.
+        """
+        # Imported at call time, both ways round: ``condor.preflight`` resolves
+        # this run's model through ``resolve_agent_key`` here, so neither module
+        # may reach the other at import time.
+        from condor.preflight import PreflightFailed, gate_start, requirements_of
+
+        if is_experiment_mode(str(self.config.get("execution_mode") or "")):
+            return
+        if not requirements_of(self.config).declared:
+            return
+
+        try:
+            report = await gate_start(
+                await self._get_client(),
+                self.config,
+                label=self.agent_id,
+                strategy=self.strategy,
+                agent=self.agent,
+                user_id=self.user_id,
+                server_pinned=self.server_pinned,
+            )
+        except PreflightFailed as failed:
+            # The session folder exists from construction, so its state is
+            # recorded rather than left blank: a start that was refused must not
+            # read on disk as a run still coming up. Not ``_finish`` — there is
+            # nothing to wind down, and a close-out report for a loop that never
+            # ticked would be a report of nothing.
+            log.warning(
+                "TickEngine %s refused by preflight:\n%s",
+                self.agent_id,
+                failed.report.render(),
+            )
+            _supervisor().record(self, LoopState.ERROR)
+            raise
+        for line in report.render().splitlines():
+            log.info("TickEngine %s preflight: %s", self.agent_id, line.strip())
+
     async def start(self, bot=None) -> None:
-        """Start the tick loop as an asyncio task."""
+        """Start the tick loop as an asyncio task.
+
+        The trading preflight runs first: a loop whose stated capital, account
+        mode or venue rules do not hold never reaches a tick (FEAT-139).
+        """
         if self._running:
             return
+        await self._preflight_gate()
         self._running = True
         self._bot = bot
         self._task = asyncio.create_task(self._loop())

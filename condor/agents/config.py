@@ -150,6 +150,51 @@ class RiskLimitsConfig(BaseModel):
     )
 
 
+class TradingRequirementsConfig(BaseModel):
+    """What a loop needs in place before it can trade (FEAT-139).
+
+    Read by :mod:`condor.preflight`, which checks each stated requirement
+    against the venue and the account *before* a start commits capital. Every
+    field is optional and an empty ``connector`` means "nothing stated": a loop
+    that declares no requirements has nothing to check against, so the preflight
+    reports what it can and refuses nothing. Only a requirement written here can
+    fail a start, which is what keeps a working loop safe from a false negative.
+    """
+
+    connector: str = Field(
+        default="",
+        description="Venue this loop trades (e.g. 'binance', 'binance_perpetual'). "
+        "Empty = no trading requirements stated, and the preflight checks none.",
+    )
+    trading_pairs: list[str] = Field(
+        default_factory=list,
+        description="Pairs this loop trades; the venue's rules are reported per pair",
+    )
+    account_name: str = Field(
+        default="",
+        description="Account holding the capital. Empty = master_account",
+    )
+    capital_asset: str = Field(
+        default="",
+        description="The EXACT asset the capital must be in (e.g. 'USDC'). Empty = "
+        "the quote currency of the first configured pair",
+    )
+    capital_amount: float = Field(
+        default=-1.0,
+        description="Units of capital_asset that must be available; -1 = use "
+        "total_amount_quote when capital_asset is the pairs' quote currency",
+    )
+    position_mode: str = Field(
+        default="",
+        description="Position mode the account must be in ('HEDGE' or 'ONEWAY'); "
+        "empty = no requirement",
+    )
+    leverage: float = Field(
+        default=-1.0,
+        description="Leverage the account must be set to; -1 = no requirement",
+    )
+
+
 class AgentConfig(BaseModel):
     # Empty, not ``"local"``: a default that is a concrete server *name* is not
     # an absent setting — it was a name that then fell through the resolution
@@ -224,6 +269,9 @@ class AgentConfig(BaseModel):
         "revise-your-canvas nudge",
     )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
+    trading_requirements: TradingRequirementsConfig = Field(
+        default_factory=TradingRequirementsConfig
+    )
 
     def to_engine_dict(self) -> dict[str, Any]:
         """Convert to the dict format expected by TickEngine."""
