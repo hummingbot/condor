@@ -83,3 +83,14 @@ diverged or been superseded.
   why the backlog filed alongside this doc cannot be turned into a plan
   (`create_plan` refuses a `source_doc` git will not track). `tasks/` is not
   ignored, which is why this doc can be committed.
+
+## Decision
+
+Settled by the repo owner (federico) on 2026-10-16: **close `origin/feat/acp-fable-option`, do not merge it.**
+
+That removes the blocker but does not do the work. The "fail loudly" behaviour still has to exist, so write it fresh rather than cherry-picking from the closed branch:
+
+- `condor/acp/client.py` — a model pin the bridge cannot apply must raise, not `log.warning` and fall through to the adapter default.
+- `condor/doctor.py` — report an unappliable pin as a failing check, so it is visible before a session starts billing Opus rates for a haiku or sonnet pin.
+
+Closing the branch on GitHub is a separate manual step for the owner, and is not what closes this doc.
