@@ -2,7 +2,7 @@
 
 A leaf module on purpose: strings and nothing else. ``server.py`` cannot be
 imported to ask what it registers — importing it parses argv and builds a
-``FastMCP`` singleton as an import side effect — so the web process, which has
+``MCPServer`` singleton as an import side effect — so the web process, which has
 to render a switch per tool, reads the tables from here instead.
 
 ``server.py`` resolves every name below in its own module namespace at import

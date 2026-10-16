@@ -11,7 +11,7 @@ import asyncio
 import re
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from condor.memory.paths import CHAT_SLUG
 from condor.runtime.toolsets import (
@@ -90,7 +90,7 @@ CONDOR_PROFILES = {
 
 def _registered(module, profile: str) -> set[str]:
     """The tool names ``profile`` puts on a fresh server."""
-    server = FastMCP("profile-probe")
+    server = MCPServer("profile-probe")
     module.register_tools(server, profile)
     return {tool.name for tool in asyncio.run(server.list_tools())}
 
@@ -294,7 +294,7 @@ def test_the_manage_trading_agent_funnel_is_in_no_profile():
 @pytest.mark.parametrize("module", [hb_server, condor_server])
 def test_an_unknown_profile_raises_rather_than_falling_back_to_full(module):
     with pytest.raises(ValueError, match="Unknown tool profile"):
-        module.register_tools(FastMCP("probe"), "trading")
+        module.register_tools(MCPServer("probe"), "trading")
 
 
 # ── the default: a launch with no flag serves everything ─────────────────────
@@ -303,7 +303,7 @@ def test_an_unknown_profile_raises_rather_than_falling_back_to_full(module):
 @pytest.mark.parametrize("module", [hb_server, condor_server])
 def test_a_launch_with_no_flag_serves_the_full_surface(module):
     """External-host compat: uvx, the checked-in `.mcp.json`, a bare console run."""
-    server = FastMCP("probe")
+    server = MCPServer("probe")
     module.register_tools(server)
     assert {tool.name for tool in asyncio.run(server.list_tools())} == _registered(
         module, "full"

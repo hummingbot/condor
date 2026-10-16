@@ -7,7 +7,7 @@ All business logic lives in mcp_servers.condor.tools.*
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from condor.telemetry import taps as telemetry_taps
 from mcp_servers._profiles import make_resolver
@@ -350,7 +350,7 @@ def _build_instructions() -> str:
     return "\n\n".join(sections)
 
 
-mcp = FastMCP("condor", instructions=_build_instructions())
+mcp = MCPServer("condor", instructions=_build_instructions())
 
 
 @handle_errors("delegate task")
@@ -1333,7 +1333,7 @@ async def trading_agent_journal_write(
 # The rings themselves — which tool sits in which one, and why — moved to
 # ``profiles.py`` as plain name strings (FEAT-091), because the web process has
 # to read them to draw a switch per tool and cannot import *this* module to ask:
-# importing it parses argv and builds the ``FastMCP`` singleton. Here the names
+# importing it parses argv and builds the ``MCPServer`` singleton. Here the names
 # are resolved back into functions, at import, which is what keeps the table and
 # the functions provably in step.
 
@@ -1349,7 +1349,7 @@ TOOL_PROFILES: dict[str, tuple] = resolve_profiles(globals(), PROFILE_TOOLS)
 
 
 def register_tools(
-    server: FastMCP,
+    server: MCPServer,
     profile: str = DEFAULT_TOOL_PROFILE,
     muted: Iterable[str] = (),
 ) -> None:
