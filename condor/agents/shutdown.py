@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.runtime.timeouts import resolve_tick_timeout
@@ -304,11 +304,19 @@ async def _verify_and_retry(
 # executed here instead, deterministically and before the cleanup pass, and the
 # sentence now reports what the execution achieved.
 #
-# Scope is this session's own markets -- the ``(connector, trading_pair)`` of the
-# executors the winddown just acted on -- because that is as narrow as the API
-# allows: an active-order row carries its account, connector and pair and no
-# controller or executor id. Orders outside those markets belong to someone else
-# and are never touched.
+# Two filters, and they answer different questions (SEC-739). The *read* is
+# narrowed to this session's own markets -- the ``(connector, trading_pair)`` of
+# the executors the winddown just acted on -- because that is as narrow as the
+# API allows an active-order read to be: the row it returns carries its account,
+# connector and pair and no controller or executor id. That is a scope, not an
+# ownership test, and on a server with a second principal on the same pair those
+# markets hold a neighbour's resting orders too. The *ownership test* is
+# ``claimed_order_ids`` below: the order ids this session's own executor records
+# mention. Only an order that is both in scope and claimed is cancelled; a
+# resting order in scope that nothing claims is left alone and recorded on the
+# outcome as unattributed, because stopping one session is not a licence to
+# liquidate another's book (the order half of the envelope rule risk.py states
+# and SEC-559 built for executors).
 
 #: Executor types whose exposure is a gateway/CLMM position rather than an
 #: order-book order: there is no order to cancel and ``/trading`` does not reach
@@ -325,6 +333,13 @@ _RESTING_STATUSES = frozenset({"OPEN", "SUBMITTED", "PARTIALLY_FILLED"})
 #: markets, not order history.
 _ORDER_SCAN_LIMIT = 500
 
+#: How many unattributed order ids ``CancelOutcome.describe()`` names before it
+#: counts the rest. The whole list is kept on the outcome; this line reaches a
+#: Telegram notification, and on a busy market a second principal's resting
+#: orders can be most of the page read above. The same ceiling ``run_shutdown``
+#: puts on the winddown failures it quotes.
+_DISCLOSURE_SAMPLE = 5
+
 
 @dataclass
 class CancelOutcome:
@@ -340,6 +355,15 @@ class CancelOutcome:
     cancelled: list[str] = field(default_factory=list)
     #: Orders whose cancel was refused -- left resting on the venue.
     failed: list[str] = field(default_factory=list)
+    #: Resting orders found in this session's markets that no executor record of
+    #: this session claims, as ``connector pair order_id`` -- left alone because
+    #: ownership could not be established (SEC-739). Deliberately neither
+    #: ``unsupported`` (the market has a cancel path and was swept) nor
+    #: ``failed`` (no cancel was attempted, so none was refused), and
+    #: deliberately not a bar to :attr:`carried_out`: the policy's scope is this
+    #: session's own orders, and those were all swept. It is a disclosure of what
+    #: was deliberately not touched.
+    unattributed: list[str] = field(default_factory=list)
     #: Markets the policy cannot be carried out on, as ``connector pair``.
     unsupported: list[str] = field(default_factory=list)
     #: Set when the active-order read itself failed, so nothing is known about
@@ -360,6 +384,14 @@ class CancelOutcome:
         parts = [f"cancelled {len(self.cancelled)} resting order(s)"]
         if self.failed:
             parts.append(f"{len(self.failed)} LEFT RESTING (cancel failed)")
+        if self.unattributed:
+            shown = ", ".join(self.unattributed[:_DISCLOSURE_SAMPLE])
+            rest = len(self.unattributed) - _DISCLOSURE_SAMPLE
+            parts.append(
+                f"{len(self.unattributed)} resting order(s) LEFT ALONE, no "
+                f"executor of this session claims them: {shown}"
+                + (f", +{rest} more" if rest > 0 else "")
+            )
         if self.unsupported:
             parts.append(
                 f"NOT carried out on {len(self.unsupported)} market(s) with no "
@@ -406,8 +438,69 @@ def _is_resting(order: dict) -> bool:
     return str(order.get("status") or "").strip().upper() in _RESTING_STATUSES
 
 
-def _order_id(order: dict) -> str:
+def _order_id(order: Mapping[str, Any]) -> str:
     return str(order.get("order_id") or order.get("client_order_id") or "").strip()
+
+
+def _order_label(order: Mapping[str, Any]) -> str:
+    """``connector pair order_id`` -- how every outcome list names an order."""
+    return (
+        f"{order.get('connector_name') or '?'} "
+        f"{order.get('trading_pair') or '?'} {_order_id(order)}"
+    )
+
+
+#: Every ``custom_info`` key an executor record keeps order dicts under, read by
+#: union: which ones are populated depends on the executor type and on which
+#: serializer produced the row.
+#:
+#: Deliberately wider than ``closeout._RECORD_ORDER_KEYS``, which drops the keys
+#: whose own name says terminal. That is right for a *claim* -- a terminal row
+#: makes no claim that something is still out there -- and wrong for
+#: *ownership*: an order the record calls failed or cancelled while the venue
+#: still shows it resting is both this session's and exactly #273's drift, and
+#: dropping it here would leave the bug CORR-727 fixed uncancelled again.
+_CLAIM_ORDER_KEYS = (
+    "orders",
+    "open_orders",
+    "close_orders",
+    "active_orders",
+    "held_position_orders",
+    "failed_orders",
+    "canceled_orders",
+)
+
+
+def claimed_order_ids(executors: Iterable[Mapping[str, Any]] | None) -> set[str]:
+    """The order ids this session's executor records mention, at any status.
+
+    The ownership test an active-order row cannot answer: that row carries its
+    account, connector and pair and no controller or executor id, but the
+    executor rows on the other side carry the ids of the orders they placed.
+    ``closeout.record_orders`` (FEAT-134) walks the same lists for a different
+    question -- which orders the records *claim are still resting* -- so it is
+    not reused here; ownership is indifferent to the status a row states, and
+    filtering by it would un-own exactly the stale rows #273 was about.
+
+    Every status and every key, so an order this session placed is this
+    session's however its record ended up spelling it. An id missing from here
+    is not cancelled: see :attr:`CancelOutcome.unattributed`.
+    """
+    claimed: set[str] = set()
+    for ex in executors or ():
+        if not isinstance(ex, Mapping):
+            continue
+        info = ex.get("custom_info")
+        if not isinstance(info, Mapping):
+            continue
+        for key in _CLAIM_ORDER_KEYS:
+            value = info.get(key)
+            if not isinstance(value, (list, tuple)):
+                continue
+            for entry in value:
+                if isinstance(entry, Mapping) and (oid := _order_id(entry)):
+                    claimed.add(oid)
+    return claimed
 
 
 async def cancel_resting_orders(
@@ -480,7 +573,7 @@ async def cancel_resting_orders(
         outcome.unknown = f"active-order read failed ({type(e).__name__})"
         return outcome
 
-    targets = [
+    resting = [
         o
         for o in orders
         if isinstance(o, dict)
@@ -488,14 +581,20 @@ async def cancel_resting_orders(
         and _order_id(o)
         and _market_key(o.get("connector_name"), o.get("trading_pair")) in cancellable
     ]
+    # The market filter above is a scope; this is the ownership test (SEC-739).
+    # A resting order in one of this session's markets that none of its executor
+    # records mentions belongs to another principal -- a second session, a
+    # hand-run bot, a human's manual order -- and is left alone and disclosed.
+    claimed = claimed_order_ids(executors)
+    targets = [o for o in resting if _order_id(o) in claimed]
+    outcome.unattributed = sorted(
+        _order_label(o) for o in resting if _order_id(o) not in claimed
+    )
 
     from condor.fetchers.executors import describe_executor_error
 
     async def _cancel_one(order: dict) -> tuple[str, str | None]:
-        label = (
-            f"{order.get('connector_name') or '?'} "
-            f"{order.get('trading_pair') or '?'} {_order_id(order)}"
-        )
+        label = _order_label(order)
         try:
             await trading.cancel_order(
                 account_name=str(order.get("account_name") or "master_account"),
@@ -722,7 +821,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         )
     if failures:
         msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
-    if cancel.failed or cancel.unsupported or cancel.unknown:
+    if cancel.failed or cancel.unattributed or cancel.unsupported or cancel.unknown:
         msg += f"\n⚠️ {cancel.describe()}"
     await engine._notify(msg)
 

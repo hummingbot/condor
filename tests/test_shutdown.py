@@ -6,6 +6,7 @@ verify/alert on residual), and the engine wrapper's idempotency guard.
 """
 
 import asyncio
+import inspect
 from contextlib import contextmanager
 from functools import partial
 from types import SimpleNamespace
@@ -26,6 +27,8 @@ from condor.agents.shutdown import (
     _is_perp,
     _keep_position,
     _should_remain_open,
+    cancel_resting_orders,
+    claimed_order_ids,
     load_shutdown_policy,
     run_shutdown,
 )
@@ -1103,6 +1106,31 @@ def _order(order_id, connector="binance", pair="BTC-USDT", status="OPEN"):
     }
 
 
+def _ex(
+    claims=(),
+    *,
+    eid="e1",
+    etype="position",
+    connector="binance",
+    pair="BTC-USDT",
+    key="orders",
+    status="OPEN",
+):
+    """One executor row of this session, claiming ``claims`` as its own orders.
+
+    The ownership side of the sweep (SEC-739): an order id a ``custom_info``
+    order list of this session's executors mentions is this session's, and the
+    sweep cancels nothing else in its markets.
+    """
+    return {
+        "id": eid,
+        "type": etype,
+        "connector": connector,
+        "pair": pair,
+        "custom_info": {key: [{"order_id": oid, "status": status} for oid in claims]},
+    }
+
+
 def _stop_stub(
     tmp_path, monkeypatch, executors, trading, *, cancel=True, policy="keep_all"
 ):
@@ -1134,7 +1162,7 @@ def test_graceful_stop_cancels_a_resting_order_in_code(tmp_path, monkeypatch):
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1"])],
         trading,
     )
     asyncio.run(stub._cancel_resting_orders())
@@ -1157,7 +1185,7 @@ def test_graceful_stop_cancels_nothing_when_the_policy_says_false(
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1"])],
         trading,
         cancel=False,
     )
@@ -1177,7 +1205,7 @@ def test_a_market_with_no_cancel_path_is_recorded_not_reported_done(
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "lp", "connector": "jupiter", "pair": "SOL-USDC"}],
+        [_ex(etype="lp", connector="jupiter", pair="SOL-USDC")],
         trading,
     )
     asyncio.run(stub._cancel_resting_orders())
@@ -1199,7 +1227,7 @@ def test_a_controller_mode_session_records_its_bot_as_out_of_reach(
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1"])],
         trading,
     )
     stub.ledger = SimpleNamespace(bases=lambda: ["acme-scalper"])
@@ -1222,7 +1250,7 @@ def test_a_failed_cancel_leaves_the_stop_standing_and_is_recorded(
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1", "o2"])],
         trading,
     )
     asyncio.run(stub._cancel_resting_orders())
@@ -1241,7 +1269,7 @@ def test_a_failed_active_order_read_is_unknown_not_a_clean_sweep(tmp_path, monke
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1"])],
         trading,
     )
     asyncio.run(stub._cancel_resting_orders())
@@ -1264,7 +1292,7 @@ def test_only_resting_statuses_are_cancelled(tmp_path, monkeypatch):
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o_open", "o_part", "o_filled", "o_going"])],
         trading,
     )
     asyncio.run(stub._cancel_resting_orders())
@@ -1277,7 +1305,7 @@ def test_a_dry_run_never_sweeps(tmp_path, monkeypatch):
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1"])],
         trading,
     )
     stub.config = {"execution_mode": "dry_run"}
@@ -1292,7 +1320,7 @@ def test_finish_does_not_sweep_again_after_a_winddown(tmp_path, monkeypatch):
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex(["o1"])],
         trading,
     )
     stub._cancel_outcome = shutdown_module.CancelOutcome(requested=True)
@@ -1306,9 +1334,7 @@ def test_the_winddown_sweeps_and_the_context_reports_what_it_executed(
     tmp_path, monkeypatch
 ):
     """Criterion 5: the sentence is derived from the outcome, not the flag."""
-    running = [
-        {"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}
-    ]
+    running = [_ex(["o1", "o2"])]
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
     trading = _FakeTradingAPI([_order("o1"), _order("o2")], refuse={"o2"})
     client.trading = trading
@@ -1343,9 +1369,7 @@ def test_the_winddown_still_reads_executors_only_twice_with_the_sweep(
     tmp_path, monkeypatch
 ):
     """The sweep reuses the baseline's rows -- PERF-641's budget is unchanged."""
-    running = [
-        {"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}
-    ]
+    running = [_ex(["o1"])]
     engine, client, notes = _engine_with_llm(
         running, [[]], tmp_path, monkeypatch, body="Do cleanup."
     )
@@ -1364,7 +1388,7 @@ def test_a_full_order_page_is_not_reported_as_the_whole_book(tmp_path, monkeypat
     stub = _stop_stub(
         tmp_path,
         monkeypatch,
-        [{"id": "e1", "type": "position", "connector": "binance", "pair": "BTC-USDT"}],
+        [_ex([f"o{i}" for i in range(limit + 5)])],
         trading,
     )
     asyncio.run(stub._cancel_resting_orders())
@@ -1373,3 +1397,137 @@ def test_a_full_order_page_is_not_reported_as_the_whole_book(tmp_path, monkeypat
     assert len(outcome.cancelled) == limit
     assert outcome.carried_out is False
     assert "not swept" in outcome.unknown
+
+
+# ── the sweep cancels only what this session OWNS (SEC-739) ──
+#
+# CORR-727 narrowed the sweep to the ``(connector, pair)`` of this session's
+# executors, which is a *scope*: on a server with a second principal on the same
+# pair, those markets hold a neighbour's resting orders too, and cancelling them
+# is not a brake but a liquidation (the order half of the envelope rule
+# ``risk.py`` states and SEC-559 built for executors). The ownership test is the
+# order ids this session's own executor records mention.
+
+
+def test_a_stop_cancels_only_the_orders_its_own_executors_claim(tmp_path, monkeypatch):
+    """Criteria 1 and 2: the neighbour's order is left resting, and disclosed."""
+    trading = _FakeTradingAPI([_order("o_mine"), _order("o_neighbour")])
+    stub = _stop_stub(tmp_path, monkeypatch, [_ex(["o_mine"])], trading)
+    asyncio.run(stub._cancel_resting_orders())
+
+    assert trading.cancel_calls == [("master_account", "binance", "o_mine")]
+    outcome = stub._cancel_outcome
+    assert outcome.cancelled == ["binance BTC-USDT o_mine"]
+    # Not swept clean, not ``unsupported`` (the market has a cancel path and was
+    # swept), not ``failed`` (no cancel was attempted, so none was refused).
+    assert outcome.unattributed == ["binance BTC-USDT o_neighbour"]
+    assert outcome.unsupported == []
+    assert outcome.failed == []
+    assert "LEFT ALONE" in outcome.describe()
+    assert "o_neighbour" in outcome.describe()
+
+
+def test_an_order_claimed_by_another_session_is_not_cancelled(tmp_path, monkeypatch):
+    """Criterion 4: the other session's rows are not this stop's scope."""
+    trading = _FakeTradingAPI([_order("o_mine"), _order("o_theirs")])
+    # The neighbour's executor claims ``o_theirs``; this stop is handed only its
+    # own rows, so that claim is not in its claimed set.
+    stub = _stop_stub(tmp_path, monkeypatch, [_ex(["o_mine"])], trading)
+    asyncio.run(stub._cancel_resting_orders())
+
+    assert [c[2] for c in trading.cancel_calls] == ["o_mine"]
+    assert stub._cancel_outcome.unattributed == ["binance BTC-USDT o_theirs"]
+
+
+def test_a_terminal_record_of_an_order_the_venue_rests_is_still_cancelled(
+    tmp_path, monkeypatch
+):
+    """Criterion 3: #273's own shape, and why ``record_orders`` is not reused.
+
+    The record says the order failed; the venue still shows it resting. It is
+    this session's either way, and leaving it would be the bug CORR-727 fixed.
+    """
+    trading = _FakeTradingAPI([_order("o_stale")])
+    stub = _stop_stub(
+        tmp_path,
+        monkeypatch,
+        [_ex(["o_stale"], key="failed_orders", status="FAILED")],
+        trading,
+    )
+    asyncio.run(stub._cancel_resting_orders())
+
+    assert [c[2] for c in trading.cancel_calls] == ["o_stale"]
+    assert stub._cancel_outcome.unattributed == []
+
+
+def test_the_closeout_path_attributes_from_the_rows_it_is_handed():
+    """Criterion 6: ``engine=None`` (closeout.close_out_agent) gets the test too."""
+    trading = _FakeTradingAPI([_order("o_mine"), _order("o_neighbour")])
+    client = SimpleNamespace(trading=trading)
+    outcome = asyncio.run(
+        cancel_resting_orders(None, client, ShutdownPolicy(), [_ex(["o_mine"])])
+    )
+
+    assert [c[2] for c in trading.cancel_calls] == ["o_mine"]
+    assert outcome.cancelled == ["binance BTC-USDT o_mine"]
+    assert outcome.unattributed == ["binance BTC-USDT o_neighbour"]
+
+
+def test_claimed_order_ids_unions_every_order_key_at_every_status():
+    """Criterion 7: key by key, and indifferent to the status stated."""
+    keys = (
+        "orders",
+        "open_orders",
+        "close_orders",
+        "active_orders",
+        "held_position_orders",
+        "failed_orders",
+        "canceled_orders",
+    )
+    assert set(keys) == set(shutdown_module._CLAIM_ORDER_KEYS)
+    for key in keys:
+        assert claimed_order_ids([_ex(["o1"], key=key)]) == {"o1"}, key
+    for status in ("OPEN", "FILLED", "CANCELED", "FAILED", "PENDING_CANCEL", ""):
+        assert claimed_order_ids([_ex(["o1"], status=status)]) == {"o1"}, status
+
+    # Every key of one row, unioned; ``client_order_id`` spelt either way; and a
+    # row with no ids at all (``held_position_orders`` often carries only a
+    # price) contributes nothing rather than raising.
+    row = {"custom_info": {key: [{"order_id": f"{key}-1"}] for key in keys}}
+    row["custom_info"]["orders"].append({"client_order_id": "alt"})
+    row["custom_info"]["held_position_orders"].append({"price": 7.25})
+    assert claimed_order_ids([row]) == {f"{key}-1" for key in keys} | {"alt"}
+
+    # Shapes that carry no claim at all.
+    assert claimed_order_ids(None) == set()
+    assert claimed_order_ids([{}, {"custom_info": None}, "not a row"]) == set()
+
+
+def test_the_disclosure_counts_every_order_and_names_the_first_few():
+    """The line reaches a Telegram notify; a busy neighbour can fill the page."""
+    outcome = shutdown_module.CancelOutcome(
+        requested=True,
+        unattributed=[f"binance BTC-USDT o{i}" for i in range(9)],
+    )
+    text = outcome.describe()
+
+    assert "9 resting order(s) LEFT ALONE" in text
+    assert "o4" in text and "o5" not in text
+    assert "+4 more" in text
+    # A disclosure, not an incompletion: this session's own orders were swept.
+    assert outcome.carried_out is True
+
+
+def test_the_sweep_filter_itself_tests_the_claimed_ids():
+    """Criterion 9: the comment cannot drift from the code again."""
+    source = inspect.getsource(shutdown_module.cancel_resting_orders)
+    assert "claimed = claimed_order_ids(executors)" in source
+    assert "_order_id(o) in claimed" in source
+
+    # And the comment where the trade-off is made states the ownership test
+    # rather than implying the market scope is one.
+    module_source = inspect.getsource(shutdown_module)
+    comment = module_source.split("cancel_open_orders -- executed")[1].split(
+        "_NO_CANCEL_PATH_TYPES"
+    )[0]
+    assert "claimed_order_ids" in comment

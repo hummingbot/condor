@@ -549,7 +549,12 @@ class TickEngine:
                     "cancel_open_orders",
                     outcome.describe(),
                 )
-            if outcome.failed or outcome.unsupported or outcome.unknown:
+            if (
+                outcome.failed
+                or outcome.unattributed
+                or outcome.unsupported
+                or outcome.unknown
+            ):
                 log.warning("TickEngine %s: %s", self.agent_id, outcome.describe())
         except Exception:
             log.exception(

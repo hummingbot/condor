@@ -733,14 +733,21 @@ def _scope_rows(executors: Iterable[Mapping[str, Any]]) -> list[dict]:
     a market is out of reach only when *every* executor the lineage ran there
     is gateway/CLMM, and the report must not claim a cancel path the sweep
     itself does not have.
+
+    ``custom_info`` travels with the row because the sweep's ownership test
+    reads it (``shutdown.claimed_order_ids``, SEC-739): translated without it,
+    the close-out action would hand the sweep rows that claim no order at all
+    and every resting order of the lineage would read as another principal's.
     """
     rows = []
     for ex in executors:
         connector, pair = _ex_market(ex)
+        info = ex.get("custom_info")
         rows.append(
             {
                 "connector": connector,
                 "pair": pair,
+                "custom_info": info if isinstance(info, Mapping) else {},
                 # Resolved here rather than left to ``_cancel_scope``'s own
                 # lookup: the type can sit on the record, in the config, or be
                 # inferable from neither, and ``get_executor_type`` is the one

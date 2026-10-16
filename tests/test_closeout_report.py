@@ -155,6 +155,15 @@ def _order(order_id, connector="gate_io", pair="SOL-USDC", status="OPEN"):
     }
 
 
+def _claims(*order_ids, status="OPEN"):
+    """``custom_info`` for an executor record that owns ``order_ids`` (SEC-739).
+
+    The sweep cancels only the orders this lineage's own executors claim, so a
+    fixture whose leftover order is meant to be swept has to say whose it is.
+    """
+    return {"orders": [{"order_id": oid, "status": status} for oid in order_ids]}
+
+
 def _strategy(tmp_path, monkeypatch, *, sessions=(1,)) -> Strategy:
     """A real strategy on disk, so the lineage's session tags resolve."""
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
@@ -640,7 +649,7 @@ def test_close_everything_runs_against_a_stopped_agent(tmp_path, monkeypatch):
     strat = _strategy(tmp_path, monkeypatch, sessions=(1, 2))
     running = [
         _executor("e-old", session=1, status="RUNNING"),
-        _executor("e-new", session=2, status="RUNNING"),
+        _executor("e-new", session=2, status="RUNNING", custom_info=_claims("o1")),
     ]
     executors = _FakeExecutorsAPI({"RUNNING": running, "TERMINATED": []})
     trading = _FakeTradingAPI(active=[_order("o1")])
@@ -710,7 +719,14 @@ def test_close_everything_cancels_an_order_a_dead_executor_left_behind(
     """
     _strategy(tmp_path, monkeypatch)
     executors = _FakeExecutorsAPI(
-        {"RUNNING": [], "TERMINATED": [_executor("e-done", status="TERMINATED")]}
+        {
+            "RUNNING": [],
+            "TERMINATED": [
+                _executor(
+                    "e-done", status="TERMINATED", custom_info=_claims("stranded")
+                )
+            ],
+        }
     )
     trading = _FakeTradingAPI(active=[_order("stranded")])
     client = _FakeClient(executors, trading)
@@ -842,7 +858,10 @@ def test_the_close_out_action_runs_on_a_stopped_strategy(tmp_path, monkeypatch):
     """No engine is registered, so ``/stop`` would 404 and this still works."""
     strat = _strategy(tmp_path, monkeypatch)
     executors = _FakeExecutorsAPI(
-        {"RUNNING": [_executor("e1", status="RUNNING")], "TERMINATED": []}
+        {
+            "RUNNING": [_executor("e1", status="RUNNING", custom_info=_claims("o1"))],
+            "TERMINATED": [],
+        }
     )
     trading = _FakeTradingAPI(active=[_order("o1")])
     http = _route_client(
