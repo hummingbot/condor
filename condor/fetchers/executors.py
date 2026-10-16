@@ -187,8 +187,9 @@ def _quote_size(
     executor reports as filled, and otherwise to 0: it is never returned as-is.
     Summed as exposure, a base figure made 2.9 LTC read as $2.90, so a $0.70
     loss on a ~$200 position read as a 24% drawdown and tripped the kill switch.
-    That 0 means "not priced here", not "no exposure": the agents' executors
-    provider, which has a client, prices such a row at the live price.
+    That 0 means "not priced here", not "no exposure": a caller that has a
+    client prices such a row at the live price with
+    :func:`price_pending_rows`, below.
     """
     total = float(cfg.get("total_amount_quote") or 0)
     if total > 0:
@@ -208,6 +209,51 @@ def _quote_size(
             return base * price
         return float(ex.get("filled_amount_quote") or 0)
     return float(custom_info.get("total_value_quote") or 0)
+
+
+async def price_pending_rows(client: Any, rows: List[Dict[str, Any]]) -> List[str]:
+    """Value the rows :func:`build_executor_row` could not, at the live price.
+
+    A market order still pending at the next tick reports no entry, no limit
+    price and no fill, so ``build_executor_row`` -- pure, no client -- sizes it
+    at 0. The risk gate priced that same create at the live price before
+    approving it (``condor.agents.risk._planned_amount_quote``); dropping it
+    from the book one tick later let a second create through a position cap the
+    two together exceed. So it is priced here the way the gate priced it.
+
+    Lives beside :func:`_quote_size`, whose 0 it exists to resolve, because two
+    callers need it: the agents' executors provider over its own fetched rows,
+    and the tick's executor adoption over the orphans it inherits (CORR-735) --
+    rows that never pass through the provider at all, since the provider fetches
+    under this session's own controller tag.
+
+    Rows are updated in place. Returns the ids that still have no price: their
+    exposure is unknown, not zero, and the caller must say so.
+    """
+    from condor.fetchers.market_data import fetch_current_price
+
+    prices: Dict[tuple[str, str], float] = {}
+    unpriced: List[str] = []
+    for row in rows:
+        if row.get("amount", 0) > 0:
+            continue
+        try:
+            base = float((row.get("config") or {}).get("amount") or 0)
+        except (TypeError, ValueError):
+            base = 0.0
+        if base <= 0:
+            continue
+        market = (row.get("connector") or "", row.get("pair") or "")
+        if market not in prices:
+            try:
+                prices[market] = float(await fetch_current_price(client, *market) or 0)
+            except (TypeError, ValueError):
+                prices[market] = 0.0
+        if prices[market] > 0:
+            row["amount"] = base * prices[market]
+        else:
+            unpriced.append(row.get("id") or "?")
+    return unpriced
 
 
 def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:

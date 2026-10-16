@@ -373,7 +373,9 @@ def test_the_report_summary_names_the_orphans():
 # ── The book and the winddown, not only the prompt ──
 
 
-def _book_engine(adopted, own_rows, own_exposure):
+def _book_engine(
+    adopted, own_rows, own_exposure, *, adopted_unpriced=(), own_unpriced=()
+):
     """A hand-built engine at the seam where the tick assembles its risk book.
 
     Same construction as ``tests/test_journal_read_cache.py``: the assembly is
@@ -392,9 +394,11 @@ def _book_engine(adopted, own_rows, own_exposure):
     engine.is_experiment = False
     engine._last_block_reason = ""
     engine._adopted_executors = list(adopted)
+    engine._adopted_unpriced = list(adopted_unpriced)
     engine._last_skill_data = {
         "executors": list(own_rows),
         "total_exposure": own_exposure,
+        "unpriced_exposure": list(own_unpriced),
     }
 
     async def _no_adopt(client=None):
@@ -452,6 +456,191 @@ def test_a_session_with_nothing_adopted_reads_exactly_the_provider():
     assert captured["state"].executor_count == 1
     assert captured["state"].total_exposure == pytest.approx(100.0)
     assert "adopted_executors" not in captured["summaries"]
+
+
+def test_an_inherited_position_fills_the_whole_cap_on_its_own():
+    """The failure CORR-735 names, at the two numbers it names it with.
+
+    One inherited $5,000 position, a $6,000 position cap and room for three
+    executors: read from the provider alone the book says zero on both, so a
+    fresh $6,000 allowance is approved on top of the $5,000 and real exposure
+    reaches $11,000 against a $6,000 cap.
+    """
+    engine, captured = _book_engine(
+        adopted=[{"id": "dead-1", "controller_id": DEAD_TAG, "amount": 5000.0}],
+        own_rows=[],
+        own_exposure=0.0,
+    )
+
+    asyncio.run(engine._gather_tick_context(client=None))
+    state = captured["state"]
+
+    assert state.executor_count == 1
+    assert state.total_exposure == pytest.approx(5000.0)
+
+    from condor.agents.risk import RiskEngine, RiskLimits
+
+    allowed, reason = RiskEngine(
+        RiskLimits(max_open_executors=3, max_position_size_quote=6000.0)
+    ).check_executor_action(
+        {"tool": "create_position_executor", "input": {"amount": 0.02}}, state, 2000.0
+    )
+
+    assert not allowed
+    assert "position limit" in reason
+
+
+def test_the_inherited_and_the_own_halves_are_summed_in_one_unit():
+    engine, captured = _book_engine(
+        adopted=[{"id": "dead-1", "controller_id": DEAD_TAG, "amount": 5000.0}],
+        own_rows=[{"id": "live-1", "amount": 1000.0}],
+        own_exposure=1000.0,
+    )
+
+    asyncio.run(engine._gather_tick_context(client=None))
+
+    assert captured["state"].executor_count == 2
+    assert captured["state"].total_exposure == pytest.approx(6000.0)
+
+
+def test_an_inherited_row_nothing_could_price_refuses_creates():
+    """An unvalued inherited row is exposure of unknown size, not $0.
+
+    Same answer the provider's own pending rows already get: the book cannot
+    size a create against an unknown, so it refuses them by name instead of
+    sizing the next one against a zero.
+    """
+    engine, captured = _book_engine(
+        adopted=[{"id": "dead-1", "controller_id": DEAD_TAG, "amount": 0.0}],
+        own_rows=[],
+        own_exposure=0.0,
+        adopted_unpriced=["dead-1"],
+    )
+
+    asyncio.run(engine._gather_tick_context(client=None))
+    state = captured["state"]
+
+    assert not state.book_trusted
+    assert "dead-1" in state.drift_reason
+
+    from condor.agents.risk import RiskEngine, RiskLimits
+
+    allowed, reason = RiskEngine(
+        RiskLimits(max_open_executors=3, max_position_size_quote=6000.0)
+    ).check_executor_action(
+        {"tool": "create_position_executor", "input": {"amount": 0.02}}, state, 2000.0
+    )
+
+    assert not allowed
+    assert "Book untrusted" in reason and "dead-1" in reason
+
+
+def test_the_two_unpriced_halves_are_unioned_once_each():
+    engine, captured = _book_engine(
+        adopted=[{"id": "dead-1", "controller_id": DEAD_TAG, "amount": 0.0}],
+        own_rows=[{"id": "hype-1"}],
+        own_exposure=0.0,
+        adopted_unpriced=["dead-1"],
+        own_unpriced=["hype-1"],
+    )
+
+    asyncio.run(engine._gather_tick_context(client=None))
+    reason = captured["state"].drift_reason
+
+    assert "dead-1" in reason and "hype-1" in reason
+    assert reason.count("dead-1") == 1
+
+
+def test_a_pending_inherited_order_is_priced_during_adoption(tmp_path, monkeypatch):
+    """The rows the provider never sees are priced the way it prices its own.
+
+    ``build_executor_row`` is pure, so a market order still pending reports no
+    entry, no limit price and no fill and is sized at 0. The provider resolves
+    that for its own rows; an adopted orphan is under a dead session's tag and
+    reaches the book from here instead.
+    """
+    row = _row("dead-1", DEAD_TAG)
+    row["config"].update({"amount": 2.0, "connector_name": "hyperliquid_perpetual"})
+    row["config"]["trading_pair"] = "HYPE-USD"
+    engine, client = _engine(tmp_path, monkeypatch, [row])
+
+    async def _price(client, connector_name="", trading_pair="", **_kw):
+        assert (connector_name, trading_pair) == ("hyperliquid_perpetual", "HYPE-USD")
+        return 50.0
+
+    monkeypatch.setattr("condor.fetchers.market_data.fetch_current_price", _price)
+
+    asyncio.run(engine._adopt_running_executors(client))
+
+    assert [r["amount"] for r in engine._adopted_executors] == [pytest.approx(100.0)]
+    assert engine._adopted_unpriced == []
+
+
+def test_an_inherited_order_with_no_price_is_adopted_and_reported_unvalued(
+    tmp_path, monkeypatch
+):
+    row = _row("dead-1", DEAD_TAG)
+    row["config"].update({"amount": 2.0, "connector_name": "hyperliquid_perpetual"})
+    row["config"]["trading_pair"] = "HYPE-USD"
+    engine, client = _engine(tmp_path, monkeypatch, [row])
+
+    async def _no_price(client, **_kw):
+        return None
+
+    monkeypatch.setattr("condor.fetchers.market_data.fetch_current_price", _no_price)
+
+    asyncio.run(engine._adopt_running_executors(client))
+
+    assert [r["id"] for r in engine._adopted_executors] == ["dead-1"]
+    assert engine._adopted_unpriced == ["dead-1"]
+
+
+def test_a_failed_price_read_still_adopts_and_does_not_raise(tmp_path, monkeypatch):
+    """Best-effort, like the rest of the pass — and conservative on the way out.
+
+    Owning the orphan is the point of the pass; pricing it is a refinement.
+    A pricing pass that blew up leaves every still-unvalued row named as
+    unpriced, which refuses creates rather than sizing them against a zero.
+    """
+    row = _row("dead-1", DEAD_TAG)
+    row["config"].update({"amount": 2.0, "connector_name": "hyperliquid_perpetual"})
+    engine, client = _engine(tmp_path, monkeypatch, [row])
+
+    async def _boom(client, rows):
+        raise RuntimeError("the price service is down")
+
+    monkeypatch.setattr("condor.fetchers.executors.price_pending_rows", _boom)
+
+    asyncio.run(engine._adopt_running_executors(client))
+
+    assert [r["id"] for r in engine._adopted_executors] == ["dead-1"]
+    assert engine._adopted_unpriced == ["dead-1"]
+
+
+def test_this_sessions_own_executors_are_never_adopted(tmp_path, monkeypatch):
+    """Why the two halves of the sum cannot double-count.
+
+    ``risk_state.total_exposure`` adds the adopted rows to the provider's own
+    total without deduping by id, and that is safe only because the two sets
+    are disjoint by construction: ``orphaned_running_rows`` keeps a row only
+    when its lineage session number is *outside* the live set, and the caller's
+    own number is always inside it (``_live_session_nums`` returns ``None``
+    otherwise, which adopts nothing at all).
+    """
+    engine, client = _engine(
+        tmp_path, monkeypatch, [_row("live-1", LIVE_TAG), _row("dead-1", DEAD_TAG)]
+    )
+
+    asyncio.run(engine._adopt_running_executors(client))
+
+    assert [r["id"] for r in engine._adopted_executors] == ["dead-1"]
+    assert engine.session_num == 2
+    assert (
+        orphaned_running_rows(
+            [_row("live-1", LIVE_TAG)], AGENT, STRATEGY, live_sessions={2}
+        )
+        == []
+    )
 
 
 def test_the_winddown_stops_an_adopted_orphan_too():

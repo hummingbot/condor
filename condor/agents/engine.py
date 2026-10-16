@@ -218,6 +218,11 @@ class TickEngine:
     _adopted_executors: list[dict[str, Any]] = field(
         default_factory=list, init=False, repr=False
     )
+    # Ids among ``_adopted_executors`` nothing could put a quote size on — a
+    # pending market order, whose size ``build_executor_row`` leaves at 0
+    # because it is pure. Unioned into the tick's unpriced set (CORR-735) so an
+    # inherited row of unknown size refuses creates instead of reading as $0.
+    _adopted_unpriced: list[str] = field(default_factory=list, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
     # What the risk gate refused, and why. The gate appends during the tick
     # (condor.agents.risk.RefusalLog); the tick drains it into the journal and
@@ -971,7 +976,18 @@ class TickEngine:
         # A pending order nothing could price is exposure of unknown size, not
         # zero: the book cannot size a create, so it refuses them like any
         # other missing metric while every brake still passes.
-        unpriced = self._last_skill_data.get("unpriced_exposure") or []
+        # The adopted rows carry their own unvalued ids: they are priced during
+        # adoption, not by the provider, so the two halves of the book have two
+        # halves of this list too (CORR-735).
+        unpriced = list(
+            dict.fromkeys(
+                [
+                    str(eid)
+                    for eid in (self._last_skill_data.get("unpriced_exposure") or [])
+                ]
+                + [str(eid) for eid in (getattr(self, "_adopted_unpriced", None) or [])]
+            )
+        )
         if unpriced:
             risk_state.book_trusted = False
             risk_state.drift_reason = (
@@ -1584,13 +1600,18 @@ class TickEngine:
         next, never fatal.
         """
         self._adopted_executors = []
+        self._adopted_unpriced = []
         if self.is_experiment:
             return
         live = self._live_session_nums()
         if live is None:
             return
 
-        from condor.fetchers.executors import build_executor_row, fetch_all_executors
+        from condor.fetchers.executors import (
+            build_executor_row,
+            fetch_all_executors,
+            price_pending_rows,
+        )
 
         from .executor_adoption import orphaned_running_rows
 
@@ -1609,7 +1630,25 @@ class TickEngine:
         if not orphans:
             return
         built = [row for row in map(build_executor_row, orphans) if row["id"]]
+        # The provider prices its own pending rows this way; these rows never
+        # reach it (it fetches under this session's tag), so they are priced
+        # with the same helper rather than folded into the book at $0
+        # (CORR-735). Best-effort like the rest of the pass: a read that fails
+        # leaves the row unvalued and says so, and owns the orphan regardless.
+        try:
+            unpriced = await price_pending_rows(client, built)
+        except Exception:
+            log.warning(
+                "TickEngine %s: adopted executor pricing failed; their exposure "
+                "is unknown, not zero",
+                self.agent_id,
+                exc_info=True,
+            )
+            unpriced = [
+                row["id"] for row in built if not float(row.get("amount") or 0) > 0
+            ]
         self._adopted_executors = built
+        self._adopted_unpriced = unpriced
         log.warning(
             "TickEngine %s adopted %d orphaned executor(s) from dead session(s): %s",
             self.agent_id,
