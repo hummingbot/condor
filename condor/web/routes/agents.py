@@ -55,7 +55,7 @@ from condor.agents.sessions_index import (
 )
 from condor.agents.strategy import LOOP_MD, LOOPS_DIRNAME
 from condor.fsutil import atomic_write_text
-from condor.layering import fork_if_stock
+from condor.layering import fork_if_stock, write_preserving_stamp
 from condor.web.auth import (
     check_server_access,
     get_current_user,
@@ -2296,8 +2296,11 @@ async def update_agent_md(
     )
     # Straight past ``AgentStore``, so the stock guard is stated here rather
     # than inherited: a shipped AGENT.md is forked into the local root first and
-    # this writes the fork (FEAT-115).
-    atomic_write_text(fork_if_stock(agent.slug, "AGENT.md"), req.content)
+    # this writes the fork (FEAT-115). The write has to go through
+    # ``write_preserving_stamp`` -- ``req.content`` came from a GET that read the
+    # stock file, which carries no stamp, so a plain write erases the one the
+    # fork just gained.
+    write_preserving_stamp(fork_if_stock(agent.slug, "AGENT.md"), req.content)
     return {"updated": True}
 
 
@@ -2848,9 +2851,10 @@ async def update_strategy_md(
         new_defaults.get("server_name") if isinstance(new_defaults, dict) else None,
         (strategy.default_config or {}).get("server_name") or "",
     )
-    # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here.
+    # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here,
+    # and the stamp has to be carried across the write for the same reason.
     target = fork_if_stock(slug, LOOPS_DIRNAME, strategy.slug, LOOP_MD)
-    atomic_write_text(target, req.content)
+    write_preserving_stamp(target, req.content)
     return {"updated": True}
 
 

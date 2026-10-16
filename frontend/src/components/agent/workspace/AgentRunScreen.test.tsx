@@ -1087,12 +1087,12 @@ describe("the spine and the tabs share one row (ARCH-425)", () => {
 
     await click(beat(150));
     expect(new URLSearchParams(search()).get("tick")).toBe("150");
-    expect(beat(150).className).toContain("ring-2");
-    expect(beat(149).className).not.toContain("ring-2");
+    expect(beat(150).dataset.beatSelected).toBe("true");
+    expect(beat(149).dataset.beatSelected).toBeUndefined();
 
     await click(container.querySelector<HTMLButtonElement>("[data-spine-overview]")!);
     expect(new URLSearchParams(search()).get("tick")).toBeNull();
-    expect(beat(150).className).not.toContain("ring-2");
+    expect(beat(150).dataset.beatSelected).toBeUndefined();
   });
 
   it("with no session run, the row holds the tabs alone", async () => {

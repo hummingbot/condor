@@ -1,9 +1,8 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Activity, X } from "lucide-react";
+import { Activity } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { SnapshotDetail } from "@/components/agent/session/Snapshot";
 import { isLoopRun, liveControllerIds } from "@/components/agent/lab/runs";
 import { TickSpine } from "@/components/agent/lab/TickSpine";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
@@ -12,6 +11,7 @@ import { LoopBar } from "@/components/agent/workspace/LoopBar";
 import { NowView } from "@/components/agent/workspace/NowView";
 import { PlaybookView } from "@/components/agent/workspace/PlaybookView";
 import { RunsBand } from "@/components/agent/workspace/RunsBand";
+import { TickOverlay } from "@/components/agent/workspace/TickOverlay";
 import { SECTION_META } from "@/components/agent/workspace/sectionMeta";
 import {
   PANE_SECTIONS,
@@ -381,33 +381,17 @@ export function AgentRunScreen({
       // Over the screen rather than instead of it — so closing it returns the
       // reader to the tab and the run they left. In the pane it covers the
       // pane only: the conversation beside it stays readable.
-      <div
+      <TickOverlay
         className={`${
           isPane ? "absolute" : "fixed"
         } inset-0 z-50 flex flex-col bg-[var(--color-bg)]`}
-      >
-        <div className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
-          <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            Tick #{url.tick} · session {selectedRun.number}
-          </span>
-          <button
-            type="button"
-            onClick={() => setParams({ tick: null })}
-            aria-label="Close tick"
-            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <SnapshotDetail
-            slug={agent.slug}
-            sslug={sslug}
-            sessionNum={selectedRun.number}
-            tick={url.tick}
-          />
-        </div>
-      </div>
+        slug={agent.slug}
+        sslug={sslug}
+        sessionNum={selectedRun.number}
+        tick={url.tick}
+        onSelectTick={(next) => setParams({ tick: next }, { replace: true })}
+        onClose={() => setParams({ tick: null })}
+      />
     );
 
   return (
