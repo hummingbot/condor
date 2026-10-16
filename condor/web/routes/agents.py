@@ -27,7 +27,7 @@ from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from condor.agents.attribution import (
@@ -148,6 +148,19 @@ class RunningInstance(BaseModel):
     tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
+    #: ── Effective vs file ([[FEAT-136]]) ──
+    #: The model the *adapter* says this session is on, which is not the
+    #: ``agent_key`` pin above: a bridge that could not match the pin keeps its
+    #: own default. Empty for a backend with no adapter to ask, and before the
+    #: first tick has started a client.
+    active_model_id: str = ""
+    #: Which pins/limits this process holds that ``config.yml`` no longer says,
+    #: as ``{field: {"running": ..., "file": ...}}`` — empty when they agree.
+    #: An engine copies its config at start and nothing swaps it mid-tick
+    #: (CORR-732), so without this the only route to "is it still running the
+    #: config I edited" was the logs. Only computed by callers that loaded the
+    #: file; a status-only caller leaves it empty, which reads as "no drift".
+    config_drift: dict[str, Any] = {}
     # ── The loop's pulse ──
     # The engine has computed all of this since it was written; the model just
     # never carried it, so every strategy view could say a loop was "running"
@@ -156,6 +169,15 @@ class RunningInstance(BaseModel):
     # two surfaces describe one loop in one vocabulary.
     #: Unix seconds the current tick started, 0 before the first one.
     last_tick_at: float = 0.0
+    #: ── Quiet or dead ([[FEAT-137]]) ──
+    #: ``last_tick_at`` is set at tick *start*, so it advances on a tick whose
+    #: every call failed. These two advance only on an outcome: a reading that
+    #: said something, and a mutating call that worked. 0 = never.
+    last_reading_at: float = 0.0
+    last_successful_action_at: float = 0.0
+    #: How long the last completed tick took, in seconds ([[FEAT-141]]). 0 =
+    #: no tick has completed yet.
+    last_tick_duration: float = 0.0
     #: 0 = unbounded; otherwise the tick this session stops at.
     max_ticks: int = 0
     #: What the loop last *said* — the journal's `Last action:` line.
@@ -163,6 +185,13 @@ class RunningInstance(BaseModel):
     #: What the loop last *did* — one ``AgentAction`` row, or null.
     last_did: dict[str, Any] | None = None
     last_error: str = ""
+    #: ── Throttling ([[FEAT-138]]) ──
+    #: The venues that have refused *this* session, each as a venue/connector
+    #: condition with the attempts / successes / refusals behind it. Beside
+    #: ``last_error`` and never inside it: a throttled venue is not this agent's
+    #: failure, and reading it as one is what made it look like a strategy bug.
+    #: Empty = checked and nothing refused.
+    throttled_venues: list[dict[str, Any]] = []
 
 
 #: Why a strategy's money could not be read, or ``""`` when it could (CORR-706).
@@ -275,12 +304,37 @@ class AgentPerformanceModel(BaseModel):
     controllers: list[dict[str, Any]] = []
     close_type_counts: dict[str, int] = {}
     fees_known: bool = True
+    # Whether the open book above was confirmed live; see AgentPerformance. The
+    # rollup sets it too — it reads the same resolved aggregates (CORR-723).
+    liveness_known: bool = True
     # Each owned base's (realized, volume, trades, fees) over this session's own
     # ownership window — what the deployment ledger's bot rows read (CORR-661).
     base_windows: dict[str, tuple[float, float, float, float]] = {}
+    # ── Scope labelling (FEAT-135) ──
+    # Realized PnL and volume at both scopes, each naming the instances it was
+    # summed over. The figures above are one number folded from both, which is
+    # how a session summary came to report "$200" for a session that earned $120
+    # (GitHub #262) while a leaderboard needed exactly that $200. null = the scope
+    # is unavailable (no ownership window to slice, or no instance aggregate to
+    # sum) and must not be rendered as the other scope's total.
+    #
+    # No lifetime twin exists for unrealized_pnl, the open book or exposure: per
+    # GitHub #234 those come only from instances the active-bot inventory confirms
+    # and are never summed across generations.
+    session_realized_pnl: float | None = None
+    session_volume: float | None = None
+    session_instances: list[str] = []
+    lifetime_realized_pnl: float | None = None
+    lifetime_volume: float | None = None
+    lifetime_instances: list[str] = []
     # Only the tick's executors provider asks for the curve (PERF-639); the routes
     # serve it from fetch_agent_pnl_series, so this stays null on the wire.
     pnl_series: list[dict] | None = None
+    # Whether these figures are a reading at all — ``ok`` / ``empty`` /
+    # ``missing`` ([[CORR-725]]'s tri-state, rolled up to the agent). Carried
+    # for the same reason ``fees_known`` is: the numbers above are 0.0 in all
+    # three cases and only this says which of them is "flat" ([[FEAT-137]]).
+    reading: str = "ok"
 
     @classmethod
     def from_perf(cls, perf: AgentPerformance, **overrides) -> AgentPerformanceModel:
@@ -615,6 +669,50 @@ class ActionModel(BaseModel):
     error: str = ""
 
 
+class VenueConditionModel(BaseModel):
+    """One (host, venue) pair's call accounting ([[FEAT-138]]).
+
+    ``condition`` is ``throttled`` while the venue has refused recently, else
+    ``ok``. The counts are cumulative for this process's lifetime, so "8
+    attempts, 0 successes, 8 refusals" is reproducible from them rather than
+    from a log sample — which is the finding this exists for (GitHub #276).
+    """
+
+    host: str = ""
+    venue: str = ""
+    condition: str = "ok"
+    attempts: int = 0
+    successes: int = 0
+    refusals: int = 0
+    errors: int = 0
+    last_refusal_at: float = 0.0
+    last_reason: str = ""
+
+
+class CallerVolumeModel(BaseModel):
+    """What one (agent, session, host) spent — who consumed whose budget.
+
+    The question [[CORR-726]]'s incident could not answer: nothing showed that
+    one 1.0s poller was the sole consumer starving a host. ``agent`` empty means
+    the calls were made by a seat carrying no agent label (a chat session).
+    """
+
+    agent: str = ""
+    agent_id: str = ""
+    host: str = ""
+    attempts: int = 0
+    successes: int = 0
+    refusals: int = 0
+    errors: int = 0
+    last_refusal_at: float = 0.0
+    last_reason: str = ""
+
+
+class VenueConditionsResponse(BaseModel):
+    venues: list[VenueConditionModel] = []
+    callers: list[CallerVolumeModel] = []
+
+
 # ── The fleet map (FEAT-096) ──
 # The wire shape of condor.agents.fleet_map's dataclasses; see that module for
 # what each field is and why the map is cheap enough for the bots page to poll.
@@ -627,6 +725,13 @@ class LiveLoopModel(BaseModel):
     tick_count: int = 0
     last_tick_at: float = 0.0
     frequency_sec: int = 60
+    #: Outcomes rather than attempts, beside the tick-start stamp above
+    #: ([[FEAT-137]]); see ``condor.agents.fleet_map.LiveLoop``.
+    last_reading_at: float = 0.0
+    last_successful_action_at: float = 0.0
+    #: How long the last completed tick took ([[FEAT-141]]) — the host-capacity
+    #: signal a slow tick *is*. 0 = no tick has completed yet.
+    last_tick_duration: float = 0.0
     last_action: str = ""
     #: What the loop last *did* — one ``AgentAction`` row, or null. See
     #: ``condor.agents.actions``; the band shows it above ``last_action``.
@@ -670,12 +775,130 @@ class DeedIndexModel(BaseModel):
     since: float = 0.0
 
 
+class HostLoadModel(BaseModel):
+    """Condor's own host: 1-minute load against its vCPU count ([[FEAT-141]]).
+
+    ``available`` is ``False`` where the platform has no load average or will
+    not say how many CPUs it has. A reader renders that as *unknown* and never
+    as *ok* — the load number alone is not a reading, since 3.0 is idle on 32
+    vCPUs and on fire on 2.
+    """
+
+    available: bool = False
+    load_1m: float = 0.0
+    vcpus: int = 0
+    load_per_vcpu: float = 0.0
+
+
+class ApiLagModel(BaseModel):
+    """One server's measured round-trip, as the order-placement lag it bounds.
+
+    Read off the server-data service's own poll counters, so this is the one
+    placement-lag reading available without issuing an order. A *floor*: an
+    order cannot be placed faster than the API answers.
+    """
+
+    host: str = ""
+    status: str = "unknown"
+    last_latency_ms: float = 0.0
+    consecutive_failures: int = 0
+
+
+class FleetDiagnosticsModel(BaseModel):
+    """The signals the fleet diagnostics view needs and nothing else produced.
+
+    Carried on the fleet map rather than on a route of its own, and that is the
+    feature's defining constraint: the view must add **no** polling cost to a
+    dashboard that already polls per server, and the fleet map is the one agent
+    payload the bots page already polls while making no Hummingbot call at all.
+    Every field here is a counter already kept or a kernel reading, so the map
+    stays as cheap as it was ([[FEAT-141]]).
+    """
+
+    host: HostLoadModel = Field(default_factory=HostLoadModel)
+    api_lag: list[ApiLagModel] = []
+    #: Throttling ([[FEAT-138]]), both folds: a venue condition is never an
+    #: agent error, and a caller row names whose volume spent a host's budget.
+    venues: list[VenueConditionModel] = []
+    callers: list[CallerVolumeModel] = []
+
+
 class FleetMapResponse(BaseModel):
     owners: list[FleetOwnerModel] = []
     #: Additive: a client that ignores this field behaves exactly as it did
     #: before FEAT-106, because the pseudo-runs appended to ``owners`` carry an
     #: empty namespace and so match nothing by name.
     deeds: DeedIndexModel = Field(default_factory=DeedIndexModel)
+    #: Additive the same way ([[FEAT-141]]): a client that ignores this field
+    #: gets the map it got before, and a client that reads it gets the host,
+    #: lag and throttle signals without a second poll.
+    diagnostics: FleetDiagnosticsModel = Field(default_factory=FleetDiagnosticsModel)
+
+
+class StuckSwapModel(BaseModel):
+    """One swap still ``SUBMITTED``, and for how long ([[FEAT-140]]).
+
+    ``condition`` is ``unverifiable`` past the threshold and ``pending`` below
+    it — never ``failed``. Upstream holds a swap in ``SUBMITTED`` until a status
+    read *succeeds*, so a Gateway that cannot be reached keeps one here with no
+    statement about the chain either way (GitHub #278), and reporting it as lost
+    would be Condor asserting an outcome it has not observed.
+
+    ``since`` says where the clock started: ``submitted`` is the swap's own
+    recorded time, ``observed`` is Condor's first sighting of the row and can
+    only understate the duration (a restart resets it), ``unknown`` means
+    neither was available and ``unverifiable_for_seconds`` is ``None``.
+    """
+
+    transaction_hash: str = ""
+    connector: str = ""
+    network: str = ""
+    trading_pair: str = ""
+    side: str = ""
+    status: str = "SUBMITTED"
+    condition: str = "pending"
+    since: str = "unknown"
+    submitted_at: float | None = None
+    unverifiable_for_seconds: float | None = None
+    unverifiable_for: str = ""
+    threshold_seconds: float = 0.0
+    message: str = ""
+
+
+class StuckSwapsResponse(BaseModel):
+    """Every in-flight swap on one server, and which ones are alerting.
+
+    ``alerts`` is the subset of ``swaps`` past the threshold, carried separately
+    so a dashboard does not have to re-derive the threshold to know what to
+    show. ``resolvable`` is unknown until a resolve is actually attempted — the
+    capability answer comes from the server's own 404 — so it is deliberately
+    absent here rather than guessed from a version string.
+    """
+
+    server_name: str = ""
+    threshold_seconds: float = 0.0
+    swaps: list[StuckSwapModel] = []
+    alerts: list[StuckSwapModel] = []
+    server_online: bool = True
+    error_hint: str = ""
+
+
+class ResolveSwapResponse(BaseModel):
+    """What the server answered when asked to resolve a swap ([[FEAT-140]]).
+
+    ``supported=False`` with an ``error_hint`` is the normal answer from a
+    server that predates the route (``condor.fetchers.raw_api`` turns its 404
+    into a capability answer), and the same shape
+    ``PerformanceHistoryResponse`` already uses for exactly that case. Nothing
+    local changes on either branch: ``result`` is the server's verbatim answer
+    and Condor records no swap state of its own.
+    """
+
+    transaction_hash: str = ""
+    server_name: str = ""
+    supported: bool = True
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_hint: str = ""
 
 
 class CreateAgentRequest(BaseModel):
@@ -934,9 +1157,9 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
     place the rollup was computed from, or the two numbers are about two
     fleets (ARCH-324).
 
-    Empty is a real state, not a missing one: ``AgentConfig`` defaults to
-    ``"local"``, so an empty string is a strategy that explicitly declared no
-    server — and the caller is expected to say so rather than substitute one.
+    Empty is a real state, not a missing one: ``AgentConfig`` defaults to ``""``
+    (CORR-729), so an empty string is a strategy that names no server — and the
+    caller is expected to say so rather than substitute one.
     """
     from condor.agents.config import load_full_config
 
@@ -1281,11 +1504,14 @@ _INSTANCE_PERF_FIELDS = {
 }
 
 
-def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
+def _instance_from_engine(
+    engine, perf_by_id: dict, file_config: dict | None = None
+) -> RunningInstance:
     # The same two reads the fleet band makes per live engine — a cached
     # summary read and a tail of actions.jsonl — reused rather than re-derived,
     # so "what the loop last did" cannot mean two different things in two
     # places. Both swallow their own errors and return empty.
+    from condor.agents.config import config_drift
     from condor.agents.fleet_map import read_last_action, read_last_did
 
     info = engine.get_info()
@@ -1308,13 +1534,25 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         frequency_sec=info.get("frequency_sec", 60),
         tick_timeout_sec=info.get("tick_timeout_sec", 600),
         agent_key=info.get("agent_key", ""),
+        active_model_id=info.get("active_model_id", "") or "",
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
+        # The engine's own view against the file as it stands now. Computed here
+        # because this is the one place both sides are already in hand, so no
+        # caller re-implements the diff and they cannot drift apart
+        # ([[FEAT-136]]).
+        config_drift=config_drift(info, file_config) if file_config else {},
         last_tick_at=float(info.get("last_tick_at", 0.0) or 0.0),
+        last_reading_at=float(info.get("last_reading_at", 0.0) or 0.0),
+        last_successful_action_at=float(
+            info.get("last_successful_action_at", 0.0) or 0.0
+        ),
+        last_tick_duration=float(info.get("last_tick_duration", 0.0) or 0.0),
         max_ticks=int(info.get("max_ticks", 0) or 0),
         last_action=read_last_action(getattr(engine, "journal", None)),
         last_did=read_last_did(engine),
         last_error=info.get("last_error", "") or "",
+        throttled_venues=list(info.get("throttled_venues") or []),
     )
 
 
@@ -1323,6 +1561,7 @@ def _strategy_live_state(
     run_key: str,
     engines: list,
     perf_by_id: dict | None = None,
+    file_config: dict | None = None,
 ) -> tuple[str, str, int, list[RunningInstance]]:
     """A strategy's headline ``(status, agent_id, tick_count, instances)``.
 
@@ -1334,10 +1573,18 @@ def _strategy_live_state(
     ``instances`` is only built when ``perf_by_id`` is given: each one costs a
     journal summary read and an ``actions.jsonl`` tail per engine, which a
     status-only caller (the brain panel) must not pay — it gets ``[]``.
+
+    ``file_config`` is the strategy's config as it stands on disk; pass it and
+    each instance carries its effective-vs-file drift ([[FEAT-136]]). Only
+    ``get_strategy`` does: it already returns that config as the response's
+    ``config``, so the diff costs it no extra read. The list and card views omit
+    it rather than loading a config per strategy for a badge their rows do not
+    draw, and read as "no drift" — which is why the badge lives on the detail
+    view that can actually tell.
     """
     instances: list[RunningInstance] = []
     if perf_by_id is not None:
-        instances = [_instance_from_engine(e, perf_by_id) for e in engines]
+        instances = [_instance_from_engine(e, perf_by_id, file_config) for e in engines]
 
     if engines:
         if instances:
@@ -1590,14 +1837,25 @@ async def get_fleet_map(user: WebUser = Depends(get_current_user)):
     Deliberately *not* part of ``GET /agents``, which fans out a performance
     fetch per session of every strategy and is the most expensive read in the
     app. This one makes **no Hummingbot API call at all** — a memoised directory
-    walk plus the in-memory loop registry — so the bots page can poll it.
+    walk, the in-memory loop registry, and (for ``diagnostics``) a kernel load
+    reading plus one incremental read of the local call log — so the bots page
+    can poll it.
 
     A literal path, and so registered before the ``/{slug}`` catch-all above.
     """
     from condor.agents.deed_index import build_deed_index
+    from condor.agents.diagnostics import api_lag, host_load
     from condor.agents.fleet_map import build_fleet_map
+    from condor.agents.throttle import ledger
 
     index = build_deed_index()
+    # The diagnostics block rides along because it costs nothing the map does
+    # not already cost: a kernel load reading, counters the poller already
+    # keeps, and one incremental read of the local call log. A separate route
+    # would have been a second poll, which is the one thing FEAT-141 may not
+    # add.
+    book = ledger()
+    book.ingest()
     return FleetMapResponse(
         owners=[FleetOwnerModel(**asdict(owner)) for owner in build_fleet_map()],
         deeds=DeedIndexModel(
@@ -1606,6 +1864,147 @@ async def get_fleet_map(user: WebUser = Depends(get_current_user)):
             },
             since=index.since,
         ),
+        diagnostics=FleetDiagnosticsModel(
+            host=HostLoadModel(**host_load()),
+            api_lag=[ApiLagModel(**row) for row in api_lag()],
+            venues=[VenueConditionModel(**row) for row in book.venue_conditions()],
+            callers=[CallerVolumeModel(**row) for row in book.caller_volume()],
+        ),
+    )
+
+
+@router.get("/venue-conditions", response_model=VenueConditionsResponse)
+async def get_venue_conditions(user: WebUser = Depends(get_current_user)):
+    """Which venues are refusing us, and which agent spent the host's budget.
+
+    The accounting FEAT-138 added, read off the shared call log every MCP
+    subprocess appends to (:mod:`condor.agents.throttle`). Two folds of the same
+    counters, because they answer two different questions: ``venues`` is a
+    condition of the venue (never of an agent), and ``callers`` names the agent
+    and session whose call volume consumed a host.
+
+    Makes no Hummingbot API call and no network call at all — one incremental
+    read of a local log — so a diagnostics view can poll it.
+
+    A literal path, and so registered before the ``/{slug}`` catch-all.
+    """
+    from condor.agents.throttle import ledger
+
+    book = ledger()
+    book.ingest()
+    return VenueConditionsResponse(
+        venues=[VenueConditionModel(**row) for row in book.venue_conditions()],
+        callers=[CallerVolumeModel(**row) for row in book.caller_volume()],
+    )
+
+
+@router.get("/stuck-swaps", response_model=StuckSwapsResponse)
+async def get_stuck_swaps(
+    server_name: str,
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    """Swaps still ``SUBMITTED`` on one server, with how long each is unverifiable.
+
+    The diagnostic FEAT-140 adds for GitHub #278: a swap leaves ``SUBMITTED``
+    only after a status read *succeeds*, so a failing Gateway ping keeps one
+    there indefinitely and the dashboard showed an hourglass with no duration
+    and no exit. Every row says how long, and the ones past
+    :func:`condor.swap_watch.unverifiable_after_seconds` are repeated under
+    ``alerts``.
+
+    Unlike ``/venue-conditions`` this does make one API call — the swap search —
+    so it is not free to poll at a venue-condition cadence. An unreachable
+    server reads as ``server_online: false`` with the hint, never as "no stuck
+    swaps": the whole failure mode here is a server that cannot be asked.
+
+    A literal path, and so registered before the ``/{slug}`` catch-all.
+    """
+    from condor.swap_watch import unverifiable_after_seconds, watch
+
+    client = await _controller_client(user, server_name)
+    threshold = unverifiable_after_seconds()
+    try:
+        raw = await client.gateway_swap.search_swaps(
+            status="SUBMITTED", limit=max(1, min(int(limit), 1000))
+        )
+    except Exception as exc:
+        # The hint reaches a browser, so it carries the API's own message and
+        # never ``str(exc)`` — an aiohttp error stringifies with the backend's
+        # host and port in it (SEC-116).
+        from condor.fetchers.executors import describe_executor_error
+
+        log.warning("Stuck-swap search on '%s' failed: %s", server_name, exc)
+        _status, message = describe_executor_error(exc)
+        return StuckSwapsResponse(
+            server_name=server_name,
+            threshold_seconds=threshold,
+            server_online=False,
+            error_hint=f"Could not search swaps on '{server_name}': {message}",
+        )
+
+    rows = raw.get("data") or [] if isinstance(raw, dict) else raw or []
+    book = watch()
+    book.observe(rows)
+    return StuckSwapsResponse(
+        server_name=server_name,
+        threshold_seconds=threshold,
+        swaps=[StuckSwapModel(**row) for row in book.conditions(rows)],
+        alerts=[StuckSwapModel(**row) for row in book.alerts(rows)],
+    )
+
+
+@router.post("/stuck-swaps/{transaction_hash}/resolve")
+async def resolve_stuck_swap(
+    transaction_hash: str,
+    server_name: str,
+    network: str | None = None,
+    user: WebUser = Depends(get_current_user),
+) -> ResolveSwapResponse:
+    """Ask the server to resolve one stuck swap. Condor sets no swap state.
+
+    The operator half of FEAT-140's exit, over the same
+    :func:`condor.swap_watch.resolve` the ``resolve_swap`` MCP tool calls, so an
+    agent and an operator cannot resolve a swap by different routes. The server
+    reads the chain and records the outcome; the answer here is its answer.
+
+    A server that does not serve the route answers 404, which comes back as
+    ``supported: false`` and an ``error_hint`` — a capability answer, not an
+    outage — and nothing has changed anywhere. Condor never marks the swap
+    itself: it does not track swap confirmation and has no chain read, so a
+    local status would be exactly the invented fact this feature exists to
+    avoid.
+
+    A literal prefix, and so registered before the ``/{slug}`` catch-all.
+    """
+    from condor.swap_watch import SwapResolveUnsupported
+    from condor.swap_watch import resolve as resolve_swap
+
+    client = await _controller_client(user, server_name)
+    try:
+        answered = await resolve_swap(client, transaction_hash, network=network)
+    except SwapResolveUnsupported as exc:
+        return ResolveSwapResponse(
+            transaction_hash=transaction_hash,
+            server_name=server_name,
+            supported=False,
+            error_hint=(
+                f"'{server_name}' does not offer a swap resolve route ({exc}). "
+                f"Nothing was changed; the swap is still SUBMITTED and "
+                f"unverifiable."
+            ),
+        )
+    except Exception as exc:
+        from condor.web.routes._errors import upstream_error
+
+        log.warning("Resolving swap on '%s' failed: %s", server_name, exc)
+        raise upstream_error(f"Failed to resolve the swap on '{server_name}'", exc)
+
+    result = answered.get("result")
+    return ResolveSwapResponse(
+        transaction_hash=transaction_hash,
+        server_name=server_name,
+        result=result if isinstance(result, dict) else {"answer": result},
     )
 
 
@@ -2421,6 +2820,113 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
     return {"deleted": True}
 
 
+# ── An agent as one file (FEAT-133) ──
+#
+# Export is a download, so it answers raw bytes with a filename rather than a
+# model. Import is two calls onto one builder: ``/import/preview`` computes the
+# plan and writes nothing, ``/import`` writes exactly that plan. Splitting them
+# is what lets the dialog show every executable file *before* anything lands,
+# which is the only gate there is — an imported routine runs in this process.
+
+
+def _bundle_refusal(exc: Exception) -> HTTPException:
+    """A bundle refusal as HTTP: 415 for the wrong kind of file, 400 for a bad one."""
+    from condor.agents.bundle import NotJsonError
+
+    return HTTPException(
+        status_code=415 if isinstance(exc, NotJsonError) else 400, detail=str(exc)
+    )
+
+
+async def _uploaded_bundle(file: UploadFile):
+    """The parsed bundle behind a multipart upload, or the refusal to answer with.
+
+    The size cap is applied here rather than left to the HTTP layer so the MCP
+    and chat doors, which never pass through it, are held to the same bound.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    data = await file.read()
+    if len(data) > agent_bundle.MAX_BUNDLE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"That file is {len(data)} bytes, over the "
+                f"{agent_bundle.MAX_BUNDLE_BYTES}-byte bundle limit"
+            ),
+        )
+    try:
+        return agent_bundle.parse(data)
+    except ValueError as exc:
+        raise _bundle_refusal(exc) from exc
+
+
+@router.post("/import/preview")
+async def preview_agent_import(
+    file: UploadFile = File(...),
+    as_slug: str = Form(""),
+    user: WebUser = Depends(get_current_user),
+):
+    """What importing this bundle would do. Writes nothing.
+
+    Declared before ``/{slug}``-shaped routes read as a sibling, not a special
+    case: ``import`` is a literal first segment and no POST route here takes a
+    path parameter in that position.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    bundle = await _uploaded_bundle(file)
+    return agent_bundle.plan(bundle, as_slug=as_slug, user_id=user.id).summary()
+
+
+@router.post("/import")
+async def import_agent(
+    file: UploadFile = File(...),
+    as_slug: str = Form(""),
+    user: WebUser = Depends(get_current_user),
+):
+    """Register the agent in this bundle, with its code switched off.
+
+    409 on a taken slug — through the same ``_create_refusal`` that answers
+    ``POST /agents``, because this is the same rule: import creates, and never
+    replaces an agent somebody has already tuned.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    bundle = await _uploaded_bundle(file)
+    plan = agent_bundle.plan(bundle, as_slug=as_slug, user_id=user.id)
+    try:
+        return agent_bundle.apply(plan, user_id=user.id)
+    except ValueError as exc:
+        raise _create_refusal(exc) from exc
+
+
+@router.get("/{slug}/bundle")
+async def export_agent_bundle(slug: str, user: WebUser = Depends(get_current_user)):
+    """This agent as one portable file.
+
+    Bearer-guarded like everything else here, so the frontend fetches it with
+    ``authFetch`` and makes an object URL — a bare ``<a href>`` has no way to
+    carry the header, which is the same reason ``useAuthedImage`` exists.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    _get_agent(slug)
+    try:
+        bundle = agent_bundle.build(slug)
+    except ValueError as exc:
+        raise _bundle_refusal(exc) from exc
+    return Response(
+        content=agent_bundle.render(bundle),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{agent_bundle.filename_for(slug)}"'
+            )
+        },
+    )
+
+
 def _chat_member_status(member: Any) -> str | None:
     """Normalize the two shapes ``get_chat_member`` can answer with.
 
@@ -2809,7 +3315,7 @@ async def get_strategy(
     engines = _get_engines_for(slug, sslug)
     # StrategyDetail carries no tick_count; the instances do.
     status, agent_id, _ticks, instances = _strategy_live_state(
-        strategy_dir, run_key, engines, perf_by_id
+        strategy_dir, run_key, engines, perf_by_id, config_dict
     )
 
     return StrategyDetail(
@@ -2874,7 +3380,26 @@ async def update_strategy_config(
     )
     config_dict.update(req.config)
     save_full_config(strategy.home, config_dict)
-    return {"updated": True, "config": config_dict}
+    # The write reached the file and no running session. An engine holds the
+    # config dict it was constructed with (``TickEngine.config``) and nothing swaps
+    # it mid-tick on purpose — a live trading loop must not have its limits
+    # changed under it. ``{"updated": True}`` alone was true of the file and
+    # silent about the process, and read identically whether a session was left
+    # drifting or there was none to drift, so an operator who saw it had no way
+    # to learn the running agent still had the old config (CORR-732). The count
+    # is the answer to "how many restarts does applying this take".
+    live = len(_get_engines_for(slug, sslug))
+    return {
+        "updated": True,
+        "config": config_dict,
+        "applies_to_running": False,
+        "live_engines": live,
+        "message": (
+            f"Saved; restart {live} session{'s' if live != 1 else ''} to apply."
+            if live
+            else "Saved. No session is running, so the next one starts on it."
+        ),
+    }
 
 
 @router.delete("/{slug}/strategies/{sslug}")
@@ -3083,10 +3608,12 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     # request body is a free-form dict, so without this gate any authenticated
     # user could start a live loop on another user's stored credentials — the
     # same check the config pin and delegate already apply. A name the
-    # body asked for is held to it strictly; an inherited one (strategy default,
-    # or the "local" that AgentConfig fills in) only matters when it resolves to
-    # a real server, since otherwise the engine falls through to the caller's
-    # own accessible servers, which is scoped already.
+    # body asked for is held to it strictly; an inherited one (a strategy
+    # default) only matters when it resolves to a real server, since otherwise
+    # the engine falls through to the caller's own accessible servers, which is
+    # scoped already. ``asked_for_it`` is also what pins the engine, so a name
+    # the body chose keeps resolving to that server for the life of the loop
+    # (CORR-729).
     cm = get_config_manager()
     server_name = config_dict.get("server_name")
     asked_for_it = bool(req.config and req.config.get("server_name"))
@@ -3134,8 +3661,45 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         config=config_dict,
         chat_id=req.chat_id,
         user_id=user_id,
+        # The same distinction this route's server gate draws, carried into the
+        # run: a name the body asked for must keep resolving to that server for
+        # the life of the loop, never to another one (CORR-729).
+        server_pinned=asked_for_it,
     )
-    await new_engine.start()
+    # The trading preflight (FEAT-139) runs inside ``start`` so the boot restart
+    # goes through it too; a stated requirement that does not hold answers here,
+    # before a tick, with the line the operator can act on.
+    from condor.preflight import PreflightFailed
+
+    try:
+        await new_engine.start()
+    except PreflightFailed as failed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Trading preflight failed: {failed.report.reason}",
+        )
+
+    # "Started" used to mean "a task was created": a run whose very first tick
+    # died answered success, and the operator found out from the session page
+    # much later (CORR-728). Wait for the tick, bounded — a tick can honestly
+    # take minutes, so one still in flight at the bound counts as came-up and
+    # only a tick that failed, or a run that ended before ticking, is a failure.
+    # Imported at call time so a test can shorten the bound.
+    from condor.agents.engine import FIRST_TICK_WAIT_SEC
+
+    problem = await new_engine.wait_first_tick(FIRST_TICK_WAIT_SEC)
+    if problem:
+        # Nothing is left ticking behind a reported failure: a loop running on
+        # after "could not start" is the same untruth in the other direction,
+        # and an operator who retries would then be starting a second session.
+        await new_engine.stop()
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Session {new_engine.session_num} was created but could not "
+                f"run ({problem}); it has been stopped"
+            ),
+        )
     return {
         "started": True,
         "strategy": strategy.slug,
@@ -3793,6 +4357,89 @@ async def get_session_report(
         owner_id=report_owner_filter(user),
     )
     return {"report": ReportSummary(**reports[0]).model_dump() if reports else None}
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/closeout")
+async def get_session_closeout(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
+):
+    """What this session's stop closed and what it left (FEAT-134).
+
+    One read of ``sessions/session_{N}/closeout.json`` — **no Hummingbot API
+    call** — because the venue was read once, when the stop happened, and that
+    reading is the artifact. Re-deriving it now would answer a different
+    question (what is open *today*), which is the question
+    ``POST .../close-out`` is for.
+
+    ``{"closeout": null}`` rather than 404 for a session that is still running
+    or that stopped before this report existed: having no close-out is a normal
+    state, not an error the caller should have to tell apart from a missing
+    session.
+    """
+    from condor.agents.closeout import read_closeout
+
+    strategy = _get_strategy(slug, sslug)
+    session_dir = find_session_dir(strategy.home, session_num)
+    if not session_dir:
+        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
+    return {"closeout": read_closeout(session_dir)}
+
+
+@router.post("/{slug}/strategies/{sslug}/close-out")
+async def close_out_strategy(
+    slug: str,
+    sslug: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Close everything this strategy's lineage still holds, and report it.
+
+    The post-mortem door #273 needed: it takes the strategy rather than a live
+    engine, so it works on an agent that is **already stopped** — which is when
+    the operator actually goes looking, and which is why it cannot be a variant
+    of ``/stop`` or ``/shutdown`` (both 404 without a running engine).
+
+    Scoped to the lineage, so a previous session's executor is closed too
+    instead of being refused by the per-session stop gate (CORR-726). It stops
+    the live executors per ``shutdown.md``, sweeps the resting orders, then reads
+    the venue — so the report describes the state it left, not the one it found.
+
+    Refused while someone else's loop is running this strategy (SEC-638): the
+    close-out would be flattening *that* owner's live run. Its own owner's live
+    run is allowed, since the lineage is theirs either way and ``_finish`` will
+    emit its own report on top.
+    """
+    from condor.agents.closeout import close_out_agent
+    from condor.agents.journal import iter_session_dirs
+    from condor.agents.shutdown import load_shutdown_policy
+
+    strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
+
+    resolved = await _get_client_for_strategy(
+        strategy.home, strategy.default_config, _strategy_principal(strategy, user)
+    )
+    if resolved.client is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No Hummingbot API client for this strategy ({resolved.unavailable})",
+        )
+
+    policy, _body = load_shutdown_policy(strategy)
+    # The newest session, so the record lands beside the journal it belongs
+    # with. A strategy that has never run has nowhere to file it, and the
+    # report is still returned to the caller.
+    sessions = iter_session_dirs(strategy.home)
+    report = await close_out_agent(
+        resolved.client,
+        slug,
+        strategy.slug,
+        policy=policy,
+        session_dir=sessions[-1][1] if sessions else None,
+    )
+    return {"closeout": report.to_dict()}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/actions")

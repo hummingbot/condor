@@ -11,7 +11,13 @@ import {
   type ControllerPerformanceSnapshot,
   type BotRunInfo,
   type ExecutorInfo,
+  type ExecutorHygiene,
+  type FleetDiagnostics,
 } from "@/lib/api";
+import {
+  UNKNOWN_DIAGNOSTICS,
+  UNKNOWN_EXECUTOR_HYGIENE,
+} from "@/components/bots/fleet-diagnostics";
 import type { DeedIndex, FleetOwner } from "@/lib/agent-attribution";
 import type { ExecutorPaging } from "@/components/perf/PerfBrowser";
 import type { Population } from "@/lib/perf-tree";
@@ -64,6 +70,15 @@ export interface FleetData {
   terminatedControllers: ControllerInfo[];
   owners: FleetOwner[];
   deeds: DeedIndex | null;
+  /**
+   * The host, lag and throttle signals the fleet map carries (FEAT-141).
+   *
+   * Off the map rather than a query of its own: the diagnostics view may add
+   * no poll to a page that already polls per server.
+   */
+  diagnostics: FleetDiagnostics;
+  /** This host's executor hygiene, off the bots payload (FEAT-141). */
+  hygiene: ExecutorHygiene;
   /** Display-currency conversion over every quote on screen. */
   convert: ConvertFn;
   currencySymbol: string;
@@ -370,6 +385,8 @@ export function useFleetData(
     terminatedControllers: terminatedData?.controllers ?? EMPTY_TERMINATED,
     owners: fleet?.owners ?? EMPTY_OWNERS,
     deeds: fleet?.deeds ?? null,
+    diagnostics: fleet?.diagnostics ?? UNKNOWN_DIAGNOSTICS,
+    hygiene: data?.executor_hygiene ?? UNKNOWN_EXECUTOR_HYGIENE,
     convert,
     currencySymbol,
     rateFormatPnl: formatPnlValue,

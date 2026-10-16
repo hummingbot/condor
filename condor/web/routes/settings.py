@@ -947,6 +947,21 @@ async def connector_config_map(
         raise upstream_error("Failed to fetch connector config map", e)
 
 
+def _restart_required(result: object) -> bool:
+    """Whether an upstream connector write says a restart is needed to apply it.
+
+    hummingbot-api answers a credential write with ``restart_required`` when the
+    new key only reaches already-running bots after a restart. Condor returned
+    the upstream body verbatim under ``result`` and nothing ever read it, so the
+    operator was told "added" and never told the running bots were still on the
+    old key — the same gap as a strategy config write reporting ``updated`` and
+    not reaching a live session (CORR-732). Lifted to the top level so the flag
+    is part of Condor's own answer rather than something every caller has to go
+    digging for; a server that does not send it reads as no restart needed.
+    """
+    return bool(isinstance(result, dict) and result.get("restart_required"))
+
+
 @router.post("/credentials")
 async def add_credential(
     req: AddCredentialRequest,
@@ -972,7 +987,11 @@ async def add_credential(
     # Outside the try: the credential write already succeeded, and an
     # exception here must not be swallowed and re-reported as a failed add.
     get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
-    return {"added": True, "result": result}
+    return {
+        "added": True,
+        "restart_required": _restart_required(result),
+        "result": result,
+    }
 
 
 @router.delete("/credentials/{connector}")
@@ -993,7 +1012,11 @@ async def delete_credential(
         # Invalidate every credential-derived cache so the removed key
         # disappears immediately (including VENUES' `credentialed` trait).
         get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
-        return {"deleted": True, "result": result}
+        return {
+            "deleted": True,
+            "restart_required": _restart_required(result),
+            "result": result,
+        }
     except Exception as e:
         logger.exception(
             "Failed to delete credentials for '%s' on '%s'", connector, server

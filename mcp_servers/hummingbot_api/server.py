@@ -2069,6 +2069,39 @@ async def get_swap_status(transaction_hash: str) -> str:
     return format_gateway_swap_result("get_status", result)
 
 
+@handle_errors("resolve a Gateway swap", GATEWAY_LOG_HINT)
+async def resolve_swap(transaction_hash: str, network: str | None = None) -> str:
+    """Get a swap out of SUBMITTED when no status read can confirm it. Signs nothing.
+
+    Use this tool when: `get_swap_status` or `search_swaps` reports a swap as
+    unverifiable — it has been SUBMITTED past the threshold and no status read has
+    succeeded. A swap leaves SUBMITTED only on a *successful* read, so a Gateway that
+    cannot be reached keeps one there indefinitely (GitHub #278), and before this tool
+    the only exit was redeploying the agent.
+
+    UNVERIFIABLE IS NOT FAILED. The swap may have landed on-chain. Read the explorer
+    before you tell the user anything about the outcome, and never report a stuck swap
+    as lost.
+
+    THE SERVER DECIDES, NOT CONDOR. This asks the API to read the chain and record the
+    swap's real outcome; it writes no state of its own and moves no funds. A server too
+    old to offer the route says so plainly and nothing changes — that is a capability
+    answer, not an outage, and not a reason to retry.
+
+    Args:
+        transaction_hash: The stuck swap's hash, from `search_swaps` or `execute_swap`.
+        network: Network id, e.g. 'solana-mainnet-beta'. Optional — the server
+            identifies the swap by hash; pass it only if you know it.
+    """
+    request = GatewaySwapRequest(
+        action="resolve", transaction_hash=transaction_hash, network=network
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result("resolve", result)
+
+
 @handle_errors("search Gateway swaps", GATEWAY_LOG_HINT)
 async def search_swaps(
     connector: str | None = None,
@@ -2260,12 +2293,21 @@ def _apply_cli_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
     parser.add_argument("--server-name")
+    # Who to attribute this process's calls to (FEAT-138). Non-secret labels,
+    # so argv is the right channel: they make a running subprocess identifiable
+    # in ``ps`` the way ``--server-name`` already does.
+    parser.add_argument("--agent-slug")
+    parser.add_argument("--caller-id")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
     if args.server_name:
         settings.server_name = args.server_name
+    if args.agent_slug:
+        settings.agent_slug = args.agent_slug
+    if args.caller_id:
+        settings.caller_id = args.caller_id
 
 
 async def _run():

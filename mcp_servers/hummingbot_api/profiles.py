@@ -45,6 +45,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "quote_swap": "Price a DEX swap — free, signs nothing",
     "execute_swap": "Sign and submit a DEX swap — spends funds",
     "get_swap_status": "Resolve a submitted swap by transaction hash",
+    "resolve_swap": "Exit a swap stuck SUBMITTED and unverifiable",
     "search_swaps": "Query swap history with filters",
     "explore_geckoterminal": "Explore GeckoTerminal DEX market data",
     "manage_amm": "Direct AMM pool operations and pool creation",
@@ -97,6 +98,7 @@ TRADING_TOOLS: tuple[str, ...] = (
     "quote_swap",
     "execute_swap",
     "get_swap_status",
+    "resolve_swap",
     "search_swaps",
     "explore_geckoterminal",
 )

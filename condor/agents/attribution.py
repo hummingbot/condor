@@ -14,7 +14,11 @@ place:
   live ``cum_fees_quote`` fallback, which also owns the flag), which exist
   exactly once, here;
 - **the current-owner rule** — live unrealized PnL and the open book belong to
-  whoever operates the bot now.
+  whoever operates the bot now;
+- **scope labelling** — a session's own window and a bot name's whole lifetime
+  are both legitimate scopes for realized PnL and volume, so each is reported
+  under its own name and tagged with the instances it covers
+  (:func:`session_scope` / :func:`lifetime_scope`).
 
 Both consumers go through this module: the web strategy rollup
 (``condor.web.routes.agents``) via :func:`apply_bot_mode_pnl` /
@@ -49,7 +53,7 @@ log = logging.getLogger(__name__)
 # ``perf`` is duck-typed over the attribute vocabulary the two consumers share:
 # the agents-side ``AgentPerformance`` dataclass and the web's
 # ``AgentPerformanceModel`` both carry realized_pnl / unrealized_pnl / total_pnl /
-# volume / fees / fees_known / trade_count / closed_count.
+# volume / fees / fees_known / liveness_known / trade_count / closed_count.
 
 
 def fold_sliced_window(perf: Any, window: tuple[float, float, float, float]) -> None:
@@ -98,6 +102,20 @@ def apply_fee_fallback(perf: Any, sliced_fees: float, bot: dict[str, Any]) -> No
         return
     perf.fees += live - sliced_fees
     perf.fees_known = False
+
+
+def apply_liveness(perf: Any, bot: dict[str, Any]) -> None:
+    """Carry ``resolve_bots``'s unknown-liveness marker onto ``perf``.
+
+    An aggregate resolved with unknown liveness is unfiltered, so it may still
+    carry a stopped instance's frozen unrealized PnL and positions. The figure
+    stands — showing it is better than zeroing every open book — but only as
+    unverified, exactly the shape ``fees_known`` has ([[CORR-723]]). Shared by
+    both read surfaces so the rollup and the agent's own view cannot disagree
+    about whether what they rendered was confirmed live.
+    """
+    if bot.get("liveness_unknown"):
+        perf.liveness_known = False
 
 
 # ── Session ownership resolution ──
@@ -215,6 +233,128 @@ def window_span(windows: Mapping[str, OwnershipWindow]) -> tuple[float, float]:
     if not windows or any(w.is_open for w in windows.values()):
         return since, 0.0
     return since, max(w.end for w in windows.values())
+
+
+# ── Scope labelling ([[FEAT-135]]) ──
+# Both scopes are wanted, and the defect was that nothing said which one a
+# number had. GitHub #262 reports a session summary that folded earlier stopped
+# generations in ("$120 from the current bot plus $80 from previous runs appears
+# as $200"); its race comment reports the inverse need, a leaderboard that
+# understated until it summed the stopped generations too. So neither scope is a
+# correction of the other and neither can be dropped — each figure says which it
+# is, and names the instances it was summed over, which is what makes a
+# disagreement between two surfaces diagnosable instead of mysterious.
+#
+# Realized PnL and volume only. Per #234 unrealized PnL, open positions and
+# exposure come solely from instances the active-bot inventory confirms and are
+# "never summed across generations", so they deliberately have no lifetime twin
+# here: offering one would invite exactly the sum that issue forbids.
+
+
+class ScopedTotals(NamedTuple):
+    """Realized PnL and volume at one scope, and the instances summed into it.
+
+    The figures are ``None`` — not ``0.0`` — when there is nothing to sum the
+    scope from: no ownership window for the session scope, no instance aggregate
+    for the lifetime one. "Unavailable" must not render as "flat", and above all
+    must not fall back to the other scope's total; that silent fallback is the
+    #262 defect.
+    """
+
+    realized_pnl: float | None
+    volume: float | None
+    instances: list[str]
+
+
+def session_scope(
+    sliced: Mapping[str, tuple[float, float, float, float]],
+    histories: Mapping[
+        str, Mapping[str, list[tuple[float, float, float, float, float]]]
+    ],
+    windows: Mapping[str, OwnershipWindow],
+    now: float,
+) -> ScopedTotals:
+    """This session's own scope: the sliced windows, and the instances in them.
+
+    ``sliced`` is what :func:`slice_history` cut over each base's
+    :meth:`OwnershipWindow.bounds` — already the session figure, so this only
+    sums it and names its instances. An instance counts as in scope when its
+    history has a sample inside the window, which is the only non-heuristic
+    answer to "was this generation running while the session held the base":
+    an instance name's deploy suffix is a naming convention, not a fact.
+
+    Empty ``sliced`` means no base had a window to slice, and the scope is
+    unavailable. A session owning several bases of which only some have windows
+    reports the figure over those: the instance list is what says so, and a base
+    whose instances are absent from it is a base with no recorded takeover.
+    """
+    if not sliced:
+        return ScopedTotals(None, None, [])
+    names: list[str] = []
+    for base in sorted(sliced):
+        start, stop = windows[base].bounds(now)
+        names += [
+            inst
+            for inst, h in (histories.get(base) or {}).items()
+            if any(start <= t < stop for t, *_ in h)
+        ]
+    return ScopedTotals(
+        sum(w[0] for w in sliced.values()),
+        sum(w[1] for w in sliced.values()),
+        list(dict.fromkeys(names)),
+    )
+
+
+def lifetime_scope(
+    instances: Mapping[str, list[str]],
+    all_bot_perf: Mapping[str, dict],
+    histories: (
+        Mapping[str, Mapping[str, list[tuple[float, float, float, float, float]]]]
+        | None
+    ) = None,
+    now: float = 0.0,
+) -> ScopedTotals:
+    """Every generation of every owned base, which is what a leaderboard wants.
+
+    Each instance contributes its own whole life, so a base redeployed three
+    times reports all three rather than only the one running now.
+
+    An instance's lifetime comes from its **history** where there is one, and
+    only from the live snapshot's aggregate where there is not. The order matters
+    both ways: the snapshot forgets an archived instance entirely — the normal
+    end state of a stopped bot, and where a session's whole realized PnL can
+    live — and the history is the same source the session slice is cut from, so
+    taking it first is what keeps the session figure from exceeding the lifetime
+    one on identical data.
+
+    The instance list is therefore not always every name in ``bot_instances``: an
+    instance with neither a history nor an aggregate contributes nothing, and
+    leaving it out of the list is what makes the gap visible instead of making
+    the total quietly short.
+    """
+    from condor.fetchers.bot_performance import slice_history
+
+    end = now if now > 0 else time.time()
+    names: list[str] = []
+    realized = volume = 0.0
+    for base in sorted(instances):
+        hist = (histories or {}).get(base) or {}
+        for inst in instances.get(base) or []:
+            if inst in names:
+                continue
+            if hist.get(inst):
+                r, v, _trades, _fees = slice_history([hist[inst]], 0.0, end)
+            elif inst in all_bot_perf:
+                r = float(all_bot_perf[inst].get("realized_pnl_quote", 0) or 0)
+                v = float(all_bot_perf[inst].get("volume_traded", 0) or 0)
+            else:
+                continue
+            names.append(inst)
+            realized += r
+            volume += v
+    if not names:
+        return ScopedTotals(None, None, [])
+    return ScopedTotals(realized, volume, names)
 
 
 def owner_windows(
@@ -393,6 +533,9 @@ async def apply_bot_mode_pnl(
             continue
         operator = by_num[num]
         b_rows = bot_executor_rows(bot)
+        # Unknown liveness leaves the aggregate unfiltered, so this open book may
+        # be a stopped instance's frozen mark: attributed, but not as confirmed.
+        apply_liveness(operator, bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
         # Top the operator up to the fallback figure: when the whole sliced fee
         # column is zero, the live open-position fees are the only ones there are

@@ -57,6 +57,63 @@ function query(params: object): string {
   return q ? `?${q}` : "";
 }
 
+/** One file inside an agent bundle, as the review dialog lists it. */
+export interface AgentBundleFile {
+  path: string;
+  bytes: number;
+}
+
+/**
+ * What importing a bundle would do — or, once applied, what it did.
+ *
+ * The preview endpoint and the apply endpoint return the same shape from the
+ * same builder, so the dialog cannot show something the write does not do.
+ */
+export interface AgentImportPlan {
+  slug: string;
+  source_slug: string;
+  name: string;
+  description: string;
+  when_to_consult: string;
+  exported_at: string;
+  schema_version: number;
+  /** Everything that is not a `.py`. */
+  files: AgentBundleFile[];
+  /** The executable files, listed apart because reviewing them is the gate. */
+  executables: AgentBundleFile[];
+  total_bytes: number;
+  stamps: Record<string, string>;
+  mutes: { routines: string[]; skills: string[] };
+  agent_key: string;
+  agent_key_inherited: boolean;
+  /** The taken slug, when the bundle cannot land under the name it asked for. */
+  collision: string;
+  suggested_slug: string;
+  refusals: string[];
+  imported?: boolean;
+  next_step?: string;
+}
+
+/** `authFetch` because the body is `FormData` — see `uploadAttachment`. */
+async function postAgentBundle(
+  path: string,
+  file: File,
+  asSlug: string,
+): Promise<AgentImportPlan> {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("as_slug", asSlug);
+  const res = await authFetch(path, { method: "POST", body });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(
+      new Error(detail.detail || `Import failed: ${res.status}`),
+      { status: res.status },
+    );
+  }
+  return res.json();
+}
+
 /** A finished background task, addressed to the user rather than to a chat. */
 export interface AppNotification {
   id: string;
@@ -195,10 +252,49 @@ export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
+  /** `status: "running"` with no controller to run: the container is up and
+   *  nothing is trading (CORR-725). Rendered by FEAT-141. */
+  running_without_controllers?: boolean;
   error_count: number;
   deployed_at: string | null;
   error_logs: BotLogEntry[];
   general_logs: BotLogEntry[];
+}
+
+/**
+ * A RUNNING executor whose owning session is gone (CORR-726).
+ *
+ * The race's single most expensive defect: one such LP executor polled every
+ * second for 13.5h and ate a host's whole RPC budget, and nothing on any
+ * screen said it existed. The session number is part of the identity — the
+ * lineage is alive, that *session* is not.
+ */
+export interface OrphanedExecutor {
+  executor_id: string;
+  controller_id: string;
+  agent_slug: string;
+  strategy_slug: string;
+  session_num: number;
+  pair: string;
+  kind: string;
+}
+
+/**
+ * One host's executor hygiene (FEAT-141).
+ *
+ * Folded from the rows the poller already cached, so the bots payload pays no
+ * extra call for it. `available: false` means nothing was cached and nothing
+ * was fetched — drawn as *unknown*, never as a clean host. `truncated` says
+ * the counts are a floor: the cache holds the newest page, and nothing
+ * upstream prunes a terminal row (PERF-733).
+ */
+export interface ExecutorHygiene {
+  available: boolean;
+  counted: number;
+  running: number;
+  terminated: number;
+  truncated: boolean;
+  orphaned_running: OrphanedExecutor[];
 }
 
 export interface BotsPageResponse {
@@ -208,6 +304,8 @@ export interface BotsPageResponse {
   total_volume: number;
   server_online?: boolean;
   error_hint?: string;
+  /** This host's executor hygiene (FEAT-141); absent on an older backend. */
+  executor_hygiene?: ExecutorHygiene;
 }
 
 export interface BotRunInfo {
@@ -765,6 +863,12 @@ export interface DeployBotRequest {
 
 // ── Agents ──
 
+/** One drifted config field: what the process holds, and what the file says now. */
+export interface ConfigDrift {
+  running: unknown;
+  file: unknown;
+}
+
 export interface RunningInstance {
   agent_id: string;
   session_num: number;
@@ -788,11 +892,34 @@ export interface RunningInstance {
   tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
+  /**
+   * The model the *adapter* says this session is on — not the `agent_key` pin
+   * above (FEAT-136). A bridge that could not match the pin keeps its own
+   * default, and the two then differ, which is what a pin audit looks for.
+   * `""` for a backend with no adapter to ask, and before the first tick.
+   * Optional so an older backend reads as "not reported".
+   */
+  active_model_id?: string;
+  /**
+   * Which pins/limits this process holds that `config.yml` no longer says
+   * (FEAT-136). Keyed by field — `risk_limits` is reported per sub-key, dotted
+   * — with both values, so the reader sees what a restart would change rather
+   * than only that something would. Absent/empty = the two agree.
+   */
+  config_drift?: Record<string, ConfigDrift>;
   // ── The loop's pulse ──
   // The engine has always computed these; the wire model dropped them, so a
   // strategy view could say "running" and nothing about when it last ran.
   /** Unix seconds the current tick started. 0 before the first one. */
   last_tick_at: number;
+  /**
+   * Quiet or dead (FEAT-137). `last_tick_at` is stamped at tick *start*, so it
+   * advances on a tick whose every call failed; these two advance only on an
+   * outcome — a reading that said something, and a mutating call that worked.
+   * 0 = never. Optional so an older backend reads as "never".
+   */
+  last_reading_at?: number;
+  last_successful_action_at?: number;
   /** 0 = unbounded; otherwise the tick this session stops at. */
   max_ticks: number;
   /** What the loop last *said* — the journal's `Last action:` line. */
@@ -800,6 +927,59 @@ export interface RunningInstance {
   /** What the loop last *did* — one mutating tool call, or null. */
   last_did: AgentActionRow | null;
   last_error: string;
+  /**
+   * The venues that refused *this* session (FEAT-138) — a venue/connector
+   * condition, deliberately not folded into `last_error`. The agent did
+   * nothing wrong, and reading a throttled venue as an agent failure is what
+   * made it look like a strategy bug. Absent on an older backend; `[]` means
+   * checked and nothing refused.
+   */
+  throttled_venues?: VenueCondition[];
+}
+
+/**
+ * One (host, venue) pair's call accounting (`FEAT-138`).
+ *
+ * `condition` is `"throttled"` while the venue has refused recently, else
+ * `"ok"`. The counts are cumulative, so `attempts === successes + refusals +
+ * errors` always holds — which is what makes "8 attempts, 0 successes, 8
+ * refusals" readable off the counters instead of sampled out of the logs.
+ */
+export interface VenueCondition {
+  host: string;
+  venue: string;
+  condition: "throttled" | "ok";
+  attempts: number;
+  successes: number;
+  refusals: number;
+  errors: number;
+  last_refusal_at: number;
+  last_reason: string;
+}
+
+/**
+ * What one (agent, session, host) spent — who consumed whose budget.
+ *
+ * The question CORR-726's incident could not answer: nothing showed that one
+ * 1.0s poller was the sole consumer starving a host. `agent` empty means a
+ * seat with no agent label made the calls.
+ */
+export interface CallerVolume {
+  agent: string;
+  agent_id: string;
+  host: string;
+  attempts: number;
+  successes: number;
+  refusals: number;
+  errors: number;
+  last_refusal_at: number;
+  last_reason: string;
+}
+
+/** `GET /agents/venue-conditions` — two folds of the same counters. */
+export interface VenueConditions {
+  venues: VenueCondition[];
+  callers: CallerVolume[];
 }
 
 /**
@@ -875,10 +1055,76 @@ interface FleetOwnerWire {
     tick_count: number;
     last_tick_at: number;
     frequency_sec: number;
+    /** Outcomes rather than attempts (FEAT-137); see `RunningInstance`. */
+    last_reading_at?: number;
+    last_successful_action_at?: number;
+    /** Seconds the last completed tick took (FEAT-141); 0 = none yet. */
+    last_tick_duration?: number;
     last_action: string;
     last_did: AgentActionRow | null;
     last_error: string;
   } | null;
+}
+
+/**
+ * Condor's own host: 1-minute load average against its vCPU count (FEAT-141).
+ *
+ * `available: false` where the platform has no load average, or will not say
+ * how many CPUs it has — rendered as *unknown* and never as *ok*. The bare
+ * load number is not a reading: 3.0 is idle on 32 vCPUs and on fire on 2.
+ */
+export interface HostLoad {
+  available: boolean;
+  load_1m: number;
+  vcpus: number;
+  load_per_vcpu: number;
+}
+
+/**
+ * One server's measured round-trip, as the order-placement lag it bounds.
+ *
+ * Read off the poll counters the data service already keeps, so it is the one
+ * placement-lag reading available without issuing an order. A *floor*: an
+ * order cannot be placed faster than the API answers.
+ */
+export interface ApiLag {
+  host: string;
+  status: string;
+  last_latency_ms: number;
+  consecutive_failures: number;
+}
+
+/**
+ * The diagnostics block that rides along on the fleet map (FEAT-141).
+ *
+ * On the map rather than on a route of its own, and that is the feature's
+ * defining constraint: the view must add no polling cost to a dashboard that
+ * already polls per server, and the map is the one agent payload `/bots`
+ * already polls while making no Hummingbot call at all.
+ */
+export interface FleetDiagnostics {
+  host: HostLoad;
+  api_lag: ApiLag[];
+  venues: VenueCondition[];
+  callers: CallerVolume[];
+}
+
+interface FleetDiagnosticsWire {
+  host?: Partial<HostLoad>;
+  api_lag?: ApiLag[];
+  venues?: VenueCondition[];
+  callers?: CallerVolume[];
+}
+
+/**
+ * `GET /agents/fleet-map` as this client reads it.
+ *
+ * The attribution join (`FleetMap`, which `lib/agent-attribution` owns and
+ * which imports nothing) plus the diagnostics block that rides along on the
+ * same response (FEAT-141).
+ */
+export interface FleetMapResult extends FleetMap {
+  diagnostics: FleetDiagnostics;
 }
 
 /**
@@ -988,6 +1234,38 @@ export interface AgentPerformance {
   /** False when `fees` is a floor: the backend reports no cumulative fee column,
    *  so 0 means unknown rather than free. */
   fees_known?: boolean;
+  // ── Scope labelling (FEAT-135) ──
+  // `realized_pnl` and `volume` above are one number folded from both scopes,
+  // and nothing in them says which: that is how a session summary came to report
+  // $200 for a session that earned $120, $80 of it belonging to a stopped
+  // earlier generation of the same bot name (#262), while the race leaderboard
+  // needed exactly that $200. Both are reported here, each naming the instances
+  // it covers. `null`/absent = the scope is unavailable — render it as such,
+  // never as the other scope's total.
+  //
+  // There is no lifetime twin for `unrealized_pnl`, the open book or exposure:
+  // per #234 those come only from instances the active-bot inventory confirms
+  // and are never summed across generations.
+  /** Realized PnL sliced to this session's ownership window. */
+  session_realized_pnl?: number | null;
+  /** Volume sliced to this session's ownership window. */
+  session_volume?: number | null;
+  /** The instances the session-scoped figures were summed over. */
+  session_instances?: string[];
+  /** Realized PnL over every generation ever deployed under the owned bases. */
+  lifetime_realized_pnl?: number | null;
+  /** Volume over every generation ever deployed under the owned bases. */
+  lifetime_volume?: number | null;
+  /** The instances the lifetime-scoped figures were summed over. */
+  lifetime_instances?: string[];
+  /**
+   * Whether these figures are a reading at all (FEAT-137, on CORR-725's
+   * tri-state): `ok` is a controller that reported, `empty` one that answered
+   * and said nothing, `missing` no performance object at all. All three print
+   * 0.0 for every number above, so this is the only thing that tells a flat bot
+   * from a dead one. Absent from an older backend, which reads as `ok`.
+   */
+  reading?: "ok" | "empty" | "missing";
 }
 
 /** One controller of one bot instance a session operated. */
@@ -2174,6 +2452,14 @@ export interface AppEnvResponse {
   os: string;
   arch: string;
   in_docker: boolean;
+  /**
+   * Which *process*, not just which code (FEAT-136). Unix seconds this backend
+   * started, and the id it stamps its status files with — together they say
+   * whether it has been restarted since a config was edited. Optional so an
+   * older backend reads as "not reported".
+   */
+  process_started_at?: number;
+  boot_id?: string;
 }
 
 /**
@@ -3073,10 +3359,12 @@ export const api = {
    * session of every strategy and is the most expensive read in the app. This
    * one makes no Hummingbot call at all, which is what lets `/bots` poll it.
    */
-  getFleetMap: async (): Promise<FleetMap> => {
-    const data = await apiFetch<{ owners: FleetOwnerWire[]; deeds?: DeedIndexWire }>(
-      "/api/v1/agents/fleet-map",
-    );
+  getFleetMap: async (): Promise<FleetMapResult> => {
+    const data = await apiFetch<{
+      owners: FleetOwnerWire[];
+      deeds?: DeedIndexWire;
+      diagnostics?: FleetDiagnosticsWire;
+    }>("/api/v1/agents/fleet-map");
     const owners: FleetOwner[] = (data.owners ?? []).map((owner) => ({
       runKey: owner.run_key,
       agentSlug: owner.agent_slug,
@@ -3094,6 +3382,9 @@ export const api = {
             tickCount: owner.live.tick_count,
             lastTickAt: owner.live.last_tick_at,
             frequencySec: owner.live.frequency_sec,
+            lastReadingAt: owner.live.last_reading_at ?? 0,
+            lastSuccessfulActionAt: owner.live.last_successful_action_at ?? 0,
+            lastTickDuration: owner.live.last_tick_duration ?? 0,
             lastAction: owner.live.last_action,
             lastDid: owner.live.last_did ?? null,
             lastError: owner.live.last_error,
@@ -3104,8 +3395,35 @@ export const api = {
     for (const [name, ref] of Object.entries(data.deeds?.bots ?? {})) {
       deeds.bots[name] = { runKey: ref.run_key, runId: ref.run_id ?? "", at: ref.at ?? 0 };
     }
-    return { owners, deeds };
+    // Snake-cased through, like `VenueCondition` beside it: every field is one
+    // word or an already-wire-shaped row, so there is no casing pass to get
+    // wrong. An older backend sends no block at all and reads as the
+    // unavailable host with no rows — which the view draws as *unknown*.
+    const wire = data.diagnostics;
+    const diagnostics: FleetDiagnostics = {
+      host: {
+        available: false,
+        load_1m: 0,
+        vcpus: 0,
+        load_per_vcpu: 0,
+        ...(wire?.host ?? {}),
+      },
+      api_lag: wire?.api_lag ?? [],
+      venues: wire?.venues ?? [],
+      callers: wire?.callers ?? [],
+    };
+    return { owners, deeds, diagnostics };
   },
+
+  /**
+   * Which venues are refusing us, and which agent spent the host's budget
+   * (FEAT-138).
+   *
+   * Like `getFleetMap`, no Hummingbot call at all — one incremental read of a
+   * local log — so a diagnostics view can poll it.
+   */
+  getVenueConditions: () =>
+    apiFetch<VenueConditions>("/api/v1/agents/venue-conditions"),
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),
@@ -3316,6 +3634,34 @@ export const api = {
         method: "DELETE",
       },
     ),
+
+  // ── An agent as one file (FEAT-133) ──
+
+  /**
+   * The agent as one portable JSON file, as text.
+   *
+   * `authFetch` and not a bare `<a href>`: the endpoint is bearer-guarded like
+   * everything else here, and a link has no way to carry the header — the same
+   * reason `useAuthedImage` exists. The caller makes an object URL from this.
+   */
+  exportAgentBundle: async (slug: string): Promise<string> => {
+    const res = await authFetch(
+      `/api/v1/agents/${encodeURIComponent(slug)}/bundle`,
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Export failed: ${res.status}`);
+    }
+    return res.text();
+  },
+
+  /** What importing this bundle would do. Writes nothing on the server. */
+  previewAgentImport: (file: File, asSlug = "") =>
+    postAgentBundle("/api/v1/agents/import/preview", file, asSlug),
+
+  /** Register the agent in this bundle, with its routines and skills muted. */
+  importAgent: (file: File, asSlug = "") =>
+    postAgentBundle("/api/v1/agents/import", file, asSlug),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 
@@ -3995,11 +4341,14 @@ export const api = {
       `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
     ),
 
+  /** `restart_required` is the API server's own answer: the key is stored, and
+   *  bots already running keep the one they started with until restarted. It
+   *  used to arrive inside the opaque `result` and be dropped (CORR-732). */
   addCredential: (
     server: string,
     data: { connector_name: string; credentials: Record<string, string> },
   ) =>
-    apiFetch<{ added: boolean }>(
+    apiFetch<{ added: boolean; restart_required: boolean }>(
       `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
       {
         method: "POST",
@@ -4008,7 +4357,7 @@ export const api = {
     ),
 
   deleteCredential: (server: string, connector: string) =>
-    apiFetch<{ deleted: boolean }>(
+    apiFetch<{ deleted: boolean; restart_required: boolean }>(
       `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
       { method: "DELETE" },
     ),

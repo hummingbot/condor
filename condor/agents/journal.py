@@ -32,6 +32,8 @@ from condor.fsutil import atomic_write_text
 from condor.memory.paths import safe_slug
 from condor.paths import local_agents_root
 
+from .volume_render import format_volume_usd
+
 log = logging.getLogger(__name__)
 
 MAX_LEARNINGS = 20
@@ -109,6 +111,14 @@ ARCHIVE_NAME = "journal_archive.md"
 # it reads as part of the list, and with a word that no entry parser accepts, so
 # _parse_snapshots / _count_ticks skip it instead of parsing it as data.
 ARCHIVE_MARKER_PREFIX = "- archived "
+
+#: The one value of the reading tri-state ([[CORR-725]]) whose figures are a
+#: reading. A snapshot line stamped ``empty`` or ``missing`` carries the same
+#: ``$0.00`` as a flat book without being one, so every reader of the figures
+#: subtracts those lines (:meth:`JournalManager._reading_snapshots`). Absent
+#: from a line means ``ok``: that is what every snapshot written before the
+#: stamp existed is, and the only state the figures were ever usable in.
+READING_OK = "ok"
 
 JOURNAL_TEMPLATE = """\
 # Journal - {agent_id}
@@ -930,12 +940,33 @@ class JournalManager:
         total_volume: float,
         open_count: int,
         position_size: float,
+        reading: str = "ok",
     ) -> None:
+        """Write this tick's figures, stamped with whether they are a reading.
+
+        ``reading`` is the tri-state the figures arrived with
+        (``ok``/``empty``/``missing``, [[CORR-725]]). Anything other than
+        ``ok`` is written onto the line, because the three produce the same
+        ``$0.00`` here and a reader cannot tell them apart afterwards: the
+        drawdown guard saw a zero snapshot, took it for a flat book, and
+        reported ``known=True`` at 0.0% — the exact confusion the tri-state
+        exists to end, re-entered through the journal
+        (:meth:`get_drawdown_pct_checked` subtracts these lines again).
+        """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        # A negative volume is not a reading, so it is written as a flagged data
+        # error rather than as a figure ([[CORR-731]]). The flag deliberately
+        # carries no ``$``, which is what keeps ``_parse_snapshot_line`` from
+        # reading it back as a number.
+        volume = format_volume_usd(total_volume, source="journal snapshot")
         entry = (
-            f"- {now} | pnl=${total_pnl:+.2f} | volume=${total_volume:,.0f} "
+            f"- {now} | pnl=${total_pnl:+.2f} | volume={volume} "
             f"| open={open_count} | exposure=${position_size:.2f}"
         )
+        # Only when it is not a reading, so the overwhelmingly common line is
+        # unchanged and every snapshot ever written still parses as ``ok``.
+        if reading and reading != READING_OK:
+            entry += f" | reading={reading}"
         self._append_bounded("Snapshots", entry, MAX_SNAPSHOT_LINES)
 
     # ------------------------------------------------------------------
@@ -956,10 +987,51 @@ class JournalManager:
         self._parsed_cache["snapshots"] = results
         return results
 
+    def _reading_snapshots(self) -> list[dict]:
+        """The snapshots that are *readings* — the only ones a figure may use.
+
+        A tick whose performance read came back ``empty`` or ``missing`` still
+        writes its line, so the journal records that the tick happened; its
+        ``$0.00`` is the absence of a reading rather than a flat book, and
+        every consumer that would otherwise take it for one subtracts it here
+        ([[CORR-725]]).
+        """
+        return [
+            s
+            for s in self._parse_snapshots()
+            if str(s.get("reading", READING_OK)) == READING_OK
+        ]
+
     def get_drawdown_pct(self) -> float:
-        snapshots = self._parse_snapshots()
+        return self.get_drawdown_pct_checked()[0]
+
+    def get_drawdown_pct_checked(self) -> tuple[float, bool]:
+        """The drawdown, and whether it is a reading at all.
+
+        ``known`` is False when the journal holds no snapshot even though the
+        session has already ticked. 0.0 is then the *absence* of a reading, not
+        a flat book, and a guard handed it is handed the one drawdown that
+        clears every limit ([[CORR-725]]) -- "no reading" is unknown, not zero.
+
+        Before the first tick there is nothing to have fallen from, so an empty
+        Snapshots section is the real answer and ``known`` stays True: a session
+        blocked on its own missing history could never take the tick that writes
+        the first snapshot.
+
+        A session that is genuinely flat has snapshots and reports ``True`` with
+        0.0 -- quiet and dead are told apart by whether anything was read, never
+        by the number.
+
+        Snapshots written for a tick that obtained no reading do not count as
+        snapshots here. They carry the same ``$0.00`` as a flat book, and a
+        zero *exposure* clears the drawdown outright (the division below is
+        skipped and 0.0 returned as known) -- so a strategy whose performance
+        reads had stopped answering read as one sitting safely at zero, which
+        is this function's own failure mode reached by another route.
+        """
+        snapshots = self._reading_snapshots()
         if not snapshots:
-            return 0.0
+            return 0.0, self.tick_count == 0
         pnls = [s.get("pnl", 0) for s in snapshots]
         current = pnls[-1]
         archived_peak = self._archived_peak_pnl()
@@ -968,11 +1040,11 @@ class JournalManager:
         peak = max(pnls)
         drawdown = peak - current
         if drawdown <= 0:
-            return 0.0
+            return 0.0, True
         exposure = snapshots[-1].get("exposure", 0.0)
         if exposure <= 0:
-            return 0.0
-        return drawdown / exposure * 100
+            return 0.0, True
+        return drawdown / exposure * 100, True
 
     def get_pnl_series(self) -> list[dict]:
         """PnL points still held in journal.md (at most MAX_SNAPSHOT_LINES).
@@ -980,14 +1052,19 @@ class JournalManager:
         Older points are in ``journal_archive.md``; this is the equity-curve
         fallback used when the bot's own series is empty, so a bounded tail is
         what it needs -- it must not re-read the whole history every tick.
+
+        Readings only, like the drawdown: a tick that read nothing would
+        otherwise draw the curve down to zero and back.
         """
         return [
             {"timestamp": s.get("timestamp", ""), "pnl": s.get("pnl", 0)}
-            for s in self._parse_snapshots()
+            for s in self._reading_snapshots()
         ]
 
     def get_total_volume(self) -> float:
-        snapshots = self._parse_snapshots()
+        # The last line that was a reading: an unread tick's ``$0`` is not a
+        # fleet that stopped trading.
+        snapshots = self._reading_snapshots()
         if not snapshots:
             return 0.0
         return snapshots[-1].get("volume", 0.0)
@@ -1111,16 +1188,28 @@ def _parse_snapshot_line(line: str) -> dict[str, Any]:
     entry: dict[str, Any] = {}
     for part in line[2:].split(" | "):
         part = part.strip()
-        if part.startswith("pnl=$"):
-            entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
-        elif part.startswith("volume=$"):
-            entry["volume"] = float(part.replace("volume=$", "").replace(",", ""))
-        elif part.startswith("exposure=$"):
-            entry["exposure"] = float(part.replace("exposure=$", ""))
-        elif part.startswith("open="):
-            entry["open"] = int(part.replace("open=", ""))
-        elif re.match(r"\d{4}-\d{2}-\d{2}", part):
-            entry["timestamp"] = part
+        try:
+            if part.startswith("pnl=$"):
+                entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
+            elif part.startswith("volume=$"):
+                entry["volume"] = float(part.replace("volume=$", "").replace(",", ""))
+            elif part.startswith("exposure=$"):
+                entry["exposure"] = float(part.replace("exposure=$", ""))
+            elif part.startswith("open="):
+                entry["open"] = int(part.replace("open=", ""))
+            elif part.startswith("reading="):
+                # Absent on every line written for a real reading, which is
+                # why the default below is ``ok`` rather than "unknown".
+                entry["reading"] = part.replace("reading=", "").strip()
+            elif re.match(r"\d{4}-\d{2}-\d{2}", part):
+                entry["timestamp"] = part
+        except ValueError:
+            # A field written as a flagged data error, or a hand-edited line.
+            # The key stays absent, which readers already treat as "not here";
+            # raising would take every snapshot with it, and with them the
+            # drawdown guard ([[CORR-731]]).
+            log.debug("snapshot field is not a number: %r", part)
+            continue
     return entry
 
 

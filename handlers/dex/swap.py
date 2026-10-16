@@ -164,6 +164,22 @@ async def _fetch_recent_swaps(client, limit: int = 5) -> list:
     return result.get("data", [])
 
 
+def _unverifiable_label(swap: dict) -> str:
+    """``"unverifiable 3h 12m"`` for a swap stuck SUBMITTED, else ``""``.
+
+    Only past the threshold. A swap submitted a minute ago is ordinary pending
+    and saying anything about it would train the operator to ignore the label.
+    The word is *unverifiable* and never *failed*: no status read has succeeded,
+    which is not the same as the swap not having landed (FEAT-140, GitHub #278).
+    """
+    from condor.swap_watch import watch
+
+    row = watch().condition(swap)
+    if row is None or row["condition"] != "unverifiable":
+        return ""
+    return f"unverifiable {row['unverifiable_for']}"
+
+
 def _format_compact_swap_line(swap: dict) -> str:
     """Format a single swap as a compact line
 
@@ -218,6 +234,13 @@ def _format_compact_swap_line(swap: dict) -> str:
         meta_parts.append(age)
     if connector:
         meta_parts.append(connector)
+    # An hourglass alone does not say how long (FEAT-140): a swap leaves
+    # SUBMITTED only on a successful status read, so one that cannot be checked
+    # sits here for ever and the operator needs the duration to tell a
+    # confirmation still in flight from a swap that needs resolving.
+    stuck = _unverifiable_label(swap)
+    if stuck:
+        meta_parts.append(stuck)
 
     if meta_parts:
         line_text += f"  {' '.join(meta_parts)}"
@@ -1324,6 +1347,27 @@ async def process_swap_status(
                 if key in result:
                     status_info += escape_markdown_v2(f"{key.title()}: {result[key]}\n")
 
+            # A status read that comes back SUBMITTED is the moment the operator
+            # is asking "did this land" — so say how long nobody has been able
+            # to answer that, rather than showing SUBMITTED with no duration
+            # (FEAT-140).
+            from condor.swap_watch import watch
+
+            row = dict(result)
+            row.setdefault("transaction_hash", tx_hash)
+            book = watch()
+            book.observe([row])
+            condition = book.condition(row)
+            if condition and condition["unverifiable_for"]:
+                status_info += escape_markdown_v2(
+                    f"Unverifiable for: {condition['unverifiable_for']}\n"
+                )
+                if condition["condition"] == "unverifiable":
+                    status_info += escape_markdown_v2(
+                        "No status read has succeeded. The swap may still have "
+                        "landed on-chain — check the explorer.\n"
+                    )
+
         keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1405,6 +1449,9 @@ def _format_detailed_swap_line(swap: dict) -> str:
     age = format_relative_time(timestamp)
     if age:
         meta_parts.append(f"{age} ago")
+    stuck = _unverifiable_label(swap)
+    if stuck:
+        meta_parts.append(stuck)
     if meta_parts:
         lines.append(f"   {' | '.join(meta_parts)}")
 

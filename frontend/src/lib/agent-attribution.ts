@@ -50,6 +50,26 @@ export interface LiveLoop {
   /** Epoch **seconds**, or 0 when the loop has not ticked yet. */
   lastTickAt: number;
   frequencySec: number;
+  /**
+   * Quiet or dead (FEAT-137). Epoch **seconds**, 0 = never.
+   *
+   * `lastTickAt` is stamped at tick *start*, so a loop whose every call fails
+   * looks exactly as fresh as a healthy one. These two are stamped only where
+   * the outcome is known — a reading that said something, and a mutating call
+   * that worked — which is what separates a market maker that is legitimately
+   * quiet from one whose strategy died.
+   */
+  lastReadingAt: number;
+  lastSuccessfulActionAt: number;
+  /**
+   * How long the last completed tick took, in **seconds** (FEAT-141). 0 = no
+   * tick has completed yet.
+   *
+   * The host-capacity signal a slow tick *is*: an oversubscribed box showed up
+   * at the race as long ticks and timeouts, never as a crash, and was read as
+   * a strategy bug.
+   */
+  lastTickDuration: number;
   /** What the agent last *said* — the journal's `Last action:` line. */
   lastAction: string;
   /**
@@ -461,4 +481,32 @@ export function loopFacts(live: LiveLoop | null | undefined, nowMs: number): str
   const dueIn = live.lastTickAt + live.frequencySec - nowMs / 1000;
   facts.push(dueIn > 0 ? `next tick ${countdown(dueIn)}` : `tick overdue by ${countdown(-dueIn)}`);
   return facts;
+}
+
+/**
+ * The two ages that tell a quiet loop from a dead one (FEAT-137).
+ *
+ * Said as ages rather than as a countdown because there is nothing to count
+ * down to: the question is how long it has been since the loop last got a
+ * reading and since it last did something that worked. A stamp of 0 is
+ * **never**, not 1970 — and "never" is itself the answer on a loop that has
+ * only ever read, so it is printed rather than hidden.
+ *
+ * Its own line rather than two more entries in `loopFacts`: that band answers
+ * "when does it tick next", which is a schedule, and these answer "is anything
+ * still coming out of it", which is a diagnosis. They are also wanted in
+ * different places — the fleet view of FEAT-141 wants these without the
+ * countdown.
+ */
+export function livenessFacts(
+  live: LiveLoop | null | undefined,
+  nowMs: number,
+): string[] {
+  if (!live) return [];
+  const age = (at: number) =>
+    at > 0 ? `${countdown(nowMs / 1000 - at)} ago` : "never";
+  return [
+    `read ${age(live.lastReadingAt)}`,
+    `acted ${age(live.lastSuccessfulActionAt)}`,
+  ];
 }

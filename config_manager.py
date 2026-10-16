@@ -1466,6 +1466,100 @@ def may_use_stored_server(cm, user_id: int, server_name: Optional[str]) -> bool:
     return cm.has_server_access(user_id, server_name)
 
 
+class ServerUnavailable(RuntimeError):
+    """A run that named a server, or needs one, could not get it (CORR-729).
+
+    Carries the name it could not honour in ``server_name`` (empty when there
+    was none to honour), so a caller can report it without re-deriving it.
+    """
+
+    def __init__(self, message: str, server_name: str = ""):
+        super().__init__(message)
+        self.server_name = server_name
+
+
+def resolve_stored_server(
+    cm,
+    user_id: int,
+    server_name: Optional[str] = None,
+    *,
+    pinned: bool = False,
+    required: bool = False,
+    chat_id=None,
+    user_data: dict = None,
+) -> Optional[str]:
+    """Turn a run's server setting into a server name — the one rule (CORR-729).
+
+    ``toolsets.build_mcp_servers_for_session`` and ``TickEngine._resolve_server``
+    each open-coded the same three-candidate chain — the setting, the chat
+    default, the first accessible server — so neither could tell *"no server was
+    chosen, choose sensibly"* from *"this server was chosen and it is not
+    usable"*. A session pinned to a server that is down, renamed or revoked
+    therefore traded on a different server's accounts behind one log line
+    (issue #279). The distinction lives in the two flags rather than in each
+    caller's reading of its own setting:
+
+    ``pinned``
+        ``server_name`` was *chosen* for this run — an Agent pinned to a named
+        server, a start request that asked for one, a restart carrying the dead
+        session's pin. It resolves to that server or raises
+        :class:`ServerUnavailable`; it never silently becomes another one.
+
+    ``required``
+        the seat cannot run at all without a server. Raises when the whole chain
+        comes up empty, instead of handing back ``None`` for the caller to turn
+        into a warning. A serverless session stays a valid outcome for every
+        seat that does not ask for this (a chat whose user has no grants yet).
+
+    With neither flag this is exactly the previous lenient chain, which is what
+    keeps an *inherited* name — a strategy default, or the ``""`` AgentConfig
+    now fills in — falling through to the subject's own servers. That leniency
+    is deliberate and matches ``_start``/``_check_restartable``, which hold a
+    name the run asked for strictly and leave an inherited one alone.
+
+    Every candidate is held to :func:`may_use_stored_server`, so the name that
+    comes out has been checked for existence *and* reach by ``user_id`` — the
+    SEC-164/SEC-178 bar, unchanged. ``chat_id`` is not a principal: it only
+    selects which ambient default to consider, and that default is held to the
+    same bar as the rest.
+
+    Returns the resolved name, or ``None`` when nothing resolved and nothing
+    required it.
+    """
+
+    def usable(name: Optional[str]) -> bool:
+        return may_use_stored_server(cm, user_id, name)
+
+    if server_name and not usable(server_name):
+        if pinned:
+            raise ServerUnavailable(
+                f"server '{server_name}' is not available to user {user_id} "
+                "(it does not exist, or the share was withdrawn)",
+                server_name,
+            )
+        server_name = None
+
+    if not server_name:
+
+        def candidates():
+            # Lazy on purpose: resolving the chat default writes back into
+            # ``user_data``, so it must not run when a pin already answered.
+            if chat_id is not None:
+                yield get_effective_server(chat_id, user_data)
+            accessible = cm.get_accessible_servers(user_id)
+            yield accessible[0] if accessible else None
+
+        server_name = next((name for name in candidates() if usable(name)), None)
+
+    if not server_name and required:
+        raise ServerUnavailable(
+            f"user {user_id} has no accessible Hummingbot server, and this run "
+            "cannot do anything without one"
+        )
+
+    return server_name
+
+
 def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     """Get the effective default server for a chat, checking both user_data and config.yml.
 

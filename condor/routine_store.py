@@ -39,6 +39,7 @@ from typing import Any
 import condor.reports as reports
 from condor import primitives, routine_hooks
 from condor.memory.paths import (
+    ROUTINES_DIRNAME,
     agent_home_layers,
     iter_agent_slugs,
     shared_routines_roots,
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 def _agent_routine_dirs(slug: str) -> tuple:
     """An agent's routine dirs in read order: local first, then shipped."""
-    return tuple(home / "routines" for home in agent_home_layers(slug))
+    return tuple(home / ROUTINES_DIRNAME for home in agent_home_layers(slug))
 
 
 def routine_source_roots() -> tuple[Path, ...]:

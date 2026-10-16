@@ -482,9 +482,10 @@ def disown(strategy_home: Path, name: str) -> dict[str, Any]:
        ``since``, which reads as a brand-new claim nobody made.
 
     2. **The disowned set**, here. Erasing the ledgers cannot be enough on its
-       own: ``_adopt_running_bots`` re-derives ownership on the first tick from
-       the namespace, from lineage *and* from this session's own recorded
-       deploys (``actions.jsonl``), and that third source is a permanent record
+       own: ``_adopt_running_bots`` re-derives ownership — on any tick where the
+       ledger is still empty, not only the first — from the namespace, from
+       lineage *and* from this session's own recorded deploys
+       (``actions.jsonl``), and that third source is a permanent record
        of a real event — the strategy did deploy the bot. Nothing that reads a
        deploy log can distinguish "we deployed this" from "we should be credited
        with this", so the human's answer is stored separately and consulted

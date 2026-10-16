@@ -24,12 +24,27 @@ log = logging.getLogger(__name__)
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 _started_at = time.monotonic()
+# The wall clock at the same instant as ``_started_at``, which is monotonic and
+# therefore cannot be read as a date. Taken here so there is one answer to "when
+# did this process start" rather than one per reader ([[FEAT-136]]).
+_started_at_epoch = time.time()
 
 _app: dict | None = None
 
 
 def uptime_h() -> float:
     return round((time.monotonic() - _started_at) / 3600.0, 3)
+
+
+def process_started_at() -> float:
+    """Unix seconds this process started (this module's import).
+
+    Not sent with the telemetry envelope — a timestamp is an install's own
+    detail, and :func:`uptime_h` is what a report needs. It exists for the
+    operator-facing ``/meta/env``, where "the process is still running a
+    start-time config" is the thing being diagnosed (GitHub #275).
+    """
+    return _started_at_epoch
 
 
 def _git(*args: str) -> str:

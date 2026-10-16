@@ -123,6 +123,7 @@ GOLDEN_REST = {
             "bot_name": "epsilon",
             "status": "running",
             "num_controllers": 2,
+            "running_without_controllers": False,
             "error_count": 1,
             "deployed_at": "2026-07-01T00:00:00Z",
             "error_logs": [{"msg": "e1"}],
@@ -132,6 +133,7 @@ GOLDEN_REST = {
             "bot_name": "zeta",
             "status": "stopped",
             "num_controllers": 0,
+            "running_without_controllers": False,
             "error_count": 0,
             "deployed_at": None,
             "error_logs": [],
@@ -142,6 +144,18 @@ GOLDEN_REST = {
     "total_volume": 1284.5,
     "server_online": True,
     "error_hint": None,
+    # The builder is pure and takes no executor rows, so the page it returns
+    # carries the *unavailable* hygiene reading ([[FEAT-141]]) — the route folds
+    # the real one from the executor cache. Unavailable rather than zeroed on
+    # purpose: a clean answer invented from a reading nobody took is CORR-725.
+    "executor_hygiene": {
+        "available": False,
+        "counted": 0,
+        "running": 0,
+        "terminated": 0,
+        "truncated": False,
+        "orphaned_running": [],
+    },
 }
 
 # Captured from the pre-refactor ws_manager._transform_bots (no enrichment).
@@ -188,6 +202,7 @@ GOLDEN_WS = {
             "bot_name": "epsilon",
             "status": "running",
             "num_controllers": 2,
+            "running_without_controllers": False,
             "error_count": 1,
             "deployed_at": None,
             "error_logs": [{"msg": "e1"}],
@@ -197,6 +212,7 @@ GOLDEN_WS = {
             "bot_name": "zeta",
             "status": "stopped",
             "num_controllers": 0,
+            "running_without_controllers": False,
             "error_count": 0,
             "deployed_at": None,
             "error_logs": [],
@@ -406,3 +422,61 @@ def test_extract_bots_list_handles_malformed_inputs():
         {"bot_name": "a"}
     ]
     assert extract_bots_list([{"bot_name": "b"}, 42]) == [{"bot_name": "b"}]
+
+
+# ---------------------------------------------------------------------------
+# CORR-725: "no reading" is unknown, not zero
+# ---------------------------------------------------------------------------
+
+
+def test_running_with_an_empty_performance_object_is_flagged():
+    """GitHub #272: the container is up, the orchestrator says running, and the
+    controller loop never iterates because ``performance`` came back empty. A
+    bare ``status: "running"`` read as a healthy agent for 4h45m."""
+    page = build_bots_page(
+        {
+            "status": "success",
+            "data": {"ghost": {"status": "running", "performance": {}}},
+        }
+    )
+
+    (bot,) = page["bots"]
+    assert bot["num_controllers"] == 0
+    assert bot["running_without_controllers"] is True
+    # And the flag survives the REST response model rather than being dropped.
+    (model,) = BotsPageResponse(**page).bots
+    assert model.running_without_controllers is True
+
+
+def test_a_stopped_bot_with_no_controllers_is_not_flagged():
+    """The flag is "running with nothing running", not "has no controllers"."""
+    page = build_bots_page(
+        {
+            "status": "success",
+            "data": {"gone": {"status": "stopped", "performance": {}}},
+        }
+    )
+
+    (bot,) = page["bots"]
+    assert bot["num_controllers"] == 0
+    assert bot["running_without_controllers"] is False
+
+
+def test_a_controller_with_no_status_does_not_read_as_running():
+    page = build_bots_page(
+        {
+            "status": "success",
+            "data": {
+                "epsilon": {
+                    "status": "running",
+                    "performance": {"ctrl_a": {"performance": {"volume_traded": 1.0}}},
+                },
+            },
+        }
+    )
+
+    (row,) = page["controllers"]
+    assert row["status"] == "unknown"
+    # A bot with a controller is not the flagged shape, whatever that
+    # controller's status turned out to be.
+    assert page["bots"][0]["running_without_controllers"] is False

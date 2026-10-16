@@ -1,5 +1,6 @@
 import {
   Bell,
+  Brain,
   Download,
   KeyRound,
   LogOut,
@@ -15,6 +16,7 @@ import {
 import { useSearchParams } from "react-router-dom";
 
 import { AdminSettings } from "@/components/settings/AdminSettings";
+import { AgentsSettings } from "@/components/settings/AgentsSettings";
 import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
 import { ApiServerSettings } from "@/components/settings/ApiServerSettings";
 import { CustomProvidersSettings } from "@/components/settings/CustomProvidersSettings";
@@ -30,6 +32,7 @@ import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
 
 type TabKey =
+  | "agents"
   | "api"
   | "gateway"
   | "keys"
@@ -71,6 +74,7 @@ function buildGroups(server: string | null, isAdmin: boolean): TabGroup[] {
       label: "Condor",
       tabs: [
         { key: "servers", label: "Servers", icon: Server },
+        { key: "agents", label: "Agents", icon: Brain },
         { key: "llm", label: "LLM Endpoints", icon: Sparkles },
         { key: "voice", label: "Voice & AI", icon: Mic },
       ],
@@ -187,6 +191,7 @@ export function Settings() {
         <div className="min-w-0 flex-1">
           {/* Tab content */}
           {tab === "servers" && <ServersSettings />}
+          {tab === "agents" && <AgentsSettings />}
           {tab === "api" && <ApiServerSettings />}
           {tab === "gateway" && <GatewaySettings />}
           {tab === "keys" && <ApiKeysSettings />}

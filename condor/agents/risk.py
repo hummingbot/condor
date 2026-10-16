@@ -104,6 +104,11 @@ class RiskState:
     book_trusted: bool = True
     drift_quote: float | None = None  # None = nothing priced, never 0.0
     drift_reason: str = ""
+    # Whether ``drawdown_pct`` is a reading at all ([[CORR-725]]). False when
+    # the tracker reports it has nothing on record: 0.0 is then absence, not a
+    # flat book, and it is treated like a tracker that raised rather than
+    # compared against the limits.
+    drawdown_known: bool = True
     # The limits these metrics are judged against, carried so ``to_dict`` can
     # show them to the agent. A bare ``RiskState()`` reports ``RiskLimits``'
     # own defaults; ``RiskEngine.get_state`` passes the engine's limits.
@@ -121,6 +126,7 @@ class RiskState:
             "book_trusted": self.book_trusted,
             "drift_quote": self.drift_quote,
             "drift_reason": self.drift_reason,
+            "drawdown_known": self.drawdown_known,
             # Include limits for prompt display
             "max_position_size": self.limits.max_position_size_quote,
             "max_open_executors": self.limits.max_open_executors,
@@ -275,14 +281,27 @@ class RiskEngine:
     def get_state(self, tracker: Any) -> RiskState:
         """Compute current risk metrics from tracker data.
 
-        The tracker only supplies ``get_drawdown_pct``. Exposure and the open
-        executor count come from the live executors provider, which the engine
-        sets on the returned state itself.
+        The tracker only supplies the drawdown. Exposure and the open executor
+        count come from the live executors provider, which the engine sets on
+        the returned state itself.
+
+        A tracker may report the drawdown two ways: ``get_drawdown_pct_checked``
+        returns ``(pct, known)`` and can say it has no reading on record, while
+        the flat ``get_drawdown_pct`` can only return a number. Both arrive at
+        the same fail-closed arm -- a tracker that raises and a tracker that
+        reports nothing are equally unable to tell us where the drawdown is
+        ([[CORR-725]]).
         """
         state = RiskState(limits=self.limits)
 
         try:
-            state.drawdown_pct = tracker.get_drawdown_pct()
+            checked = getattr(tracker, "get_drawdown_pct_checked", None)
+            if callable(checked):
+                state.drawdown_pct, state.drawdown_known = checked()
+            else:
+                # A tracker with no checked reading cannot report absence, so
+                # its number is taken as one: behavior unchanged for it.
+                state.drawdown_pct = tracker.get_drawdown_pct()
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
@@ -290,6 +309,18 @@ class RiskEngine:
             # pause the tick and notify instead of trading blind.
             state.is_blocked = True
             state.block_reason = f"risk state unavailable: {exc}"
+            return state
+
+        if not state.drawdown_known:
+            # The reporting path into the arm above. The drawdown the tracker
+            # would hand us here is 0.0 -- the one value that passes every
+            # limit -- so a strategy that has stopped producing readings would
+            # otherwise read as one sitting safely at zero.
+            state.is_blocked = True
+            state.block_reason = (
+                "risk state unavailable: no drawdown reading on record, "
+                "so 0.0% cannot be compared against the drawdown limits"
+            )
             return state
 
         # Check blocking conditions
@@ -627,17 +658,41 @@ class RefusalLog:
     So the gate writes down why it said no. Same shape as ``BotLedger``'s
     violation list, and used the same way: appended here, drained by the engine
     after the tick, journaled, and shown in the next tick's prompt.
+
+    One tick has one refusal surface, so the *venue* refusing is recorded here
+    too rather than in a parallel store (FEAT-138): a 429 counted in the tool
+    path arrives with ``kind="throttle"`` and the venue it came from. The kind
+    is what keeps the two apart where it matters — a throttle refusal is a
+    venue condition and the agent did nothing wrong, while a gate refusal is a
+    decision about what the agent asked for — and reading them as one thing is
+    what made throttling look like a strategy bug (GitHub #276).
     """
+
+    #: The gate said no about this call.
+    KIND_RISK = "risk"
+    #: The venue said no about this host. Counted in the tool path, not here.
+    KIND_THROTTLE = "throttle"
 
     def __init__(self) -> None:
         self._pending: list[dict[str, Any]] = []
 
-    def note(self, tool: str, reason: str, now: float | None = None) -> None:
+    def note(
+        self,
+        tool: str,
+        reason: str,
+        now: float | None = None,
+        kind: str = KIND_RISK,
+        venue: str = "",
+        host: str = "",
+    ) -> None:
         self._pending.append(
             {
                 "tool": tool or "",
                 "reason": reason or "",
                 "at": time.time() if now is None else now,
+                "kind": kind or self.KIND_RISK,
+                "venue": venue or "",
+                "host": host or "",
             }
         )
         self._pending = self._pending[-_MAX_REFUSALS:]

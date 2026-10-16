@@ -46,8 +46,12 @@ NEVER open a 2nd slot on a pool **or token** you already hold. Concentrating mul
 
 ## Each Tick — Step by Step
 
-### 1. Load state — ADOPT every live slot (critical after a restart)
-`[CORE DATA]` pre-loads executors **this session** opened — but a fresh session (e.g. after a restart) shows **none even when positions are live on-chain**, which would make you re-open a full duplicate set and over-expose the wallet. So **on the FIRST tick of a session (open_slots from `[CORE DATA]` is empty), verify against reality**: call `list_executors(executor_types=["lp_executor"], status="RUNNING")` and **treat ALL returned RUNNING lp_executors as your open slots** (they share `controller_id="main"`, so you can monitor and exit them). `open_slots` = that RUNNING set; `free_slots = slots − open_slots`. From each, note its `pool_address` and **base mint** = the part before `-SOL`/`-USDC` in its `trading_pair`. NEVER open a slot for a token/pool already in that RUNNING set. Only call `get_portfolio_overview` if you need the live wallet SOL balance.
+### 1. Load state — your slots are BOTH `[CORE DATA]` blocks
+`[CORE DATA - executors]` lists the executors **this session** opened. `[CORE DATA - adopted_executors]`, when present, lists the ones a **previous session of this same strategy** left running and this session has inherited — the loop adopts them automatically on every tick, so a fresh session after a restart sees its live positions instead of none and does not re-open a duplicate set.
+
+`open_slots` = both blocks together; `free_slots = slots − open_slots`. From each, note its `pool_address` and **base mint** = the part before `-SOL`/`-USDC` in its `trading_pair`. NEVER open a slot for a token/pool already in that set.
+
+You may `stop_executor` any id in either block. `list_executors(executor_types=["lp_executor"], status="RUNNING")` is a read, useful to cross-check — but an id it returns that is in **neither** block belongs to another strategy or to a session that is still live, and the risk gate refuses to stop it (*"belongs to controller … stopping it would close another session's position"*). Do not retry such a stop; report it instead. Only call `get_portfolio_overview` if you need the live wallet SOL balance.
 
 ### 2. Monitor + exit your open slots
 For each RUNNING lp_executor you own, read `net_pnl_pct`, `state`, and `out_of_range_seconds`. **Exit** (`stop_executor(executor_id=..., keep_position=false)`) if:

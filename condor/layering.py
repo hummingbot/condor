@@ -47,6 +47,7 @@ log = logging.getLogger(__name__)
 
 FORKED_FROM_KEY = "forked_from"
 FORKED_AT_KEY = "forked_at"
+CREATED_BY_KEY = "created_by"
 
 
 def content_digest(path: Path) -> str:
@@ -225,11 +226,20 @@ def carry_fork_stamp(path: Path, meta: dict) -> dict:
     return meta
 
 
-def clear_fork_stamp(path: Path) -> None:
-    """Drop ``forked_from``/``forked_at`` — used when publishing back into stock.
+def scrub_for_stock(path: Path) -> None:
+    """Drop this install's local facts from a file on its way into stock.
 
-    A stock file that still claims to be a fork of a stock file would make every
-    install that pulls it look forked from itself.
+    Two of them, for one reason: a shipped file must not assert something that
+    is only true on the install that published it.
+
+    * ``forked_from``/``forked_at`` — a stock file that still claims to be a
+      fork of a stock file would make every install that pulls it look forked
+      from itself.
+    * ``created_by`` — the publisher's real Telegram id, which names nobody on
+      another box, yet the admin-principal rule and the legacy-restart owner
+      fallback both still act on it ([[CORR-705]]). The stores keep recording
+      the real creator in the local layer on purpose; this is the one boundary
+      it must not cross ([[CORR-721]]).
     """
     if path.suffix != ".md":
         return
@@ -237,22 +247,30 @@ def clear_fork_stamp(path: Path) -> None:
         meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     except OSError:
         return
-    if not meta or not (FORKED_FROM_KEY in meta or FORKED_AT_KEY in meta):
+    if not meta:
+        return
+    forked = FORKED_FROM_KEY in meta or FORKED_AT_KEY in meta
+    claims_creator = meta.get(CREATED_BY_KEY, 0) not in (0, None)
+    if not (forked or claims_creator):
         return
     meta.pop(FORKED_FROM_KEY, None)
     meta.pop(FORKED_AT_KEY, None)
+    if claims_creator:
+        meta[CREATED_BY_KEY] = 0
     try:
         atomic_write_text(path, render_frontmatter(meta, body))
     except OSError:
-        log.warning("Could not clear the fork stamp on %s", path, exc_info=True)
+        log.warning("Could not scrub %s for publishing", path, exc_info=True)
 
 
 # ── Publishing: the one sanctioned write into the shipped library ──
 
-# What a published agent consists of. An allowlist rather than a denylist, and
-# deliberately: a whole-directory copy would drag ``store/``, ``sessions/`` and
-# the mute set into the tracked tree, which is the exact wound this feature
-# closed. Anything not named here is this install's, not the library's.
+# Runtime output, by name at any depth. The half of the publishing contract that
+# names what this install accumulated: a whole-directory copy would drag
+# ``store/``, ``sessions/`` and the mute set into the tracked tree, which is the
+# exact wound this feature closed. The other half is :func:`_root_library_dirs`,
+# which decides the root positively, so a name nobody listed here is still not
+# library content when it sits in a folder the layout never defined.
 _RUNTIME_NAMES = frozenset(
     {
         "store",
@@ -270,8 +288,66 @@ _RUNTIME_NAMES = frozenset(
         # The dot only hides the *directory*; the files in it are plain names,
         # which the dotfile check below would let through.
         ".server_backups",
+        # Compiled bytecode of an agent's own routines. Matched at any depth
+        # because it appears *under* an allowed directory
+        # (``routines/__pycache__/``), and the name is reserved by Python, so no
+        # library item can legitimately claim it ([[CORR-720]]).
+        "__pycache__",
     }
 )
+
+
+def _root_library_dirs() -> frozenset[str]:
+    """The root directories the agent layout defines — nothing else is library.
+
+    The other half of the contract above, and the half that makes it true
+    rather than aspirational: ``_RUNTIME_NAMES`` can only name runtime
+    output somebody already thought of, and an agent that invents a root folder
+    — a routine keeping its own ``state/``, say — invents a name no denylist
+    holds ([[CORR-720]]). At the root the layout *is* a closed set, so it is
+    stated as one, each entry named by the module that owns it.
+
+    Imported inside the function because :mod:`condor.agents.strategy` imports
+    this module, so naming ``LOOPS_DIRNAME`` at module scope would be a cycle.
+    """
+    from condor.agent_controllers import CONTROLLERS_DIRNAME
+    from condor.agents.strategy import LOOPS_DIRNAME
+    from condor.memory.paths import ROUTINES_DIRNAME, SKILLS_DIRNAME
+
+    return frozenset(
+        {CONTROLLERS_DIRNAME, LOOPS_DIRNAME, ROUTINES_DIRNAME, SKILLS_DIRNAME}
+    )
+
+
+def is_library_path(rel: str) -> bool:
+    """Whether ``rel``, relative to an agent home, is library content.
+
+    The path rule of :func:`publishable_files` as a predicate, so a door that
+    takes paths from *outside* this install — :mod:`condor.agents.bundle`'s
+    import — can refuse exactly what the export skips instead of keeping a
+    second copy of the same list to drift from. That matters beyond tidiness:
+    a bundle is hand-editable JSON, so a crafted one could otherwise write
+    ``loops/<s>/sessions/session_1/status.json`` and have boot reconciliation
+    read it as a crashed session and start the loop, with no operator ever
+    pressing Start.
+
+    Both rules of the export apply, plus one the export gets from the
+    filesystem rather than from a name: a dotted *part* at any depth is
+    refused here, where ``publishable_files`` only skips dotted file names
+    (a dotted directory it meets is runtime output named in
+    ``_RUNTIME_NAMES``). Nothing an export produces is rejected by that, so
+    the round trip is unaffected.
+    """
+    parts = tuple(part for part in str(rel).split("/") if part)
+    if not parts:
+        return False
+    if any(part.startswith(".") for part in parts):
+        return False
+    if any(part in _RUNTIME_NAMES for part in parts):
+        return False
+    if len(parts) > 1 and parts[0] not in _root_library_dirs():
+        return False
+    return True
 
 
 def publishable_files(home: Path, path: str = "") -> list[Path]:
@@ -280,6 +356,13 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
     ``path`` narrows to one file or folder (``skills/recon``,
     ``loops/grid``); empty takes the whole agent. The runtime filter applies
     either way, so naming a folder cannot smuggle a store out.
+
+    Two rules, because the layout is only closed at one level. A root
+    *directory* must be one the layout defines (:func:`_root_library_dirs`); a
+    root *file*, and any name at any depth, must not be runtime output
+    (``_RUNTIME_NAMES``). Matching ``state`` at the root rather than by name is
+    what keeps a ``skills/state/`` playbook publishable while an agent's root
+    ``state/`` folder is not.
     """
     rel_parts = tuple(part for part in path.split("/") if part and part != "..")
     base = home.joinpath(*rel_parts)
@@ -289,11 +372,14 @@ def publishable_files(home: Path, path: str = "") -> list[Path]:
         return []
 
     found: list[Path] = []
+    root_dirs = _root_library_dirs()
     for candidate in sorted(base.rglob("*")):
         if not candidate.is_file() or candidate.name.startswith("."):
             continue
         rel = candidate.relative_to(home)
         if any(part in _RUNTIME_NAMES for part in rel.parts):
+            continue
+        if len(rel.parts) > 1 and rel.parts[0] not in root_dirs:
             continue
         found.append(rel)
     return found
@@ -303,9 +389,9 @@ def publish_to_stock(agent_slug: str, path: str = "") -> dict:
     """Copy this install's agent (or one item of it) into the shipped library.
 
     The inverse of :func:`fork_if_stock`, and the only write into the tracked
-    tree in the product. The fork stamp is cleared on the way in — a shipped
-    file that still claimed to be forked from a shipped file would make every
-    install that pulls it look forked from itself.
+    tree in the product. Every copy is run through :func:`scrub_for_stock` on
+    the way in, which drops the facts that are true only of this install — the
+    fork stamp and the publisher's ``created_by``.
 
     Returns the paths to commit, relative to the repo, so the maintainer can see
     what their tree now holds. Overwriting is the point here (publishing an
@@ -327,7 +413,7 @@ def publish_to_stock(agent_slug: str, path: str = "") -> dict:
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(local_home / rel, destination)
-            clear_fork_stamp(destination)
+            scrub_for_stock(destination)
         except OSError:
             log.warning("Could not publish %s/%s", agent_slug, rel, exc_info=True)
             continue

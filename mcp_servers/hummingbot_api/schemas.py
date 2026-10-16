@@ -146,21 +146,24 @@ class GatewaySwapRequest(BaseModel):
     - execute: Execute a swap transaction
     - search: Search swap history with filters
     - get_status: Get status of a specific swap by transaction hash
+    - resolve: Ask the server to resolve a swap stuck SUBMITTED (FEAT-140)
 
     Progressive Flow:
     1. action="quote" -> Get price quote before executing
     2. action="execute" -> Execute the swap
     3. action="get_status" + tx_hash -> Check transaction status
     4. action="search" + filters -> Query swap history
+    5. action="resolve" + tx_hash -> Exit a swap stuck SUBMITTED and unverifiable
     """
 
-    action: Literal["quote", "execute", "execute_quote", "search", "get_status"] = (
-        Field(
-            description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
-            "price found at execution), 'execute_quote' (execute a quote you already have, by its "
-            "quote_id — the price you were shown is the price you get), 'search' (query history), "
-            "'get_status' (check tx status)"
-        )
+    action: Literal[
+        "quote", "execute", "execute_quote", "search", "get_status", "resolve"
+    ] = Field(
+        description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
+        "price found at execution), 'execute_quote' (execute a quote you already have, by its "
+        "quote_id — the price you were shown is the price you get), 'search' (query history), "
+        "'get_status' (check tx status), 'resolve' (ask the server to resolve a swap stuck "
+        "SUBMITTED — the server decides and Condor records nothing)"
     )
 
     # Common swap parameters (required for quote/execute)

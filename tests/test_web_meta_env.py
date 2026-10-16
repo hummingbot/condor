@@ -50,12 +50,33 @@ def test_env_returns_build_identity(app):
 
     assert res.status_code == 200
     body = res.json()
-    assert set(body) == {"version", "branch", "python", "os", "arch", "in_docker"}
+    assert set(body) == {
+        "version",
+        "branch",
+        "python",
+        "os",
+        "arch",
+        "in_docker",
+        # Which *process*, not just which code (FEAT-136): a session reads its
+        # config at start and keeps it for the life of this process, so "has it
+        # been restarted since I edited that" needs a start time to answer.
+        "process_started_at",
+        "boot_id",
+    }
     assert isinstance(body["in_docker"], bool)
     # An install deployed from a tarball has no git metadata; the context layer
     # reports "unknown" rather than failing, and either is a valid answer.
     assert body["version"]
     assert body["python"].startswith("3.")
+
+    import time
+
+    from condor.runtime.registry_file import BOOT_ID
+
+    # A wall clock, in the past -- not the monotonic anchor it is taken beside,
+    # which cannot be read as a date.
+    assert 0 < body["process_started_at"] <= time.time()
+    assert body["boot_id"] == BOOT_ID
 
 
 def test_env_leaks_no_configuration(app):

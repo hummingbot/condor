@@ -114,6 +114,14 @@ def resolve_agent_key(config: dict[str, Any], strategy, agent) -> str:
     return config.get("agent_key") or strategy.agent_key or agent.agent_key
 
 
+# How long a caller that just started a run waits for its first tick before it
+# answers (CORR-728). Short on purpose: a tick can honestly take minutes, so
+# what this bound has to tell apart is "the run came up" from "it died on the
+# way up", and dying is immediate. A tick still in flight at the bound counts
+# as came-up — see ``TickEngine.wait_first_tick``.
+FIRST_TICK_WAIT_SEC = 20.0
+
+
 def get_engine(agent_id: str) -> TickEngine | None:
     return _supervisor().get(agent_id)
 
@@ -129,6 +137,12 @@ class TickEngine:
     config: dict[str, Any]
     chat_id: int
     user_id: int
+    # Whether ``config["server_name"]`` was *chosen* for this run rather than
+    # inherited from the strategy's config: the start route's ``asked_for_it``,
+    # a restart's carried pin. A chosen name must resolve or the run refuses
+    # (CORR-729); an inherited one still falls through to the owner's own
+    # servers, which is what ``_start`` and ``_check_restartable`` allow.
+    server_pinned: bool = False
 
     # Derived identity (set in __post_init__)
     agent_id: str = field(init=False)
@@ -157,14 +171,53 @@ class TickEngine:
         default=None, init=False, repr=False
     )
     _last_tick_at: float = field(default=0.0, init=False)
+    # How long the last completed tick took, in seconds ([[FEAT-141]]). The
+    # journal has always recorded it per tick; keeping the newest one here is
+    # what lets the fleet view read it without opening a journal, and a tick
+    # that is slow because its host is oversubscribed is the symptom the race
+    # misread as a strategy bug. 0 = no tick has completed yet.
+    _last_tick_duration: float = field(default=0.0, init=False)
+    # ── Liveness, as outcomes rather than attempts ([[FEAT-137]]) ──
+    # ``_last_tick_at`` above is set at tick *start*, so it advances even when
+    # every call in the tick failed: a session whose model is broken looks
+    # exactly as fresh as a healthy one, which is GitHub #272's failure mode.
+    # These two are stamped only where the outcome is known -- a reading that
+    # said something, and a mutating call that worked -- and are persisted
+    # through ``LoopSupervisor.record_tick`` so they survive the process.
+    _last_reading_at: float = field(default=0.0, init=False)
+    _last_successful_action_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
+    # The first tick's two moments, so a caller that started this run can report
+    # what the run did instead of that a task was created (CORR-728).
+    # ``_first_tick_arrived`` is set as the tick is entered; ``_first_tick_done``
+    # once it has returned, with ``_first_tick_error`` saying how. A loop that
+    # ends before ticking sets both on its way out, so no waiter hangs.
+    _first_tick_arrived: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False
+    )
+    _first_tick_done: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False
+    )
+    _first_tick_error: str = field(default="", init=False, repr=False)
     # Set once an experiment tick has written its own dry-run file.
     _experiment_written: bool = field(default=False, init=False)
     # The block the owner was last told about, so a block lasting many ticks is
     # announced once instead of on every one of them.
     _last_block_reason: str = field(default="", init=False, repr=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
-    _adoption_done: bool = field(default=False, init=False, repr=False)
+    # The recorded-deploy bases the last adoption pass was matched against, so a
+    # deploy written to the action log afterwards re-opens adoption for one more
+    # pass. Whether adoption is *settled* is read off the ledger itself, by the
+    # ``_adoption_done`` property — never latched by a pass having run (CORR-724).
+    _adoption_deploys: set[str] = field(default_factory=set, init=False, repr=False)
+    # Executor rows a dead session of this same strategy left RUNNING (CORR-726).
+    # Merged into ``_executor_owners`` so the stop gate's existing membership
+    # test lets this session close them, and shown in the prompt so it knows
+    # their ids at all. Re-derived every tick, so one whose owner came back is
+    # dropped again.
+    _adopted_executors: list[dict[str, Any]] = field(
+        default_factory=list, init=False, repr=False
+    )
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
     # What the risk gate refused, and why. The gate appends during the tick
     # (condor.agents.risk.RefusalLog); the tick drains it into the journal and
@@ -189,9 +242,28 @@ class TickEngine:
     _active_client: "ACPClient | PydanticAIClient | None" = field(
         default=None, init=False, repr=False
     )
+    # What the adapter said it is on, read off the last started client
+    # ([[FEAT-136]]). The requested pin is ``agent_key``'s suffix; this is the
+    # answer, which is what makes it an audit rather than an echo: a bridge that
+    # could not match the pin keeps its own default and says so in
+    # ``active_model_id``, and before this the only record of that was a log
+    # line. Empty for a backend with no adapter to ask (pydantic-ai, where the
+    # key *is* the model) and until the first tick has started a client.
+    _active_model_id: str = field(default="", init=False, repr=False)
     # Set by _finish(): the run's teardown has happened, so any later exit path
     # (a stop() after the loop self-completed) is a no-op.
     _finished: bool = field(default=False, init=False, repr=False)
+    # What the shutdown policy's order cancel achieved (CORR-727). None until a
+    # sweep has run; a winddown sets it before its cleanup pass, which is how
+    # _finish knows not to sweep the same orders a second time on the way out.
+    _cancel_outcome: "CancelOutcome | None" = field(
+        default=None, init=False, repr=False
+    )
+    # The close-out report this run's teardown recorded (FEAT-134). None until
+    # _finish has run, which is also how a caller tells a run that has not
+    # stopped yet from one whose report could not be built -- the latter is a
+    # report carrying an ``error``, never an absent one.
+    _closeout: "CloseoutReport | None" = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -290,10 +362,70 @@ class TickEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    async def _preflight_gate(self) -> None:
+        """Refuse the start when a stated trading requirement is not met (FEAT-139).
+
+        Here rather than in the start route so that every path into a live loop
+        goes through it — the dashboard start, and the boot restart that has no
+        request to answer. Raises
+        :class:`~condor.preflight.PreflightFailed`, which the route turns into a
+        422 naming the reason and the boot pass records as a failed restart.
+
+        Two deliberate narrowings keep a working loop safe from a false
+        negative, which is the one way this check could cost more than it saves:
+
+        * a config that states no ``trading_requirements`` is not gated at all,
+          and no API read is made for it — the preflight has nothing to check
+          against, so there is nothing it could wrongly refuse;
+        * an experiment (``dry_run``/``run_once``) commits no capital under the
+          risk gate's refusals, so it is reported on by ``doctor`` but never
+          stopped by this.
+        """
+        # Imported at call time, both ways round: ``condor.preflight`` resolves
+        # this run's model through ``resolve_agent_key`` here, so neither module
+        # may reach the other at import time.
+        from condor.preflight import PreflightFailed, gate_start, requirements_of
+
+        if is_experiment_mode(str(self.config.get("execution_mode") or "")):
+            return
+        if not requirements_of(self.config).declared:
+            return
+
+        try:
+            report = await gate_start(
+                await self._get_client(),
+                self.config,
+                label=self.agent_id,
+                strategy=self.strategy,
+                agent=self.agent,
+                user_id=self.user_id,
+                server_pinned=self.server_pinned,
+            )
+        except PreflightFailed as failed:
+            # The session folder exists from construction, so its state is
+            # recorded rather than left blank: a start that was refused must not
+            # read on disk as a run still coming up. Not ``_finish`` — there is
+            # nothing to wind down, and a close-out report for a loop that never
+            # ticked would be a report of nothing.
+            log.warning(
+                "TickEngine %s refused by preflight:\n%s",
+                self.agent_id,
+                failed.report.render(),
+            )
+            _supervisor().record(self, LoopState.ERROR)
+            raise
+        for line in report.render().splitlines():
+            log.info("TickEngine %s preflight: %s", self.agent_id, line.strip())
+
     async def start(self, bot=None) -> None:
-        """Start the tick loop as an asyncio task."""
+        """Start the tick loop as an asyncio task.
+
+        The trading preflight runs first: a loop whose stated capital, account
+        mode or venue rules do not hold never reaches a tick (FEAT-139).
+        """
         if self._running:
             return
+        await self._preflight_gate()
         self._running = True
         self._bot = bot
         self._task = asyncio.create_task(self._loop())
@@ -349,6 +481,89 @@ class TickEngine:
             )
         self._active_client = None
 
+    async def _cancel_resting_orders(self) -> None:
+        """Execute ``cancel_open_orders`` for this run's end. Never raises.
+
+        Lives in :meth:`_finish` because that is the one teardown every exit path
+        goes through -- a graceful stop, a completed run, an error and a winddown
+        all end here. A winddown has already swept before its cleanup pass and
+        left its :class:`~condor.agents.shutdown.CancelOutcome` on the engine, so
+        this sees it and does not sweep twice.
+
+        A ``dry_run`` is skipped: the risk gate refuses every mutating call in
+        that mode, so the session cannot have placed an order to cancel.
+
+        ``getattr`` throughout, and a blanket ``except``: ``_finish`` is driven in
+        tests by ``SimpleNamespace`` stand-ins that carry neither a strategy nor a
+        client, and a teardown must finish either way.
+        """
+        if getattr(self, "_cancel_outcome", None) is not None:
+            return
+        from .config import is_experiment_mode
+        from .shutdown import cancel_resting_orders, load_shutdown_policy
+
+        try:
+            config = getattr(self, "config", None) or {}
+            if is_experiment_mode(str(config.get("execution_mode") or "")):
+                return
+            strategy = getattr(self, "strategy", None)
+            if strategy is None:
+                return
+            policy, _ = load_shutdown_policy(strategy)
+            if not policy.cancel_open_orders:
+                return
+            client = await self._get_client()
+            if client is None:
+                log.warning(
+                    "TickEngine %s: could not reach the API to cancel resting "
+                    "orders; any open order is STILL RESTING",
+                    self.agent_id,
+                )
+                return
+            # ``all_executors``, not just the running ones: an executor that
+            # already terminated can be exactly the one that left an order
+            # resting, and its market has to stay in scope.
+            skill_data = self._last_skill_data or {}
+            executors = list(skill_data.get("all_executors") or []) or list(
+                skill_data.get("executors") or []
+            )
+            # And the markets of anything inherited from a dead session
+            # (CORR-726): an adopted executor is not under this session's tag,
+            # so the provider rows above do not carry its market and its
+            # resting orders would be out of scope.
+            executors += [
+                row
+                for row in (getattr(self, "_adopted_executors", None) or [])
+                if isinstance(row, dict)
+            ]
+            outcome = await cancel_resting_orders(self, client, policy, executors)
+            self._cancel_outcome = outcome
+            if self.journal:
+                self.journal.append_action(
+                    self.journal.tick_count + 1,
+                    "cancel_open_orders",
+                    outcome.describe(),
+                )
+            if outcome.failed or outcome.unsupported or outcome.unknown:
+                log.warning("TickEngine %s: %s", self.agent_id, outcome.describe())
+        except Exception:
+            log.exception(
+                "TickEngine %s: could not cancel resting orders on stop",
+                getattr(self, "agent_id", "?"),
+            )
+
+    async def _emit_closeout(self) -> None:
+        """Record what this run closed and what it left (FEAT-134). Never raises.
+
+        A thin delegation: :func:`condor.agents.closeout.emit_closeout` owns the
+        reads, the timeout and the catch, so the teardown holds no policy of its
+        own. Imported lazily, like the sweep above it, to keep the venue-read
+        module off the engine's import path.
+        """
+        from .closeout import emit_closeout
+
+        await emit_closeout(self)
+
     async def _finish(self, final_state: str, reason: str) -> None:
         """End this run: the ONE teardown every exit path goes through.
 
@@ -367,6 +582,27 @@ class TickEngine:
         self._running = False
         try:
             await self._reap_client()
+            # The shutdown policy's order cancel, on EVERY exit path. A graceful
+            # stop keeps positions but must not leave resting orders behind, and
+            # until CORR-727 the flag only ever reached the LLM context as a
+            # sentence -- so a stop's claim rested on whether a model acted on it.
+            # ``getattr`` for the same reason the ones above it are: a stand-in
+            # driven through the lifecycle methods carries only what it binds.
+            sweep = getattr(self, "_cancel_resting_orders", None)
+            if sweep is not None:
+                await sweep()
+            # The close-out report (FEAT-134), last and best-effort: the stop's
+            # own work is done by here, so a report that fails or hangs can
+            # neither fail nor delay it -- emit_closeout catches everything and
+            # caps itself. Here and not in run_shutdown/stop(), because this is
+            # the one teardown every exit path reaches, so one call site covers
+            # the graceful stop, the emergency winddown, an error, and the stop
+            # half of a restart. Before the ``finally`` below, which closes the
+            # journal the report is recorded in. ``getattr`` for the same reason
+            # the sweep above uses it.
+            emit = getattr(self, "_emit_closeout", None)
+            if emit is not None:
+                await emit()
         finally:
             # Close the ownership window before the journal: from here on this
             # session operates nothing, so a bot left running must stop accruing
@@ -470,9 +706,53 @@ class TickEngine:
     async def _loop(self) -> None:
         freq = self.config.get("frequency_sec", 60)
         mode = self.config.get("execution_mode", "loop")
+        try:
+            await self._run_ticks(freq, mode)
+        finally:
+            # A run that ended before any tick still has to release whoever is
+            # waiting on its first one — with the truth, not with silence.
+            self._note_first_tick(
+                self._last_error or "the run ended before its first tick"
+            )
+
+    def _note_first_tick(self, error: str) -> None:
+        """Record how the first tick went, once. Later ticks change nothing."""
+        if self._first_tick_done.is_set():
+            return
+        self._first_tick_error = error
+        self._first_tick_done.set()
+
+    async def wait_first_tick(self, timeout: float) -> str:
+        """Wait for this run's first tick. ``""`` when the run is answerable.
+
+        A start that reports success on ``create_task`` alone says "running"
+        for a run that died on its first tick where nobody was watching
+        (CORR-728). Waiting here is what makes the answer a fact.
+
+        Returns ``""`` when the first tick completed cleanly, or is still in
+        flight at the bound — a tick that arrived and is thinking is a run that
+        came back, and a tick can honestly take minutes, so the bound must not
+        hold a request for one. Otherwise a reason fit to show a human: the
+        first tick raised, or the run ended (or never started one) before it.
+        """
+        try:
+            # ``asyncio.timeout``, the same shape as the tick budget in
+            # ``_run_model`` — and the one timeout idiom this file uses
+            # (READ-672).
+            async with asyncio.timeout(timeout):
+                await self._first_tick_done.wait()
+        except TimeoutError:
+            if self._first_tick_arrived.is_set():
+                return ""
+            return f"no tick had started {timeout:.0f}s after the run was created"
+        return self._first_tick_error
+
+    async def _run_ticks(self, freq: int, mode: str) -> None:
+        """The tick loop itself; ``_loop`` wraps it to settle the first tick."""
         while self._running:
             if not self._paused:
                 tick_error = ""
+                self._first_tick_arrived.set()
                 try:
                     await self._tick()
                     self._last_error = ""
@@ -494,6 +774,8 @@ class TickEngine:
                         await self._notify(
                             f"Agent {self.agent_id} tick error: {tick_error}"
                         )
+
+                self._note_first_tick(tick_error)
 
                 # A shutdown that started *inside* the tick (the hard risk
                 # kill-switch) already ran its winddown, wrote the terminal
@@ -557,17 +839,22 @@ class TickEngine:
         """One tick, in three phases: gather, run the model, persist.
 
         Each phase is its own method so it can be read and tested on its own.
-        The tick ends early only when there is no API client or the gather
-        phase returns ``None`` (a hard shutdown or a risk block); past that,
-        the model always runs and its outcome is always persisted.
+        The tick ends early only when the gather phase returns ``None`` (a hard
+        shutdown or a risk block); past that, the model always runs and its
+        outcome is always persisted.
+
+        No API client is a *failure*, not an early return: a trading loop with
+        nothing to trade through can do nothing at all, and journalling it and
+        returning cleanly reported the run as ticking (CORR-729). Raising hands
+        the reason to ``_run_ticks``, which journals it, tells the owner once per
+        distinct error, and — on the first tick — makes the start or restart that
+        created this run report the failure instead of "started".
         """
         self._last_tick_at = time.time()
 
         client = await self._get_client()
         if not client:
-            if self.journal:
-                self.journal.append_error("No API client available")
-            return
+            raise RuntimeError("No API client available")
 
         ctx = await self._gather_tick_context(client)
         if ctx is None:
@@ -580,11 +867,12 @@ class TickEngine:
         # A failed turn may already have run tool calls (a deploy), so it is
         # persisted like any other tick first; raising afterwards lets ``_loop``
         # journal the error, tell the owner and end a dry run as failed.
+        self._last_tick_duration = time.time() - self._last_tick_at
         await self._persist_tick(
             ctx,
             response_text,
             tool_calls,
-            time.time() - self._last_tick_at,
+            self._last_tick_duration,
             failure=failure,
         )
         if failure:
@@ -607,6 +895,12 @@ class TickEngine:
         # restart always mints a NEW session (see condor/runtime/loops.py), so the
         # live bot must be taken over rather than orphaned and redeployed.
         await self._adopt_running_bots(client)
+
+        # And the executors a dead session of this same strategy left running
+        # (CORR-726). Every tick, not just the first: a sibling session can end
+        # at any point in this one's life, and a graceful stop leaves its
+        # executors behind by design.
+        await self._adopt_running_executors(client)
 
         # Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
@@ -634,19 +928,46 @@ class TickEngine:
         if drift_result:
             self._last_skill_data["drift"] = drift_result.data
 
+        # This tick obtained a reading ([[FEAT-137]]). ``ok`` only: ``empty`` is
+        # a controller that answered and said nothing and ``missing`` is no
+        # performance object at all ([[CORR-725]]), and a key that is absent
+        # altogether is the provider's own error path. All three leave the stamp
+        # where it was, which is what lets a reader tell a market maker that is
+        # merely quiet from one whose strategy died.
+        if str(self._last_skill_data.get("reading") or "") == "ok":
+            self._last_reading_at = time.time()
+
         # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
             name: result.summary for name, result in skill_results.items()
         }
+        adopted_summary = self._adopted_executors_summary()
+        if adopted_summary:
+            core_data_summaries["adopted_executors"] = adopted_summary
 
         # Risk state (experiments pass None — returns clean state)
         risk_state = self.risk.get_state(self.journal or _NullTracker())
         live_executors = self._last_skill_data.get("executors", [])
         live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
-        risk_state.executor_count = live_open_count
+        # Inherited positions count against the limits (CORR-726). The provider
+        # reads only this session's own ``controller_id``, so an adopted orphan
+        # is exposure this session is responsible for -- it is in the prompt as
+        # "YOURS to monitor and close" and in the stop allowlist -- that the
+        # book could not see. Left out, a restarted session holding three
+        # inherited executors could open its full ``max_open_executors`` on top
+        # of them and never be refused.
+        adopted = [
+            row
+            for row in (getattr(self, "_adopted_executors", None) or [])
+            if isinstance(row, dict)
+        ]
+        risk_state.executor_count = live_open_count + len(adopted)
+        # ``amount`` is the quote exposure ``build_executor_row`` computes, the
+        # same field the provider sums for its own rows, so the two halves of
+        # the total are in one unit.
         risk_state.total_exposure = float(
             self._last_skill_data.get("total_exposure", 0.0) or 0.0
-        )
+        ) + sum(float(row.get("amount") or 0.0) for row in adopted)
         # A pending order nothing could price is exposure of unknown size, not
         # zero: the book cannot size a create, so it refuses them like any
         # other missing metric while every brake still passes.
@@ -818,6 +1139,11 @@ class TickEngine:
         stop_reason = "end_turn"
 
         await acp_client.start()
+        # The handshake has just resolved the model, so this is where the
+        # adapter's own answer is readable ([[FEAT-136]]). Kept on the engine
+        # rather than read off the client, which is torn down at the end of
+        # every tick — the status that reports it is served between ticks.
+        self._active_model_id = getattr(acp_client, "active_model_id", "") or ""
         # Wall-clock budget for this tick's agent session. Comes from the shared
         # policy (10 min default, CONDOR_TIMEOUT_TICK_DEFAULT) unless the run
         # config sets ``tick_timeout_sec`` -- a slower model or a tick that does
@@ -868,6 +1194,12 @@ class TickEngine:
         ``failure`` is set when the model turn itself failed; the tick is still
         recorded in full, marked as failed.
         """
+        # What the venue refused this tick, counted in the tool path by the MCP
+        # subprocess, folded in here so it joins the gate's own refusals in one
+        # surface (FEAT-138). Before the drain, so this tick's 429s reach the
+        # journal and the next tick's prompt instead of lagging a tick behind.
+        self._ingest_throttle_refusals()
+
         # What the gate refused this tick, taken before either branch below so a
         # dry run and a live tick both carry it. It reaches the agent through the
         # next tick's prompt; the journal entry below is for the human reading
@@ -948,6 +1280,15 @@ class TickEngine:
             tool_calls, tick=self.journal.tick_count + 1, at=time.time()
         )
 
+        # When it last did something that *worked* ([[FEAT-137]]). Read off the
+        # same rows, so the stamp and the log can never disagree about what the
+        # session did, and only ever moved forward: a tick whose every call
+        # failed leaves it where the last successful one put it, where
+        # ``_last_tick_at`` would have advanced.
+        effect_at = actions_mod.last_effect_at(tick_actions)
+        if effect_at > self._last_successful_action_at:
+            self._last_successful_action_at = effect_at
+
         # And what it took ownership of (FEAT-102). Derived from the same
         # folded list, so a deploy that is logged is a deploy that is owned.
         # The risk gate already claims a deploy on its way *in*
@@ -982,6 +1323,16 @@ class TickEngine:
                 total_volume=skill_volume,
                 open_count=skill_executors,
                 position_size=skill_exposure,
+                # Whether the figures above are a reading at all ([[FEAT-137]],
+                # [[CORR-725]]). Written onto the line because the four of them
+                # are the same zeros either way: without it the guard reading
+                # them back took a tick that read nothing for a flat book, and
+                # a zero exposure clears the drawdown outright.
+                #
+                # An absent key is the provider's *own* error path -- it stamps
+                # every answer it gives, including ``empty`` and ``missing`` --
+                # so absence is the one case that must not read as ``ok``.
+                reading=str(self._last_skill_data.get("reading") or "missing"),
             )
 
             if failure:
@@ -1077,10 +1428,24 @@ class TickEngine:
                 f"${limit:,.2f} limit"
             )
 
+    @property
+    def _adoption_done(self) -> bool:
+        """Adoption is settled: this session's fleet is on the ledger.
+
+        Read off the ledger rather than latched by a pass having run. The two
+        used to be the same flag, and a first pass that reached the API and
+        found nothing to adopt — an empty server, a deployment still seconds
+        away — closed adoption for the life of the session. Owning nothing is
+        not a finished state; it is what every missed deployment leaves behind,
+        and it is the state :meth:`_adopt_running_bots` exists to leave
+        (CORR-724).
+        """
+        return bool(self.ledger is not None and self.ledger.bases())
+
     async def _adopt_running_bots(self, client) -> None:
         """Record the bots already live that belong to us (FEAT-017).
 
-        Runs once, on the first tick — not in ``__post_init__``, which is sync and
+        Runs at most once per tick — not in ``__post_init__``, which is sync and
         must not do network I/O. Reaching the API is best-effort: a failure means
         "own nothing yet" and is retried on the next tick, never fatal.
 
@@ -1090,45 +1455,25 @@ class TickEngine:
         this strategy's bot, and the session that just replaced that one inherits
         it. Both rules are conservative — an unrecognised bot is left alone.
 
-        All three rules match a *name*, and the performance snapshot they are
-        matched against is not a list of what is running: it keeps every bot the
-        API ever orchestrated, a stopped one's frozen final row included. So the
-        names are filtered through the orchestrator's live listing first
-        (CORR-699), or a restart would adopt every bot the strategy has ever run
-        and open an ownership window, starting now, on bots that are dead.
+        All three rules match a *name*, and the names they are matched against are
+        the orchestrator's live listing. The controller-performance snapshot is not
+        a list of what is running — it keeps every bot the API ever orchestrated, a
+        stopped one's frozen final row included — so it was only ever usable here
+        once filtered through that listing (CORR-699), which left it with nothing
+        to add: every name it contributed that survived the filter was already in
+        the listing, and a bot that is live but has no performance row yet was
+        dropped for the lack of it (CORR-724).
+
+        Adoption is not a read: it opens an ownership window starting now and
+        makes every later stop/resume/redeploy target a real bot. So an *unknown*
+        liveness defers the whole pass rather than falling back to the unfiltered
+        snapshot — the one failure this function used not to route through its own
+        best-effort contract (CORR-723). The read surfaces keep the fallback.
         """
-        if self._adoption_done or self.ledger is None:
+        if self.ledger is None:
             return
-        from condor.fetchers.bot_performance import (
-            fetch_all_bot_performance,
-            fetch_live_instance_names,
-        )
-
-        try:
-            all_perf = await fetch_all_bot_performance(client)
-        except Exception as e:
-            log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
-            return
-
-        # Liveness is best-effort in the same way the rest of the function is:
-        # ``None`` means the orchestrator did not answer, and an unknown liveness
-        # must not silently adopt nothing — it leaves the snapshot unfiltered,
-        # exactly as before this filter existed.
-        live = await fetch_live_instance_names(client)
 
         from .ownership import prior_session_bases, read_disowned, strip_deploy_suffix
-
-        # What a person has said is *not* ours, which outranks all three sources
-        # below. Every one of them is an inference from a name or a log, and a
-        # mis-attributed bot is one somebody has to be able to hand back — a
-        # namespace match cannot be argued with, and a recorded deploy is a
-        # permanent fact that would otherwise re-claim the bot on every restart
-        # for the life of the strategy.
-        disowned = read_disowned(getattr(self.strategy, "home", None))
-
-        inherited: set[str] = set()
-        if not self.ledger.enforced and self.session_dir is not None:
-            inherited = prior_session_bases(self.session_dir.parent)
 
         # A third source, as conservative as the other two: the bases this
         # session's *own* action log records deploying (FEAT-102). Reading back
@@ -1136,27 +1481,166 @@ class TickEngine:
         # — or a session whose first ticks predate this feature — recover its
         # fleet on the next tick instead of never.
         recorded = {
-            strip_deploy_suffix(name)
-            for name in actions_mod.recorded_deploy_names(self.session_dir)
+            base
+            for base in (
+                strip_deploy_suffix(name)
+                for name in actions_mod.recorded_deploy_names(self.session_dir)
+            )
+            if base
         }
-        inherited |= {base for base in recorded if base}
+
+        # "Nothing to adopt yet" and "adoption is finished" used to be the same
+        # state: one successful pass closed adoption for the life of the session,
+        # so a bot deployed — or first seen — on any later tick was never owned,
+        # and the session then reported its lifetime totals instead of its own
+        # window (CORR-724). A pass is worth repeating while the ledger owns
+        # nothing, and again whenever this session's action log records a deploy
+        # the last pass had not seen; a bot confirmed live on a later tick is
+        # adopted then rather than never. Still one pass per tick at most, so
+        # this stays off the hot path, and both reads below are server-cached.
+        if self._adoption_done and not recorded - self._adoption_deploys:
+            return
+
+        from condor.fetchers.bot_performance import fetch_live_instance_names_checked
+
+        # Fail closed: an unanswered orchestrator means nothing here is known to
+        # be running, and adopting on the unfiltered snapshot would open an
+        # ownership window on bots that may be dead. Deferring costs a tick and
+        # is the same best-effort contract every other failure here uses.
+        live, live_known = await fetch_live_instance_names_checked(client)
+        if not live_known:
+            log.warning(
+                "TickEngine %s: bot adoption deferred (liveness unknown — the "
+                "orchestrator did not answer the active-bots listing)",
+                self.agent_id,
+            )
+            return
+
+        # What a person has said is *not* ours, which outranks all three sources
+        # below. Every one of them is an inference from a name or a log, and a
+        # mis-attributed bot is one somebody has to be able to hand back — a
+        # namespace match cannot be argued with, and a recorded deploy is a
+        # permanent fact that would otherwise re-claim the bot on every restart
+        # for the life of the strategy. Re-read on every pass, so a disown taken
+        # mid-session is honoured by the next one rather than only by the next
+        # process.
+        disowned = read_disowned(getattr(self.strategy, "home", None))
+
+        inherited: set[str] = set(recorded)
+        if not self.ledger.enforced and self.session_dir is not None:
+            inherited |= prior_session_bases(self.session_dir.parent)
 
         now = time.time()
-        for instance_name in all_perf:
-            if live is not None and instance_name not in live:
-                continue
+        held = set(self.ledger.bases())
+        for instance_name in sorted(live):
             base = strip_deploy_suffix(instance_name)
             if base in disowned:
                 continue
             if self.ledger.owns(instance_name) or base in inherited:
                 self.ledger.adopt(instance_name, now)
-        self._adoption_done = True
-        if self.ledger.bases():
+        self._adoption_deploys = recorded
+        # Only what this pass added: with adoption no longer one-shot, logging
+        # the whole book would repeat it on every tick that retries.
+        adopted = sorted(set(self.ledger.bases()) - held)
+        if adopted:
             log.info(
-                "TickEngine %s adopted bots: %s",
-                self.agent_id,
-                ", ".join(self.ledger.bases()),
+                "TickEngine %s adopted bots: %s", self.agent_id, ", ".join(adopted)
             )
+
+    def _live_session_nums(self) -> set[int] | None:
+        """Session numbers of this strategy the supervisor holds engines for.
+
+        ``None`` when the registry cannot be trusted to answer: this engine is
+        not in it, which in a real run only happens before ``start()``. Adoption
+        reads that as "do not adopt" rather than "nothing is alive" — the whole
+        safety of the pass rests on knowing which siblings are still running.
+        """
+        try:
+            engines = _supervisor().for_strategy(self.agent.slug, self.strategy.slug)
+        except Exception:  # pragma: no cover - the registry is a plain dict
+            log.warning("TickEngine %s: supervisor unreadable", self.agent_id)
+            return None
+        nums = {int(getattr(e, "session_num", 0) or 0) for e in engines}
+        if self.session_num not in nums:
+            return None
+        return nums
+
+    async def _adopt_running_executors(self, client) -> None:
+        """Take over the executors a dead session of this strategy left RUNNING.
+
+        The gap :meth:`_adopt_running_bots` closes for bots, closed for
+        executors (CORR-726). An executor's ``controller_id`` is the *session*
+        tag, and a graceful ``stop()`` deliberately leaves positions and
+        executors running, so the ordinary restart hands the next session a
+        book it cannot touch: ``_stop_refusal`` refuses every id outside this
+        tick's own snapshot. Feeding the orphans into that snapshot is the whole
+        fix — the gate itself is left exactly as it is, because widening it
+        would also allow stopping a *live* sibling's position.
+
+        Conservative on three counts: same agent and strategy, owner session not
+        alive in the supervisor, and RUNNING. Re-derived every tick rather than
+        latched, so an id stops being adopted the moment its owner is back, and
+        best-effort: a failed read owns nothing this tick and is retried on the
+        next, never fatal.
+        """
+        self._adopted_executors = []
+        if self.is_experiment:
+            return
+        live = self._live_session_nums()
+        if live is None:
+            return
+
+        from condor.fetchers.executors import build_executor_row, fetch_all_executors
+
+        from .executor_adoption import orphaned_running_rows
+
+        try:
+            rows = await fetch_all_executors(client, status="RUNNING")
+        except Exception:
+            log.warning(
+                "TickEngine %s: executor adoption deferred (the API did not "
+                "answer the running-executor search)",
+                self.agent_id,
+                exc_info=True,
+            )
+            return
+
+        orphans = orphaned_running_rows(rows, self.agent.slug, self.strategy.slug, live)
+        if not orphans:
+            return
+        built = [row for row in map(build_executor_row, orphans) if row["id"]]
+        self._adopted_executors = built
+        log.warning(
+            "TickEngine %s adopted %d orphaned executor(s) from dead session(s): %s",
+            self.agent_id,
+            len(built),
+            ", ".join(f"{row['id']} ({row['controller_id']})" for row in built),
+        )
+
+    def _adopted_executors_summary(self) -> str:
+        """The adopted orphans as a prompt section, or ``""`` when there are none.
+
+        Without this the agent is told it has no executors while an inherited
+        one is live and spending: the executors provider only reports rows under
+        this session's own tag and the bots its ledger owns, so an adopted
+        orphan appears nowhere else in the prompt — and an id the model never
+        sees is one it can never stop.
+        """
+        rows = self._adopted_executors
+        if not rows:
+            return ""
+        lines = [
+            f"ADOPTED from a previous session ({len(rows)}) — these are YOURS to "
+            "monitor and close. A previous session of this strategy opened them "
+            "and is no longer running; stop_executor() on these ids is allowed.",
+        ]
+        for row in rows:
+            lines.append(
+                f"  {row.get('id')} {row.get('pair') or '?'} "
+                f"{row.get('type') or 'executor'} ${row.get('pnl', 0.0):+.2f} "
+                f"(opened by {row.get('controller_id') or '?'})"
+            )
+        return "\n".join(lines)
 
     async def _pnl_series(self) -> list[dict]:
         """This session's realized curve for the live report, or ``[]``.
@@ -1243,6 +1727,53 @@ class TickEngine:
                 f"namespace '{self.ledger.namespace}'",
             )
 
+    def _ingest_throttle_refusals(self) -> None:
+        """Move this session's venue refusals into the tick's refusal log.
+
+        The count is taken where the call is made — the ``hummingbot_api`` MCP
+        subprocess, the one place that sees every agent call and its status —
+        and travels back on the shared log
+        (:mod:`condor.agents.throttle`). Here it becomes a refusal like any
+        other, tagged ``throttle`` with the venue that refused, so the journal
+        and the next tick's prompt both carry it.
+
+        Deliberately *not* folded into ``_last_error``: the agent did nothing
+        wrong, and recording a throttled venue as an agent failure is what made
+        it read as a mysterious strategy bug (GitHub #276). Best-effort — an
+        unreadable log leaves the tick exactly as it was.
+        """
+        try:
+            from condor.agents.throttle import ledger
+
+            book = ledger()
+            book.ingest()
+            for event in book.drain_refusals(self.agent_id):
+                self._refusals.note(
+                    event.get("tool", "") or "a venue call",
+                    event.get("reason", "") or "the venue refused the call",
+                    now=event.get("at") or None,
+                    kind=RefusalLog.KIND_THROTTLE,
+                    venue=event.get("venue", ""),
+                    host=event.get("host", ""),
+                )
+        except Exception:  # noqa: BLE001 - accounting may never fail a tick
+            log.debug("throttle ingest failed", exc_info=True)
+
+    def _throttled_venues(self) -> list[dict[str, Any]]:
+        """The venues that have refused this session, for the status payload.
+
+        Reported as a venue/connector condition and never as this agent's
+        error, which is the whole distinction FEAT-138 exists to draw. Empty
+        when nothing has refused — and empty, not absent, so a reader can tell
+        "checked, nothing" from "no counters at all".
+        """
+        try:
+            from condor.agents.throttle import ledger
+
+            return ledger().session_venues(self.agent_id)
+        except Exception:  # noqa: BLE001
+            return []
+
     def _journal_refusals(self, tick_num: int) -> None:
         """Record what the risk gate refused this tick, and why.
 
@@ -1256,6 +1787,17 @@ class TickEngine:
         if not self._last_refusals or not self.journal:
             return
         for entry in self._last_refusals:
+            if entry.get("kind") == RefusalLog.KIND_THROTTLE:
+                # A separate label on purpose: a reader scanning the journal for
+                # why a session stalled must be able to tell "the venue refused
+                # us" from "the gate refused the agent" without reading prose.
+                venue = entry.get("venue") or "the venue"
+                self.journal.append_action(
+                    tick_num,
+                    "venue_throttled",
+                    f"{venue} refused {entry['tool']} — {entry['reason']}",
+                )
+                continue
             self.journal.append_action(
                 tick_num,
                 "risk_blocked",
@@ -1309,6 +1851,12 @@ class TickEngine:
         is the full set (the session's own tag plus every row of the bots its
         ledger owns), with the RUNNING-only ``executors`` as the fallback for a
         provider result that carries no full set.
+
+        Plus whatever this tick adopted from a dead session of this same
+        strategy (:meth:`_adopt_running_executors`, CORR-726). Those rows are
+        ours by inheritance and by nothing the provider can see — it fetches
+        under this session's own tag — so they are added here rather than
+        by widening the gate itself.
         """
         rows = (
             self._last_skill_data.get("all_executors")
@@ -1316,7 +1864,11 @@ class TickEngine:
             or []
         )
         if not isinstance(rows, list):
-            return {}
+            rows = []
+        # ``getattr``: the gate is also built for stand-in engines that carry
+        # only ``_last_skill_data`` (tests, and the shutdown path's
+        # SimpleNamespace), the same convention ``_finish`` documents.
+        rows = list(rows) + list(getattr(self, "_adopted_executors", None) or [])
         owners: dict[str, str] = {}
         for row in rows:
             if not isinstance(row, dict):
@@ -1347,30 +1899,31 @@ class TickEngine:
           and in a private Telegram chat, where chat id == user id.
         * a name that matched nothing at start stays unusable. The loop is
           long-running, so a configured ``server_name`` that resolved to
-          nothing — the ``"local"`` ``AgentConfig`` fills in, typically — must
-          not silently bind to whatever another user creates under that name
-          later.
+          nothing must not silently bind to whatever another user creates under
+          that name later.
 
         Falls back to the subject's accessible servers, as before, so a run
         with no server configured still works.
+
+        The chain itself is ``config_manager.resolve_stored_server``, shared with
+        the toolset builder, which open-coded the same three steps (CORR-729).
+        ``server_pinned`` is what this run *asked for* — the start route's
+        ``asked_for_it``, a restart's carried pin — and a pinned name raises
+        ``ServerUnavailable`` rather than resolving to a different server. An
+        inherited ``server_name`` keeps falling through, which is the leniency
+        ``_start`` and ``_check_restartable`` deliberately allow.
         """
-        from config_manager import (
-            get_config_manager,
-            get_effective_server,
-            may_use_stored_server,
-        )
+        from config_manager import get_config_manager, resolve_stored_server
 
         cm = get_config_manager()
 
-        def usable(name: str | None) -> bool:
-            return may_use_stored_server(cm, self.user_id, name)
-
-        server_name = self.config.get("server_name")
-        if not usable(server_name):
-            server_name = get_effective_server(self.user_id)
-        if not usable(server_name):
-            accessible = cm.get_accessible_servers(self.user_id)
-            server_name = accessible[0] if accessible else None
+        server_name = resolve_stored_server(
+            cm,
+            self.user_id,
+            self.config.get("server_name"),
+            pinned=self.server_pinned,
+            chat_id=self.user_id,
+        )
         if not server_name:
             return None, None
 
@@ -1378,7 +1931,15 @@ class TickEngine:
         return server_name, server
 
     async def _get_client(self):
-        """Get the Hummingbot API client for this agent."""
+        """Get the Hummingbot API client for this agent.
+
+        ``ServerUnavailable`` is deliberately not swallowed: a pinned server
+        that cannot be used is the one failure here that no retry fixes and that
+        the operator has to be told about by name (CORR-729). Every other
+        failure stays best-effort — ``None``, and the caller decides.
+        """
+        from config_manager import ServerUnavailable
+
         try:
             server_name, server = self._resolve_server()
             if not server:
@@ -1399,6 +1960,8 @@ class TickEngine:
 
             cm = get_config_manager()
             return await cm.get_client(server_name)
+        except ServerUnavailable:
+            raise
         except Exception:
             log.exception("Failed to get API client for agent %s", self.agent_id)
             return None
@@ -1498,12 +2061,27 @@ class TickEngine:
             "controllers": sd.get("controllers", []),
             "close_type_counts": sd.get("close_type_counts", {}),
             "fees_known": sd.get("fees_known", True),
+            # Which scope each figure has, and over which instances (FEAT-135).
+            # The PnL/volume above are one number folded from both scopes, so the
+            # session report renders these beside them rather than letting the
+            # fold read as a single unlabelled total.
+            "session_realized_pnl": sd.get("session_realized_pnl"),
+            "session_volume": sd.get("session_volume"),
+            "session_instances": sd.get("session_instances", []),
+            "lifetime_realized_pnl": sd.get("lifetime_realized_pnl"),
+            "lifetime_volume": sd.get("lifetime_volume"),
+            "lifetime_instances": sd.get("lifetime_instances", []),
             "frequency_sec": self.config.get("frequency_sec", 60),
             "tick_timeout_sec": resolve_tick_timeout(
                 execution_mode=self.config.get("execution_mode", "loop"),
                 strategy=self.config.get("tick_timeout_sec"),
             ),
             "server_name": self.config.get("server_name", ""),
+            # The third pin, beside ``server_name`` and ``agent_key`` below.
+            # Carried so an effective-vs-file diff covers the whole pin set
+            # rather than the two thirds of it a status happened to report
+            # ([[FEAT-136]]).
+            "model_base_url": self.config.get("model_base_url", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": (
@@ -1516,10 +2094,24 @@ class TickEngine:
                 )
             ),
             "agent_key": self._agent_key(),
+            # The pin above is what was asked for; this is what the adapter
+            # answered ([[FEAT-136]]). They differ exactly when a pin did not
+            # apply, which is what a pin audit before a race start looks for.
+            "active_model_id": self._active_model_id,
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,
+            # How long the last completed tick took ([[FEAT-141]]) — the host
+            # capacity reading a slow tick is the symptom of.
+            "last_tick_duration": self._last_tick_duration,
+            # Outcomes, beside the attempt above ([[FEAT-137]]).
+            "last_reading_at": self._last_reading_at,
+            "last_successful_action_at": self._last_successful_action_at,
             "last_error": self._last_error,
+            #: Which venues refused *this* session, with the attempts /
+            #: successes / refusals behind the claim ([[FEAT-138]]). A venue
+            #: condition, deliberately beside ``last_error`` and not inside it.
+            "throttled_venues": self._throttled_venues(),
             "session_dir": str(self.session_dir) if self.session_dir else "",
             "is_experiment": self.is_experiment,
         }
@@ -1543,12 +2135,19 @@ def build_gated_client(
     # tick=True narrows both subprocesses to the loop profile (FEAT-066).
     # This seat runs unattended behind an auto-approving permission callback,
     # so what it can reach at all is decided here, by what gets mounted.
+    # ``server_required``: a tick with no mcp-hummingbot is a trading agent with
+    # no trading tools, which used to be started on a log line (CORR-729).
     mcp_servers = toolsets.build_mcp_servers_for_session(
         engine.user_id,
         engine.chat_id,
         server_name=engine.config.get("server_name"),
         agent_slug=engine.agent.slug,
         tick=True,
+        server_pinned=engine.server_pinned,
+        server_required=True,
+        # So a 429 this seat's tools are handed is counted against this session
+        # and not merely against the agent ([[FEAT-138]]).
+        caller_id=engine.agent_id,
     )
     permission_cb = auto_approve_with_risk_check(
         engine.risk,

@@ -165,14 +165,26 @@ async def run_agent_to_completion(
     # agent_slug the condor MCP tools would target the CHAT's stores.
     effective_server = agent.server_name or server_name
 
-    mcp_servers = toolsets.build_mcp_servers_for_session(
-        user_id,
-        chat_id,
-        server_name=effective_server if agent.server_required else None,
-        agent_slug=slug,
-        delegate_worker=delegate_worker,
-        ask_target=ask_target,
-    )
+    # A server pinned on the Agent itself is chosen, not inherited: it resolves
+    # or this run refuses, naming it, instead of answering on another server's
+    # accounts (CORR-729). The caller's ambient server stays a fallback.
+    from config_manager import ServerUnavailable
+
+    try:
+        mcp_servers = toolsets.build_mcp_servers_for_session(
+            user_id,
+            chat_id,
+            server_name=effective_server if agent.server_required else None,
+            agent_slug=slug,
+            delegate_worker=delegate_worker,
+            ask_target=ask_target,
+            server_pinned=agent.server_required and bool(agent.server_name),
+        )
+    except ServerUnavailable as exc:
+        return (
+            f"The '{slug}' agent is pinned to a server it cannot use: {exc}\n\n"
+            "Re-point the agent at a server you can reach, or clear its pin."
+        )
 
     # Build the client for the (possibly fallback) model through the shared
     # factory (ARCH-192). A pydantic-ai model also filters by the agent's tool
