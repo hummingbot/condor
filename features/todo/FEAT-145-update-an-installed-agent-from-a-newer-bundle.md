@@ -278,7 +278,9 @@ rename.
   `uv run pytest` → **6683 passed, 2 skipped, 0 failed, exit 0 in 105.57 s**;
   `cd frontend && npm test` (`vitest run`) → **220 files, 2286 tests, 0 failed,
   exit 0 in 12.18 s**. Provenance only; both counts move with every item in this
-  workstream, so the criteria above are the invariant. Re-measure.
+  workstream, so the criteria above are the invariant. Re-measure:
+  [[FEAT-139]] landed immediately afterwards and added `tests/test_preflight.py`,
+  so the pytest count has already changed.
 - **`agent_id` in this codebase means the slug** — 446 occurrences across
   `condor/`, `mcp_servers/` and `handlers/`, including `get_engine(agent_id)`
   (`condor/agents/engine.py:125`). [[FEAT-143]]'s new identifier is therefore
@@ -294,7 +296,9 @@ rename.
   only when [[FEAT-144]] reports a finding on it.
 - **Updating does not re-run a preflight.** Whether the agent can still trade
   here after the update — capital, account mode, venue rules — is [[FEAT-139]],
-  and an update is a good moment to invite it. Do not reimplement any of it.
+  now closed (`22952d57`), so the thing to point at is
+  `condor/preflight.py`'s `PreflightReport`. An update is a good moment to
+  invite it; do not reimplement any of it.
 - **An update of a `stock` agent is out of scope.** `publish_to_stock`
   (`condor/layering.py:357`) is the one sanctioned write into the tracked
   library and is admin-only; an imported agent lives in the local layer, and an

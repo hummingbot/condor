@@ -70,6 +70,17 @@ author to maintain one — the same move `publishable_files`
 (`condor/layering.py:322`) already makes for "what is this agent, as opposed to
 what this install accumulated".
 
+**Part of the requirement set is now *declared*, with one reader.**
+[[FEAT-139]] landed at `22952d57` while this was being written and brought
+`AgentConfig.trading_requirements` (`TradingRequirementsConfig`,
+`condor/agents/config.py:153`, the field at `:272`) and
+`condor/preflight.py`'s `Requirements` (`:165`) and
+`requirements_of(config)` (`:204`): a loop now states its connector, trading
+pairs, account, capital asset and amount, position mode and leverage, and
+`Requirements.declared` answers whether it stated anything at all. So the
+connector a loop needs has a single authoritative reader, and this item must
+use it rather than parse `trading_requirements` a second time.
+
 **The receiving install can answer each one.**
 `fetch_available_cex_connectors` (`condor/fetchers/connectors.py:64`) returns
 the connectors with credentials configured intersected with what the server
@@ -122,9 +133,13 @@ ship as easily as anyone. Integrity between a hub and a client is
 contents is [[FEAT-144]].
 
 **4. An author-declared `requires:` block in AGENT.md.** One place to read.
-Rejected: it drifts from the files the moment a loop's connector changes, and
-nothing would notice. A derived block is checkable against the bundle it
-describes.
+Rejected **as the whole answer**, not as the idea: a hand-written block covering
+everything drifts from the files the moment a loop's connector changes and
+nothing notices. But declaration is exactly what [[FEAT-139]] chose for trading
+requirements, deliberately — its module docstring says the checks run "against
+what the loop *states* it needs … rather than against one order" — so the right
+split is to **read what is declared and derive what is not**, with no field
+parsed twice.
 
 ## Decision
 
@@ -201,9 +216,13 @@ artifact would link two unrelated things about one install.
 }
 ```
 
-- `connectors`: the set of `connector_name` values across every
-  `loops/*/loop.md` `default_config` and every
-  `controllers/*/sample_configs/*.yml` in the bundle.
+- `connectors`: for each loop in the bundle, `requirements_of(default_config)`
+  — [[FEAT-139]]'s one reader of a stated requirement — and where
+  `Requirements.declared` is false, the loop's own `default_config.connector_name`;
+  union the `connector_name` of every `controllers/*/sample_configs/*.yml`.
+  `trading_requirements` is never parsed here: a second parse of a field that
+  already has a reader is the two-selectors-disagreeing hazard [[FEAT-133]]
+  names when it refuses to re-implement `publishable_files`.
 - `tools`: `AGENT.md`'s `tools:` list. An empty list means unrestricted and is
   recorded as `[]`, not as "every tool".
 - `agent_key`: the model the agent asks for — the field [[FEAT-133]] already
@@ -284,6 +303,13 @@ them for no safety gain.
       `bitget_perpetual` and `binance_perpetual` and one controller sample
       config naming `hyperliquid_perpetual` is exactly those three, sorted and
       deduplicated
+- [ ] A loop declaring `trading_requirements.connector` contributes that value,
+      read through `requirements_of`, and a loop declaring nothing
+      (`Requirements.declared` false) contributes its `default_config.connector_name`
+      — asserted on one bundle carrying both kinds of loop
+- [ ] No code path in `bundle.py` reads the `trading_requirements` key directly:
+      asserted by a grep-style test over the module, so the field keeps its one
+      reader
 - [ ] `requires.tools` equals the AGENT.md `tools:` list, and is `[]` (not the
       full discovered set) for an agent with an empty allowlist
 - [ ] `requires.skills` splits the loops' skill names into the ones carried in
@@ -315,7 +341,9 @@ them for no safety gain.
   `.venv/bin/python -m pytest -q`, the `make test` command): **6683 passed, 2
   skipped, 0 failed, exit 0 in 105.57 s**. Quoted as provenance only — the
   count moves with every item in this workstream, so the criterion above is the
-  invariant, not the number. Re-measure; never treat 6683 as expected. The
+  invariant, not the number. Re-measure; never treat 6683 as expected —
+  [[FEAT-139]] landed immediately afterwards and added `tests/test_preflight.py`,
+  so the count has already moved. The
   frontend gate at the same sha, `cd frontend && npm test` (`vitest run`):
   **220 files, 2286 tests, 0 failed, exit 0 in 12.18 s**.
 - **If this ships in the same batch as [[FEAT-133]], collapse it into schema 1**
@@ -334,6 +362,9 @@ them for no safety gain.
 - **An unmet requirement is not a trading preflight.** This item answers "does
   this install have that connector at all"; whether capital sits in the right
   asset, in the right account mode, under venue rules that make the strategy
-  viable, is [[FEAT-139]]. Do not re-implement any of its checks here.
+  viable, is [[FEAT-139]] — now **closed** (`22952d57`,
+  `features/done/`), so the hook is concrete code: `condor/preflight.py`'s
+  `PreflightReport` and its `doctor --agent` section. Do not re-implement any of
+  its checks here; the natural wiring is for the import result to point at it.
 - `/features/` is excluded by `.gitignore:187`, and the 28 docs tracked on this
   branch are force-added, so committing this doc needs `git add -f`.

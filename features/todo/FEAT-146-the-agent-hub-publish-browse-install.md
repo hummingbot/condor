@@ -326,7 +326,8 @@ sandbox.
   `uv run pytest` → **6683 passed, 2 skipped, 0 failed, exit 0 in 105.57 s**;
   `cd frontend && npm test` (`vitest run`) → **220 files, 2286 tests, 0 failed,
   exit 0 in 12.18 s**. Provenance only; re-measure, and treat neither count as
-  expected.
+  expected — [[FEAT-139]] landed immediately afterwards and added
+  `tests/test_preflight.py`, so the pytest count has already moved.
 - **The service does not exist and is not in this repo.** Everything here is
   testable against a stub transport, but nothing here is *verified against a
   real hub* until one is standing. The decisions that are not Condor's to make —

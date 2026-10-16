@@ -88,12 +88,16 @@ import edge back into the runtime: `condor/runtime/danger.py` —
 (`:43`) and `CODE_RUN_TOOL = "run_code"` (`:225`).
 
 **The brakes travel with the bundle, and nothing clamps them.**
-`load_full_config` (`condor/agents/config.py:243`) starts from the strategy
+`load_full_config` (`condor/agents/config.py:291`) starts from the strategy
 defaults — a loop's `default_config`, which is bundle content — and overlays
 `config.yml`, which is runtime output and does not travel. `risk_limits` is an
-`AgentConfig` field (`:226`) of type `RiskLimitsConfig` (`:124`), and there is
+`AgentConfig` field (`:271`) of type `RiskLimitsConfig` (`:124`), and there is
 no install-wide maximum anywhere: a grep for a cap or clamp across
-`condor/agents/risk.py` and `condor/preferences.py` returns nothing. So an
+`condor/agents/risk.py` and `condor/preferences.py` returns nothing, and
+[[FEAT-139]]'s new `condor/preflight.py` mentions `risk_limits` nowhere.
+(These three anchors were first read at `87043ad6` and re-pinned at `77f2300d`
+after [[FEAT-139]] landed and moved two of them; the class at `:124` did not
+move, and the reading holds at both shas.) So an
 imported `loop.md` carrying `max_position_size_quote: 999999` and
 `max_open_executors: 50` becomes that agent's guardrails on its first run with
 no install-side veto. The shipped library's own figures are the comparison:
@@ -280,7 +284,9 @@ then `tool_steer`, then `risk_limits` — most-decisive first, so a long
   `uv run pytest` → **6683 passed, 2 skipped, 0 failed, exit 0 in 105.57 s**;
   `cd frontend && npm test` (`vitest run`) → **220 files, 2286 tests, 0 failed,
   exit 0 in 12.18 s**. Provenance only — both counts move with every item in
-  this workstream, so the criteria above are the invariant. Re-measure.
+  this workstream, so the criteria above are the invariant. Re-measure:
+  [[FEAT-139]] landed immediately afterwards and added `tests/test_preflight.py`,
+  so the pytest count has already changed.
 - **This is best-effort and the copy must say so.** Borrow
   `secrets.py`'s own sentence rather than softening it: the bot warns, it does
   not prevent. The honest claim for an imported bundle is that it arrives inert,
