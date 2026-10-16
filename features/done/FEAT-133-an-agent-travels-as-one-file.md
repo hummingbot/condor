@@ -6,7 +6,7 @@ summary: >-
   was install-specific. Give it one portable JSON bundle: export carries
   library content only and scrubs this install's facts; import previews it,
   refuses a slug collision, and lands routines and skills muted.
-status: todo
+status: done
 effort: L
 risk: medium
 new_files:
@@ -17,17 +17,20 @@ new_files:
   - frontend/src/components/settings/ImportAgentDialog.test.tsx
 touched_files:
   - condor/web/routes/agents.py
+  - mcp_servers/condor/server.py
+  - tests/test_agents_routes_order.py
   - mcp_servers/condor/tools/trading_agent.py
   - frontend/src/lib/api.ts
   - frontend/src/pages/Settings.tsx
   - frontend/src/components/agent/workspace/WorkspaceHeader.tsx
-  - frontend/src/pages/AgentWorkspace.tsx
   - agents/condor/skills/agent_builder/SKILL.md
   - condor/agents/README.md
 depends_on:
   - CORR-720
-commits: []
+commits:
+  - "62f3e2ea feat(agents): an agent travels as one file — export a bundle, import it, review before anything runs (FEAT-133)"
 created: 2026-10-07
+closed: 2026-10-15
 ---
 
 ## Objective
@@ -335,69 +338,79 @@ hand with `run_code`. That edit is part of this feature, not a follow-up.
 
 ## Acceptance criteria
 
-- [ ] Exporting an agent whose home contains `AGENT.md`, `skills/s/SKILL.md`,
+- [x] Exporting an agent whose home contains `AGENT.md`, `skills/s/SKILL.md`,
       `routines/r.py`, `controllers/c/c.py`,
       `controllers/c/sample_configs/a.yml`, `loops/l/loop.md` and `shutdown.md`
       produces a bundle whose `files` paths are exactly those seven
-- [ ] That same export, against a home that **also** contains `store/user_7/x`,
+- [x] That same export, against a home that **also** contains `store/user_7/x`,
       `sessions/`, `dry_runs/`, `learnings.md`, `config.yml`, `mutes.yml`,
       `proposals/`, `state/op.json` and `routines/__pycache__/r.pyc`, carries
       none of them (the last two require [[CORR-720]])
-- [ ] A skill in `agents/_shared/skills/` that the agent reads is **not** in the
+- [x] A skill in `agents/_shared/skills/` that the agent reads is **not** in the
       bundle, asserted on a fixture where the agent resolves it successfully
       through `SkillStore` in the same test
-- [ ] The exported `AGENT.md` text has `server_name: ''`, `created_by: 0` and no
+- [x] The exported `AGENT.md` text has `server_name: ''`, `created_by: 0` and no
       `forked_from`/`forked_at`, starting from a home where all four are set to
       non-default values; the file on disk still has all four unchanged
-- [ ] A bundle with `schema: 2` is refused by `parse`, the message names both
+- [x] A bundle with `schema: 2` is refused by `parse`, the message names both
       `2` and `1`, and `agent_home(slug)` does not exist afterwards
-- [ ] A bundle whose `kind` is anything else is refused with a message, not an
+- [x] A bundle whose `kind` is anything else is refused with a message, not an
       exception
-- [ ] A bundle one of whose `files[].text` has been altered after `sha256` was
+- [x] A bundle one of whose `files[].text` has been altered after `sha256` was
       computed is refused, naming that path, and nothing is written
-- [ ] A bundle containing `files[].path` of `../../../agents/condor/AGENT.md`,
+- [x] A bundle containing `files[].path` of `../../../agents/condor/AGENT.md`,
       `/etc/passwd` and `skills/../../x` is refused whole for each: nothing is
       written, and the tracked `agents/condor/AGENT.md` is byte-identical
       afterwards
-- [ ] Importing a bundle whose slug already exists (local **and**, in a second
+- [x] Importing a bundle whose slug already exists (local **and**, in a second
       case, stock-only) answers 409, names the taken slug and a free
       alternative, and leaves the existing agent's `AGENT.md` byte-identical
-- [ ] Importing with `as_slug` set to a free name writes under
+- [x] Importing with `as_slug` set to a free name writes under
       `local_agents_root()/<as_slug>` and nothing under `stock_agents_root()`,
       asserted by comparing the stock tree's file list before and after
-- [ ] The imported `AGENT.md` has `created_by` equal to the importing user's id
+- [x] The imported `AGENT.md` has `created_by` equal to the importing user's id
       and `server_name: ''`
-- [ ] After import, `mutes.yml` lists every imported routine name and every
+- [x] After import, `mutes.yml` lists every imported routine name and every
       imported skill slug, and `AgentStore().get(slug)` returns the agent — so
       it is registered and listed while its code is switched off
-- [ ] After import, the agent's prompt index contains none of the imported
+- [x] After import, the agent's prompt index contains none of the imported
       skills and `assistant_routines` offers none of the imported routines;
       after `PUT /agents/{slug}/mutes` unmutes one routine, that one and only
       that one is offered
-- [ ] Import starts nothing: with a bundle whose `AGENT.md` default_config sets
+- [x] Import starts nothing: with a bundle whose `AGENT.md` default_config sets
       a frequency, no `TickEngine` exists for the slug after import and no
       delegation is recorded
-- [ ] A non-UTF-8 file in the home makes **export** refuse, naming that file,
+- [x] A non-UTF-8 file in the home makes **export** refuse, naming that file,
       rather than producing a bundle the importer will reject
-- [ ] The preview endpoint and the apply endpoint report the same file list,
+- [x] The preview endpoint and the apply endpoint report the same file list,
       the same scrubs and the same mute list for one bundle — asserted by
       comparing the two responses field by field, so the dialog cannot show
       something the write does not do
-- [ ] The preview names every `.py` in the bundle, with its byte count, in a
+- [x] The preview names every `.py` in the bundle, with its byte count, in a
       field distinct from the non-executable files
-- [ ] A round trip is lossless for everything that travels: export an agent,
+- [x] A round trip is lossless for everything that travels: export an agent,
       import it under a new slug on a clean local root, and the two homes'
       `publishable_files` sets and file contents match, modulo the three
       scrubbed fields and the new slug
-- [ ] No restart is needed to use an imported agent: within one process,
+- [x] No restart is needed to use an imported agent: within one process,
       import, then `AgentStore().get`, `StrategyStore().list`,
       `agent_controllers`, `SkillStore(slug)` and
       `discover_routines_from_path` each see the new content on their next call
 - [ ] `uv run pytest` reports no failure that is not already failing on the
       merge-base: run it on the merge-base and on the change in the same turn
-      and compare the two lists, rather than against a recalled count
+      and compare the two lists, rather than against a recalled count —
+      **scoped, not skipped**: this shipped inside plan `89937873-9f5`, whose
+      instruction is to run this item's own criteria plus the tests covering
+      the touched files and leave the whole-suite comparison to the plan's
+      final verification chunk. 450 tests across the 17 related modules pass,
+      and `uv run pytest --collect-only` collects all 6805 (no import broken
+      anywhere). See `## Notes`.
 - [ ] `cd frontend && npm run build` succeeds, and the frontend suite reports no
-      failure absent on the merge-base, compared the same way
+      failure absent on the merge-base, compared the same way — the build
+      succeeds and `npm run lint:ci` exits 0 ("no new lint errors", 41
+      baselined); 69 settings tests and 488 agent/page tests pass. The
+      whole-frontend-suite comparison is scoped to the plan's final chunk for
+      the same reason as the line above.
 
 ## Risks and notes
 
@@ -432,3 +445,47 @@ hand with `run_code`. That edit is part of this feature, not a follow-up.
   `git check-ignore -v` on any fixture path they expect to commit.
 - This doc lives in `features/todo/`, which `.gitignore:187` excludes, so
   filing it leaves no commit. See [[TASK-001]].
+
+## Notes
+
+**Shipped as designed.** Alternative 4 whole: one JSON document, one builder
+(`plan`) behind the preview and the write, export scrubbing the three
+install-local fields, import refusing a collision rather than replacing, and
+every imported routine and skill arriving muted. `[[CORR-720]]` was already
+closed, so `publishable_files` is used unchanged and `bundle.py` carries no
+second filter — the root `state/` and `__pycache__` cases are asserted here
+anyway, so this file fails if that selector ever regresses.
+
+**Three justified deviations.**
+
+1. `plan(bundle, as_slug)` takes an optional `user_id` as well. The preview has
+   to show the `created_by` it will stamp and the `agent_key` it will resolve,
+   and the only way the dialog and the write can be *guaranteed* to agree on
+   those — the criterion two lines up — is for both to come out of one call.
+2. `build(slug)` reads **both** layers, local shadowing stock per file, rather
+   than only `publishable_files(agent_home(slug))`. The design's reasoning for
+   the local layer is about where an import *writes*; an export that could not
+   carry a shipped agent would have been an arbitrary hole, and the read order
+   is the one `resolve_agent_file` already applies.
+3. `frontend/src/pages/AgentWorkspace.tsx` is **not** touched, though the design
+   listed it. Export needed no page state: `ExportAgentButton` takes a slug and
+   does its own fetch, so `WorkspaceHeader` renders it directly. `onDelete` had
+   to be threaded from the page only because it opens that page's confirm
+   dialog. Nothing is owed.
+
+**`mcp_servers/condor/server.py` and `tests/test_agents_routes_order.py` were
+touched beyond the declared list.** The former is where `manage_agents`'
+`Literal` action set and docstring live, so the two new actions are unreachable
+without it; the latter is the repo's standing guard that a literal first segment
+(`/agents/import`) is not swallowed by `/agents/{slug}`, which is exactly the
+shape these routes add.
+
+**Deploying this needs one restart**, as the design says: the three new
+endpoints in `condor/web/routes/agents.py` are not in `main.py`'s
+`modules_to_reload`, so the live API keeps the old shape until the process is
+restarted. Everything above was verified offline against the router directly.
+
+**`FEAT-143` and `FEAT-144` build on this** — schema 2's identity block and a
+content-review pass. Both land in `bundle.py` and in `plan()`, which is why the
+schema constant, the refusal list and the single plan builder are the shapes
+left behind.
