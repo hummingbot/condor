@@ -236,6 +236,36 @@ export function beatState(input: {
   return "unlogged";
 }
 
+/**
+ * The ticks either side of `tick` in the journal's order, or `null` at an end.
+ *
+ * Neighbours by position, not by `tick ± 1`: a journal can skip a number (a
+ * tick that crashed before it was written), and stepping must land on a tick
+ * that has a snapshot rather than on a hole. A tick the journal does not list
+ * (a hand-typed `?tick=`) gets the nearest one each side.
+ */
+export function adjacentTicks(
+  ticks: readonly number[],
+  tick: number,
+): { prev: number | null; next: number | null; index: number } {
+  const sorted = [...ticks].sort((a, b) => a - b);
+  const index = sorted.indexOf(tick);
+  if (index >= 0) {
+    return {
+      prev: index > 0 ? sorted[index - 1] : null,
+      next: index < sorted.length - 1 ? sorted[index + 1] : null,
+      index,
+    };
+  }
+  const before = sorted.filter((t) => t < tick);
+  const after = sorted.filter((t) => t > tick);
+  return {
+    prev: before.length ? before[before.length - 1] : null,
+    next: after.length ? after[0] : null,
+    index: -1,
+  };
+}
+
 /** What hovering a beat says, when the beat itself cannot say it. */
 export const BEAT_TITLES: Record<BeatState, string> = {
   failed: "an action failed on this tick",

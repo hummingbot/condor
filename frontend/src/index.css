@@ -197,6 +197,25 @@ body {
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
+/* Keep dock magnification above the unlayered theme transition rule, which
+   overrides Tailwind transition utilities and would make the ticks snap. */
+[data-testid="tick-spine"] [data-beat-visual] {
+  transition:
+    transform 220ms cubic-bezier(.22, .8, .25, 1),
+    width 220ms cubic-bezier(.22, .8, .25, 1),
+    height 220ms cubic-bezier(.22, .8, .25, 1),
+    box-shadow 180ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="tick-spine"] [data-beat-visual] {
+    transition: none;
+  }
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;
