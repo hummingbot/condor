@@ -598,6 +598,10 @@ def test_shutdown_threshold_disabled_by_default():
 # ── bounded LLM cleanup pass ──
 
 
+#: The server this session resolved, asserted on the winddown seat's mount.
+SHUTDOWN_SERVER = "the-fleet-this-session-is-on"
+
+
 def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
     from condor.agents.risk import RefusalLog, RiskEngine
 
@@ -605,9 +609,11 @@ def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
     engine.agent = SimpleNamespace(slug="acme", tools=[], instructions="You are acme.")
     engine.user_id = 7
     engine.chat_id = 99
-    # What ``build_gated_client`` reads to decide whether the run's server name
-    # was chosen or inherited (CORR-729). Inherited, as a strategy config's is.
+    # The run's one server answer, which ``build_gated_client`` now reads off the
+    # engine rather than re-deriving from ``chat_id`` (CORR-737) — so the LLM
+    # cleanup pass acts on the fleet the deterministic floor just acted on.
     engine.server_pinned = False
+    engine._resolve_server = lambda: (SHUTDOWN_SERVER, {"host": "127.0.0.1"})
     # What the tick's gate reads off the engine (SEC-631).
     engine.risk = RiskEngine()
     engine.journal.get_drawdown_pct = lambda: 0.0
@@ -695,6 +701,11 @@ def test_llm_cleanup_mounts_the_tick_profile(tmp_path, monkeypatch):
     assert mount["tick"] is True
     assert mount["agent_slug"] == "acme"
     assert (mount["user_id"], mount["chat_id"]) == (7, 99)
+    # The winddown seat's trading tools act on the server the run resolved, not
+    # on the one chat 99's ambient default would name (CORR-737). Pinned, because
+    # a name chosen for this run must stick rather than quietly become another.
+    assert mount["server_name"] == SHUTDOWN_SERVER
+    assert mount["server_pinned"] is True
     [(kwargs, _)] = built
     assert kwargs["permission_callback"] is not None
 

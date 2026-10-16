@@ -284,10 +284,12 @@ instructions); validate a cheaper pick with a dry run. **Watch/report loop, priv
 zero cost** → a loaded local model or a cheap OpenRouter one. Override per launch with
 `config={"agent_key": "…"}`. One pick with a one-line why; it's easy to change later.
 
-**Server.** Leave `server_name` empty: it means "follow the chat's server", the only
-value that travels to other installs. Naming the current server **pins** the agent (its
-MCP subprocess and every loop it deploys) to it forever. Pin only when the user says so;
-it can be changed later from the agent's page.
+**Server.** Leave `server_name` empty: it means "follow the owner's server" — their
+default, else the first server they can reach — the only value that travels to other
+installs. A loop of theirs resolves that once and uses it for both its data and its
+trading tools, so it does not follow the default of the chat it was started from. Naming
+the current server **pins** the agent (its MCP subprocess and every loop it deploys) to it
+forever. Pin only when the user says so; it can be changed later from the agent's page.
 
 **Tools allowlist.** Empty = unrestricted — the default. The allowlist binds on every
 model, ACP bridges included: a tool it omits is never mounted. A non-empty list must name

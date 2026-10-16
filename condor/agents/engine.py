@@ -2169,20 +2169,42 @@ def build_gated_client(
     same narrow profile and answer every dangerous call through the same
     ``auto_approve_with_risk_check`` — ledger, refusal log and executor
     ownership included. Does NOT start the client.
+
+    Also the one place the run's server is decided for its *tools*, and it reads
+    that answer off ``engine._resolve_server`` rather than deriving a second one
+    (CORR-737), so a tick's data and its trading tools are always one fleet.
     """
-    # A configured server pins the toolset; None falls back to the chat's.
+    # Resolve the server ONCE per run and hand the name down (CORR-737). This
+    # used to pass ``config["server_name"]`` and let the toolset builder resolve
+    # its own answer from ``engine.chat_id``, while the data client resolved from
+    # ``user_id`` (SEC-164's deliberate substitution in ``_resolve_server``). On
+    # the same rule but different inputs the two legs diverge for every loop that
+    # configures no server — which is every shipped one — so the prompt described
+    # fleet A while ``create_executor`` landed on fleet B. Handing the name down
+    # makes the disagreement unrepresentable: the venue a loop trades on is the
+    # one its *owner* resolves, not the chat it happened to be started from.
+    # Not cached on the engine: ``_resolve_server`` re-checks existence and reach
+    # every tick, which is CORR-729's "a name that matched nothing at start stays
+    # unusable" property for a long-running loop. The chain is dict lookups.
+    resolved, _ = engine._resolve_server()
     # tick=True narrows both subprocesses to the loop profile (FEAT-066).
     # This seat runs unattended behind an auto-approving permission callback,
     # so what it can reach at all is decided here, by what gets mounted.
+    # ``server_pinned``: a name resolved for THIS run must stick — if it has
+    # since become unusable the toolset raises ``ServerUnavailable`` naming it
+    # rather than quietly resolving to a second server.
     # ``server_required``: a tick with no mcp-hummingbot is a trading agent with
-    # no trading tools, which used to be started on a log line (CORR-729).
+    # no trading tools, which used to be started on a log line (CORR-729). It
+    # still carries the empty case, where nothing resolved for the owner at all.
     mcp_servers = toolsets.build_mcp_servers_for_session(
         engine.user_id,
+        # Still the chat the condor MCP posts into and resolves its session from
+        # (``_condor_mcp_args``) — it no longer selects the trading venue.
         engine.chat_id,
-        server_name=engine.config.get("server_name"),
+        server_name=resolved,
         agent_slug=engine.agent.slug,
         tick=True,
-        server_pinned=engine.server_pinned,
+        server_pinned=bool(resolved),
         server_required=True,
         # So a 429 this seat's tools are handed is counted against this session
         # and not merely against the agent ([[FEAT-138]]).
