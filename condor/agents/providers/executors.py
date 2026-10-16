@@ -142,9 +142,9 @@ class ExecutorsProvider(BaseProvider):
         unpriced = await price_pending_rows(client, running)
         if unpriced:
             lines.append(
-                f"  ⚠️ No price for pending executor(s) {', '.join(unpriced)} — "
+                f"  ⚠️ No size for executor(s) {', '.join(unpriced)} — "
                 "their exposure is unknown, so new positions are refused until "
-                "they fill or a price is available."
+                "they fill, report their own size, or a price is available."
             )
         total_exposure = sum(r.get("amount", 0) for r in running)
 

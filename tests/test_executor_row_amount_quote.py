@@ -169,3 +169,115 @@ def test_pending_order_with_no_price_is_reported_unpriced_not_flat(monkeypatch):
 
     assert data["total_exposure"] == 0.0
     assert data["unpriced_exposure"] == ["hype-1"]
+
+
+# ── An executor whose own sizing field is absent (CORR-740) ──
+#
+# ``_quote_size`` returns 0 for two different reasons and ``price_pending_rows``
+# used to resolve only one of them: it looked for a base ``config.amount`` and
+# skipped every row without one, so an lp with no ``total_value_quote``, a grid
+# with no ``total_amount_quote`` and a dca with an empty ladder all entered the
+# book at $0 *and* were reported as priced, leaving ``book_trusted`` True with
+# open rows valued at nothing.
+
+
+def _lp_row(**overrides):
+    """A RUNNING lp executor, sized by nothing the row carries."""
+    ex = {
+        "id": "lp-1",
+        "status": "RUNNING",
+        "config": {
+            "type": "lp_executor",
+            "connector_name": "meteora",
+            "trading_pair": "SOL-USDC",
+        },
+    }
+    ex.update(overrides)
+    return ex
+
+
+def _provider_data_for(monkeypatch, raw, price=150.0):
+    async def _fake(client, agent_id, **_kw):
+        return AgentPerformance(agent_id=agent_id, executors=[_executor_row(raw)])
+
+    async def _price(client, *_a, **_kw):
+        return price
+
+    monkeypatch.setattr("condor.agents.performance.fetch_agent_performance", _fake)
+    monkeypatch.setattr("condor.fetchers.market_data.fetch_current_price", _price)
+    return asyncio.run(ExecutorsProvider().execute(object(), {}, agent_id="a_1")).data
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _lp_row(),
+        _lp_row(custom_info={"break_even_price": 1.0}),
+        {
+            "id": "lp-1",
+            "status": "RUNNING",
+            "config": {"type": "grid_executor", "trading_pair": "SOL-USDC"},
+        },
+        {
+            "id": "lp-1",
+            "status": "RUNNING",
+            "config": {"type": "dca_executor", "amounts_quote": []},
+        },
+    ],
+    ids=["lp-no-custom-info", "lp-custom-info-without-the-field", "grid", "dca"],
+)
+def test_an_unsized_executor_is_reported_unknown_not_folded_in_at_zero(
+    monkeypatch, raw
+):
+    data = _provider_data_for(monkeypatch, raw)
+
+    assert data["total_exposure"] == 0.0
+    assert data["unpriced_exposure"] == ["lp-1"]
+
+
+def test_a_sizing_field_present_and_zero_is_a_fact_not_absent_data(monkeypatch):
+    """The criterion that separates this from "report every zero row".
+
+    An lp position withdrawn but not closed reports ``total_value_quote: 0`` and
+    a grid can carry ``total_amount_quote: 0``. Those rows are worth nothing and
+    say so; refusing every create while one is open would be the shortcut, and
+    the repo's own display rule (``dex/format.ts``) is that a genuine $0 is a
+    figure and only a missing one renders as an em-dash.
+    """
+    for raw in (
+        _lp_row(custom_info={"total_value_quote": 0}),
+        {"id": "lp-1", "status": "RUNNING", "config": {"total_amount_quote": 0}},
+        {"id": "lp-1", "status": "RUNNING", "config": {"amount": 0}},
+    ):
+        data = _provider_data_for(monkeypatch, raw)
+
+        assert data["total_exposure"] == 0.0
+        assert data["unpriced_exposure"] == []
+
+
+@pytest.mark.parametrize(
+    "ex,known",
+    [
+        ({"config": {"type": "lp_executor"}}, False),
+        ({"config": {"type": "dca_executor", "amounts_quote": []}}, False),
+        ({"config": {"type": "lp_executor"}, "custom_info": {}}, False),
+        ({"config": None}, False),
+        ({"config": {"total_amount_quote": 0}}, True),
+        ({"config": {"amounts_quote": [0]}}, True),
+        ({"config": {"amount": 0}}, True),
+        ({"custom_info": {"total_value_quote": 0}}, True),
+        ({"filled_amount_quote": 0}, True),
+    ],
+)
+def test_quote_size_checked_reports_whether_any_sizing_field_was_there(ex, known):
+    """``known`` is about presence, never about the value being nonzero."""
+    assert build_executor_row(ex)["amount_known"] is known
+
+
+def test_quote_size_is_its_checked_siblings_value():
+    """The plain form delegates, after ``journal.get_drawdown_pct``."""
+    from condor.fetchers.executors import _quote_size, _quote_size_checked
+
+    args = ({"filled_amount_quote": 150.0}, {"amount": 2.9}, {}, 0.0, 0.0)
+
+    assert _quote_size(*args) == _quote_size_checked(*args)[0] == 150.0

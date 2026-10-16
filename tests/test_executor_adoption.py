@@ -617,6 +617,83 @@ def test_a_failed_price_read_still_adopts_and_does_not_raise(tmp_path, monkeypat
     assert engine._adopted_unpriced == ["dead-1"]
 
 
+def test_an_inherited_lp_sized_by_nothing_is_adopted_unvalued(tmp_path, monkeypatch):
+    """The Agent Builder Cup orphan itself: an lp with no size to read (CORR-740).
+
+    ``_row`` is the shape this file was written for — an ``lp_executor`` whose
+    config carries no ``amount`` and which has no ``custom_info`` at all. No
+    price lookup can size it (its value is the venue's valuation of two token
+    balances, not a pair's price), so it was skipped by the pricing pass and
+    adopted at ``amount: 0.0`` *and* reported priced, which left the risk book
+    trusting a total that excluded an open position of unknown size.
+    """
+    engine, client = _engine(tmp_path, monkeypatch, [_row("dead-1", DEAD_TAG)])
+    asked: list = []
+
+    async def _price(client, **_kw):
+        asked.append(_kw)
+        return 150.0
+
+    monkeypatch.setattr("condor.fetchers.market_data.fetch_current_price", _price)
+
+    asyncio.run(engine._adopt_running_executors(client))
+
+    assert [r["amount"] for r in engine._adopted_executors] == [0.0]
+    assert engine._adopted_unpriced == ["dead-1"]
+    # Reported, not priced: a live feed answering $150 cannot value an lp
+    # position, so the row is never even looked up.
+    assert asked == []
+
+    # ...and the book says so, rather than counting the row as a valued $0.
+    book, captured = _book_engine(
+        adopted=engine._adopted_executors,
+        own_rows=[],
+        own_exposure=0.0,
+        adopted_unpriced=engine._adopted_unpriced,
+    )
+    asyncio.run(book._gather_tick_context(client=None))
+
+    assert captured["state"].executor_count == 1
+    assert not captured["state"].book_trusted
+    assert "dead-1" in captured["state"].drift_reason
+
+
+def test_the_pricing_pass_names_the_same_set_whether_it_raised_or_not(
+    tmp_path, monkeypatch
+):
+    """The failure arm and the success arm agreed on nothing (CORR-740).
+
+    Nine lines apart, the ``except`` arm reported *every* unvalued row while the
+    pricing call reported only the base-denominated ones. Over three rows — one
+    unsized, one base-denominated with no price, one genuinely worth zero — the
+    two must name the same two ids.
+    """
+    unsized = _row("e-unsized", DEAD_TAG)
+    pending = _row("e-pending", DEAD_TAG)
+    pending["config"].update({"amount": 2.0, "connector_name": "hyperliquid_perpetual"})
+    flat = _row("e-flat", DEAD_TAG)
+    flat["custom_info"] = {"total_value_quote": 0}
+    rows = [unsized, pending, flat]
+
+    async def _no_price(client, **_kw):
+        return None
+
+    monkeypatch.setattr("condor.fetchers.market_data.fetch_current_price", _no_price)
+    # A fresh home per engine, or the second one mints session 3.
+    engine, client = _engine(tmp_path / "ok", monkeypatch, rows)
+    asyncio.run(engine._adopt_running_executors(client))
+    on_success = engine._adopted_unpriced
+
+    async def _boom(client, rows):
+        raise RuntimeError("the price service is down")
+
+    monkeypatch.setattr("condor.fetchers.executors.price_pending_rows", _boom)
+    engine, client = _engine(tmp_path / "raised", monkeypatch, rows)
+    asyncio.run(engine._adopt_running_executors(client))
+
+    assert on_success == engine._adopted_unpriced == ["e-unsized", "e-pending"]
+
+
 def test_this_sessions_own_executors_are_never_adopted(tmp_path, monkeypatch):
     """Why the two halves of the sum cannot double-count.
 

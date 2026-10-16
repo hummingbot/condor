@@ -174,6 +174,16 @@ def _quote_size(
     entry_price: float,
     current_price: float,
 ) -> float:
+    return _quote_size_checked(ex, cfg, custom_info, entry_price, current_price)[0]
+
+
+def _quote_size_checked(
+    ex: Dict[str, Any],
+    cfg: Dict[str, Any],
+    custom_info: Dict[str, Any],
+    entry_price: float,
+    current_price: float,
+) -> tuple[float, bool]:
     """An executor's size in QUOTE currency -- the row's ``amount``.
 
     Each executor type sizes itself in a different field and a different unit:
@@ -194,36 +204,114 @@ def _quote_size(
     That 0 means "not priced here", not "no exposure": a caller that has a
     client prices such a row at the live price with
     :func:`price_pending_rows`, below.
+
+    ``known`` separates the two meanings that 0 used to carry, because only one
+    of them is resolvable downstream. It is ``False`` only when *none* of the
+    fields above was present at all -- an lp with no ``total_value_quote``, a
+    grid with no ``total_amount_quote``, a dca with an empty ladder. Such a row
+    has no size anyone can compute, so a caller summing exposure must report it
+    unknown rather than fold it in at $0 (CORR-740); ``price_pending_rows``
+    cannot rescue it, since the only live source here is a *pair's* price and
+    none of these types is denominated in base.
+
+    A field present and zero is known-zero: an lp position withdrawn but not
+    closed reports ``total_value_quote: 0``, and that is a fact about the
+    position, the same distinction the display layer already draws between
+    ``$0.00`` and an em-dash (``frontend/src/components/dex/format.ts``).
+
+    The ``(value, known)`` sibling with the plain form delegating to it is the
+    repo's own shape for an unreadable metric, after
+    :meth:`condor.agents.journal.JournalManager.get_drawdown_pct_checked`.
     """
+    ladder = cfg.get("amounts_quote")
+    # Presence, not truth: every branch below reads one of these, so if all of
+    # them are absent the function had nothing to size the row from.
+    known = (
+        cfg.get("total_amount_quote") is not None
+        or (isinstance(ladder, list) and bool(ladder))
+        or cfg.get("amount") is not None
+        or custom_info.get("total_value_quote") is not None
+        or ex.get("filled_amount_quote") is not None
+    )
     total = float(cfg.get("total_amount_quote") or 0)
     if total > 0:
-        return total
-    ladder = cfg.get("amounts_quote")
+        return total, known
     if isinstance(ladder, list) and ladder:
         try:
             total = sum(float(v or 0) for v in ladder)
         except (TypeError, ValueError):
             total = 0.0
         if total > 0:
-            return total
+            return total, known
     base = float(cfg.get("amount") or 0)
     if base > 0:
         price = entry_price or float(cfg.get("price") or 0) or current_price
         if price > 0:
-            return base * price
-        return float(ex.get("filled_amount_quote") or 0)
-    return float(custom_info.get("total_value_quote") or 0)
+            return base * price, known
+        return float(ex.get("filled_amount_quote") or 0), known
+    return float(custom_info.get("total_value_quote") or 0), known
+
+
+def _pending_base(row: Dict[str, Any]) -> float:
+    """The BASE amount :func:`price_pending_rows` would value ``row`` from."""
+    try:
+        return float((row.get("config") or {}).get("amount") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _size_unknown(row: Dict[str, Any]) -> bool:
+    """Whether :func:`build_executor_row` found no sizing field for ``row``.
+
+    Read off the row rather than re-derived from its ``config``: the field list
+    belongs to :func:`_quote_size_checked`, which is also the only place that
+    can see ``filled_amount_quote``, and the last time this transform was
+    written twice the two copies drifted (see :func:`build_executor_row`).
+
+    A row some other builder produced -- ``bot_performance.bot_executor_rows``
+    emits the same shape from a controller snapshot -- carries no verdict, and
+    absence means "not this helper's business", the behaviour it had before.
+    """
+    return not row.get("amount_known", True)
+
+
+def unpriced_row_ids(rows: List[Dict[str, Any]]) -> List[str]:
+    """Ids :func:`price_pending_rows` would leave of unknown size.
+
+    The verdict it reaches with every price lookup failing, so a caller whose
+    ``except`` arm has no return value from it names the same set its success
+    arm would. The two used to disagree -- the failure arm reported every
+    unvalued row and the success arm only the base-denominated ones (CORR-740).
+    """
+    return [
+        row.get("id") or "?"
+        for row in rows
+        if not float(row.get("amount") or 0) > 0
+        and (_pending_base(row) > 0 or _size_unknown(row))
+    ]
 
 
 async def price_pending_rows(client: Any, rows: List[Dict[str, Any]]) -> List[str]:
     """Value the rows :func:`build_executor_row` could not, at the live price.
 
-    A market order still pending at the next tick reports no entry, no limit
-    price and no fill, so ``build_executor_row`` -- pure, no client -- sizes it
-    at 0. The risk gate priced that same create at the live price before
-    approving it (``condor.agents.risk._planned_amount_quote``); dropping it
-    from the book one tick later let a second create through a position cap the
-    two together exceed. So it is priced here the way the gate priced it.
+    Two shapes arrive here unvalued, and only one of them can be priced. A
+    market order still pending at the next tick reports no entry, no limit price
+    and no fill, so ``build_executor_row`` -- pure, no client -- sizes it at 0;
+    the risk gate priced that same create at the live price before approving it
+    (``condor.agents.risk._planned_amount_quote``), and dropping it from the
+    book one tick later let a second create through a position cap the two
+    together exceed. So it is priced here the way the gate priced it.
+
+    The other is an executor whose own sizing field is absent: an lp with no
+    ``total_value_quote``, a grid with no ``total_amount_quote``, a dca with an
+    empty ladder. None of those is denominated in base and the only live source
+    here is a pair's price, so pricing cannot be the answer -- reporting can.
+    Such a row is appended to the returned ids unpriced instead of entering the
+    book at $0 and being counted as valued (CORR-740).
+
+    A row whose sizing field was present and zero is neither: it is worth zero
+    and says so, and refusing creates over it would refuse them for every
+    withdrawn-but-open lp position.
 
     Lives beside :func:`_quote_size`, whose 0 it exists to resolve, because two
     callers need it: the agents' executors provider over its own fetched rows,
@@ -231,8 +319,8 @@ async def price_pending_rows(client: Any, rows: List[Dict[str, Any]]) -> List[st
     rows that never pass through the provider at all, since the provider fetches
     under this session's own controller tag.
 
-    Rows are updated in place. Returns the ids that still have no price: their
-    exposure is unknown, not zero, and the caller must say so.
+    Rows are updated in place. Returns the ids whose exposure is still unknown,
+    not zero, and the caller must say so.
     """
     from condor.fetchers.market_data import fetch_current_price
 
@@ -241,11 +329,10 @@ async def price_pending_rows(client: Any, rows: List[Dict[str, Any]]) -> List[st
     for row in rows:
         if row.get("amount", 0) > 0:
             continue
-        try:
-            base = float((row.get("config") or {}).get("amount") or 0)
-        except (TypeError, ValueError):
-            base = 0.0
+        base = _pending_base(row)
         if base <= 0:
+            if _size_unknown(row):
+                unpriced.append(row.get("id") or "?")
             continue
         market = (row.get("connector") or "", row.get("pair") or "")
         if market not in prices:
@@ -276,7 +363,9 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
     Pure: no client, no caching, no UI. The keys are the agent-row shape that
     :func:`condor.fetchers.bot_performance.bot_executor_rows` also emits and the
     agents API serves; ``ExecutorInfo.from_raw`` renames them for the REST/WS
-    wire. Casing of ``status`` and ``close_type`` is the callers' business -- they
+    wire. ``amount_known`` is the one key only this builder sets, because only
+    a raw executor has sizing fields to be absent -- its absence on a row means
+    the same as ``True`` (:func:`_size_unknown`). Casing of ``status`` and ``close_type`` is the callers' business -- they
     are returned as the API spelled them, only stringified.
     """
     config = ex.get("config")
@@ -318,7 +407,13 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
             current_price = _candidate
             break
 
-    amount = _quote_size(ex, cfg, custom_info, entry_price, current_price)
+    # Computed once, here, where the fields are read: ``amount_known`` is the
+    # difference between "worth nothing" and "nothing could size this", and a
+    # consumer that re-derived it from the row would be the second copy of
+    # ``_quote_size``'s field list (CORR-740).
+    amount, amount_known = _quote_size_checked(
+        ex, cfg, custom_info, entry_price, current_price
+    )
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
@@ -345,6 +440,7 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
         "entry_price": entry_price,
         "current_price": current_price,
         "amount": amount,
+        "amount_known": amount_known,
         "timestamp": float(cfg.get("timestamp") or ex.get("timestamp") or 0),
         "close_timestamp": float(ex.get("close_timestamp") or 0),
         # Top-level first, and that is not a style choice. The creator's

@@ -218,9 +218,11 @@ class TickEngine:
     _adopted_executors: list[dict[str, Any]] = field(
         default_factory=list, init=False, repr=False
     )
-    # Ids among ``_adopted_executors`` nothing could put a quote size on — a
-    # pending market order, whose size ``build_executor_row`` leaves at 0
-    # because it is pure. Unioned into the tick's unpriced set (CORR-735) so an
+    # Ids among ``_adopted_executors`` nothing could put a quote size on —
+    # either a pending market order, whose size ``build_executor_row`` leaves at
+    # 0 because it is pure, or an executor whose own sizing field is absent (an
+    # lp with no ``total_value_quote``), which no price lookup can rescue
+    # (CORR-740). Unioned into the tick's unpriced set (CORR-735) so an
     # inherited row of unknown size refuses creates instead of reading as $0.
     _adopted_unpriced: list[str] = field(default_factory=list, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
@@ -996,7 +998,7 @@ class TickEngine:
         if unpriced:
             risk_state.book_trusted = False
             risk_state.drift_reason = (
-                f"no price for pending executor(s) {', '.join(unpriced)}, "
+                f"no size for executor(s) {', '.join(unpriced)}, "
                 "so their exposure is unknown"
             )
         self._apply_drift_verdict(risk_state, drift_result)
@@ -1616,6 +1618,7 @@ class TickEngine:
             build_executor_row,
             fetch_all_executors,
             price_pending_rows,
+            unpriced_row_ids,
         )
 
         from .executor_adoption import orphaned_running_rows
@@ -1649,9 +1652,10 @@ class TickEngine:
                 self.agent_id,
                 exc_info=True,
             )
-            unpriced = [
-                row["id"] for row in built if not float(row.get("amount") or 0) > 0
-            ]
+            # The same set the success arm names, from the same predicate: this
+            # arm used to report *every* unvalued row, so the two disagreed
+            # over any row that is genuinely worth zero (CORR-740).
+            unpriced = unpriced_row_ids(built)
         self._adopted_executors = built
         self._adopted_unpriced = unpriced
         log.warning(
