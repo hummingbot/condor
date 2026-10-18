@@ -1393,6 +1393,11 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
     same way as direct executors. Realized PnL from already-closed positions is
     not row-level here (the snapshot only summarizes open positions); it is still
     reflected in the aggregate totals the caller applies.
+
+    Each row carries its own ``amount_known`` verdict, because its quote size is
+    derived -- ``amount`` x ``breakeven_price`` off the upstream snapshot -- and
+    so has its own absence mode, which no verdict from the raw-executor builder
+    describes (CORR-742).
     """
     from datetime import datetime
 
@@ -1413,6 +1418,15 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
             entry = float(pos.get("breakeven_price", 0) or 0)
             amount = float(pos.get("amount", 0) or 0)
             unrealized = float(pos.get("unrealized_pnl_quote", 0) or 0)
+            # The row's own sizing verdict, decided where its two fields are
+            # read -- the shape ``executors.build_executor_row`` carries and
+            # ``executors._size_unknown`` reads (CORR-740). A position holding
+            # base at a breakeven of 0 has no valid notional, so an absent or
+            # zero price over a nonzero amount is *unknown* exposure, not $0,
+            # and the brakes must refuse creates over it rather than approve
+            # them against a total that is missing it. A genuinely flat
+            # position (``amount == 0``) is known-zero and refuses nothing.
+            amount_known = not (amount != 0 and entry <= 0)
             rows.append(
                 {
                     "id": f"{controller_id}:{pair}" if pair else controller_id,
@@ -1430,6 +1444,7 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
                     "entry_price": entry,
                     "current_price": 0.0,
                     "amount": abs(amount) * entry,
+                    "amount_known": amount_known,
                     "timestamp": ts_epoch,
                     "close_timestamp": 0.0,
                     "controller_id": controller_id,

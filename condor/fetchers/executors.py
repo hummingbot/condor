@@ -268,9 +268,11 @@ def _size_unknown(row: Dict[str, Any]) -> bool:
     can see ``filled_amount_quote``, and the last time this transform was
     written twice the two copies drifted (see :func:`build_executor_row`).
 
-    A row some other builder produced -- ``bot_performance.bot_executor_rows``
-    emits the same shape from a controller snapshot -- carries no verdict, and
-    absence means "not this helper's business", the behaviour it had before.
+    Both builders of this shape set it: this module's
+    :func:`build_executor_row` from a raw executor's sizing fields, and
+    ``bot_performance.bot_executor_rows`` from the two fields its controller
+    row's size is derived from (CORR-742). On a row from anywhere else absence
+    still means "not this helper's business", the behaviour it had before.
     """
     return not row.get("amount_known", True)
 
@@ -363,9 +365,10 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
     Pure: no client, no caching, no UI. The keys are the agent-row shape that
     :func:`condor.fetchers.bot_performance.bot_executor_rows` also emits and the
     agents API serves; ``ExecutorInfo.from_raw`` renames them for the REST/WS
-    wire. ``amount_known`` is the one key only this builder sets, because only
-    a raw executor has sizing fields to be absent -- its absence on a row means
-    the same as ``True`` (:func:`_size_unknown`). Casing of ``status`` and ``close_type`` is the callers' business -- they
+    wire. ``amount_known`` is set here from a raw executor's sizing fields and
+    there from the two a controller position's size is derived from; on a row
+    from any other builder its absence means the same as ``True``
+    (:func:`_size_unknown`). Casing of ``status`` and ``close_type`` is the callers' business -- they
     are returned as the API spelled them, only stringified.
     """
     config = ex.get("config")
