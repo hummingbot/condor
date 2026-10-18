@@ -509,6 +509,66 @@ YAML config — which is what `condor/sharing/scrub.py` does to a transcript, wh
 a mangled string costs nothing — would produce an agent that silently does not
 work. And it is best-effort, so the copy says so: it warns, it does not prevent.
 
+### The hub: publish, browse, install
+
+Everything above stops at the file, so handing an agent to a stranger still
+meant emailing one. `condor/hub.py` is the distribution half (FEAT-146):
+
+```
+manage_agents(action="hub_browse")                       # no account needed
+manage_agents(action="hub_install", path="<listing_id>")  # path is the listing id
+manage_agents(action="publish_hub", agent_slug="river_scalper",
+              notes="Widened the grid")                   # admin only
+```
+
+The dashboard has the same three doors in Settings → Condor → **Agents**:
+a browse-and-install panel (`HubBrowser.tsx`), the token field, and **Publish**
+beside Export on the agent's own workspace header. The service itself lives in
+a codebase that is not this one; standing it up is TASK-004.
+
+**The trust model is three sentences, and the rest hangs off them.**
+
+1. **A bundle is untrusted code wherever it came from, and the gate is on the
+   receiving install.** Condor installs any well-formed bundle — from a file,
+   from a friend, from the hub — and never requires a hub signature. The gate is
+   what the two sections above already built: every executable named before
+   anything is written, the findings beside that list, routines and skills muted,
+   no execution consent for any imported `.py`, nothing started.
+2. **The hub is a discovery and moderation service, not a security boundary.** A
+   `validated` badge is a claim that a human reviewed *one submitted revision at
+   one point in time*. It is carried in the listing, rendered as provenance, and
+   read by nothing that decides whether to write — asserted by comparing a
+   `community` install against a `validated` one and requiring the two responses
+   to differ in the badge alone. A badge never shortens the review: a bundle
+   validated as submitted is not the bundle the operator runs after editing it.
+3. **Integrity is a content digest over HTTPS, not a signature.** The listing
+   carries the bundle's sha256; `hub.fetch` verifies the downloaded bytes
+   against it *before any caller parses them*, and FEAT-133's per-file digests
+   catch any later edit. `author` is an account claim the hub attests at upload;
+   nothing binds it to the bytes, and every surface says so.
+
+The consequence, which is the one hard requirement this places on the service:
+**the hub re-runs `bundle_review` on every submission** and publishes its
+findings with the listing (`review_version` says which review produced them, so
+drift with a client's own copy is visible). The export-side review is advice to
+the author — who runs their own copy of the exporter — and the submission-side
+one is the only review whose input the author does not control.
+
+Three design points worth not re-litigating:
+
+| Decision | Why |
+|---|---|
+| `HUB_URL` is **compiled in** and no environment variable moves it | It is the SSRF answer, not tidiness. FEAT-133 refused import-from-URL because "the Condor process can reach `localhost` and cloud metadata endpoints". A compiled-in base, a listing id through `validate_identifier` (plus a refusal of `.`/`..`, which that charset admits) before any request exists, and an opener that refuses redirects, together mean the server-side fetch is not a fetch of a user-supplied URL at all. Same rule as `condor/sharing/outbox.py`'s collector address. |
+| **No durable outbox** | The sharing queue exists because its sweep sends what nobody is watching and because a revocation must survive a restart. A publish is an interactive act with a human watching the result; a failure is reported and retried by pressing the button again. |
+| The unpublish carries **no delete-token capability** | `condor/sharing/wire.py`'s `delete_token_hash` exists because that collector "must not know who you are". A hub publish is authenticated by an account, and the same account authenticates the withdrawal. |
+
+Publishing is admin-only — tighter than the other agent writes, because there is
+one install-wide token and a claim created under it is made in that account's
+name — and it sends the bytes `GET /agents/{slug}/bundle` returns, built by the
+same `build`. So it inherits the export's refusal for a value that can only be a
+secret, which is the refusal written for exactly this moment: a published bundle
+cannot be unpublished out of somebody's download.
+
 ---
 
 ## 5. Mental model

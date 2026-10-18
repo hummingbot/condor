@@ -351,6 +351,52 @@ There is nothing to turn off on a fresh install: the default is that nothing is
 shared, and it stays that way until somebody presses the button — or turns on
 Always, which nobody but that user can do for them.
 
+## Publishing an agent to the hub
+
+Separate from everything above, and the one place where content leaves this box
+that is not a conversation. **Publishing an agent uploads that agent's files.**
+
+**What is sent.** Exactly the bytes `GET /agents/{slug}/bundle` would hand you
+as a download — one JSON document carrying the agent's *library*: its
+`AGENT.md`, skills, routines, controllers and loops. Nothing this install
+accumulated by running it goes: not its memory store, its journals, its session
+or dry-run output, its `learnings.md`, its mutes, or its local `config.yml`. The
+three install-local front-matter fields are rewritten in the bundle's copy, so
+the server you pinned it to and your own Telegram id do not travel either. You
+can read the whole thing before it goes: press Export on the same agent and open
+the file, or look at the preview the Publish button shows, which is built from
+the identical call.
+
+**When it is sent.** Only when somebody presses Publish, or calls
+`manage_agents(action="publish_hub", …)`. There is no automatic publish, no
+scheduled sweep, and nothing is queued — a publish that fails is reported and
+goes nowhere until it is retried by hand. It is **admin-only**: there is one
+install-wide token and a listing created under it is a claim in that account's
+name.
+
+**What it is not.** Publishing is not sharing a conversation and reaches a
+different service. Browsing and installing from the hub send nothing about this
+install at all — no identifier, no token, no telemetry — because browsing is
+anonymous.
+
+**It cannot be recalled.** Unpublishing removes the listing; it does not reach
+into anybody's download. The Publish button says so before it goes, which is why
+it confirms and Export does not.
+
+**Before you publish, read the review.** The export refuses outright for a value
+that can only be a private key or a recovery phrase, and warns about the rest —
+hosts the agent dials, risk limits it brings, money-moving tools its prose names.
+That refusal exists for this moment specifically: while the bundle is still on
+your machine, a key is fixable.
+
+**How to turn it off.** Do not paste a token. Publishing is impossible without
+one, and clearing the field in Settings → Condor → Agents revokes it locally:
+
+```yaml
+hub:
+  token: ''
+```
+
 ## Changes to this document
 
 Adding anything to the collected list requires a change to `schema.py`, a change

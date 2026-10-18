@@ -7,14 +7,15 @@ import {
   RefreshCw,
   Upload,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
-  api,
   type AgentBundleFinding,
   type AgentImportPlan,
   type AgentUpdatePlan,
 } from "@/lib/api";
+
+import { fileSource, type BundleSource } from "./bundleSource";
 
 /**
  * How each review category is introduced, most-decisive first (FEAT-144).
@@ -105,8 +106,27 @@ const VERDICT_ORDER = [
  * dialog renders is what the write does — findings included, which is why the
  * list here cannot differ from the one the import recorded (FEAT-144).
  */
-export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
-  const [file, setFile] = useState<File | null>(null);
+export function ImportAgentDialog({
+  onImported,
+  source,
+  provenance,
+}: {
+  onImported: () => void;
+  /**
+   * Where the bundle comes from. Omitted means "ask the operator for a file",
+   * which is the panel's own case; the hub passes a listing-backed source and
+   * this dialog previews it on sight instead of showing a picker.
+   */
+  source?: BundleSource;
+  /**
+   * Rendered above the plan. The hub puts its badge, its author attestation
+   * and the trust sentence here — facts about where this came from, which is
+   * exactly the part a file on disk cannot have.
+   */
+  provenance?: ReactNode;
+}) {
+  const [picked, setPicked] = useState<BundleSource | null>(null);
+  const active = source ?? picked;
   const [plan, setPlan] = useState<AgentImportPlan | null>(null);
   const [asSlug, setAsSlug] = useState("");
   const [busy, setBusy] = useState(false);
@@ -132,27 +152,49 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
    */
   const latest = useRef(0);
 
-  async function pick(chosen: File | null) {
-    setFile(chosen);
+  function reset() {
     setPlan(null);
     setLanded(null);
     setUpdate(null);
     setApplied(null);
     setError(null);
     setAsSlug("");
-    if (!chosen) return;
-    await review(chosen, "");
   }
 
-  async function review(chosen: File, slug: string) {
+  async function pick(chosen: File | null) {
+    setPicked(chosen ? fileSource(chosen) : null);
+    reset();
+    if (!chosen) return;
+    await review(fileSource(chosen), "");
+  }
+
+  // A supplied source needs no picker, so there is nothing for the operator to
+  // press: the review starts on sight. Keyed on `source.key` so a different
+  // listing re-previews and the same one does not loop.
+  const sourceKey = source?.key ?? "";
+  useEffect(() => {
+    if (!source) return;
+    reset();
+    void review(source, "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKey]);
+
+  async function review(from: BundleSource, slug: string) {
     const mine = ++latest.current;
     setBusy(true);
     setError(null);
     setUpdate(null);
     try {
-      const previewed = await api.previewAgentImport(chosen, slug);
+      const previewed = await from.preview(slug);
       if (mine !== latest.current) return;
-      setPlan(previewed);
+      // The two verbs land in their own state, so neither renderer can be
+      // handed the other's shape.
+      if (previewed.verb === "update") {
+        setPlan(null);
+        setUpdate(previewed.plan);
+      } else {
+        setPlan(previewed.plan);
+      }
     } catch (e) {
       if (mine !== latest.current) return;
       setPlan(null);
@@ -163,12 +205,12 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   }
 
   /** The other verb: what replacing the installed agent's library would do. */
-  async function reviewUpdate(chosen: File, slug: string) {
+  async function reviewUpdate(from: BundleSource, slug: string) {
     const mine = ++latest.current;
     setBusy(true);
     setError(null);
     try {
-      const previewed = await api.previewAgentUpdate(slug, chosen);
+      const previewed = await from.previewUpdate(slug);
       if (mine !== latest.current) return;
       setUpdate(previewed);
     } catch (e) {
@@ -181,15 +223,15 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   }
 
   async function confirmUpdate() {
-    if (!file || !update) return;
+    if (!active || !update) return;
     setBusy(true);
     setError(null);
     try {
       // `update.slug`, which is the agent the diff on screen was computed
       // against — never a name typed since.
-      const result = await api.updateAgentFromBundle(update.slug, file);
+      const result = await active.applyUpdate(update.slug);
       setApplied(result);
-      setFile(null);
+      setPicked(null);
       setPlan(null);
       setUpdate(null);
       onImported();
@@ -201,7 +243,7 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   }
 
   async function confirm() {
-    if (!file || !plan) return;
+    if (!active || !plan) return;
     setBusy(true);
     setError(null);
     try {
@@ -211,9 +253,9 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
       // the colliding name again and answered 409 while this button read
       // "Import <the free name>". The plan is what was reviewed, so the plan's
       // name is what lands.
-      const result = await api.importAgent(file, plan.slug);
+      const result = await active.install(plan.slug);
       setLanded(result);
-      setFile(null);
+      setPicked(null);
       setPlan(null);
       onImported();
     } catch (e) {
@@ -227,16 +269,22 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
 
   return (
     <div className="space-y-4">
-      <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]">
-        <Upload className="h-4 w-4" />
-        Choose a bundle
-        <input
-          type="file"
-          accept=".json,application/json"
-          className="hidden"
-          onChange={(e) => pick(e.target.files?.[0] ?? null)}
-        />
-      </label>
+      {!source && (
+        <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]">
+          <Upload className="h-4 w-4" />
+          Choose a bundle
+          <input
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => pick(e.target.files?.[0] ?? null)}
+          />
+        </label>
+      )}
+
+      {/* Above the plan, not inside it: where this came from is the first
+          question, and the answer is the same whichever verb follows. */}
+      {provenance}
 
       {busy && (
         <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
@@ -479,7 +527,7 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
                     edited here.
                   </p>
                   <button
-                    onClick={() => file && reviewUpdate(file, plan.collision)}
+                    onClick={() => active && reviewUpdate(active, plan.collision)}
                     disabled={busy}
                     className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -505,7 +553,7 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
                   className="w-56 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
                 />
                 <button
-                  onClick={() => file && review(file, asSlug || plan.suggested_slug)}
+                  onClick={() => active && review(active, asSlug || plan.suggested_slug)}
                   disabled={busy}
                   className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
                 >

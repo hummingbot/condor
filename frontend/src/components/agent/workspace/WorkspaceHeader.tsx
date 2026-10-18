@@ -15,7 +15,10 @@ import { Link } from "react-router-dom";
 import { AgentControls } from "@/components/agent/AgentControls";
 import { effectiveTradingContext } from "@/components/agent/lab/runs";
 import { BrainPicker } from "@/components/chat/BrainPicker";
-import { ExportAgentButton } from "@/components/settings/AgentsSettings";
+import {
+  ExportAgentButton,
+  PublishAgentButton,
+} from "@/components/settings/AgentsSettings";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useSessionOptions } from "@/hooks/useChat";
 import { CHAT_SLUG, api, type AgentDetail, type StrategyDetail } from "@/lib/api";
@@ -297,6 +300,11 @@ export function WorkspaceHeader({
             is the whole of FEAT-133, and this is where a person already looks
             for what they can do to an agent. */}
         <ExportAgentButton slug={agent.slug} />
+        {/* Beside Export, because it is the same act with a different
+            destination — and the destination is the whole difference: a
+            download stays on this box and a publish does not. Which is why
+            this one confirms and Export does not. */}
+        <PublishAgentButton slug={agent.slug} />
         {/* Condor is the default agent: deleting its AGENT.md would leave every
             unbound session without instructions or a model, so the store
             refuses it. The button is not offered rather than offered and

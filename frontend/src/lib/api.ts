@@ -229,6 +229,57 @@ export interface AgentUpdatePlan {
   next_step?: string;
 }
 
+/**
+ * One agent the hub offers (FEAT-146).
+ *
+ * Every field is the hub's claim except `digest`, which the *server* verifies
+ * the downloaded bytes against before anything parses them — the browser never
+ * sees the bundle, so it cannot check it and does not pretend to. `badge` is
+ * provenance and nothing more: no code here or on the server reads it to
+ * decide whether to write.
+ */
+export interface HubListing {
+  listing_id: string;
+  /** Decides whether installing this is a create or an update. Advisory. */
+  agent_uid: string;
+  slug: string;
+  name: string;
+  description: string;
+  version: number;
+  notes: string;
+  /** Attested by the hub at upload — an account claim, not a signature. */
+  author: AgentBundleAuthor;
+  /** `"validated"` | `"community"`. Rendered, never acted on. */
+  badge: string;
+  digest: string;
+  bytes: number;
+  published_at: string;
+  requires: AgentBundleRequires;
+  /** FEAT-144's review **as the hub computed it on submission**. */
+  findings: AgentBundleFinding[];
+  /** Which review produced `findings`, so drift with this install is visible. */
+  review_version: string;
+}
+
+/** The hub's badge is provenance: `HUB_TRUST`, stated server-side, once. */
+export interface HubCatalogue {
+  listings: HubListing[];
+  trust: string;
+}
+
+/**
+ * What installing a listing would do — or did.
+ *
+ * `verb` is the server's answer and not a client's comparison of two uids: a
+ * listing of an agent this install already has is an update (FEAT-145), and
+ * the plan carried is that verb's own shape.
+ */
+export interface HubInstallResponse {
+  verb: "install" | "update";
+  listing: HubListing;
+  plan: AgentImportPlan | AgentUpdatePlan;
+}
+
 /** `authFetch` because the body is `FormData` — see `uploadAttachment`. */
 async function postAgentBundle(
   path: string,
@@ -3867,6 +3918,69 @@ export const api = {
   /** Replace this agent's library from the bundle, keeping what it earned. */
   updateAgentFromBundle: (slug: string, file: File) =>
     postAgentUpdate(`/api/v1/agents/${encodeURIComponent(slug)}/update`, file),
+
+  // ── The agent hub (FEAT-146) ──
+  //
+  // Every call goes to Condor, never to the hub: the dashboard's bearer stays
+  // the dashboard's, and — the reason that matters — the bytes the dialog
+  // previewed and the bytes installed come out of one client rather than two,
+  // which is FEAT-133's one-builder rule.
+
+  /** What the hub offers, plus the one sentence about what a badge means.
+   *
+   *  The search term is a query *parameter* all the way down — never a path
+   *  segment — so it needs no identifier check and cannot change which
+   *  endpoint is addressed. (Named `search` here only because `query` is this
+   *  module's query-string builder.) */
+  browseHub: (search = "", page = 1) =>
+    apiFetch<HubCatalogue>(`/api/v1/hub/agents${query({ query: search, page })}`),
+
+  /** One listing, with the digest its bundle will be held to. */
+  getHubListing: (listingId: string) =>
+    apiFetch<{ listing: HubListing; trust: string }>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
+    ),
+
+  /** What installing this listing would do. Writes nothing on the server. */
+  previewHubInstall: (listingId: string, asSlug = "") =>
+    apiFetch<HubInstallResponse>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install/preview`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+    ),
+
+  /** Install it, through exactly the gate the file path uses. */
+  installFromHub: (listingId: string, asSlug = "") =>
+    apiFetch<HubInstallResponse>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+    ),
+
+  /** Upload one of this install's agents. Admin-only, and irreversible in
+   *  practice — unpublishing removes the listing, not anybody's download. */
+  publishAgentToHub: (slug: string, notes = "", authorName = "") =>
+    apiFetch<{ published: boolean; receipt: Record<string, unknown> }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/publish`,
+      { method: "POST", body: JSON.stringify({ notes, author_name: authorName }) },
+    ),
+
+  /** Withdraw a listing. Admin-only. */
+  unpublishFromHub: (listingId: string) =>
+    apiFetch<{ unpublished: boolean }>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Whether a publish token is set. **Never its value** — there is no route
+   *  that reads it back, here or on the server. */
+  getHubToken: () =>
+    apiFetch<{ set: boolean; can_change: boolean }>("/api/v1/settings/hub-token"),
+
+  /** Store or clear it. An empty string is how it is revoked locally. */
+  setHubToken: (token: string) =>
+    apiFetch<{ set: boolean }>("/api/v1/settings/hub-token", {
+      method: "PUT",
+      body: JSON.stringify({ token }),
+    }),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 
