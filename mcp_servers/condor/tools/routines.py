@@ -196,8 +196,17 @@ def _resolve_routine(name: str):
     its own routines plus the shared library, its own shadowing a shared name.
     The chat ``condor`` resolves the general library (root ``routines/`` +
     shared).
+
+    A routine that arrived in a bundle and has not been allowed to execute
+    raises instead of reading as missing (FEAT-147) — the file is there, and
+    saying "not found" would send the caller hunting for it.
     """
-    return _own_plus_shared(settings.specialist_slug).get(name)
+    from routines.base import raise_if_pending
+
+    found = _own_plus_shared(settings.specialist_slug).get(name)
+    if found is None:
+        raise_if_pending(settings.specialist_slug, name)
+    return found
 
 
 def list_routines(target: str | None = None) -> dict:
@@ -276,7 +285,14 @@ def list_routines(target: str | None = None) -> dict:
 
 
 def describe_routine(name: str) -> dict:
-    routine = _resolve_routine(name)
+    from condor.agents.code_trust import PendingConsentError
+
+    try:
+        routine = _resolve_routine(name)
+    except PendingConsentError as exc:
+        # Describing it is a read, and this answer *is* the description: the
+        # routine exists, and here is what has to happen before it can run.
+        return {"error": str(exc)}
     if not routine:
         return {"error": f"Routine '{name}' not found"}
     fields = routine.get_fields()
@@ -314,7 +330,11 @@ def _resolve_with_owner(name: str, target: str | None):
     """
     owner = _owner_of(target) if target else None
     if owner:
-        from routines.base import assistant_routines_dir, discover_routines_from_path
+        from routines.base import (
+            assistant_routines_dir,
+            discover_routines_from_path,
+            raise_if_pending,
+        )
 
         routines_dir = assistant_routines_dir(owner)
         if routines_dir.exists():
@@ -323,6 +343,9 @@ def _resolve_with_owner(name: str, target: str | None):
             )
             if found:
                 return found, owner
+            # The refusal belongs to the *named* agent, not to the caller's
+            # own scope — that is the one whose file is sitting there unread.
+            raise_if_pending(owner, name)
 
     return _resolve_routine(name), caller_slug(owner)
 

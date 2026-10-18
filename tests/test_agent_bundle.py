@@ -376,7 +376,14 @@ def test_imported_code_arrives_muted_and_the_agent_is_registered(traveller):
 
 
 def test_a_muted_import_is_offered_to_nobody_until_it_is_unmuted(traveller):
-    from routines.base import assistant_routines
+    """Both gestures are needed for a routine, and they are separate (FEAT-147).
+
+    Unmuting says *this agent may use it*; allowing says *this code may run
+    here*. A playbook needs only the first — it is prose and is never
+    executed.
+    """
+    from condor.agents import code_trust
+    from routines.base import assistant_routines, pending_routines
 
     ab.apply(ab.plan(_bundle_for(traveller), as_slug="arrival", user_id=7), user_id=7)
 
@@ -386,8 +393,15 @@ def test_a_muted_import_is_offered_to_nobody_until_it_is_unmuted(traveller):
     from condor.memory.mutes import set_muted
 
     set_muted("arrival", "routines", "r", False)
+    # Unmuted but still unread: it is listed as pending, and not offered.
+    assert "r" not in assistant_routines("arrival", force_reload=True)
+    assert [row.name for row in pending_routines("arrival")] == ["r"]
+
+    source = agent_home("arrival") / "routines" / "r.py"
+    code_trust.allow("arrival", "r", source.read_text())
     offered = assistant_routines("arrival", force_reload=True)
     assert "r" in offered
+    assert pending_routines("arrival") == []
     assert "s" not in SkillStore("arrival").list_index()
 
 
@@ -441,6 +455,7 @@ def test_a_round_trip_is_lossless_for_everything_that_travels(traveller):
 def test_no_restart_is_needed_to_use_an_imported_agent(traveller):
     """Every store resolves from disk on each call, so the next call sees it."""
     from condor.agent_controllers import agent_controllers
+    from condor.agents import code_trust
     from condor.agents.strategy import StrategyStore
     from routines.base import assistant_routines
 
@@ -452,6 +467,10 @@ def test_no_restart_is_needed_to_use_an_imported_agent(traveller):
     assert [s.slug for s in StrategyStore().list("arrival")] == ["l"]
     assert "c" in agent_controllers("arrival")
     assert SkillStore("arrival", include_muted=True).read("s") is not None
+    # The routine needs consent before it is imported at all (FEAT-147), and
+    # that too resolves from disk: no restart between allowing and running.
+    source = agent_home("arrival") / "routines" / "r.py"
+    code_trust.allow("arrival", "r", source.read_text())
     assert "r" in assistant_routines("arrival", include_muted=True, force_reload=True)
 
 

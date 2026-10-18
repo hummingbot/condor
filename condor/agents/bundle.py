@@ -33,9 +33,15 @@ what this install accumulated", and a second filter here would leave two
 selectors disagreeing.
 
 **What arrives switched off.** Every imported routine and skill is muted
-(:mod:`condor.memory.mutes`) so the code is inert until the operator reads it
-and unmutes it item by item. Import creates; it never overwrites, never starts
-anything, and never writes into the shipped tree.
+(:mod:`condor.memory.mutes`), and every imported routine *file* arrives
+without execution consent (:mod:`condor.agents.code_trust`, FEAT-147). The two
+are separate on purpose and both are needed: a mute says what the agent is
+told about, and is subtracted *after* discovery has already imported the file,
+so on its own it left the review surfaces — the ``/routines`` list and the
+source viewer — running the very code they were opened to review. Consent says
+what may execute at all, per file and by content digest. Import creates; it
+never overwrites, never starts anything, and never writes into the shipped
+tree.
 
 **Who this agent is, and what it needs** (FEAT-143). A bundle that travels
 between strangers carries four more manifest fields, all in schema 1 because
@@ -88,7 +94,7 @@ from uuid import uuid4
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from condor.agents import bundle_review
+from condor.agents import bundle_review, code_trust
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 from condor.fsutil import atomic_write_text
 from condor.layering import (
@@ -949,6 +955,11 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
             atomic_write_text(target, entry.text)
         _stamp_agent_md(home, import_plan, user_id)
         _mute_imported(slug, import_plan.mutes)
+        # And nothing it brought may *execute* until the operator allows that
+        # file (FEAT-147). The mute above says what the agent is told; this
+        # says what runs, and it is what makes "nothing is running" below
+        # true of the review surfaces as well as of the agent.
+        code_trust.arm(slug)
     except Exception:
         shutil.rmtree(home, ignore_errors=True)
         raise
@@ -964,8 +975,9 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
     result["imported"] = True
     found = len(import_plan.findings)
     result["next_step"] = (
-        "Nothing is running. Read each imported routine and skill, then unmute "
-        "the ones you want this agent to use."
+        "Nothing is running, and nothing it brought has been executed. Read "
+        "each imported routine and skill, then allow the routines you want to "
+        "run here and unmute the ones you want this agent to use."
         + (
             f" The review found {found} thing{'' if found == 1 else 's'} to look "
             "at first."
