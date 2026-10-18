@@ -1,7 +1,57 @@
-import { AlertTriangle, Check, FileCode2, FileText, Loader2, Upload } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  FileCode2,
+  FileText,
+  Loader2,
+  Upload,
+} from "lucide-react";
 import { useRef, useState } from "react";
 
-import { api, type AgentImportPlan } from "@/lib/api";
+import { api, type AgentBundleFinding, type AgentImportPlan } from "@/lib/api";
+
+/**
+ * How each review category is introduced, most-decisive first (FEAT-144).
+ *
+ * The order is the server's and is not re-sorted here: `findings` arrives
+ * ranked, and a second ordering in the client would be a second opinion about
+ * what matters. This map only supplies the sentence, and the groups render in
+ * the order the findings themselves first mention each category.
+ */
+const FINDING_COPY: Record<string, { title: string; blurb: string }> = {
+  secret: {
+    title: "Key-shaped values",
+    blurb:
+      "A value with the shape of a private key or a recovery phrase. Marked certain where the shape can be nothing else; the rest are also what a transaction hash looks like.",
+  },
+  endpoint: {
+    title: "Hosts it reaches",
+    blurb:
+      "Where this agent's code and config dial out to. A loopback or private host is the normal case here; a public one is a stranger's server.",
+  },
+  code_run: {
+    title: "Doors onto arbitrary code",
+    blurb:
+      "An imported routine runs inside Condor with no sandbox, and these lines run whatever string they are given.",
+  },
+  tool_steer: {
+    title: "Tools that move money, named in its text",
+    blurb:
+      "Context, not an accusation — every strategy names its own executor tool. What distinguishes that from an instruction to trade for somebody else is the sentence around it, so each line is shown.",
+  },
+  risk_limits: {
+    title: "Guardrails it brings with it",
+    blurb:
+      "These become this agent's limits on its first run. Nothing here clamps them to anything this install chose — read the figures.",
+  },
+};
+
+/** The categories present, in the order the ranked findings first mention them. */
+function categoriesOf(findings: AgentBundleFinding[]): string[] {
+  const seen: string[] = [];
+  for (const f of findings) if (!seen.includes(f.category)) seen.push(f.category);
+  return seen;
+}
 
 /**
  * Pick a bundle, read what it would do, then let it land.
@@ -14,7 +64,8 @@ import { api, type AgentImportPlan } from "@/lib/api";
  * does not exist.
  *
  * The preview and the apply call the same builder on the server, so what this
- * dialog renders is what the write does.
+ * dialog renders is what the write does — findings included, which is why the
+ * list here cannot differ from the one the import recorded (FEAT-144).
  */
 export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   const [file, setFile] = useState<File | null>(null);
@@ -179,6 +230,79 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* The review of what the files themselves carry, beside the file
+              list rather than behind a disclosure: it is the thing the operator
+              is here to read. Grouped by category, each finding with its path
+              and line, and no verdict anywhere — the server reports and refuses
+              nothing on this side. */}
+          {plan.findings.length > 0 && (
+            <div
+              data-findings
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
+            >
+              <p className="mb-1 text-xs font-semibold text-[var(--color-text)]">
+                The review found {plan.findings.length} thing
+                {plan.findings.length !== 1 ? "s" : ""} to look at
+              </p>
+              <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
+                A bundle from someone you do not trust is untrusted code, and there is
+                no sandbox here. Every file it would write is named on this screen
+                before anything is written, and this is what a scan of their contents
+                found. It warns; it does not prevent.
+              </p>
+              <div className="space-y-2">
+                {categoriesOf(plan.findings).map((category) => {
+                  const rows = plan.findings.filter((f) => f.category === category);
+                  const copy = FINDING_COPY[category];
+                  return (
+                    <div key={category} data-finding-group={category}>
+                      <p className="text-[11px] font-semibold text-[var(--color-text)]">
+                        {copy?.title ?? category}{" "}
+                        <span className="font-normal text-[var(--color-text-muted)]">
+                          ({rows.length})
+                        </span>
+                      </p>
+                      {copy && (
+                        <p className="text-[10px] text-[var(--color-text-muted)]">
+                          {copy.blurb}
+                        </p>
+                      )}
+                      <ul className="mt-0.5 space-y-0.5">
+                        {rows.map((f) => (
+                          <li
+                            key={`${f.path}:${f.start}:${f.label}`}
+                            data-finding={f.category}
+                            className="text-[11px] text-[var(--color-text-muted)]"
+                          >
+                            <span
+                              className={
+                                f.certain
+                                  ? "font-semibold text-[var(--color-red)]"
+                                  : "text-amber-400"
+                              }
+                            >
+                              {f.label}
+                              {f.certain && " (certain)"}
+                            </span>{" "}
+                            <span className="font-mono text-[var(--color-text)]">
+                              {f.path}:{f.line}
+                            </span>
+                            {f.context && (
+                              <>
+                                {" — "}
+                                <span className="font-mono text-[10px]">{f.context}</span>
+                              </>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 

@@ -62,6 +62,16 @@ An unmet requirement never refuses an import. "I will add that exchange's API
 key once I have read the agent" is the honest case, and everything that lands
 is muted and unstarted anyway: the preview says what will not work here, and
 the operator decides.
+
+**What the content itself carries** (FEAT-144). The scrub above rewrites three
+front-matter fields and looks at no file *content*, so a bundle could carry an
+API key, a stranger's endpoint, a skill steering the model at a tool that signs,
+or risk limits far wider than this install would set, and nothing said so.
+:mod:`condor.agents.bundle_review` is the one review that names those; it is
+pure and stdlib-only so a hub can re-run exactly this install's review on a
+submission. :func:`build` refuses on a value that can only be a secret and
+warns on everything else; :func:`plan` attaches the findings and refuses
+nothing new.
 """
 
 from __future__ import annotations
@@ -78,6 +88,7 @@ from uuid import uuid4
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from condor.agents import bundle_review
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 from condor.fsutil import atomic_write_text
 from condor.layering import (
@@ -283,6 +294,35 @@ class UnmetRequirement(BaseModel):
     blocking: bool = False
 
 
+class BundleFinding(BaseModel):
+    """One :class:`condor.agents.bundle_review.Finding`, on the wire (FEAT-144).
+
+    A field-for-field mirror and nothing more. It exists because the review's
+    ``Finding`` is a ``NamedTuple`` — which pydantic serializes positionally, so
+    a surface would be reading ``finding[3]`` — and because the review module is
+    deliberately stdlib-only and may not grow a pydantic import to say this
+    itself. :func:`_finding_rows` builds these by keyword from ``_asdict()``, and
+    ``tests/test_bundle_review.py`` asserts the two field sets are equal, so a
+    field added to the review cannot silently stop reaching the dialog.
+    """
+
+    category: str
+    label: str
+    path: str
+    line: int
+    start: int
+    end: int
+    certain: bool = False
+    context: str = ""
+
+
+def _finding_rows(bundle: Bundle) -> list[BundleFinding]:
+    """The review of ``bundle``, as the rows a surface renders."""
+    return [
+        BundleFinding(**finding._asdict()) for finding in bundle_review.review(bundle)
+    ]
+
+
 class ImportPlan(BaseModel):
     """What an import would do, computed without writing anything.
 
@@ -313,6 +353,11 @@ class ImportPlan(BaseModel):
     requires: BundleRequires = Field(default_factory=BundleRequires)
     #: What this install cannot supply. Never a reason to refuse the import.
     unmet: list[UnmetRequirement] = Field(default_factory=list)
+    #: What a reader should look at before unmuting any of this (FEAT-144).
+    #: Most-decisive first, and never a refusal on this side — the import's
+    #: protection is that nothing arrives unmuted and nothing is started, and
+    #: these are what the operator reads while deciding.
+    findings: list[BundleFinding] = Field(default_factory=list)
     #: Everything that is not a ``.py``, in bundle order.
     files: list[PlannedFile] = Field(default_factory=list)
     #: The ``.py`` files, named individually: a routine runs in the Condor
@@ -516,15 +561,19 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     what just went out. Export is the right place for that and a read path is
     not — ``AgentStore.get``'s contract is that the filesystem is read on every
     call, and putting a write behind it would make reading an agent mutate it.
-    Nothing is stamped until after the bundle has passed the size check, so a
-    refused export leaves no trace.
+    Nothing is stamped until after every check has passed, so a refused export
+    leaves no trace.
 
     ``notes`` and ``author_name`` are the exporting caller's; neither is read
     by anything that decides what gets written.
 
     Raises :class:`BundleError` for an agent that does not exist, a file whose
-    bytes are not UTF-8 (named, so the operator can remove it), and a bundle
-    over :data:`MAX_BUNDLE_BYTES`.
+    bytes are not UTF-8 (named, so the operator can remove it), a bundle over
+    :data:`MAX_BUNDLE_BYTES`, and a file carrying a value that can only be a
+    secret (FEAT-144). The rest of :func:`condor.agents.bundle_review.review`'s
+    findings warn rather than refuse, and a caller that wants to show them calls
+    ``review`` on the returned bundle — the same pure function this used, so the
+    export door and the import door cannot describe one bundle two ways.
     """
     from condor.agents.agent import AgentStore
 
@@ -587,6 +636,16 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
             f"'{slug}' renders to {size} bytes, over the {MAX_BUNDLE_BYTES}-byte "
             "bundle limit — move its largest files out of the agent's library"
         )
+    # The one refusal FEAT-144 adds, and only on this side. A key is still
+    # fixable by the person who owns it while the bundle is unexported, and a
+    # published one cannot be unpublished out of somebody's download. Everything
+    # else the review found is a warning a caller reads off
+    # ``bundle_review.review(bundle)``; only a value that can be nothing but a
+    # secret stops the export, which is the same loud posture the non-UTF-8
+    # refusal above already takes rather than a new one.
+    refusal = bundle_review.refusal(bundle_review.review(bundle))
+    if refusal:
+        raise BundleError(refusal)
     _stamp_bookkeeping(slug, agent_uid, version, digest)
     return bundle
 
@@ -789,7 +848,10 @@ def plan(
     Every refusal is collected rather than raised, so a reviewer sees all of
     them at once; :func:`apply` is the one that turns them into an error. An
     unmet *requirement* is not a refusal at all — it is a sentence the preview
-    shows and the operator decides about.
+    shows and the operator decides about. Neither is a FEAT-144 *finding*: this
+    side adds no refusal of its own, not even for a certain secret, because the
+    export refusal is the one that can still be acted on and refusing here would
+    only keep an operator from reading what arrived.
     """
     refusals: list[str] = []
     slug, slug_refusal = _target_slug(bundle, as_slug)
@@ -850,6 +912,7 @@ def plan(
         author=bundle.author,
         requires=requires,
         unmet=unmet,
+        findings=_finding_rows(bundle),
         files=planned,
         executables=executables,
         total_bytes=sum(row.bytes for row in planned + executables),
@@ -899,9 +962,16 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
     )
     result = import_plan.summary()
     result["imported"] = True
+    found = len(import_plan.findings)
     result["next_step"] = (
         "Nothing is running. Read each imported routine and skill, then unmute "
         "the ones you want this agent to use."
+        + (
+            f" The review found {found} thing{'' if found == 1 else 's'} to look "
+            "at first."
+            if found
+            else ""
+        )
     )
     return result
 

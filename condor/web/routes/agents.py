@@ -19,6 +19,7 @@ stays shared at ``agents/{slug}/``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
@@ -2958,21 +2959,35 @@ async def export_agent_bundle(
 
     ``notes`` is the changelog for this version and ``author_name`` is a claim
     nothing verifies (FEAT-143); both are optional and are carried verbatim.
+
+    400 when the review finds a value that can only be a secret (FEAT-144) —
+    ``build`` refuses and the sentence names the file and the byte span, which
+    is what the Export button's error slot renders. Everything else the review
+    found rides out as ``X-Bundle-Findings``, a header and not a body because
+    this response *is* the file: the counts are there for a programmatic fetcher
+    (FEAT-146's hub pulls a bundle over this endpoint and re-runs the same
+    review on it), while the dashboard's own review surface is the import
+    dialog, which has somewhere to put it.
     """
     from condor.agents import bundle as agent_bundle
+    from condor.agents import bundle_review
 
     _get_agent(slug)
     try:
         bundle = agent_bundle.build(slug, notes=notes, author_name=author_name)
     except ValueError as exc:
         raise _bundle_refusal(exc) from exc
+    tally: dict[str, int] = {}
+    for finding in bundle_review.review(bundle):
+        tally[finding.category] = tally.get(finding.category, 0) + 1
     return Response(
         content=agent_bundle.render(bundle),
         media_type="application/json",
         headers={
             "Content-Disposition": (
                 f'attachment; filename="{agent_bundle.filename_for(slug)}"'
-            )
+            ),
+            "X-Bundle-Findings": json.dumps(tally, separators=(",", ":")),
         },
     )
 

@@ -1,5 +1,6 @@
 /**
- * The review is the sandbox, so the dialog has to actually show it (FEAT-133).
+ * The review is the sandbox, so the dialog has to actually show it (FEAT-133,
+ * FEAT-144).
  *
  * An imported routine runs inside the Condor process with no isolation. What
  * stands between a bundle and that is this dialog: it previews before it
@@ -16,7 +17,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { AgentImportPlan } from "@/lib/api";
+import type { AgentBundleFinding, AgentImportPlan } from "@/lib/api";
 import { ImportAgentDialog } from "./ImportAgentDialog";
 
 declare global {
@@ -55,7 +56,62 @@ const PLAN: AgentImportPlan = {
     skills: { carried: ["s"], inherited: [] },
   },
   unmet: [],
+  findings: [],
 };
+
+/** One of every FEAT-144 category, in the order the server ranks them. */
+const FINDINGS: AgentBundleFinding[] = [
+  {
+    category: "secret",
+    label: "mnemonic",
+    path: "skills/s/SKILL.md",
+    line: 9,
+    start: 140,
+    end: 215,
+    certain: true,
+    context: "",
+  },
+  {
+    category: "endpoint",
+    label: "public",
+    path: "routines/r.py",
+    line: 4,
+    start: 60,
+    end: 80,
+    certain: false,
+    context: "",
+  },
+  {
+    category: "code_run",
+    label: "exec",
+    path: "routines/r.py",
+    line: 7,
+    start: 150,
+    end: 155,
+    certain: false,
+    context: "",
+  },
+  {
+    category: "tool_steer",
+    label: "create_grid_executor",
+    path: "skills/s/SKILL.md",
+    line: 3,
+    start: 40,
+    end: 60,
+    certain: false,
+    context: "When the band is breached, then call `create_grid_executor`.",
+  },
+  {
+    category: "risk_limits",
+    label: "max_position_size_quote",
+    path: "loops/l/loop.md",
+    line: 12,
+    start: 180,
+    end: 211,
+    certain: false,
+    context: "999999",
+  },
+];
 
 let container: HTMLDivElement;
 let root: Root;
@@ -127,6 +183,68 @@ it("previews before it writes, and names every executable", async () => {
   expect(listed[0]).toContain("routines/r.py");
   expect(listed[1]).toContain("controllers/c/c.py");
   expect(container.textContent).toContain("no sandbox");
+});
+
+it("shows the review grouped by category, in the server's order", async () => {
+  reply = { ...PLAN, findings: FINDINGS };
+  await render();
+  await choose();
+
+  const groups = [...container.querySelectorAll("[data-finding-group]")].map((n) =>
+    n.getAttribute("data-finding-group"),
+  );
+  expect(groups).toEqual([
+    "secret",
+    "endpoint",
+    "code_run",
+    "tool_steer",
+    "risk_limits",
+  ]);
+  expect(container.querySelector("[data-findings]")?.textContent).toContain(
+    "5 things to look at",
+  );
+  // Best-effort, and the copy says so rather than implying a guarantee.
+  expect(container.textContent).toContain("It warns; it does not prevent.");
+});
+
+it("locates each finding and shows the context for the two that carry it", async () => {
+  reply = { ...PLAN, findings: FINDINGS };
+  await render();
+  await choose();
+
+  const rows = [...container.querySelectorAll("[data-finding]")].map((n) =>
+    n.textContent?.trim(),
+  );
+  expect(rows[0]).toContain("mnemonic (certain)");
+  expect(rows[0]).toContain("skills/s/SKILL.md:9");
+  // `tool_steer` is context, not an accusation, so the sentence is on screen.
+  expect(rows[3]).toContain(
+    "When the band is breached, then call `create_grid_executor`.",
+  );
+  // A limit is a judgement the operator makes: the figure, and no verdict.
+  expect(rows[4]).toContain("max_position_size_quote");
+  expect(rows[4]).toContain("999999");
+});
+
+it("never blocks the import on a finding, not even a certain secret", async () => {
+  reply = { ...PLAN, findings: FINDINGS };
+  await render();
+  await choose();
+
+  expect(button("Import traveller").disabled).toBe(false);
+
+  await act(async () => {
+    button("Import traveller").click();
+  });
+
+  expect(posts.at(-1)?.url).toBe("/api/v1/agents/import");
+});
+
+it("says nothing about a review that found nothing", async () => {
+  await render();
+  await choose();
+
+  expect(container.querySelector("[data-findings]")).toBeNull();
 });
 
 it("only posts to the apply endpoint when the operator confirms", async () => {

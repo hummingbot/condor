@@ -235,8 +235,17 @@ def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> di
     bundle of this agent — and ``author_name`` is a claim nothing verifies
     (FEAT-143). Both are optional, and the version in the result is bumped only
     when the agent's content actually changed since the last export.
+
+    ``findings`` is FEAT-144's review of what the files themselves carry — a
+    key-shaped value, a host the agent reaches, a money-moving tool its prose
+    names, a door onto arbitrary code, the risk limits it brings. An export is
+    refused outright for a value that can only be a secret, because a published
+    bundle cannot be unpublished out of somebody's download; everything else is
+    reported here with its file and line, and the operator decides. It warns; it
+    does not prevent.
     """
     from condor.agents import bundle as agent_bundle
+    from condor.agents import bundle_review
     from condor.paths import data_dir
 
     try:
@@ -263,6 +272,7 @@ def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> di
         "path": str(target),
         "bytes": len(text.encode("utf-8")),
         "files": [f.path for f in bundle.files],
+        "findings": [f._asdict() for f in bundle_review.review(bundle)],
     }
 
 
@@ -279,11 +289,16 @@ def _import_agent(path: str, as_slug: str) -> dict:
     the Condor process and that review is the only gate there is.
 
     Both the success and the refusal carry ``unmet`` — what this install cannot
-    supply the agent (FEAT-143) — and neither is a reason the import did not
-    happen. Connectors are left unasked on this door: resolving them needs an
-    async Hummingbot client and this is a synchronous tool, so the chat's
-    answer covers tools, shared skills and the model, and the dashboard's
-    preview is the one that also checks the exchange.
+    supply the agent (FEAT-143) — and ``findings``, the review of what the files
+    themselves carry (FEAT-144). Neither is a reason the import did not happen,
+    and nothing here is refused for a finding: the protection on this side is
+    that the code arrives muted and unstarted, and the findings are what to read
+    before unmuting any of it.
+
+    Connectors are left unasked on this door: resolving them needs an async
+    Hummingbot client and this is a synchronous tool, so the chat's answer
+    covers tools, shared skills and the model, and the dashboard's preview is
+    the one that also checks the exchange.
     """
     from condor.agents import bundle as agent_bundle
     from condor.runtime.toolsets import every_tool_name

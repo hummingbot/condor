@@ -344,6 +344,51 @@ an imported routine runs inside the Condor process with no sandbox, so the
 preview names every executable file before the write and the operator unmutes
 them one at a time after reading each. Nothing is started by an import.
 
+### Reviewing a bundle before it runs
+
+The scrub above rewrites three frontmatter fields and looks at no file *content*,
+so on its own a bundle could carry an API key, a stranger's endpoint, a skill
+steering the model at a tool that signs, or risk limits far wider than this
+install would set — and nothing would say so. `condor/agents/bundle_review.py`
+is the one review that names those (FEAT-144). Five categories, ordered
+most-decisive first:
+
+| Category | What it reports |
+|---|---|
+| `secret` | `condor.runtime.secrets.scan` over every file, with its `certain` verdict passed through unchanged — a recovery phrase and a 64-int keypair are certain; a bare 64-hex and an 87-char base58 are also a transaction hash and a signature, which are routine here. |
+| `endpoint` | Every host the files dial, labelled `loopback`, `private` or `public`. The split is the point: an agent talking to the local Hummingbot API is the normal case, and reaching a stranger's host is the finding. |
+| `code_run` | `exec`, `eval`, `__import__`, `subprocess`, `run_code` and an `open()` in a write mode, in the `.py` files the import will write. |
+| `tool_steer` | A money-moving tool from `condor/runtime/danger.py` named in prose or code, with the line that names it. **Context, not an accusation** — every strategy skill names its own executor tool, which is why it carries its line, is ordered second-to-last, and refuses nothing. |
+| `risk_limits` | Every `default_config.risk_limits` figure the bundle brings, **as values, with no pass/fail**. They become the agent's guardrails on its first run and nothing clamps them; an install-wide ceiling would be a different change, affecting every agent, imported or not. |
+
+A finding carries `path`, `line`, `start`/`end` and a `label` from a closed set —
+**never the matched value**, the rule `condor/runtime/secrets.py` sets, so a
+finding can be logged and counted without becoming the leak it exists to prevent.
+A caller that needs the bytes slices `text[start:end]` itself. `context` is the
+one exception, for the two categories where the text *is* the finding:
+`tool_steer`'s line (run through `redact` first) and `risk_limits`' figure.
+
+Who does what with it:
+
+- **Export** refuses on a `certain` `secret`, naming the file and the byte span.
+  That is the one moment the value is still fixable by the person who owns it,
+  and a published bundle cannot be unpublished out of somebody's download.
+  Everything else warns.
+- **Import** refuses *nothing new*. The findings ride on the preview and on the
+  apply result, field for field, and what protects this side is still that the
+  code arrives muted and nothing is started.
+- **A hub** re-runs this exact function on a submission rather than trusting
+  whoever exported it — in that case the exporter is the adversary and runs their
+  own copy of the exporter, so the receiving side's check is the one that counts.
+  That is why the module imports only the standard library plus
+  `condor.runtime.secrets` and `condor.runtime.danger`, asserted in a subprocess
+  by `tests/test_bundle_review.py`.
+
+It reports and never rewrites. Substituting a value inside `routines/r.py` or a
+YAML config — which is what `condor/sharing/scrub.py` does to a transcript, where
+a mangled string costs nothing — would produce an agent that silently does not
+work. And it is best-effort, so the copy says so: it warns, it does not prevent.
+
 ---
 
 ## 5. Mental model

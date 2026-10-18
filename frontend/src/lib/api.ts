@@ -98,6 +98,32 @@ export interface AgentUnmetRequirement {
   blocking: boolean;
 }
 
+/**
+ * One thing the review found in the bundle's files (FEAT-144).
+ *
+ * Located, not quoted: `start`/`end` are offsets into that file's text, so the
+ * value itself never travels in a finding — the rule
+ * `condor/runtime/secrets.py` sets, and the reason a private RPC URL's token
+ * does not end up in a log line. `context` is populated for exactly two
+ * categories, where the text *is* the finding: `tool_steer` carries the
+ * matched line (redacted), `risk_limits` carries the limit's figure.
+ */
+export interface AgentBundleFinding {
+  /** "secret" | "endpoint" | "tool_steer" | "code_run" | "risk_limits" */
+  category: string;
+  /** The kind within the category, always from a closed set the server owns. */
+  label: string;
+  path: string;
+  /** 1-based. */
+  line: number;
+  start: number;
+  end: number;
+  /** Whether the shape has no plausible alternative. `secret` only. */
+  certain: boolean;
+  /** `tool_steer`'s line or `risk_limits`' figure; `""` for the rest. */
+  context: string;
+}
+
 export interface AgentImportPlan {
   slug: string;
   source_slug: string;
@@ -114,6 +140,8 @@ export interface AgentImportPlan {
   author: AgentBundleAuthor;
   requires: AgentBundleRequires;
   unmet: AgentUnmetRequirement[];
+  /** What to look at before unmuting any of this. Most-decisive first. */
+  findings: AgentBundleFinding[];
   /** Everything that is not a `.py`. */
   files: AgentBundleFile[];
   /** The executable files, listed apart because reviewing them is the gate. */
