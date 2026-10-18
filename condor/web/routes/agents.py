@@ -446,6 +446,12 @@ class RoutineCard(BaseModel):
     # Switched off for this Agent (FEAT-090). ``/routines`` is unaffected — a
     # mute says what the Agent is told, never what a person may run.
     muted: bool = False
+    # Came from an imported bundle and has not been allowed to execute on this
+    # install (FEAT-147). Its metadata was read statically, so it has no
+    # configuration form until it is allowed. ``pending_reason`` is
+    # ``"pending"`` (never allowed) or ``"changed"`` (allowed, then edited).
+    pending: bool = False
+    pending_reason: str = ""
 
 
 class ControllerCard(BaseModel):
@@ -1012,6 +1018,21 @@ class MuteRequest(BaseModel):
         description="The playbook's slug, the routine's name, or the tool's name."
     )
     muted: bool = Field(description="True switches it off, False restores it.")
+
+
+class CodeTrustRequest(BaseModel):
+    """Let one imported file execute in the Condor process, or stop it (FEAT-147).
+
+    The sibling of :class:`MuteRequest` and a separate gesture from it on
+    purpose: unmuting says *this Agent may use it*, allowing says *this code
+    may run here*.
+    """
+
+    kind: str = Field(default="routine", description='"routine" — the only kind.')
+    name: str = Field(description="The routine's name, unprefixed.")
+    allowed: bool = Field(
+        description="True allows the file as it stands now, False withdraws it."
+    )
 
 
 class CreateStrategyRequest(BaseModel):
@@ -2290,12 +2311,17 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
     The operator view, like :func:`_skill_store_for`: muted routines are listed
     and flagged rather than hidden, so the switch that muted one is still there
     to switch it back.
+
+    A routine still awaiting execution consent is listed too, from metadata
+    read without importing it (FEAT-147) — this panel is where the operator
+    reads imported code and decides, so it is the one surface that must never
+    be the thing that runs it.
     """
     from condor.memory.mutes import load_mutes
-    from routines.base import assistant_routines
+    from routines.base import assistant_routines, pending_routines
 
     muted = load_mutes(slug)["routines"]
-    return [
+    cards = [
         RoutineCard(
             name=name,
             description=info.description,
@@ -2306,6 +2332,20 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
         )
         for name, info in sorted(assistant_routines(slug, include_muted=True).items())
     ]
+    cards.extend(
+        RoutineCard(
+            name=row.name,
+            description=row.description,
+            continuous=row.continuous,
+            source=row.source,
+            category=row.category,
+            muted=row.muted,
+            pending=True,
+            pending_reason=row.reason,
+        )
+        for row in pending_routines(slug)
+    )
+    return cards
 
 
 def _controller_cards(slug: str) -> list[ControllerCard]:
@@ -2796,6 +2836,70 @@ async def set_agent_mute(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"kind": req.kind, "name": req.name, "muted": req.muted}
+
+
+@router.put("/{slug}/code-trust")
+async def set_agent_code_trust(
+    slug: str, req: CodeTrustRequest, user: WebUser = Depends(get_current_user)
+):
+    """Allow one imported routine file to execute here — or withdraw it.
+
+    An agent that arrived as a bundle has its routines gated: nothing it
+    brought is imported by this process until the operator has read that file
+    and allowed it (:mod:`condor.agents.code_trust`). An imported routine runs
+    **inside the Condor process with no sandbox**, which is why the gesture is
+    separate from unmuting: a mute says what this Agent is told about, this
+    says what may run at all.
+
+    Consent is recorded against the file's sha256, so a routine allowed and
+    then edited — by hand or by a bundle update (FEAT-145) — is pending again
+    and has to be read again. Withdrawing consent takes effect on the next
+    discovery call.
+
+    Refused for an agent that has no consent record: those are the operator's
+    own files, written in place, and writing one here would gate every sibling
+    routine as a side effect of allowing one.
+    """
+    from condor.agents import code_trust
+    from condor.memory.paths import safe_slug
+    from condor.paths import UnsafeIdError
+    from routines.base import assistant_routines_dirs
+
+    agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
+    if (req.kind or "").strip().lower().rstrip("s") != "routine":
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{req.kind}' cannot be allowed — only a routine can",
+        )
+    if not code_trust.is_armed(agent.slug):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{agent.slug}' was not imported from a bundle, so its "
+                "routines need no execution consent"
+            ),
+        )
+    if not req.allowed:
+        code_trust.revoke(agent.slug, req.name)
+        return {"kind": "routine", "name": req.name, "allowed": False, "digest": ""}
+
+    try:
+        source = next(
+            path
+            for root in assistant_routines_dirs(agent.slug)
+            for path in [root / f"{safe_slug(req.name)}.py"]
+            if path.is_file()
+        )
+    except (StopIteration, UnsafeIdError):
+        raise HTTPException(
+            status_code=404, detail=f"'{req.name}' is not a routine of this Agent"
+        ) from None
+    try:
+        digest = code_trust.allow(agent.slug, req.name, source.read_text())
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"kind": "routine", "name": req.name, "allowed": True, "digest": digest}
 
 
 @router.delete("/{slug}")

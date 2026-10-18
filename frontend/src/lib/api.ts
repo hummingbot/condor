@@ -1557,6 +1557,15 @@ export interface RoutineCard {
   category: string;
   /** Switched off for this Agent. `/routines` still lists and runs it. */
   muted: boolean;
+  /**
+   * Came from an imported bundle and has not been allowed to execute on this
+   * install (FEAT-147). Its name and description were read from the file
+   * without importing it, so it has no configuration form until it is
+   * allowed.
+   */
+  pending?: boolean;
+  /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
+  pending_reason?: string;
 }
 
 /** One controller an agent can sync to a server (FEAT-127). */
@@ -1843,6 +1852,15 @@ export interface RoutineInfo {
   /** Source-file modification time (epoch seconds), or null if unavailable. */
   last_modified: number | null;
   report_count: number;
+  /**
+   * Imported code the operator has not allowed to execute here (FEAT-147).
+   * Such a row is listed and its source is readable, but `fields` is empty —
+   * a pydantic model's fields only exist once the module has been imported,
+   * which is exactly what has not happened.
+   */
+  pending?: boolean;
+  /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
+  pending_reason?: string;
 }
 
 export interface RoutineInstance {
@@ -3622,6 +3640,28 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/mutes`,
       { method: "PUT", body: JSON.stringify(data) },
     ),
+
+  /** Allow one imported routine file to execute in the Condor process, or
+   *  withdraw it (FEAT-147).
+   *
+   *  A separate gesture from a mute, deliberately: unmuting says *this agent
+   *  may use it*, allowing says *this code may run here*. An agent imported
+   *  from a bundle has every routine it brought gated until this is called,
+   *  and consent is recorded against the file's content — edit it, or update
+   *  the agent from a newer bundle, and it has to be read and allowed again. */
+  setAgentCodeTrust: (
+    slug: string,
+    data: { kind: "routine"; name: string; allowed: boolean },
+  ) =>
+    apiFetch<{
+      kind: string;
+      name: string;
+      allowed: boolean;
+      digest: string;
+    }>(`/api/v1/agents/${encodeURIComponent(slug)}/code-trust`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
 
   deleteAgentSkill: (slug: string, name: string) =>
     apiFetch<{ deleted: boolean }>(

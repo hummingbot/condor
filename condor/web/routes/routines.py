@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from condor import routine_hooks
+from condor.agents.code_trust import PendingConsentError
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store, routine_source_roots
 from condor.runtime import client, wake
@@ -201,6 +202,10 @@ async def run_routine_v2(
             session_key=body.session_key,
             on_complete=on_complete,
         )
+    except PendingConsentError as e:
+        # 403, not 404: the routine is right there, and the operator has not
+        # allowed its file to execute on this install yet (FEAT-147).
+        raise HTTPException(403, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
     # The *bounded* value, not the requested one: a caller told "resume" when
@@ -233,6 +238,10 @@ async def start_continuous_v2(
             conversation_id=await client.conversation_for_session(body.session_key),
             session_key=body.session_key,
         )
+    except PendingConsentError as e:
+        # 403, not 404: the routine is right there, and the operator has not
+        # allowed its file to execute on this install yet (FEAT-147).
+        raise HTTPException(403, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"instance_id": instance_id}
@@ -254,6 +263,10 @@ async def schedule_routine_v2(
             interval_sec=body.interval_sec,
             user_id=user.id,
         )
+    except PendingConsentError as e:
+        # 403, not 404: the routine is right there, and the operator has not
+        # allowed its file to execute on this install yet (FEAT-147).
+        raise HTTPException(403, str(e))
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"instance_id": instance_id}
@@ -369,14 +382,22 @@ async def get_routine_source(
     allowlist stopping ``..`` and symlink escapes out of the dirs discovery
     reads, never an authorization check. Agent homes stay out of those roots,
     so a journal or memory store next door is not in scope either way.
+
+    A routine awaiting execution consent is served from its ``source_path``
+    rather than through ``inspect.getfile(run_fn)`` (FEAT-147): resolving the
+    file through the imported object would mean importing it, and reading the
+    code is the one thing the operator must be able to do *before* that.
     """
     store = get_routine_store()
     all_routines = store._discover_all()
     routine = all_routines.get(routine_name)
-    if not routine:
+    pending = None if routine else store._pending_all().get(routine_name)
+    if not routine and not pending:
         raise HTTPException(404, "Routine not found")
     try:
-        source_file = inspect.getfile(routine.run_fn)
+        source_file = (
+            pending.source_path if pending else inspect.getfile(routine.run_fn)
+        )
         source_path = Path(source_file).resolve()
         # CORR-585: confine to the roots discovery actually reads — the general
         # library, the shared one and each agent's own routines/ — not just a

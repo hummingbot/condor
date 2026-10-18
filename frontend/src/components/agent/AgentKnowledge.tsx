@@ -282,6 +282,22 @@ export const AgentKnowledge = memo(function AgentKnowledge({
     },
   });
 
+  /**
+   * Allow one imported routine file to run in the Condor process (FEAT-147).
+   *
+   * Not optimistic, unlike the mute above: the row does not merely change
+   * state, it *becomes* a different row — the server imports the file and
+   * answers with its real description and config schema, or refuses because
+   * the module raised. So this one waits for the round trip and re-fetches.
+   */
+  const allowMut = useMutation({
+    mutationFn: (v: { kind: "routine"; name: string; allowed: boolean }) =>
+      api.setAgentCodeTrust(slug, v),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent-brain", slug] });
+    },
+  });
+
   // A count is what the *agent* gets, because that is the number the tab is
   // asked for. When something is muted the panel lists more rows than that, so
   // the count says "7/9" — otherwise the tab would contradict its own list.
@@ -290,7 +306,9 @@ export const AgentKnowledge = memo(function AgentKnowledge({
     memories: brain?.memories.length ?? 0,
     tools: brain?.tools.filter((t) => !t.muted).length ?? 0,
     strategies: brain?.strategies.length ?? 0,
-    routines: brain?.routines.filter((r) => !r.muted).length ?? 0,
+    // `pending` counts against the agent too: a routine whose code has not
+    // been allowed to run here is one the agent cannot call, muted or not.
+    routines: brain?.routines.filter((r) => !r.muted && !r.pending).length ?? 0,
     controllers: brain?.controllers?.length ?? 0,
   };
   const totals = {
@@ -585,6 +603,10 @@ export const AgentKnowledge = memo(function AgentKnowledge({
                 onMute={(name, muted) =>
                   muteMut.mutate({ kind: "routine", name, muted })
                 }
+                onAllow={(name) =>
+                  allowMut.mutate({ kind: "routine", name, allowed: true })
+                }
+                allowing={allowMut.isPending}
                 onAskAgent={onAskAgent}
               />
             )}
@@ -1173,6 +1195,8 @@ function RoutinesTab({
   action,
   onOpen,
   onMute,
+  onAllow,
+  allowing,
   onAskAgent,
 }: {
   brain: AgentBrain;
@@ -1181,9 +1205,14 @@ function RoutinesTab({
   onOpen?: (routineName: string) => void;
   /** Switch a routine off for this agent, or back on (FEAT-090). */
   onMute?: (name: string, muted: boolean) => void;
+  /** Let an imported routine's file execute in this process (FEAT-147). */
+  onAllow?: (name: string) => void;
+  /** An allow is in flight — the chips stop inviting a second click. */
+  allowing?: boolean;
   /** Put the improvement to the agent that runs it (FEAT-092). */
   onAskAgent?: (text: string) => void;
 }) {
+  const anyPending = brain.routines.some((r) => r.pending);
   return (
     <div className="space-y-1.5">
       <div className="flex items-start justify-between gap-3">
@@ -1195,6 +1224,15 @@ function RoutinesTab({
         </p>
         {action}
       </div>
+      {anyPending && (
+        <p className="rounded border border-amber-500/40 bg-amber-500/5 px-2.5 py-1.5 text-[11px] text-amber-400">
+          Some of these routines came from an imported bundle and have not run
+          here yet. A routine runs as Python inside the Condor process, with no
+          sandbox — open it, read it, then Allow it. Allowing is separate from
+          the on/off switch: the switch says whether this agent may use it, Allow
+          says whether its code may run at all.
+        </p>
+      )}
       {brain.routines.length === 0 ? (
         <Empty>No routines this agent can run.</Empty>
       ) : (
@@ -1204,6 +1242,23 @@ function RoutinesTab({
             title={formatRoutineName(r.name)}
             badges={
               <>
+                {r.pending && (
+                  <Chip
+                    tone="warn"
+                    title={
+                      r.pending_reason === "changed"
+                        ? "Allowed before, but the file has changed since — read it again, then allow it"
+                        : "Imported code that has never run here — read it, then allow it"
+                    }
+                    onClick={
+                      onAllow && !allowing ? () => onAllow(r.name) : undefined
+                    }
+                  >
+                    {r.pending_reason === "changed"
+                      ? "changed — allow"
+                      : "not allowed to run — allow"}
+                  </Chip>
+                )}
                 {r.muted && (
                   <Chip title="Switched off — this agent cannot run it">
                     muted

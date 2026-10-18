@@ -344,6 +344,45 @@ an imported routine runs inside the Condor process with no sandbox, so the
 preview names every executable file before the write and the operator unmutes
 them one at a time after reading each. Nothing is started by an import.
 
+### Nothing imported executes before consent
+
+A mute, though, is not an execution gate and never was: it is subtracted
+*after* discovery, and discovery is `spec.loader.exec_module`. So the two
+surfaces an operator uses to *review* an imported routine — the `/routines`
+list and the source viewer — were themselves what ran it. `condor/agents/
+code_trust.py` closes that (FEAT-147).
+
+- `bundle.apply` writes `store/code_trust.yml` for the agent it just imported.
+  Its **presence is the gate**: that agent's routines are not imported until
+  each file is allowed. An agent created here has no such file and nothing
+  changes for it — gating code somebody typed into their own install would be
+  a consent dialog for your own work.
+- Consent is keyed by the file's **sha256**, not its name. A routine allowed
+  and then edited — by hand, or by an update from a newer bundle — is pending
+  again, because the thing the operator read is not the thing on disk.
+- A pending routine is still **listed**, still **readable** and still
+  **mutable**. `condor/routine_meta.py` reads its name, category, continuous
+  flag and description out of the parse tree with `ast`, importing nothing;
+  `GET /routines/<name>/source` serves the file from its path instead of
+  through `inspect.getfile(run_fn)`. The one thing it cannot show is the
+  `Config` **form**: pydantic builds a model's fields at class-creation time,
+  so there is no schema until the module has run. You cannot configure code
+  you have not agreed to run.
+- Running one is refused — through `RoutineStore._resolve_routine`, so the web
+  runner, the scheduler, the MCP tool and `condor.primitives` all get the same
+  sentence, which names the allow action.
+- `PUT /agents/{slug}/code-trust` is the gesture, and it is **separate from
+  unmuting on purpose**: unmuting says *this agent may use it*, allowing says
+  *this code may run here*.
+- The record lives under `store/`, which `condor.layering.is_library_path`
+  already refuses, so a hand-edited bundle carrying `store/code_trust.yml`
+  cannot arrive pre-allowed — the import's existing path guard rejects it.
+
+Out of scope, deliberately: a skill is prose and is not executed, and a
+controller runs inside the Hummingbot instance rather than in this process.
+`routines/*.py` is the whole in-process executable surface a bundle carries,
+which is why one file-level gate covers it.
+
 ### Reviewing a bundle before it runs
 
 The scrub above rewrites three frontmatter fields and looks at no file *content*,
