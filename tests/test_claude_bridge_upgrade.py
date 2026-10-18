@@ -170,17 +170,24 @@ def test_an_unpinned_session_is_untouched_by_the_failure_path():
     assert client.active_model_id == "opus[1m]"
 
 
-# ── The doctor probe reads the same verdict as a session ──
+# ── The doctor probe, which asks the bridge what it really offers ──
 
 
-def _patch_probe_client(monkeypatch, start, model_id="haiku"):
-    """Replace the client ``probe_model_pin`` launches; return what it stopped."""
-    stopped = []
+def _patch_probe_client(monkeypatch, start, offers=("default", "sonnet", "haiku")):
+    """Replace the client ``probe_model_pin`` launches.
+
+    Returns ``(stopped, launched)``: whether the bridge was stopped, and the
+    ``(command, kwargs)`` it was launched with — the probe must launch it
+    *unpinned*, since Condor's own ANTHROPIC_MODEL would otherwise make the
+    bridge advertise the very pin under test.
+    """
+    stopped, launched = [], []
 
     class _FakeClient:
-        def __init__(self, command, extra_env=None, model=None):
-            self.model = model
-            self.active_model_id = model_id
+        def __init__(self, command, **kw):
+            launched.append((command, kw))
+            self.available_models = [{"modelId": m, "name": m} for m in offers]
+            self.active_model_id = offers[0] if offers else None
 
         async def start(self):
             await start()
@@ -189,14 +196,15 @@ def _patch_probe_client(monkeypatch, start, model_id="haiku"):
             stopped.append(True)
 
     monkeypatch.setattr(acp_client, "ACPClient", _FakeClient)
-    return stopped
+    return stopped, launched
 
 
-def test_probe_model_pin_passes_an_appliable_pin_and_stops_the_bridge(monkeypatch):
-    async def start():
-        return None
+async def _started():
+    return None
 
-    stopped = _patch_probe_client(monkeypatch, start)
+
+def test_probe_model_pin_passes_a_pin_the_bridge_offers(monkeypatch):
+    stopped, launched = _patch_probe_client(monkeypatch, _started)
 
     ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
 
@@ -205,25 +213,41 @@ def test_probe_model_pin_passes_an_appliable_pin_and_stops_the_bridge(monkeypatc
     assert stopped == [True]
 
 
-def test_probe_model_pin_fails_an_unappliable_pin_with_the_sessions_own_error(
-    monkeypatch,
-):
-    async def start():
-        raise ModelPinError("it offers: sonnet, haiku")
+def test_probe_model_pin_asks_the_bridge_unpinned(monkeypatch):
+    """The pin must not be handed to the bridge: it would echo it back as offered."""
+    _, launched = _patch_probe_client(monkeypatch, _started)
 
-    _patch_probe_client(monkeypatch, start)
+    asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
 
-    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:fable"))
+    ((command, kwargs),) = launched
+    assert command == "claude-agent-acp"
+    assert not kwargs  # no model=, and no ANTHROPIC_MODEL in an extra_env
+
+
+def test_probe_model_pin_fails_a_pin_the_bridge_does_not_offer(monkeypatch):
+    _patch_probe_client(monkeypatch, _started)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:gpt-4o"))
 
     assert ok is False
-    assert detail == "it offers: sonnet, haiku"
+    assert "'gpt-4o'" in detail
+    assert "default, sonnet, haiku" in detail  # what to pin instead
+
+
+def test_probe_model_pin_fails_a_bridge_that_offers_nothing(monkeypatch):
+    _patch_probe_client(monkeypatch, _started, offers=())
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is False  # a pin nothing can apply is not a pass
+    assert "offers: nothing" in detail
 
 
 def test_probe_model_pin_reports_a_silent_bridge_as_not_checkable(monkeypatch):
-    async def start():
+    async def never():
         await asyncio.sleep(5)
 
-    stopped = _patch_probe_client(monkeypatch, start)
+    stopped, _ = _patch_probe_client(monkeypatch, never)
 
     ok, detail = asyncio.run(
         acp_client.probe_model_pin("claude-acp:haiku", timeout=0.05)
@@ -232,6 +256,18 @@ def test_probe_model_pin_reports_a_silent_bridge_as_not_checkable(monkeypatch):
     assert ok is None  # not a pass: nothing was verified
     assert "did not answer" in detail
     assert stopped == [True]
+
+
+def test_probe_model_pin_reports_a_bridge_that_will_not_launch(monkeypatch):
+    async def dead():
+        raise ConnectionError("ACP agent exited")
+
+    _patch_probe_client(monkeypatch, dead)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is None
+    assert "ACP agent exited" in detail
 
 
 def test_probe_model_pin_has_nothing_to_check_without_a_pin(monkeypatch):
