@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from condor.fetchers.api_server import (
     ApiServerSettingsUnsupported,
@@ -1235,3 +1236,60 @@ async def set_telemetry_settings(
 
     applied = consent.deny() if level == consent.OFF else consent.set_level(level)
     return {"level": applied, "consent": consent.state()}
+
+
+# ── The agent hub's publish token (FEAT-146) ──
+
+
+class HubTokenRequest(BaseModel):
+    """The Botcamp token, pasted. An empty string clears it.
+
+    Pasted and not negotiated: Condor's own accounts are Telegram-derived
+    (``create_jwt``) and there is no external identity provider anywhere in the
+    product, while the dashboard is served on a configurable ``WEB_PORT`` so an
+    OAuth redirect URI would differ per install. Taking an outside credential
+    as a value the operator pastes is how this product already does it —
+    ``ApiKeysSettings``, ``ConnectHyperliquid``, ``ImportGatewayWallet``.
+    """
+
+    token: str = ""
+
+
+@router.get("/hub-token")
+async def get_hub_token(user: WebUser = Depends(get_current_user)):
+    """Whether a publish token is set. **Never its value.**
+
+    There is no route, here or anywhere, that reads the token back out. A
+    "reveal" control would be a second copy of the credential on a screen and
+    in an HTTP response for no capability the operator does not already have —
+    they can paste a new one. ``can_change`` mirrors the sharing veto's shape
+    so the panel disables the field rather than offering a write that 403s.
+    """
+    from condor import hub
+
+    cm = get_config_manager()
+    return {"set": bool(hub.token()), "can_change": cm.is_admin(user.id)}
+
+
+@router.put("/hub-token")
+async def update_hub_token(
+    req: HubTokenRequest, user: WebUser = Depends(get_current_user)
+):
+    """Store or clear the token. Admin-only, and the answer carries no value.
+
+    Install-wide, like the telemetry level above and for the same reason: there
+    is one token, every publish from this box is made with it, and a claim
+    created under it is made in the admin's name at an outside service.
+    """
+    from condor import hub
+
+    cm = get_config_manager()
+    if not cm.is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The hub token is an install-wide credential; only the admin "
+                "can change it"
+            ),
+        )
+    return {"set": hub.set_token(req.token)}

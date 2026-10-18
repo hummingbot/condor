@@ -61,6 +61,7 @@ from condor.web.auth import (
     check_server_access,
     get_current_user,
     report_owner_filter,
+    require_admin,
 )
 from condor.web.models import ReportSummary, WebUser
 
@@ -921,6 +922,44 @@ class CreateAgentRequest(BaseModel):
 
 class UpdateAgentMdRequest(BaseModel):
     content: str
+
+
+#: The one sentence every hub surface renders beside a badge (FEAT-146).
+#:
+#: Stated once, on the server, and returned with the catalogue rather than
+#: written into the frontend: it is the *product's* claim about what a badge
+#: means, and a copy of it in a component is a second claim nobody audits. See
+#: ``condor/hub.py``'s trust model for the long form.
+HUB_TRUST = (
+    "The hub is a discovery service, not a security boundary. A validated "
+    "badge means a human reviewed one submitted revision once; it is not a "
+    "signature, Condor verifies no bundle against it, and it does not shorten "
+    "this review. Whatever you install arrives muted and unstarted, and what "
+    "protects you is reading it."
+)
+
+
+class HubInstallRequest(BaseModel):
+    """What to call a hub agent on the way in, when its name is taken.
+
+    Only ever a rename. A collision that is the *same agent* newer is an
+    update, not a second copy, and that branch is chosen by the plan rather
+    than by the caller (FEAT-145).
+    """
+
+    as_slug: str = ""
+
+
+class PublishAgentRequest(BaseModel):
+    """The two things the publisher writes; the hub derives everything else.
+
+    ``author_name`` is a claim nothing verifies — the hub attaches the account
+    handle it authenticated beside it, and the two are rendered as separate
+    facts because they are.
+    """
+
+    notes: str = ""
+    author_name: str = ""
 
 
 class SkillWriteRequest(BaseModel):
@@ -5019,3 +5058,286 @@ async def upload_agent_controller_config(
         )
     except ControllerError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ── The agent hub (FEAT-146) ──
+#
+# Its own router, not more paths under ``/agents``: the hub's noun is a
+# *listing*, addressed by a ``listing_id`` that is not a slug, and hanging
+# ``/agents/hub/agents/{listing_id}`` off the prefix would read as an agent
+# called "hub" and sit one rename away from shadowing ``/agents/{slug}``
+# (CORR-061's whole subject). ``POST /agents/{slug}/publish`` stays on the
+# agents router, because that one really does act on a local agent.
+#
+# Every handler sends the blocking hub call through ``asyncio.to_thread``. The
+# rule is PERF-235's, stated in ``condor/web/routes/sharing.py``: these
+# handlers run on the bot's own event loop, so an inline 20-second hub timeout
+# would not merely slow this request — it would stop Telegram polling, the
+# WebSocket pushes, the share flush and the sweep, for everyone on the install.
+hub_router = APIRouter(prefix="/hub", tags=["hub"])
+
+
+def _hub_refusal(exc: Exception) -> HTTPException:
+    """A hub failure as HTTP, keeping the distinction the error already carries.
+
+    ``HubError.status`` is the hub's own status when the hub answered and ``0``
+    when nothing arrived. A 4xx is passed through — a 401 is the operator's
+    token and a 404 is a listing that is gone, and both are answers they can
+    act on. A 5xx or a transport failure becomes 502, because from the
+    browser's point of view the thing that is broken is upstream of Condor and
+    not the dashboard.
+
+    ``NoTokenError`` is the exception to that reading and gets its own branch:
+    nothing was sent, so there is no upstream to blame, and 502 would have the
+    panel tell the operator the hub is down when what is actually missing is a
+    field they have not filled in yet.
+    """
+    from condor.hub import HubError, NoTokenError
+
+    if isinstance(exc, NoTokenError):
+        return HTTPException(status_code=400, detail=str(exc))
+    status = getattr(exc, "status", 0) if isinstance(exc, HubError) else 0
+    return HTTPException(
+        status_code=status if 400 <= status < 500 else 502, detail=str(exc)
+    )
+
+
+def _listing_refusal(exc: Exception) -> HTTPException:
+    """An identifier this install refused to put in a URL. 400, and nothing sent."""
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+async def _hub_bundle(listing_id: str):
+    """``(listing, bundle)`` for one listing, digest-verified before parsing.
+
+    One helper behind the preview and the install so the two cannot differ in
+    *how* they get the bytes. They each run it — a second fetch, not a cached
+    one — and the digest check inside ``hub.fetch`` is what makes that safe:
+    both requests are held to the same listing digest, so they are the same
+    bundle or the second one fails loudly.
+    """
+    from condor import hub
+    from condor.agents import bundle as agent_bundle
+    from condor.fetchers._identifiers import IdentifierError
+    from condor.hub import HubError
+
+    try:
+        listing = await asyncio.to_thread(hub.get, listing_id)
+        # The listing goes back in rather than being looked up twice: this
+        # layer renders it as provenance and ``fetch`` needs its digest, and
+        # they are the same answer.
+        data = await asyncio.to_thread(hub.fetch, listing_id, listing)
+    except IdentifierError as exc:
+        raise _listing_refusal(exc) from exc
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    try:
+        return listing, agent_bundle.parse(data)
+    except ValueError as exc:
+        raise _bundle_refusal(exc) from exc
+
+
+async def _hub_plan(listing_id: str, as_slug: str, user: WebUser):
+    """Which verb this listing is, and the plan for it. Writes nothing.
+
+    The choice is FEAT-133's ``is_update``, not a comparison this layer makes:
+    ``plan`` already resolves the bundle's ``agent_uid`` against what is
+    installed and states whether the collision is the *same agent* newer. When
+    it is, the answer is FEAT-145's ``plan_update`` and not a rename — which is
+    the same branch the import dialog's collision step takes, reached here
+    without a round trip because the hub listing carries the identity.
+
+    The listing's ``badge`` is deliberately read by nothing in here. It is
+    returned beside the plan as provenance and changes no decision: a
+    ``community`` bundle plans, mutes and reports exactly what a ``validated``
+    one does.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    listing, bundle = await _hub_bundle(listing_id)
+    connectors, tools = await _install_capabilities(user)
+    plan = agent_bundle.plan(
+        bundle,
+        as_slug=as_slug,
+        user_id=user.id,
+        available_connectors=connectors,
+        available_tools=tools,
+    )
+    if plan.is_update:
+        return (
+            listing,
+            "update",
+            agent_bundle.plan_update(
+                bundle,
+                plan.collision,
+                available_connectors=connectors,
+                available_tools=tools,
+            ),
+        )
+    return listing, "install", plan
+
+
+@hub_router.get("/agents")
+async def browse_hub(
+    query: str = "",
+    page: int = 1,
+    user: WebUser = Depends(get_current_user),
+):
+    """What the hub offers. Anonymous upstream, bearer-guarded here.
+
+    The browser never talks to the hub: it asks Condor, and Condor's bearer
+    stays Condor's. That is not only tidiness — the alternative (the page
+    fetching the hub directly) would mean the bytes the dialog previewed and
+    the bytes installed came from two different clients, which breaks
+    FEAT-133's one-builder rule outright.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    try:
+        listings = await asyncio.to_thread(hub.browse, query, page)
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return {
+        "listings": [listing.model_dump() for listing in listings],
+        "trust": HUB_TRUST,
+    }
+
+
+@hub_router.get("/agents/{listing_id}")
+async def get_hub_listing(listing_id: str, user: WebUser = Depends(get_current_user)):
+    """One listing, with the digest its bundle will be held to."""
+    from condor import hub
+    from condor.fetchers._identifiers import IdentifierError
+    from condor.hub import HubError
+
+    try:
+        listing = await asyncio.to_thread(hub.get, listing_id)
+    except IdentifierError as exc:
+        raise _listing_refusal(exc) from exc
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return {"listing": listing.model_dump(), "trust": HUB_TRUST}
+
+
+@hub_router.post("/agents/{listing_id}/install/preview")
+async def preview_hub_install(
+    listing_id: str,
+    req: HubInstallRequest | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """What installing this listing would do. Writes nothing.
+
+    ``verb`` says which of the two plans came back, so the dialog does not have
+    to sniff the shape: ``install`` carries FEAT-133's ``ImportPlan`` and
+    ``update`` FEAT-145's ``UpdatePlan``.
+    """
+    listing, verb, plan = await _hub_plan(
+        listing_id, (req.as_slug if req else ""), user
+    )
+    return {"verb": verb, "listing": listing.model_dump(), "plan": plan.summary()}
+
+
+@hub_router.post("/agents/{listing_id}/install")
+async def install_from_hub(
+    listing_id: str,
+    req: HubInstallRequest | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """Install this listing, with its code switched off.
+
+    Re-fetches and re-plans rather than trusting anything the client carried
+    back — the same rule ``/import`` and ``/{slug}/update`` follow, and it
+    matters as much here: one of the update blockers is whether a loop is
+    running *right now*.
+
+    It lands through FEAT-133's ``apply`` or FEAT-145's ``apply_update``, which
+    is to say through exactly the gate the file path uses. Nothing about the
+    listing — least of all its badge — shortens that: routines and skills
+    arrive muted, no imported ``.py`` has execution consent, and nothing is
+    started.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    listing, verb, plan = await _hub_plan(
+        listing_id, (req.as_slug if req else ""), user
+    )
+    try:
+        if verb == "update":
+            result = agent_bundle.apply_update(plan, user_id=user.id)
+        else:
+            result = agent_bundle.apply(plan, user_id=user.id)
+    except ValueError as exc:
+        raise (
+            _create_refusal(exc)
+            if verb == "install"
+            else HTTPException(status_code=400, detail=str(exc))
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"verb": verb, "listing": listing.model_dump(), "plan": result}
+
+
+@hub_router.delete("/agents/{listing_id}")
+async def unpublish_from_hub(
+    listing_id: str, user: WebUser = Depends(get_current_user)
+):
+    """Withdraw one of this install's listings.
+
+    Admin-only for the same reason the publish is: the token is one Botcamp
+    account's, so acting with it is acting as that account.
+
+    It removes the listing and does not recall a download — the surface that
+    offers it says that in a sentence.
+    """
+    from condor import hub
+    from condor.fetchers._identifiers import IdentifierError
+    from condor.hub import HubError
+
+    require_admin(user)
+    try:
+        await asyncio.to_thread(hub.unpublish, listing_id, hub.token())
+    except IdentifierError as exc:
+        raise _listing_refusal(exc) from exc
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return {"unpublished": True, "listing_id": listing_id}
+
+
+@router.post("/{slug}/publish")
+async def publish_agent_to_hub(
+    slug: str,
+    req: PublishAgentRequest | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """Upload this agent to the hub, as the file an export would hand over.
+
+    **Admin-only**, which is a tighter line than the other agent writes draw
+    and is drawn deliberately. Every other write here affects this install; this
+    one creates a claim at an outside service under the single Botcamp token
+    stored in ``config.yml``. A non-admin publishing with it would be acting as
+    the admin's account, and a published bundle cannot be unpublished out of
+    somebody's download.
+
+    400 when FEAT-144's review finds a value that can only be a secret: it is
+    ``build`` that refuses, the same refusal the Export button already renders,
+    and nothing is sent. The sentence names the file and the byte span.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    require_admin(user)
+    _get_agent(slug)
+    try:
+        receipt = await asyncio.to_thread(
+            hub.publish,
+            slug,
+            hub.token(),
+            (req.notes if req else ""),
+            (req.author_name if req else ""),
+        )
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    except ValueError as exc:
+        raise _bundle_refusal(exc) from exc
+    return {"published": True, "receipt": receipt.model_dump()}

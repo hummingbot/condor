@@ -371,6 +371,119 @@ def _upgrade_agent(agent_slug: str, path: str) -> dict:
         return {"error": str(exc), "preview": plan.summary()}
 
 
+def _hub_browse(query: str = "") -> dict:
+    """What the agent hub offers, as rows to read out (FEAT-146).
+
+    Anonymous — browsing needs no token, because the listing is public content
+    and gating it would make the feature useless for an operator who has no
+    Botcamp account, which is most of them on day one.
+
+    ``badge`` is **provenance and nothing else**. A ``validated`` badge means a
+    human reviewed one submitted revision once; it is not a signature, Condor
+    verifies no bundle against it, and it must never be read back to the user
+    as a reason something is safe to run. Say what it is, and say that the
+    review on install is the gate.
+    """
+    from condor import hub
+
+    try:
+        listings = hub.browse(query or "")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {
+        "listings": [listing.model_dump() for listing in listings],
+        "trust": (
+            "A badge is provenance, not a verdict: the hub is a discovery "
+            "service and not a security boundary. Whatever you install arrives "
+            "muted and unstarted, and the review on install is the gate."
+        ),
+    }
+
+
+def _hub_install(listing_id: str, as_slug: str = "") -> dict:
+    """Install a hub listing, through exactly the gate the file path uses.
+
+    The bytes are digest-verified against the listing before anything parses
+    them (``hub.fetch``), and then this is FEAT-133's ``plan``/``apply`` — or
+    FEAT-145's ``plan_update``/``apply_update`` when the listing's agent is
+    already installed here, which the plan decides, not this function and not
+    the caller. ``as_slug`` is only ever a rename for a collision that is a
+    *different* agent.
+
+    Everything the import door promises holds unchanged: every executable file
+    is named in the result, routines and skills arrive muted, no imported
+    ``.py`` may execute until the operator allows it, and nothing is started.
+    Report the ``findings`` and the ``unmet`` list; neither blocks the install.
+
+    Connectors are left unasked here for the same reason the file import leaves
+    them: resolving them needs an async Hummingbot client and this is a
+    synchronous tool.
+    """
+    from condor import hub
+    from condor.agents import bundle as agent_bundle
+    from condor.runtime.toolsets import every_tool_name
+
+    try:
+        listing = hub.get(listing_id)
+        data = hub.fetch(listing_id, listing)
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+
+    try:
+        bundle = agent_bundle.parse(data)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    tools = sorted(every_tool_name())
+    plan = agent_bundle.plan(
+        bundle,
+        as_slug=as_slug or "",
+        user_id=settings.user_id,
+        available_tools=tools,
+    )
+    listing_row = listing.model_dump()
+    if plan.is_update:
+        update = agent_bundle.plan_update(bundle, plan.collision, available_tools=tools)
+        try:
+            result = agent_bundle.apply_update(update, user_id=settings.user_id)
+        except ValueError as exc:
+            return {"error": str(exc), "verb": "update", "preview": update.summary()}
+        return {"verb": "update", "listing": listing_row, **result}
+    try:
+        result = agent_bundle.apply(plan, user_id=settings.user_id)
+    except ValueError as exc:
+        return {"error": str(exc), "verb": "install", "preview": plan.summary()}
+    return {"verb": "install", "listing": listing_row, **result}
+
+
+def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+    """Upload this agent to the hub, as the file an export would hand over.
+
+    The bytes are built by FEAT-133's ``build`` and rendered by its ``render``,
+    which is to say they are byte-identical to what ``action="export"`` writes
+    to disk — there is no second serializer. It therefore inherits the export's
+    FEAT-144 refusal: an agent carrying a value that can only be a secret stops
+    here, and nothing is sent, because a published bundle cannot be unpublished
+    out of somebody's download.
+
+    It needs the install's Botcamp token, which lives in ``config.yml`` and is
+    set in Settings → Agents. There is no way to pass one in here and there
+    should not be: a token in a tool argument is a token in a transcript.
+
+    Publishing sends content off this box and is irreversible in practice —
+    ``unpublish`` removes the listing, it does not recall a download. Confirm
+    with the user before calling it, and read the receipt back rather than
+    summarising it.
+    """
+    from condor import hub
+
+    try:
+        receipt = hub.publish(agent_slug, hub.token(), notes or "", author_name or "")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {"published": True, **receipt.model_dump()}
+
+
 def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
     """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
 
@@ -542,6 +655,30 @@ def _manage_agent(
         if not path:
             return {"error": "path (the newer bundle file) is required"}
         return _upgrade_agent(agent_slug, path)
+
+    if action == "hub_browse":
+        # ``agent_slug`` doubles as the search here: there is no listing to
+        # look up yet, and a second string parameter for one optional filter
+        # would be a field every other action has to ignore.
+        return _hub_browse(agent_slug or "")
+
+    if action == "hub_install":
+        if not path:
+            return {
+                "error": (
+                    "path (the hub listing_id to install) is required — "
+                    'find one with manage_agents(action="hub_browse")'
+                )
+            }
+        # ``path`` carries the listing id and ``agent_slug`` the name to land
+        # under, which is the same split ``import`` already uses: the bundle
+        # names itself, and ``agent_slug`` is how a collision is answered.
+        return _hub_install(path, agent_slug or "")
+
+    if action == "publish_hub":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        return _publish_hub(agent_slug, notes or "", author_name or "")
 
     if action == "delete_agent":
         if not agent_slug:
@@ -913,6 +1050,15 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="upgrade", agent_slug=..., path=...)',
     ),
+    "hub_browse": ("manage_agents", 'manage_agents(action="hub_browse")'),
+    "hub_install": (
+        "manage_agents",
+        'manage_agents(action="hub_install", path=<listing_id>)',
+    ),
+    "publish_hub": (
+        "manage_agents",
+        'manage_agents(action="publish_hub", agent_slug=...)',
+    ),
     "list_strategies": ("manage_loops", 'manage_loops(action="list")'),
     "get_strategy": ("manage_loops", 'manage_loops(action="get", loop_id=...)'),
     "create_strategy": (
@@ -961,6 +1107,13 @@ _AGENT_ACTIONS = {
     "export": "export_agent",
     "import": "import_agent",
     "upgrade": "upgrade_agent",
+    # The hub's three (FEAT-146). Spelled with their prefix even in the short
+    # table: "browse" and "install" on their own would read as local verbs, and
+    # ``publish`` is already taken by the publish-to-stock action — which is a
+    # different act entirely, writing into this repo's tracked library.
+    "hub_browse": "hub_browse",
+    "hub_install": "hub_install",
+    "publish_hub": "publish_hub",
 }
 
 _STRATEGY_ACTIONS = {

@@ -809,6 +809,9 @@ async def manage_agents(
         "export",
         "import",
         "upgrade",
+        "hub_browse",
+        "hub_install",
+        "publish_hub",
         # Legacy funnel-era spellings this family still answers to.
         "list_agent_definitions",
         "create_agent",
@@ -888,6 +891,29 @@ async def manage_agents(
       agent's upstream, when the bundle is older, for an agent the repo ships,
       and while a loop is running: read `blockers` back verbatim. On success
       read `files` back — a conflict is content nobody else can reproduce.
+    - "hub_browse": What the Botcamp agent hub offers (`agent_slug` doubles as
+      an optional search term). No account needed. Each row carries a `badge`:
+      "validated" means a human reviewed ONE submitted revision once, and
+      "community" means nobody did. Say which it is and say what it is NOT —
+      the hub is a discovery service, not a security boundary; it is not a
+      signature, Condor verifies nothing against it, and it never shortens the
+      review on install. Never read a badge back as a reason something is safe.
+    - "hub_install": Install a listing (requires `path` = the listing_id;
+      `agent_slug` renames it if the name is taken). The bytes are verified
+      against the listing's digest before anything parses them, and then this
+      is exactly the import door: a listing of an agent already installed here
+      becomes an UPGRADE automatically (`verb` says which happened), everything
+      arrives MUTED, no imported routine may execute until the user allows it,
+      and nothing is started. Report `findings` and `unmet`; neither blocks it.
+    - "publish_hub": ADMIN ONLY, and not the same thing as "publish" — that
+      one copies an agent into this repo's tracked library, this one uploads it
+      to the hub for strangers (requires agent_slug; `notes` and `author_name`
+      as for "export"). It needs the install's token, set in Settings →
+      Agents, and cannot take one as an argument. It sends the SAME bytes
+      "export" writes, so it refuses outright on a value that can only be a
+      secret. **Confirm with the user before calling it**: publishing sends
+      content off this box and is irreversible in practice — unpublishing
+      removes the listing, it does not recall a download.
 
     Args:
         action: What to do with the agent definition.
@@ -922,11 +948,15 @@ async def manage_agents(
             its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
             mutes and session output are never published. For "import" and
-            "upgrade" — the bundle file to read.
-        notes: For "export" — the changelog for this version, carried verbatim
-            in the bundle. What changed since the last bundle of this agent.
-        author_name: For "export" — who to credit. An unverified claim: Condor
-            signs nothing and the receiving install cannot check it.
+            "upgrade" — the bundle file to read. For "hub_install" — the
+            listing_id from "hub_browse", not a path at all.
+        notes: For "export" and "publish_hub" — the changelog for this version,
+            carried verbatim in the bundle. What changed since the last bundle
+            of this agent.
+        author_name: For "export" and "publish_hub" — who to credit. An
+            unverified claim: Condor signs nothing and the receiving install
+            cannot check it. On a hub publish the hub attaches the account
+            handle it authenticated beside it, as a separate fact.
 
     Returns:
         Action-specific result dict.

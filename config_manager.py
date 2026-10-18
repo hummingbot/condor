@@ -93,6 +93,12 @@ CONFIG_SECTIONS: "dict[str, Callable[[ConfigManager], Any]]" = {
     # admin's sharing veto, each user's standing answer and the share_secret
     # behind the stable pseudonyms were re-minted on every restart (CORR-244).
     "sharing": lambda cm: {},
+    # The Botcamp hub's publish token (FEAT-146). One entry covers the load
+    # setdefault, the save projection and the empty-file default because
+    # ARCH-738 collapsed those three hand-kept lists into this one — before it,
+    # a section declared in two of the three was dropped on the next save,
+    # twice (ARCH-177, CORR-244).
+    "hub": lambda cm: {},
     "version": lambda cm: cm.VERSION,
 }
 
@@ -824,6 +830,28 @@ class ConfigManager:
         if not isinstance(section, dict):
             section = {}
             self._data["sharing"] = section
+        section.update(changes)
+        self._save_config()
+        return dict(section)
+
+    def get_hub(self) -> dict:
+        """The agent-hub section (FEAT-146). Empty until a token is pasted.
+
+        Separate from :meth:`get_sharing` for the same reason sharing is
+        separate from telemetry: this holds one outside service's credential,
+        install-wide and the operator's, while sharing holds per-user consent
+        and this install's own ids. Its only key is ``token``, which no route
+        ever reads back out to a client.
+        """
+        section = self._data.get("hub")
+        return dict(section) if isinstance(section, dict) else {}
+
+    def update_hub(self, **changes) -> dict:
+        """Merge keys into the hub section and persist."""
+        section = self._data.setdefault("hub", {})
+        if not isinstance(section, dict):
+            section = {}
+            self._data["hub"] = section
         section.update(changes)
         self._save_config()
         return dict(section)
