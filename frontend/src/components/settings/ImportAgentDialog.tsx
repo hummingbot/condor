@@ -128,11 +128,59 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
               {plan.description || plan.when_to_consult || "No description."}
             </p>
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              Exported {plan.exported_at || "at an unknown time"} as{" "}
-              <span className="font-mono">{plan.source_slug}</span> ·{" "}
+              Version {plan.version} · exported {plan.exported_at || "at an unknown time"}{" "}
+              as <span className="font-mono">{plan.source_slug}</span> ·{" "}
               {plan.files.length + plan.executables.length} files · {plan.total_bytes} bytes
             </p>
+            <p data-agent-uid className="text-[11px] text-[var(--color-text-muted)]">
+              Agent id <span className="font-mono">{plan.agent_uid}</span> — the same
+              agent on every install that imported this bundle, whatever it is named
+              there.
+            </p>
+            {plan.notes && (
+              <p data-bundle-notes className="mt-1 text-[11px] text-[var(--color-text)]">
+                “{plan.notes}”
+              </p>
+            )}
+            {/* The label is not decoration: a handle rendered next to a download
+                without one reads as provenance, and Condor verifies nothing
+                here — it signs no bundle and has no keys to check one with. */}
+            {(plan.author.name || plan.author.handle) && (
+              <p data-bundle-author className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+                Author (unverified claim):{" "}
+                <span className="text-[var(--color-text)]">
+                  {plan.author.name || plan.author.handle}
+                </span>
+                {plan.author.name && plan.author.handle && ` (${plan.author.handle})`}
+              </p>
+            )}
           </div>
+
+          {plan.unmet.length > 0 && (
+            <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5">
+              <p className="mb-1 text-xs font-semibold text-[var(--color-text)]">
+                {plan.unmet.length} thing{plan.unmet.length !== 1 ? "s" : ""} this install
+                cannot give it
+              </p>
+              <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
+                None of this stops the import — everything arrives muted anyway. It is
+                what will not work until you fix it.
+              </p>
+              <ul className="space-y-0.5">
+                {plan.unmet.map((u) => (
+                  <li
+                    key={`${u.kind}:${u.name}`}
+                    data-unmet
+                    className="text-[11px] text-[var(--color-text-muted)]"
+                  >
+                    <span className={u.blocking ? "text-amber-400" : ""}>{u.kind}</span>{" "}
+                    <span className="font-mono text-[var(--color-text)]">{u.name}</span>
+                    {u.have.length > 0 && <> — you have {u.have.join(", ")}</>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {plan.executables.length > 0 && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5">

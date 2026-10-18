@@ -69,6 +69,35 @@ export interface AgentBundleFile {
  * The preview endpoint and the apply endpoint return the same shape from the
  * same builder, so the dialog cannot show something the write does not do.
  */
+/** Who the exporter *says* made a bundle. Verified by nothing — label it. */
+export interface AgentBundleAuthor {
+  name: string;
+  handle: string;
+}
+
+/**
+ * What an agent needs, derived from its own files — never authored, and
+ * re-derived on the server at preview time rather than read off the manifest.
+ */
+export interface AgentBundleRequires {
+  connectors: string[];
+  tools: string[];
+  agent_key: string;
+  /** `carried` travel in the bundle; `inherited` come from the shared library. */
+  skills: { carried: string[]; inherited: string[] };
+}
+
+/** One thing the bundle needs that this install cannot supply. Never fatal. */
+export interface AgentUnmetRequirement {
+  /** "connector" | "tool" | "skill" | "model" */
+  kind: string;
+  name: string;
+  /** What this install has instead. */
+  have: string[];
+  /** Whether the agent cannot do its job at all without it. */
+  blocking: boolean;
+}
+
 export interface AgentImportPlan {
   slug: string;
   source_slug: string;
@@ -77,6 +106,14 @@ export interface AgentImportPlan {
   when_to_consult: string;
   exported_at: string;
   schema_version: number;
+  /** The identity that survives the rename `as_slug` performs. */
+  agent_uid: string;
+  /** Advisory, and only within one `agent_uid`'s lineage. */
+  version: number;
+  notes: string;
+  author: AgentBundleAuthor;
+  requires: AgentBundleRequires;
+  unmet: AgentUnmetRequirement[];
   /** Everything that is not a `.py`. */
   files: AgentBundleFile[];
   /** The executable files, listed apart because reviewing them is the gate. */

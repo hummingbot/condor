@@ -42,7 +42,7 @@ Only an admin can copy a local agent into the shipped `agents/` library
 | An idea: "I want an agent for X" | **A — From scratch** (minimal first, layer on) |
 | A folder / files: instructions, controllers, configs, scripts | **B — From a folder** (inventory → discuss → build) |
 | One controller for an existing agent | skip both — follow `controller_sources` (see Controllers) |
-| A bundle someone exported (`*.condor-agent.json`) | skip both — `manage_agents(action="import", path=...)`, then review its muted routines before unmuting |
+| A bundle someone exported (`*.condor-agent.json`) | skip both — `manage_agents(action="import", path=...)`, then review its muted routines before unmuting and report its `unmet` list |
 
 Label each message with the current step, e.g. `[B2 — Discuss]`. Only the step label as a
 header; status as key: value.
@@ -322,6 +322,27 @@ reads the shared library (`routine_cookbook`, `controller_sources`, `loop_builde
 `manage_agents(action="update", agent_slug=…, instructions=…)`.
 `manage_agents(action="delete", agent_slug=…)` refuses while the agent owns loops (delete
 them first with `manage_loops(action="delete", loop_id=…)`) and always for a shipped agent.
+
+**Handing an agent to someone else.** `manage_agents(action="export", agent_slug=…)`
+writes one file under `data/exports/` and returns its path — send that. Two optional
+arguments are worth filling in, and nothing else about the manifest is yours to write:
+
+| Argument | What to put in it |
+|---|---|
+| `notes` | The changelog for this version: what changed since the last bundle of this agent. Omit it on a first export. |
+| `author_name` | Who to credit. Say plainly that it is **unverified** — Condor signs nothing and the receiving install cannot check it. |
+
+The rest the export derives and you should read back to the user rather than invent:
+`agent_uid` (the agent's identity, the same on every install that imported this bundle,
+whatever it is named there), `version` (bumped only when the agent's content actually
+changed — re-exporting an untouched agent returns the same number), and `requires` (the
+connectors, tools, model and skills read out of the agent's own files).
+
+`manage_agents(action="import", path=…, agent_slug=<new name>)` is the other door. Its
+result carries `unmet`: what this install cannot give the agent — a connector with no
+credentials, a shared playbook it does not have, a tool it does not mount, a model it had
+to substitute. **None of it blocks the import**, and everything arrives muted anyway, so
+report the list and let the user decide what to fix before unmuting.
 
 ## Rules
 - **From scratch: minimal first.** Role + purpose, then prove it with an `ask`; routines

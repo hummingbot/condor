@@ -828,6 +828,8 @@ async def manage_agents(
     server_required: bool | None = None,
     server_name: str | None = None,
     path: str | None = None,
+    notes: str | None = None,
+    author_name: str | None = None,
 ) -> dict:
     """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
 
@@ -858,13 +860,20 @@ async def manage_agents(
     - "export": Write the agent out as ONE portable file under data/exports/
       (requires agent_slug), and return its path — hand that file to the user.
       It carries the agent's library only: its store, journals, mutes, session
-      output and this install's server pin and creator id never travel.
+      output and this install's server pin and creator id never travel. The
+      bundle also says WHICH agent it is (a stable agent_uid that survives a
+      rename on import), which version (bumped only when the content actually
+      changed since the last export — pass `notes` to say what changed), who
+      claims to have made it (`author_name`, verified by nothing), and what it
+      needs: the connectors, tools, model and skills read out of its own files.
     - "import": Register the agent in a bundle file (requires `path`;
       `agent_slug` renames it on the way in, which is how a name collision is
       answered). It never overwrites an existing agent, and everything it
       brings arrives MUTED — tell the user to read each imported routine and
       skill before unmuting it, because an imported routine runs inside this
-      process with no sandbox. Nothing is started.
+      process with no sandbox. Nothing is started. The result's `unmet` lists
+      what this install cannot supply the agent; it never blocks the import,
+      so report it and let the user decide.
 
     Args:
         action: What to do with the agent definition.
@@ -900,6 +909,10 @@ async def manage_agents(
             Empty publishes the whole agent's library half; its store, journals,
             mutes and session output are never published. For "import" — the
             bundle file to read.
+        notes: For "export" — the changelog for this version, carried verbatim
+            in the bundle. What changed since the last bundle of this agent.
+        author_name: For "export" — who to credit. An unverified claim: Condor
+            signs nothing and the receiving install cannot check it.
 
     Returns:
         Action-specific result dict.
@@ -916,6 +929,8 @@ async def manage_agents(
         server_required=server_required,
         server_name=server_name,
         path=path,
+        notes=notes,
+        author_name=author_name,
     )
 
 

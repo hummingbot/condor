@@ -55,6 +55,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter, slugify
 from condor.fsutil import atomic_write_text
@@ -100,6 +101,19 @@ class Agent:
     server_name: str = ""
     created_by: int = 0
     created_at: str = ""
+    # Stable identity, slug-independent (FEAT-143). 32 hex characters, minted by
+    # ``create`` and — for every agent that predates this field — at export.
+    # NOT ``agent_id``: that name already means *the slug* in 446 places
+    # (``get_engine(agent_id)``), so a second identifier under it would make
+    # every one of them ambiguous. Empty is legal and means "never exported,
+    # never created under this field"; nothing mints it on a read path.
+    agent_uid: str = ""
+    # Bundle bookkeeping (FEAT-143), written only by an export: the version the
+    # last bundle of this agent carried, and the digest of the content it was
+    # computed over. Together they are what lets a re-export of unchanged
+    # content return the same version instead of inflating one per export.
+    bundle_version: int = 0
+    bundle_digest: str = ""
 
     def __post_init__(self):
         if not self.created_at:
@@ -249,6 +263,9 @@ def _load_agent_from_file(path: Path, slug: str) -> Agent | None:
             server_name=meta.get("server_name", "") or "",
             created_by=meta.get("created_by", 0),
             created_at=meta.get("created_at", ""),
+            agent_uid=str(meta.get("agent_uid", "") or ""),
+            bundle_version=int(meta.get("bundle_version", 0) or 0),
+            bundle_digest=str(meta.get("bundle_digest", "") or ""),
         )
     except Exception:
         log.exception("Failed to load agent from %s", path)
@@ -361,6 +378,10 @@ class AgentStore:
             server_required=server_required,
             server_name=server_name,
             created_by=created_by,
+            # Minted here and nowhere else on a write path (FEAT-143): a new
+            # agent is a new lineage, and this is the one moment that is true.
+            # ``get`` must never mint, or reading an agent would write to disk.
+            agent_uid=uuid4().hex,
         )
         self._save(agent)
         log.info("Created agent %s (dir: %s)", agent.name, agent.slug)
@@ -412,6 +433,9 @@ class AgentStore:
             "server_name": agent.server_name,
             "created_by": agent.created_by,
             "created_at": agent.created_at,
+            "agent_uid": agent.agent_uid,
+            "bundle_version": agent.bundle_version,
+            "bundle_digest": agent.bundle_digest,
         }
         # Forks a stock AGENT.md down before overwriting it, so the shipped
         # copy is never the file this writes and the local one carries a

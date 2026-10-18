@@ -157,8 +157,13 @@ def seat_tools(agent_slug: str | None, tick: bool = False) -> list[dict[str, Any
     ]
 
 
-def _every_tool_name() -> set[str]:
-    """Every tool name any ring of either server can mount."""
+def every_tool_name() -> set[str]:
+    """Every tool name any ring of either server can mount.
+
+    Public because it is also the answer to "what tools does this install have
+    at all", which is what an agent bundle's ``requires.tools`` is resolved
+    against (FEAT-143).
+    """
     from mcp_servers.condor import profiles as condor_profiles
     from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
 
@@ -194,7 +199,7 @@ def allowlist_mutes(agent_slug: str | None) -> set[str]:
     if agent is None or not agent.tools:
         return set()
     allowed = {canonical_tool_name(name).rsplit("__", 1)[-1] for name in agent.tools}
-    return _every_tool_name() - allowed
+    return every_tool_name() - allowed
 
 
 def seat_mutes(agent_slug: str | None) -> list[str]:

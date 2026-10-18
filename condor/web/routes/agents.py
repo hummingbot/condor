@@ -2861,6 +2861,34 @@ async def _uploaded_bundle(file: UploadFile):
         raise _bundle_refusal(exc) from exc
 
 
+async def _install_capabilities(user: WebUser) -> tuple[list[str] | None, list[str]]:
+    """What this install can supply an imported agent (FEAT-143).
+
+    ``(connectors, tools)``. The connector half is ``None`` — *not asked* —
+    whenever there is no server to ask or the one there is cannot be reached:
+    an unreachable server is no evidence about which connectors are configured,
+    and reporting every requirement as unmet because of it would be a preview
+    that cries wolf. A failure here never fails the preview; the worst case is
+    a plan that reports fewer unmet requirements than it could have.
+    """
+    from condor.runtime.toolsets import every_tool_name
+
+    tools = sorted(every_tool_name())
+    try:
+        from condor.fetchers.connectors import fetch_available_cex_connectors
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        server_name = cm.get_chat_default_server(user.id) or cm.get_default_server()
+        if not server_name or not cm.has_server_access(user.id, server_name):
+            return None, tools
+        client = await cm.get_client(server_name)
+        return list(await fetch_available_cex_connectors(client, strict=True)), tools
+    except Exception as exc:  # noqa: BLE001 - no server is "not asked", not an error
+        log.info("agents: import preview could not resolve connectors: %s", exc)
+        return None, tools
+
+
 @router.post("/import/preview")
 async def preview_agent_import(
     file: UploadFile = File(...),
@@ -2876,7 +2904,14 @@ async def preview_agent_import(
     from condor.agents import bundle as agent_bundle
 
     bundle = await _uploaded_bundle(file)
-    return agent_bundle.plan(bundle, as_slug=as_slug, user_id=user.id).summary()
+    connectors, tools = await _install_capabilities(user)
+    return agent_bundle.plan(
+        bundle,
+        as_slug=as_slug,
+        user_id=user.id,
+        available_connectors=connectors,
+        available_tools=tools,
+    ).summary()
 
 
 @router.post("/import")
@@ -2894,7 +2929,14 @@ async def import_agent(
     from condor.agents import bundle as agent_bundle
 
     bundle = await _uploaded_bundle(file)
-    plan = agent_bundle.plan(bundle, as_slug=as_slug, user_id=user.id)
+    connectors, tools = await _install_capabilities(user)
+    plan = agent_bundle.plan(
+        bundle,
+        as_slug=as_slug,
+        user_id=user.id,
+        available_connectors=connectors,
+        available_tools=tools,
+    )
     try:
         return agent_bundle.apply(plan, user_id=user.id)
     except ValueError as exc:
@@ -2902,18 +2944,26 @@ async def import_agent(
 
 
 @router.get("/{slug}/bundle")
-async def export_agent_bundle(slug: str, user: WebUser = Depends(get_current_user)):
+async def export_agent_bundle(
+    slug: str,
+    notes: str = "",
+    author_name: str = "",
+    user: WebUser = Depends(get_current_user),
+):
     """This agent as one portable file.
 
     Bearer-guarded like everything else here, so the frontend fetches it with
     ``authFetch`` and makes an object URL — a bare ``<a href>`` has no way to
     carry the header, which is the same reason ``useAuthedImage`` exists.
+
+    ``notes`` is the changelog for this version and ``author_name`` is a claim
+    nothing verifies (FEAT-143); both are optional and are carried verbatim.
     """
     from condor.agents import bundle as agent_bundle
 
     _get_agent(slug)
     try:
-        bundle = agent_bundle.build(slug)
+        bundle = agent_bundle.build(slug, notes=notes, author_name=author_name)
     except ValueError as exc:
         raise _bundle_refusal(exc) from exc
     return Response(

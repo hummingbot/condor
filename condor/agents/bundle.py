@@ -36,6 +36,32 @@ selectors disagreeing.
 (:mod:`condor.memory.mutes`) so the code is inert until the operator reads it
 and unmutes it item by item. Import creates; it never overwrites, never starts
 anything, and never writes into the shipped tree.
+
+**Who this agent is, and what it needs** (FEAT-143). A bundle that travels
+between strangers carries four more manifest fields, all in schema 1 because
+no schema-1 bundle without them ever reached ``main``:
+
+* ``agent.agent_uid`` — a stable 32-hex identity that survives the rename
+  ``as_slug`` performs, so two homes that came from one bundle can still be
+  recognised as the same agent. It is *not* spelled ``agent_id``: that name
+  already means the slug everywhere in this codebase.
+* ``version`` and ``notes`` — an integer that orders two bundles of one
+  ``agent_uid``, bumped only when the content actually changed, and the free
+  text the exporter wrote about the change. A version is meaningful only
+  *within one lineage*: two installs that import one bundle, edit and
+  re-export both produce version 2 with different content. The authoritative
+  answer for an upgrade is the file diff, never this number.
+* ``author`` — a **claim**. Nothing in Condor verifies it, Condor has no key
+  infrastructure, and every surface that renders it must say so.
+* ``requires`` — **derived from the files, never authored**, so it cannot
+  drift from what the agent actually names. :func:`requires_of` is the one
+  derivation and both the export and the preview call it, which is why a
+  hand-edited ``requires`` block in a bundle changes nothing.
+
+An unmet requirement never refuses an import. "I will add that exchange's API
+key once I have read the agent" is the honest case, and everything that lands
+is muted and unstarted anyway: the preview says what will not work here, and
+the operator decides.
 """
 
 from __future__ import annotations
@@ -44,9 +70,12 @@ import hashlib
 import json
 import logging
 import shutil
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
@@ -55,6 +84,7 @@ from condor.layering import (
     CREATED_BY_KEY,
     FORKED_AT_KEY,
     FORKED_FROM_KEY,
+    fork_if_stock,
     is_library_path,
     publishable_files,
 )
@@ -67,6 +97,16 @@ log = logging.getLogger(__name__)
 #: misread. An unknown value is refused **whole**, the stance
 #: ``condor/sharing/wire.py`` sets: a bundle from a newer Condor fails loudly
 #: rather than being half-understood.
+#:
+#: Still 1 after FEAT-143 added four manifest fields, and that is the
+#: deliberate answer to the question that item's own risk note poses: a schema
+#: bump exists to protect readers of bundles already in the wild, and
+#: ``condor/agents/bundle.py`` had not reached ``main`` when the fields landed,
+#: so no bundle without them was ever emitted by a released Condor. Shipping
+#: schema 2 would have been a version number nothing had ever written. The
+#: *reader* is tolerant regardless — every new field has a default, so a
+#: manifest that omits them all parses, and the missing values are minted or
+#: derived on the way in.
 SCHEMA = 1
 
 #: Stamped on every bundle and checked on the way in, so an unrelated JSON file
@@ -84,10 +124,22 @@ FILENAME_SUFFIX = ".condor-agent.json"
 
 AGENT_MD = "AGENT.md"
 SERVER_NAME_KEY = "server_name"
+AGENT_UID_KEY = "agent_uid"
+BUNDLE_VERSION_KEY = "bundle_version"
+BUNDLE_DIGEST_KEY = "bundle_digest"
 
 #: The frontmatter keys rewritten on the way out. Named here so the export
 #: scrub, the import stamp and the preview all read one list.
 SCRUBBED_KEYS = (SERVER_NAME_KEY, CREATED_BY_KEY, FORKED_FROM_KEY, FORKED_AT_KEY)
+
+#: The ``AGENT.md`` keys that are *this install's* bundle bookkeeping rather
+#: than part of the agent, dropped from the carried copy. They have to be
+#: dropped rather than merely ignored: the export stamps them back onto disk
+#: after computing the digest, so carrying them would make every export see
+#: different bytes than the last one measured and bump the version forever.
+#: ``agent_uid`` is deliberately **not** here — it is the one thing that must
+#: travel.
+BOOKKEEPING_KEYS = (BUNDLE_VERSION_KEY, BUNDLE_DIGEST_KEY)
 
 
 class BundleError(ValueError):
@@ -117,12 +169,67 @@ class BundleFile(BaseModel):
 
 
 class BundleAgent(BaseModel):
-    """The identity a reviewer sees before opening a single file."""
+    """The identity a reviewer sees before opening a single file.
+
+    ``agent_uid`` is the identity; ``slug`` is only the name, and the importer
+    is allowed to change it. Empty on a bundle written before FEAT-143, and
+    minted on the way in — see :func:`_minted_uid`.
+    """
 
     slug: str
     name: str = ""
     description: str = ""
     when_to_consult: str = ""
+    agent_uid: str = ""
+
+
+class BundleAuthor(BaseModel):
+    """Who the exporter *says* made this. Verified by nothing, anywhere.
+
+    ``handle`` is reserved for the account a hub attaches at publish time and
+    is empty on a bundle exported locally. The ``install_secret``/
+    ``share_secret`` pair is deliberately not reused to sign any of this: those
+    exist to prove something locally and never leave the box, and a signature
+    would answer "who built this" while the dangerous payload is free-text
+    instructions a verified author can ship as readily as anyone.
+    """
+
+    name: str = ""
+    handle: str = ""
+
+
+class BundleSkills(BaseModel):
+    """The skill slugs the agent's loops name, split by where they come from.
+
+    ``carried`` arrive in ``files``; ``inherited`` are expected from
+    ``agents/_shared/skills``, which is structurally absent from a bundle (a
+    shared playbook is a *sibling* of the agent home, so an export cannot
+    reach it). The split is the whole point: only the second kind can be
+    missing on the receiving install.
+    """
+
+    carried: list[str] = Field(default_factory=list)
+    inherited: list[str] = Field(default_factory=list)
+
+
+class BundleRequires(BaseModel):
+    """What this agent needs, derived from its own files. Never authored.
+
+    A hand-written requirements block drifts from the files the moment a loop's
+    connector changes and nothing notices, so this is read out of the content
+    by :func:`requires_of` at export *and* again at preview — the importer
+    never trusts the block a bundle carries.
+    """
+
+    #: Every connector the loops and the controller sample configs name,
+    #: sorted and deduplicated.
+    connectors: list[str] = Field(default_factory=list)
+    #: ``AGENT.md``'s ``tools:`` allowlist, verbatim. Empty means unrestricted
+    #: and is recorded as ``[]``, never expanded to "every tool".
+    tools: list[str] = Field(default_factory=list)
+    #: The model the agent asks for.
+    agent_key: str = ""
+    skills: BundleSkills = Field(default_factory=BundleSkills)
 
 
 class Bundle(BaseModel):
@@ -138,6 +245,14 @@ class Bundle(BaseModel):
     schema_version: int = Field(default=SCHEMA, alias="schema")
     kind: str = KIND
     exported_at: str = ""
+    #: Advisory, and only within one ``agent_uid``'s lineage — see the module
+    #: docstring. It orders two bundles of one agent; it does not establish who
+    #: is upstream, and the file diff is the authoritative answer.
+    version: int = 1
+    #: Free text the exporting caller supplied, carried verbatim. The changelog.
+    notes: str = ""
+    author: BundleAuthor = Field(default_factory=BundleAuthor)
+    requires: BundleRequires = Field(default_factory=BundleRequires)
     agent: BundleAgent
     files: list[BundleFile] = Field(default_factory=list)
 
@@ -147,6 +262,25 @@ class PlannedFile(BaseModel):
 
     path: str
     bytes: int
+
+
+class UnmetRequirement(BaseModel):
+    """One thing this agent needs that this install cannot supply.
+
+    Never a refusal. ``blocking`` says whether the agent can do its job at all
+    without it — a connector it cannot reach and a shared playbook that does
+    not exist here are blocking; a tool this install does not mount and a model
+    that had to be substituted leave the agent degraded but runnable.
+
+    ``have`` is what the install offers instead, so the sentence a surface
+    renders is "it wants X, you have Y" rather than a bare absence.
+    """
+
+    #: ``"connector"``, ``"tool"``, ``"skill"`` or ``"model"``.
+    kind: str
+    name: str
+    have: list[str] = Field(default_factory=list)
+    blocking: bool = False
 
 
 class ImportPlan(BaseModel):
@@ -169,6 +303,16 @@ class ImportPlan(BaseModel):
     when_to_consult: str
     exported_at: str
     schema_version: int
+    #: The identity that survives ``as_slug``: carried when the bundle has one,
+    #: minted from the bundle's own content when it does not.
+    agent_uid: str = ""
+    version: int = 1
+    notes: str = ""
+    author: BundleAuthor = Field(default_factory=BundleAuthor)
+    #: Derived here from the bundle's files, never read off its manifest.
+    requires: BundleRequires = Field(default_factory=BundleRequires)
+    #: What this install cannot supply. Never a reason to refuse the import.
+    unmet: list[UnmetRequirement] = Field(default_factory=list)
     #: Everything that is not a ``.py``, in bundle order.
     files: list[PlannedFile] = Field(default_factory=list)
     #: The ``.py`` files, named individually: a routine runs in the Condor
@@ -197,16 +341,186 @@ class ImportPlan(BaseModel):
         return self.model_dump(exclude={"bundle"})
 
 
+# ── What the agent needs, read out of what the agent is ──
+
+
+def requires_of(files: Sequence[BundleFile]) -> BundleRequires:
+    """The capability set these files ask for. The one derivation there is.
+
+    Called by :func:`build` so a bundle states it, and again by :func:`plan` so
+    a preview never has to trust what a bundle states. That is not redundancy:
+    a bundle is hand-editable JSON, and a ``requires`` block understating what
+    the files name would be a preview that lied about what will not work.
+
+    Requirements are *named capabilities*, not a version range, because there
+    is no Condor version to compare against: ``telemetry.context.version()`` is
+    a git short hash and ``pyproject.toml`` has said ``0.1.0`` since the repo
+    began, so ``condor_min_version`` would have nothing to mean.
+
+    The connector of a loop is read through :func:`condor.preflight.requirements_of`
+    — FEAT-139's single reader of a *stated* requirement — and only a loop that
+    states nothing (``Requirements.declared`` false) falls back to its
+    ``default_config.connector_name``. ``trading_requirements`` is never parsed
+    here: a second parse of a field that already has a reader is exactly the
+    two-selectors-disagreeing hazard this module refuses elsewhere.
+    """
+    from condor.preflight import requirements_of
+
+    texts = {entry.path: entry.text for entry in files}
+    meta = _frontmatter(texts.get(AGENT_MD, ""))
+
+    connectors: set[str] = set()
+    named_skills: set[str] = set()
+    for path, text in texts.items():
+        parts = path.split("/")
+        if len(parts) == 3 and parts[0] == "loops" and parts[2] == "loop.md":
+            loop = _frontmatter(text)
+            config = loop.get("default_config")
+            config = config if isinstance(config, dict) else {}
+            stated = requirements_of(config)
+            connector = (
+                stated.connector
+                if stated.declared
+                else str(config.get("connector_name") or "")
+            )
+            if connector.strip():
+                connectors.add(connector.strip())
+            for skill in loop.get("skills") or []:
+                if str(skill).strip():
+                    named_skills.add(str(skill).strip())
+        elif (
+            len(parts) == 4
+            and parts[0] == "controllers"
+            and parts[2] == "sample_configs"
+            and path.endswith((".yml", ".yaml"))
+        ):
+            connector = str(_yaml_mapping(text).get("connector_name") or "")
+            if connector.strip():
+                connectors.add(connector.strip())
+
+    carried = {
+        path.split("/")[1]
+        for path in texts
+        if path.startswith("skills/") and len(path.split("/")) > 2
+    }
+    return BundleRequires(
+        connectors=sorted(connectors),
+        tools=[str(tool) for tool in (meta.get("tools") or [])],
+        agent_key=str(meta.get("agent_key") or ""),
+        skills=BundleSkills(
+            carried=sorted(named_skills & carried),
+            inherited=sorted(named_skills - carried),
+        ),
+    )
+
+
+def _frontmatter(text: str) -> dict:
+    meta, _ = parse_frontmatter(text)
+    return meta if isinstance(meta, dict) else {}
+
+
+def _yaml_mapping(text: str) -> dict:
+    """A controller sample config as a mapping, or an empty one.
+
+    A malformed sample config is a reason to report no connector, not to refuse
+    an export: the file travels either way and the reviewer can read it.
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def unmet_of(
+    requires: BundleRequires,
+    *,
+    available_connectors: Sequence[str] | None = None,
+    available_tools: Sequence[str] | None = None,
+    available_skills: Sequence[str] | None = None,
+    substituted_model: str = "",
+) -> list[UnmetRequirement]:
+    """Which requirements this install cannot meet, given what it has.
+
+    Headless on purpose: the install's connector list arrives as an **argument**
+    because reading it needs an async Hummingbot client, and this module takes
+    no FastAPI and no Telegram import. ``None`` means *not asked* and is not the
+    same as an empty list — an unreachable server is no evidence about which
+    connectors are configured, so nothing is reported unmet for it.
+    """
+    unmet: list[UnmetRequirement] = []
+    if available_connectors is not None:
+        have = sorted(set(available_connectors))
+        for name in requires.connectors:
+            if name not in set(have):
+                unmet.append(
+                    UnmetRequirement(
+                        kind="connector", name=name, have=have, blocking=True
+                    )
+                )
+    if available_tools is not None:
+        have = sorted(set(available_tools))
+        short = {name.rsplit("__", 1)[-1] for name in have}
+        for name in requires.tools:
+            if name.rsplit("__", 1)[-1] not in short:
+                unmet.append(UnmetRequirement(kind="tool", name=name, blocking=False))
+    if available_skills is not None:
+        have = set(available_skills)
+        for name in requires.skills.inherited:
+            if name not in have:
+                unmet.append(UnmetRequirement(kind="skill", name=name, blocking=True))
+    if substituted_model:
+        unmet.append(
+            UnmetRequirement(
+                kind="model",
+                name=requires.agent_key,
+                have=[substituted_model],
+                blocking=False,
+            )
+        )
+    return unmet
+
+
+def _shared_skill_slugs() -> list[str]:
+    """The shared playbooks this install can lend an imported agent.
+
+    Both layers, because ``agents/_shared/skills`` is read local-then-stock
+    like everything else — a stock playbook is as resolvable as a local one.
+    """
+    from condor.memory.paths import shared_skills_roots
+
+    return sorted(
+        {
+            child.name
+            for root in shared_skills_roots()
+            if root.is_dir()
+            for child in root.iterdir()
+            if child.is_dir()
+        }
+    )
+
+
 # ── Export ──
 
 
-def build(slug: str) -> Bundle:
-    """The bundle for ``slug``, read from disk and scrubbed. Writes nothing.
+def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
+    """The bundle for ``slug``, read from disk and scrubbed.
 
     Reads **both** layers, local shadowing stock per file, so a shipped agent
     travels as readily as one this install authored — which is the same read
     order ``resolve_agent_file`` applies and the reason a forked ``AGENT.md``
     does not cost an install upstream's skills.
+
+    The one thing it writes is this agent's own ``AGENT.md`` bookkeeping
+    (FEAT-143): the ``agent_uid`` it had to mint, and the version and digest of
+    what just went out. Export is the right place for that and a read path is
+    not — ``AgentStore.get``'s contract is that the filesystem is read on every
+    call, and putting a write behind it would make reading an agent mutate it.
+    Nothing is stamped until after the bundle has passed the size check, so a
+    refused export leaves no trace.
+
+    ``notes`` and ``author_name`` are the exporting caller's; neither is read
+    by anything that decides what gets written.
 
     Raises :class:`BundleError` for an agent that does not exist, a file whose
     bytes are not UTF-8 (named, so the operator can remove it), and a bundle
@@ -227,22 +541,42 @@ def build(slug: str) -> Bundle:
     if not sources:
         raise BundleError(f"Agent '{slug}' has no library files to export")
 
+    # Every agent on disk today predates ``agent_uid``, so most exports mint
+    # one. ``uuid4`` and not a content hash here, unlike the import's mint: a
+    # locally authored agent is a new lineage by definition, and two unrelated
+    # agents that happen to hold identical bytes are still two agents.
+    agent_uid = agent.agent_uid or uuid4().hex
+
     files: list[BundleFile] = []
     for rel, source in sources:
         text = _read_text(source, rel)
         if rel.name.endswith(".md"):
             text = _scrub_markdown(text)
+        if rel.as_posix() == AGENT_MD:
+            text = _carried_agent_md(text, agent_uid)
         files.append(BundleFile(path=rel.as_posix(), sha256=_digest(text), text=text))
+
+    digest = _content_digest(files)
+    version = (
+        (agent.bundle_version or 1)
+        if agent.bundle_digest == digest
+        else (agent.bundle_version or 0) + 1
+    )
 
     bundle = Bundle(
         schema=SCHEMA,
         kind=KIND,
         exported_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        version=version,
+        notes=notes,
+        author=BundleAuthor(name=author_name),
+        requires=requires_of(files),
         agent=BundleAgent(
             slug=slug,
             name=agent.name,
             description=agent.description,
             when_to_consult=agent.when_to_consult,
+            agent_uid=agent_uid,
         ),
         files=files,
     )
@@ -253,7 +587,75 @@ def build(slug: str) -> Bundle:
             f"'{slug}' renders to {size} bytes, over the {MAX_BUNDLE_BYTES}-byte "
             "bundle limit — move its largest files out of the agent's library"
         )
+    _stamp_bookkeeping(slug, agent_uid, version, digest)
     return bundle
+
+
+def _carried_agent_md(text: str, agent_uid: str) -> str:
+    """The ``AGENT.md`` the bundle carries: identity in, bookkeeping out."""
+    meta, body = parse_frontmatter(text)
+    meta = meta if isinstance(meta, dict) else {}
+    meta[AGENT_UID_KEY] = agent_uid
+    for key in BOOKKEEPING_KEYS:
+        meta.pop(key, None)
+    return render_frontmatter(meta, body)
+
+
+def _content_digest(files: Sequence[BundleFile]) -> str:
+    """``sha256:<12>`` over what travels — path and content, in sorted order.
+
+    Over the *bundle's* files rather than a second walk of the home, which
+    gives the version-bump rule three properties for free. Runtime output is
+    already excluded, because the selection is ``publishable_files``. The three
+    scrubbed install-local fields are already rewritten, so changing a server
+    pin is not a new version of the agent. And the bookkeeping this very export
+    is about to stamp is already dropped, so the digest is stable across
+    exports of unchanged content — which is the whole point, since a digest
+    that measured its own stamp would bump the version on every export forever.
+
+    Short like :func:`condor.layering.content_digest`, and for the same reason:
+    it identifies *which* content, and it is not a security claim — a bundle's
+    integrity is the per-file ``sha256``, which is full length.
+    """
+    rolling = hashlib.sha256()
+    for entry in sorted(files, key=lambda f: f.path):
+        rolling.update(entry.path.encode("utf-8"))
+        rolling.update(b"\0")
+        rolling.update(entry.sha256.encode("utf-8"))
+        rolling.update(b"\0")
+    return f"sha256:{rolling.hexdigest()[:12]}"
+
+
+def _stamp_bookkeeping(slug: str, agent_uid: str, version: int, digest: str) -> None:
+    """Record on disk what this export just said, so the next one can compare.
+
+    Patches the frontmatter in place rather than going through
+    ``AgentStore.update``: that rebuilds ``meta`` from the dataclass, whose
+    ``tools`` has already been through ``_with_implied_tools`` — saving it
+    would quietly write an implied tool into the authored allowlist.
+
+    Forks a stock ``AGENT.md`` down first, like every other write to one. A
+    shipped agent that is exported therefore gains a local definition; that is
+    the repo's fork-on-write rule, not an exception to it.
+    """
+    target = fork_if_stock(slug, AGENT_MD)
+    if not target.exists():
+        return
+    try:
+        meta, body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    except OSError:
+        log.warning("agents: could not stamp bundle bookkeeping on '%s'", slug)
+        return
+    meta = meta if isinstance(meta, dict) else {}
+    stamped = {
+        AGENT_UID_KEY: agent_uid,
+        BUNDLE_VERSION_KEY: version,
+        BUNDLE_DIGEST_KEY: digest,
+    }
+    if all(meta.get(key) == value for key, value in stamped.items()):
+        return
+    meta.update(stamped)
+    atomic_write_text(target, render_frontmatter(meta, body))
 
 
 def render(bundle: Bundle) -> str:
@@ -365,7 +767,13 @@ def parse(data: bytes | str) -> Bundle:
         raise BundleError(f"Malformed bundle: {exc}") from exc
 
 
-def plan(bundle: Bundle, as_slug: str = "", user_id: int = 0) -> ImportPlan:
+def plan(
+    bundle: Bundle,
+    as_slug: str = "",
+    user_id: int = 0,
+    available_connectors: Sequence[str] | None = None,
+    available_tools: Sequence[str] | None = None,
+) -> ImportPlan:
     """Everything a human needs to decide, computed without writing anything.
 
     ``user_id`` is not in the feature's sketch of this signature and is here for
@@ -373,8 +781,15 @@ def plan(bundle: Bundle, as_slug: str = "", user_id: int = 0) -> ImportPlan:
     ``agent_key`` it will resolve, and the only way the dialog and the write can
     be guaranteed to agree on those is for both to come out of this call.
 
+    ``available_connectors`` and ``available_tools`` are what *this* install can
+    supply, passed in rather than fetched so the module stays headless — the
+    connector list needs an async Hummingbot client. Leaving either ``None``
+    means "not asked", and nothing of that kind is then reported unmet.
+
     Every refusal is collected rather than raised, so a reviewer sees all of
-    them at once; :func:`apply` is the one that turns them into an error.
+    them at once; :func:`apply` is the one that turns them into an error. An
+    unmet *requirement* is not a refusal at all — it is a sentence the preview
+    shows and the operator decides about.
     """
     refusals: list[str] = []
     slug, slug_refusal = _target_slug(bundle, as_slug)
@@ -411,6 +826,15 @@ def plan(bundle: Bundle, as_slug: str = "", user_id: int = 0) -> ImportPlan:
 
     agent_key, inherited = _resolve_agent_key(bundle, user_id)
 
+    requires = requires_of(bundle.files)
+    unmet = unmet_of(
+        requires,
+        available_connectors=available_connectors,
+        available_tools=available_tools,
+        available_skills=_shared_skill_slugs(),
+        substituted_model=agent_key if inherited and requires.agent_key else "",
+    )
+
     return ImportPlan(
         bundle=bundle,
         slug=slug,
@@ -420,6 +844,12 @@ def plan(bundle: Bundle, as_slug: str = "", user_id: int = 0) -> ImportPlan:
         when_to_consult=bundle.agent.when_to_consult,
         exported_at=bundle.exported_at,
         schema_version=bundle.schema_version,
+        agent_uid=bundle.agent.agent_uid or _minted_uid(bundle),
+        version=bundle.version,
+        notes=bundle.notes,
+        author=bundle.author,
+        requires=requires,
+        unmet=unmet,
         files=planned,
         executables=executables,
         total_bytes=sum(row.bytes for row in planned + executables),
@@ -474,6 +904,23 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
         "the ones you want this agent to use."
     )
     return result
+
+
+def _minted_uid(bundle: Bundle) -> str:
+    """The identity to give a bundle that carries none. 32 hex, like a uuid4.
+
+    Derived from the bundle's own content, **not** random, for two reasons that
+    both matter. ``plan`` runs twice on the web path — once for the preview and
+    once for the write — and a random mint would make the two disagree about
+    the very field that is supposed to be stable. And two installs importing
+    one pre-FEAT-143 bundle should land on the same ``agent_uid``, because
+    "these two homes came from one bundle" is exactly what the field is for;
+    minting randomly per install would answer no for the one case that most
+    needs a yes.
+    """
+    return hashlib.sha256(
+        b"condor-agent-uid\0" + _content_digest(bundle.files).encode("utf-8")
+    ).hexdigest()[:32]
 
 
 def _target_slug(bundle: Bundle, as_slug: str) -> tuple[str, str]:
@@ -662,6 +1109,14 @@ def _stamp_agent_md(home: Path, import_plan: ImportPlan, user_id: int) -> None:
     hand-assembled bundle land on the same footing: the importer owns the
     agent, the pin is empty, the fork stamp is gone, and the model is the one
     :func:`_resolve_agent_key` settled on.
+
+    ``agent_uid`` is the one thing written here that is *not* local: it is the
+    bundle's, or the one minted from it, unchanged by ``as_slug``. That is what
+    makes two differently-named homes agree on which agent they are.
+    ``bundle_version`` carries the lineage forward; ``bundle_digest`` does not,
+    because it measured the exporter's content and this home's ``AGENT.md`` is
+    no longer those bytes — so the first re-export from here is honestly a new
+    version rather than a false match.
     """
     path = home / AGENT_MD
     meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -671,4 +1126,7 @@ def _stamp_agent_md(home: Path, import_plan: ImportPlan, user_id: int) -> None:
     meta.pop(FORKED_FROM_KEY, None)
     meta.pop(FORKED_AT_KEY, None)
     meta["agent_key"] = import_plan.agent_key
+    meta[AGENT_UID_KEY] = import_plan.agent_uid
+    meta[BUNDLE_VERSION_KEY] = import_plan.version
+    meta.pop(BUNDLE_DIGEST_KEY, None)
     atomic_write_text(path, render_frontmatter(meta, body))

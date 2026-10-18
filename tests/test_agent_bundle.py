@@ -15,6 +15,7 @@ Three properties, in the order they matter:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -169,8 +170,15 @@ def test_export_scrubs_the_three_install_local_fields(traveller):
     assert "forked_from" not in meta
     assert "forked_at" not in meta
 
-    # The file on disk still says what it said.
-    assert (traveller / "AGENT.md").read_text("utf-8") == before
+    # The file on disk still says what it said about *these* fields. Export
+    # does write to AGENT.md — the bundle bookkeeping of [[FEAT-143]] — so the
+    # claim is that scrubbing is a property of the bundle's copy, not that the
+    # export never touches disk.
+    on_disk, body = parse_frontmatter((traveller / "AGENT.md").read_text("utf-8"))
+    was, was_body = parse_frontmatter(before)
+    assert body == was_body
+    for key in ("server_name", "created_by", "forked_from", "forked_at"):
+        assert on_disk[key] == was[key]
 
 
 def test_export_refuses_a_non_utf8_file_naming_it(traveller):
@@ -420,7 +428,11 @@ def test_a_round_trip_is_lossless_for_everything_that_travels(traveller):
         (agent_home("arrival") / "AGENT.md").read_text("utf-8")
     )
     assert body == parse_frontmatter((traveller / "AGENT.md").read_text("utf-8"))[1]
-    for key in ("server_name", "created_by", "agent_key"):
+    # ``bundle_digest`` joins the three: it measured the *exporter's* content
+    # and this home's AGENT.md is no longer those bytes ([[FEAT-143]]), so it
+    # is deliberately not carried. ``agent_uid`` and ``bundle_version`` are,
+    # which is why they are not popped here.
+    for key in ("server_name", "created_by", "agent_key", "bundle_digest"):
         before.pop(key, None)
         after.pop(key, None)
     assert before == after
@@ -577,3 +589,360 @@ def test_manage_agents_import_needs_a_path(traveller):
     from mcp_servers.condor.tools import trading_agent
 
     assert "path" in trading_agent.manage_agents(action="import")["error"]
+
+
+# ── Identity, version, author and requirements (FEAT-143) ──
+#
+# Four manifest fields, one question each: which agent is this, which bundle of
+# it, who claims to have made it, and what will not work here. The fourth is the
+# only one that reads anything off this install, and even it never refuses.
+
+
+LOOP_MD = "---\nname: {name}\nskills: {skills}\ndefault_config:\n{config}---\n\nTick.\n"
+
+
+def _loop(home, slug, name, config: str, skills: str = "[]"):
+    return _write(
+        home / "loops" / slug / "loop.md",
+        LOOP_MD.format(name=name, skills=skills, config=config),
+    )
+
+
+def test_a_created_agent_gets_its_own_identity():
+    store = AgentStore()
+    one = store.create(name="One")
+    two = store.create(name="Two")
+
+    meta, _ = parse_frontmatter((agent_home("one") / "AGENT.md").read_text("utf-8"))
+    assert len(meta["agent_uid"]) == 32
+    assert set(meta["agent_uid"]) <= set("0123456789abcdef")
+    assert one.agent_uid != two.agent_uid
+
+
+def test_an_export_mints_an_identity_once_and_keeps_it(traveller):
+    """Every agent on disk today predates the field, so export has to mint."""
+    first = ab.build("traveller")
+
+    assert len(first.agent.agent_uid) == 32
+    on_disk, _ = parse_frontmatter((traveller / "AGENT.md").read_text("utf-8"))
+    assert on_disk["agent_uid"] == first.agent.agent_uid
+    assert ab.build("traveller").agent.agent_uid == first.agent.agent_uid
+
+
+def test_reading_an_agent_never_writes_its_identity(traveller):
+    """``get`` must not mint: a read that writes would break its own contract."""
+    path = traveller / "AGENT.md"
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+
+    for _ in range(10):
+        assert AgentStore().get("traveller").agent_uid == ""
+
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
+def test_a_renamed_import_keeps_the_identity_it_arrived_with(traveller):
+    bundle = _bundle_for(traveller)
+    ab.apply(ab.plan(bundle, as_slug="arrival", user_id=7), user_id=7)
+
+    meta, _ = parse_frontmatter((agent_home("arrival") / "AGENT.md").read_text("utf-8"))
+    assert meta["agent_uid"] == bundle.agent.agent_uid
+    assert meta["name"] != "arrival"  # the two homes disagree on the slug
+
+
+def test_the_version_tracks_content_and_not_the_number_of_exports(traveller):
+    assert ab.build("traveller").version == 1
+    assert ab.build("traveller").version == 1
+
+    _write(
+        traveller / "skills" / "s" / "SKILL.md", SKILL_MD.format(slug="s", body="X.")
+    )
+    assert ab.build("traveller").version == 2
+
+
+def test_runtime_output_in_the_home_is_not_a_new_version(traveller):
+    """The bump is driven by ``publishable_files`` content, nothing else."""
+    assert ab.build("traveller").version == 1
+
+    _write(traveller / "store" / "user_7" / "x", "mine\n")
+    _write(traveller / "config.yml", "a: 1\n")
+    _write(traveller / "routines" / "__pycache__" / "r.pyc", "bytecode\n")
+
+    assert ab.build("traveller").version == 1
+
+
+def test_notes_travel_verbatim_and_default_to_an_empty_string(traveller):
+    told = "Rewrote the liquidation guard; widened the grid."
+    bundle = ab.build("traveller", notes=told)
+
+    assert bundle.notes == told
+    assert ab.plan(bundle, as_slug="arrival", user_id=7).summary()["notes"] == told
+    assert ab.build("traveller").notes == ""
+
+
+def test_an_author_is_carried_as_a_claim_and_decides_nothing(traveller):
+    """A forged handle changes no byte of the plan — it is never read."""
+    honest = ab.build("traveller", author_name="Fede")
+    assert honest.author.name == "Fede"
+    assert honest.author.handle == ""
+
+    payload = json.loads(ab.render(honest))
+    payload["author"] = {"name": "Satoshi", "handle": "@condor-official"}
+    forged = ab.plan(ab.parse(json.dumps(payload)), as_slug="arrival", user_id=7)
+    plain = ab.plan(honest, as_slug="arrival", user_id=7)
+
+    assert forged.summary() | {"author": None} == plain.summary() | {"author": None}
+    assert forged.author.handle == "@condor-official"
+
+
+def test_requires_names_every_connector_the_agent_asks_for(traveller):
+    _loop(traveller, "l", "l", "  connector_name: bitget_perpetual\n")
+    _loop(traveller, "m", "m", "  connector_name: binance_perpetual\n")
+    _write(
+        traveller / "controllers" / "c" / "sample_configs" / "a.yml",
+        "connector_name: hyperliquid_perpetual\ntrading_pair: SOL-USDC\n",
+    )
+
+    assert ab.build("traveller").requires.connectors == [
+        "binance_perpetual",
+        "bitget_perpetual",
+        "hyperliquid_perpetual",
+    ]
+
+
+def test_a_declared_requirement_wins_and_an_undeclared_one_falls_back(traveller):
+    """One bundle, both kinds of loop: the stated connector is read through
+    ``preflight.requirements_of``, the silent one through its own config."""
+    _loop(
+        traveller,
+        "stated",
+        "stated",
+        "  connector_name: ignored_perpetual\n"
+        "  trading_requirements:\n"
+        "    connector: bitget_perpetual\n"
+        "    trading_pairs: [BTC-USDT]\n",
+    )
+    _loop(traveller, "silent", "silent", "  connector_name: binance_perpetual\n")
+
+    assert ab.build("traveller").requires.connectors == [
+        "binance_perpetual",
+        "bitget_perpetual",
+    ]
+
+
+def test_trading_requirements_has_exactly_one_reader(traveller):
+    """``bundle.py`` must not parse the field FEAT-139 already owns."""
+    source = (Path(ab.__file__)).read_text("utf-8")
+    body = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert '"trading_requirements"' not in body
+    assert "'trading_requirements'" not in body
+    assert "requirements_of" in body
+
+
+def test_requires_tools_is_the_allowlist_and_empty_means_empty(traveller):
+    assert ab.build("traveller").requires.tools == []
+
+    _write(
+        traveller / "AGENT.md",
+        _agent_md().replace("tools: []", "tools: [run_code, manage_skill]"),
+    )
+    assert ab.build("traveller").requires.tools == ["run_code", "manage_skill"]
+
+
+def test_requires_splits_carried_skills_from_inherited_ones(traveller):
+    _loop(traveller, "l", "l", "  frequency_sec: 60\n", skills="[s, lp_rebalance]")
+
+    skills = ab.build("traveller").requires.skills
+    assert skills.carried == ["s"]
+    assert skills.inherited == ["lp_rebalance"]
+
+
+def test_requires_names_the_model_the_agent_asks_for(traveller):
+    assert ab.build("traveller").requires.agent_key == "claude-code"
+
+
+def test_an_unmet_connector_is_reported_and_the_import_still_happens(traveller):
+    _loop(traveller, "l", "l", "  connector_name: bitget_perpetual\n")
+    bundle = _bundle_for(traveller)
+
+    import_plan = ab.plan(
+        bundle, as_slug="arrival", user_id=7, available_connectors=["binance"]
+    )
+    unmet = [u for u in import_plan.unmet if u.kind == "connector"]
+    assert len(unmet) == 1
+    assert unmet[0].name == "bitget_perpetual"
+    assert unmet[0].have == ["binance"]
+    assert unmet[0].blocking is True
+    assert import_plan.refusals == []
+
+    ab.apply(import_plan, user_id=7)
+    assert AgentStore().get("arrival") is not None
+
+
+def test_a_connector_this_install_has_is_not_unmet(traveller):
+    _loop(traveller, "l", "l", "  connector_name: bitget_perpetual\n")
+
+    import_plan = ab.plan(
+        _bundle_for(traveller),
+        as_slug="arrival",
+        user_id=7,
+        available_connectors=["binance", "bitget_perpetual"],
+    )
+    assert [u for u in import_plan.unmet if u.kind == "connector"] == []
+
+
+def test_an_unasked_install_reports_no_connector_unmet(traveller):
+    """``None`` is "not asked", which is not the same as "has none"."""
+    _loop(traveller, "l", "l", "  connector_name: bitget_perpetual\n")
+
+    import_plan = ab.plan(_bundle_for(traveller), as_slug="arrival", user_id=7)
+    assert [u for u in import_plan.unmet if u.kind == "connector"] == []
+
+
+def test_a_shared_skill_this_install_lacks_is_unmet_and_one_it_has_is_not(traveller):
+    from condor.memory.paths import shared_skills_root
+
+    _loop(traveller, "l", "l", "  frequency_sec: 60\n", skills="[lp_rebalance]")
+    bundle = _bundle_for(traveller)
+
+    missing = ab.plan(bundle, as_slug="arrival", user_id=7).unmet
+    assert [(u.kind, u.name, u.blocking) for u in missing] == [
+        ("skill", "lp_rebalance", True)
+    ]
+
+    _write(
+        shared_skills_root() / "lp_rebalance" / "SKILL.md",
+        SKILL_MD.format(slug="lp_rebalance", body="Rebalance."),
+    )
+    assert ab.plan(bundle, as_slug="arrival", user_id=7).unmet == []
+
+
+def test_a_tool_this_install_does_not_mount_is_unmet_but_not_blocking(traveller):
+    _write(
+        traveller / "AGENT.md",
+        _agent_md().replace("tools: []", "tools: [run_code, invented_tool]"),
+    )
+
+    import_plan = ab.plan(
+        _bundle_for(traveller),
+        as_slug="arrival",
+        user_id=7,
+        available_tools=["run_code", "manage_skill"],
+    )
+    assert [(u.kind, u.name, u.blocking) for u in import_plan.unmet] == [
+        ("tool", "invented_tool", False)
+    ]
+
+
+def test_a_bundle_without_the_new_fields_still_imports(traveller):
+    """The reader is tolerant downward: FEAT-133's own manifest had none of
+    these, so a document that omits them all is read, not refused."""
+    payload = _bundle_for(traveller, as_dict=True)
+    for key in ("version", "notes", "author", "requires"):
+        payload.pop(key, None)
+    payload["agent"].pop("agent_uid", None)
+    for entry in payload["files"]:
+        if entry["path"] == "AGENT.md":
+            meta, body = parse_frontmatter(entry["text"])
+            meta.pop("agent_uid", None)
+            from condor.frontmatter import render_frontmatter
+
+            entry["text"] = render_frontmatter(meta, body)
+            entry["sha256"] = ab._digest(entry["text"])
+
+    import_plan = ab.plan(ab.parse(json.dumps(payload)), as_slug="arrival", user_id=7)
+
+    assert len(import_plan.agent_uid) == 32
+    assert import_plan.version == 1
+    assert import_plan.author.name == "" and import_plan.author.handle == ""
+    assert import_plan.requires.agent_key == "claude-code"
+    assert import_plan.refusals == []
+
+    ab.apply(import_plan, user_id=7)
+    meta, _ = parse_frontmatter((agent_home("arrival") / "AGENT.md").read_text("utf-8"))
+    assert meta["agent_uid"] == import_plan.agent_uid
+
+
+def test_the_minted_identity_is_the_same_on_every_install(traveller):
+    """Two installs importing one legacy bundle must agree on which agent it
+    is — which is the whole reason the mint is derived and not random."""
+    payload = _bundle_for(traveller, as_dict=True)
+    payload["agent"]["agent_uid"] = ""
+    bundle = ab.parse(json.dumps(payload))
+
+    first = ab.plan(bundle, as_slug="arrival", user_id=7).agent_uid
+    second = ab.plan(bundle, as_slug="elsewhere", user_id=9).agent_uid
+    assert first == second
+
+
+def test_a_schema_from_the_future_is_still_refused_whole(traveller):
+    payload = _bundle_for(traveller, as_dict=True)
+    payload["schema"] = 3
+    with pytest.raises(ab.BundleError) as exc:
+        ab.parse(json.dumps(payload))
+    assert "3" in str(exc.value) and str(ab.SCHEMA) in str(exc.value)
+    assert not agent_home("arrival").exists()
+
+
+def test_preview_and_apply_agree_on_identity_version_author_and_unmet(traveller):
+    _loop(traveller, "l", "l", "  connector_name: bitget_perpetual\n")
+    bundle = ab.build("traveller", notes="n", author_name="Fede")
+    preview = ab.plan(
+        ab.parse(ab.render(bundle)),
+        as_slug="arrival",
+        user_id=7,
+        available_connectors=["binance"],
+    )
+    written = ab.apply(preview, user_id=7)
+
+    shown = preview.summary()
+    for field in ("agent_uid", "version", "notes", "author", "unmet", "requires"):
+        assert written[field] == shown[field], field
+    assert written["unmet"]
+
+
+def test_the_endpoints_report_the_identity_and_what_is_missing(traveller):
+    client = _client()
+    _loop(traveller, "l", "l", "  connector_name: bitget_perpetual\n")
+
+    exported = client.get(
+        "/agents/traveller/bundle", params={"notes": "n", "author_name": "Fede"}
+    )
+    assert exported.status_code == 200
+    assert exported.json()["notes"] == "n"
+    assert exported.json()["author"]["name"] == "Fede"
+
+    preview = _upload(client, "/agents/import/preview", exported.text, "arrival")
+    applied = _upload(client, "/agents/import", exported.text, "arrival")
+    assert preview.status_code == 200 and applied.status_code == 200
+
+    shown, written = preview.json(), applied.json()
+    for field, value in shown.items():
+        assert written[field] == value, field
+    assert len(shown["agent_uid"]) == 32
+    assert shown["requires"]["connectors"] == ["bitget_perpetual"]
+
+
+def test_the_chat_door_reports_the_version_and_what_is_missing(traveller, monkeypatch):
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+    _loop(traveller, "l", "l", "  frequency_sec: 60\n", skills="[lp_rebalance]")
+
+    exported = trading_agent.manage_agents(
+        action="export", agent_slug="traveller", notes="first cut", author_name="Fede"
+    )
+    assert exported["version"] == 1
+    assert exported["notes"] == "first cut"
+    assert exported["author"] == {"name": "Fede", "handle": ""}
+    assert exported["requires"]["skills"]["inherited"] == ["lp_rebalance"]
+
+    landed = trading_agent.manage_agents(
+        action="import", path=exported["path"], agent_slug="arrival"
+    )
+    assert landed["imported"] is True
+    assert landed["agent_uid"] == exported["agent_uid"]
+    assert [u["name"] for u in landed["unmet"]] == ["lp_rebalance"]

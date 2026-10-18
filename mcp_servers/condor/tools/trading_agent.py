@@ -222,7 +222,7 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
-def _export_agent(agent_slug: str) -> dict:
+def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
     """Write this agent out as one portable file, and say where it landed.
 
     Into ``data/exports/``, which is gitignored and is already this install's
@@ -230,12 +230,17 @@ def _export_agent(agent_slug: str) -> dict:
     Not a return of the bundle text: an agent's library is tens of kilobytes of
     JSON, and pushing that through a tool result would fill the model's context
     with the very thing it is only meant to hand over.
+
+    ``notes`` is the changelog for this version — what changed since the last
+    bundle of this agent — and ``author_name`` is a claim nothing verifies
+    (FEAT-143). Both are optional, and the version in the result is bumped only
+    when the agent's content actually changed since the last export.
     """
     from condor.agents import bundle as agent_bundle
     from condor.paths import data_dir
 
     try:
-        bundle = agent_bundle.build(agent_slug)
+        bundle = agent_bundle.build(agent_slug, notes=notes, author_name=author_name)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -250,6 +255,11 @@ def _export_agent(agent_slug: str) -> dict:
     return {
         "exported": True,
         "agent_slug": bundle.agent.slug,
+        "agent_uid": bundle.agent.agent_uid,
+        "version": bundle.version,
+        "notes": bundle.notes,
+        "author": bundle.author.model_dump(),
+        "requires": bundle.requires.model_dump(),
         "path": str(target),
         "bytes": len(text.encode("utf-8")),
         "files": [f.path for f in bundle.files],
@@ -267,8 +277,16 @@ def _import_agent(path: str, as_slug: str) -> dict:
     The preview is the plan this returns on refusal: every executable file is
     named before anything is written, because an imported routine runs inside
     the Condor process and that review is the only gate there is.
+
+    Both the success and the refusal carry ``unmet`` — what this install cannot
+    supply the agent (FEAT-143) — and neither is a reason the import did not
+    happen. Connectors are left unasked on this door: resolving them needs an
+    async Hummingbot client and this is a synchronous tool, so the chat's
+    answer covers tools, shared skills and the model, and the dashboard's
+    preview is the one that also checks the exchange.
     """
     from condor.agents import bundle as agent_bundle
+    from condor.runtime.toolsets import every_tool_name
 
     try:
         data = Path(path).expanduser().read_bytes()
@@ -280,7 +298,12 @@ def _import_agent(path: str, as_slug: str) -> dict:
     except ValueError as exc:
         return {"error": str(exc)}
 
-    plan = agent_bundle.plan(bundle, as_slug=as_slug, user_id=settings.user_id)
+    plan = agent_bundle.plan(
+        bundle,
+        as_slug=as_slug,
+        user_id=settings.user_id,
+        available_tools=sorted(every_tool_name()),
+    )
     try:
         return agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:
@@ -342,6 +365,8 @@ def _manage_agent(
     server_required: bool | None,
     server_name: str | None,
     path: str | None = None,
+    notes: str | None = None,
+    author_name: str | None = None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -440,7 +465,7 @@ def _manage_agent(
     if action == "export_agent":
         if not agent_slug:
             return {"error": "agent_slug is required"}
-        return _export_agent(agent_slug)
+        return _export_agent(agent_slug, notes or "", author_name or "")
 
     if action == "import_agent":
         if not path:
@@ -916,6 +941,8 @@ def manage_agents(
     server_required: bool | None = None,
     server_name: str | None = None,
     path: str | None = None,
+    notes: str | None = None,
+    author_name: str | None = None,
 ) -> dict:
     resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
     if err:
@@ -934,6 +961,8 @@ def manage_agents(
         server_required,
         server_name,
         path,
+        notes,
+        author_name,
     )
 
 

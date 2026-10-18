@@ -44,6 +44,17 @@ const PLAN: AgentImportPlan = {
   collision: "",
   suggested_slug: "",
   refusals: [],
+  agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
+  version: 3,
+  notes: "",
+  author: { name: "", handle: "" },
+  requires: {
+    connectors: ["bitget_perpetual"],
+    tools: [],
+    agent_key: "claude-code",
+    skills: { carried: ["s"], inherited: [] },
+  },
+  unmet: [],
 };
 
 let container: HTMLDivElement;
@@ -242,4 +253,64 @@ it("shows the newest bundle's plan when an older preview answers late", async ()
   // The late answer for the first bundle is dropped, not rendered.
   expect(button("Import second")).toBeTruthy();
   expect(container.textContent).not.toContain("First");
+});
+
+it("names the identity and the version, which survive a rename", async () => {
+  await render();
+  await choose();
+
+  expect(container.querySelector("[data-agent-uid]")?.textContent).toContain(
+    "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
+  );
+  expect(container.textContent).toContain("Version 3");
+});
+
+it("labels the author as a claim nobody verified", async () => {
+  // A handle rendered next to a download without this label reads as
+  // provenance, and Condor verifies none of it.
+  reply = { ...PLAN, author: { name: "Fede", handle: "@condor-official" } };
+  await render();
+  await choose();
+
+  const block = container.querySelector("[data-bundle-author]")?.textContent;
+  expect(block).toContain("unverified claim");
+  expect(block).toContain("Fede");
+  expect(block).toContain("@condor-official");
+});
+
+it("says nothing about an author when the bundle claims none", async () => {
+  await render();
+  await choose();
+
+  expect(container.querySelector("[data-bundle-author]")).toBeNull();
+});
+
+it("lists what this install cannot give the agent, without blocking import", async () => {
+  reply = {
+    ...PLAN,
+    notes: "Widened the grid.",
+    unmet: [
+      {
+        kind: "connector",
+        name: "bitget_perpetual",
+        have: ["binance"],
+        blocking: true,
+      },
+      { kind: "tool", name: "invented_tool", have: [], blocking: false },
+    ],
+  };
+  await render();
+  await choose();
+
+  const rows = [...container.querySelectorAll("[data-unmet]")].map((n) =>
+    n.textContent?.replace(/\s+/g, " ").trim(),
+  );
+  expect(rows).toEqual([
+    "connector bitget_perpetual — you have binance",
+    "tool invented_tool",
+  ]);
+  expect(container.querySelector("[data-bundle-notes]")?.textContent).toContain(
+    "Widened the grid.",
+  );
+  expect(button("Import traveller").disabled).toBe(false);
 });

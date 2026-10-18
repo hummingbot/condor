@@ -294,7 +294,8 @@ came from. It travels as **one file** instead (`condor/agents/bundle.py`,
 FEAT-133):
 
 ```
-manage_agents(action="export", agent_slug="river_scalper")
+manage_agents(action="export", agent_slug="river_scalper",
+              notes="Widened the grid", author_name="Fede")
     -> data/exports/river_scalper-20261015.condor-agent.json
 manage_agents(action="import", path="…/river_scalper-20261015.condor-agent.json",
               agent_slug="river_scalper_2")   # agent_slug renames it on the way in
@@ -313,6 +314,28 @@ running the agent: `store/`, `sessions/`, `dry_runs/`, `learnings.md`,
 in the bundle's copy because they are facts about the exporting install, not
 about the agent: `server_name`, `created_by` and the `forked_from`/`forked_at`
 stamp.
+
+The manifest also says **which** agent this is and **what it needs** (FEAT-143):
+
+| Field | What it means |
+|---|---|
+| `agent.agent_uid` | 32 hex characters, stable across the rename `agent_slug` performs, so two homes that came from one bundle are still recognisably one agent. Minted by `AgentStore.create`, or at export for an agent that predates the field; never on a read path. Not spelled `agent_id`, which already means the slug everywhere here. |
+| `version` / `notes` | An integer that orders two bundles of one `agent_uid`, bumped only when the agent's *content* changed since the last export, plus the exporter's free-text changelog. Meaningful only within one lineage: two installs that import one bundle and both edit it both produce version 2. The file diff is the authoritative answer. |
+| `author` | `{name, handle}`, and a **claim** — Condor signs nothing and verifies nothing. `handle` is reserved for a hub to fill in at publish time and is empty on a locally exported file. Every surface that shows it must say "unverified". |
+| `requires` | The connectors, `tools:` allowlist, `agent_key` and skills (split into those carried in the bundle and those expected from `agents/_shared/skills`) — **derived from the files**, never authored, so it cannot drift from what the agent names. A loop's connector is read through `condor.preflight.requirements_of`, FEAT-139's single reader of a stated requirement. |
+
+Three ``AGENT.md`` keys back this: `agent_uid`, and the `bundle_version` /
+`bundle_digest` pair an export stamps so the next one can tell changed content
+from an unchanged re-export. The digest is the one thing that does not travel —
+it measured the exporter's bytes.
+
+The preview answers `unmet`: every requirement this install cannot supply, with
+what it has instead and whether the agent is blocked without it. It never
+refuses the import. "I will add that exchange's API key once I have read the
+agent" is the honest case, and everything lands muted and unstarted regardless —
+the preview says what will not work, and the operator decides. Whether capital
+sits in the right asset under venue rules that make the strategy viable is a
+different question, answered by `condor/preflight.py`.
 
 Two rules make an import safe to accept from somebody else. It **creates and
 never replaces** — a taken slug is refused with a free alternative, so a tuned
