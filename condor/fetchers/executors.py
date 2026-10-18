@@ -538,9 +538,9 @@ def summarize_executors_by_quote(
 # **read-only**. Today's consumers all copy what they keep
 # (``orphaned_running_rows`` appends ``dict(row)``, ``build_executor_row``
 # returns a fresh dict, ``venue_drift.tracked_from_active`` only reads), but
-# ``providers/executors.py``'s ``_price_pending_rows`` mutates rows in place on
-# a neighbouring path, and a caller that did that to a cached list would
-# corrupt the other consumer's view of the same rows.
+# :func:`price_pending_rows`, in this module, mutates rows in place on a
+# neighbouring path, and a caller that did that to a cached list would corrupt
+# the other consumer's view of the same rows.
 _WALK_TTL = 2.0
 _WALK_CACHE_MAX = 64
 _walk_cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
