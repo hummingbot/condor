@@ -633,20 +633,17 @@ def test_the_mcp_export_refuses_a_certain_secret(reviewed):
 # ── Portability: the hub must be able to run this ──
 #
 # FEAT-144 asked for a subprocess that imports the module and then finds no
-# ``condor.agents.engine`` in ``sys.modules``. That half is unreachable at any
-# path in this repo and the item's own reasoning is what shows why:
-# ``condor/agents/__init__.py`` imports ``TickEngine`` eagerly, so importing any
-# submodule of the package runs it — and the two modules whose docstrings
-# declare themselves "stdlib-only on purpose", ``condor.runtime.secrets`` and
-# ``condor.runtime.danger``, each drag in ``condor.acp`` through their own
-# package's ``__init__`` exactly the same way. So the repo's standing meaning of
-# that promise is **a module's own import edges**, not its package's, and moving
-# this file beside those two would buy nothing.
+# ``condor.agents.engine`` in ``sys.modules``, and could not write it: both
+# package ``__init__`` files re-exported their submodules eagerly, so importing
+# any submodule ran the tick engine, the ACP client and ``pydantic``. ARCH-744
+# made both lazy, so the criterion is now reachable and is asserted below.
 #
-# The promise is therefore asserted where it lives: the first test reads this
-# module's imports out of its source, which is path-independent and is the thing
-# that would actually regress, and the second holds the line a hub would
-# actually notice — no web app, no Telegram bot, and a review that runs.
+# Two tests, in two directions. The first reads this module's imports out of its
+# source: path-independent, and the thing that would regress if somebody reached
+# for a convenience import here. The second runs the module in a subprocess and
+# looks at what actually got loaded, which is the only place a package-level
+# regression one level up can show — and it reviews a file while it is there,
+# because a module that imports clean and cannot review is no use to a hub.
 
 _ALLOWED_IMPORTS = {"condor.runtime.secrets", "condor.runtime.danger"}
 
@@ -672,14 +669,28 @@ def test_the_review_imports_only_the_stdlib_and_two_pure_modules():
     assert foreign == set(), f"{br.__name__} grew an import edge: {sorted(foreign)}"
 
 
+#: Prefixes no process that only wanted the review has any business loading.
+#: ``fastapi``/``telegram``/``condor.web`` are the hub's own line — it vendors a
+#: reviewer, not an app. ``condor.agents.engine``, ``condor.acp`` and
+#: ``pydantic`` are what the eager re-exports used to drag in (ARCH-744): the
+#: whole agent framework, reached by a module whose own edges are ``re``,
+#: ``collections.abc``, ``typing`` and two pure siblings.
+_FORBIDDEN = (
+    "fastapi",
+    "telegram",
+    "condor.web",
+    "condor.agents.engine",
+    "condor.acp",
+    "pydantic",
+)
+
 _PURITY_PROBE = textwrap.dedent("""
     import json, sys
     import condor.agents.bundle_review as br
     forbidden = sorted(
         name
         for name in sys.modules
-        if name in ("fastapi", "telegram")
-        or name.startswith(("fastapi.", "telegram.", "condor.web"))
+        if name in FORBIDDEN or name.startswith(tuple(p + "." for p in FORBIDDEN))
     )
     # Not a smoke test of the import alone: a module that imports clean and
     # cannot review is no use to a hub either.
@@ -688,14 +699,39 @@ _PURITY_PROBE = textwrap.dedent("""
     """)
 
 
-def test_the_review_runs_without_the_web_app_or_the_bot():
+def _probe(source: str) -> list[str]:
+    """Run ``source`` in a bare subprocess and return the JSON list it prints."""
     repo = Path(__file__).resolve().parent.parent
     done = subprocess.run(
-        [sys.executable, "-c", _PURITY_PROBE],
+        [sys.executable, "-c", f"FORBIDDEN = {_FORBIDDEN!r}\n{source}"],
         cwd=repo,
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert done.returncode == 0, done.stderr
-    assert json.loads(done.stdout.strip().splitlines()[-1]) == []
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_the_review_runs_without_the_web_app_or_the_bot():
+    assert _probe(_PURITY_PROBE) == []
+
+
+#: Sibling promise: ``danger.py`` and ``secrets.py`` say "stdlib-only on
+#: purpose" too, and the review's own purity rests on theirs. Importing either
+#: may touch its package but nothing else under ``condor``.
+_SIBLING_PROBE = textwrap.dedent("""
+    import json, sys
+    import importlib
+    importlib.import_module(MODULE)
+    allowed = {"condor", "condor.runtime", MODULE}
+    print(json.dumps(sorted(
+        name for name in sys.modules
+        if name.split(".")[0] == "condor" and name not in allowed
+    )))
+    """)
+
+
+@pytest.mark.parametrize("module", ["condor.runtime.secrets", "condor.runtime.danger"])
+def test_the_two_pure_siblings_pull_in_nothing_else(module):
+    assert _probe(f"MODULE = {module!r}\n{_SIBLING_PROBE}") == []
