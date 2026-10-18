@@ -78,6 +78,16 @@ pure and stdlib-only so a hub can re-run exactly this install's review on a
 submission. :func:`build` refuses on a value that can only be a secret and
 warns on everything else; :func:`plan` attaches the findings and refuses
 nothing new.
+
+**And a second verb beside the import** (FEAT-145). A newer bundle of an agent
+this install already has is an *update*, not a name collision: without one the
+new version lands beside the old under ``<slug>_2``, the memory forks, and the
+dashboard lists two agents one of which is stale. :func:`plan_update` shows
+what would change file by file and writes nothing; :func:`apply_update` writes
+exactly that. Library files are replaced, runtime output is untouched, a file
+the operator edited keeps its bytes, whatever arrives new is muted, and nothing
+is started. Its bookkeeping is :data:`STAMP_FILENAME` — a dotfile in the home,
+so the export cannot see it.
 """
 
 from __future__ import annotations
@@ -380,6 +390,15 @@ class ImportPlan(BaseModel):
     collision: str = ""
     #: The first free ``<slug>_2``, ``<slug>_3`` … when there is a collision.
     suggested_slug: str = ""
+    #: The ``agent_uid`` of the agent already installed under ``collision``.
+    #: Empty when there is no collision, or when the installed agent carries no
+    #: identity at all.
+    collision_agent_uid: str = ""
+    #: Whether the collision is the *same agent*, newer — in which case the
+    #: answer is :func:`plan_update` and not a rename (FEAT-145). Stated as a
+    #: field rather than left for a surface to derive by comparing two uids,
+    #: so the dialog and the chat cannot disagree about which verb applies.
+    is_update: bool = False
     #: Every reason this import is refused. Empty means it would run.
     refusals: list[str] = Field(default_factory=list)
 
@@ -892,6 +911,9 @@ def plan(
     if slug and not slug_refusal:
         collision, suggested = _collision(slug)
 
+    agent_uid = bundle.agent.agent_uid or _minted_uid(bundle)
+    collision_uid = _installed_agent_uid(collision) if collision else ""
+
     agent_key, inherited = _resolve_agent_key(bundle, user_id)
 
     requires = requires_of(bundle.files)
@@ -912,7 +934,7 @@ def plan(
         when_to_consult=bundle.agent.when_to_consult,
         exported_at=bundle.exported_at,
         schema_version=bundle.schema_version,
-        agent_uid=bundle.agent.agent_uid or _minted_uid(bundle),
+        agent_uid=agent_uid,
         version=bundle.version,
         notes=bundle.notes,
         author=bundle.author,
@@ -928,6 +950,8 @@ def plan(
         agent_key_inherited=inherited,
         collision=collision,
         suggested_slug=suggested,
+        collision_agent_uid=collision_uid,
+        is_update=bool(collision_uid) and collision_uid == agent_uid,
         refusals=refusals,
     )
 
@@ -960,6 +984,19 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
         # says what runs, and it is what makes "nothing is running" below
         # true of the review surfaces as well as of the agent.
         code_trust.arm(slug)
+        # And last, the record of what this bundle said, so the newer bundle
+        # that arrives next month can be told apart from a local edit
+        # (FEAT-145). A dotfile, so ``publishable_files`` cannot see it and a
+        # re-export of this agent cannot carry its own bookkeeping.
+        write_stamp(
+            home,
+            BundleStamp(
+                agent_uid=import_plan.agent_uid,
+                version=import_plan.version,
+                exported_at=import_plan.bundle.exported_at,
+                digests=_stamp_digests(import_plan.bundle.files),
+            ),
+        )
     except Exception:
         shutil.rmtree(home, ignore_errors=True)
         raise
@@ -1060,7 +1097,9 @@ def _collision(slug: str) -> tuple[str, str]:
     refused as firmly as a local one. Import creates; it never replaces, because
     updating an agent from a bundle is a different verb with a diff-and-confirm
     problem of its own, and conflating the two is how a tuned local agent gets
-    silently reset.
+    silently reset. That verb is :func:`plan_update` / :func:`apply_update`
+    (FEAT-145), and ``ImportPlan.is_update`` is how a surface knows the
+    collision it is looking at is a case for it rather than for a rename.
     """
     from condor.agents.agent import AgentStore
 
@@ -1070,6 +1109,23 @@ def _collision(slug: str) -> tuple[str, str]:
     if store.get(slug) is not None or agent_home(slug).exists():
         return slug, _first_free(slug)
     return "", ""
+
+
+def _installed_agent_uid(slug: str) -> str:
+    """The identity of the agent already installed under ``slug``, or ``""``.
+
+    ``AGENT.md``'s own ``agent_uid`` first and the import stamp second, which
+    is the order that keeps answering after a local edit: a save through
+    ``AgentStore._save`` rebuilds the front matter from the dataclass, and the
+    stamp is the copy no agent-facing tool can rewrite (FEAT-145).
+    """
+    from condor.agents.agent import AgentStore
+
+    agent = AgentStore().get(slug)
+    if agent is not None and agent.agent_uid:
+        return agent.agent_uid
+    stamp = read_stamp(agent_home(slug))
+    return stamp.agent_uid if stamp else ""
 
 
 def _first_free(slug: str) -> str:
@@ -1212,3 +1268,824 @@ def _stamp_agent_md(home: Path, import_plan: ImportPlan, user_id: int) -> None:
     meta[BUNDLE_VERSION_KEY] = import_plan.version
     meta.pop(BUNDLE_DIGEST_KEY, None)
     atomic_write_text(path, render_frontmatter(meta, body))
+
+
+# ── Update an installed agent from a newer bundle (FEAT-145) ──
+#
+# The import above creates and never replaces, which left a newer version of an
+# agent you already have landing beside the old one under ``<slug>_2`` with the
+# memory forked. This is the other verb: it shows what would change file by
+# file, replaces the library content, and keeps everything this install earned
+# by running the agent.
+#
+# **The split that makes it safe is already the export's own.**
+# ``publishable_files`` divides a home into library content and what this
+# install accumulated; an update replaces exactly the first and never looks at
+# the second, so ``store/``, ``config.yml``, ``mutes.yml``, ``sessions/`` and
+# the rest are untouched by construction rather than by a second denylist.
+#
+# **A conflict is kept, never merged.** These are markdown instructions a model
+# reads and YAML a trader tuned: a conflict-marked ``SKILL.md`` is not a
+# conflict to resolve later, it is a *new instruction* the model will follow. A
+# file the operator edited keeps its bytes and the plan carries the bundle's
+# copy so a surface can offer it. That default is the deliberate half — an
+# operator's edit is the only content in the home nobody else can reproduce.
+
+#: The import stamp, at the root of the agent home: the record of *what the
+#: bundle said last time*, which is the only way to tell an operator's local
+#: edit from an upstream change. A dotfile, so ``publishable_files`` cannot see
+#: it and it can never travel in a bundle of its own agent — invisible to the
+#: export by construction, not by being added to a list.
+STAMP_FILENAME = ".bundle.json"
+
+#: Where an update leaves the bytes it replaced or deleted, under a timestamp.
+#: A dotdir, excluded from publishing for the same structural reason, and the
+#: ``.server_backups`` idiom FEAT-126 set: an overwrite leaves the previous
+#: bytes behind, out of the library.
+BACKUP_DIRNAME = ".bundle_backup"
+
+#: The per-path verdicts :func:`plan_update` assigns, computed from three
+#: digests — the bundle's, the file on disk, and the stamp's.
+ADDED = "added"
+CHANGED = "changed"
+UNCHANGED = "unchanged"
+LOCAL_ONLY = "local_only"
+CONFLICT = "conflict"
+REMOVED = "removed"
+CONFLICT_REMOVED = "conflict_removed"
+
+#: The verdicts whose bytes :func:`apply_update` writes from the bundle.
+_ADOPTED = (ADDED, CHANGED)
+
+#: The verdicts whose previous bytes are copied aside before anything happens.
+_BACKED_UP = (CHANGED, REMOVED)
+
+#: The verdicts that keep what is on disk and leave the stamp alone, so the
+#: divergence survives into every later update instead of being forgotten and
+#: silently overwritten by the next bundle that touches the same path.
+_KEPT_LOCAL = (LOCAL_ONLY, CONFLICT, CONFLICT_REMOVED)
+
+#: The ``AGENT.md`` front-matter keys an update keeps from the installed copy
+#: rather than taking from the bundle. Each is a fact about *this* install and
+#: not part of the agent: who owns it here, when it landed here, which server
+#: its orders go to, and which model this install resolved for it. Everything
+#: else in the file — the instructions, the description, the ``tools``
+#: allowlist — is library content and is replaced like any other file.
+INSTALL_LOCAL_KEYS = (CREATED_BY_KEY, SERVER_NAME_KEY, "created_at", "agent_key")
+
+#: What a diff of ``AGENT.md`` must not see. That file is the one place where
+#: library content and this install's own facts share a document, so pinning a
+#: server or resolving a model would otherwise read as the operator having
+#: edited the agent's instructions — which would freeze upstream's instructions
+#: out of every future update, the opposite of what this verb is for.
+_IGNORED_AGENT_MD_KEYS = (
+    *INSTALL_LOCAL_KEYS,
+    *BOOKKEEPING_KEYS,
+    AGENT_UID_KEY,
+    FORKED_FROM_KEY,
+    FORKED_AT_KEY,
+)
+
+
+class BundleStamp(BaseModel):
+    """What the bundle said last time this install accepted one.
+
+    ``digests`` is a digest per carried path over the *comparable* form of that
+    path's bundled text (:func:`_comparable`), so it answers exactly one
+    question: which upstream bytes has this install already taken for this
+    file. A path whose local copy was kept in a conflict is deliberately **not**
+    updated, which is what keeps the divergence visible to the next update.
+    """
+
+    agent_uid: str = ""
+    version: int = 0
+    exported_at: str = ""
+    digests: dict[str, str] = Field(default_factory=dict)
+
+    def knows(self, path: str) -> bool:
+        return path in self.digests
+
+    def upstream(self, path: str) -> str:
+        return self.digests.get(path, "")
+
+
+class UpdateBlocker(BaseModel):
+    """Something that refuses the update, in words the operator can act on."""
+
+    code: str
+    message: str
+
+
+class UpdateWarning(BaseModel):
+    """A consequence worth knowing about. Never a reason to refuse."""
+
+    code: str
+    message: str
+
+
+class UpdateFile(BaseModel):
+    """One path, and what the update would do to it."""
+
+    path: str
+    verdict: str
+    #: The bundle's copy, in bytes of UTF-8. ``0`` when the bundle carries none.
+    bytes: int = 0
+    #: ``True`` for a ``.py``. Execution consent is keyed by content
+    #: (:mod:`condor.agents.code_trust`), so a replaced routine is pending
+    #: again and has to be read and allowed before it can run.
+    executable: bool = False
+    #: The bundle's copy, carried **only** for a ``conflict``: the local bytes
+    #: are what survives, so this is what a surface offers instead. Empty for
+    #: every other verdict, which is what keeps a plan summary the size of a
+    #: diff rather than the size of the agent.
+    incoming: str = ""
+
+
+class UpdatePlan(BaseModel):
+    """What an update would do, computed without writing anything.
+
+    Speaks ``condor/updates``' vocabulary one level down — blockers, warnings
+    and a plan — rather than inventing a third, and keeps :func:`plan`'s
+    one-builder rule: the dialog and the write call this same function, so
+    pressing Update does exactly what the diff showed.
+
+    ``unmet`` and ``findings`` are carried as their own lists rather than
+    flattened into ``warnings``. Both already have a renderer on every surface
+    that shows an import, and a second copy of each as a sentence would be the
+    same fact reported twice in two shapes.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    bundle: Bundle
+    slug: str
+    #: The identity the bundle claims, or the one minted from its content.
+    agent_uid: str = ""
+    #: The identity of the agent already installed here. Equal to the above is
+    #: what makes this an update rather than a collision.
+    installed_agent_uid: str = ""
+    version: int = 1
+    installed_version: int = 0
+    exported_at: str = ""
+    notes: str = ""
+    author: BundleAuthor = Field(default_factory=BundleAuthor)
+    requires: BundleRequires = Field(default_factory=BundleRequires)
+    unmet: list[UnmetRequirement] = Field(default_factory=list)
+    findings: list[BundleFinding] = Field(default_factory=list)
+    #: One entry per path, in path order. A file the bundle never carried and
+    #: this install never installed — the operator's own — is not listed at all.
+    files: list[UpdateFile] = Field(default_factory=list)
+    #: ``{verdict: count}`` for the verdicts present, so a surface can say what
+    #: this update is without walking the list.
+    counts: dict[str, int] = Field(default_factory=dict)
+    #: ``{"routines": [...], "skills": [...]}`` — what arrives switched off.
+    #: Only what is genuinely new: an item the operator unmuted after reading
+    #: it stays unmuted, and a changed one is not re-muted.
+    mutes: dict[str, list[str]] = Field(default_factory=dict)
+    blockers: list[UpdateBlocker] = Field(default_factory=list)
+    warnings: list[UpdateWarning] = Field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.blockers
+
+    def summary(self) -> dict:
+        """The plan without the bundle — what a surface shows a human."""
+        return self.model_dump(exclude={"bundle"})
+
+
+def stamp_path(home: Path) -> Path:
+    """``agents/<slug>/.bundle.json``."""
+    return home / STAMP_FILENAME
+
+
+def read_stamp(home: Path) -> BundleStamp | None:
+    """The import stamp under ``home``, or ``None`` when there is no basis.
+
+    An unreadable or malformed stamp answers ``None`` rather than an empty one.
+    The two are not the same: ``None`` means "nothing here says a bundle is
+    this agent's upstream", which blocks the update and offers import-as-new,
+    while an empty stamp would mean "upstream has never carried any of these
+    files" and would classify the whole agent as a conflict against itself.
+
+    Its paths are held to :func:`condor.layering.is_library_path`, the same rule
+    :func:`_refuse_path` applies to a bundle's. No bundle can write this file —
+    the import refuses a dotted path — but it is plain JSON in a directory the
+    operator owns, and a path read out of it reaches ``apply_update``'s
+    ``unlink`` of a ``removed`` row. A ``..`` typed in by hand must not be able
+    to delete anything.
+    """
+    try:
+        payload = json.loads(stamp_path(home).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        log.warning("agents: unreadable %s under %s", STAMP_FILENAME, home)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        stamp = BundleStamp.model_validate(payload)
+    except Exception:  # noqa: BLE001 - a stamp we cannot read is no basis
+        log.warning("agents: malformed %s under %s", STAMP_FILENAME, home)
+        return None
+    kept = {
+        path: digest for path, digest in stamp.digests.items() if is_library_path(path)
+    }
+    if len(kept) != len(stamp.digests):
+        log.warning(
+            "agents: dropped %d non-library path(s) from %s under %s",
+            len(stamp.digests) - len(kept),
+            STAMP_FILENAME,
+            home,
+        )
+    return stamp.model_copy(update={"digests": kept})
+
+
+def write_stamp(home: Path, stamp: BundleStamp) -> None:
+    """Record what the bundle said, so the next update can compare.
+
+    Written **last** by both the import and the update, so an interrupted write
+    leaves a stamp describing the previous state. A file already replaced then
+    reads as holding the bundle's bytes and is classified ``unchanged``, and one
+    not reached yet still reads ``changed`` — so the next plan is correct and
+    the update resumes rather than reporting the whole agent as a conflict.
+    """
+    atomic_write_text(
+        stamp_path(home),
+        json.dumps(stamp.model_dump(), indent=2, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _comparable(path: str, text: str) -> str:
+    """The form of ``path``'s text that a diff is computed over.
+
+    Identity for every file but ``AGENT.md``, whose front matter carries both
+    library content and this install's own facts in one document — see
+    :data:`_IGNORED_AGENT_MD_KEYS`. The mapping is compared as a *sorted*
+    mapping and the body stripped, so a plain re-save through
+    ``AgentStore._save`` (which rebuilds the front matter in its own key order)
+    is not mistaken for the operator having rewritten the agent.
+    """
+    if path != AGENT_MD:
+        return text
+    meta, body = parse_frontmatter(text)
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    for key in _IGNORED_AGENT_MD_KEYS:
+        meta.pop(key, None)
+    return json.dumps(meta, sort_keys=True, default=str) + "\n" + body.strip()
+
+
+def _stamp_digests(files: Sequence[BundleFile]) -> dict[str, str]:
+    """The comparable digest of every file a bundle carries, by path."""
+    return {entry.path: _digest(_comparable(entry.path, entry.text)) for entry in files}
+
+
+def _disk_digests(home: Path) -> dict[str, str]:
+    """The comparable digest of every **library** file under ``home``.
+
+    The selection is ``publishable_files``, which is what makes "runtime output
+    is untouched" structural: a path this never yields is a path no verdict is
+    ever computed for, so nothing under ``store/``, ``sessions/`` or beside
+    ``config.yml`` can be replaced or deleted by an update.
+    """
+    found: dict[str, str] = {}
+    for rel in publishable_files(home):
+        path = rel.as_posix()
+        try:
+            found[path] = _digest(_comparable(path, (home / rel).read_text("utf-8")))
+        except (OSError, UnicodeDecodeError):
+            # Unreadable or not UTF-8: digest the raw bytes instead, so the file
+            # reads as diverged from whatever the bundle carries rather than as
+            # absent. Absent would make an update delete or replace it.
+            try:
+                found[path] = hashlib.sha256((home / rel).read_bytes()).hexdigest()
+            except OSError:
+                found[path] = "unreadable"
+    return found
+
+
+def _classify(
+    carried: dict[str, str], disk: dict[str, str], stamp: BundleStamp
+) -> list[tuple[str, str]]:
+    """``(path, verdict)`` for every path either side has an opinion about.
+
+    The table FEAT-145 states, plus the two cases it does not reach:
+
+    * **A path on disk that the stamp never knew, holding bytes the bundle
+      does not carry**, is a ``conflict`` rather than an ``added``. The
+      operator has content at that path which this install never installed;
+      replacing it would destroy the only bytes in the home nobody else can
+      reproduce, which is the thing every other row of the table is arranged to
+      avoid. Holding the bundle's *own* bytes it stays ``added`` — the write is
+      then a no-op, and calling it unchanged would leave a new routine unmuted.
+    * **A path the stamp knows whose disk copy already holds the bundle's
+      bytes** is ``unchanged`` whatever the stamp says. Those two together are
+      what makes an interrupted update resumable: the files it got to are
+      recognised as done instead of reading as a conflict between the operator
+      and upstream.
+
+    A deleted file is folded into "edited" by comparing an absent digest, so a
+    library file the operator removed is not resurrected behind their back —
+    it is reported, with the bundle's copy on offer where upstream changed it.
+    """
+    verdicts: list[tuple[str, str]] = []
+    for path in sorted(set(carried) | set(disk) | set(stamp.digests)):
+        in_bundle = path in carried
+        known = stamp.knows(path)
+        local = disk.get(path, "")
+        if not known and not in_bundle:
+            continue  # the operator's own file — never listed, never touched
+        if not known:
+            diverged = bool(local) and local != carried[path]
+            verdicts.append((path, CONFLICT if diverged else ADDED))
+            continue
+        if not in_bundle:
+            kept = bool(local) and local != stamp.upstream(path)
+            verdicts.append((path, CONFLICT_REMOVED if kept else REMOVED))
+            continue
+        if local and local == carried[path]:
+            verdicts.append((path, UNCHANGED))
+            continue
+        edited = local != stamp.upstream(path)
+        upstream_changed = carried[path] != stamp.upstream(path)
+        if edited and upstream_changed:
+            verdicts.append((path, CONFLICT))
+        elif edited:
+            verdicts.append((path, LOCAL_ONLY))
+        elif upstream_changed:
+            verdicts.append((path, CHANGED))
+        else:
+            verdicts.append((path, UNCHANGED))
+    return verdicts
+
+
+def _added_mutes(added: Sequence[str], known: Sequence[str]) -> dict[str, list[str]]:
+    """The routines and skills an update switches off: the genuinely new ones.
+
+    A ``changed`` item is **not** re-muted, and a name already in ``mutes.yml``
+    is left exactly as it is. That asymmetry is a decision: re-muting on every
+    update would make updating an agent cost the whole curation pass again, and
+    the diff already told the operator which instructions changed. An item the
+    operator unmuted after reading it stays unmuted.
+    """
+    fresh = _mutes_for(sorted(added))
+    had = _mutes_for(sorted(known))
+    return {
+        kind: [name for name in names if name not in set(had[kind])]
+        for kind, names in fresh.items()
+    }
+
+
+def plan_update(
+    bundle: Bundle,
+    slug: str,
+    available_connectors: Sequence[str] | None = None,
+    available_tools: Sequence[str] | None = None,
+) -> UpdatePlan:
+    """What updating ``slug`` from ``bundle`` would do. Writes nothing.
+
+    Every blocker is collected rather than raised, so a reviewer sees all of
+    them at once; :func:`apply_update` is the one that turns them into an error.
+    The bundle is held to every check :func:`plan` applies to an import —
+    per-file digest, no duplicate path, path containment through ``safe_slug``,
+    library paths only, an ``AGENT.md`` present — and all of it before the
+    first write.
+
+    ``available_connectors`` and ``available_tools`` are what *this* install
+    can supply, passed in rather than fetched so the module stays headless.
+    ``None`` means "not asked", exactly as in :func:`unmet_of`.
+    """
+    from condor.agents.agent import AgentStore
+
+    blockers: list[UpdateBlocker] = []
+    warnings: list[UpdateWarning] = []
+
+    carried: dict[str, str] = {}
+    texts: dict[str, str] = {}
+    for entry in bundle.files:
+        refusal = _refuse_path(entry.path)
+        if refusal:
+            blockers.append(UpdateBlocker(code="unusable_path", message=refusal))
+            continue
+        if entry.path in texts:
+            blockers.append(
+                UpdateBlocker(
+                    code="duplicate_path",
+                    message=f"'{entry.path}' appears twice in this bundle",
+                )
+            )
+            continue
+        if _digest(entry.text) != entry.sha256:
+            blockers.append(
+                UpdateBlocker(
+                    code="altered",
+                    message=(
+                        f"'{entry.path}' does not match its sha256 — the bundle "
+                        "has been altered since it was exported"
+                    ),
+                )
+            )
+            continue
+        texts[entry.path] = entry.text
+        carried[entry.path] = _digest(_comparable(entry.path, entry.text))
+    if AGENT_MD not in texts:
+        blockers.append(
+            UpdateBlocker(
+                code="not_an_agent",
+                message=f"A bundle without {AGENT_MD} is not an agent",
+            )
+        )
+
+    incoming_uid = bundle.agent.agent_uid or _minted_uid(bundle)
+    try:
+        slug = safe_slug(slug)
+    except UnsafeIdError:
+        blockers.append(
+            UpdateBlocker(
+                code="unusable_slug", message=f"'{slug}' is not a usable agent name"
+            )
+        )
+        return UpdatePlan(
+            bundle=bundle,
+            slug="",
+            agent_uid=incoming_uid,
+            version=bundle.version,
+            exported_at=bundle.exported_at,
+            notes=bundle.notes,
+            author=bundle.author,
+            blockers=blockers,
+        )
+
+    local, stock = agent_home_layers(slug)
+    agent = AgentStore().get(slug)
+    stamp = read_stamp(local)
+    installed = local.is_dir()
+    if not installed:
+        if stock.is_dir() or agent is not None:
+            blockers.append(
+                UpdateBlocker(
+                    code="stock_agent",
+                    message=(
+                        f"'{slug}' is an agent Condor ships, and the shipped "
+                        "library is only written by publishing. Import this "
+                        "bundle under another name instead."
+                    ),
+                )
+            )
+        else:
+            blockers.append(
+                UpdateBlocker(
+                    code="no_such_agent",
+                    message=(
+                        f"No agent '{slug}' is installed here, so there is "
+                        "nothing to update — import it as a new agent instead."
+                    ),
+                )
+            )
+
+    installed_uid = (agent.agent_uid if agent else "") or (
+        stamp.agent_uid if stamp else ""
+    )
+    installed_version = (
+        stamp.version if stamp else (agent.bundle_version if agent else 0)
+    )
+
+    if installed:
+        if not installed_uid and stamp is None:
+            blockers.append(
+                UpdateBlocker(
+                    code="no_basis",
+                    message=(
+                        f"'{slug}' carries no agent_uid and was never imported "
+                        "from a bundle, so nothing here says this bundle is its "
+                        "upstream. Import it as a new agent instead."
+                    ),
+                )
+            )
+        elif installed_uid and installed_uid != incoming_uid:
+            blockers.append(
+                UpdateBlocker(
+                    code="different_agent",
+                    message=(
+                        f"This bundle is agent {incoming_uid}; '{slug}' here is "
+                        f"agent {installed_uid}. Those are two different agents, "
+                        "not an update — import it under another name."
+                    ),
+                )
+            )
+        elif stamp is None:
+            warnings.append(
+                UpdateWarning(
+                    code="no_stamp",
+                    message=(
+                        f"'{slug}' has no import stamp, so there is no record of "
+                        "what a bundle last said about it. Every file it already "
+                        "has reads as a conflict and keeps its local bytes; only "
+                        "files it does not have yet will land."
+                    ),
+                )
+            )
+
+    if stamp is not None and bundle.version < stamp.version:
+        blockers.append(
+            UpdateBlocker(
+                code="older_bundle",
+                message=(
+                    f"This bundle is version {bundle.version} and '{slug}' is "
+                    f"already at version {stamp.version} — it is not newer."
+                ),
+            )
+        )
+    elif (
+        stamp is not None
+        and bundle.version == stamp.version
+        and carried != stamp.digests
+    ):
+        warnings.append(
+            UpdateWarning(
+                code="same_version_new_build",
+                message=(
+                    f"This bundle says version {bundle.version}, the same as the "
+                    "one installed, but its files differ — a different build of "
+                    "the same version. A version only orders bundles within one "
+                    "agent's lineage; the diff is the authoritative answer."
+                ),
+            )
+        )
+
+    if _engine_running(slug):
+        blockers.append(
+            UpdateBlocker(
+                code="live_loop",
+                message=(
+                    f"'{slug}' has a loop running right now. Swapping a skill's "
+                    "instructions under a session that is mid-tick changes what "
+                    "the model is told between one tool call and the next — stop "
+                    "the loop first."
+                ),
+            )
+        )
+
+    disk = _disk_digests(local) if installed else {}
+    rows: list[UpdateFile] = []
+    for path, verdict in _classify(carried, disk, stamp or BundleStamp()):
+        text = texts.get(path, "")
+        rows.append(
+            UpdateFile(
+                path=path,
+                verdict=verdict,
+                bytes=len(text.encode("utf-8")) if text else 0,
+                executable=path.endswith(".py"),
+                incoming=text if verdict == CONFLICT else "",
+            )
+        )
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.verdict] = counts.get(row.verdict, 0) + 1
+
+    requires = requires_of(bundle.files)
+    unmet = unmet_of(
+        requires,
+        available_connectors=available_connectors,
+        available_tools=available_tools,
+        available_skills=_shared_skill_slugs(),
+    )
+
+    return UpdatePlan(
+        bundle=bundle,
+        slug=slug,
+        agent_uid=incoming_uid,
+        installed_agent_uid=installed_uid,
+        version=bundle.version,
+        installed_version=installed_version,
+        exported_at=bundle.exported_at,
+        notes=bundle.notes,
+        author=bundle.author,
+        requires=requires,
+        unmet=unmet,
+        findings=_finding_rows(bundle),
+        files=rows,
+        counts=counts,
+        mutes=_added_mutes(
+            [row.path for row in rows if row.verdict == ADDED],
+            # What this agent already had, which is every path either side
+            # knows *minus* the ones this update is adding. Subtracting them is
+            # what makes a resumed update still mute a routine whose file the
+            # interrupted run had already written: it is on disk, but it is
+            # this update's own work and not something the agent had.
+            sorted(
+                (set(stamp.digests if stamp else {}) | set(disk))
+                - {row.path for row in rows if row.verdict == ADDED}
+            ),
+        ),
+        blockers=blockers,
+        warnings=warnings,
+    )
+
+
+def _engine_running(slug: str) -> bool:
+    """Whether a ``TickEngine`` exists for ``slug`` — a live trading loop.
+
+    A supervisor that cannot be reached answers *no engine*: this is one of six
+    blockers and the only one that depends on live runtime state, and a preview
+    that refused every update because the supervisor was mid-import would be a
+    verb nobody could use. The route that applies re-plans before it writes, so
+    the check runs again against the state of the moment.
+    """
+    try:
+        from condor.agents.engine import get_engine
+
+        return get_engine(slug) is not None
+    except Exception:  # noqa: BLE001 - no supervisor is not a running loop
+        log.debug("agents: could not ask the supervisor about '%s'", slug)
+        return False
+
+
+def apply_update(update_plan: UpdatePlan, user_id: int = 0) -> dict:
+    """Write exactly what ``update_plan`` described. Starts nothing.
+
+    All validation already ran in :func:`plan_update`, so the only thing
+    between here and an updated agent is disk. There is no rollback and
+    deliberately so — the home already holds an agent somebody has been
+    running, and removing it on a half-finished write is the silent reset this
+    whole verb exists to avoid. What stands in for one is the pair of
+    guarantees the order of these steps gives: the previous bytes of every
+    replaced or deleted file are copied aside *first*, and the stamp is
+    rewritten *last*, so an interrupted update is resumable and reversible by
+    hand.
+
+    Nothing is started. No ``control_agent(start)``, no delegation, no tick:
+    the result names the next step instead.
+    """
+    if update_plan.blockers:
+        raise BundleError(update_plan.blockers[0].message)
+
+    slug = update_plan.slug
+    home = agent_home(slug)
+    texts = {entry.path: entry.text for entry in update_plan.bundle.files}
+    digests = dict((read_stamp(home) or BundleStamp()).digests)
+    backup = (
+        home / BACKUP_DIRNAME / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+
+    for row in update_plan.files:
+        target = home.joinpath(*row.path.split("/"))
+        if row.verdict in _BACKED_UP and target.is_file():
+            kept = backup.joinpath(*row.path.split("/"))
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, kept)
+        if row.verdict in _ADOPTED:
+            text = texts.get(row.path, "")
+            if row.path == AGENT_MD:
+                text = _updated_agent_md(target, text, update_plan)
+            atomic_write_text(target, text)
+            digests[row.path] = _digest(_comparable(row.path, texts.get(row.path, "")))
+        elif row.verdict == REMOVED:
+            target.unlink(missing_ok=True)
+            _prune_empty(home, target.parent)
+            digests.pop(row.path, None)
+        elif row.verdict == UNCHANGED:
+            digests[row.path] = _digest(_comparable(row.path, texts.get(row.path, "")))
+
+    # An update keeps the curation the operator performed after the last import:
+    # only what is genuinely new arrives switched off.
+    _mute_imported(slug, update_plan.mutes)
+    # Consent is keyed by content, so every replaced routine is pending again
+    # and has to be read and allowed before it can run (FEAT-147). Arming is
+    # idempotent in the only direction that matters — an agent already gated
+    # keeps whatever has been allowed.
+    code_trust.arm(slug)
+    if _verdict_of(update_plan, AGENT_MD) == UNCHANGED:
+        _carry_bookkeeping(home / AGENT_MD, update_plan)
+    write_stamp(
+        home,
+        BundleStamp(
+            agent_uid=update_plan.agent_uid,
+            version=update_plan.version,
+            exported_at=update_plan.bundle.exported_at,
+            digests=digests,
+        ),
+    )
+
+    log.info(
+        "agents: updated '%s' to version %d (%s)",
+        slug,
+        update_plan.version,
+        ", ".join(f"{n} {verdict}" for verdict, n in sorted(update_plan.counts.items()))
+        or "no change",
+    )
+    result = update_plan.summary()
+    result["updated"] = True
+    result["backup"] = str(backup) if backup.is_dir() else ""
+    result["next_step"] = _update_next_step(update_plan)
+    return result
+
+
+def _verdict_of(update_plan: UpdatePlan, path: str) -> str:
+    for row in update_plan.files:
+        if row.path == path:
+            return row.verdict
+    return ""
+
+
+def _update_next_step(update_plan: UpdatePlan) -> str:
+    """What the operator has to do now, naming only what actually happened."""
+    parts = ["Nothing was started and nothing this update brought has run."]
+    kept = [row.path for row in update_plan.files if row.verdict in _KEPT_LOCAL]
+    if kept:
+        parts.append(
+            f"{len(kept)} file{'' if len(kept) == 1 else 's'} you had edited kept "
+            f"your copy ({', '.join(kept[:5])}"
+            + (", …" if len(kept) > 5 else "")
+            + ")."
+        )
+    replaced = [
+        row.path
+        for row in update_plan.files
+        if row.verdict in _ADOPTED and row.executable
+    ]
+    if replaced:
+        parts.append(
+            f"{len(replaced)} routine file{'' if len(replaced) == 1 else 's'} "
+            "changed, so each needs reading and allowing again before it can run."
+        )
+    muted = sum(len(names) for names in update_plan.mutes.values())
+    if muted:
+        parts.append(
+            f"{muted} new item{'' if muted == 1 else 's'} arrived muted — read "
+            "each one before you switch it on."
+        )
+    return " ".join(parts)
+
+
+def _updated_agent_md(path: Path, incoming: str, update_plan: UpdatePlan) -> str:
+    """The bundle's ``AGENT.md``, with this install's own facts carried over.
+
+    The body and every other front-matter key are the bundle's — that is the
+    library content this verb exists to replace. :data:`INSTALL_LOCAL_KEYS` are
+    taken from the copy already on disk, so an update cannot reassign the agent
+    to the exporter, unpin the server its orders go to, or rewrite the model
+    this install resolved for it.
+    """
+    meta, body = parse_frontmatter(incoming)
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    try:
+        local_meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except OSError:
+        local_meta = {}
+    local_meta = local_meta if isinstance(local_meta, dict) else {}
+    for key in INSTALL_LOCAL_KEYS:
+        if key in local_meta:
+            meta[key] = local_meta[key]
+    meta.pop(FORKED_FROM_KEY, None)
+    meta.pop(FORKED_AT_KEY, None)
+    meta.pop(BUNDLE_DIGEST_KEY, None)
+    meta[AGENT_UID_KEY] = update_plan.agent_uid
+    meta[BUNDLE_VERSION_KEY] = update_plan.version
+    return render_frontmatter(meta, body)
+
+
+def _carry_bookkeeping(path: Path, update_plan: UpdatePlan) -> None:
+    """Move ``AGENT.md``'s lineage bookkeeping forward without touching content.
+
+    Only needed when ``AGENT.md`` itself is ``unchanged`` — an adopted one is
+    rewritten by :func:`_updated_agent_md` and a kept one is left alone, since
+    writing to a file this update promised not to touch is exactly the thing
+    the conflict verdict is a promise about.
+    """
+    try:
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except OSError:
+        log.warning("agents: could not carry bookkeeping onto %s", path)
+        return
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    if (
+        meta.get(AGENT_UID_KEY) == update_plan.agent_uid
+        and meta.get(BUNDLE_VERSION_KEY) == update_plan.version
+        and BUNDLE_DIGEST_KEY not in meta
+    ):
+        return
+    meta[AGENT_UID_KEY] = update_plan.agent_uid
+    meta[BUNDLE_VERSION_KEY] = update_plan.version
+    meta.pop(BUNDLE_DIGEST_KEY, None)
+    atomic_write_text(path, render_frontmatter(meta, body))
+
+
+def _prune_empty(home: Path, directory: Path) -> None:
+    """Remove the directories a deletion emptied, never ``home`` itself."""
+    current = directory
+    while current != home and home in current.parents:
+        try:
+            next(current.iterdir())
+            return
+        except StopIteration:
+            pass
+        except OSError:
+            return
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
