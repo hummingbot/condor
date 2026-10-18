@@ -664,15 +664,18 @@ def test_extra_env_falls_back_to_chat_id(monkeypatch):
 def test_resolve_acp_model_suffix():
     from condor.acp.client import resolve_acp
 
-    # Returns (command, env, model_pref). The suffix is surfaced as model_pref so
-    # ACPClient can select it via session/set_model (the bridge ignores env).
+    # Returns (command, env, model_pref). The pin is surfaced ONLY as model_pref,
+    # so ACPClient applies it via session/set_model — the one channel on which a
+    # pin the bridge cannot apply fails loudly. The env overlay stays empty: the
+    # bridge advertises whatever env hands it and reports it as current, typos
+    # included, which made that failure unreachable (CORR-746).
     cmd, env, pref = resolve_acp("claude-acp:opus")
     assert cmd == "claude-agent-acp"
-    assert env == {"ANTHROPIC_MODEL": "opus"}
+    assert env == {}
     assert pref == "opus"
 
     _, env, pref = resolve_acp("claude-acp:claude-opus-4-8")
-    assert env == {"ANTHROPIC_MODEL": "claude-opus-4-8"}
+    assert env == {}
     assert pref == "claude-opus-4-8"
 
     assert resolve_acp("claude-code") == ("claude-agent-acp", {}, "")

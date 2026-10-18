@@ -8,6 +8,7 @@ leave every pinned brain on the default model.
 """
 
 import asyncio
+import copy
 import json
 import os
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from condor.acp.client import (
     ACPClient,
     ModelPinError,
     advertised_models,
+    resolve_acp,
     resolve_model_id,
 )
 from condor.llm import readiness
@@ -37,6 +39,28 @@ CONFIG_OPTIONS_SESSION = {
             "options": [
                 {"value": "default", "name": "Default (recommended)"},
                 {"value": "opus[1m]", "name": "Opus 5"},
+                {"value": "sonnet", "name": "Sonnet 5"},
+                {"value": "haiku", "name": "Haiku 4.5"},
+            ],
+        },
+    ],
+}
+
+# The session/new a bridge 0.79 hands back when nothing pins its model:
+# measured 2026-10-18 with ANTHROPIC_MODEL unset. With the pin on the env the
+# bridge appended it to these options and reported it as currentValue, so every
+# pin matched itself and the switch was never sent (CORR-746).
+UNPINNED_SESSION = {
+    "sessionId": "s",
+    "configOptions": [
+        {
+            "id": "model",
+            "category": "model",
+            "currentValue": "default",
+            "options": [
+                {"value": "default", "name": "Default (recommended)"},
+                {"value": "opus[1m]", "name": "Opus 5"},
+                {"value": "claude-fable-5-1[1m]", "name": "Fable 5.1"},
                 {"value": "sonnet", "name": "Sonnet 5"},
                 {"value": "haiku", "name": "Haiku 4.5"},
             ],
@@ -168,6 +192,71 @@ def test_a_failed_pin_stops_the_bridge_rather_than_orphaning_it():
     assert stopped == [True]
 
 
+def test_an_unpinned_bridge_is_actually_asked_to_switch():
+    """The catalogue is honest, so the pin differs from current and is sent."""
+    client, sent = _client_with_fake_peer("haiku")
+
+    asyncio.run(client._select_model(UNPINNED_SESSION))
+
+    assert sent == [
+        (
+            "session/set_config_option",
+            {"sessionId": "s", "configId": "model", "value": "haiku"},
+        )
+    ]
+    assert client.active_model_id == "haiku"
+
+
+def test_an_unpinned_bridge_refuses_a_pin_it_does_not_offer():
+    """With the pin off the env, a bogus one cannot match itself any more."""
+    client, sent = _client_with_fake_peer("gpt-4o")
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(UNPINNED_SESSION))
+
+    message = str(err.value)
+    assert "'gpt-4o'" in message
+    assert "default, opus[1m], claude-fable-5-1[1m], sonnet, haiku" in message
+    assert sent == []
+    # Never reported as the effective model on /agents (FEAT-136's audit field).
+    assert client.active_model_id != "gpt-4o"
+
+
+def _session_as_bridge_079_answers(env: dict[str, str]) -> dict:
+    """``UNPINNED_SESSION``, plus whatever ``ANTHROPIC_MODEL`` does to it.
+
+    Measured 2026-10-18 against @agentclientprotocol/claude-agent-acp 0.79.0:
+    the variable's value is appended to the advertised options and reported as
+    ``currentValue``, unchecked — ``gpt-4o`` and ``sonnet-typo-xyz`` came back
+    exactly like a real alias.
+    """
+    session = copy.deepcopy(UNPINNED_SESSION)
+    pinned = env.get("ANTHROPIC_MODEL")
+    if pinned:
+        option = session["configOptions"][0]
+        option["options"].append({"value": pinned, "name": pinned})
+        option["currentValue"] = pinned
+    return session
+
+
+def test_a_bogus_pin_cannot_smuggle_itself_in_through_the_environment():
+    """The pin travels only on the protocol, so the bridge cannot echo it back.
+
+    While resolve_acp also exported it, the bridge advertised the pin and
+    reported it as current: target == current, nothing sent, no raise, and the
+    typo went on to /agents as the effective model (CORR-746).
+    """
+    _, env, pref = resolve_acp("claude-acp:gpt-4o")
+    client, sent = _client_with_fake_peer(pref)
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(_session_as_bridge_079_answers(env)))
+
+    assert "'gpt-4o'" in str(err.value)
+    assert sent == []
+    assert client.active_model_id != "gpt-4o"
+
+
 def test_an_unpinned_session_is_untouched_by_the_failure_path():
     client, sent = _client_with_fake_peer("")
     asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
@@ -183,8 +272,8 @@ def _patch_probe_client(monkeypatch, start, offers=("default", "sonnet", "haiku"
 
     Returns ``(stopped, launched)``: whether the bridge was stopped, and the
     ``(command, kwargs)`` it was launched with — the probe must launch it
-    *unpinned*, since Condor's own ANTHROPIC_MODEL would otherwise make the
-    bridge advertise the very pin under test.
+    *unpinned*, since an ANTHROPIC_MODEL handed to the bridge would make it
+    advertise the very pin under test.
     """
     stopped, launched = [], []
 

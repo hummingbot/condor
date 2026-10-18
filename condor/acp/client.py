@@ -333,10 +333,12 @@ _CLAUDE_SESSION_ENV_VARS = (
 # The suffix is selected at runtime via session/set_model against the agent's
 # advertised models (see ACPClient._select_model), which resolves aliases
 # ("opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
-# NOTE: the protocol is the lever, not ANTHROPIC_MODEL. Bridge 0.79 does read
-# that variable (0.21 did not), but it reads it by *trusting* it: the value is
+# NOTE: the protocol is the only channel a pin travels on. ANTHROPIC_MODEL is
+# deliberately NOT exported (it was until CORR-746). Bridge 0.79 does read that
+# variable (0.21 did not), but it reads it by *trusting* it: the value is
 # appended to the models it advertises and reported as current, unchecked — so
-# the env channel cannot tell a real model from a typo (see probe_model_pin).
+# the env channel cannot tell a real model from a typo, and while a pin was on
+# it every pin "applied" and _select_model's refusal was unreachable.
 _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 
 
@@ -348,20 +350,18 @@ def resolve_acp(agent_key: str) -> tuple[str, dict[str, str], str]:
     no preference, so the agent keeps its own default. Non-Claude bases ignore any
     suffix.
 
-    The suffix is returned as ``model-pref`` so the caller can select it over the
-    ACP protocol (``session/set_model``), which is the channel that can fail
-    loudly. ``ANTHROPIC_MODEL`` is also exported, for a non-bridge consumer and
-    because older bridges ignored it outright; bridge 0.79 does read it, but it
-    takes whatever it is given (see the note above `_CLAUDE_ACP_BASES`), so it is
-    not a channel a pin can be *verified* through. ACPClient drives the model
-    over the protocol.
+    The suffix is returned as ``model-pref`` and on no other channel, so the
+    caller selects it over the ACP protocol (``session/set_model``) — the one
+    channel that can fail loudly. The env overlay is empty for the Claude bases:
+    exporting the pin as ``ANTHROPIC_MODEL`` had bridge 0.79 advertise whatever
+    string it was handed and report it as current, so every pin "applied", typos
+    included (CORR-746). Nothing in this repository reads the variable.
     """
     base, _, model = agent_key.partition(":")
     command = ACP_COMMANDS.get(base, ACP_COMMANDS["claude-code"])
     env: dict[str, str] = {}
     model_pref = ""
     if model and base in _CLAUDE_ACP_BASES:
-        env["ANTHROPIC_MODEL"] = model
         model_pref = model
     return command, env, model_pref
 
@@ -1484,15 +1484,16 @@ async def probe_model_pin(
     asked at all (not installed, not logged in, no answer in time), which is a
     "could not be checked", never a pass.
 
-    The bridge is launched **unpinned**, which is the whole trick: ``resolve_acp``
-    also exports the pin as ``ANTHROPIC_MODEL``, and bridge 0.79 — contrary to
-    the comment this module carried for two versions — honours that variable,
-    appends its value to the models it advertises and reports it as the current
-    one. A session asked about its own pin therefore always says yes, whatever
-    the string (measured 2026-10-18: ``claude-acp:gpt-4o`` came back
-    "advertised"). Unpinned, the bridge states its real catalogue, and the pin
-    is matched against that with the same :func:`resolve_model_id` a session
-    uses.
+    The bridge is launched **unpinned**, which is the whole trick: bridge 0.79 —
+    contrary to the comment this module carried for two versions — honours
+    ``ANTHROPIC_MODEL``, appends its value to the models it advertises and
+    reports it as the current one, whatever the string (measured 2026-10-18:
+    ``claude-acp:gpt-4o`` came back "advertised"). ``resolve_acp`` no longer
+    puts the pin there (CORR-746), but ``ACPClient.start`` copies
+    ``os.environ``, and ``utils.config`` loads ``.env`` into the process, so a
+    variable the operator set can still reach the child. Handing it nothing of
+    our own is what keeps the catalogue it states its real one, and the pin is
+    matched against that with the same :func:`resolve_model_id` a session uses.
 
     It launches a bridge and throws the session away, so it belongs to a
     diagnostic (``condor doctor``), not to a hot path.
