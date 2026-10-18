@@ -11,6 +11,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
@@ -365,15 +366,35 @@ def resolve_acp(agent_key: str) -> tuple[str, dict[str, str], str]:
     return command, env, model_pref
 
 
+_CONTEXT_HINT = re.compile(r"\[\d+m\]$")
+_VERSION_TAIL = re.compile(r"^[-.]?\d[\d.\-]*$")
+
+
+def _canonical_family(value: str) -> str:
+    """``value`` without the vendor prefix or the trailing ``[1m]`` context hint.
+
+    ``opus[1m]`` and ``claude-opus-4-6`` are the same family stated two ways;
+    both reduce to something starting ``opus``, so one can be tested as a prefix
+    of the other.
+    """
+    return _CONTEXT_HINT.sub("", value).removeprefix("claude-")
+
+
 def resolve_model_id(preference: str, available_models: list[dict]) -> str | None:
     """Map a model ``preference`` (e.g. "sonnet", "claude-sonnet-4-6") to an exact
     advertised ``modelId`` from the ACP agent's ``availableModels``.
 
     The ``session/set_model`` request needs an EXACT id — the bridge does not
-    fuzzy-match there (unlike its own settings.model handling). We mirror its
-    matching: exact id/name, then substring, so a short alias like "sonnet" still
-    resolves. Returns ``None`` if nothing matches, which the caller treats as a
-    failure, not as a reason to keep the default (:class:`ModelPinError`).
+    fuzzy-match there (unlike its own settings.model handling). Matching is
+    exact id/name, then a forward substring so a short alias like "sonnet"
+    resolves against a full id, then a *versioned form* of an advertised family:
+    a pin may name the family an id advertises plus a version or date tail, the
+    way ``claude-opus-4-6`` names the advertised ``opus[1m]``. Nothing else
+    matches in that direction — an unanchored test would accept any string
+    merely containing an alias, so a typo like ``sonnet-typo-xyz`` would pass as
+    ``sonnet`` (CORR-745). Returns ``None`` if nothing matches, which the caller
+    treats as a failure, not as a reason to keep the default
+    (:class:`ModelPinError`).
     """
     if not preference or not available_models:
         return None
@@ -387,11 +408,17 @@ def resolve_model_id(preference: str, available_models: list[dict]) -> str | Non
         mid, name = fields(m)
         if pref in (mid, name):
             return m.get("modelId")
-    # Substring match either direction (handles "sonnet" ⊂ "claude-sonnet-4-6").
+    # Forward substring (handles "sonnet" ⊂ "claude-sonnet-4-6"), or an
+    # advertised family plus a version tail ("claude-opus-4-6" → "opus[1m]").
+    canon_pref = _canonical_family(pref)
     for m in available_models:
         mid, name = fields(m)
-        if (mid and (pref in mid or mid in pref)) or (name and pref in name):
+        if (mid and pref in mid) or (name and pref in name):
             return m.get("modelId")
+        canon_mid = _canonical_family(mid)
+        if canon_mid and canon_pref.startswith(canon_mid):
+            if _VERSION_TAIL.match(canon_pref[len(canon_mid) :]):
+                return m.get("modelId")
     return None
 
 

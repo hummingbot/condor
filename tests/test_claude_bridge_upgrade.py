@@ -16,7 +16,12 @@ import pytest
 
 from condor import setup_llm
 from condor.acp import client as acp_client
-from condor.acp.client import ACPClient, ModelPinError, advertised_models
+from condor.acp.client import (
+    ACPClient,
+    ModelPinError,
+    advertised_models,
+    resolve_model_id,
+)
 from condor.llm import readiness
 from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
 from utils import updater
@@ -280,6 +285,74 @@ def test_probe_model_pin_has_nothing_to_check_without_a_pin(monkeypatch):
 
     assert ok is True
     assert "no model pinned" in detail
+
+
+# ── Matching a pin against a catalogue of bare aliases (CORR-745) ──
+#
+# The installed bridge answers an unpinned session/new with short aliases, not
+# full dated ids, so the matcher's reverse direction is exercised only here.
+# Unanchored, that direction accepted any string merely *containing* an alias,
+# and the doctor row that exists to catch a mistyped pin passed one.
+
+#: What @agentclientprotocol/claude-agent-acp 0.79.0 really advertises for an
+#: unpinned session, measured 2026-10-18 over one initialize + session/new
+#: handshake. A literal on purpose: the gate needs no bridge installed and no
+#: login, and a later bridge advertising other aliases cannot red it.
+MEASURED_ALIAS_CATALOGUE = [
+    {"modelId": "default", "name": "Default (recommended)"},
+    {"modelId": "opus[1m]", "name": "Opus 5"},
+    {"modelId": "claude-fable-5-1[1m]", "name": "Fable 5.1"},
+    {"modelId": "sonnet", "name": "Sonnet 5"},
+    {"modelId": "haiku", "name": "Haiku 4.5"},
+]
+
+
+@pytest.mark.parametrize("pin", ["sonnet-typo-xyz", "no-sonnet", "haiku!!", "SONNETT"])
+def test_a_pin_merely_containing_an_alias_resolves_to_nothing(pin):
+    assert resolve_model_id(pin, MEASURED_ALIAS_CATALOGUE) is None
+
+
+@pytest.mark.parametrize(
+    "pin,expected",
+    [
+        ("haiku", "haiku"),
+        ("sonnet", "sonnet"),
+        ("opus", "opus[1m]"),
+        ("claude-sonnet-4-6", "sonnet"),
+        ("claude-haiku-4-5-20251001", "haiku"),
+        # An advertised family carrying a context suffix: 'opus[1m]' is not a
+        # substring of this pin in either direction, so only the anchored
+        # family-plus-version reading resolves it.
+        ("claude-opus-4-6", "opus[1m]"),
+    ],
+)
+def test_an_alias_or_a_versioned_form_of_one_still_resolves(pin, expected):
+    assert resolve_model_id(pin, MEASURED_ALIAS_CATALOGUE) == expected
+
+
+@pytest.mark.parametrize("pin", ["sonnet-typo-xyz", "no-sonnet"])
+def test_the_doctor_probe_fails_a_typo_of_an_advertised_alias(monkeypatch, pin):
+    """The row added so a mistyped pin is caught must not report it as fine."""
+    _patch_probe_client(
+        monkeypatch, _started, offers=[m["modelId"] for m in MEASURED_ALIAS_CATALOGUE]
+    )
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin(f"claude-acp:{pin}"))
+
+    assert ok is False
+    assert f"{pin!r}" in detail
+    assert "default, opus[1m], claude-fable-5-1[1m], sonnet, haiku" in detail
+
+
+def test_the_doctor_probe_still_passes_a_pin_that_catalogue_offers(monkeypatch):
+    _patch_probe_client(
+        monkeypatch, _started, offers=[m["modelId"] for m in MEASURED_ALIAS_CATALOGUE]
+    )
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is True
+    assert "'haiku' resolves to 'haiku'" in detail
 
 
 # ── Detecting an outdated install ──
