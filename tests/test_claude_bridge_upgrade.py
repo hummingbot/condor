@@ -12,8 +12,11 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from condor import setup_llm
-from condor.acp.client import ACPClient, advertised_models
+from condor.acp import client as acp_client
+from condor.acp.client import ACPClient, ModelPinError, advertised_models
 from condor.llm import readiness
 from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
 from utils import updater
@@ -65,17 +68,25 @@ def test_advertised_models_still_reads_the_legacy_block():
     assert config_id is None
 
 
-def _client_with_fake_peer(model: str):
+def _client_with_fake_peer(model: str, refuse: Exception | None = None):
+    """A client whose peer records requests instead of sending them.
+
+    ``returncode``/``cancel_all`` are what ``stop()`` reads: the failure paths
+    kill the bridge, and a fake that cannot be stopped would fail on the
+    teardown rather than on what the test is about.
+    """
     sent = []
 
     async def send_request(method, params, stdin, **kw):
         sent.append((method, params))
+        if refuse is not None:
+            raise refuse
         return {}
 
     client = ACPClient("claude-agent-acp", model=model)
     client._session_id = "s"
-    client._process = SimpleNamespace(stdin=None)
-    client._peer = SimpleNamespace(send_request=send_request)
+    client._process = SimpleNamespace(stdin=None, returncode=0)
+    client._peer = SimpleNamespace(send_request=send_request, cancel_all=lambda: None)
     return client, sent
 
 
@@ -102,6 +113,137 @@ def test_select_model_sends_nothing_when_already_on_it():
     asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
     assert sent == []
     assert client.active_model_id == "opus[1m]"
+
+
+# ── A pin the bridge cannot apply fails the session (issue #221) ──
+
+
+def _recorder(log: list):
+    async def stop():
+        log.append(True)
+
+    return stop
+
+
+def test_an_unoffered_pin_fails_the_session_naming_what_is_offered():
+    client, sent = _client_with_fake_peer("fable")
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+
+    message = str(err.value)
+    assert "'fable'" in message
+    # What to pin instead, and the default it is NOT silently running on.
+    assert "default, opus[1m], sonnet, haiku" in message
+    assert "opus[1m]" in message
+    assert sent == []  # nothing was switched, so nothing was sent
+
+
+def test_a_refused_switch_fails_the_session_instead_of_keeping_the_default():
+    client, sent = _client_with_fake_peer("haiku", refuse=RuntimeError("nope"))
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+
+    assert "session/set_config_option" in str(err.value)
+    assert "nope" in str(err.value)
+    assert sent  # it did try
+    # Never reported as the effective model: the session is not running on it.
+    assert client.active_model_id == "opus[1m]"
+
+
+def test_a_failed_pin_stops_the_bridge_rather_than_orphaning_it():
+    client, _ = _client_with_fake_peer("fable")
+    stopped = []
+    client.stop = _recorder(stopped)
+
+    with pytest.raises(ModelPinError):
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+
+    assert stopped == [True]
+
+
+def test_an_unpinned_session_is_untouched_by_the_failure_path():
+    client, sent = _client_with_fake_peer("")
+    asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+    assert sent == []
+    assert client.active_model_id == "opus[1m]"
+
+
+# ── The doctor probe reads the same verdict as a session ──
+
+
+def _patch_probe_client(monkeypatch, start, model_id="haiku"):
+    """Replace the client ``probe_model_pin`` launches; return what it stopped."""
+    stopped = []
+
+    class _FakeClient:
+        def __init__(self, command, extra_env=None, model=None):
+            self.model = model
+            self.active_model_id = model_id
+
+        async def start(self):
+            await start()
+
+        async def stop(self):
+            stopped.append(True)
+
+    monkeypatch.setattr(acp_client, "ACPClient", _FakeClient)
+    return stopped
+
+
+def test_probe_model_pin_passes_an_appliable_pin_and_stops_the_bridge(monkeypatch):
+    async def start():
+        return None
+
+    stopped = _patch_probe_client(monkeypatch, start)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is True
+    assert "'haiku'" in detail
+    assert stopped == [True]
+
+
+def test_probe_model_pin_fails_an_unappliable_pin_with_the_sessions_own_error(
+    monkeypatch,
+):
+    async def start():
+        raise ModelPinError("it offers: sonnet, haiku")
+
+    _patch_probe_client(monkeypatch, start)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:fable"))
+
+    assert ok is False
+    assert detail == "it offers: sonnet, haiku"
+
+
+def test_probe_model_pin_reports_a_silent_bridge_as_not_checkable(monkeypatch):
+    async def start():
+        await asyncio.sleep(5)
+
+    stopped = _patch_probe_client(monkeypatch, start)
+
+    ok, detail = asyncio.run(
+        acp_client.probe_model_pin("claude-acp:haiku", timeout=0.05)
+    )
+
+    assert ok is None  # not a pass: nothing was verified
+    assert "did not answer" in detail
+    assert stopped == [True]
+
+
+def test_probe_model_pin_has_nothing_to_check_without_a_pin(monkeypatch):
+    def fail(*a, **kw):
+        raise AssertionError("no bridge should be launched for an unpinned key")
+
+    monkeypatch.setattr(acp_client, "ACPClient", fail)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp"))
+
+    assert ok is True
+    assert "no model pinned" in detail
 
 
 # ── Detecting an outdated install ──

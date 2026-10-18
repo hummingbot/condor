@@ -479,3 +479,115 @@ def test_hummingbot_api_check_fails_when_env_exists_but_config_does_not(
 
     checks = doctor.check_hummingbot_api()
     assert checks[0].state == doctor.FAIL
+
+
+# ── Config: a model pin the bridge cannot apply is a failure, not a log line ──
+
+
+def _patch_pin_probe(monkeypatch, verdict):
+    """Stand in for the bridge launch, and report whether it was attempted."""
+    launched = []
+
+    async def fake_probe(agent_key, **kw):
+        launched.append(agent_key)
+        return verdict
+
+    import condor.acp.client as client_module
+
+    monkeypatch.setattr(client_module, "probe_model_pin", fake_probe)
+    return launched
+
+
+def test_an_unappliable_model_pin_fails_the_check(monkeypatch):
+    from condor.llm.readiness import READY, Readiness
+
+    _patch_pin_probe(monkeypatch, (False, "it offers: sonnet, haiku"))
+
+    checks = doctor.check_model_pin(
+        "claude-acp:fable", Readiness(READY, "installed and logged in")
+    )
+
+    assert [c.state for c in checks] == [doctor.FAIL]
+    assert "claude-acp:fable" in checks[0].detail
+    assert "it offers: sonnet, haiku" in checks[0].detail
+
+
+def test_an_appliable_model_pin_passes_the_check(monkeypatch):
+    from condor.llm.readiness import READY, Readiness
+
+    _patch_pin_probe(monkeypatch, (True, "'haiku' resolves to 'haiku'"))
+
+    checks = doctor.check_model_pin(
+        "claude-acp:haiku", Readiness(READY, "installed and logged in")
+    )
+
+    assert [c.state for c in checks] == [doctor.OK]
+
+
+def test_a_pin_that_could_not_be_checked_warns_rather_than_passing(monkeypatch):
+    from condor.llm.readiness import READY, Readiness
+
+    _patch_pin_probe(monkeypatch, (None, "could not be checked: no answer"))
+
+    checks = doctor.check_model_pin(
+        "claude-acp:haiku", Readiness(READY, "installed and logged in")
+    )
+
+    assert [c.state for c in checks] == [doctor.WARN]
+
+
+def test_an_unpinned_key_gets_no_pin_row(monkeypatch):
+    from condor.llm.readiness import READY, Readiness
+
+    launched = _patch_pin_probe(monkeypatch, (True, "unused"))
+
+    assert doctor.check_model_pin("claude-acp", Readiness(READY, "ready")) == []
+    assert doctor.check_model_pin("gemini", Readiness(READY, "ready")) == []
+    assert launched == []
+
+
+def test_a_missing_bridge_is_not_launched_to_check_its_pin(monkeypatch):
+    from condor.llm.readiness import MISSING, Readiness
+
+    launched = _patch_pin_probe(monkeypatch, (True, "unused"))
+
+    checks = doctor.check_model_pin(
+        "claude-acp:haiku", Readiness(MISSING, "not installed")
+    )
+
+    assert [c.state for c in checks] == [doctor.WARN]
+    assert "not available" in checks[0].detail
+    assert launched == []  # the row above already says the bridge is missing
+
+
+def test_a_probe_that_raises_is_a_warning_not_a_pass(monkeypatch):
+    from condor.llm.readiness import READY, Readiness
+
+    async def boom(agent_key, **kw):
+        raise OSError("no node")
+
+    import condor.acp.client as client_module
+
+    monkeypatch.setattr(client_module, "probe_model_pin", boom)
+
+    checks = doctor.check_model_pin("claude-acp:haiku", Readiness(READY, "ready"))
+
+    assert [c.state for c in checks] == [doctor.WARN]
+    assert "no node" in checks[0].detail
+
+
+def test_check_config_checks_the_default_agents_pin(tmp_path, monkeypatch):
+    from condor.llm.readiness import READY, Readiness
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "CONDOR_MODE=local\nADMIN_USER_ID=1\nCONDOR_DEFAULT_AGENT=claude-acp:fable\n"
+    )
+    monkeypatch.setattr(doctor, "ENV_PATH", env_file)
+    _patch_readiness_probe(monkeypatch, Readiness(READY, "installed and logged in"))
+    _patch_pin_probe(monkeypatch, (False, "it offers: sonnet"))
+
+    pin_check = next(c for c in doctor.check_config() if c.name == "Model pin")
+
+    assert pin_check.state == doctor.FAIL
+    assert "claude-acp:fable" in pin_check.detail

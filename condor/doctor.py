@@ -15,7 +15,10 @@ session would really run with. The checks themselves live in
 a read of the same gate, not a second opinion (FEAT-139).
 
 Read-only — nothing here mutates `.env`, `config.yml`, or any running
-process. Unlike :mod:`condor.setup_llm` (which always exits 0 because a
+process. The one thing it *starts* is a throwaway ACP session, so that a model
+pin the bridge cannot apply is caught before a session bills for it
+(:func:`check_model_pin`); that bridge is stopped before the row is printed.
+Unlike :mod:`condor.setup_llm` (which always exits 0 because a
 model can be picked later), this exits non-zero when a check actually
 ``fail``s, so `make install`/CI can act on the result.
 """
@@ -281,6 +284,7 @@ def check_config() -> list[Check]:
     from condor.llm import readiness
 
     agent_key = current_default(env)
+    state = None
     try:
         state = asyncio.run(readiness.probe(base_of(agent_key), env))
         badge = {"ready": OK, "unverified": WARN, "missing": FAIL}.get(
@@ -289,8 +293,50 @@ def check_config() -> list[Check]:
         checks.append(Check("AI model", badge, f"{agent_key} — {state.detail}"))
     except Exception as e:
         checks.append(Check("AI model", WARN, f"{agent_key} — could not check: {e}"))
+    checks.extend(check_model_pin(agent_key, state))
 
     return checks
+
+
+def check_model_pin(agent_key: str, state) -> list[Check]:
+    """Whether the bridge can apply ``agent_key``'s ``:model`` pin — a row, or none.
+
+    No row for a key that pins no model: there is nothing to verify, and the
+    ``AI model`` row above already says whether the bridge itself is usable.
+
+    This is the one check here that *starts* something: a bridge, for a session
+    it immediately throws away. It earns that because the failure it catches is
+    expensive and silent — a pin the bridge does not offer used to leave the
+    session on the bridge's default (``opus[1m]``), so a ``:haiku`` or
+    ``:sonnet`` agent billed at Opus rates with only a log line saying so
+    (issue #221). A session is the next thing that spends money, so the pin is
+    checked before one starts rather than after the invoice.
+
+    ``state`` is the ``AI model`` row's :class:`~condor.llm.readiness.Readiness`
+    (``None`` when that probe itself failed). A bridge that is not even
+    installed is not launched: that would restate the row above as a second
+    failure instead of checking anything.
+    """
+    from condor.acp.client import probe_model_pin, resolve_acp
+    from condor.llm.readiness import MISSING
+
+    if not resolve_acp(agent_key)[2]:
+        return []
+    if state is None or state.state == MISSING:
+        return [
+            Check(
+                "Model pin",
+                WARN,
+                f"{agent_key} — could not be checked: the bridge is not "
+                "available (see above)",
+            )
+        ]
+    try:
+        ok, detail = asyncio.run(probe_model_pin(agent_key))
+    except Exception as e:  # a probe that cannot run is not a verdict
+        ok, detail = None, f"could not be checked: {e}"
+    badge = {True: OK, False: FAIL, None: WARN}[ok]
+    return [Check("Model pin", badge, f"{agent_key} — {detail}")]
 
 
 # ── Port exposure ────────────────────────────────────────────────────────────

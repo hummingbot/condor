@@ -8,9 +8,10 @@ using:
 - the effective-vs-file diff over the pin/limit set, with both values;
 - ``process_started_at`` and ``boot_id`` on ``/meta/env``, so "has this been
   restarted since I edited that" is answerable;
-- the model the ACP adapter reports it is on, which is #221's third ask: a pin
-  that did not apply leaves the bridge on its own default, and the only record
-  of that used to be a log line.
+- the model the ACP adapter reports it is on, which is #221's third ask. A pin
+  that did not apply used to leave the bridge on its own default with nothing
+  but a log line to say so; since [[TASK-002]] that session does not start at
+  all, so this reads back only models the bridge confirmed.
 """
 
 from types import SimpleNamespace
@@ -250,16 +251,26 @@ def test_a_backend_with_no_adapter_to_ask_records_nothing(tmp_path, monkeypatch)
     assert engine.get_info()["active_model_id"] == ""
 
 
-def test_select_model_leaves_the_adapters_own_model_when_the_pin_misses():
-    """The source of the audit: an unmatched pin keeps ``currentValue``."""
+def test_select_model_refuses_a_pin_the_bridge_does_not_offer():
+    """The audit never has to report a pin that missed: such a session never runs.
+
+    This test used to assert the opposite — that an unmatched pin left the
+    adapter on its own ``currentValue`` and the audit was the only way to find
+    out. [[TASK-002]] removed that session: the pin now fails before the first
+    turn, so every model this audit reports is one the bridge confirmed.
+    """
     import asyncio
 
-    from condor.acp.client import ACPClient
+    from condor.acp.client import ACPClient, ModelPinError
 
     client = ACPClient.__new__(ACPClient)
     client.model = "fable"
     client.active_model_id = None
     client._session_id = "s1"
+    # What ``stop()`` reads on the failure path: a refused pin kills the bridge.
+    client._peer = SimpleNamespace(cancel_all=lambda: None)
+    client._read_task = client._stderr_task = None
+    client._process = None
     session = {
         "configOptions": [
             {
@@ -271,9 +282,11 @@ def test_select_model_leaves_the_adapters_own_model_when_the_pin_misses():
         ]
     }
 
-    asyncio.run(client._select_model(session))
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(session))
 
-    assert client.active_model_id == "sonnet"
+    assert "'fable'" in str(err.value)
+    assert "sonnet" in str(err.value)  # what it does offer
 
 
 # ── Process identity ──

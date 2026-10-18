@@ -24,6 +24,16 @@ from .usage import TokenUsage
 log = logging.getLogger(__name__)
 
 
+class ModelPinError(RuntimeError):
+    """A model pin the bridge cannot apply: it is not offered, or the switch failed.
+
+    Raised instead of logging and running the session on the bridge's default,
+    which is how a ``claude-acp:haiku`` brain came to bill at Opus rates with
+    only a ``log.warning`` to say so (issue #221). A pin is a cost and a
+    comparability statement, so a session that cannot honour it must not start.
+    """
+
+
 #: Values an adapter sends when it means "no name". ``undefined`` is a
 #: JavaScript ``undefined`` that reached the wire as text; ``null``/``none`` are
 #: the JSON and Python spellings of the same absence. Compared case-folded, and
@@ -358,7 +368,8 @@ def resolve_model_id(preference: str, available_models: list[dict]) -> str | Non
     The ``session/set_model`` request needs an EXACT id — the bridge does not
     fuzzy-match there (unlike its own settings.model handling). We mirror its
     matching: exact id/name, then substring, so a short alias like "sonnet" still
-    resolves. Returns ``None`` if nothing matches (caller keeps the default).
+    resolves. Returns ``None`` if nothing matches, which the caller treats as a
+    failure, not as a reason to keep the default (:class:`ModelPinError`).
     """
     if not preference or not available_models:
         return None
@@ -701,9 +712,10 @@ class ACPClient:
 
         ``session`` is the ``session/new`` response. Bridges advertise models in
         one of two shapes (:func:`advertised_models`), and each is set through
-        its own request. No-op when no model was requested or it can't be
-        matched — we log either way so the effective model is verifiable from
-        the bot logs rather than the model's self-report.
+        its own request. No-op when no model was requested; a pin that cannot be
+        applied raises :class:`ModelPinError` instead of running the session on
+        the bridge's default. We log the applied pin too, so the effective model
+        is verifiable from the bot logs rather than the model's self-report.
         """
         available, current, config_id = advertised_models(session)
         self.active_model_id = current
@@ -712,13 +724,11 @@ class ACPClient:
             return
         target = resolve_model_id(self.model, available)
         if not target:
-            log.warning(
-                "ACP model %r not found in advertised models %s; keeping default %s",
-                self.model,
-                [m.get("modelId") for m in available],
+            raise await self._model_pin_error(
+                f"this bridge does not offer the pinned model {self.model!r}",
+                available,
                 current,
             )
-            return
         if target == current:
             log.info(
                 "ACP session %s already on requested model %s", self._session_id, target
@@ -736,17 +746,43 @@ class ACPClient:
             params = {"sessionId": self._session_id, "modelId": target}
         try:
             await self._peer.send_request(method, params, self._process.stdin)
-            self.active_model_id = target
-            log.info(
-                "ACP session %s model set to %s (requested %r)",
-                self._session_id,
-                target,
-                self.model,
-            )
-        except Exception:
-            log.exception(
-                "ACP %s failed for %r; staying on %s", method, self.model, current
-            )
+        except Exception as exc:
+            raise await self._model_pin_error(
+                f"the bridge refused {method} for the pinned model "
+                f"{self.model!r} ({target!r}): {exc}",
+                available,
+                current,
+            ) from exc
+        self.active_model_id = target
+        log.info(
+            "ACP session %s model set to %s (requested %r)",
+            self._session_id,
+            target,
+            self.model,
+        )
+
+    async def _model_pin_error(
+        self, problem: str, available: list[dict], current: str | None
+    ) -> ModelPinError:
+        """Stop the bridge and build the error for a pin it cannot apply.
+
+        The bridge is killed here rather than left for the caller: ``start()``
+        guards the handshake but this runs after it, so an unappliable pin would
+        otherwise orphan a ``claude`` process and every MCP server under it for
+        the life of the bot. Building the error rather than raising it keeps the
+        ``raise ... from exc`` chain readable at the two call sites.
+        """
+        offered = (
+            ", ".join(str(m.get("modelId")) for m in available if m.get("modelId"))
+            or "nothing"
+        )
+        await self.stop()
+        return ModelPinError(
+            f"ACP model pin could not be applied: {problem}. It offers: "
+            f"{offered} (its default is {current or 'unknown'}). The session was "
+            f"not started — pin one of those, or drop the ':model' suffix from "
+            f"the agent key to accept the default."
+        )
 
     async def stop(self) -> None:
         """Terminate the subprocess and ALL descendants (claude + MCP servers).
@@ -1382,3 +1418,46 @@ class ACPClient:
                 "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
             }
         return {"outcome": {"outcome": "cancelled"}}
+
+
+#: How long :func:`probe_model_pin` gives a bridge to hand over a session. Far
+#: short of ``TIMEOUTS.agent_handshake`` (120s): a diagnostic that a human is
+#: waiting on reports "could not be checked" rather than stalling `make
+#: install` for two minutes on a bridge that will never answer.
+_PIN_PROBE_TIMEOUT = 30
+
+
+async def probe_model_pin(
+    agent_key: str, *, timeout: float = _PIN_PROBE_TIMEOUT
+) -> tuple[bool | None, str]:
+    """Can a bridge actually apply ``agent_key``'s ``:model`` pin? ``(ok, detail)``.
+
+    ``True`` the pin resolved to an advertised model (or the key pins none),
+    ``False`` it cannot be applied — ``detail`` is the :class:`ModelPinError`
+    naming what the bridge does offer — and ``None`` the bridge could not be
+    asked at all (not installed, not logged in, no answer in time), which is a
+    "could not be checked", never a pass.
+
+    It launches a bridge and throws the session away, so it belongs to a
+    diagnostic (``condor doctor``), not to a hot path. The verdict comes from
+    the same :meth:`ACPClient._select_model` a real session runs, so the two
+    cannot disagree about which pins are appliable.
+    """
+    command, env, pin = resolve_acp(agent_key)
+    if not pin:
+        return True, "no model pinned — the bridge default is used"
+    client = ACPClient(command, extra_env=env or None, model=pin)
+    try:
+        await asyncio.wait_for(client.start(), timeout=timeout)
+    except ModelPinError as exc:
+        return False, str(exc)
+    except (asyncio.TimeoutError, TimeoutError):
+        return None, f"could not be checked: the bridge did not answer in {timeout}s"
+    except Exception as exc:
+        return None, f"could not be checked: {exc}"
+    finally:
+        # Unconditional: the session is of no use to a probe, and the one path
+        # that already stopped the bridge (an unappliable pin) makes this a
+        # no-op rather than a second kill.
+        await client.stop()
+    return True, f"{pin!r} resolves to {client.active_model_id!r}"
