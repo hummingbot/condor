@@ -61,3 +61,15 @@ def test_import_is_a_literal_not_an_agent_slug():
 
 def test_export_still_hangs_off_a_real_slug():
     assert _first_full_match("GET", "/agents/my-agent/bundle") == "export_agent_bundle"
+
+
+def test_update_hangs_off_a_real_slug_and_its_preview_is_not_shadowed():
+    """``/{slug}/update`` and ``/{slug}/update/preview`` (FEAT-145)."""
+    assert (
+        _first_full_match("POST", "/agents/my-agent/update")
+        == "update_agent_from_bundle"
+    )
+    assert (
+        _first_full_match("POST", "/agents/my-agent/update/preview")
+        == "preview_agent_update"
+    )

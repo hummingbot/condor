@@ -344,6 +344,87 @@ an imported routine runs inside the Condor process with no sandbox, so the
 preview names every executable file before the write and the operator unmutes
 them one at a time after reading each. Nothing is started by an import.
 
+### Updating one from a newer bundle
+
+"Never replaces" is right for a *stranger's* agent and wrong for a newer
+version of one you already run: without a second verb the new version lands
+beside the old as `<slug>_2`, the memory forks, and the dashboard lists two
+agents one of which is stale. That verb is `bundle.plan_update` /
+`bundle.apply_update` (FEAT-145), with the same one-builder rule as the import
+pair — `POST /agents/{slug}/update/preview` and `POST /agents/{slug}/update`,
+`manage_agents(action="upgrade", agent_slug=…, path=…)`, and in the import
+dialog the collision step offers it when `is_update` says the bundle is the
+same agent.
+
+It speaks `condor/updates`' vocabulary one level down: **blockers**, warnings
+and a plan. Each blocker refuses and names the reason.
+
+| Blocker | Why |
+|---|---|
+| `different_agent` | The bundle's `agent_uid` is not the installed agent's. Two agents, not an update — the answer stays the 409 and a rename. |
+| `no_basis` | The agent has no `agent_uid` and no `.bundle.json`: it was authored here, or imported before the stamp existed. Nothing says this bundle is its upstream. |
+| `older_bundle` | The bundle's `version` is lower than the stamp's. |
+| `live_loop` | `get_engine(slug)` answers an engine. Swapping a skill's instructions under a session that is mid-tick changes what the model is told between one tool call and the next. |
+| `stock_agent` | An agent the repo ships. `publish_to_stock` is the one sanctioned write into the tracked library, and it is admin-only. |
+| `no_such_agent` | Nothing installed under that slug. |
+
+`.bundle.json` at the root of the home is the bookkeeping: the `agent_uid`, the
+`version` and a digest per carried file — the record of *what the bundle said
+last time*, which is the only way to tell an operator's local edit from an
+upstream change. A dotfile, so `publishable_files` cannot see it and it never
+travels in a bundle of its own agent. `AGENT.md`'s digest is taken over the
+file with this install's own keys (`created_by`, `created_at`, `server_name`,
+`agent_key`) removed, so pinning a server is not mistaken for the operator
+rewriting the agent — which would otherwise freeze upstream's instructions out
+of every later update.
+
+The plan is one row per path, from three digests — the bundle's, the file on
+disk, and the stamp's:
+
+| Verdict | What it means, and what happens |
+|---|---|
+| `added` | The bundle carries it, the stamp never did. Written, and muted if it is a routine or a skill. |
+| `changed` | Unedited on disk, different upstream. Replaced. |
+| `unchanged` | All three agree. Nothing to do. |
+| `local_only` | Edited here, unchanged upstream. **Kept.** |
+| `conflict` | Edited on both sides. **Kept**, and the plan carries the bundle's copy so a surface can offer it. |
+| `removed` | In the stamp, gone from the bundle, unedited here. Deleted. |
+| `conflict_removed` | Same, but edited here. **Kept.** |
+| *not listed* | A file the operator created that the bundle never carried. Never touched, never reported as removed. |
+
+Defaulting a conflict to *keep local* is the deliberate half: an operator's
+edit is the only content in the home nobody else can reproduce. Conflicts are
+never merged — these are markdown instructions a model reads, and a
+conflict-marked `SKILL.md` is not a conflict to resolve later, it is a new
+instruction the model will follow.
+
+What an update replaces is exactly `publishable_files`' half of the home, so
+everything this install accumulated by running the agent is untouched *by
+construction*: `store/`, `config.yml` (the risk limits actually in force),
+`sessions/`, `dry_runs/`, `learnings.md`, `state.json`, the bot ledgers,
+`proposals/` and `delegations/`. `mutes.yml` is the one runtime file an update
+writes, and only to switch off what is genuinely **new**: a name already in it
+is left exactly as it is, and a `changed` item is *not* re-muted. That
+asymmetry is a decision — re-muting on every update would cost the whole
+curation pass again, and the diff already named the files whose instructions
+changed. Execution consent needs no such rule: it is keyed by content, so a
+replaced routine is pending again on its own.
+
+Three things make a half-finished update recoverable rather than destructive.
+The previous bytes of every replaced or deleted file are copied to
+`.bundle_backup/<timestamp>/` first (a dotdir, so it never travels — the
+`.server_backups` idiom). The stamp is rewritten **last**, so an interrupted
+update leaves one describing the previous state. And a file whose disk copy
+already holds the bundle's bytes reads as `unchanged`, so the next plan
+recognises what the interrupted run got to instead of reporting the whole
+agent as a conflict. There is deliberately no rollback: the home holds an
+agent somebody has been running, and removing it on a failed write is the
+silent reset this verb exists to avoid.
+
+Nothing is started. No `control_agent(start)`, no delegation, no tick — the
+result names the next step instead. And an update does not re-run a preflight:
+whether the agent can still trade here is `condor/preflight.py`'s question.
+
 ### Nothing imported executes before consent
 
 A mute, though, is not an execution gate and never was: it is subtracted

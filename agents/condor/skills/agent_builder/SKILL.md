@@ -43,6 +43,7 @@ Only an admin can copy a local agent into the shipped `agents/` library
 | A folder / files: instructions, controllers, configs, scripts | **B — From a folder** (inventory → discuss → build) |
 | One controller for an existing agent | skip both — follow `controller_sources` (see Controllers) |
 | A bundle someone exported (`*.condor-agent.json`) | skip both — `manage_agents(action="import", path=...)`, then review its muted routines before unmuting and report its `unmet` list |
+| A bundle of an agent this install ALREADY has | skip both — `manage_agents(action="upgrade", agent_slug=..., path=...)`; never import a second copy |
 
 Label each message with the current step, e.g. `[B2 — Discuss]`. Only the step label as a
 header; status as key: value.
@@ -343,6 +344,25 @@ result carries `unmet`: what this install cannot give the agent — a connector 
 credentials, a shared playbook it does not have, a tool it does not mount, a model it had
 to substitute. **None of it blocks the import**, and everything arrives muted anyway, so
 report the list and let the user decide what to fix before unmuting.
+
+**A newer bundle of an agent they already have is an upgrade, not an import.**
+`manage_agents(action="upgrade", agent_slug=<the installed one>, path=…)`. Importing it
+instead gives them two agents with one name and a forked memory, and nothing to migrate
+with — so never answer a collision with `<slug>_2` when the bundle is the same agent.
+The upgrade keeps the agent's store, config, mutes, journals and sessions, and keeps any
+file they had edited here.
+
+Read its result out rather than summarising it:
+
+| Field | What to say |
+|---|---|
+| `blockers` | Why it did not happen, verbatim, and nothing was written. A different agent, nothing saying this bundle is its upstream, an older version, a shipped agent, or a loop running right now — the last one is fixed by stopping the loop and asking again. |
+| `files` | The per-path diff. Name the `conflict` and `local_only` rows explicitly: those kept **their** copy, and a conflict carries the bundle's copy so they can look at it and decide. |
+| `mutes` | What arrived switched off. Only genuinely new items; an item they unmuted stays unmuted, and a changed one is not re-muted. |
+| `warnings` | Read them. `same_version_new_build` means the same version number with different files. |
+
+Every replaced routine needs allowing again before it runs — consent is keyed by content.
+Nothing is started by an upgrade.
 
 ## Rules
 - **From scratch: minimal first.** Role + purpose, then prove it with an `ask`; routines

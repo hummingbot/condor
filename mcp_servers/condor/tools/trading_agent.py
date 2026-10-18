@@ -325,6 +325,52 @@ def _import_agent(path: str, as_slug: str) -> dict:
         return {"error": str(exc), "preview": plan.summary()}
 
 
+def _upgrade_agent(agent_slug: str, path: str) -> dict:
+    """Replace an installed agent's library from a newer bundle (FEAT-145).
+
+    The verb beside ``import``, which creates and never replaces: a newer
+    bundle of an agent this install already has lands here instead of beside
+    the old one as ``<slug>_2`` with the memory forked.
+
+    Spelled ``upgrade`` and not ``update`` only because ``update_agent`` already
+    means editing an agent's instructions on this tool, and two actions with
+    one name would be a coin flip about whether a bundle or a sentence was
+    meant.
+
+    What comes back is the plan either way. On a refusal the blockers say why —
+    a different agent, no basis for claiming this bundle as upstream, an older
+    version, a shipped agent, a loop running right now — and nothing was
+    written. On success, ``files`` is the per-path diff: replaced, added,
+    deleted, and the ones that kept your copy because you had edited them.
+    Read those out rather than summarising them away; a conflict is the only
+    content in the home nobody else can reproduce.
+
+    Connectors are left unasked here for the same reason the import leaves
+    them: resolving them needs an async Hummingbot client and this is a
+    synchronous tool.
+    """
+    from condor.agents import bundle as agent_bundle
+    from condor.runtime.toolsets import every_tool_name
+
+    try:
+        data = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        return {"error": f"Could not read '{path}': {exc}"}
+
+    try:
+        bundle = agent_bundle.parse(data)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    plan = agent_bundle.plan_update(
+        bundle, agent_slug, available_tools=sorted(every_tool_name())
+    )
+    try:
+        return agent_bundle.apply_update(plan, user_id=settings.user_id)
+    except ValueError as exc:
+        return {"error": str(exc), "preview": plan.summary()}
+
+
 def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
     """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
 
@@ -489,6 +535,13 @@ def _manage_agent(
         # bundle already carries its own, and this is how a collision is
         # answered.
         return _import_agent(path, agent_slug or "")
+
+    if action == "upgrade_agent":
+        if not agent_slug:
+            return {"error": "agent_slug (the installed agent to update) is required"}
+        if not path:
+            return {"error": "path (the newer bundle file) is required"}
+        return _upgrade_agent(agent_slug, path)
 
     if action == "delete_agent":
         if not agent_slug:
@@ -856,6 +909,10 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         'manage_agents(action="export", agent_slug=...)',
     ),
     "import_agent": ("manage_agents", 'manage_agents(action="import", path=...)'),
+    "upgrade_agent": (
+        "manage_agents",
+        'manage_agents(action="upgrade", agent_slug=..., path=...)',
+    ),
     "list_strategies": ("manage_loops", 'manage_loops(action="list")'),
     "get_strategy": ("manage_loops", 'manage_loops(action="get", loop_id=...)'),
     "create_strategy": (
@@ -903,6 +960,7 @@ _AGENT_ACTIONS = {
     "publish": "publish_agent",
     "export": "export_agent",
     "import": "import_agent",
+    "upgrade": "upgrade_agent",
 }
 
 _STRATEGY_ACTIONS = {

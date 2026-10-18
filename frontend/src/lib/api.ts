@@ -154,8 +154,78 @@ export interface AgentImportPlan {
   /** The taken slug, when the bundle cannot land under the name it asked for. */
   collision: string;
   suggested_slug: string;
+  /** The `agent_uid` of the agent already installed under `collision`. */
+  collision_agent_uid: string;
+  /**
+   * Whether the collision is the *same agent*, newer — in which case the
+   * answer is the update verb and not a rename (FEAT-145). The server states
+   * it rather than leaving a client to compare two uids, so the dialog and the
+   * chat cannot disagree about which verb applies.
+   */
+  is_update: boolean;
   refusals: string[];
   imported?: boolean;
+  next_step?: string;
+}
+
+/** One path, and what updating this agent from a bundle would do to it. */
+export interface AgentUpdateFile {
+  path: string;
+  /**
+   * `added` | `changed` | `unchanged` | `local_only` | `conflict` | `removed`
+   * | `conflict_removed`. The last three keep what is on disk.
+   */
+  verdict: string;
+  /** The bundle's copy, in bytes. `0` when the bundle carries none. */
+  bytes: number;
+  /** A `.py`: consent is keyed by content, so a replaced one is pending again. */
+  executable: boolean;
+  /** The bundle's copy, carried only for a `conflict` — the local bytes win,
+   *  so this is what the screen can offer instead. Empty otherwise. */
+  incoming: string;
+}
+
+/** Something that refuses the update outright. */
+export interface AgentUpdateBlocker {
+  code: string;
+  message: string;
+}
+
+/** A consequence worth knowing about. Never a reason to refuse. */
+export type AgentUpdateWarning = AgentUpdateBlocker;
+
+/**
+ * What updating an installed agent from a newer bundle would do — or did.
+ *
+ * Same contract as the import pair: the preview endpoint and the apply
+ * endpoint return this from one builder on the server, so the diff on screen
+ * is the diff the write performs.
+ */
+export interface AgentUpdatePlan {
+  slug: string;
+  /** The identity the bundle claims. */
+  agent_uid: string;
+  /** The identity installed here. Equal is what makes this an update. */
+  installed_agent_uid: string;
+  version: number;
+  installed_version: number;
+  exported_at: string;
+  notes: string;
+  author: AgentBundleAuthor;
+  requires: AgentBundleRequires;
+  unmet: AgentUnmetRequirement[];
+  findings: AgentBundleFinding[];
+  /** One entry per path. A file neither side installed is not listed at all. */
+  files: AgentUpdateFile[];
+  /** `{verdict: count}` for the verdicts present. */
+  counts: Record<string, number>;
+  /** What arrives switched off — only what is genuinely new. */
+  mutes: { routines: string[]; skills: string[] };
+  blockers: AgentUpdateBlocker[];
+  warnings: AgentUpdateWarning[];
+  updated?: boolean;
+  /** Where the replaced and deleted bytes were kept. */
+  backup?: string;
   next_step?: string;
 }
 
@@ -175,6 +245,23 @@ async function postAgentBundle(
       new Error(detail.detail || `Import failed: ${res.status}`),
       { status: res.status },
     );
+  }
+  return res.json();
+}
+
+/** The update pair's door. One bundle, no rename — the slug is in the path. */
+async function postAgentUpdate(
+  path: string,
+  file: File,
+): Promise<AgentUpdatePlan> {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await authFetch(path, { method: "POST", body });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(new Error(detail.detail || `Update failed: ${res.status}`), {
+      status: res.status,
+    });
   }
   return res.json();
 }
@@ -3767,6 +3854,19 @@ export const api = {
   /** Register the agent in this bundle, with its routines and skills muted. */
   importAgent: (file: File, asSlug = "") =>
     postAgentBundle("/api/v1/agents/import", file, asSlug),
+
+  // ── Updating one from a newer bundle (FEAT-145) ──
+
+  /** What updating `slug` from this bundle would do. Writes nothing. */
+  previewAgentUpdate: (slug: string, file: File) =>
+    postAgentUpdate(
+      `/api/v1/agents/${encodeURIComponent(slug)}/update/preview`,
+      file,
+    ),
+
+  /** Replace this agent's library from the bundle, keeping what it earned. */
+  updateAgentFromBundle: (slug: string, file: File) =>
+    postAgentUpdate(`/api/v1/agents/${encodeURIComponent(slug)}/update`, file),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 

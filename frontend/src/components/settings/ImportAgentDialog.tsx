@@ -4,11 +4,17 @@ import {
   FileCode2,
   FileText,
   Loader2,
+  RefreshCw,
   Upload,
 } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { api, type AgentBundleFinding, type AgentImportPlan } from "@/lib/api";
+import {
+  api,
+  type AgentBundleFinding,
+  type AgentImportPlan,
+  type AgentUpdatePlan,
+} from "@/lib/api";
 
 /**
  * How each review category is introduced, most-decisive first (FEAT-144).
@@ -54,6 +60,38 @@ function categoriesOf(findings: AgentBundleFinding[]): string[] {
 }
 
 /**
+ * How each per-path verdict reads, and whether it needs the operator's eye
+ * (FEAT-145).
+ *
+ * `kept` is the half that matters: those rows are the files where the update
+ * did *not* do what upstream asked, because the bytes on disk are the
+ * operator's and nobody else can reproduce them.
+ */
+const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
+  added: { label: "new — arrives muted" },
+  changed: { label: "replaced" },
+  unchanged: { label: "unchanged" },
+  local_only: { label: "your copy kept — upstream did not change it", kept: true },
+  conflict: { label: "your copy kept — upstream changed it too", kept: true },
+  removed: { label: "deleted" },
+  conflict_removed: {
+    label: "your copy kept — upstream dropped the file",
+    kept: true,
+  },
+};
+
+/** The verdicts worth showing first: everything that is not `unchanged`. */
+const VERDICT_ORDER = [
+  "conflict",
+  "conflict_removed",
+  "local_only",
+  "changed",
+  "added",
+  "removed",
+  "unchanged",
+];
+
+/**
  * Pick a bundle, read what it would do, then let it land.
  *
  * Two steps and not one, because the review *is* the sandbox. An imported
@@ -75,6 +113,15 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [landed, setLanded] = useState<AgentImportPlan | null>(null);
   /**
+   * The update diff, once the operator has asked to see it.
+   *
+   * A separate piece of state and not a mode flag: the import plan stays on
+   * screen underneath, because the identity, the author claim and the review
+   * findings are the same facts whichever verb ends up running.
+   */
+  const [update, setUpdate] = useState<AgentUpdatePlan | null>(null);
+  const [applied, setApplied] = useState<AgentUpdatePlan | null>(null);
+  /**
    * Which preview the screen belongs to.
    *
    * Two bundles chosen in a row are two requests, and the first one can answer
@@ -89,6 +136,8 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
     setFile(chosen);
     setPlan(null);
     setLanded(null);
+    setUpdate(null);
+    setApplied(null);
     setError(null);
     setAsSlug("");
     if (!chosen) return;
@@ -99,6 +148,7 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
     const mine = ++latest.current;
     setBusy(true);
     setError(null);
+    setUpdate(null);
     try {
       const previewed = await api.previewAgentImport(chosen, slug);
       if (mine !== latest.current) return;
@@ -109,6 +159,44 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
       setError((e as Error).message);
     } finally {
       if (mine === latest.current) setBusy(false);
+    }
+  }
+
+  /** The other verb: what replacing the installed agent's library would do. */
+  async function reviewUpdate(chosen: File, slug: string) {
+    const mine = ++latest.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const previewed = await api.previewAgentUpdate(slug, chosen);
+      if (mine !== latest.current) return;
+      setUpdate(previewed);
+    } catch (e) {
+      if (mine !== latest.current) return;
+      setUpdate(null);
+      setError((e as Error).message);
+    } finally {
+      if (mine === latest.current) setBusy(false);
+    }
+  }
+
+  async function confirmUpdate() {
+    if (!file || !update) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // `update.slug`, which is the agent the diff on screen was computed
+      // against — never a name typed since.
+      const result = await api.updateAgentFromBundle(update.slug, file);
+      setApplied(result);
+      setFile(null);
+      setPlan(null);
+      setUpdate(null);
+      onImported();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -167,6 +255,16 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
           <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
           <span data-import-done>
             Imported <span className="font-mono">{landed.slug}</span>. {landed.next_step}
+          </span>
+        </div>
+      )}
+
+      {applied && (
+        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
+          <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+          <span data-update-done>
+            Updated <span className="font-mono">{applied.slug}</span> to version{" "}
+            {applied.version}. {applied.next_step}
           </span>
         </div>
       )}
@@ -367,10 +465,37 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
 
           {plan.collision && (
             <div className="space-y-1.5">
-              <p role="alert" className="text-xs text-[var(--color-red)]">
-                An agent called <span className="font-mono">{plan.collision}</span> already
-                exists. Import never replaces one — give it another name.
-              </p>
+              {plan.is_update ? (
+                /* The same agent, newer. Offering only a rename here is what
+                   left the new version sitting beside the old one with the
+                   memory forked, so the update verb is offered first and the
+                   rename stays available underneath (FEAT-145). */
+                <div data-update-offer className="space-y-1.5">
+                  <p className="text-xs text-[var(--color-text)]">
+                    This is a newer version of{" "}
+                    <span className="font-mono">{plan.collision}</span>, the agent you
+                    already have — version {plan.version} against the one installed.
+                    Updating keeps its memory, its config, its mutes and anything you
+                    edited here.
+                  </p>
+                  <button
+                    onClick={() => file && reviewUpdate(file, plan.collision)}
+                    disabled={busy}
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                    Review the changes
+                  </button>
+                  <p className="text-[11px] text-[var(--color-text-muted)]">
+                    Or import it as a second agent under another name:
+                  </p>
+                </div>
+              ) : (
+                <p role="alert" className="text-xs text-[var(--color-red)]">
+                  An agent called <span className="font-mono">{plan.collision}</span>{" "}
+                  already exists. Import never replaces one — give it another name.
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   aria-label="Import as"
@@ -398,6 +523,105 @@ export function ImportAgentDialog({ onImported }: { onImported: () => void }) {
             <Upload className="h-4 w-4" />
             Import {plan.slug}
           </button>
+        </div>
+      )}
+
+      {update && (
+        <div
+          data-update-plan
+          className="space-y-3 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-surface)] p-3"
+        >
+          <div>
+            <p className="text-sm font-semibold text-[var(--color-text)]">
+              Updating <span className="font-mono">{update.slug}</span> — version{" "}
+              {update.installed_version || "?"} → {update.version}
+            </p>
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              Its memory, config, mutes, journals and session output are untouched.
+              Nothing is started, and every routine that changes has to be read and
+              allowed again before it can run.
+            </p>
+          </div>
+
+          {update.blockers.map((b) => (
+            <p
+              key={b.code}
+              role="alert"
+              data-update-blocker={b.code}
+              className="text-xs text-[var(--color-red)]"
+            >
+              {b.message}
+            </p>
+          ))}
+
+          {update.warnings.map((w) => (
+            <p
+              key={w.code}
+              data-update-warning={w.code}
+              className="text-[11px] text-amber-400"
+            >
+              {w.message}
+            </p>
+          ))}
+
+          {update.blockers.length === 0 && (
+            <>
+              <ul className="space-y-0.5">
+                {[...update.files]
+                  .sort(
+                    (a, b) =>
+                      VERDICT_ORDER.indexOf(a.verdict) -
+                        VERDICT_ORDER.indexOf(b.verdict) ||
+                      a.path.localeCompare(b.path),
+                  )
+                  .map((f) => {
+                    const copy = VERDICT_COPY[f.verdict];
+                    return (
+                      <li
+                        key={f.path}
+                        data-update-file={f.verdict}
+                        className="flex items-center gap-1.5 text-[11px]"
+                      >
+                        {f.executable ? (
+                          <FileCode2 className="h-3 w-3 shrink-0 text-amber-400" />
+                        ) : (
+                          <FileText className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+                        )}
+                        <span className="font-mono text-[var(--color-text)]">
+                          {f.path}
+                        </span>
+                        <span
+                          className={
+                            copy?.kept
+                              ? "text-amber-400"
+                              : "text-[var(--color-text-muted)]"
+                          }
+                        >
+                          {copy?.label ?? f.verdict}
+                        </span>
+                      </li>
+                    );
+                  })}
+              </ul>
+
+              <p className="text-[11px] text-[var(--color-text-muted)]">
+                Muted on arrival:{" "}
+                {[...update.mutes.routines, ...update.mutes.skills].join(", ") ||
+                  "nothing new"}
+                . The previous bytes of every replaced or deleted file are kept
+                beside the agent, out of its library.
+              </p>
+
+              <button
+                onClick={confirmUpdate}
+                disabled={busy}
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RefreshCw className="h-4 w-4" />
+                Update {update.slug}
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

@@ -3048,6 +3048,66 @@ async def import_agent(
         raise _create_refusal(exc) from exc
 
 
+@router.post("/{slug}/update/preview")
+async def preview_agent_update(
+    slug: str,
+    file: UploadFile = File(...),
+    user: WebUser = Depends(get_current_user),
+):
+    """What updating this agent from this bundle would do. Writes nothing.
+
+    The other half of the 409 above: a newer bundle of an agent this install
+    already has is an *update*, not a name collision, and the import plan's
+    ``is_update`` is what tells the dialog which of the two it is looking at
+    (FEAT-145). The plan this returns is the per-path diff — replaced, kept,
+    added, deleted — plus the blockers that refuse it outright.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    bundle = await _uploaded_bundle(file)
+    connectors, tools = await _install_capabilities(user)
+    return agent_bundle.plan_update(
+        bundle,
+        slug,
+        available_connectors=connectors,
+        available_tools=tools,
+    ).summary()
+
+
+@router.post("/{slug}/update")
+async def update_agent_from_bundle(
+    slug: str,
+    file: UploadFile = File(...),
+    user: WebUser = Depends(get_current_user),
+):
+    """Replace this agent's library from the bundle. Keeps what it earned.
+
+    Re-plans rather than trusting a plan the client carried back, which is the
+    same rule ``/import`` follows and matters more here: one of the blockers is
+    whether a trading loop is running *right now*, and a plan computed a minute
+    ago cannot answer that.
+
+    400 on a blocker, through the plan's own sentence — a refused update is a
+    rule, not a broken server, and the message names the reason and the fix.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    bundle = await _uploaded_bundle(file)
+    connectors, tools = await _install_capabilities(user)
+    plan = agent_bundle.plan_update(
+        bundle,
+        slug,
+        available_connectors=connectors,
+        available_tools=tools,
+    )
+    try:
+        return agent_bundle.apply_update(plan, user_id=user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/{slug}/bundle")
 async def export_agent_bundle(
     slug: str,

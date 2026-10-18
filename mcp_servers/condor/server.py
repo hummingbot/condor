@@ -808,6 +808,7 @@ async def manage_agents(
         "publish",
         "export",
         "import",
+        "upgrade",
         # Legacy funnel-era spellings this family still answers to.
         "list_agent_definitions",
         "create_agent",
@@ -817,6 +818,7 @@ async def manage_agents(
         "publish_agent",
         "export_agent",
         "import_agent",
+        "upgrade_agent",
     ],
     agent_slug: str | None = None,
     name: str | None = None,
@@ -874,10 +876,22 @@ async def manage_agents(
       process with no sandbox. Nothing is started. The result's `unmet` lists
       what this install cannot supply the agent; it never blocks the import,
       so report it and let the user decide.
+    - "upgrade": Replace an INSTALLED agent's library from a newer bundle of
+      the same agent (requires agent_slug + `path`). Spelled "upgrade" because
+      "update" already means editing an agent's instructions here. It keeps
+      everything the install earned — the agent's store, config, mutes,
+      sessions and journals — and keeps any file the user had edited locally,
+      reporting it as a conflict with the bundle's copy on offer. Whatever
+      arrives new comes in MUTED, every replaced routine needs allowing again
+      before it can run, and nothing is started. It refuses outright when the
+      bundle is a different agent, when nothing says this bundle is the
+      agent's upstream, when the bundle is older, for an agent the repo ships,
+      and while a loop is running: read `blockers` back verbatim. On success
+      read `files` back — a conflict is content nobody else can reproduce.
 
     Args:
         action: What to do with the agent definition.
-        agent_slug: The agent to act on (get/update/delete).
+        agent_slug: The agent to act on (get/update/delete/upgrade).
         name: Agent name (create/update).
         description: Agent description (create/update).
         instructions: The AGENT.md body — identity + domain knowledge (create/update).
@@ -907,8 +921,8 @@ async def manage_agents(
         path: For "publish" — narrow to one item of the agent, relative to
             its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
-            mutes and session output are never published. For "import" — the
-            bundle file to read.
+            mutes and session output are never published. For "import" and
+            "upgrade" — the bundle file to read.
         notes: For "export" — the changelog for this version, carried verbatim
             in the bundle. What changed since the last bundle of this agent.
         author_name: For "export" — who to credit. An unverified claim: Condor

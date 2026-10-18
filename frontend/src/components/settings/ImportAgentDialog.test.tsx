@@ -17,7 +17,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { AgentBundleFinding, AgentImportPlan } from "@/lib/api";
+import type {
+  AgentBundleFinding,
+  AgentImportPlan,
+  AgentUpdatePlan,
+} from "@/lib/api";
 import { ImportAgentDialog } from "./ImportAgentDialog";
 
 declare global {
@@ -44,6 +48,8 @@ const PLAN: AgentImportPlan = {
   agent_key_inherited: false,
   collision: "",
   suggested_slug: "",
+  collision_agent_uid: "",
+  is_update: false,
   refusals: [],
   agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
   version: 3,
@@ -113,21 +119,63 @@ const FINDINGS: AgentBundleFinding[] = [
   },
 ];
 
+/** The diff of a newer bundle of the agent already installed (FEAT-145). */
+const UPDATE: AgentUpdatePlan = {
+  slug: "traveller",
+  agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
+  installed_agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
+  version: 3,
+  installed_version: 2,
+  exported_at: "2026-10-15T09:00:00Z",
+  notes: "",
+  author: { name: "", handle: "" },
+  requires: {
+    connectors: [],
+    tools: [],
+    agent_key: "claude-code",
+    skills: { carried: [], inherited: [] },
+  },
+  unmet: [],
+  findings: [],
+  files: [
+    { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+    { path: "routines/r.py", verdict: "changed", bytes: 130, executable: true, incoming: "" },
+    { path: "routines/new.py", verdict: "added", bytes: 90, executable: true, incoming: "" },
+    {
+      path: "skills/s/SKILL.md",
+      verdict: "conflict",
+      bytes: 70,
+      executable: false,
+      incoming: "---\nname: s\n---\n\nUpstream's copy.\n",
+    },
+    { path: "shutdown.md", verdict: "removed", bytes: 0, executable: false, incoming: "" },
+  ],
+  counts: { unchanged: 1, changed: 1, added: 1, conflict: 1, removed: 1 },
+  mutes: { routines: ["new"], skills: [] },
+  blockers: [],
+  warnings: [],
+};
+
 let container: HTMLDivElement;
 let root: Root;
 let posts: { url: string; asSlug: string }[] = [];
 let reply: AgentImportPlan = PLAN;
+let updateReply: AgentUpdatePlan = UPDATE;
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   posts = [];
   reply = PLAN;
+  updateReply = UPDATE;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
       const body = init?.body as FormData;
       posts.push({ url, asSlug: String(body.get("as_slug") ?? "") });
-      return new Response(JSON.stringify(reply), {
+      // The update pair answers a different shape, and the dialog must not be
+      // able to render one as the other.
+      const payload = url.includes("/update") ? updateReply : reply;
+      return new Response(JSON.stringify(payload), {
         headers: { "Content-Type": "application/json" },
       });
     }),
@@ -431,4 +479,142 @@ it("lists what this install cannot give the agent, without blocking import", asy
     "Widened the grid.",
   );
   expect(button("Import traveller").disabled).toBe(false);
+});
+
+// ── A collision that is really an update (FEAT-145) ──
+
+/** The import preview of a newer bundle of the agent already installed. */
+const SAME_AGENT: AgentImportPlan = {
+  ...PLAN,
+  collision: "traveller",
+  suggested_slug: "traveller_2",
+  collision_agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
+  is_update: true,
+};
+
+it("offers the update verb when the collision is the same agent, newer", async () => {
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  const offer = container.querySelector("[data-update-offer]")?.textContent;
+  expect(offer).toContain("newer version");
+  expect(offer).toContain("keeps its memory");
+  // The rename stays available underneath rather than being replaced by it.
+  expect(button("Check name")).toBeTruthy();
+});
+
+it("offers only a rename when the collision is a different agent", async () => {
+  reply = { ...SAME_AGENT, collision_agent_uid: "0".repeat(32), is_update: false };
+  await render();
+  await choose();
+
+  expect(container.querySelector("[data-update-offer]")).toBeNull();
+  expect(container.textContent).toContain("Import never replaces one");
+});
+
+it("previews the update before it writes, and names what keeps your copy", async () => {
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(posts.at(-1)?.url).toBe("/api/v1/agents/traveller/update/preview");
+  const rows = [...container.querySelectorAll("[data-update-file]")].map((n) => ({
+    verdict: n.getAttribute("data-update-file"),
+    text: n.textContent ?? "",
+  }));
+  // Conflicts first: they are the only rows the operator has to decide about.
+  expect(rows[0].verdict).toBe("conflict");
+  expect(rows[0].text).toContain("skills/s/SKILL.md");
+  expect(rows[0].text).toContain("your copy kept");
+  expect(rows.map((r) => r.verdict)).toEqual([
+    "conflict",
+    "changed",
+    "added",
+    "removed",
+    "unchanged",
+  ]);
+  expect(container.querySelector("[data-update-plan]")?.textContent).toContain(
+    "version 2 → 3",
+  );
+  expect(container.textContent).toContain("Muted on arrival: new");
+});
+
+it("only posts to the update endpoint when the operator confirms", async () => {
+  reply = SAME_AGENT;
+  const imported = vi.fn();
+  await render(imported);
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+  expect(imported).not.toHaveBeenCalled();
+
+  updateReply = { ...UPDATE, updated: true, next_step: "Nothing was started." };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  expect(posts.map((p) => p.url)).toEqual([
+    "/api/v1/agents/import/preview",
+    "/api/v1/agents/traveller/update/preview",
+    "/api/v1/agents/traveller/update",
+  ]);
+  expect(imported).toHaveBeenCalledOnce();
+  expect(container.querySelector("[data-update-done]")?.textContent).toContain(
+    "Updated traveller to version 3",
+  );
+});
+
+it("shows a blocker instead of an Update button", async () => {
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    blockers: [
+      { code: "live_loop", message: "'traveller' has a loop running right now." },
+    ],
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(
+    container.querySelector("[data-update-blocker=live_loop]")?.textContent,
+  ).toContain("loop running right now");
+  expect(container.querySelector("[data-update-file]")).toBeNull();
+  expect(() => button("Update traveller")).toThrow();
+});
+
+it("shows a different build of the same version as a warning, with the diff", async () => {
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    warnings: [
+      {
+        code: "same_version_new_build",
+        message: "This bundle says version 3, the same as the one installed.",
+      },
+    ],
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(
+    container.querySelector("[data-update-warning=same_version_new_build]")
+      ?.textContent,
+  ).toContain("same as the one installed");
+  expect(container.querySelectorAll("[data-update-file]").length).toBe(5);
+  expect(button("Update traveller").disabled).toBe(false);
 });
