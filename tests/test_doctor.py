@@ -479,3 +479,137 @@ def test_hummingbot_api_check_fails_when_env_exists_but_config_does_not(
 
     checks = doctor.check_hummingbot_api()
     assert checks[0].state == doctor.FAIL
+
+
+# ── The dashboard-port check reads the bind it was given (macOS lsof) ──
+
+
+def test_a_loopback_bind_is_not_reported_as_public():
+    """``lsof -sTCP:LISTEN`` prints the state as its own trailing token.
+
+    NAME is ``TCP 127.0.0.1:8088 (LISTEN)``, so the last column is
+    ``(LISTEN)``. Taking it and splitting on "(" produced the empty string,
+    which counted as a wildcard — so on any host without ``ss`` (macOS, and
+    WSL without iproute2) a loopback-only dashboard was reported as reachable
+    on all interfaces, and in local mode that is a FAIL whose remedy is to
+    unset a variable nobody set.
+    """
+    import socket
+
+    from condor.doctor import _is_public_bind, _listening_binds
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    try:
+        binds = _listening_binds(sock.getsockname()[1])
+        assert binds, "nothing parsed out of the listener listing"
+        assert all(not _is_public_bind(b) for b in binds), binds
+        assert all(b.startswith("127.0.0.1:") for b in binds), binds
+    finally:
+        sock.close()
+
+
+def test_a_wildcard_bind_is_still_reported_as_public():
+    """The check has to keep catching the thing it exists for."""
+    import socket
+
+    from condor.doctor import _is_public_bind, _listening_binds
+
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 0))
+    sock.listen(1)
+    try:
+        binds = _listening_binds(sock.getsockname()[1])
+        assert binds and any(_is_public_bind(b) for b in binds), binds
+    finally:
+        sock.close()
+
+
+def test_an_unparseable_bind_is_unknown_rather_than_public():
+    """A bind this code could not read is not evidence of exposure."""
+    from condor.doctor import _is_public_bind
+
+    assert _is_public_bind("") is False
+    assert _is_public_bind("0.0.0.0:8088") is True
+    assert _is_public_bind("[::]:8088") is True
+
+
+# ── The id the dashboard signs in as must be able to administer (V10) ──
+
+
+def _admin_checks(tmp_path, monkeypatch, *, admin_id, users, env_lines=None):
+    import condor.doctor as doctor_module
+
+    env = tmp_path / ".env"
+    env.write_text("\n".join(env_lines or [f"ADMIN_USER_ID={admin_id}"]) + "\n")
+    monkeypatch.setattr(doctor_module, "ENV_PATH", env)
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", admin_id)
+    monkeypatch.setattr("utils.config.LOCAL_MODE", True)
+    return doctor_module._check_admin_can_administer({"users": users})
+
+
+def test_a_matching_admin_passes_quietly(tmp_path, monkeypatch):
+    assert (
+        _admin_checks(tmp_path, monkeypatch, admin_id=1, users={1: {"role": "admin"}})
+        == []
+    )
+
+
+def test_an_id_config_yml_calls_a_user_is_reported(tmp_path, monkeypatch):
+    """Two files have to agree about one number, and nothing checked that.
+
+    `.env` decides who the dashboard *is* — local mode signs in as
+    `ADMIN_USER_ID` with no password — and `config.yml` decides what that id
+    may *do*. Disagree and every admin route answers 403: no Updates tab, and
+    the "Updates available" notification links to a tab that is not rendered.
+    The old check asked only whether the variable was set, so an install in
+    exactly this state reported `ADMIN_USER_ID` green.
+    """
+    checks = _admin_checks(
+        tmp_path,
+        monkeypatch,
+        admin_id=777,
+        users={1: {"role": "admin"}, 777: {"role": "user"}},
+    )
+    assert [c.name for c in checks] == ["Admin access"]
+    detail = checks[0].detail
+    assert "777" in detail and "'user'" in detail
+    assert "role: admin" in detail, "the remedy has to name the knob"
+
+
+def test_an_id_config_yml_has_never_heard_of_is_reported(tmp_path, monkeypatch):
+    checks = _admin_checks(
+        tmp_path, monkeypatch, admin_id=999, users={1: {"role": "admin"}}
+    )
+    assert [c.name for c in checks] == ["Admin access"]
+    assert "no user 999" in checks[0].detail
+
+
+def test_a_duplicated_assignment_is_named_on_its_own(tmp_path, monkeypatch):
+    """`.env` is read by three parsers and the last assignment wins in all of
+    them, so a second line is silently authoritative and the first is the one
+    people read."""
+    checks = _admin_checks(
+        tmp_path,
+        monkeypatch,
+        admin_id=777,
+        users={777: {"role": "admin"}},
+        env_lines=["ADMIN_USER_ID=1", "OTHER=x", "ADMIN_USER_ID=777"],
+    )
+    assert [c.name for c in checks] == ["ADMIN_USER_ID (duplicate)"]
+    assert "the last one wins (777)" in checks[0].detail
+
+
+def test_one_assignment_and_a_good_role_says_nothing(tmp_path, monkeypatch):
+    assert (
+        _admin_checks(
+            tmp_path,
+            monkeypatch,
+            admin_id=777,
+            users={777: {"role": "admin"}},
+            env_lines=["ADMIN_USER_ID=777", "OTHER=x"],
+        )
+        == []
+    )

@@ -37,8 +37,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from condor.frontmatter import parse_frontmatter, render_frontmatter
 from condor.fsutil import atomic_write_text
@@ -50,13 +51,23 @@ FORKED_AT_KEY = "forked_at"
 
 
 def content_digest(path: Path) -> str:
-    """``sha256:<12>`` of a file's bytes — short enough to read in a log line.
+    """``sha256:<12>`` of a file's content, with line endings normalized.
 
     Twelve hex characters is the same order of collision resistance a git short
     hash gives, against a corpus of a few hundred markdown files. It identifies
     *which* upstream revision was forked; it is not a security claim.
+
+    Newlines are normalized to LF before hashing, because the stamp has to mean
+    the same thing on every platform. Hashing raw bytes made the digest depend
+    on the checkout's line endings — the same file gave sha256:6d9b716cc24c on
+    an LF checkout and sha256:ee60f3851972 on a CRLF one — so a ``forked_from``
+    written on one host compared as *changed* on another, and every fork looked
+    stale for a reason that had nothing to do with upstream. ``.gitattributes``
+    now keeps the tracked tree LF; this makes the comparison correct even where
+    it does not, such as a local root carried between machines.
     """
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    raw = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    digest = hashlib.sha256(raw).hexdigest()
     return f"sha256:{digest[:12]}"
 
 
@@ -223,6 +234,273 @@ def carry_fork_stamp(path: Path, meta: dict) -> dict:
         if isinstance(existing, dict) and key in existing:
             meta[key] = existing[key]
     return meta
+
+
+@dataclass(frozen=True)
+class StaleFork:
+    """A forked item whose stock counterpart has moved, or gone, since the fork."""
+
+    path: Path
+    """The local file that is being used instead of stock."""
+    rel: str
+    """Its path relative to the local root — what a message should show."""
+    forked_from: str
+    """The digest of the stock file at fork time; ``""`` when never stamped."""
+    stock_digest: str | None
+    """The stock file's digest now; ``None`` when it no longer exists."""
+    owner: str = ""
+    """Which library it belongs to -- an agent slug, or ``_shared``."""
+
+    @property
+    def label(self) -> str:
+        """What a message should show: the item qualified by its library.
+
+        :attr:`rel` is relative to *one* library's root, so three agents with a
+        customized playbook each render as a bare ``AGENT.md`` and the reader
+        cannot tell which is which. Nine agents ship, so that is the ordinary
+        case rather than an edge one.
+        """
+        return f"{self.owner}/{self.rel}" if self.owner else self.rel
+
+    @property
+    def retired(self) -> bool:
+        """Whether upstream removed the stock counterpart entirely."""
+        return self.stock_digest is None
+
+    @property
+    def unprovenanced(self) -> bool:
+        """Shadowing stock with no record of ever having been the same file.
+
+        Two ways to get here, and they need the same sentence. A file with no
+        frontmatter cannot hold a stamp -- a routine's ``.py`` is the case that
+        matters, since the library ships nineteen of them -- so a forked skill
+        folder stamps its ``SKILL.md`` and nothing else. And a file the agent
+        *created* under a name upstream later ships collides the same way: local
+        wins per item, so upstream's version never appears.
+        """
+        return not self.forked_from
+
+
+def _legacy_digest(path: Path) -> str:
+    """What :func:`content_digest` returned before newlines were normalized.
+
+    A stamp written from a CRLF working tree holds the raw-bytes hash, and after
+    normalization it would compare as changed for a reason that has nothing to
+    do with upstream. Checking the legacy form as well keeps those stamps
+    meaningful instead of reporting every one of them stale once.
+    """
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()[:12]}"
+
+
+def stale_forks(agent_slug: str | None) -> list[StaleFork]:
+    """Forked items of one agent whose stock counterpart has since moved.
+
+    The other half of copy-on-write, and the half that was missing.
+    :func:`fork_path` records ``forked_from`` and nothing ever read it back, so
+    a customized playbook kept shadowing stock for ever: the update succeeded,
+    upstream's rewrite landed on disk, and the agent never saw it. Upstream
+    churns exactly these files, and they carry trading rules and risk limits, so
+    the divergence is both silent and consequential.
+
+    This only *reports*. Local still wins — that is the deliberate promise of
+    FEAT-115, and an update that quietly took upstream's version back would be
+    the old loud failure wearing a new coat. What the operator gets is the
+    sentence nobody was being told.
+
+    Items with no stamp are skipped: a file the operator authored from scratch
+    was never a fork of anything, so there is nothing for it to be stale
+    against.
+    """
+    local, stock = _homes(agent_slug)
+    # Read the owner off the resolved path rather than from ``agent_slug``,
+    # which is None for the chat agent and would leave its items unqualified.
+    return _compare_layer(local, stock, local.name)
+
+
+def _compare_layer(
+    local: Path, stock: Path, owner: str, rel_prefix: str = ""
+) -> list[StaleFork]:
+    """Every file under ``local`` measured against ``stock/<same relative path>``.
+
+    Split out of :func:`stale_forks` because one layer does not resolve that
+    way: the chat agent's routines fall back to the repo-root ``routines/``
+    rather than to ``<stock>/condor/routines`` (see :func:`_chat_routine_forks`),
+    so it needs the same comparison against a stock root of its own.
+
+    ``rel_prefix`` keeps the reported path the one the reader would look for --
+    a chat routine is reported as ``routines/<name>.py``, which is where it sits
+    under the agent, not as the bare filename the scan happens to walk.
+    """
+    if not local.is_dir():
+        return []
+
+    out: list[StaleFork] = []
+    for path in sorted(local.rglob("*")):
+        if not path.is_file():
+            continue
+
+        rel = path.relative_to(local)
+        counterpart = stock / rel
+        shown = f"{rel_prefix}/{rel}" if rel_prefix else str(rel)
+        forked_from = _stamp_of(path)
+
+        if not counterpart.is_file():
+            # No stock counterpart. Either upstream retired something this
+            # install forked -- worth saying, since reads never reconcile the
+            # roots and a withdrawn playbook keeps running -- or it is an
+            # ordinary file the agent authored, which was never a fork of
+            # anything and has nothing to be stale against.
+            if forked_from:
+                out.append(StaleFork(path, shown, forked_from, None, owner))
+            continue
+
+        now = content_digest(counterpart)
+        if forked_from:
+            if now == forked_from or _legacy_digest(counterpart) == forked_from:
+                continue
+            out.append(StaleFork(path, shown, forked_from, now, owner))
+            continue
+
+        # No stamp, but stock ships this exact path, so the local copy is
+        # shadowing it. Identical content means the fork simply never diverged
+        # -- nothing to report. Different content means upstream's version is
+        # unreachable and nothing recorded that it ever matched.
+        if now != content_digest(path):
+            out.append(StaleFork(path, shown, "", now, owner))
+    return out
+
+
+def _stamp_of(path: Path) -> str:
+    """The ``forked_from`` digest recorded on ``path``, or ``""``.
+
+    Only markdown can carry one: :func:`_stamp` deliberately refuses to invent
+    frontmatter for a file that has none, because that would change what the
+    file *is* and the machinery reading a routine's ``.py`` would not survive it.
+    """
+    if path.suffix != ".md":
+        return ""
+    try:
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return str((meta or {}).get(FORKED_FROM_KEY) or "")
+
+
+def locally_overridden(rel_paths: list[str]) -> list[str]:
+    """Which of ``rel_paths`` this install already has its own version of.
+
+    ``rel_paths`` are repo-relative, as ``incoming_paths`` reports them, so only
+    those under ``agents/`` can have a local counterpart at all.
+
+    This is the *predictive* half of the staleness story. :func:`stale_forks`
+    compares a fork against the stock file on disk, and that only moves once the
+    fast-forward has landed -- so it answers "upstream has already moved on"
+    after the fact. This answers "the update you are about to apply will change
+    files you have overridden" while there is still a decision to make.
+    """
+    from condor.paths import local_agents_root
+
+    root = local_agents_root()
+    if not root.is_dir():
+        return []
+
+    out: list[str] = []
+    for rel in rel_paths:
+        parts = PurePosixPath(rel).parts
+        if len(parts) < 2:
+            continue
+        if parts[0] == "agents":
+            local = root.joinpath(*parts[1:])
+        elif parts[0] == "routines":
+            # The chat agent's library is the exception: it is shipped at the
+            # repo root, not under ``agents/``, and its local layer sits at
+            # ``<local>/condor/routines`` (see ``_chat_routine_forks``). Without
+            # this arm an update that rewrites a shipped routine the chat has
+            # improved matched nothing, and the one warning that fires before
+            # the change lands never mentioned it.
+            local = root.joinpath(CHAT_LIBRARY, *parts)
+        else:
+            continue
+        if local.is_file():
+            out.append(rel)
+    return out
+
+
+#: The library every agent reads *under* its own — published skills, routines
+#: and controllers. Not an agent, so ``iter_agent_slugs`` never yields it:
+#: ``_is_agent_dir`` rejects a leading underscore, which is what kept three
+#: whole trees out of the scan below.
+SHARED_LIBRARY = "_shared"
+
+#: The chat agent's own library. Named here because its routines are the one
+#: layer that falls back to the repo root rather than to the shipped agent tree.
+CHAT_LIBRARY = "condor"
+
+
+def _chat_routine_forks() -> list[StaleFork]:
+    """Chat-authored routines shadowing the library they were copied from.
+
+    The one layer whose stock root is not ``<stock>/<slug>/``. FEAT-033 keeps
+    the shipped library at the repo-root ``routines/`` and FEAT-115 moved only
+    the *write* target under the agent, so the pair is
+    ``(<local>/condor/routines, <repo>/routines)`` -- which is what
+    :func:`routines.base.assistant_routines_dirs` resolves and what the loader
+    actually reads.
+
+    :func:`stale_forks` cannot see it. It asks ``_homes`` for the pair, gets
+    ``<stock>/condor/routines`` as the stock side, finds nothing there on any
+    install, and files every chat routine under "an ordinary file the agent
+    authored" -- so improving a shipped routine, which is the whole point of
+    the local layer, shadowed it in silence. Ask the loader where stock is
+    instead.
+    """
+    from routines.base import assistant_routines_dirs
+
+    local, stock = assistant_routines_dirs(None)
+    return _compare_layer(local, stock, CHAT_LIBRARY, rel_prefix="routines")
+
+
+def all_stale_forks() -> list[StaleFork]:
+    """:func:`stale_forks` across every agent this install has, plus the shared root."""
+    from condor.memory.paths import iter_agent_slugs
+
+    out: list[StaleFork] = []
+    seen: set[Path] = set()
+    # The chat routines first: the per-agent scan below walks the same files
+    # under ``<local>/condor`` and would judge them against the wrong root.
+    for fork in [*_chat_routine_forks()]:
+        seen.add(fork.path)
+        out.append(fork)
+    for slug in [None, SHARED_LIBRARY, *iter_agent_slugs()]:
+        for fork in stale_forks(slug):
+            if fork.path in seen:
+                continue
+            seen.add(fork.path)
+            out.append(fork)
+    return out
+
+
+def write_preserving_stamp(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` without destroying its fork stamp.
+
+    The three *stores* already do this by hand, rendering their frontmatter
+    through :func:`carry_fork_stamp`. The web routes did not: they took a body
+    the browser had round-tripped and wrote it straight down, and because the
+    GET that produced it had read the **stock** file — which carries no stamp —
+    the fork's stamp was written by :func:`fork_path` and erased by the very
+    next line. Editing an agent through the dashboard is the primary way anyone
+    edits these files, so in practice the stamp almost never survived.
+
+    Factored out rather than inlined at the two call sites so a third write path
+    cannot reintroduce the same bug by forgetting the dance.
+    """
+    if path.suffix != ".md":
+        atomic_write_text(path, content)
+        return
+    meta, body = parse_frontmatter(content)
+    atomic_write_text(
+        path, render_frontmatter(carry_fork_stamp(path, dict(meta or {})), body)
+    )
 
 
 def clear_fork_stamp(path: Path) -> None:

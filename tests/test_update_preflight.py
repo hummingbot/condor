@@ -45,6 +45,7 @@ def _blocks(
     with patch.multiple(
         "utils.updater",
         is_git_repo=AsyncMock(return_value=is_repo),
+        is_detached=AsyncMock(return_value=False),
         fetch=AsyncMock(return_value=(fetched, "" if fetched else "no such remote")),
         get_current_branch=AsyncMock(return_value="main"),
         ahead_count=AsyncMock(return_value=ahead),
@@ -60,6 +61,7 @@ def test_the_blockers_are_computed_against_a_freshly_fetched_origin():
     with patch.multiple(
         "utils.updater",
         is_git_repo=AsyncMock(return_value=True),
+        is_detached=AsyncMock(return_value=False),
         fetch=fetch,
         get_current_branch=AsyncMock(return_value="main"),
         ahead_count=AsyncMock(return_value=0),
@@ -238,13 +240,36 @@ REMOTE = "sha256:62d70399bf8e80d491ee7e11edacd0b740a6bfc60a1025140e4f8e6b8f597e0
 _DEFAULT_SERVICE = {"image": "hummingbot/hummingbot-api:latest"}
 
 
-def _facet(*, service=_DEFAULT_SERVICE, local=LOCAL, remote=REMOTE):
-    """``service=None`` stands for ``docker compose config`` having failed."""
+IMAGE_ID = "sha256:943773e318e028d8a303e7c2237586fbd0d96e3ba46b902b215dc3799264bb54"
+
+
+def _facet(
+    *,
+    service=_DEFAULT_SERVICE,
+    local=LOCAL,
+    remote=REMOTE,
+    image_id=IMAGE_ID,
+    published=True,
+):
+    """``service=None`` stands for ``docker compose config`` having failed.
+
+    ``image_id=None`` is "no such image here"; ``local=None`` with an id is an
+    image that is present but carries no registry digest — a local build under
+    the classic image store.
+
+    ``published`` is what the registry says about the *local* digest, and it is
+    stubbed rather than left to the real call: ``registry_has_digest`` shells
+    out to ``docker buildx imagetools inspect``, so an unstubbed facet test
+    reached the network, took around thirteen seconds, and agreed with its own
+    assertion only because the registry happened to answer one of the two ways
+    that lead to the same branch.
+    """
     with patch.multiple(
         "utils.updater",
         compose_service=AsyncMock(return_value=service),
-        local_image_digest=AsyncMock(return_value=local),
+        local_image_identity=AsyncMock(return_value=(image_id, local)),
         registry_image_digest=AsyncMock(return_value=remote),
+        registry_has_digest=AsyncMock(return_value=published),
     ):
         return asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
 
@@ -265,6 +290,43 @@ def test_a_newer_published_image_is_reported_as_behind():
     assert facet.behind == 1
 
 
+def test_an_image_the_registry_never_published_is_the_operators_own():
+    """A `make build` over the published tag, as the containerd store leaves it.
+
+    Same tag, a RepoDigest like any other, and a digest the registry has never
+    heard of. Offering to pull here would overwrite the only copy of a build
+    that exists nowhere else.
+    """
+    facet, _ = _facet(published=False)
+    assert facet.up_to_date is True
+    assert facet.behind == 0
+    assert facet.available is None
+    assert facet.error is None
+    assert any("Built locally" in d for d in facet.detail)
+
+
+def test_an_inconclusive_origin_probe_offers_nothing_and_says_why():
+    """Neither "behind" nor "built here" — the probe failed, so neither is known.
+
+    The two wrong answers are not symmetric: one overwrites the operator's
+    build, the other hides a real update. This blocks instead, which is what an
+    ``error`` on the image facet does.
+    """
+    facet, _ = _facet(published=None)
+    assert facet.behind == 0, "an unknown origin is not evidence of being behind"
+    assert facet.up_to_date is False
+    assert facet.error_code == "image-origin-unknown"
+    assert facet.error and "either" in facet.error
+
+
+def test_a_digest_the_registry_does_publish_is_simply_behind():
+    """The ordinary case, pinned explicitly rather than by what the network did."""
+    facet, _ = _facet(published=True)
+    assert facet.up_to_date is False
+    assert facet.behind == 1
+    assert facet.error is None
+
+
 def test_an_unreachable_registry_never_claims_up_to_date():
     facet, _ = _facet(remote=None)
     assert facet.up_to_date is False
@@ -272,18 +334,42 @@ def test_an_unreachable_registry_never_claims_up_to_date():
     assert facet.available is None
 
 
-def test_an_image_with_no_local_digest_is_unknown_not_behind():
-    """Loaded from a tarball: there is nothing comparable to compare."""
-    facet, _ = _facet(local=None)
+def test_an_image_that_is_not_here_at_all_is_unknown_not_behind():
+    """Nothing to compare, and nothing to run either."""
+    facet, _ = _facet(local=None, image_id=None)
     assert facet.up_to_date is False
     assert facet.current == "unknown"
-    assert facet.error and "never been pulled" in facet.error
+    assert facet.error_code == "image-absent"
+    assert facet.error and "never been pulled or built" in facet.error
 
 
-def test_a_build_key_means_source_mode_and_no_registry_lookup():
-    facet, mode = _facet(service={"build": {"context": "."}, "image": "local/api"})
-    assert mode == "source"
+def test_an_image_present_without_a_registry_digest_is_the_operators_own():
+    """`make build` under the classic image store leaves `RepoDigests` empty.
+
+    That store is still the default on Docker Engine, so this is the ordinary
+    shape of an operator running their own build — not an error, and above all
+    not a reason to block the whole update. It used to raise
+    ``registry-unreachable`` while the registry was answering fine.
+    """
+    facet, _ = _facet(local=None)
+    assert facet.error is None, "a local build is not a failure"
     assert facet.up_to_date is True
+    assert facet.behind == 0
+    assert facet.current == "sha256:943773e3"
+    assert facet.detail and "Built here" in facet.detail[0]
+
+
+def test_a_hand_added_build_key_no_longer_means_a_second_mode():
+    """ "source" was a mode the product could not enter, so it is gone.
+
+    No shipped compose file has a ``build:`` key and hummingbot-api is deployed
+    from the published image, so the branch was dead code. An operator who adds
+    one is running their own image, which the checkout gate and the
+    locally-built check already cover -- by leaving it alone, not by rebuilding
+    it on their behalf.
+    """
+    _, mode = _facet(service={"build": {"context": "."}, "image": "local/api"})
+    assert mode == "image"
 
 
 def test_docker_being_down_is_an_error_not_a_verdict():
@@ -296,3 +382,122 @@ def test_docker_being_down_is_an_error_not_a_verdict():
 @pytest.mark.parametrize("digest", ["", None, "not-a-digest"])
 def test_short_digest_survives_junk(digest):
     assert components._short_digest(digest) in ("", "not-a-digest")
+
+
+# ── V12: an update must not adopt another checkout's stack ──
+
+
+def _owner_probe(monkeypatch, label, repo_dir):
+    """Stub `docker inspect` returning the compose working-dir label."""
+    from utils import updater as u
+
+    async def fake(*args, **kwargs):
+        return (0, label) if label is not None else (1, "")
+
+    monkeypatch.setattr(u, "_run_cmd", fake)
+    return asyncio.run(u.compose_stack_owner(repo_dir, "hummingbot-api"))
+
+
+def test_containers_from_another_checkout_are_reported(monkeypatch):
+    """`container_name:` is fixed, so Compose matches by name across projects.
+
+    It does not treat that as an error — it prints `Recreate` and the second
+    checkout takes over the first's containers and its postgres volume.
+    Condor points at a directory; Compose acts on a project.
+    """
+    owner = _owner_probe(monkeypatch, "/srv/other-checkout", "/srv/mine")
+    assert owner == "/srv/other-checkout"
+
+
+def test_our_own_containers_are_not_a_conflict(monkeypatch):
+    assert _owner_probe(monkeypatch, "/srv/mine", "/srv/mine") is None
+
+
+def test_a_trailing_slash_is_not_a_different_checkout(monkeypatch):
+    assert _owner_probe(monkeypatch, "/srv/mine/", "/srv/mine") is None
+
+
+def test_nothing_running_is_not_a_conflict(monkeypatch):
+    assert _owner_probe(monkeypatch, None, "/srv/mine") is None
+
+
+def test_an_unlabelled_container_is_not_a_conflict(monkeypatch):
+    """Docker prints `<no value>` for a label that is not set."""
+    assert _owner_probe(monkeypatch, "<no value>", "/srv/mine") is None
+
+
+# ── V13: a daemon that is down is not a missing image ──
+
+
+def _facet_with_docker(*, daemon_up, identity=(None, None)):
+    """`_image_facet` with the daemon's liveness and the inspect result pinned."""
+    with patch.multiple(
+        "utils.updater",
+        compose_service=AsyncMock(return_value=_DEFAULT_SERVICE),
+        local_image_identity=AsyncMock(return_value=identity),
+        registry_image_digest=AsyncMock(return_value=REMOTE),
+        docker_running=AsyncMock(return_value=daemon_up),
+    ):
+        return asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
+
+
+def test_a_stopped_daemon_is_not_reported_as_a_missing_image():
+    """Reported from a live dashboard while Docker Desktop was restarting.
+
+    `docker image inspect` is the only probe here that needs the daemon —
+    `compose config` merges files locally and `imagetools inspect` asks the
+    registry — so a daemon that is down reaches the `local is None` branch
+    with everything else looking healthy. It read "it has never been pulled by
+    tag", about an image that was sitting on disk the whole time.
+    """
+    facet, _ = _facet_with_docker(daemon_up=False)
+    assert facet.error_code == "docker-unavailable"
+    assert "Docker is not answering" in facet.error
+    assert "never been pulled" not in facet.error
+    # The registry answered even with the daemon down, so keep what we learned.
+    assert facet.available == "sha256:62d70399"
+
+
+def test_a_running_daemon_with_no_such_image_still_says_so():
+    """The fix must not swallow the case it was carved out of."""
+    facet, _ = _facet_with_docker(daemon_up=True)
+    assert facet.error_code == "image-absent"
+    assert "never been pulled or built" in facet.error
+
+
+def test_the_daemon_is_not_probed_when_the_image_is_there():
+    """One extra command, and only on the error path."""
+
+    def boom(*a, **kw):  # pragma: no cover - reached only on regression
+        raise AssertionError("docker_running must not run on the happy path")
+
+    with patch.multiple(
+        "utils.updater",
+        compose_service=AsyncMock(return_value=_DEFAULT_SERVICE),
+        local_image_identity=AsyncMock(return_value=(IMAGE_ID, LOCAL)),
+        registry_image_digest=AsyncMock(return_value=LOCAL),
+        docker_running=boom,
+    ):
+        facet, _ = asyncio.run(components._image_facet("/tmp/repo", "hummingbot-api"))
+    assert facet.up_to_date is True and facet.error is None
+
+
+def test_a_symlinked_checkout_is_not_a_foreign_stack(monkeypatch, tmp_path):
+    """Compose records the *resolved* directory; `normpath` does not resolve.
+
+    A checkout reached through a symlink — macOS `/tmp` is one, and symlinked
+    project roots are common — compared unequal to itself, so the guard
+    refused the operator's own update naming the same directory back at them.
+    """
+    from utils import updater as u
+
+    real = tmp_path / "checkout"
+    real.mkdir()
+    link = tmp_path / "via-symlink"
+    link.symlink_to(real)
+
+    async def fake(*args, **kwargs):
+        return (0, str(real))
+
+    monkeypatch.setattr(u, "_run_cmd", fake)
+    assert asyncio.run(u.compose_stack_owner(str(link), "hummingbot-api")) is None
