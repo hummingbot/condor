@@ -36,11 +36,15 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from condor.runtime.danger import (
+    CREATE_EXECUTOR_TOOLS,
+    MUTATING_AMM_ACTIONS,
+    MUTATING_CLMM_ACTIONS,
     format_tool_summary,
     is_recordable_tool_call,
     tool_call_input,
@@ -149,6 +153,65 @@ def _verb(tool: str, call: dict[str, Any]) -> str:
 #: because a deed recorded outside a tick (:mod:`condor.agents.deeds`) has to
 #: spell the same verb or the two doors would not join.
 DEPLOY_VERB = "manage_bots:deploy"
+
+
+#: The verbs that change the market, for ``last_successful_action_at``
+#: ([[FEAT-137]]).
+#:
+#: Deliberately *not* "every recordable call that did not raise". The log
+#: records writes of several kinds, and most of them say nothing about whether
+#: a strategy is still trading: a saved controller config, a routine written, a
+#: token mapping edited, an agent paused. A dead market maker's operator can do
+#: all of those; what it cannot do is place an order. So the set is the four
+#: effects GitHub #64's race comment asks for -- an order placed, a cancel sent,
+#: an executor created, a bot deployed -- plus their DEX equivalents, since a
+#: swap signed and liquidity moved change the world exactly as an order does and
+#: a DEX-only strategy that does nothing else would otherwise read as dead.
+#:
+#: The liquidity halves are spelled from ``danger``'s own mutating sets rather
+#: than hand-listed, so a new action added there cannot silently fall out of
+#: this one.
+EFFECT_VERBS = frozenset(
+    {
+        # An order placed. ``create_order_executor`` is how a loop places one
+        # since the typed split (FEAT-062); ``place_order`` is the direct door.
+        "place_order",
+        "create_order_executor",
+        # A cancel sent: stopping an executor cancels the orders it holds.
+        "stop_executor",
+        # An executor created.
+        *(CREATE_EXECUTOR_TOOLS - {"create_order_executor"}),
+        # A bot deployed.
+        DEPLOY_VERB,
+        # The DEX siblings: a signed swap, and every liquidity move.
+        "execute_swap",
+        *(f"manage_clmm:{action}" for action in MUTATING_CLMM_ACTIONS),
+        *(f"manage_amm:{action}" for action in MUTATING_AMM_ACTIONS),
+    }
+)
+
+
+def is_effect(action: AgentAction) -> bool:
+    """Did this row change the market, and did it work? ([[FEAT-137]])
+
+    Both halves matter. ``ok`` alone is the trap alternative 2 of the design
+    falls into -- a tick spent successfully *reading* would advance a liveness
+    stamp and make a dead strategy look alive. Membership of
+    :data:`EFFECT_VERBS` alone is the other half -- a refused or failed create
+    is an attempt, not an effect.
+    """
+    return action.ok and action.verb in EFFECT_VERBS
+
+
+def last_effect_at(actions: Iterable[AgentAction]) -> float:
+    """When the last successful effect happened; ``0.0`` when there was none.
+
+    Pure, over rows the caller already holds, so the rule is testable without a
+    tick -- and it is a ``max`` rather than "the last matching row" because
+    nothing orders a tick's rows by time: every row of one tick shares that
+    tick's stamp (:func:`actions_from_tool_calls`).
+    """
+    return max((a.at for a in actions if is_effect(a)), default=0.0)
 
 
 def _deployed_name(verb: str, call: dict[str, Any]) -> str:

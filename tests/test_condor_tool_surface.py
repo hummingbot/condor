@@ -342,11 +342,31 @@ def test_no_condor_skill_names_a_funnel_era_action_as_a_tool():
     rather than a hand-copied deny-list that would rot the same way the skill
     did. Bare mentions count too: prose saying "``delete_agent`` refuses while
     the agent owns strategies" reads as a tool name even without parentheses.
-    """
-    from mcp_servers.condor.tools.trading_agent import _ACTION_OWNER
 
-    dead = set(_ACTION_OWNER) - _every_registered_tool()
+    The three short tables are subtracted because ``_ACTION_OWNER`` holds two
+    kinds of entry and only one of them is dead. Most are the funnel-era
+    *prefixed* spellings (``export_agent``), which no table admits and which a
+    skill must never write. But an action whose sanctioned spelling simply is
+    prefix-shaped — ``hub_browse``, ``hub_install``, ``publish_hub``
+    (FEAT-146), named that way because "browse" alone reads as a local verb and
+    ``publish`` was already taken by publish-to-stock — appears in
+    ``_AGENT_ACTIONS`` *and* here, so that a sibling family answers it with the
+    call that works instead of a bare "unknown action". Those are current
+    vocabulary, and a skill naming one is doing the right thing.
+    """
+    from mcp_servers.condor.tools.trading_agent import (
+        _ACTION_OWNER,
+        _AGENT_ACTIONS,
+        _CONTROL_ACTIONS,
+        _STRATEGY_ACTIONS,
+    )
+
+    live = set(_AGENT_ACTIONS) | set(_STRATEGY_ACTIONS) | set(_CONTROL_ACTIONS)
+    dead = set(_ACTION_OWNER) - _every_registered_tool() - live
     assert dead, "the compatibility map named no dead actions — did it move?"
+    # The exemption is narrow by construction: it covers only a name a tool
+    # still answers to today, so every funnel-era spelling stays in `dead`.
+    assert {"export_agent", "import_agent", "delete_agent"} <= dead
 
     skills = _committed_condor_skills()
     assert skills, "found no committed condor skills — the guard would pass vacuously"

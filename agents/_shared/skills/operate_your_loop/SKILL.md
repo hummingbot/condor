@@ -1,13 +1,16 @@
 ---
 name: operate_your_loop
 description: The lifecycle of a loop that is already running — finding your own instances,
-  pausing and resuming, and the difference between `stop` (halts the ticks, leaves positions
-  open) and `shutdown` (winds the positions down first). Every step is a `control_agent`
-  call; nothing here needs a YAML edit or a restart.
+  pausing and resuming, the difference between `stop` (halts the ticks, leaves positions
+  open) and `shutdown` (winds the positions down first), and getting a DEX swap out of
+  `SUBMITTED` without a redeploy. Almost every step is a `control_agent` call; nothing here
+  needs a YAML edit or a restart.
 when_to_use: A loop is already running and the user wants it stopped, paused, resumed, wound
   down, or listed — "stop the agent", "pause it", "kill it", "close everything and stop",
-  "what is running". Read this BEFORE improvising — `loop_builder` covers authoring and
-  launching, this covers everything after the loop is live.
+  "what is running" — or a swap of its is stuck waiting for confirmation ("the swap is
+  stuck", "it has been SUBMITTED for ages", "should I redeploy to clear it"). Read this
+  BEFORE improvising — `loop_builder` covers authoring and launching, this covers
+  everything after the loop is live.
 created: '2026-08-31T00:00:00Z'
 source: builtin
 ---
@@ -155,6 +158,61 @@ on-chain without its executor).
 Either way, tell the user what is still live. A loop that stopped cleanly while leaving
 funded positions unattended reads as "done" and is not.
 
+## 6. A swap stuck on `SUBMITTED`
+
+A DEX swap that will not leave `SUBMITTED` is **not** a reason to restart or redeploy the
+loop. It was at the Agent Builder Cup, because nothing else could get the entry out of
+that state, and it cost race time (GitHub #278). It is a swap-level problem with a
+swap-level fix, and the loop above it keeps ticking.
+
+**Why it happens.** A swap leaves `SUBMITTED` only after a status read *succeeds*. A
+Gateway that cannot be pinged, a `None` status, an unparseable network string or an
+exception all leave the row exactly as it was — on purpose, because a poll that could not
+check the chain must never be allowed to age a swap out. The cost is that the row stays
+`SUBMITTED` for as long as the condition lasts.
+
+**So `SUBMITTED` means unverifiable, not failed.** Nobody has been able to check. The
+swap may well have landed on-chain and the tokens may already be in the wallet. Never
+tell the user a stuck swap failed, never re-submit it as if it had not happened, and never
+size the next order as though the funds were still unspent — check first.
+
+The steps, in order:
+
+```
+search_swaps(status="SUBMITTED")             # how long has each been unverifiable?
+get_swap_status(transaction_hash="<hash>")   # the duration, for one hash
+```
+
+Both report **how long** a swap has been unverifiable and raise an alert past the
+threshold. That duration is the whole decision: seconds or a minute is an ordinary
+confirmation still in flight, and anything past the alert is stuck.
+
+1. **Read the chain yourself.** The explorer link on the swap is the only thing that can
+   say what actually happened. Do that before saying anything to the user about the
+   outcome.
+2. **Check the wallet.** `get_portfolio_overview()` against the expected tokens tells you
+   whether the swap landed, independently of what the swap row says.
+3. **Resolve it.**
+
+   ```
+   resolve_swap(transaction_hash="<hash>")
+   ```
+
+   This asks the **server** to read the chain and record the swap's real outcome. It
+   signs nothing, moves nothing, and Condor records no state of its own — the server's
+   answer is the swap's state. A server too old to offer the route says so plainly and
+   nothing changes; that is a capability answer, not an outage, and retrying it will not
+   help.
+4. **If the route is unavailable**, you are down to step 1 and step 2: report what the
+   chain shows, say plainly that the swap row is unverifiable, and continue from the
+   wallet balance rather than from the swap record. Still do not redeploy — a redeploy
+   does not resolve the swap either, it only hides the row from this session.
+
+Tell the user which of these happened. "The swap is unverifiable after 40 minutes, the
+explorer shows it confirmed, and I have resolved the record" and "the swap is
+unverifiable and I cannot tell yet" are different states, and the second one is an honest
+answer.
+
 ## Reference
 
 - `control_agent(action="get_state"|"set_state", agent_id=…, key=…, value=…, expires_in=…,
@@ -174,4 +232,6 @@ funded positions unattended reads as "done" and is not.
 - "Not found" means someone else's run (SEC-251) — say so, don't work around it.
 - Never tell a user to edit a deployed config, YAML or controller to stop a loop. It does
   nothing to the running session.
+- A swap stuck on `SUBMITTED` is unverifiable, never failed. Read the chain, then
+  `resolve_swap` — never redeploy the loop to clear one.
 - Verify afterwards, and report anything still open.

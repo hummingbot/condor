@@ -8,12 +8,22 @@ leave every pinned brain on the default model.
 """
 
 import asyncio
+import copy
 import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from condor import setup_llm
-from condor.acp.client import ACPClient, advertised_models
+from condor.acp import client as acp_client
+from condor.acp.client import (
+    ACPClient,
+    ModelPinError,
+    advertised_models,
+    resolve_acp,
+    resolve_model_id,
+)
 from condor.llm import readiness
 from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
 from utils import updater
@@ -29,6 +39,28 @@ CONFIG_OPTIONS_SESSION = {
             "options": [
                 {"value": "default", "name": "Default (recommended)"},
                 {"value": "opus[1m]", "name": "Opus 5"},
+                {"value": "sonnet", "name": "Sonnet 5"},
+                {"value": "haiku", "name": "Haiku 4.5"},
+            ],
+        },
+    ],
+}
+
+# The session/new a bridge 0.79 hands back when nothing pins its model:
+# measured 2026-10-18 with ANTHROPIC_MODEL unset. With the pin on the env the
+# bridge appended it to these options and reported it as currentValue, so every
+# pin matched itself and the switch was never sent (CORR-746).
+UNPINNED_SESSION = {
+    "sessionId": "s",
+    "configOptions": [
+        {
+            "id": "model",
+            "category": "model",
+            "currentValue": "default",
+            "options": [
+                {"value": "default", "name": "Default (recommended)"},
+                {"value": "opus[1m]", "name": "Opus 5"},
+                {"value": "claude-fable-5-1[1m]", "name": "Fable 5.1"},
                 {"value": "sonnet", "name": "Sonnet 5"},
                 {"value": "haiku", "name": "Haiku 4.5"},
             ],
@@ -65,17 +97,25 @@ def test_advertised_models_still_reads_the_legacy_block():
     assert config_id is None
 
 
-def _client_with_fake_peer(model: str):
+def _client_with_fake_peer(model: str, refuse: Exception | None = None):
+    """A client whose peer records requests instead of sending them.
+
+    ``returncode``/``cancel_all`` are what ``stop()`` reads: the failure paths
+    kill the bridge, and a fake that cannot be stopped would fail on the
+    teardown rather than on what the test is about.
+    """
     sent = []
 
     async def send_request(method, params, stdin, **kw):
         sent.append((method, params))
+        if refuse is not None:
+            raise refuse
         return {}
 
     client = ACPClient("claude-agent-acp", model=model)
     client._session_id = "s"
-    client._process = SimpleNamespace(stdin=None)
-    client._peer = SimpleNamespace(send_request=send_request)
+    client._process = SimpleNamespace(stdin=None, returncode=0)
+    client._peer = SimpleNamespace(send_request=send_request, cancel_all=lambda: None)
     return client, sent
 
 
@@ -102,6 +142,306 @@ def test_select_model_sends_nothing_when_already_on_it():
     asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
     assert sent == []
     assert client.active_model_id == "opus[1m]"
+
+
+# ── A pin the bridge cannot apply fails the session (issue #221) ──
+
+
+def _recorder(log: list):
+    async def stop():
+        log.append(True)
+
+    return stop
+
+
+def test_an_unoffered_pin_fails_the_session_naming_what_is_offered():
+    client, sent = _client_with_fake_peer("fable")
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+
+    message = str(err.value)
+    assert "'fable'" in message
+    # What to pin instead, and the default it is NOT silently running on.
+    assert "default, opus[1m], sonnet, haiku" in message
+    assert "opus[1m]" in message
+    assert sent == []  # nothing was switched, so nothing was sent
+
+
+def test_a_refused_switch_fails_the_session_instead_of_keeping_the_default():
+    client, sent = _client_with_fake_peer("haiku", refuse=RuntimeError("nope"))
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+
+    assert "session/set_config_option" in str(err.value)
+    assert "nope" in str(err.value)
+    assert sent  # it did try
+    # Never reported as the effective model: the session is not running on it.
+    assert client.active_model_id == "opus[1m]"
+
+
+def test_a_failed_pin_stops_the_bridge_rather_than_orphaning_it():
+    client, _ = _client_with_fake_peer("fable")
+    stopped = []
+    client.stop = _recorder(stopped)
+
+    with pytest.raises(ModelPinError):
+        asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+
+    assert stopped == [True]
+
+
+def test_an_unpinned_bridge_is_actually_asked_to_switch():
+    """The catalogue is honest, so the pin differs from current and is sent."""
+    client, sent = _client_with_fake_peer("haiku")
+
+    asyncio.run(client._select_model(UNPINNED_SESSION))
+
+    assert sent == [
+        (
+            "session/set_config_option",
+            {"sessionId": "s", "configId": "model", "value": "haiku"},
+        )
+    ]
+    assert client.active_model_id == "haiku"
+
+
+def test_an_unpinned_bridge_refuses_a_pin_it_does_not_offer():
+    """With the pin off the env, a bogus one cannot match itself any more."""
+    client, sent = _client_with_fake_peer("gpt-4o")
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(UNPINNED_SESSION))
+
+    message = str(err.value)
+    assert "'gpt-4o'" in message
+    assert "default, opus[1m], claude-fable-5-1[1m], sonnet, haiku" in message
+    assert sent == []
+    # Never reported as the effective model on /agents (FEAT-136's audit field).
+    assert client.active_model_id != "gpt-4o"
+
+
+def _session_as_bridge_079_answers(env: dict[str, str]) -> dict:
+    """``UNPINNED_SESSION``, plus whatever ``ANTHROPIC_MODEL`` does to it.
+
+    Measured 2026-10-18 against @agentclientprotocol/claude-agent-acp 0.79.0:
+    the variable's value is appended to the advertised options and reported as
+    ``currentValue``, unchecked — ``gpt-4o`` and ``sonnet-typo-xyz`` came back
+    exactly like a real alias.
+    """
+    session = copy.deepcopy(UNPINNED_SESSION)
+    pinned = env.get("ANTHROPIC_MODEL")
+    if pinned:
+        option = session["configOptions"][0]
+        option["options"].append({"value": pinned, "name": pinned})
+        option["currentValue"] = pinned
+    return session
+
+
+def test_a_bogus_pin_cannot_smuggle_itself_in_through_the_environment():
+    """The pin travels only on the protocol, so the bridge cannot echo it back.
+
+    While resolve_acp also exported it, the bridge advertised the pin and
+    reported it as current: target == current, nothing sent, no raise, and the
+    typo went on to /agents as the effective model (CORR-746).
+    """
+    _, env, pref = resolve_acp("claude-acp:gpt-4o")
+    client, sent = _client_with_fake_peer(pref)
+
+    with pytest.raises(ModelPinError) as err:
+        asyncio.run(client._select_model(_session_as_bridge_079_answers(env)))
+
+    assert "'gpt-4o'" in str(err.value)
+    assert sent == []
+    assert client.active_model_id != "gpt-4o"
+
+
+def test_an_unpinned_session_is_untouched_by_the_failure_path():
+    client, sent = _client_with_fake_peer("")
+    asyncio.run(client._select_model(CONFIG_OPTIONS_SESSION))
+    assert sent == []
+    assert client.active_model_id == "opus[1m]"
+
+
+# ── The doctor probe, which asks the bridge what it really offers ──
+
+
+def _patch_probe_client(monkeypatch, start, offers=("default", "sonnet", "haiku")):
+    """Replace the client ``probe_model_pin`` launches.
+
+    Returns ``(stopped, launched)``: whether the bridge was stopped, and the
+    ``(command, kwargs)`` it was launched with — the probe must launch it
+    *unpinned*, since an ANTHROPIC_MODEL handed to the bridge would make it
+    advertise the very pin under test.
+    """
+    stopped, launched = [], []
+
+    class _FakeClient:
+        def __init__(self, command, **kw):
+            launched.append((command, kw))
+            self.available_models = [{"modelId": m, "name": m} for m in offers]
+            self.active_model_id = offers[0] if offers else None
+
+        async def start(self):
+            await start()
+
+        async def stop(self):
+            stopped.append(True)
+
+    monkeypatch.setattr(acp_client, "ACPClient", _FakeClient)
+    return stopped, launched
+
+
+async def _started():
+    return None
+
+
+def test_probe_model_pin_passes_a_pin_the_bridge_offers(monkeypatch):
+    stopped, launched = _patch_probe_client(monkeypatch, _started)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is True
+    assert "'haiku'" in detail
+    assert stopped == [True]
+
+
+def test_probe_model_pin_asks_the_bridge_unpinned(monkeypatch):
+    """The pin must not be handed to the bridge: it would echo it back as offered."""
+    _, launched = _patch_probe_client(monkeypatch, _started)
+
+    asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    ((command, kwargs),) = launched
+    assert command == "claude-agent-acp"
+    assert not kwargs  # no model=, and no ANTHROPIC_MODEL in an extra_env
+
+
+def test_probe_model_pin_fails_a_pin_the_bridge_does_not_offer(monkeypatch):
+    _patch_probe_client(monkeypatch, _started)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:gpt-4o"))
+
+    assert ok is False
+    assert "'gpt-4o'" in detail
+    assert "default, sonnet, haiku" in detail  # what to pin instead
+
+
+def test_probe_model_pin_fails_a_bridge_that_offers_nothing(monkeypatch):
+    _patch_probe_client(monkeypatch, _started, offers=())
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is False  # a pin nothing can apply is not a pass
+    assert "offers: nothing" in detail
+
+
+def test_probe_model_pin_reports_a_silent_bridge_as_not_checkable(monkeypatch):
+    async def never():
+        await asyncio.sleep(5)
+
+    stopped, _ = _patch_probe_client(monkeypatch, never)
+
+    ok, detail = asyncio.run(
+        acp_client.probe_model_pin("claude-acp:haiku", timeout=0.05)
+    )
+
+    assert ok is None  # not a pass: nothing was verified
+    assert "did not answer" in detail
+    assert stopped == [True]
+
+
+def test_probe_model_pin_reports_a_bridge_that_will_not_launch(monkeypatch):
+    async def dead():
+        raise ConnectionError("ACP agent exited")
+
+    _patch_probe_client(monkeypatch, dead)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is None
+    assert "ACP agent exited" in detail
+
+
+def test_probe_model_pin_has_nothing_to_check_without_a_pin(monkeypatch):
+    def fail(*a, **kw):
+        raise AssertionError("no bridge should be launched for an unpinned key")
+
+    monkeypatch.setattr(acp_client, "ACPClient", fail)
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp"))
+
+    assert ok is True
+    assert "no model pinned" in detail
+
+
+# ── Matching a pin against a catalogue of bare aliases (CORR-745) ──
+#
+# The installed bridge answers an unpinned session/new with short aliases, not
+# full dated ids, so the matcher's reverse direction is exercised only here.
+# Unanchored, that direction accepted any string merely *containing* an alias,
+# and the doctor row that exists to catch a mistyped pin passed one.
+
+#: What @agentclientprotocol/claude-agent-acp 0.79.0 really advertises for an
+#: unpinned session, measured 2026-10-18 over one initialize + session/new
+#: handshake. A literal on purpose: the gate needs no bridge installed and no
+#: login, and a later bridge advertising other aliases cannot red it.
+MEASURED_ALIAS_CATALOGUE = [
+    {"modelId": "default", "name": "Default (recommended)"},
+    {"modelId": "opus[1m]", "name": "Opus 5"},
+    {"modelId": "claude-fable-5-1[1m]", "name": "Fable 5.1"},
+    {"modelId": "sonnet", "name": "Sonnet 5"},
+    {"modelId": "haiku", "name": "Haiku 4.5"},
+]
+
+
+@pytest.mark.parametrize("pin", ["sonnet-typo-xyz", "no-sonnet", "haiku!!", "SONNETT"])
+def test_a_pin_merely_containing_an_alias_resolves_to_nothing(pin):
+    assert resolve_model_id(pin, MEASURED_ALIAS_CATALOGUE) is None
+
+
+@pytest.mark.parametrize(
+    "pin,expected",
+    [
+        ("haiku", "haiku"),
+        ("sonnet", "sonnet"),
+        ("opus", "opus[1m]"),
+        ("claude-sonnet-4-6", "sonnet"),
+        ("claude-haiku-4-5-20251001", "haiku"),
+        # An advertised family carrying a context suffix: 'opus[1m]' is not a
+        # substring of this pin in either direction, so only the anchored
+        # family-plus-version reading resolves it.
+        ("claude-opus-4-6", "opus[1m]"),
+    ],
+)
+def test_an_alias_or_a_versioned_form_of_one_still_resolves(pin, expected):
+    assert resolve_model_id(pin, MEASURED_ALIAS_CATALOGUE) == expected
+
+
+@pytest.mark.parametrize("pin", ["sonnet-typo-xyz", "no-sonnet"])
+def test_the_doctor_probe_fails_a_typo_of_an_advertised_alias(monkeypatch, pin):
+    """The row added so a mistyped pin is caught must not report it as fine."""
+    _patch_probe_client(
+        monkeypatch, _started, offers=[m["modelId"] for m in MEASURED_ALIAS_CATALOGUE]
+    )
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin(f"claude-acp:{pin}"))
+
+    assert ok is False
+    assert f"{pin!r}" in detail
+    assert "default, opus[1m], claude-fable-5-1[1m], sonnet, haiku" in detail
+
+
+def test_the_doctor_probe_still_passes_a_pin_that_catalogue_offers(monkeypatch):
+    _patch_probe_client(
+        monkeypatch, _started, offers=[m["modelId"] for m in MEASURED_ALIAS_CATALOGUE]
+    )
+
+    ok, detail = asyncio.run(acp_client.probe_model_pin("claude-acp:haiku"))
+
+    assert ok is True
+    assert "'haiku' resolves to 'haiku'" in detail
 
 
 # ── Detecting an outdated install ──

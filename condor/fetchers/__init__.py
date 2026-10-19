@@ -19,7 +19,7 @@ Rules:
       depend on who asks) or its subject is immutable. Every such cache must be
       keyed so one server's — or one Gateway network's — answer can never be
       served for another, carry a comment saying why the caller cannot hold it
-      instead, and be listed here. There are eight today:
+      instead, and be listed here. There are ten today:
 
         * ``bots._ctrl_configs_cache`` — one bot's controller configs as fetched,
           keyed ``(server, bot_name)`` so a new bot invalidates nothing else,
@@ -29,6 +29,19 @@ Rules:
           bot_name=None)``, which the two config-editing bots routes call so a
           UI edit does not wait out the TTL. The TTL, not that hook, is the
           freshness bound: Telegram and MCP edit the same configs.
+
+        * ``executors._walk_cache`` — one cursor walk's rows as fetched
+          (``fetch_all_executors``), keyed ``(server, max_items, filter set)``
+          so the route's unfiltered page walk can never be served the agents'
+          ``status="RUNNING"`` rows, ``_WALK_TTL`` 2s, LRU-capped at
+          ``_WALK_CACHE_MAX`` (64), in-flight coalesced, never caching a
+          failure, ``clear_executor_cache()``. It exists because one agent tick
+          asks for the RUNNING set twice over — the adoption pass and the drift
+          provider, microseconds apart (PERF-736) — and neither caller can hold
+          it, since adoption runs before the providers and fetches only
+          conditionally. The 2s poll (``fetch_executors``) deliberately bypasses
+          it: its cadence *is* the TTL, so an entry would cost freshness without
+          collapsing any duplicate.
 
         * ``bot_performance._raw_snapshot_cache`` — the whole-server
           controller-performance rows as fetched (``fetch_latest_snapshots``),
@@ -93,6 +106,7 @@ from condor.fetchers.connectors import (
     is_cex_connector,
 )
 from condor.fetchers.executors import (
+    clear_executor_cache,
     create_executor,
     describe_executor_error,
     extract_executors_list,
@@ -142,6 +156,7 @@ __all__ = [
     "is_cex_connector",
     "fetch_executors",
     "fetch_all_executors",
+    "clear_executor_cache",
     "create_executor",
     "stop_executor",
     "describe_executor_error",

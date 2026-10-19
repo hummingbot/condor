@@ -42,6 +42,9 @@ Only an admin can copy a local agent into the shipped `agents/` library
 | An idea: "I want an agent for X" | **A — From scratch** (minimal first, layer on) |
 | A folder / files: instructions, controllers, configs, scripts | **B — From a folder** (inventory → discuss → build) |
 | One controller for an existing agent | skip both — follow `controller_sources` (see Controllers) |
+| A bundle someone exported (`*.condor-agent.json`) | skip both — `manage_agents(action="import", path=...)`, then review its muted routines before unmuting and report its `unmet` list |
+| A bundle of an agent this install ALREADY has | skip both — `manage_agents(action="upgrade", agent_slug=..., path=...)`; never import a second copy |
+| "Is there an agent that does X already?" / "get me one from the hub" | skip both — `manage_agents(action="hub_browse")`, then `hub_install` with the listing_id; review its muted routines before unmuting, and never read its badge back as a safety verdict |
 
 Label each message with the current step, e.g. `[B2 — Discuss]`. Only the step label as a
 header; status as key: value.
@@ -283,10 +286,12 @@ instructions); validate a cheaper pick with a dry run. **Watch/report loop, priv
 zero cost** → a loaded local model or a cheap OpenRouter one. Override per launch with
 `config={"agent_key": "…"}`. One pick with a one-line why; it's easy to change later.
 
-**Server.** Leave `server_name` empty: it means "follow the chat's server", the only
-value that travels to other installs. Naming the current server **pins** the agent (its
-MCP subprocess and every loop it deploys) to it forever. Pin only when the user says so;
-it can be changed later from the agent's page.
+**Server.** Leave `server_name` empty: it means "follow the owner's server" — their
+default, else the first server they can reach — the only value that travels to other
+installs. A loop of theirs resolves that once and uses it for both its data and its
+trading tools, so it does not follow the default of the chat it was started from. Naming
+the current server **pins** the agent (its MCP subprocess and every loop it deploys) to it
+forever. Pin only when the user says so; it can be changed later from the agent's page.
 
 **Tools allowlist.** Empty = unrestricted — the default. The allowlist binds on every
 model, ACP bridges included: a tool it omits is never mounted. A non-empty list must name
@@ -319,6 +324,54 @@ reads the shared library (`routine_cookbook`, `controller_sources`, `loop_builde
 `manage_agents(action="update", agent_slug=…, instructions=…)`.
 `manage_agents(action="delete", agent_slug=…)` refuses while the agent owns loops (delete
 them first with `manage_loops(action="delete", loop_id=…)`) and always for a shipped agent.
+
+**Handing an agent to someone else.** `manage_agents(action="export", agent_slug=…)`
+writes one file under `data/exports/` and returns its path — send that. Two optional
+arguments are worth filling in, and nothing else about the manifest is yours to write:
+
+| Argument | What to put in it |
+|---|---|
+| `notes` | The changelog for this version: what changed since the last bundle of this agent. Omit it on a first export. |
+| `author_name` | Who to credit. Say plainly that it is **unverified** — Condor signs nothing and the receiving install cannot check it. |
+
+The rest the export derives and you should read back to the user rather than invent:
+`agent_uid` (the agent's identity, the same on every install that imported this bundle,
+whatever it is named there), `version` (bumped only when the agent's content actually
+changed — re-exporting an untouched agent returns the same number), and `requires` (the
+connectors, tools, model and skills read out of the agent's own files).
+
+`manage_agents(action="import", path=…, agent_slug=<new name>)` is the other door. Its
+result carries `unmet`: what this install cannot give the agent — a connector with no
+credentials, a shared playbook it does not have, a tool it does not mount, a model it had
+to substitute. **None of it blocks the import**, and everything arrives muted anyway, so
+report the list and let the user decide what to fix before unmuting.
+
+**A newer bundle of an agent they already have is an upgrade, not an import.**
+`manage_agents(action="upgrade", agent_slug=<the installed one>, path=…)`. Importing it
+instead gives them two agents with one name and a forked memory, and nothing to migrate
+with — so never answer a collision with `<slug>_2` when the bundle is the same agent.
+The upgrade keeps the agent's store, config, mutes, journals and sessions, and keeps any
+file they had edited here.
+
+Read its result out rather than summarising it:
+
+| Field | What to say |
+|---|---|
+| `blockers` | Why it did not happen, verbatim, and nothing was written. A different agent, nothing saying this bundle is its upstream, an older version, a shipped agent, or a loop running right now — the last one is fixed by stopping the loop and asking again. |
+| `files` | The per-path diff. Name the `conflict` and `local_only` rows explicitly: those kept **their** copy, and a conflict carries the bundle's copy so they can look at it and decide. |
+| `mutes` | What arrived switched off. Only genuinely new items; an item they unmuted stays unmuted, and a changed one is not re-muted. |
+| `warnings` | Read them. `same_version_new_build` means the same version number with different files. |
+
+Every replaced routine needs allowing again before it runs — consent is keyed by content.
+Nothing is started by an upgrade.
+
+**The hub, for handing an agent to a stranger.** Three more actions, same gate:
+
+| Action | What to do with it |
+|---|---|
+| `hub_browse` | What the hub offers (`agent_slug` doubles as a search term). No account needed. Each row's `badge` is **provenance, never a verdict**: `validated` means a human reviewed ONE submitted revision once, `community` means nobody did. Say which it is and say what it is not — not a signature, Condor verifies nothing against it, and it does not shorten the review. Never report a badge as a reason something is safe to run. |
+| `hub_install` | Install a listing (`path` is the **listing_id**, not a file path; `agent_slug` renames it if the name is taken). The bytes are digest-checked before anything parses them, and then this is the import door exactly: a listing of an agent they already have becomes an UPGRADE automatically — `verb` says which happened — everything arrives muted, no routine may execute until allowed, nothing is started. Read `findings` and `unmet` out; neither blocks it. |
+| `publish_hub` | **Admin only, and confirm first.** Not the same as `publish`, which copies an agent into the repo's tracked library; this uploads it for strangers. It needs the install's token (Settings → Agents) and cannot take one as an argument — a token in a tool argument is a token in a transcript. It sends the same bytes `export` writes, so it refuses outright on a value that can only be a secret. Publishing sends content off the box and is irreversible in practice: unpublishing removes the listing, it does not recall a download. |
 
 ## Rules
 - **From scratch: minimal first.** Role + purpose, then prove it with an `ask`; routines

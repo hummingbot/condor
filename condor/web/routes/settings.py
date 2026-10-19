@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from condor.fetchers.api_server import (
     ApiServerSettingsUnsupported,
@@ -947,6 +948,21 @@ async def connector_config_map(
         raise upstream_error("Failed to fetch connector config map", e)
 
 
+def _restart_required(result: object) -> bool:
+    """Whether an upstream connector write says a restart is needed to apply it.
+
+    hummingbot-api answers a credential write with ``restart_required`` when the
+    new key only reaches already-running bots after a restart. Condor returned
+    the upstream body verbatim under ``result`` and nothing ever read it, so the
+    operator was told "added" and never told the running bots were still on the
+    old key — the same gap as a strategy config write reporting ``updated`` and
+    not reaching a live session (CORR-732). Lifted to the top level so the flag
+    is part of Condor's own answer rather than something every caller has to go
+    digging for; a server that does not send it reads as no restart needed.
+    """
+    return bool(isinstance(result, dict) and result.get("restart_required"))
+
+
 @router.post("/credentials")
 async def add_credential(
     req: AddCredentialRequest,
@@ -972,7 +988,11 @@ async def add_credential(
     # Outside the try: the credential write already succeeded, and an
     # exception here must not be swallowed and re-reported as a failed add.
     get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
-    return {"added": True, "result": result}
+    return {
+        "added": True,
+        "restart_required": _restart_required(result),
+        "result": result,
+    }
 
 
 @router.delete("/credentials/{connector}")
@@ -993,7 +1013,11 @@ async def delete_credential(
         # Invalidate every credential-derived cache so the removed key
         # disappears immediately (including VENUES' `credentialed` trait).
         get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
-        return {"deleted": True, "result": result}
+        return {
+            "deleted": True,
+            "restart_required": _restart_required(result),
+            "result": result,
+        }
     except Exception as e:
         logger.exception(
             "Failed to delete credentials for '%s' on '%s'", connector, server
@@ -1212,3 +1236,60 @@ async def set_telemetry_settings(
 
     applied = consent.deny() if level == consent.OFF else consent.set_level(level)
     return {"level": applied, "consent": consent.state()}
+
+
+# ── The agent hub's publish token (FEAT-146) ──
+
+
+class HubTokenRequest(BaseModel):
+    """The Botcamp token, pasted. An empty string clears it.
+
+    Pasted and not negotiated: Condor's own accounts are Telegram-derived
+    (``create_jwt``) and there is no external identity provider anywhere in the
+    product, while the dashboard is served on a configurable ``WEB_PORT`` so an
+    OAuth redirect URI would differ per install. Taking an outside credential
+    as a value the operator pastes is how this product already does it —
+    ``ApiKeysSettings``, ``ConnectHyperliquid``, ``ImportGatewayWallet``.
+    """
+
+    token: str = ""
+
+
+@router.get("/hub-token")
+async def get_hub_token(user: WebUser = Depends(get_current_user)):
+    """Whether a publish token is set. **Never its value.**
+
+    There is no route, here or anywhere, that reads the token back out. A
+    "reveal" control would be a second copy of the credential on a screen and
+    in an HTTP response for no capability the operator does not already have —
+    they can paste a new one. ``can_change`` mirrors the sharing veto's shape
+    so the panel disables the field rather than offering a write that 403s.
+    """
+    from condor import hub
+
+    cm = get_config_manager()
+    return {"set": bool(hub.token()), "can_change": cm.is_admin(user.id)}
+
+
+@router.put("/hub-token")
+async def update_hub_token(
+    req: HubTokenRequest, user: WebUser = Depends(get_current_user)
+):
+    """Store or clear the token. Admin-only, and the answer carries no value.
+
+    Install-wide, like the telemetry level above and for the same reason: there
+    is one token, every publish from this box is made with it, and a claim
+    created under it is made in the admin's name at an outside service.
+    """
+    from condor import hub
+
+    cm = get_config_manager()
+    if not cm.is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The hub token is an install-wide credential; only the admin "
+                "can change it"
+            ),
+        )
+    return {"set": hub.set_token(req.token)}

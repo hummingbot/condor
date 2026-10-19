@@ -11,6 +11,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
@@ -22,6 +23,16 @@ from .jsonrpc import JSONRPCPeer
 from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
+
+
+class ModelPinError(RuntimeError):
+    """A model pin the bridge cannot apply: it is not offered, or the switch failed.
+
+    Raised instead of logging and running the session on the bridge's default,
+    which is how a ``claude-acp:haiku`` brain came to bill at Opus rates with
+    only a ``log.warning`` to say so (issue #221). A pin is a cost and a
+    comparability statement, so a session that cannot honour it must not start.
+    """
 
 
 #: Values an adapter sends when it means "no name". ``undefined`` is a
@@ -322,7 +333,12 @@ _CLAUDE_SESSION_ENV_VARS = (
 # The suffix is selected at runtime via session/set_model against the agent's
 # advertised models (see ACPClient._select_model), which resolves aliases
 # ("opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
-# NOTE: claude-agent-acp ignores ANTHROPIC_MODEL; the protocol is the real lever.
+# NOTE: the protocol is the only channel a pin travels on. ANTHROPIC_MODEL is
+# deliberately NOT exported (it was until CORR-746). Bridge 0.79 does read that
+# variable (0.21 did not), but it reads it by *trusting* it: the value is
+# appended to the models it advertises and reported as current, unchecked — so
+# the env channel cannot tell a real model from a typo, and while a pin was on
+# it every pin "applied" and _select_model's refusal was unreachable.
 _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 
 
@@ -334,21 +350,34 @@ def resolve_acp(agent_key: str) -> tuple[str, dict[str, str], str]:
     no preference, so the agent keeps its own default. Non-Claude bases ignore any
     suffix.
 
-    The suffix is returned as ``model-pref`` so the caller can select it over the
-    ACP protocol (``session/set_model``) — the ``claude-agent-acp`` bridge does NOT
-    read ``ANTHROPIC_MODEL`` (it picks from Claude Code ``settings.model`` or the
-    first advertised model), so env is not a reliable channel. We still set
-    ``ANTHROPIC_MODEL`` for any non-bridge consumer, but ACPClient drives the model
-    via the protocol.
+    The suffix is returned as ``model-pref`` and on no other channel, so the
+    caller selects it over the ACP protocol (``session/set_model``) — the one
+    channel that can fail loudly. The env overlay is empty for the Claude bases:
+    exporting the pin as ``ANTHROPIC_MODEL`` had bridge 0.79 advertise whatever
+    string it was handed and report it as current, so every pin "applied", typos
+    included (CORR-746). Nothing in this repository reads the variable.
     """
     base, _, model = agent_key.partition(":")
     command = ACP_COMMANDS.get(base, ACP_COMMANDS["claude-code"])
     env: dict[str, str] = {}
     model_pref = ""
     if model and base in _CLAUDE_ACP_BASES:
-        env["ANTHROPIC_MODEL"] = model
         model_pref = model
     return command, env, model_pref
+
+
+_CONTEXT_HINT = re.compile(r"\[\d+m\]$")
+_VERSION_TAIL = re.compile(r"^[-.]?\d[\d.\-]*$")
+
+
+def _canonical_family(value: str) -> str:
+    """``value`` without the vendor prefix or the trailing ``[1m]`` context hint.
+
+    ``opus[1m]`` and ``claude-opus-4-6`` are the same family stated two ways;
+    both reduce to something starting ``opus``, so one can be tested as a prefix
+    of the other.
+    """
+    return _CONTEXT_HINT.sub("", value).removeprefix("claude-")
 
 
 def resolve_model_id(preference: str, available_models: list[dict]) -> str | None:
@@ -356,9 +385,16 @@ def resolve_model_id(preference: str, available_models: list[dict]) -> str | Non
     advertised ``modelId`` from the ACP agent's ``availableModels``.
 
     The ``session/set_model`` request needs an EXACT id — the bridge does not
-    fuzzy-match there (unlike its own settings.model handling). We mirror its
-    matching: exact id/name, then substring, so a short alias like "sonnet" still
-    resolves. Returns ``None`` if nothing matches (caller keeps the default).
+    fuzzy-match there (unlike its own settings.model handling). Matching is
+    exact id/name, then a forward substring so a short alias like "sonnet"
+    resolves against a full id, then a *versioned form* of an advertised family:
+    a pin may name the family an id advertises plus a version or date tail, the
+    way ``claude-opus-4-6`` names the advertised ``opus[1m]``. Nothing else
+    matches in that direction — an unanchored test would accept any string
+    merely containing an alias, so a typo like ``sonnet-typo-xyz`` would pass as
+    ``sonnet`` (CORR-745). Returns ``None`` if nothing matches, which the caller
+    treats as a failure, not as a reason to keep the default
+    (:class:`ModelPinError`).
     """
     if not preference or not available_models:
         return None
@@ -372,12 +408,37 @@ def resolve_model_id(preference: str, available_models: list[dict]) -> str | Non
         mid, name = fields(m)
         if pref in (mid, name):
             return m.get("modelId")
-    # Substring match either direction (handles "sonnet" ⊂ "claude-sonnet-4-6").
+    # Forward substring (handles "sonnet" ⊂ "claude-sonnet-4-6"), or an
+    # advertised family plus a version tail ("claude-opus-4-6" → "opus[1m]").
+    canon_pref = _canonical_family(pref)
     for m in available_models:
         mid, name = fields(m)
-        if (mid and (pref in mid or mid in pref)) or (name and pref in name):
+        if (mid and pref in mid) or (name and pref in name):
             return m.get("modelId")
+        canon_mid = _canonical_family(mid)
+        if canon_mid and canon_pref.startswith(canon_mid):
+            if _VERSION_TAIL.match(canon_pref[len(canon_mid) :]):
+                return m.get("modelId")
     return None
+
+
+def model_pin_failure(problem: str, available: list[dict], current: str | None) -> str:
+    """The sentence an unappliable pin fails with: the problem, then the way out.
+
+    One wording for the session that refuses to start and for the ``condor
+    doctor`` row that refuses to pass it, because they are the same complaint
+    and a user who reads one has already read the other.
+    """
+    offered = (
+        ", ".join(str(m.get("modelId")) for m in available if m.get("modelId"))
+        or "nothing"
+    )
+    return (
+        f"ACP model pin could not be applied: {problem}. It offers: {offered} "
+        f"(its default is {current or 'unknown'}). No session was started — pin "
+        f"one of those, or drop the ':model' suffix from the agent key to accept "
+        f"the default."
+    )
 
 
 def advertised_models(session: dict) -> tuple[list[dict], str | None, str | None]:
@@ -536,9 +597,13 @@ class ACPClient:
         # sends arrives as a user turn and loses the argument (FEAT-025).
         self.system_prompt = system_prompt
         # Requested model preference (e.g. "sonnet"); selected over the ACP
-        # protocol after session/new since the bridge ignores ANTHROPIC_MODEL.
+        # protocol after session/new, which is where an unappliable pin fails.
         self.model = model
         self.active_model_id: str | None = None  # resolved id actually in effect
+        # What the adapter said it offers, as of the last session/new. Read by
+        # :func:`probe_model_pin`, which has to know what a bridge's catalogue
+        # really is to say whether a pin is in it.
+        self.available_models: list[dict] = []
         self._process: asyncio.subprocess.Process | None = None
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
@@ -690,10 +755,10 @@ class ACPClient:
             .get("image")
         )
 
-        # Select the requested model over the ACP protocol. The claude-agent-acp
-        # bridge does NOT honor ANTHROPIC_MODEL — it defaults to Claude Code's
-        # settings.model or the first advertised model — so the only reliable way
-        # to pin (e.g.) Sonnet is to select an exact advertised id over ACP.
+        # Select the requested model over the ACP protocol: the only channel on
+        # which a pin can be checked against what the bridge really offers. Env
+        # is not one (see resolve_acp), and without a pin the bridge falls back
+        # to Claude Code's settings.model or the first model it advertises.
         await self._select_model(result)
 
     async def _select_model(self, session: dict) -> None:
@@ -701,24 +766,24 @@ class ACPClient:
 
         ``session`` is the ``session/new`` response. Bridges advertise models in
         one of two shapes (:func:`advertised_models`), and each is set through
-        its own request. No-op when no model was requested or it can't be
-        matched — we log either way so the effective model is verifiable from
-        the bot logs rather than the model's self-report.
+        its own request. No-op when no model was requested; a pin that cannot be
+        applied raises :class:`ModelPinError` instead of running the session on
+        the bridge's default. We log the applied pin too, so the effective model
+        is verifiable from the bot logs rather than the model's self-report.
         """
         available, current, config_id = advertised_models(session)
+        self.available_models = available
         self.active_model_id = current
         if not self.model:
             log.info("ACP session %s using default model %s", self._session_id, current)
             return
         target = resolve_model_id(self.model, available)
         if not target:
-            log.warning(
-                "ACP model %r not found in advertised models %s; keeping default %s",
-                self.model,
-                [m.get("modelId") for m in available],
+            raise await self._model_pin_error(
+                f"this bridge does not offer the pinned model {self.model!r}",
+                available,
                 current,
             )
-            return
         if target == current:
             log.info(
                 "ACP session %s already on requested model %s", self._session_id, target
@@ -736,17 +801,34 @@ class ACPClient:
             params = {"sessionId": self._session_id, "modelId": target}
         try:
             await self._peer.send_request(method, params, self._process.stdin)
-            self.active_model_id = target
-            log.info(
-                "ACP session %s model set to %s (requested %r)",
-                self._session_id,
-                target,
-                self.model,
-            )
-        except Exception:
-            log.exception(
-                "ACP %s failed for %r; staying on %s", method, self.model, current
-            )
+        except Exception as exc:
+            raise await self._model_pin_error(
+                f"the bridge refused {method} for the pinned model "
+                f"{self.model!r} ({target!r}): {exc}",
+                available,
+                current,
+            ) from exc
+        self.active_model_id = target
+        log.info(
+            "ACP session %s model set to %s (requested %r)",
+            self._session_id,
+            target,
+            self.model,
+        )
+
+    async def _model_pin_error(
+        self, problem: str, available: list[dict], current: str | None
+    ) -> ModelPinError:
+        """Stop the bridge and build the error for a pin it cannot apply.
+
+        The bridge is killed here rather than left for the caller: ``start()``
+        guards the handshake but this runs after it, so an unappliable pin would
+        otherwise orphan a ``claude`` process and every MCP server under it for
+        the life of the bot. Building the error rather than raising it keeps the
+        ``raise ... from exc`` chain readable at the two call sites.
+        """
+        await self.stop()
+        return ModelPinError(model_pin_failure(problem, available, current))
 
     async def stop(self) -> None:
         """Terminate the subprocess and ALL descendants (claude + MCP servers).
@@ -1382,3 +1464,57 @@ class ACPClient:
                 "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
             }
         return {"outcome": {"outcome": "cancelled"}}
+
+
+#: How long :func:`probe_model_pin` gives a bridge to hand over a session. Far
+#: short of ``TIMEOUTS.agent_handshake`` (120s): a diagnostic that a human is
+#: waiting on reports "could not be checked" rather than stalling `make
+#: install` for two minutes on a bridge that will never answer.
+_PIN_PROBE_TIMEOUT = 30
+
+
+async def probe_model_pin(
+    agent_key: str, *, timeout: float = _PIN_PROBE_TIMEOUT
+) -> tuple[bool | None, str]:
+    """Can a bridge actually apply ``agent_key``'s ``:model`` pin? ``(ok, detail)``.
+
+    ``True`` the pin matches a model the bridge offers (or the key pins none),
+    ``False`` it does not — ``detail`` is :func:`model_pin_failure`'s sentence,
+    naming what the bridge does offer — and ``None`` the bridge could not be
+    asked at all (not installed, not logged in, no answer in time), which is a
+    "could not be checked", never a pass.
+
+    The bridge is launched **unpinned**, which is the whole trick: bridge 0.79 —
+    contrary to the comment this module carried for two versions — honours
+    ``ANTHROPIC_MODEL``, appends its value to the models it advertises and
+    reports it as the current one, whatever the string (measured 2026-10-18:
+    ``claude-acp:gpt-4o`` came back "advertised"). ``resolve_acp`` no longer
+    puts the pin there (CORR-746), but ``ACPClient.start`` copies
+    ``os.environ``, and ``utils.config`` loads ``.env`` into the process, so a
+    variable the operator set can still reach the child. Handing it nothing of
+    our own is what keeps the catalogue it states its real one, and the pin is
+    matched against that with the same :func:`resolve_model_id` a session uses.
+
+    It launches a bridge and throws the session away, so it belongs to a
+    diagnostic (``condor doctor``), not to a hot path.
+    """
+    command, _env, pin = resolve_acp(agent_key)
+    if not pin:
+        return True, "no model pinned — the bridge default is used"
+    client = ACPClient(command)
+    try:
+        await asyncio.wait_for(client.start(), timeout=timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        return None, f"could not be checked: the bridge did not answer in {timeout}s"
+    except Exception as exc:
+        return None, f"could not be checked: {exc}"
+    finally:
+        await client.stop()
+    target = resolve_model_id(pin, client.available_models)
+    if not target:
+        return False, model_pin_failure(
+            f"this bridge does not offer the pinned model {pin!r}",
+            client.available_models,
+            client.active_model_id,
+        )
+    return True, f"{pin!r} resolves to {target!r}"

@@ -120,7 +120,7 @@ async def test_boot_restarts_only_the_run_that_opted_in(tmp_path, monkeypatch):
     supervisor = LoopSupervisor()
     restarted: list[str] = []
 
-    async def fake_restart(status):
+    async def fake_restart(status, session_dir=None):
         restarted.append(status["strategy_slug"])
         return True
 

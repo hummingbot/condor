@@ -24,6 +24,7 @@ from condor.fetchers.bot_performance import (
     clear_snapshot_cache,
     extract_snapshots,
     fetch_all_bot_performance,
+    resolve_bots,
 )
 
 
@@ -358,6 +359,7 @@ def test_bot_executor_rows_from_positions():
     assert r["fees"] == 0.3
     assert r["entry_price"] == 60.0
     assert r["amount"] == 120.0  # abs(2.0) * 60.0 quote notional
+    assert r["amount_known"] is True  # both fields read, size is a fact
     assert r["timestamp"] > 0  # ISO parsed to epoch
 
 
@@ -369,6 +371,149 @@ def test_flat_controller_yields_no_rows_but_counts_pnl():
     # realized/unrealized still aggregate even with no open positions
     assert agg["bot"]["realized_pnl_quote"] == 1.0
     assert agg["bot"]["unrealized_pnl_quote"] == 2.0
+
+
+# ── A controller position's own sizing verdict (CORR-742) ──
+#
+# The row's quote size is derived, ``amount`` x ``breakeven_price`` off the
+# upstream ``positions_summary``, so it has an absence mode of its own that the
+# raw-executor builder's verdict (CORR-740) does not describe. Without one,
+# ``executors._size_unknown`` read the missing key as known-zero and a position
+# holding real base at no usable price entered the risk book at $0 *and* was
+# reported as priced, leaving ``book_trusted`` True over exposure of unknown
+# size -- the very failure CORR-740 closed, reached through the other builder.
+
+
+def _rows_for(pos):
+    agg = _aggregate_by_bot(
+        [_snap_with_positions("bot", "dn_CL_mm", "2026-07-24T18:00:00+00:00", [pos])]
+    )
+    return bot_executor_rows(agg["bot"])
+
+
+_UNPRICED_POSITION = {
+    "connector_name": "hyperliquid",
+    "trading_pair": "XYZ:CL-USD",
+    "side": "TradeType.SELL",
+    "amount": 2.0,
+}
+_ROW_ID = "dn_CL_mm:XYZ:CL-USD"
+
+
+@pytest.mark.parametrize(
+    "pos,known",
+    [
+        ({"amount": 2.0, "breakeven_price": 60.0}, True),
+        ({"amount": 2.0}, False),
+        ({"amount": 2.0, "breakeven_price": 0}, False),
+        ({"amount": 2.0, "breakeven_price": None}, False),
+        ({"amount": -2.0}, False),
+        ({"amount": 0, "breakeven_price": 60.0}, True),
+        ({"amount": 0}, True),
+    ],
+    ids=[
+        "priced",
+        "no-breakeven",
+        "breakeven-zero",
+        "breakeven-null",
+        "short-no-breakeven",
+        "flat-priced",
+        "flat",
+    ],
+)
+def test_a_controller_position_carries_its_own_sizing_verdict(pos, known):
+    """Unlike a quote sizing field, a price of 0 over held base is not a fact.
+
+    ``abs(amount) * 0`` says nothing about a position holding base, so an absent
+    and a present-zero ``breakeven_price`` are the same answer: unknown. A
+    genuinely flat position is known-zero and must refuse nothing.
+    """
+    rows = _rows_for({"trading_pair": "XYZ:CL-USD", **pos})
+
+    assert len(rows) == 1
+    assert rows[0]["amount_known"] is known
+
+
+def test_every_controller_row_carries_the_verdict():
+    agg = _aggregate_by_bot(
+        [
+            _snap_with_positions(
+                "bot",
+                "dn_CL_mm",
+                "2026-07-24T18:00:00+00:00",
+                [
+                    {"trading_pair": "A-USD", "amount": 2.0, "breakeven_price": 60.0},
+                    {"trading_pair": "B-USD", "amount": 2.0},
+                ],
+            )
+        ]
+    )
+
+    assert [r["amount_known"] for r in bot_executor_rows(agg["bot"])] == [True, False]
+
+
+def _provider_data_for(monkeypatch, rows, asked=None):
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    async def _fake(client, agent_id, **_kw):
+        return AgentPerformance(agent_id=agent_id, executors=list(rows))
+
+    async def _price(client, *_a, **_kw):
+        if asked is not None:
+            asked.append(_a)
+        return 150.0
+
+    monkeypatch.setattr("condor.agents.performance.fetch_agent_performance", _fake)
+    monkeypatch.setattr("condor.fetchers.market_data.fetch_current_price", _price)
+    return asyncio.run(ExecutorsProvider().execute(object(), {}, agent_id="a_1")).data
+
+
+def test_an_unpriced_controller_position_unbooks_the_risk_book(monkeypatch):
+    """Driven through the real consumers: provider -> tick -> ``book_trusted``."""
+    from tests.test_executor_adoption import _book_engine
+
+    asked: list = []
+    data = _provider_data_for(monkeypatch, _rows_for(_UNPRICED_POSITION), asked)
+
+    assert data["total_exposure"] == 0.0
+    assert data["unpriced_exposure"] == [_ROW_ID]
+    # Reported, not priced: the row carries no base ``config.amount`` to value,
+    # so a live feed answering $150 is never even asked (CORR-740's answer).
+    assert asked == []
+
+    book, captured = _book_engine(
+        adopted=[],
+        own_rows=data["executors"],
+        own_exposure=data["total_exposure"],
+        own_unpriced=data["unpriced_exposure"],
+    )
+    asyncio.run(book._gather_tick_context(client=None))
+
+    assert not captured["state"].book_trusted
+    assert _ROW_ID in captured["state"].drift_reason
+
+
+def test_a_priced_controller_position_still_counts_as_valued_exposure(monkeypatch):
+    """The other half: the fix must not refuse creates over a sized position."""
+    from tests.test_executor_adoption import _book_engine
+
+    data = _provider_data_for(
+        monkeypatch, _rows_for({**_UNPRICED_POSITION, "breakeven_price": 60.0})
+    )
+
+    assert data["total_exposure"] == pytest.approx(120.0)
+    assert data["unpriced_exposure"] == []
+
+    book, captured = _book_engine(
+        adopted=[],
+        own_rows=data["executors"],
+        own_exposure=data["total_exposure"],
+        own_unpriced=data["unpriced_exposure"],
+    )
+    asyncio.run(book._gather_tick_context(client=None))
+
+    assert captured["state"].book_trusted
+    assert captured["state"].total_exposure == pytest.approx(120.0)
 
 
 # ── Merge into AgentPerformance ──
@@ -1556,3 +1701,93 @@ def test_pnl_series_is_empty_without_an_owned_bot():
 
     assert asyncio.run(fetch_agent_pnl_series(object(), [], since=1.0)) == []
     assert asyncio.run(fetch_agent_pnl_series(object(), ["b"], since=0.0)) == []
+
+
+# ---------------------------------------------------------------------------
+# CORR-725: a performance object that says nothing is not a flat book
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_reports_the_reading_state_tri_state():
+    """``float(perf.get(..., 0) or 0)`` makes "no data" and "flat" the same
+    number. The state travels alongside the figures so a reader can tell them
+    apart (GitHub #272: "'No reading' is unknown, not zero")."""
+    agg = _aggregate_by_bot(
+        [
+            {"bot_name": "no_perf", "controller_id": "c1"},
+            {"bot_name": "bad_perf", "controller_id": "c2", "performance": "nope"},
+            {"bot_name": "empty_perf", "controller_id": "c3", "performance": {}},
+            {
+                "bot_name": "real_perf",
+                "controller_id": "c4",
+                "performance": {"realized_pnl_quote": 0.0, "volume_traded": 0.0},
+            },
+        ]
+    )
+
+    assert agg["no_perf"]["reading"] == "missing"
+    assert agg["bad_perf"]["reading"] == "missing"
+    assert agg["empty_perf"]["reading"] == "empty"
+    # A controller that genuinely reports zeros is a reading, not an absence.
+    assert agg["real_perf"]["reading"] == "ok"
+
+    # The numeric fields are all 0.0 in every one of the four, which is exactly
+    # why the state is needed: the figures cannot carry the difference.
+    for bn in ("no_perf", "bad_perf", "empty_perf", "real_perf"):
+        bot = agg[bn]
+        assert bot["realized_pnl_quote"] == 0.0
+        assert bot["unrealized_pnl_quote"] == 0.0
+        assert bot["volume_traded"] == 0.0
+        # Per-controller too, so a reader of the rows is not back to guessing.
+        assert bot["controllers"][0]["reading"] == bot["reading"]
+
+
+def test_a_flat_shaped_snapshot_still_reads_ok():
+    """``performance`` absent is only ``missing`` when nothing was reported --
+    a snapshot carrying the fields at its top level has the data, just not
+    nested."""
+    agg = _aggregate_by_bot(
+        [{"bot_name": "flat", "controller_id": "c", "volume_traded": 500.0}]
+    )
+
+    assert agg["flat"]["reading"] == "ok"
+    assert agg["flat"]["volume_traded"] == 500.0
+
+
+def test_one_reporting_controller_lifts_the_bots_reading():
+    agg = _aggregate_by_bot(
+        [
+            {"bot_name": "mixed", "controller_id": "quiet", "performance": {}},
+            {
+                "bot_name": "mixed",
+                "controller_id": "loud",
+                "performance": {"volume_traded": 10.0},
+            },
+        ]
+    )
+
+    assert agg["mixed"]["reading"] == "ok"
+    assert [c["reading"] for c in agg["mixed"]["controllers"]] == ["empty", "ok"]
+
+
+def test_resolve_bots_carries_the_reading_across_instances():
+    """``_merge_instance_aggregates`` pools the figures of a redeployed base;
+    the reading must be pooled too, or an instance that reports would be hidden
+    behind one that does not."""
+    all_perf = _aggregate_by_bot(
+        [
+            {"bot_name": "base-1", "controller_id": "a", "performance": {}},
+            {
+                "bot_name": "base-2",
+                "controller_id": "b",
+                "performance": {"volume_traded": 3.0},
+            },
+        ]
+    )
+    all_perf["base"] = all_perf.pop("base-1")
+    all_perf["base"]["bot_name"] = "base"
+
+    resolved = resolve_bots(all_perf, ["base"], live_names={"base", "base-2"})
+
+    assert resolved["base"]["reading"] == "ok"
+    assert resolved["base"]["volume_traded"] == 3.0

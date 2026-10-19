@@ -806,6 +806,12 @@ async def manage_agents(
         "update",
         "delete",
         "publish",
+        "export",
+        "import",
+        "upgrade",
+        "hub_browse",
+        "hub_install",
+        "publish_hub",
         # Legacy funnel-era spellings this family still answers to.
         "list_agent_definitions",
         "create_agent",
@@ -813,6 +819,9 @@ async def manage_agents(
         "update_agent",
         "delete_agent",
         "publish_agent",
+        "export_agent",
+        "import_agent",
+        "upgrade_agent",
     ],
     agent_slug: str | None = None,
     name: str | None = None,
@@ -824,6 +833,8 @@ async def manage_agents(
     server_required: bool | None = None,
     server_name: str | None = None,
     path: str | None = None,
+    notes: str | None = None,
+    author_name: str | None = None,
 ) -> dict:
     """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
 
@@ -851,10 +862,62 @@ async def manage_agents(
       only way to author what other installs receive. It leaves the repo dirty
       on purpose — review and commit. There is no "install": a shipped agent is
       present the moment an install pulls.
+    - "export": Write the agent out as ONE portable file under data/exports/
+      (requires agent_slug), and return its path — hand that file to the user.
+      It carries the agent's library only: its store, journals, mutes, session
+      output and this install's server pin and creator id never travel. The
+      bundle also says WHICH agent it is (a stable agent_uid that survives a
+      rename on import), which version (bumped only when the content actually
+      changed since the last export — pass `notes` to say what changed), who
+      claims to have made it (`author_name`, verified by nothing), and what it
+      needs: the connectors, tools, model and skills read out of its own files.
+    - "import": Register the agent in a bundle file (requires `path`;
+      `agent_slug` renames it on the way in, which is how a name collision is
+      answered). It never overwrites an existing agent, and everything it
+      brings arrives MUTED — tell the user to read each imported routine and
+      skill before unmuting it, because an imported routine runs inside this
+      process with no sandbox. Nothing is started. The result's `unmet` lists
+      what this install cannot supply the agent; it never blocks the import,
+      so report it and let the user decide.
+    - "upgrade": Replace an INSTALLED agent's library from a newer bundle of
+      the same agent (requires agent_slug + `path`). Spelled "upgrade" because
+      "update" already means editing an agent's instructions here. It keeps
+      everything the install earned — the agent's store, config, mutes,
+      sessions and journals — and keeps any file the user had edited locally,
+      reporting it as a conflict with the bundle's copy on offer. Whatever
+      arrives new comes in MUTED, every replaced routine needs allowing again
+      before it can run, and nothing is started. It refuses outright when the
+      bundle is a different agent, when nothing says this bundle is the
+      agent's upstream, when the bundle is older, for an agent the repo ships,
+      and while a loop is running: read `blockers` back verbatim. On success
+      read `files` back — a conflict is content nobody else can reproduce.
+    - "hub_browse": What the Botcamp agent hub offers (`agent_slug` doubles as
+      an optional search term). No account needed. Each row carries a `badge`:
+      "validated" means a human reviewed ONE submitted revision once, and
+      "community" means nobody did. Say which it is and say what it is NOT —
+      the hub is a discovery service, not a security boundary; it is not a
+      signature, Condor verifies nothing against it, and it never shortens the
+      review on install. Never read a badge back as a reason something is safe.
+    - "hub_install": Install a listing (requires `path` = the listing_id;
+      `agent_slug` renames it if the name is taken). The bytes are verified
+      against the listing's digest before anything parses them, and then this
+      is exactly the import door: a listing of an agent already installed here
+      becomes an UPGRADE automatically (`verb` says which happened), everything
+      arrives MUTED, no imported routine may execute until the user allows it,
+      and nothing is started. Report `findings` and `unmet`; neither blocks it.
+    - "publish_hub": ADMIN ONLY, and not the same thing as "publish" — that
+      one copies an agent into this repo's tracked library, this one uploads it
+      to the hub for strangers (requires agent_slug; `notes` and `author_name`
+      as for "export"). It needs the install's token, set in Settings →
+      Agents, and cannot take one as an argument. It sends the SAME bytes
+      "export" writes, so it refuses outright on a value that can only be a
+      secret. **Confirm with the user before calling it**: publishing sends
+      content off this box and is irreversible in practice — unpublishing
+      removes the listing, it does not recall a download.
 
     Args:
         action: What to do with the agent definition.
-        agent_slug: The agent to act on (get/update/delete).
+        agent_slug: The agent to act on (get/update/delete/upgrade).
         name: Agent name (create/update).
         description: Agent description (create/update).
         instructions: The AGENT.md body — identity + domain knowledge (create/update).
@@ -881,10 +944,19 @@ async def manage_agents(
             loop it deploys use THIS server regardless of the chat's active
             server, and on a machine without that server the agent is broken. Do
             not fill it in with whatever server the chat happens to be on.
-        path: For "publish" only — narrow to one item of the agent, relative to
+        path: For "publish" — narrow to one item of the agent, relative to
             its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
-            mutes and session output are never published.
+            mutes and session output are never published. For "import" and
+            "upgrade" — the bundle file to read. For "hub_install" — the
+            listing_id from "hub_browse", not a path at all.
+        notes: For "export" and "publish_hub" — the changelog for this version,
+            carried verbatim in the bundle. What changed since the last bundle
+            of this agent.
+        author_name: For "export" and "publish_hub" — who to credit. An
+            unverified claim: Condor signs nothing and the receiving install
+            cannot check it. On a hub publish the hub attaches the account
+            handle it authenticated beside it, as a separate fact.
 
     Returns:
         Action-specific result dict.
@@ -901,6 +973,8 @@ async def manage_agents(
         server_required=server_required,
         server_name=server_name,
         path=path,
+        notes=notes,
+        author_name=author_name,
     )
 
 

@@ -113,7 +113,7 @@ def test_the_swap_family_is_gated_by_name():
     assert "execute_swap" in DANGEROUS_TOOLS
     assert is_dangerous_tool_call({"tool": "execute_swap", "input": {}})
 
-    for name in ("quote_swap", "get_swap_status", "search_swaps"):
+    for name in ("quote_swap", "get_swap_status", "search_swaps", "resolve_swap"):
         assert name in registered, f"{name} is no longer registered"
         assert name not in DANGEROUS_TOOLS, f"{name} reads only; gating it is noise"
         assert not is_dangerous_tool_call(

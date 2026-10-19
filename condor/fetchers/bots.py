@@ -10,7 +10,8 @@ from condor.asyncutil import SingleFlight
 # ``_server_key`` is the package's one rule for "which server does this client
 # talk to" (base_url, never id(client), whose reuse after GC would hand one
 # server's answer to another); shared rather than re-derived here.
-from condor.fetchers.bot_performance import _server_key, fetch_latest_snapshots
+from condor.fetchers._server import _server_key
+from condor.fetchers.bot_performance import fetch_latest_snapshots
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,12 @@ def build_bots_page(
                     continue
 
                 num_controllers += 1
-                ctrl_status = ctrl_info.get("status", "running")
+                # An absent status is unknown, never "running": the snapshot of
+                # an archived instance already says ``running`` on its own
+                # ([[CORR-633]]), so defaulting the missing case the same way
+                # left a reader no value that means "nobody told us"
+                # ([[CORR-725]]).
+                ctrl_status = ctrl_info.get("status") or "unknown"
 
                 # Get config from pre-fetched configs
                 ctrl_config = ctrl_configs.get(ctrl_name, {})
@@ -212,11 +218,21 @@ def build_bots_page(
                     }
                 )
 
+        # The shape GitHub #272 cost a race entry on: the container is up and
+        # the orchestrator still says ``running``, but the performance object
+        # came back empty, so the controller loop above never iterated and
+        # nothing is actually trading. Flagged once here instead of being
+        # re-derived from two fields by every reader ([[CORR-725]]).
+        running_without_controllers = (
+            num_controllers == 0 and str(bot_status).lower() == "running"
+        )
+
         bots.append(
             {
                 "bot_name": bot_name,
                 "status": bot_status,
                 "num_controllers": num_controllers,
+                "running_without_controllers": running_without_controllers,
                 "error_count": len(error_logs),
                 "deployed_at": bot_runs.get(bot_name),
                 "error_logs": error_logs[-100:],

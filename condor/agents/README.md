@@ -110,6 +110,34 @@ agents/
 
 `auto_approve_with_risk_check(...)` is wired in as the ACP permission callback. Every tool call the LLM tries to make is intercepted: trading-side tools are checked against `RiskLimits` (max exposure, max drawdown, max open executors); read-only tools are auto-approved. The agent literally cannot exceed its limits — the framework refuses on its behalf.
 
+### What survives a restart
+
+A restart never resurrects a session: `LoopSupervisor._restart` (`condor/runtime/loops.py`) always mints a **fresh session number**, because the dead session's journal is closed history. What it carries across is this (CORR-728):
+
+| | Survives a restart | Where it comes from |
+|---|---|---|
+| Strategy config (`frequency_sec`, `risk_limits`, `total_amount_quote`, `trading_context`…) | ✅ as it stands **now** | re-read through `load_full_config`, so an edit made while the session was dead takes effect — that is the point of re-reading rather than replaying |
+| **Pins** — `server_name`, `agent_key`, `model_base_url` | ✅ as the dead run had them | overlaid from the dead session's recorded pins; the one definition of the set is `PIN_FIELDS` in `condor/agents/config.py` |
+| `restart_on_boot` | ✅ forced on | a run that came back is still opted in |
+| Scratch state (`condor.runtime.state`) | ✅ | keyed on (agent, strategy), not on the session |
+| Memory, learnings, skills | ✅ | they hang off the Agent/strategy folder |
+| Journal, canvas, session report, tick count | ❌ new session | `sessions/session_{N+1}/`, starting at tick 1 |
+| Open executors and bots | ✅ still running | the venue never heard about the restart; the new session **adopts** them on its first tick (`_adopt_running_bots`, `_adopt_running_executors`). An executor whose strategy did not come back is reported as orphaned, never stopped |
+
+A restart makes the same up-front checks a start does — an unknown pinned server and an unrunnable model are refused rather than started — replaces any live engine for the strategy instead of adding a second one to it, and reports success only once the new run has a first tick to its name.
+
+#### The five places a pin can live
+
+This is why "it came back on the wrong server" was hard to reason about. One `server_name` (or `agent_key`) can be written in five places, and the *first* of these that is set wins:
+
+1. **The start request** — `config` in the `POST /agents/{slug}/strategies/{sslug}/start` body (the Start-session form, `control_agent(start)`, a delegation). Persisted to `sessions/session_N/config.yml` and nowhere else, which is why a restart that only re-read the strategy config lost it.
+2. **The strategy's saved `config.yml`** — `agents/{slug}/loops/{sslug}/config.yml`, what the config editor writes.
+3. **The strategy's `loop.md` frontmatter** — `default_config:`, and `agent_key:` for the model.
+4. **The Agent's `AGENT.md` frontmatter** — `agent_key:`, the Agent's default model for every playbook it owns.
+5. **The `AgentConfig` field default** — `server_name: "local"`, `agent_key: ""` (meaning "the runtime's default model"). An unresolvable *inherited* server name is not an error: the engine falls through to the owner's accessible servers.
+
+A sixth copy is written, never read as a source of truth: `status.json` next to the session journal carries a `pins` snapshot, rewritten every tick, and that is what `_restart` reads first (falling back to `sessions/session_N/config.yml` for sessions recorded before the snapshot existed).
+
 ---
 
 ## 3. The executor / position-hold pattern in detail
@@ -257,6 +285,289 @@ In production, agents are normally started/stopped from the Telegram `/agent` fl
 - `agents/{slug}/sessions/session_N/snapshots/snapshot_K.md` — the *full* tick: system prompt, response text, every tool call with arguments and status, executor snapshot, risk state, duration.
 - `agents/{slug}/learnings.md` — lessons the agent has chosen to keep across sessions.
 - `agents/{slug}/dry_runs/experiment_N.md` — dry-run / run-once results.
+
+### 4.5 Moving an agent to another install
+
+An agent is a folder, which is exactly why handing one to someone else used to
+mean copying a directory and then repairing whatever was true only of the box it
+came from. It travels as **one file** instead (`condor/agents/bundle.py`,
+FEAT-133):
+
+```
+manage_agents(action="export", agent_slug="river_scalper",
+              notes="Widened the grid", author_name="Fede")
+    -> data/exports/river_scalper-20261015.condor-agent.json
+manage_agents(action="import", path="…/river_scalper-20261015.condor-agent.json",
+              agent_slug="river_scalper_2")   # agent_slug renames it on the way in
+```
+
+The dashboard has the same two doors: **Export** on the agent's workspace
+header, and Settings → Condor → **Agents** for import, which previews the
+bundle before anything is written.
+
+What travels is the *library* half of the folder — the same selection
+`publish_to_stock` uses (`condor.layering.publishable_files`): `AGENT.md`,
+`skills/`, `routines/`, `controllers/`, `loops/` and any other authored file at
+the root. What stays behind is everything above that this install accumulated by
+running the agent: `store/`, `sessions/`, `dry_runs/`, `learnings.md`,
+`config.yml`, `mutes.yml`, `proposals/`. Three frontmatter fields are rewritten
+in the bundle's copy because they are facts about the exporting install, not
+about the agent: `server_name`, `created_by` and the `forked_from`/`forked_at`
+stamp.
+
+The manifest also says **which** agent this is and **what it needs** (FEAT-143):
+
+| Field | What it means |
+|---|---|
+| `agent.agent_uid` | 32 hex characters, stable across the rename `agent_slug` performs, so two homes that came from one bundle are still recognisably one agent. Minted by `AgentStore.create`, or at export for an agent that predates the field; never on a read path. Not spelled `agent_id`, which already means the slug everywhere here. |
+| `version` / `notes` | An integer that orders two bundles of one `agent_uid`, bumped only when the agent's *content* changed since the last export, plus the exporter's free-text changelog. Meaningful only within one lineage: two installs that import one bundle and both edit it both produce version 2. The file diff is the authoritative answer. |
+| `author` | `{name, handle}`, and a **claim** — Condor signs nothing and verifies nothing. `handle` is reserved for a hub to fill in at publish time and is empty on a locally exported file. Every surface that shows it must say "unverified". |
+| `requires` | The connectors, `tools:` allowlist, `agent_key` and skills (split into those carried in the bundle and those expected from `agents/_shared/skills`) — **derived from the files**, never authored, so it cannot drift from what the agent names. A loop's connector is read through `condor.preflight.requirements_of`, FEAT-139's single reader of a stated requirement. |
+
+Three ``AGENT.md`` keys back this: `agent_uid`, and the `bundle_version` /
+`bundle_digest` pair an export stamps so the next one can tell changed content
+from an unchanged re-export. The digest is the one thing that does not travel —
+it measured the exporter's bytes.
+
+The preview answers `unmet`: every requirement this install cannot supply, with
+what it has instead and whether the agent is blocked without it. It never
+refuses the import. "I will add that exchange's API key once I have read the
+agent" is the honest case, and everything lands muted and unstarted regardless —
+the preview says what will not work, and the operator decides. Whether capital
+sits in the right asset under venue rules that make the strategy viable is a
+different question, answered by `condor/preflight.py`.
+
+Two rules make an import safe to accept from somebody else. It **creates and
+never replaces** — a taken slug is refused with a free alternative, so a tuned
+local agent cannot be silently reset. And everything it brings **arrives muted**:
+an imported routine runs inside the Condor process with no sandbox, so the
+preview names every executable file before the write and the operator unmutes
+them one at a time after reading each. Nothing is started by an import.
+
+### Updating one from a newer bundle
+
+"Never replaces" is right for a *stranger's* agent and wrong for a newer
+version of one you already run: without a second verb the new version lands
+beside the old as `<slug>_2`, the memory forks, and the dashboard lists two
+agents one of which is stale. That verb is `bundle.plan_update` /
+`bundle.apply_update` (FEAT-145), with the same one-builder rule as the import
+pair — `POST /agents/{slug}/update/preview` and `POST /agents/{slug}/update`,
+`manage_agents(action="upgrade", agent_slug=…, path=…)`, and in the import
+dialog the collision step offers it when `is_update` says the bundle is the
+same agent.
+
+It speaks `condor/updates`' vocabulary one level down: **blockers**, warnings
+and a plan. Each blocker refuses and names the reason.
+
+| Blocker | Why |
+|---|---|
+| `different_agent` | The bundle's `agent_uid` is not the installed agent's. Two agents, not an update — the answer stays the 409 and a rename. |
+| `no_basis` | The agent has no `agent_uid` and no `.bundle.json`: it was authored here, or imported before the stamp existed. Nothing says this bundle is its upstream. |
+| `older_bundle` | The bundle's `version` is lower than the stamp's. |
+| `live_loop` | `get_engine(slug)` answers an engine. Swapping a skill's instructions under a session that is mid-tick changes what the model is told between one tool call and the next. |
+| `stock_agent` | An agent the repo ships. `publish_to_stock` is the one sanctioned write into the tracked library, and it is admin-only. |
+| `no_such_agent` | Nothing installed under that slug. |
+
+`.bundle.json` at the root of the home is the bookkeeping: the `agent_uid`, the
+`version` and a digest per carried file — the record of *what the bundle said
+last time*, which is the only way to tell an operator's local edit from an
+upstream change. A dotfile, so `publishable_files` cannot see it and it never
+travels in a bundle of its own agent. `AGENT.md`'s digest is taken over the
+file with this install's own keys (`created_by`, `created_at`, `server_name`,
+`agent_key`) removed, so pinning a server is not mistaken for the operator
+rewriting the agent — which would otherwise freeze upstream's instructions out
+of every later update.
+
+The plan is one row per path, from three digests — the bundle's, the file on
+disk, and the stamp's:
+
+| Verdict | What it means, and what happens |
+|---|---|
+| `added` | The bundle carries it, the stamp never did. Written, and muted if it is a routine or a skill. |
+| `changed` | Unedited on disk, different upstream. Replaced. |
+| `unchanged` | All three agree. Nothing to do. |
+| `local_only` | Edited here, unchanged upstream. **Kept.** |
+| `conflict` | Edited on both sides. **Kept**, and the plan carries the bundle's copy so a surface can offer it. |
+| `removed` | In the stamp, gone from the bundle, unedited here. Deleted. |
+| `conflict_removed` | Same, but edited here. **Kept.** |
+| *not listed* | A file the operator created that the bundle never carried. Never touched, never reported as removed. |
+
+Defaulting a conflict to *keep local* is the deliberate half: an operator's
+edit is the only content in the home nobody else can reproduce. Conflicts are
+never merged — these are markdown instructions a model reads, and a
+conflict-marked `SKILL.md` is not a conflict to resolve later, it is a new
+instruction the model will follow.
+
+What an update replaces is exactly `publishable_files`' half of the home, so
+everything this install accumulated by running the agent is untouched *by
+construction*: `store/`, `config.yml` (the risk limits actually in force),
+`sessions/`, `dry_runs/`, `learnings.md`, `state.json`, the bot ledgers,
+`proposals/` and `delegations/`. `mutes.yml` is the one runtime file an update
+writes, and only to switch off what is genuinely **new**: a name already in it
+is left exactly as it is, and a `changed` item is *not* re-muted. That
+asymmetry is a decision — re-muting on every update would cost the whole
+curation pass again, and the diff already named the files whose instructions
+changed. Execution consent needs no such rule: it is keyed by content, so a
+replaced routine is pending again on its own.
+
+Three things make a half-finished update recoverable rather than destructive.
+The previous bytes of every replaced or deleted file are copied to
+`.bundle_backup/<timestamp>/` first (a dotdir, so it never travels — the
+`.server_backups` idiom). The stamp is rewritten **last**, so an interrupted
+update leaves one describing the previous state. And a file whose disk copy
+already holds the bundle's bytes reads as `unchanged`, so the next plan
+recognises what the interrupted run got to instead of reporting the whole
+agent as a conflict. There is deliberately no rollback: the home holds an
+agent somebody has been running, and removing it on a failed write is the
+silent reset this verb exists to avoid.
+
+Nothing is started. No `control_agent(start)`, no delegation, no tick — the
+result names the next step instead. And an update does not re-run a preflight:
+whether the agent can still trade here is `condor/preflight.py`'s question.
+
+### Nothing imported executes before consent
+
+A mute, though, is not an execution gate and never was: it is subtracted
+*after* discovery, and discovery is `spec.loader.exec_module`. So the two
+surfaces an operator uses to *review* an imported routine — the `/routines`
+list and the source viewer — were themselves what ran it. `condor/agents/
+code_trust.py` closes that (FEAT-147).
+
+- `bundle.apply` writes `store/code_trust.yml` for the agent it just imported.
+  Its **presence is the gate**: that agent's routines are not imported until
+  each file is allowed. An agent created here has no such file and nothing
+  changes for it — gating code somebody typed into their own install would be
+  a consent dialog for your own work.
+- Consent is keyed by the file's **sha256**, not its name. A routine allowed
+  and then edited — by hand, or by an update from a newer bundle — is pending
+  again, because the thing the operator read is not the thing on disk.
+- A pending routine is still **listed**, still **readable** and still
+  **mutable**. `condor/routine_meta.py` reads its name, category, continuous
+  flag and description out of the parse tree with `ast`, importing nothing;
+  `GET /routines/<name>/source` serves the file from its path instead of
+  through `inspect.getfile(run_fn)`. The one thing it cannot show is the
+  `Config` **form**: pydantic builds a model's fields at class-creation time,
+  so there is no schema until the module has run. You cannot configure code
+  you have not agreed to run.
+- Running one is refused — through `RoutineStore._resolve_routine`, so the web
+  runner, the scheduler, the MCP tool and `condor.primitives` all get the same
+  sentence, which names the allow action.
+- `PUT /agents/{slug}/code-trust` is the gesture, and it is **separate from
+  unmuting on purpose**: unmuting says *this agent may use it*, allowing says
+  *this code may run here*.
+- The record lives under `store/`, which `condor.layering.is_library_path`
+  already refuses, so a hand-edited bundle carrying `store/code_trust.yml`
+  cannot arrive pre-allowed — the import's existing path guard rejects it.
+
+Out of scope, deliberately: a skill is prose and is not executed, and a
+controller runs inside the Hummingbot instance rather than in this process.
+`routines/*.py` is the whole in-process executable surface a bundle carries,
+which is why one file-level gate covers it.
+
+### Reviewing a bundle before it runs
+
+The scrub above rewrites three frontmatter fields and looks at no file *content*,
+so on its own a bundle could carry an API key, a stranger's endpoint, a skill
+steering the model at a tool that signs, or risk limits far wider than this
+install would set — and nothing would say so. `condor/agents/bundle_review.py`
+is the one review that names those (FEAT-144). Five categories, ordered
+most-decisive first:
+
+| Category | What it reports |
+|---|---|
+| `secret` | `condor.runtime.secrets.scan` over every file, with its `certain` verdict passed through unchanged — a recovery phrase and a 64-int keypair are certain; a bare 64-hex and an 87-char base58 are also a transaction hash and a signature, which are routine here. |
+| `endpoint` | Every host the files dial, labelled `loopback`, `private` or `public`. The split is the point: an agent talking to the local Hummingbot API is the normal case, and reaching a stranger's host is the finding. |
+| `code_run` | `exec`, `eval`, `__import__`, `subprocess`, `run_code` and an `open()` in a write mode, in the `.py` files the import will write. |
+| `tool_steer` | A money-moving tool from `condor/runtime/danger.py` named in prose or code, with the line that names it. **Context, not an accusation** — every strategy skill names its own executor tool, which is why it carries its line, is ordered second-to-last, and refuses nothing. |
+| `risk_limits` | Every `default_config.risk_limits` figure the bundle brings, **as values, with no pass/fail**. They become the agent's guardrails on its first run and nothing clamps them; an install-wide ceiling would be a different change, affecting every agent, imported or not. |
+
+A finding carries `path`, `line`, `start`/`end` and a `label` from a closed set —
+**never the matched value**, the rule `condor/runtime/secrets.py` sets, so a
+finding can be logged and counted without becoming the leak it exists to prevent.
+A caller that needs the bytes slices `text[start:end]` itself. `context` is the
+one exception, for the two categories where the text *is* the finding:
+`tool_steer`'s line (run through `redact` first) and `risk_limits`' figure.
+
+Who does what with it:
+
+- **Export** refuses on a `certain` `secret`, naming the file and the byte span.
+  That is the one moment the value is still fixable by the person who owns it,
+  and a published bundle cannot be unpublished out of somebody's download.
+  Everything else warns.
+- **Import** refuses *nothing new*. The findings ride on the preview and on the
+  apply result, field for field, and what protects this side is still that the
+  code arrives muted and nothing is started.
+- **A hub** re-runs this exact function on a submission rather than trusting
+  whoever exported it — in that case the exporter is the adversary and runs their
+  own copy of the exporter, so the receiving side's check is the one that counts.
+  That is why the module imports only the standard library plus
+  `condor.runtime.secrets` and `condor.runtime.danger`, asserted in a subprocess
+  by `tests/test_bundle_review.py`.
+
+It reports and never rewrites. Substituting a value inside `routines/r.py` or a
+YAML config — which is what `condor/sharing/scrub.py` does to a transcript, where
+a mangled string costs nothing — would produce an agent that silently does not
+work. And it is best-effort, so the copy says so: it warns, it does not prevent.
+
+### The hub: publish, browse, install
+
+Everything above stops at the file, so handing an agent to a stranger still
+meant emailing one. `condor/hub.py` is the distribution half (FEAT-146):
+
+```
+manage_agents(action="hub_browse")                       # no account needed
+manage_agents(action="hub_install", path="<listing_id>")  # path is the listing id
+manage_agents(action="publish_hub", agent_slug="river_scalper",
+              notes="Widened the grid")                   # admin only
+```
+
+The dashboard has the same three doors in Settings → Condor → **Agents**:
+a browse-and-install panel (`HubBrowser.tsx`), the token field, and **Publish**
+beside Export on the agent's own workspace header. The service itself lives in
+a codebase that is not this one; standing it up is TASK-004.
+
+**The trust model is three sentences, and the rest hangs off them.**
+
+1. **A bundle is untrusted code wherever it came from, and the gate is on the
+   receiving install.** Condor installs any well-formed bundle — from a file,
+   from a friend, from the hub — and never requires a hub signature. The gate is
+   what the two sections above already built: every executable named before
+   anything is written, the findings beside that list, routines and skills muted,
+   no execution consent for any imported `.py`, nothing started.
+2. **The hub is a discovery and moderation service, not a security boundary.** A
+   `validated` badge is a claim that a human reviewed *one submitted revision at
+   one point in time*. It is carried in the listing, rendered as provenance, and
+   read by nothing that decides whether to write — asserted by comparing a
+   `community` install against a `validated` one and requiring the two responses
+   to differ in the badge alone. A badge never shortens the review: a bundle
+   validated as submitted is not the bundle the operator runs after editing it.
+3. **Integrity is a content digest over HTTPS, not a signature.** The listing
+   carries the bundle's sha256; `hub.fetch` verifies the downloaded bytes
+   against it *before any caller parses them*, and FEAT-133's per-file digests
+   catch any later edit. `author` is an account claim the hub attests at upload;
+   nothing binds it to the bytes, and every surface says so.
+
+The consequence, which is the one hard requirement this places on the service:
+**the hub re-runs `bundle_review` on every submission** and publishes its
+findings with the listing (`review_version` says which review produced them, so
+drift with a client's own copy is visible). The export-side review is advice to
+the author — who runs their own copy of the exporter — and the submission-side
+one is the only review whose input the author does not control.
+
+Three design points worth not re-litigating:
+
+| Decision | Why |
+|---|---|
+| `HUB_URL` is **compiled in** and no environment variable moves it | It is the SSRF answer, not tidiness. FEAT-133 refused import-from-URL because "the Condor process can reach `localhost` and cloud metadata endpoints". A compiled-in base, a listing id through `validate_identifier` (plus a refusal of `.`/`..`, which that charset admits) before any request exists, and an opener that refuses redirects, together mean the server-side fetch is not a fetch of a user-supplied URL at all. Same rule as `condor/sharing/outbox.py`'s collector address. |
+| **No durable outbox** | The sharing queue exists because its sweep sends what nobody is watching and because a revocation must survive a restart. A publish is an interactive act with a human watching the result; a failure is reported and retried by pressing the button again. |
+| The unpublish carries **no delete-token capability** | `condor/sharing/wire.py`'s `delete_token_hash` exists because that collector "must not know who you are". A hub publish is authenticated by an account, and the same account authenticates the withdrawal. |
+
+Publishing is admin-only — tighter than the other agent writes, because there is
+one install-wide token and a claim created under it is made in that account's
+name — and it sends the bytes `GET /agents/{slug}/bundle` returns, built by the
+same `build`. So it inherits the export's refusal for a value that can only be a
+secret, which is the refusal written for exactly this moment: a published bundle
+cannot be unpublished out of somebody's download.
 
 ---
 

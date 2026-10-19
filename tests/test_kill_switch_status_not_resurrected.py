@@ -72,10 +72,16 @@ def _stub_engine(session_dir: Path, *, restart_on_boot=True, mode="loop"):
         _last_error="",
         _last_stop_reason="",
         _notify=_swallow,
+        # The first tick's own bookkeeping, which ``_loop`` settles (CORR-728).
+        _first_tick_arrived=asyncio.Event(),
+        _first_tick_done=asyncio.Event(),
+        _first_tick_error="",
     )
     # The shared teardown every exit path ends in (ARCH-646).
     stub._reap_client = partial(TickEngine._reap_client, stub)
     stub._finish = partial(TickEngine._finish, stub)
+    stub._run_ticks = partial(TickEngine._run_ticks, stub)
+    stub._note_first_tick = partial(TickEngine._note_first_tick, stub)
     return stub
 
 

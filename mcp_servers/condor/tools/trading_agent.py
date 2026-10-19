@@ -1,7 +1,9 @@
 """Agent CRUD, loop CRUD, instance lifecycle, and the journal."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
+from condor.fsutil import atomic_write_text
 from mcp_servers.condor.condor_client import agent_strategy_from_agent_id, call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
@@ -220,6 +222,268 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
+def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+    """Write this agent out as one portable file, and say where it landed.
+
+    Into ``data/exports/``, which is gitignored and is already this install's
+    own scratch space — the chat then offers the file with ``send_document``.
+    Not a return of the bundle text: an agent's library is tens of kilobytes of
+    JSON, and pushing that through a tool result would fill the model's context
+    with the very thing it is only meant to hand over.
+
+    ``notes`` is the changelog for this version — what changed since the last
+    bundle of this agent — and ``author_name`` is a claim nothing verifies
+    (FEAT-143). Both are optional, and the version in the result is bumped only
+    when the agent's content actually changed since the last export.
+
+    ``findings`` is FEAT-144's review of what the files themselves carry — a
+    key-shaped value, a host the agent reaches, a money-moving tool its prose
+    names, a door onto arbitrary code, the risk limits it brings. An export is
+    refused outright for a value that can only be a secret, because a published
+    bundle cannot be unpublished out of somebody's download; everything else is
+    reported here with its file and line, and the operator decides. It warns; it
+    does not prevent.
+    """
+    from condor.agents import bundle as agent_bundle
+    from condor.agents import bundle_review
+    from condor.paths import data_dir
+
+    try:
+        bundle = agent_bundle.build(agent_slug, notes=notes, author_name=author_name)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    text = agent_bundle.render(bundle)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    target = (
+        data_dir()
+        / "exports"
+        / f"{bundle.agent.slug}-{stamp}{agent_bundle.FILENAME_SUFFIX}"
+    )
+    atomic_write_text(target, text)
+    return {
+        "exported": True,
+        "agent_slug": bundle.agent.slug,
+        "agent_uid": bundle.agent.agent_uid,
+        "version": bundle.version,
+        "notes": bundle.notes,
+        "author": bundle.author.model_dump(),
+        "requires": bundle.requires.model_dump(),
+        "path": str(target),
+        "bytes": len(text.encode("utf-8")),
+        "files": [f.path for f in bundle.files],
+        "findings": [f._asdict() for f in bundle_review.review(bundle)],
+    }
+
+
+def _import_agent(path: str, as_slug: str) -> dict:
+    """Register the agent in a bundle file, with its code switched off.
+
+    ``as_slug`` (passed as ``agent_slug``) renames it on the way in, which is
+    the answer to a collision — import creates and never replaces, because
+    updating an agent from a bundle is a different verb and conflating the two
+    is how a tuned local agent gets silently reset.
+
+    The preview is the plan this returns on refusal: every executable file is
+    named before anything is written, because an imported routine runs inside
+    the Condor process and that review is the only gate there is.
+
+    Both the success and the refusal carry ``unmet`` — what this install cannot
+    supply the agent (FEAT-143) — and ``findings``, the review of what the files
+    themselves carry (FEAT-144). Neither is a reason the import did not happen,
+    and nothing here is refused for a finding: the protection on this side is
+    that the code arrives muted and unstarted, and the findings are what to read
+    before unmuting any of it.
+
+    Connectors are left unasked on this door: resolving them needs an async
+    Hummingbot client and this is a synchronous tool, so the chat's answer
+    covers tools, shared skills and the model, and the dashboard's preview is
+    the one that also checks the exchange.
+    """
+    from condor.agents import bundle as agent_bundle
+    from condor.runtime.toolsets import every_tool_name
+
+    try:
+        data = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        return {"error": f"Could not read '{path}': {exc}"}
+
+    try:
+        bundle = agent_bundle.parse(data)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    plan = agent_bundle.plan(
+        bundle,
+        as_slug=as_slug,
+        user_id=settings.user_id,
+        available_tools=sorted(every_tool_name()),
+    )
+    try:
+        return agent_bundle.apply(plan, user_id=settings.user_id)
+    except ValueError as exc:
+        return {"error": str(exc), "preview": plan.summary()}
+
+
+def _upgrade_agent(agent_slug: str, path: str) -> dict:
+    """Replace an installed agent's library from a newer bundle (FEAT-145).
+
+    The verb beside ``import``, which creates and never replaces: a newer
+    bundle of an agent this install already has lands here instead of beside
+    the old one as ``<slug>_2`` with the memory forked.
+
+    Spelled ``upgrade`` and not ``update`` only because ``update_agent`` already
+    means editing an agent's instructions on this tool, and two actions with
+    one name would be a coin flip about whether a bundle or a sentence was
+    meant.
+
+    What comes back is the plan either way. On a refusal the blockers say why —
+    a different agent, no basis for claiming this bundle as upstream, an older
+    version, a shipped agent, a loop running right now — and nothing was
+    written. On success, ``files`` is the per-path diff: replaced, added,
+    deleted, and the ones that kept your copy because you had edited them.
+    Read those out rather than summarising them away; a conflict is the only
+    content in the home nobody else can reproduce.
+
+    Connectors are left unasked here for the same reason the import leaves
+    them: resolving them needs an async Hummingbot client and this is a
+    synchronous tool.
+    """
+    from condor.agents import bundle as agent_bundle
+    from condor.runtime.toolsets import every_tool_name
+
+    try:
+        data = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        return {"error": f"Could not read '{path}': {exc}"}
+
+    try:
+        bundle = agent_bundle.parse(data)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    plan = agent_bundle.plan_update(
+        bundle, agent_slug, available_tools=sorted(every_tool_name())
+    )
+    try:
+        return agent_bundle.apply_update(plan, user_id=settings.user_id)
+    except ValueError as exc:
+        return {"error": str(exc), "preview": plan.summary()}
+
+
+def _hub_browse(query: str = "") -> dict:
+    """What the agent hub offers, as rows to read out (FEAT-146).
+
+    Anonymous — browsing needs no token, because the listing is public content
+    and gating it would make the feature useless for an operator who has no
+    Botcamp account, which is most of them on day one.
+
+    ``badge`` is **provenance and nothing else**. A ``validated`` badge means a
+    human reviewed one submitted revision once; it is not a signature, Condor
+    verifies no bundle against it, and it must never be read back to the user
+    as a reason something is safe to run. Say what it is, and say that the
+    review on install is the gate.
+    """
+    from condor import hub
+
+    try:
+        listings = hub.browse(query or "")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {
+        "listings": [listing.model_dump() for listing in listings],
+        "trust": (
+            "A badge is provenance, not a verdict: the hub is a discovery "
+            "service and not a security boundary. Whatever you install arrives "
+            "muted and unstarted, and the review on install is the gate."
+        ),
+    }
+
+
+def _hub_install(listing_id: str, as_slug: str = "") -> dict:
+    """Install a hub listing, through exactly the gate the file path uses.
+
+    The bytes are digest-verified against the listing before anything parses
+    them (``hub.fetch``), and then this is FEAT-133's ``plan``/``apply`` — or
+    FEAT-145's ``plan_update``/``apply_update`` when the listing's agent is
+    already installed here, which the plan decides, not this function and not
+    the caller. ``as_slug`` is only ever a rename for a collision that is a
+    *different* agent.
+
+    Everything the import door promises holds unchanged: every executable file
+    is named in the result, routines and skills arrive muted, no imported
+    ``.py`` may execute until the operator allows it, and nothing is started.
+    Report the ``findings`` and the ``unmet`` list; neither blocks the install.
+
+    Connectors are left unasked here for the same reason the file import leaves
+    them: resolving them needs an async Hummingbot client and this is a
+    synchronous tool.
+    """
+    from condor import hub
+    from condor.agents import bundle as agent_bundle
+    from condor.runtime.toolsets import every_tool_name
+
+    try:
+        listing = hub.get(listing_id)
+        data = hub.fetch(listing_id, listing)
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+
+    try:
+        bundle = agent_bundle.parse(data)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    tools = sorted(every_tool_name())
+    plan = agent_bundle.plan(
+        bundle,
+        as_slug=as_slug or "",
+        user_id=settings.user_id,
+        available_tools=tools,
+    )
+    listing_row = listing.model_dump()
+    if plan.is_update:
+        update = agent_bundle.plan_update(bundle, plan.collision, available_tools=tools)
+        try:
+            result = agent_bundle.apply_update(update, user_id=settings.user_id)
+        except ValueError as exc:
+            return {"error": str(exc), "verb": "update", "preview": update.summary()}
+        return {"verb": "update", "listing": listing_row, **result}
+    try:
+        result = agent_bundle.apply(plan, user_id=settings.user_id)
+    except ValueError as exc:
+        return {"error": str(exc), "verb": "install", "preview": plan.summary()}
+    return {"verb": "install", "listing": listing_row, **result}
+
+
+def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+    """Upload this agent to the hub, as the file an export would hand over.
+
+    The bytes are built by FEAT-133's ``build`` and rendered by its ``render``,
+    which is to say they are byte-identical to what ``action="export"`` writes
+    to disk — there is no second serializer. It therefore inherits the export's
+    FEAT-144 refusal: an agent carrying a value that can only be a secret stops
+    here, and nothing is sent, because a published bundle cannot be unpublished
+    out of somebody's download.
+
+    It needs the install's Botcamp token, which lives in ``config.yml`` and is
+    set in Settings → Agents. There is no way to pass one in here and there
+    should not be: a token in a tool argument is a token in a transcript.
+
+    Publishing sends content off this box and is irreversible in practice —
+    ``unpublish`` removes the listing, it does not recall a download. Confirm
+    with the user before calling it, and read the receipt back rather than
+    summarising it.
+    """
+    from condor import hub
+
+    try:
+        receipt = hub.publish(agent_slug, hub.token(), notes or "", author_name or "")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {"published": True, **receipt.model_dump()}
+
+
 def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
     """The MCP mirror of the web layer's ``_gate_pin_change`` (SEC-698).
 
@@ -275,6 +539,8 @@ def _manage_agent(
     server_required: bool | None,
     server_name: str | None,
     path: str | None = None,
+    notes: str | None = None,
+    author_name: str | None = None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -369,6 +635,50 @@ def _manage_agent(
         if not agent_slug:
             return {"error": "agent_slug is required"}
         return _publish_agent(agent_slug, path or "")
+
+    if action == "export_agent":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        return _export_agent(agent_slug, notes or "", author_name or "")
+
+    if action == "import_agent":
+        if not path:
+            return {"error": "path (the bundle file to import) is required"}
+        # ``agent_slug`` is the name to land under, not one to look up: the
+        # bundle already carries its own, and this is how a collision is
+        # answered.
+        return _import_agent(path, agent_slug or "")
+
+    if action == "upgrade_agent":
+        if not agent_slug:
+            return {"error": "agent_slug (the installed agent to update) is required"}
+        if not path:
+            return {"error": "path (the newer bundle file) is required"}
+        return _upgrade_agent(agent_slug, path)
+
+    if action == "hub_browse":
+        # ``agent_slug`` doubles as the search here: there is no listing to
+        # look up yet, and a second string parameter for one optional filter
+        # would be a field every other action has to ignore.
+        return _hub_browse(agent_slug or "")
+
+    if action == "hub_install":
+        if not path:
+            return {
+                "error": (
+                    "path (the hub listing_id to install) is required — "
+                    'find one with manage_agents(action="hub_browse")'
+                )
+            }
+        # ``path`` carries the listing id and ``agent_slug`` the name to land
+        # under, which is the same split ``import`` already uses: the bundle
+        # names itself, and ``agent_slug`` is how a collision is answered.
+        return _hub_install(path, agent_slug or "")
+
+    if action == "publish_hub":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        return _publish_hub(agent_slug, notes or "", author_name or "")
 
     if action == "delete_agent":
         if not agent_slug:
@@ -731,6 +1041,24 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="publish", agent_slug=...)',
     ),
+    "export_agent": (
+        "manage_agents",
+        'manage_agents(action="export", agent_slug=...)',
+    ),
+    "import_agent": ("manage_agents", 'manage_agents(action="import", path=...)'),
+    "upgrade_agent": (
+        "manage_agents",
+        'manage_agents(action="upgrade", agent_slug=..., path=...)',
+    ),
+    "hub_browse": ("manage_agents", 'manage_agents(action="hub_browse")'),
+    "hub_install": (
+        "manage_agents",
+        'manage_agents(action="hub_install", path=<listing_id>)',
+    ),
+    "publish_hub": (
+        "manage_agents",
+        'manage_agents(action="publish_hub", agent_slug=...)',
+    ),
     "list_strategies": ("manage_loops", 'manage_loops(action="list")'),
     "get_strategy": ("manage_loops", 'manage_loops(action="get", loop_id=...)'),
     "create_strategy": (
@@ -776,6 +1104,16 @@ _AGENT_ACTIONS = {
     "update": "update_agent",
     "delete": "delete_agent",
     "publish": "publish_agent",
+    "export": "export_agent",
+    "import": "import_agent",
+    "upgrade": "upgrade_agent",
+    # The hub's three (FEAT-146). Spelled with their prefix even in the short
+    # table: "browse" and "install" on their own would read as local verbs, and
+    # ``publish`` is already taken by the publish-to-stock action — which is a
+    # different act entirely, writing into this repo's tracked library.
+    "hub_browse": "hub_browse",
+    "hub_install": "hub_install",
+    "publish_hub": "publish_hub",
 }
 
 _STRATEGY_ACTIONS = {
@@ -829,6 +1167,8 @@ def manage_agents(
     server_required: bool | None = None,
     server_name: str | None = None,
     path: str | None = None,
+    notes: str | None = None,
+    author_name: str | None = None,
 ) -> dict:
     resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
     if err:
@@ -847,6 +1187,8 @@ def manage_agents(
         server_required,
         server_name,
         path,
+        notes,
+        author_name,
     )
 
 

@@ -65,7 +65,10 @@ def test_create_strategy_keeps_strategy_keys_and_fills_core_defaults(
     saved = yaml.safe_load((strategy.home / "config.yml").read_text())
     assert saved["trading_pair"] == "SOL-USDC"
     assert saved["frequency_sec"] == 30
-    assert saved["server_name"] == "local"
+    # Core defaults are filled, and ``server_name``'s is empty: a default that
+    # was a concrete server name made "no server chosen" indistinguishable from
+    # "chosen: the one called local" (CORR-729).
+    assert saved["server_name"] == ""
 
 
 def test_the_narrow_config_pair_is_gone():

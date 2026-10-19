@@ -1,6 +1,6 @@
 ---
 on_kill_switch: flatten_all     # close ALL LP positions on shutdown (not keep_spot)
-cancel_open_orders: true         # cancel any resting/Gateway orders during winddown
+cancel_open_orders: true         # sweeps resting CLOB orders; a Gateway LP position has no cancel path
 ---
 # Emergency shutdown — Solana LP Expert
 

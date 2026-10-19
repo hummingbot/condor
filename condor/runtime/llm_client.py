@@ -91,9 +91,10 @@ def build_llm_client(
         )
 
     # ACP subprocess models: claude-code, gemini, codex. A Claude model can be
-    # pinned via a suffix ("claude-acp:opus"); ACPClient selects it over the
-    # protocol (session/set_model) after handshake — the bridge ignores
-    # ANTHROPIC_MODEL.
+    # pinned via a suffix ("claude-acp:opus"); resolve_acp carries it only as a
+    # model preference, and ACPClient applies it over the protocol
+    # (session/set_model) after the handshake, where a pin the bridge does not
+    # offer fails the session instead of running on its default (CORR-746).
     command, model_env, model_pref = acp_client.resolve_acp(agent_key)
     merged_env = {**(extra_env or {}), **model_env}
     return acp_client.ACPClient(

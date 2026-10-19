@@ -19,10 +19,13 @@ The three properties this file pins, in the order they matter:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from condor.agents.agent import AgentStore
 from condor.agents.strategy import StrategyStore
+from condor.frontmatter import parse_frontmatter
 from condor.layering import FORKED_FROM_KEY
 from condor.memory.paths import (
     agent_home,
@@ -617,8 +620,16 @@ def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock)
     )
     _write(home / "loops" / "carry" / "loop.md", "---\nname: Carry\n---\n\ntick\n")
     _write(home / "loops" / "carry" / "learnings.md", "learned")
+    _write(home / "routines" / "basis_check.py", "def run():\n    return 1\n")
     _write(home / "store" / "user_7" / "audit.log", "ran")
     _write(home / "mutes.yml", "skills: []\n")
+    # Neither of these is named by the runtime denylist, and both are this
+    # install's: bytecode the interpreter wrote under an allowed directory, and
+    # a state folder a routine invented for itself ([[CORR-720]]).
+    _write(home / "routines" / "__pycache__" / "basis_check.cpython-312.pyc", "\x00")
+    _write(home / "state" / "regime.json", '{"peak_equity": 1}')
+    # And the next invented root folder, which needs no further rule.
+    _write(home / "scratch" / "notes.md", "scribbles")
 
     result = publish_to_stock("perps")
 
@@ -629,12 +640,105 @@ def test_publishing_copies_the_library_half_and_leaves_the_runtime_behind(stock)
         f"{prefix}/perps/AGENT.md",
         f"{prefix}/perps/skills/basis/SKILL.md",
         f"{prefix}/perps/loops/carry/loop.md",
+        f"{prefix}/perps/routines/basis_check.py",
     }
     shipped = stock_agent_home("perps")
     assert (shipped / "AGENT.md").exists()
     assert not (shipped / "store").exists()
     assert not (shipped / "mutes.yml").exists()
     assert not (shipped / "loops" / "carry" / "learnings.md").exists()
+    assert not (shipped / "state").exists()
+    assert not (shipped / "scratch").exists()
+    assert not list(shipped.rglob("__pycache__"))
+
+
+def test_the_root_rule_excludes_invented_folders_not_the_name_state(stock):
+    """``state`` is excluded by *where* it sits, not by what it is called.
+
+    The distinction matters: ``rel.parts`` is matched at any depth, so putting
+    ``state`` on the runtime denylist would also drop a playbook or a controller
+    an agent legitimately named ``state`` ([[CORR-720]]).
+    """
+    from condor.layering import publishable_files
+
+    home = agent_home("perps")
+    _write(home / "AGENT.md", AGENT_MD.format(name="Perps", desc="mine", body="F."))
+    _write(
+        home / "skills" / "state" / "SKILL.md", SKILL_MD.format(slug="state", body="S.")
+    )
+    _write(home / "controllers" / "state" / "state.py", "class State:\n    pass\n")
+    _write(home / "state" / "op.json", "{}")
+
+    assert {str(p) for p in publishable_files(home)} == {
+        "AGENT.md",
+        "skills/state/SKILL.md",
+        "controllers/state/state.py",
+    }
+
+
+def test_naming_a_file_cannot_smuggle_runtime_output_out(stock):
+    """A named path narrows what is considered, never whether it is filtered.
+
+    The whole-agent walk filtered and the named-file branch returned the path
+    unread, so the one file a bare publish refused was handed straight back
+    when the caller spelled it out ([[CORR-734]]). Both branches read the same
+    predicate now.
+    """
+    from condor.layering import publish_to_stock, publishable_files
+
+    home = agent_home("perps")
+    for rel in ("AGENT.md", "core_rules.md", "reflect.md", "shutdown.md"):
+        _write(home / rel, AGENT_MD.format(name="Perps", desc="mine", body="F."))
+    _write(
+        home / "skills" / "basis" / "SKILL.md", SKILL_MD.format(slug="basis", body="B.")
+    )
+    _write(home / "loops" / "carry" / "loop.md", "---\nname: Carry\n---\n\ntick\n")
+    _write(home / "routines" / "r.py", "def run():\n    return 1\n")
+    _write(home / "state" / "op.json", "{}")
+    _write(home / "store" / "user_7" / "audit.log", "ran")
+    _write(home / "config.yml", "model: x\n")
+    _write(home / "mutes.yml", "skills: []\n")
+    _write(home / "routines" / "__pycache__" / "x.cpython-312.pyc", "\x00")
+
+    for rel in (
+        "state/op.json",
+        "store/user_7/audit.log",
+        "config.yml",
+        "mutes.yml",
+        "routines/__pycache__/x.cpython-312.pyc",
+    ):
+        assert (home / rel).is_file(), rel
+        assert publishable_files(home, rel) == [], rel
+
+    for rel in (
+        "AGENT.md",
+        "core_rules.md",
+        "reflect.md",
+        "shutdown.md",
+        "skills/basis/SKILL.md",
+        "loops/carry/loop.md",
+        "routines/r.py",
+    ):
+        assert publishable_files(home, rel) == [Path(rel)], rel
+
+    # Positive control: the two branches now answer the same question, so the
+    # bare walk is exactly the files the named branch admits. Both sides are
+    # measured — neither is a literal set — so this stays a control as the
+    # fixture grows.
+    named = [
+        rel
+        for f in sorted(home.rglob("*"))
+        if f.is_file()
+        for rel in [f.relative_to(home)]
+        if publishable_files(home, rel.as_posix()) == [rel]
+    ]
+    assert publishable_files(home) == named
+
+    # And the caller the hole was reachable through refuses it.
+    assert publish_to_stock("perps", "state/op.json") == {
+        "error": "Nothing publishable at 'perps/state/op.json'"
+    }
+    assert not (stock_agent_home("perps") / "state").exists()
 
 
 def test_publishing_clears_the_fork_stamp(stock):
@@ -651,6 +755,51 @@ def test_publishing_clears_the_fork_stamp(stock):
     # install that pulls it look forked from itself.
     assert FORKED_FROM_KEY not in (stock / "AGENT.md").read_text()
     assert "Mine." in (stock / "AGENT.md").read_text()
+
+
+def test_publishing_zeroes_the_creator_and_leaves_the_local_copy_alone(stock):
+    """The publisher's Telegram id is a local fact — it must not ship.
+
+    It names nobody on the box that pulls the file, yet the admin-principal
+    rule and the legacy-restart owner fallback both still act on it
+    ([[CORR-705]], [[CORR-721]]). The stores go on recording the real creator
+    locally, which is deliberate.
+    """
+    from condor.layering import publish_to_stock
+
+    home = agent_home("perps")
+    _write(
+        home / "AGENT.md",
+        "---\nname: Perps\ndescription: mine\ncreated_by: 481175164\n---\n\nF.\n",
+    )
+    _write(
+        home / "loops" / "carry" / "loop.md",
+        "---\nname: Carry\ncreated_by: 481175164\n---\n\ntick\n",
+    )
+
+    assert publish_to_stock("perps")["published"] is True
+
+    shipped = stock_agent_home("perps")
+    for rel in ("AGENT.md", "loops/carry/loop.md"):
+        meta, _ = parse_frontmatter((shipped / rel).read_text())
+        assert meta["created_by"] == 0, rel
+        # The local layer keeps the operator's own id.
+        local_meta, _ = parse_frontmatter((home / rel).read_text())
+        assert local_meta["created_by"] == 481175164, rel
+
+
+def test_publishing_leaves_a_file_that_claims_nothing_untouched(stock):
+    """No creator and no fork stamp means nothing to scrub — and no rewrite."""
+    from condor.layering import publish_to_stock
+
+    home = agent_home("perps")
+    source = _write(
+        home / "AGENT.md", AGENT_MD.format(name="Perps", desc="mine", body="Funding.")
+    )
+
+    assert publish_to_stock("perps", "AGENT.md")["published"] is True
+
+    assert (stock_agent_home("perps") / "AGENT.md").read_text() == source.read_text()
 
 
 def test_publishing_is_admin_only(stock, monkeypatch):

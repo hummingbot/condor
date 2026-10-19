@@ -21,6 +21,7 @@ import type {
   AgentSummary,
   RunningInstance,
   StrategySummary,
+  VenueCondition,
 } from "@/lib/api";
 import { positionQuoteValue } from "@/lib/pnl-chart";
 import type { ConvertQuote, PerfLeaf } from "@/lib/perf-tree";
@@ -197,6 +198,93 @@ export function dueInSec(
  */
 export function tickCountdownLabel(due: number): string {
   return due > 0 ? `next in ${countdown(due)}` : `overdue ${countdown(-due)}`;
+}
+
+/**
+ * The drifted fields of a live engine, as one line per field (FEAT-136).
+ *
+ * The backend sends both values precisely so a reader does not have to go back
+ * to the file; this only words them. Empty array = the process and the file
+ * agree, which is what a badge should read off rather than a boolean nobody
+ * computed.
+ */
+export function driftLines(live: RunningInstance | null): string[] {
+  const drift = live?.config_drift;
+  if (!drift) return [];
+  return Object.entries(drift).map(
+    ([field, both]) =>
+      `${field}: running ${describeValue(both?.running)} · file ${describeValue(both?.file)}`,
+  );
+}
+
+/** A drift value as text. `""` has to read as empty, not as nothing at all. */
+function describeValue(value: unknown): string {
+  if (value === null || value === undefined) return "unset";
+  if (value === "") return '""';
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+/**
+ * The model this session is on, and whether its pin took (FEAT-136).
+ *
+ * `agent_key` carries the *requested* pin as a suffix (`claude-acp:opus`);
+ * `active_model_id` is what the adapter answered. A pin that did not apply
+ * leaves the adapter on its own default, and before this the only record of
+ * that was a log line — so the mismatch is the whole point of showing it.
+ *
+ * `null` when there is no adapter answer to report: a pydantic-ai backend has
+ * no adapter to ask, and an ACP session has none until its first tick.
+ */
+export function effectiveModel(
+  live: RunningInstance | null,
+): { active: string; requested: string; mismatch: boolean } | null {
+  const active = live?.active_model_id ?? "";
+  if (!active) return null;
+  const requested = (live?.agent_key ?? "").split(":").slice(1).join(":");
+  // Mirrors the backend's own alias matching (`resolve_model_id`): a pin of
+  // "opus" is honoured by "claude-opus-4-8", so only a pair that shares no
+  // substring either way is a pin that did not take.
+  const a = active.toLowerCase();
+  const r = requested.toLowerCase();
+  const mismatch = !!r && !a.includes(r) && !r.includes(a);
+  return { active, requested, mismatch };
+}
+
+/**
+ * The venues refusing this session right now, worst first (FEAT-138).
+ *
+ * Only the ones whose `condition` is still `throttled`: the counts stay on the
+ * payload as the record, but a venue that refused an hour ago is not something
+ * an operator can act on now. Reported as a *venue* condition and never
+ * alongside the session's errors — the agent did nothing wrong, and the whole
+ * reason throttling read as a mysterious strategy bug is that nobody drew that
+ * line (GitHub #276).
+ *
+ * Empty array for a session nothing is refusing, and for an older backend that
+ * does not send the field at all — which read the same way before this existed.
+ */
+export function throttledVenues(live: RunningInstance | null): VenueCondition[] {
+  const rows = live?.throttled_venues ?? [];
+  return rows
+    .filter((row) => row.condition === "throttled")
+    .slice()
+    .sort((a, b) => b.refusals - a.refusals || a.venue.localeCompare(b.venue));
+}
+
+/**
+ * How a throttled venue reads: what refused, and the count behind the claim.
+ *
+ * The counts are the point. "Intermittent, may recover" was what sampling the
+ * logs said about a host that had answered 0 of 8 calls, so a surface naming
+ * the venue has to print attempts and successes beside the refusals.
+ */
+export function throttleLines(venues: readonly VenueCondition[]): string[] {
+  return venues.map(
+    (v) =>
+      `${v.venue}${v.host ? ` on ${v.host}` : ""}: ${v.attempts} attempt${
+        v.attempts === 1 ? "" : "s"
+      }, ${v.successes} ok, ${v.refusals} refused`,
+  );
 }
 
 /** Running, then paused, then everything idle — the sort's first key. */
