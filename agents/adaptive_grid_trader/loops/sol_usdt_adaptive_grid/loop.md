@@ -1,7 +1,7 @@
 ---
 name: SOL-USDT Adaptive Grid
-description: Hourly adaptive grid on SOL-USDT binance_perpetual — multi-timeframe
-  analysis, ATR-based ranges, liquidation guard, $100 budget.
+description: One-way hourly adaptive grid on SOL-USDT binance_perpetual with a $100
+  budget, restart-safe discovery, and strict position-mode gating.
 agent_key: null
 skills: []
 default_config:
@@ -9,6 +9,7 @@ default_config:
   trading_pair: SOL-USDT
   frequency_sec: 3600
   total_amount_quote: 100
+  leverage: null
   execution_mode: loop
   risk_limits:
     max_position_size_quote: 500
@@ -16,187 +17,110 @@ default_config:
 default_trading_context: ''
 created_by: 0
 created_at: '2026-07-30T15:47:53.006353+00:00'
+forked_from: sha256:990d09b6957a
+forked_at: '2026-10-19T12:57:06.980627+00:00'
 ---
 
 # SOL-USDT Adaptive Grid — Tick Instructions
 
-You are the Adaptive Grid Trader on **SOL-USDT** / **binance_perpetual**.
+Follow the Adaptive Grid Trader brain exactly. This loop trades one LONG or SHORT grid only.
 
-Follow the **Agent brain** exactly. This file is envelope + tick checklist only.
+## Fixed envelope
 
-## Envelope
+- account: `master_account`; use a dedicated/exclusive account + connector + pair scope
+- connector/pair: `binance_perpetual` / `SOL-USDT`
+- budget: 100 USDT; reserve 10%; trade budget 90 USDT
+- minimum order: 7 USDT or exchange minimum, whichever is greater
+- leverage: top-level `leverage: null` resolves to explicit `5` (`5x (default)`); a positive finite configured number resolves to that explicit value (`Nx (configured)`)
+- maximum grid loss: 10% of budget (10 USDT)
+- profiles: LONG, SHORT, HOLD
+- activation bounds: 0.002
+- time limit: 43200 seconds
+- maximum levels: 12
+- `max_open_executors: 2`
 
-- pair: SOL-USDT
-- connector: binance_perpetual
-- budget: 100 USDT (reserve 10% → trade **$90**)
-- min_order_size: 7 USDT
-- max_leverage: 5x
-- max_loss_pct: 10% ($10)
-- allowed_profiles: LONG, SHORT, TWO_SIDED (wish-list — **gated by position_mode_check**)
-- max_open_executors: 2 (only useful if two_sided_allowed YES)
-- activation_bounds: 0.002
-- time_limit: 43200s
+A boolean, fractional, nonnumeric, nonfinite, zero, or negative leverage is invalid: create nothing, alert, and stop the loop. Resolve leverage once per tick and use the same explicit whole-number value in executor configuration. For a new grid only, `set_account_position_mode_and_leverage` must return `Leverage Set` with nested `status: success` or `ok` immediately before create; omit `position_mode`. Never call it for a CLOSE. Once inventory is open, require `exchange_leverage` to match and `leverage_match: YES`. If leverage is rejected, unreadable, or mismatched, preserve and report the real error; create nothing further. Stop and verify only this session's grid, close residual inventory only under the exclusive-pair rules, and stop the loop.
 
-### TWO_SIDED on this budget
-- $45/leg at $7 ≈ 6 levels/leg (thin but allowed)
-- **Hard gate:** `position_mode_check` → `mode` is only **HEDGE** or **ONEWAY**
-- `two_sided_allowed: NO` (ONEWAY, including when `mode_read: SHRUG` defaulted) → **omit TWO_SIDED**, favored single side
-- Do **not** auto-set HEDGE unless user ordered it
-- Never raise budget to fit a leg
+Never use TWO_SIDED, HEDGE trading, grid `stop_loss`, or `trailing_stop`.
 
-## Layer map
+## Every tick
 
-**Layer 1 baseline (first entry / flat re-entry):**
-- BULLISH incl weak → LONG
-- BEARISH incl weak → SHORT
-- NEUTRAL → ladder after menu: TWO_SIDED (if allowed) → best single side lean → HOLD
-- Hourly never vetoes first entry (prices / ATR-D only)
+### 0. Confirm mode
 
-**Layer 2 hourly (running grid only):**
-- keep / passive / flip only if both 4h+1d opposite + age ≥3h
-- Before re-opening TWO_SIDED → position_mode_check again
-
-## PnL-Aware Signal Adjustment (Layer 2 modifier)
-
-The running grid's PnL is real market feedback. Use it as a **confirming signal** to break ties and accelerate flips when the baseline is ambiguous.
-
-**How to track:** Each tick, read the executor's `net_pnl_quote` from the live state (step 3). Journal the value. After 2+ ticks you have a PnL trend.
-
-**PnL modifier rules (applied during step 4, running grid only):**
-
-1. **PnL confirms direction problem (flip accelerator):**
-   If the grid is LONG and PnL is negative AND worsening (current PnL < previous tick PnL) for **2 consecutive ticks**, AND at least ONE of 4h/1d reads opposite (not both required):
-   → Treat as flip signal. Teardown the LONG grid and redeploy SHORT (if age ≥ 3h).
-   Same logic mirrors for SHORT grids with positive price momentum.
-
-2. **PnL + NEUTRAL baseline = directional push:**
-   If baseline is NEUTRAL and the running grid has been **negative PnL for 3+ consecutive ticks**:
-   → The current direction is wrong. Tear down and redeploy in the opposite direction.
-   Do not wait for both 4h+1d to agree — sustained negative PnL across 3 hourly ticks IS the confirmation.
-
-3. **PnL healthy = stronger hold:**
-   If PnL is positive or improving, raise the bar for flipping: require both 4h+1d opposite (standard Layer 2 rule). Do not flip a profitable grid on a single TF signal.
-
-**Constraints:**
-- PnL modifier never overrides emergency exits (stop_loss, liq guard)
-- Minimum grid age 3h still applies to PnL-triggered flips
-- Journal every PnL-triggered decision with: `pnl_flip: true, pnl_trend: [values], trigger: <rule_number>`
-
-## Stale Grid Detection (Layer 2 — step 4 check)
-
-A grid that has stopped filling orders is dead weight occupying budget. Detect and recycle it regardless of age.
-
-**Definition of stale:** ALL of these must be true:
-1. Executor `filled_amount_quote` (or volume) has been **unchanged for 3+ consecutive ticks**
-2. Grid still has active open orders (it didn't naturally close)
-
-**Action when stale detected:**
-1. Teardown the grid (stop, keep_position=False, verify flat)
-2. Re-run baseline check (step 1) if older than 6h
-3. Redeploy with fresh range centered on **current price** using standard ATR/D math
-4. Journal: `stale_recycle: true, ticks_stagnant: N, old_volume: $X, reason: "no fills 3+ ticks"`
-
-**Key rules:**
-- Stale detection does NOT require a direction change — same direction redeploy is fine if baseline still agrees
-- Stale check runs BEFORE the keep/flip decision (step 4) — a stale grid is never "kept"
-- If baseline has flipped during staleness, the fresh deploy uses the new direction
-- Volume tracking: journal `filled_amount_quote` every tick; compare current vs tick N-3
-- For TWO_SIDED: check each leg independently. One stale leg → teardown + redeploy that leg only (if the other leg is healthy)
-
-## Profit-Taking Rule (Layer 2 — step 4 check)
-
-A grid that reaches meaningful unrealized profit should lock it in rather than riding it back to zero.
-
-**Profit threshold:** unrealized PnL ≥ **2% of trade budget** ($1.80 on $90 one-sided, or $0.90/leg on TWO_SIDED $45/leg)
-
-**Action when threshold hit:**
-1. Teardown the grid (stop, keep_position=False, verify flat) — this realizes the profit
-2. Journal: `profit_take: true, pnl_realized: $X, pct_of_budget: Y%`
-3. Re-run hourly MTF (step 2) for fresh range prices
-4. If baseline + hourly still confirm same direction → redeploy immediately with fresh range
-5. If signals are mixed/opposite → follow normal Layer 1/2 decision flow (may flip or HOLD)
-
-**Key rules:**
-- Profit-take is checked BEFORE keep/flip decision — a grid at profit threshold is always closed first
-- No minimum age requirement for profit-taking (profit is profit)
-- The threshold is on **unrealized PnL** (`net_pnl_quote`), not on realized fills
-- After taking profit, the next grid starts fresh — no carry-over of the old range
-- Profit-taking does NOT count as a "flip" for the 3h cooldown — if you take profit on a SHORT and redeploy SHORT, the new grid's flip timer starts fresh
-- For TWO_SIDED: check each leg independently. If one leg hits threshold, take profit on that leg and redeploy it; the other leg continues
-
-## Each tick
-
-### 1. Baseline (if missing or >24h)
-```
-manage_routines(action="run", name="baseline_7d",
+```text
+manage_routines(action="run", name="position_mode_check",
   agent="adaptive_grid_trader",
-  config={"trading_pair":"SOL-USDT","connector_name":"binance_perpetual"})
+  config={"connector_name":"binance_perpetual","account_name":"master_account",
+          "trading_pair":"SOL-USDT","leverage":<loop leverage or null>})
 ```
 
-### 2. Hourly MTF
-```
+Continue toward deployment only for confirmed ONEWAY with `oneway_ok: YES`, `pair_state_read: CONFIRMED`, `balance_state_read: CONFIRMED`, and `leverage_state_read: CONFIRMED`. HEDGE invokes ownership-aware teardown and stops this loop. UNKNOWN or an unreadable/invalid state makes no trading mutation and stops this loop.
+
+When the pair is flat, `exchange_leverage` is `n/a (flat)`. After all other pre-create checks pass, call the named leverage tool immediately before the grid create. The setter and create are separate calls; verify the applied value from the live position later. When a position exists, `exchange_leverage` must equal the resolved leverage and `leverage_match` must be `YES`; otherwise follow the owned-grid teardown above for either a higher or lower mismatch. Never report requested leverage as exchange-confirmed without that evidence.
+
+### 1. Refresh analysis
+
+Run `baseline_7d` when missing or older than 24 hours. Pass its current ATR as `baseline_atr` and its seven-day ATR median as `atr_reference_7d`:
+
+```text
 manage_routines(action="run", name="hourly_mtf_check",
   agent="adaptive_grid_trader",
   config={"trading_pair":"SOL-USDT","connector_name":"binance_perpetual",
-          "lifetime_hours":8.0,"baseline_atr":<from_1>})
+          "lifetime_hours":8.0,"baseline_atr":<current_atr>,
+          "atr_reference_7d":<seven_day_atr_median>})
 ```
-Ignore PROFILE=HOLD as first-entry veto.
 
-### 3. Live state
-```
-list_executors(connector_names=["binance_perpetual"],
-  trading_pairs=["SOL-USDT"], executor_types=["grid_executor"], status="RUNNING")
-get_portfolio_overview(connector_names=["binance_perpetual"],
-  include_perp_positions=True, include_balances=True,
-  include_lp_positions=False, include_active_orders=True)
-```
-**Record `net_pnl_quote` from executor search results. Compare against previous tick's journal entry to determine PnL trend.**
+Baseline decides first-entry direction. Hourly never vetoes a directional baseline; HOLD returns no actionable prices, so calculate ATR/D prices when first-entry logic deploys.
 
-### 3a. Orphan cleanup (before any deploy)
-If step 3 shows **active orders on SOL-USDT** but **no running executor owns them**, they are stale leftovers.
-1. Cross-reference active orders from `get_portfolio_overview` against running executor IDs from `list_executors`.
-2. Any order whose `client_order_id` belongs to an executor that is still running → stop that executor (stopping it cancels the orders it owns):
-   ```
-   stop_executor(executor_id="<owning_executor_id>")
-   ```
-3. If the stop fails, retry once. If still stuck, journal the orphan and **continue** (do not HOLD solely because of an uncancellable orphan — attempt deployment anyway unless the orphan blocks balance).
-4. Verify orders are gone before proceeding to deploy.
+### 2. Read live state across sessions
 
-### 3b. Account menu (mandatory on flat / first entry / before TWO_SIDED)
-```
-manage_routines(action="run", name="position_mode_check",
-  agent="adaptive_grid_trader",
-  config={"connector_name":"binance_perpetual","account_name":"master_account"})
-```
-Branch only on **`mode: HEDGE|ONEWAY`** and **`two_sided_allowed`**.
-Optional `mode_read: SHRUG (...)` = unreadable path already folded into ONEWAY — one-sided path only.
+List all RUNNING SOL-USDT grid executors without restricting controller ownership. The routine's live exchange position and pair-order IDs are authoritative. Require its complete pair-order ID set to exactly match the active-order IDs reported by all RUNNING exact-pair executors. Missing ID fields, incomplete schemas, or unmatched IDs are ownerless/ambiguous and block deployment.
 
-### 4. Decide
-**Priority order for running grids (check top-down, first match wins):**
-1. **Stale?** filled_amount unchanged 3+ ticks → teardown + redeploy (see Stale Grid Detection)
-2. **Profit threshold?** net_pnl_quote ≥ 2% of leg budget ($1.80 one-sided / $0.90 per TWO_SIDED leg) → teardown + realize + redeploy (see Profit-Taking Rule)
-3. **PnL flip?** rules 1/2 from PnL modifier → teardown + flip
-4. **Standard Layer 2:** keep / flip if both 4h+1d opposite + ≥3h
-5. **TWO_SIDED collapse:** both TF lock one way → teardown both → one-sided
+- Previous-session grid: create nothing, notify once, HOLD, and recheck without alert spam.
+- Multiple/ambiguous grids or contradictory state: create nothing and alert.
+- Previous grid gone: require no orders, flat live position, and confirmed ONEWAY before normal first entry. Recompute direction/range from current inputs.
 
-**Flat entry (no running grid):**
-- A flat: baseline direction or NEUTRAL ladder (menu from 3b)
-- B died: clean → 4h+1d agree one-sided else Case A
+Never stop or claim a previous-session/foreign executor. Never deploy over ownerless orders.
 
-### 5. Teardown
-stop keep_position=False; both legs if two-sided; verify flat; notify if orphan stuck.
+### 3. Manage a current-session grid
 
-### 6. Liq guard
-liquidation_guard skill; $90 one-sided / $45 per leg; per_level ≥7.
+Use its real creation timestamp for age. Evaluate:
 
-### 7. Deploy grid_executor
-total_amount_quote 90 (or 45×2 if two_sided_allowed YES only); min_order 7; max_open_orders 12; activation_bounds 0.002; TP≥0.001; stop_loss 0.10; time_limit 43200; keep_position false; **leverage: 5** (must be in executor config — defaults to 10x if omitted); controller_id = this session agent_id.
+1. profit: total executor `net_pnl_quote >= 1.80` USDT;
+2. stale: three unchanged fill samples plus price outside its actionable range, missing expected orders, or executor error;
+3. PnL flip: three consecutive negative, strictly worsening live-position `unrealized_pnl` samples, only under exclusive-pair ownership and the baseline/age rules;
+4. standard flip: both 4h and 1d opposite and age at least three hours;
+5. otherwise KEEP.
 
-### 8. Journal
-entry_path, mode (HEDGE|ONEWAY), mode_read if present, two_sided_allowed, baseline, 4h/1d, liq_guard, **net_pnl_quote, pnl_trend, filled_amount_quote** (always), **pnl_flip / stale_recycle / profit_take** (if triggered).
+Profit is checked before stale. A healthy quiet grid stays running. A fresh session never joins old-session PnL samples.
 
-## Constraints
-- First entry baseline-driven
-- mode ONEWAY or two_sided_allowed NO → never two grids
-- stop_loss 0.10 = 10% of **filled** position PnL, not of budget — tighter in dollars early in the grid's life. No trailing_stop.
-- Fee-clear TP and spacing
+### 4. Stop, close, and verify
+
+Stop only a grid owned by this session. Verify it is stopped, reread orders, and reread the live position.
+
+If an exclusive-pair leftover position remains, reread confirmed mode, side, and absolute base amount; make at most one `create_order_executor` call using the opposite side, `execution_strategy: MARKET`, `position_action: CLOSE`, exact observed base amount, resolved explicit leverage, and current controller ID. Reread the live position afterward.
+
+Any non-flat, unreadable, partial, rejected, or dusty result blocks grid creation and is reported.
+
+### 5. Deploy
+
+Immediately before create, rerun `position_mode_check`, repeat the all-session grid query, and require confirmed ONEWAY, confirmed pair/balance reads, exact order-ID ownership correlation, no grid, flat live position, balance/reserve, size, max-loss, and liquidation safety. Only after those gates pass, call `set_account_position_mode_and_leverage` with the exact account, connector, pair, and resolved leverage and omit `position_mode`. Require `Leverage Set` with nested `status: success` or `ok`, then call `create_grid_executor` immediately. On any other setup result, create nothing, report the error, and stop. Never call the leverage tool for a close.
+
+Create one `grid_executor` with:
+
+- `total_amount_quote: 90`
+- minimum order 7; maximum 12 orders
+- `activation_bounds: 0.002`
+- fee-clear per-level take profit of at least 0.001
+- `time_limit: 43200`
+- `keep_position: false`
+- resolved explicit leverage (`5` when absent/null, otherwise the valid configured value)
+- current session controller ID
+- valid directional `limit_price`
+- no `stop_loss` or `trailing_stop`
+
+Require the create result's successful leverage-setup acknowledgement before reporting DEPLOY. After an unclear create, query executors. Never retry during the same tick.
+
+### 6. Journal
+
+Record mode contract, resolved leverage and its `default` or `configured` source, exchange leverage, leverage match/setup acknowledgement, baseline/hourly outputs, executor/controller ownership, grid age, live position and orders, `net_pnl_quote`, live `unrealized_pnl`, PnL samples, filled amount, liquidation/worst-loss checks, and any predecessor wait, profit, stale, flip, close, or verification result. Show requested and exchange-confirmed leverage distinctly in every create notification, tick journal, and HOLD/DEPLOY report.
