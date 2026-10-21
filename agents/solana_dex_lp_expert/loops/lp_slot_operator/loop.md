@@ -13,6 +13,13 @@ default_config:
   take_profit_pct: 20
   stop_loss_pct: 20
   out_of_range_max_sec: 1800
+  # How far beyond the range an abandoned slot closes itself (LP-7). Every slot
+  # is opened with upper/lower limit prices this many percent outside its
+  # bounds, so a position whose loop has stopped is still bounded by something:
+  # those limits live in the executor and fire without a tick. Wide enough that
+  # the loop's own out_of_range_max_sec grace window governs normal operation --
+  # these are the backstop, not the strategy.
+  autonomous_exit_margin_pct: 10
   venues: meteora,orca,raydium
   ranking_window: 24h
   range_width_pct: auto
@@ -33,7 +40,7 @@ You are the Solana DEX LP Expert's execution loop. Each tick you **monitor open 
 ~5-minute tick limit. **Aim for ≤ 8 tool calls per tick.** Do **NOT** hand-scan GeckoTerminal — use the **`lp_scanner` routine** (one call). Fill **at most ONE slot per tick**.
 
 ## Configuration at launch
-Read from `[CURRENT CONFIG]`: `quote_asset` (SOL), `base_pct` (20), `slots` (3), `take_profit_pct` (20), `stop_loss_pct` (20), `venues` (meteora,orca,raydium), `ranking_window` (24h), `range_width_pct` (auto), `capital_per_slot`. If `capital_per_slot` is null, derive from usable `quote_asset` balance ÷ `slots`, keeping `min_wallet_sol_reserve` SOL for rent+fees.
+Read from `[CURRENT CONFIG]`: `quote_asset` (SOL), `base_pct` (20), `slots` (3), `take_profit_pct` (20), `stop_loss_pct` (20), `venues` (meteora,orca,raydium), `ranking_window` (24h), `range_width_pct` (auto), `capital_per_slot`, `autonomous_exit_margin_pct` (10). If `capital_per_slot` is null, derive from usable `quote_asset` balance ÷ `slots`, keeping `min_wallet_sol_reserve` SOL for rent+fees.
 
 ## Constants
 - `connector_name` = `solana-mainnet-beta`  ·  `lp_provider` = `{venue}/clmm`  ·  `swap_provider` = `jupiter/router`  ·  `keep_position` = `false`
@@ -82,7 +89,9 @@ Size by `base_pct` with `capital_per_slot` at price `P`:
 > **Always haircut: `base_amount = executed_amount_base × 0.995`** (or read the true post-swap wallet balance and use that). The leftover dust is worth cents; a failed open costs a full swap round-trip.
 > This is **venue-independent** — it is not a Meteora/Orca/Raydium quirk. Do **not** blacklist a pool for it: the same shortfall recurs on the next pool. Only blacklist after the open fails with the correct, haircut amount.
 
-**Open LP** (MINT pair): `create_lp_executor(connector_name="solana-mainnet-beta", lp_provider="<venue>/clmm", swap_provider="jupiter/router", trading_pair=<MintPair>, pool_address=<Pool>, lower_price=<Pl>, upper_price=<Pu>, side=<1|2|3>, base_amount=<b>, quote_amount=<q>, keep_position=false, extra_params={"strategyType":0})`.
+**Open LP** (MINT pair): `create_lp_executor(connector_name="solana-mainnet-beta", lp_provider="<venue>/clmm", swap_provider="jupiter/router", trading_pair=<MintPair>, pool_address=<Pool>, lower_price=<Pl>, upper_price=<Pu>, lower_limit_price=<Pl × (1 − autonomous_exit_margin_pct/100)>, upper_limit_price=<Pu × (1 + autonomous_exit_margin_pct/100)>, side=<1|2|3>, base_amount=<b>, quote_amount=<q>, keep_position=false, extra_params={"strategyType":0})`.
+
+**Both limit prices are mandatory — never omit them.** They are the only thing managing the slot when this loop is not. Without them a position "sits out of range indefinitely on the unprotected side": stopping the loop used to leave real on-chain liquidity with no exit at all, waiting for a tick that was never coming (LP-7). They fire only while the position is OUT_OF_RANGE, so they cannot pre-empt your own `out_of_range_max_sec` grace window — they are what happens if nobody is left to honour it.
 
 **Range bounds:** pick total width `W` from `range_width_pct`/OHLCV vol, then place `P` **asymmetrically by `base_pct`** so even (Spot) liquidity gives the target split — the **memecoin side gets `base_pct%` of `W`**, the SOL side `(100−base_pct)%`. **The memecoin side FLIPS by venue price convention:**
 - **Meteora** (price = SOL-per-memecoin, small e.g. `0.00105`): memecoin is ABOVE `P` → `upper=P×(1+W·base_pct/100)`, `lower=P×(1−W·(100−base_pct)/100)`.
