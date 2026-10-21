@@ -581,12 +581,21 @@ class RiskEngine:
                     f"position limit ${self.limits.max_position_size_quote:.2f}"
                 )
             if capital_quote is not None:
-                # DT-2: the money the bot will trade, not the loss it declares.
-                if capital_quote > self.limits.max_position_size_quote:
+                # DT-2: the money the bot will trade, not the loss it declares,
+                # and against what is LEFT of the allowance rather than all of
+                # it. Every other create accumulates into the snapshot on
+                # approval (see ``check_executor_action`` and
+                # ``check_dex_action``); a deploy did not, so two $300 deploys
+                # under a $500 limit both passed and committed $600 between
+                # them.
+                committed = current_state.total_exposure if current_state else 0.0
+                headroom = self.limits.max_position_size_quote - committed
+                if capital_quote > headroom:
                     return False, (
-                        f"the controllers would trade ${capital_quote:.2f}, "
-                        f"over this session's position limit "
-                        f"${self.limits.max_position_size_quote:.2f} — lower "
+                        f"the controllers would trade ${capital_quote:.2f}, over "
+                        f"the ${headroom:.2f} left of this session's "
+                        f"${self.limits.max_position_size_quote:.2f} position "
+                        f"limit (${committed:.2f} already committed) — lower "
                         "their total_amount_quote or raise the limit"
                     )
                 # MM-4: a kill switch at or above the capital it guards fires
@@ -622,6 +631,11 @@ class RiskEngine:
                     f"update_config total_amount_quote ${amount:.2f} exceeds "
                     f"position limit ${self.limits.max_position_size_quote:.2f}"
                 )
+
+        if action == "deploy" and capital_quote is not None and current_state:
+            # Approved: reserve it, so a second deploy in this run is gated
+            # against what is left rather than against the full allowance.
+            current_state.total_exposure += capital_quote
 
         return True, ""
 

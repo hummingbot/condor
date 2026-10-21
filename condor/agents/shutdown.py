@@ -221,13 +221,23 @@ async def _stop_owned_bots(engine: Any, client: Any) -> tuple[list[str], list[st
     ``cancel_resting_orders`` names when it reports a controller session's
     orders as unsweepable, and a kill switch is exactly the moment to take it.
 
-    Scoped by the ledger, never by a name pattern: ``owns`` is the same
-    membership test the risk gate enforces on a deploy, so a session can only
-    stop what it was allowed to start. Bots are read back from the API rather
-    than reconstructed from ``bases()`` -- Hummingbot appends a timestamp to the
-    requested name, so a base is not an instance -- and a listing that fails
-    falls back to the bases themselves, which stops a bot deployed under its
-    exact name and honestly records a failure for one that was not.
+    Scoped to the bots THIS SESSION RECORDED (``ledger.bases()``), matched
+    against live instance names with ``in_namespace`` because Hummingbot appends
+    a deploy timestamp and a base is therefore not an instance.
+
+    Deliberately not ``ledger.owns()``, which answers a different question — may
+    this session *touch* that name — by testing the namespace prefix. Recording
+    a deploy is unconditional while namespace enforcement is not, so an
+    executor-mode session can record a bot whose name sits outside the prefix:
+    ``owns`` says no and the winddown would walk past a bot that is still
+    trading. The converse is worse. The prefix also matches siblings this
+    session never deployed, including another live session's, so a winddown
+    scoped that way could stop somebody else's bot — the same harm CORR-726's
+    dead-owner conjunction exists to prevent, one object along.
+
+    A listing that fails falls back to the bases themselves, which stops a bot
+    deployed under its exact name and honestly records a failure for one
+    carrying a timestamp.
 
     Returns ``(stopped, failures)``; never raises, like every other pass here.
     """
@@ -248,7 +258,11 @@ async def _stop_owned_bots(engine: Any, client: Any) -> tuple[list[str], list[st
     try:
         active = await client.bot_orchestration.get_active_bots_status()
         data = active.get("data") if isinstance(active, dict) else None
-        names = [str(n) for n in (data or {}) if ledger.owns(str(n))]
+        names = [
+            str(n)
+            for n in (data or {})
+            if any(in_namespace(str(n), base) for base in bases)
+        ]
     except Exception as exc:
         log.warning("shutdown: could not list bots; falling back to the ledger's bases")
         failures.append(

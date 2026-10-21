@@ -276,3 +276,107 @@ def test_the_operator_loop_deploys_with_a_cap_below_its_capital():
     # used to pass.
     assert "max_global_drawdown_quote from [CURRENT CONFIG]" in text
     assert "<max_position_size_quote from risk_limits>" not in text
+
+
+# ── a deploy reserves what it commits (review follow-up) ─────────────────────
+
+
+def test_two_deploys_cannot_each_spend_the_whole_allowance():
+    """Every other create accumulates on approval; a deploy did not.
+
+    Two $300 deploys under a $500 limit therefore both passed and committed $600
+    between them, each judged against the full allowance as though the other had
+    not happened.
+    """
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+    gate = auto_approve_with_risk_check(
+        engine, state, execution_mode="loop", price_client=_Client({"cfg": 300})
+    )
+    call = {
+        "tool": "manage_bots",
+        "input": {
+            "action": "deploy",
+            "bot_name": "b",
+            "controllers_config": ["cfg"],
+            "max_global_drawdown_quote": 50,
+        },
+    }
+
+    assert _outcome(asyncio.run(gate(call, OPTIONS))) == "selected"
+    second = asyncio.run(gate(call, OPTIONS))
+
+    assert _outcome(second) == "cancelled"
+    assert "already committed" in second["reason"]
+
+
+def test_an_approved_deploy_reserves_its_capital_on_the_state():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+
+    engine.check_bot_action(
+        {
+            "tool": "manage_bots",
+            "input": {
+                "action": "deploy",
+                "bot_name": "b",
+                "controllers_config": ["cfg"],
+                "max_global_drawdown_quote": 50,
+            },
+        },
+        state,
+        300.0,
+    )
+
+    assert state.total_exposure == 300.0
+
+
+def test_a_refused_deploy_reserves_nothing():
+    """A deploy the gate turned back has committed no capital."""
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+
+    allowed, _ = engine.check_bot_action(
+        {
+            "tool": "manage_bots",
+            "input": {
+                "action": "deploy",
+                "bot_name": "b",
+                "controllers_config": ["cfg"],
+                "max_global_drawdown_quote": 900,
+            },
+        },
+        state,
+        300.0,
+    )
+
+    assert allowed is False
+    assert state.total_exposure == 0.0
+
+
+def test_a_deploy_shares_the_allowance_with_executor_creates():
+    """One envelope, not one per tool family."""
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+    engine.check_bot_action(
+        {
+            "tool": "manage_bots",
+            "input": {
+                "action": "deploy",
+                "bot_name": "b",
+                "controllers_config": ["cfg"],
+                "max_global_drawdown_quote": 50,
+            },
+        },
+        state,
+        400.0,
+    )
+
+    allowed, reason = engine.check_executor_action(
+        {"tool": "create_grid_executor", "input": {"total_amount_quote": 200}},
+        state,
+        200.0,
+    )
+
+    assert allowed is False
+    assert "position limit" in reason

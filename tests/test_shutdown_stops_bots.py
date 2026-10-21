@@ -249,3 +249,48 @@ def test_only_the_shutdown_verb_gets_the_longer_budget():
     source = inspect.getsource(trading_agent)
 
     assert "else None" in source.split("TIMEOUTS.mcp_shutdown")[1][:40]
+
+
+# ── scoped to what the session recorded (review follow-up) ──────────────────
+
+
+def test_a_recorded_bot_outside_the_namespace_is_still_stopped():
+    """Recording a deploy is unconditional; namespace enforcement is not.
+
+    An executor-mode session can therefore record a bot whose name sits outside
+    the prefix. Scoping the winddown by ``ledger.owns()`` — a prefix test —
+    walked straight past it and left it trading.
+    """
+    legacy = "jto-mm-20261022-101500"
+    client = _Client([legacy])
+
+    stopped, _ = asyncio.run(_stop_owned_bots(_engine("jto-mm"), client))
+
+    assert stopped == [legacy]
+
+
+def test_a_namespace_sibling_this_session_never_deployed_is_left_alone():
+    """The converse, and the worse half: the prefix also matches another live
+    session's bots, so a winddown scoped that way could stop someone else's —
+    the harm CORR-726's dead-owner conjunction exists to prevent, one object
+    along."""
+    client = _Client([INSTANCE, f"{NS}-never-deployed-20261022-101500"])
+
+    stopped, _ = asyncio.run(_stop_owned_bots(_engine(f"{NS}-jto"), client))
+
+    assert stopped == [INSTANCE]
+
+
+def test_scope_comes_from_the_recorded_bases_not_the_prefix():
+    """Pinned so the cheaper prefix test cannot creep back in."""
+    import inspect
+
+    from condor.agents import shutdown as shutdown_mod
+
+    source = inspect.getsource(shutdown_mod._stop_owned_bots)
+    # Past the docstring, which names ``ledger.owns`` precisely to say it is the
+    # wrong test — the prose is not the code.
+    body = source.split('"""')[2]
+
+    assert "in_namespace(str(n), base) for base in bases" in body
+    assert "ledger.owns(" not in body

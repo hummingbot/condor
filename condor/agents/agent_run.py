@@ -100,8 +100,12 @@ def _delegated_envelope() -> tuple[RiskEngine, RiskState]:
     return RiskEngine(RiskLimits()), RiskState()
 
 
-async def _price_client(user_id: int, server_name: str | None, slug: str) -> Any:
+async def _price_client(resolved_server: str | None, slug: str) -> Any:
     """The API client the gate prices a create with, or ``None``.
+
+    Takes the server the run ALREADY resolved rather than resolving its own: the
+    gate has to price a call against the same book the call will land on, and
+    two resolutions of one question are two chances to disagree.
 
     Best-effort by design: a delegation that cannot reach a server should fail
     on the tools that need one, not on the gate that guards them. ``None`` only
@@ -110,10 +114,10 @@ async def _price_client(user_id: int, server_name: str | None, slug: str) -> Any
     """
     from config_manager import get_config_manager
 
+    if not resolved_server:
+        return None
     try:
-        cm = get_config_manager()
-        resolved = resolve_stored_server(cm, user_id, server_name)
-        return await cm.get_client(resolved) if resolved else None
+        return await get_config_manager().get_client(resolved_server)
     except Exception:
         log.warning(
             "Delegation to %s: no API client for the risk gate; a create it "
@@ -227,17 +231,34 @@ async def run_agent_to_completion(
     # A server pinned on the Agent itself is chosen, not inherited: it resolves
     # or this run refuses, naming it, instead of answering on another server's
     # accounts (CORR-729). The caller's ambient server stays a fallback.
-    from config_manager import ServerUnavailable
+    from config_manager import ServerUnavailable, get_config_manager
 
     try:
+        # Resolved ONCE, for the tools AND the risk gate's price client
+        # (CORR-737's rule, applied to this seat). They used to resolve
+        # separately on different inputs — the builder with ``chat_id``, the
+        # price client without — so a run whose owner had no explicit server
+        # could price a create against the first accessible server while the
+        # create itself landed on the chat's default. A gate checking the wrong
+        # book can refuse a valid call, or approve one that is over the limit
+        # on the book that matters.
+        resolved = resolve_stored_server(
+            get_config_manager(),
+            user_id,
+            effective_server if agent.server_required else None,
+            pinned=agent.server_required and bool(agent.server_name),
+            chat_id=chat_id,
+        )
         mcp_servers = toolsets.build_mcp_servers_for_session(
             user_id,
             chat_id,
-            server_name=effective_server if agent.server_required else None,
+            # Handed back with ``server_pinned`` so the builder resolves this
+            # name to itself instead of running the chain a second time.
+            server_name=resolved,
             agent_slug=slug,
             delegate_worker=delegate_worker,
             ask_target=ask_target,
-            server_pinned=agent.server_required and bool(agent.server_name),
+            server_pinned=bool(resolved),
         )
     except ServerUnavailable as exc:
         return (
@@ -266,7 +287,7 @@ async def run_agent_to_completion(
     # The same server the tools above resolved onto, for the same reason a tick
     # resolves once for both (CORR-737): a gate pricing a create on fleet A
     # while the create lands on fleet B is checking the wrong book.
-    price_client = await _price_client(user_id, effective_server, slug)
+    price_client = await _price_client(resolved, slug)
     permission_cb = auto_approve_with_risk_check(
         risk_engine,
         risk_state,
@@ -317,7 +338,12 @@ async def run_agent_to_completion(
     # request or the client's own hard stop would come back as the placeholder
     # (or a provider error message) and every door would record it as "done".
     if stop_reason in FAILED_STOP_REASONS:
-        detail = answer.strip()
+        # The refusals go out on the failure too. They are collected during the
+        # run, and a session that dies afterwards does not make them less true:
+        # without this the caller — and the error record this raise becomes —
+        # lost the only account of why those calls were blocked, which is
+        # exactly the silence the gate's refusal log exists to end.
+        detail = (answer.strip() + _refusal_note(refusals)).strip()
         raise RuntimeError(
             f"agent session ended: {stop_reason}" + (f" — {detail}" if detail else "")
         )

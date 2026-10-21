@@ -125,7 +125,7 @@ def test_a_pool_with_no_connector_is_dropped_not_returned():
     """A row the agent cannot act on is worse than no row."""
     source = Path("agents/solana_dex_lp_expert/routines/lp_scanner.py").read_text()
 
-    assert 'if not c["lp_provider"]:' in source
+    assert "if not provider:" in source
     assert "no CLMM lp_provider" in source
 
 
@@ -214,3 +214,55 @@ def test_the_hint_warns_against_marking_it_resolved():
 
     assert "Do NOT" in hint and "resolve_orphaned_position" in hint
     assert "hides live exposure" in hint
+
+
+# ── the connector is resolved before Gateway is asked (review follow-up) ────
+
+
+def test_pool_info_is_asked_with_a_connector_gateway_knows():
+    """The half that made the LP-4 fix worse than the bug.
+
+    ``_enrich`` passed the GeckoTerminal dex id straight to Gateway as the
+    ``connector``. With the old ``raydium`` default that happened to work; with
+    the corrected ``raydium-clmm`` it does not — pool-info fails, the candidate
+    is dropped, and a Raydium scan reports nothing usable even when it found
+    eligible pools. The connector is now resolved first, and the dex id is kept
+    for discovery only.
+    """
+    source = Path("agents/solana_dex_lp_expert/routines/lp_scanner.py").read_text()
+    enrich = source[source.index("async def _enrich") :]
+    enrich = enrich[: enrich.index("enriched = [")]
+
+    assert 'connector=c["dex"]' not in enrich
+    assert "connector = provider.split" in enrich
+    # ...and resolved BEFORE the request, not after it.
+    assert enrich.index("lp_provider_for_dex(") < enrich.index("get_pool_info(")
+
+
+@pytest.mark.parametrize(
+    "dex,connector", [("raydium-clmm", "raydium"), ("meteora", "meteora")]
+)
+def test_the_gateway_connector_is_the_providers_brand(dex, connector):
+    assert lp_provider_for_dex(dex, "solana").split("/", 1)[0] == connector
+
+
+def test_an_unusable_venue_costs_no_request():
+    """Dropped before paying for a pool-info call that cannot succeed."""
+    source = Path("agents/solana_dex_lp_expert/routines/lp_scanner.py").read_text()
+    enrich = source[source.index("async def _enrich") :]
+
+    assert enrich.index("if not provider:") < enrich.index("get_pool_info(")
+
+
+# ── the autonomous limits are described honestly (review follow-up) ─────────
+
+
+def test_the_grace_window_is_not_promised():
+    """The limits fire on a crossing, which can happen inside
+    ``out_of_range_max_sec`` and while the loop is still running — telling an
+    operator their configured wait still governs exits would be false."""
+    body = Path(LP_LOOP).read_text()
+
+    assert "cannot pre-empt" not in body
+    assert "can happen inside your `out_of_range_max_sec` grace window" in body
+    assert "while this loop is still running" in body

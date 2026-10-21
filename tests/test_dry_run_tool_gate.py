@@ -80,6 +80,47 @@ def _ids(value) -> str:
     return str(value.get("action", "")) if isinstance(value, dict) else str(value)
 
 
+#: What a tool body returns when a call actually arrives at it. The real bodies
+#: talk to the main process, which is not running under pytest, so they are
+#: stubbed: an *allowed* call must be seen to reach its body, and anything that
+#: is neither a refusal nor an arrival — a schema error, a wrapper that crashes
+#: before calling through — has to fail the test rather than read as "not
+#: refused". Swallowing every exception would let a broken wrapper satisfy both
+#: the read-only and the live cases.
+_REACHED = "reached the tool body"
+
+
+def _stub_bodies(monkeypatch, *names: str) -> dict[str, list[dict]]:
+    """Replace the named tools' bodies, BEFORE the gate wraps them.
+
+    The gate wraps whatever ``TOOL_PROFILES`` holds, so stubbing has to happen
+    in that table: swapping the registered function afterwards would replace the
+    wrapper itself and the gate would never run at all.
+
+    ``functools.wraps`` keeps each stub's name, docstring and — through
+    ``__wrapped__`` — its signature, so FastMCP derives the same schema it would
+    from the real body and the arguments under test still validate.
+    """
+    import functools
+
+    calls: dict[str, list[dict]] = {name: [] for name in names}
+
+    def _stub_for(real):
+        @functools.wraps(real)
+        async def stub(**kwargs):
+            calls[real.__name__].append(kwargs)
+            return {"ok": _REACHED}
+
+        return stub
+
+    patched = {
+        profile: tuple(_stub_for(fn) if fn.__name__ in names else fn for fn in tools)
+        for profile, tools in condor_server.TOOL_PROFILES.items()
+    }
+    monkeypatch.setattr(condor_server, "TOOL_PROFILES", patched)
+    return calls
+
+
 def _seat(execution_mode: str, profile: str = "tick") -> FastMCP:
     """The condor subprocess's tool surface for a seat, as it registers it."""
     server = FastMCP("dry-run-probe")
@@ -87,48 +128,70 @@ def _seat(execution_mode: str, profile: str = "tick") -> FastMCP:
     return server
 
 
-def _refusal(server: FastMCP, tool: str, args: dict) -> str:
-    """The refusal ``tool`` answered with, or ``""`` when it ran.
+def _refusal(server: FastMCP, tool: str, args: dict, calls=None) -> str:
+    """The refusal ``tool`` answered with, or ``""`` when the call reached it.
 
     A refusal is the tool's ordinary ``{"error": ...}`` result, so it comes back
-    through ``call_tool`` as content rather than as an exception. A call that
-    gets *past* the gate reaches a body with no main process behind it under
-    pytest and raises — which is itself the evidence that nothing refused it, so
-    it is caught and reported as "not refused" rather than failing the test for
-    the wrong reason.
+    through ``call_tool`` as content rather than as an exception. With ``calls``
+    from :func:`_stub_bodies`, this also asserts the two outcomes are exclusive:
+    a refused call must not have run, and an approved one must have arrived.
     """
-    try:
-        result = asyncio.run(server.call_tool(tool, args))
-    except Exception:
-        return ""
+    result = asyncio.run(server.call_tool(tool, args))
     text = str(result)
-    return text if "dry-run mode" in text else ""
+    refused = "dry-run mode" in text
+
+    if calls is not None:
+        arrived = calls.get(tool, [])
+        if refused:
+            assert not arrived, f"{tool} was refused and still ran"
+        else:
+            assert arrived, f"{tool} neither refused nor reached: {text[:200]}"
+            assert _REACHED in text
+
+    return text if refused else ""
 
 
 # ── 1. the policy, at the layer that enforces it ─────────────────────────────
 
 
 @pytest.mark.parametrize("tool,args", MUTATING, ids=_ids)
-def test_a_dry_run_seat_refuses_every_door_onto_python(tool, args):
-    """The CO-2 regression: the snippet does not run, and the model is told why."""
-    assert _refusal(_seat("dry_run"), tool, args)
+def test_a_dry_run_seat_refuses_every_door_onto_python(tool, args, monkeypatch):
+    """The CO-2 regression: the snippet does not run, and the model is told why.
+
+    ``calls`` makes "does not run" an assertion rather than an inference — the
+    stub body records every arrival, and a refused call must have none.
+    """
+    calls = _stub_bodies(monkeypatch, "run_code", "manage_routines")
+
+    assert _refusal(_seat("dry_run"), tool, args, calls)
 
 
 @pytest.mark.parametrize("tool,args", READ_ONLY, ids=_ids)
-def test_a_dry_run_seat_still_answers_the_reads_a_rehearsal_needs(tool, args):
-    """Refusing these would make a dry run useless rather than safe."""
-    assert not _refusal(_seat("dry_run"), tool, args)
+def test_a_dry_run_seat_still_answers_the_reads_a_rehearsal_needs(
+    tool, args, monkeypatch
+):
+    """Refusing these would make a dry run useless rather than safe.
+
+    Asserted as *reaching the body*, not merely as "no refusal came back": a
+    wrapper that crashed on the way would also produce no refusal.
+    """
+    calls = _stub_bodies(monkeypatch, "run_code", "manage_routines")
+
+    assert not _refusal(_seat("dry_run"), tool, args, calls)
 
 
 @pytest.mark.parametrize("tool,args", MUTATING, ids=_ids)
-def test_a_live_seat_is_untouched(tool, args):
+def test_a_live_seat_is_untouched(tool, args, monkeypatch):
     """The flag restricts a rehearsal and nothing else.
 
     A live tick executes routines as ordinary work, which is why neither tool is
     in ``DANGEROUS_TOOLS`` to begin with (SEC-626): gating them by name would
-    put a confirmation in front of every tick.
+    put a confirmation in front of every tick. Asserted as reaching the body, so
+    "the gate is off" cannot be satisfied by the call failing some other way.
     """
-    assert not _refusal(_seat(""), tool, args)
+    calls = _stub_bodies(monkeypatch, "run_code", "manage_routines")
+
+    assert not _refusal(_seat(""), tool, args, calls)
 
 
 def test_an_unclassified_action_cannot_be_expressed_on_the_wire():

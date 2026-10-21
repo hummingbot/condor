@@ -86,14 +86,23 @@ Additionally:
 If no configs pass all criteria, lower the Sharpe threshold to 0.5 and retry. If still none qualify, do NOT deploy — journal the situation and skip deployment this tick.
 
 ### Step 4 — Check bot status
-**`[CONTROLLER MODE]` is the authority on whether you already have a bot**, not
-`manage_bots(action="status")`. It lists "Bots you own right now"; a status call
-returns the whole fleet under their deployed names (yours carries a timestamp
-suffix you never typed), so matching it by eye is how a second instance of the
-same book gets deployed on top of the first.
+Two questions, two sources, and you need both:
 
-- If you own NO bot yet and the active set is non-empty → deploy under the
-  namespace `[CONTROLLER MODE]` names:
+1. **Which name is yours** — `[CONTROLLER MODE]`, which states your namespace and
+   lists "Bots you own right now". Never guess it: Hummingbot appends a deploy
+   timestamp, so the running instance is never called what you typed, and
+   matching a status listing by eye is how a second instance of the same book
+   gets deployed on top of the first.
+2. **Whether it is actually running** — `manage_bots(action="status")`, matching
+   instances that START WITH your owned base. Ownership alone is not proof a bot
+   exists: a deploy is recorded when the risk gate approves it, before the API
+   runs it, so a deploy that then failed leaves you owning a name with nothing
+   behind it. Trusting ownership by itself would retire the deploy branch
+   forever and leave the loop running with no bot.
+
+- If you own no bot, OR you own one but no running instance carries its name,
+  and the active set is non-empty → deploy under the namespace
+  `[CONTROLLER MODE]` names:
   ```
   manage_bots(
     action="deploy",
@@ -104,8 +113,9 @@ same book gets deployed on top of the first.
   )
   ```
   Journal: action="deployed <bot_name> with <configs> — backtest Sharpes: <list>"
-  The name you own is recorded for you; next tick it is in "Bots you own right
-  now" and this branch does not fire again.
+  The name you own is recorded for you. Next tick it is in "Bots you own right
+  now" — but check status as well before concluding the bot is up, for the
+  reason above.
 
 - If you own a bot but the active set differs from its deployed set → note the discrepancy in journal; do NOT redeploy mid-session unless a controller was explicitly stopped.
 

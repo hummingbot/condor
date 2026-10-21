@@ -243,3 +243,62 @@ def test_the_delegated_run_builds_a_permission_callback():
 
     assert "permission_callback=permission_cb" in source
     assert "permission_callback=None" not in source
+
+
+# ── one server for the tools and the gate (review follow-up) ────────────────
+
+
+def test_the_gate_prices_against_the_server_the_tools_resolved():
+    """A gate checking the wrong book can refuse a valid call, or approve one
+    that is over the limit on the book that matters.
+
+    The two used to resolve separately on different inputs — the toolset builder
+    with ``chat_id``, the price client without — so a run whose owner had no
+    explicit server could price a create against the first accessible server
+    while the create landed on the chat's default.
+    """
+    import inspect
+
+    from condor.agents import agent_run
+
+    source = inspect.getsource(agent_run.run_agent_to_completion)
+
+    assert "resolved = resolve_stored_server(" in source
+    assert "server_name=resolved," in source
+    assert "_price_client(resolved, slug)" in source
+
+
+def test_the_price_client_resolves_nothing_of_its_own():
+    """It takes the answer; two resolutions of one question are two chances to
+    disagree."""
+    import inspect
+
+    from condor.agents import agent_run
+
+    source = inspect.getsource(agent_run._price_client)
+
+    assert "resolve_stored_server" not in source
+
+
+def test_a_serverless_run_gets_no_price_client():
+    import asyncio as _asyncio
+
+    from condor.agents.agent_run import _price_client
+
+    assert _asyncio.run(_price_client("", "lp")) is None
+
+
+# ── refusals survive a failed run (review follow-up) ────────────────────────
+
+
+def test_a_failed_run_still_reports_what_was_refused():
+    """A session that dies afterwards does not make the refusals less true, and
+    the raise becomes the caller's error record — the only account it gets."""
+    import inspect
+
+    from condor.agents import agent_run
+
+    source = inspect.getsource(agent_run.run_agent_to_completion)
+    failure_arm = source[source.index("if stop_reason in FAILED_STOP_REASONS:") :]
+
+    assert "_refusal_note(refusals)" in failure_arm[:600]
