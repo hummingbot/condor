@@ -11,6 +11,11 @@ default_config:
   frequency_sec: 300
   total_amount_quote: 500
   execution_mode: loop
+  # Controller mode, with the bot name DERIVED as this session's namespace
+  # (MM-5). Both loops deploy bots but ran in executor mode, so no
+  # [CONTROLLER MODE] block reached the prompt and the ownership ledger
+  # enforced nothing on the names they invented.
+  bot_mode: bot
   issuer: xyz
   reselect_every_ticks: 30
   min_spread_bps: 3

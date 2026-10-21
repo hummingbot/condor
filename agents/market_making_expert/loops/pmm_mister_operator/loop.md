@@ -8,6 +8,11 @@ default_config:
   frequency_sec: 120
   total_amount_quote: 500
   execution_mode: loop
+  # Controller mode, with the bot name DERIVED as this session's namespace
+  # (MM-5). Both loops deploy bots but ran in executor mode, so no
+  # [CONTROLLER MODE] block reached the prompt and the ownership ledger
+  # enforced nothing on the names they invented.
+  bot_mode: bot
   # The platform kill switch this loop deploys with: a fraction of the capital
   # it trades, not a figure above it (MM-4). It used to pass
   # max_position_size_quote, which was 600 against 500 of capital — a switch
@@ -42,7 +47,13 @@ If `trading_context` is present instead, parse it to extract the pair and connec
 From `trading_pair` (e.g. "JTO-USDT"), derive:
 - `base` = first token lowercased (e.g. "jto")
 - `config_name` = `{base}_mm_live` (e.g. "jto_mm_live")
-- `bot_name` = `{base}-mm` (e.g. "jto-mm")
+- `bot_name` = `{namespace}-{base}` — the namespace is in `[CONTROLLER MODE]`,
+  which states it and lists the bots you already own. A per-pair book is a
+  tagged sibling (`{ns}-jto`), which that block explicitly allows.
+  **Never `{base}-mm`**: a name outside the namespace is refused by the risk
+  gate and recorded as a violation, and before the gate could see it (MM-5)
+  it meant the session owned nothing it deployed — no attribution, no
+  namespace protection, and nothing to stop a second session touching it.
 
 ## Objective
 
@@ -116,7 +127,7 @@ The config MUST include `controller_type: "generic"` and `controller_name: "pmm_
 | max_active_executors_by_level | int | 4 | Max hanging executors per spread level |
 | tick_mode | bool | false | Use min_price_increment as spread multiplier |
 | position_profit_protection | bool | false | Block reductions at unfavorable prices |
-| min_skew | Decimal | 1.0 | Minimum skew multiplier (1.0 = no minimum) |
+| min_skew | Decimal | 1.0 | Floor on the order-SIZE skew multiplier. 1.0 = skew off; <1 (0.3-0.5) = protection on; >1 multiplies EVERY order and disables skew — never set it (MM-2) |
 | global_take_profit | Decimal | 0.03 | Global TP threshold (3%) |
 | global_stop_loss | Decimal | 0.05 | Global SL threshold (5%) |
 | global_tp_enabled | bool | false | Enable global TP |

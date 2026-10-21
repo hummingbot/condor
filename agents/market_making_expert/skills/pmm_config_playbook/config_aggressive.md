@@ -13,8 +13,8 @@ wide inventory tolerance, higher allocation.
   "controller_name": "pmm_mister",
   "connector_name": "binance_perpetual",
   "trading_pair": "JTO-USDT",
-  "total_amount_quote": 500,
-  "portfolio_allocation": 0.25,
+  "total_amount_quote": "<total_amount_quote from [CURRENT CONFIG]>",
+  "portfolio_allocation": 0.2,
   "target_base_pct": 0.5,
   "min_base_pct": 0.3,
   "max_base_pct": 0.7,
@@ -22,7 +22,7 @@ wide inventory tolerance, higher allocation.
   "sell_spreads": "0.0008,0.0015",
   "buy_amounts_pct": "1,1",
   "sell_amounts_pct": "1,1",
-  "executor_refresh_time": 20,
+  "executor_refresh_time": 15,
   "buy_cooldown_time": 30,
   "sell_cooldown_time": 30,
   "buy_position_effectivization_time": 60,
@@ -36,12 +36,12 @@ wide inventory tolerance, higher allocation.
   "leverage": 10,
   "position_mode": "ONEWAY",
   "position_side": "BUY",
-  "max_active_executors_by_level": 4,
+  "max_active_executors_by_level": 5,
   "tick_mode": false,
-  "min_skew": 1.0,
+  "min_skew": 0.5,
   "global_tp_enabled": false,
   "global_sl_enabled": true,
-  "global_stop_loss": 0.05,
+  "global_stop_loss": 0.06,
   "global_sl_activation_from": "target_base",
   "global_pnl_reference": "position"
 }
@@ -65,7 +65,8 @@ wide inventory tolerance, higher allocation.
 - `open_order_type` / `take_profit_order_type` (3 = LIMIT_MAKER): Post-only.
   Never takes liquidity. Change to 2 (LIMIT) only if the exchange rejects makers.
 - `tick_mode` (false): Keep false for continuous market making.
-- `min_skew` (1.0): No minimum skew enforced — spreads stay symmetric when
+- `min_skew` (0.5): Light inventory protection, same floor as balanced — the
+  aggression here is in allocation, leverage and refresh, not in sizing (MM-2).
   inventory is balanced.
 
 **Tuning notes**

@@ -131,7 +131,7 @@ Exchange connector. Use `_perpetual` suffix for futures (e.g. `binance_perpetual
 **`trading_pair`** (str, required)
 Market to quote in `BASE-QUOTE` format. Prefer liquid pairs — thin books amplify adverse selection.
 
-**`leverage`** (int, default: 1)
+**`leverage`** (int, default: 20)
 Only applies to perpetual connectors. For market making, keep leverage conservative (1–5x). High leverage amplifies drawdowns and makes global SL/TP hit faster. On spot, always set to 1.
 
 **`position_mode`** (str, default: `ONEWAY`)
@@ -141,14 +141,14 @@ Only applies to perpetuals. Always use `ONEWAY` for PMM Mister — fills from bu
 
 ### Portfolio Allocation & Capacity
 
-**`portfolio_allocation`** (float, default: 0.03)
+**`portfolio_allocation`** (float, default: 0.1)
 Fraction of `total_amount_quote` placed around the mid price at each iteration. This is what the bot actively quotes per cycle.
 
 Formula: `order_size = total_amount_quote × portfolio_allocation ÷ number_of_levels`
 
 Keep this small. Example: with `total_amount_quote=1000`, `portfolio_allocation=0.10`, and 2 buy levels, each buy order is ~$50.
 
-**`max_active_executors_by_level`** (int, default: 10)
+**`max_active_executors_by_level`** (int, default: 4)
 Maximum number of open (unfilled) executors per level at any time. After a fill, once the cooldown expires, the controller can open a new executor on that level — up to this cap.
 
 This cap is how you control maximum directional exposure. Think of it as: if all buys fill at similar prices, how many times can the bot re-enter before it stops quoting buys on that level?
@@ -165,16 +165,16 @@ Before finalizing a config, verify that `total_amount_quote × portfolio_allocat
 
 ### Quoting Levels
 
-**`buy_spreads`** (str, default: `"0.0002,0.0006"`)
+**`buy_spreads`** (str, default: `"0.0005"`)
 Comma-separated bid offsets from mid price as decimals (0.0002 = 0.02%). Each entry creates one buy level. More levels = more passive coverage across a price range.
 
-**`sell_spreads`** (str, default: `"0.0002,0.0006"`)
+**`sell_spreads`** (str, default: `"0.0005"`)
 Same as buy_spreads for the ask side. To skew quotes in a downtrend, widen sell spreads more than buy spreads.
 
-**`buy_amounts_pct`** (str, default: `"1,1"`)
+**`buy_amounts_pct`** (str, default: `"1"`)
 Relative weight of capital per buy level. Values don't need to sum to 100 — they're ratios. `"1,1"` = equal split. `"2,1"` = first level gets 2/3 of allocation. Front-load for more aggressive quoting at the tightest level.
 
-**`sell_amounts_pct`** (str, default: `"1,1"`)
+**`sell_amounts_pct`** (str, default: `"1"`)
 Same as buy_amounts_pct for sell levels.
 
 **`open_order_type`** (str, default: `LIMIT_MAKER`)
@@ -196,32 +196,32 @@ If base holdings exceed this, the bot stops placing buy orders (inventory too he
 Constraint: `0 ≤ min_base_pct < target_base_pct < max_base_pct ≤ 1`
 
 **`min_skew`** (float, default: 1.0)
-Minimum skew multiplier applied to spreads based on inventory imbalance. At 1.0, no minimum skew is enforced. Values above 1.0 force the bot to always widen quotes on the overweight side even when inventory is near target.
+the floor on the order-SIZE skew multiplier — not a spread setting. Each side's multiplier is `max(min(skew, 1), min_skew)`, so `1.0` disables skew (both are always 1), a value **below** 1 (0.3–0.5) enables it and lets the overweight side's orders shrink toward that floor, and a value **above** 1 pins both multipliers at `min_skew` — multiplying EVERY order by it and disabling skew entirely. Never set it above 1 (MM-2, hummingbot/condor#283): a playbook shipping 2.0 turned a ~12.5 USDT order into ~24.7 while providing no inventory protection at all.
 
 ---
 
 ### Timing
 
-**`executor_refresh_time`** (int, default: 10 seconds)
+**`executor_refresh_time`** (int, default: 30 seconds)
 How often the controller checks open orders and potentially replaces stale quotes. Lower → tighter to mid price but more API rate limit consumption.
 
-**`buy_cooldown_time`** (int, default: 10 seconds)
+**`buy_cooldown_time`** (int, default: 60 seconds)
 After a buy fill, how long to wait before placing a new buy order on that level. Lower → faster re-entry, more risk of accumulating at similar prices in a downtrend.
 
-**`sell_cooldown_time`** (int, default: 10 seconds)
+**`sell_cooldown_time`** (int, default: 60 seconds)
 Same as buy_cooldown_time but for the sell side. Tune independently from buy cooldown.
 
-**`buy_position_effectivization_time`** (int, default: 300 seconds)
+**`buy_position_effectivization_time`** (int, default: 120 seconds)
 How long the per-fill LIMIT_MAKER TP order stays on the book after a buy fill. When this expires, the TP order is **cancelled** and the position transitions to "hold" mode managed only by global SL/TP. Lower → less time for TP to fill, positions accumulate into hold faster. Higher → more time for TP to fill before transitioning.
 
-**`sell_position_effectivization_time`** (int, default: 300 seconds)
+**`sell_position_effectivization_time`** (int, default: 120 seconds)
 Same as buy_position_effectivization_time for sell fills.
 
 ---
 
 ### Per-Fill Risk (Active Phase)
 
-**`take_profit`** (float, default: 0.0003 = 0.03%)
+**`take_profit`** (float, default: 0.0001 = 0.01%)
 Offset from the fill price where the LIMIT_MAKER TP order is placed for each fill. **Must exceed round-trip maker fees to be profitable** — see Fee Reference above. On binance_perpetual use ≥ 0.0008 (0.08%); on binance spot use ≥ 0.0020 (0.20%).
 
 **`take_profit_order_type`** (str, default: `LIMIT_MAKER`)
@@ -252,7 +252,7 @@ When the total held position reaches this profit, the controller closes it and r
 **`global_stop_loss`** (float, default: 0.05 = 5%)
 When the total held position reaches this loss, the controller closes it and restarts. Set wider than global_take_profit to give the position room to recover.
 
-**`position_profit_protection`** (bool, default: True)
+**`position_profit_protection`** (bool, default: False)
 Protects accumulated position profit as the position approaches global TP — tightens or pauses quoting to avoid giving back gains.
 
 ---
