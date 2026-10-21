@@ -7,8 +7,10 @@ import logging
 import os
 import platform
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
+import aiohttp
 from hummingbot_api_client import HummingbotAPIClient
 
 from mcp_servers.hummingbot_api.exceptions import MaxConnectionsAttemptError
@@ -147,6 +149,25 @@ class HummingbotClient:
         if not self._client or not self._initialized:
             return await self.initialize()
         return self._client
+
+    @asynccontextmanager
+    async def deployment_client(self):
+        """Allow slow bot creation without changing the shared client's timeout."""
+        # The SDK has no per-call timeout. Use its public client lifecycle for
+        # this one POST; never retry a deployment whose outcome is unknown.
+        client = HummingbotAPIClient(
+            base_url=settings.api_url,
+            username=settings.api_username,
+            password=settings.api_password,
+            timeout=aiohttp.ClientTimeout(
+                total=max(120.0, settings.connection_timeout)
+            ),
+        )
+        try:
+            await client.init()
+            yield client
+        finally:
+            await client.close()
 
     async def close(self):
         """Close the client connection and reset state"""
