@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping
 from condor.fetchers.tracked_positions import fetch_tracked_positions
 from condor.runtime.timeouts import resolve_tick_timeout
 
+from .ownership import in_namespace
 from .strategy import LOOPS_DIRNAME, Strategy
 
 log = logging.getLogger(__name__)
@@ -203,6 +204,77 @@ async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
     # a row the provider just returned.
     adopted = getattr(engine, "_adopted_executors", None) or []
     return rows + [row for row in adopted if isinstance(row, dict)]
+
+
+async def _stop_owned_bots(engine: Any, client: Any) -> tuple[list[str], list[str]]:
+    """Stop every running bot this session owns -- MM-3's missing half.
+
+    The winddown stopped executors, swept resting orders and verified
+    positions, and never stopped a *bot*. For a controller-mode session that
+    leaves the thing actually trading untouched: its controllers run inside the
+    bot's own Hummingbot instance, so none of the passes either side of this one
+    can reach them. QA watched a session report itself stopped while its bot
+    grew a position from 0.05 to 0.10 SOL.
+
+    ``skip_order_cancellation=False``, which is the default's opposite. The
+    ordinary ``manage_bots(stop_bot)`` leaves orders resting; this is the path
+    ``cancel_resting_orders`` names when it reports a controller session's
+    orders as unsweepable, and a kill switch is exactly the moment to take it.
+
+    Scoped by the ledger, never by a name pattern: ``owns`` is the same
+    membership test the risk gate enforces on a deploy, so a session can only
+    stop what it was allowed to start. Bots are read back from the API rather
+    than reconstructed from ``bases()`` -- Hummingbot appends a timestamp to the
+    requested name, so a base is not an instance -- and a listing that fails
+    falls back to the bases themselves, which stops a bot deployed under its
+    exact name and honestly records a failure for one that was not.
+
+    Returns ``(stopped, failures)``; never raises, like every other pass here.
+    """
+    ledger = getattr(engine, "ledger", None)
+    if ledger is None:
+        return [], []
+    try:
+        bases = list(ledger.bases())
+    except Exception:
+        bases = []
+    if not bases:
+        # Not a controller-mode session, or one that never deployed: there is
+        # no bot to stop and nothing to report.
+        return [], []
+
+    failures: list[str] = []
+    names: list[str] = []
+    try:
+        active = await client.bot_orchestration.get_active_bots_status()
+        data = active.get("data") if isinstance(active, dict) else None
+        names = [str(n) for n in (data or {}) if ledger.owns(str(n))]
+    except Exception as exc:
+        log.warning("shutdown: could not list bots; falling back to the ledger's bases")
+        failures.append(
+            f"could not list running bots ({exc}); tried the ledger's names"
+        )
+        names = bases
+
+    stopped: list[str] = []
+    for name in names:
+        try:
+            await client.bot_orchestration.stop_and_archive_bot(
+                name, skip_order_cancellation=False
+            )
+            stopped.append(name)
+        except Exception as exc:
+            failures.append(f"bot {name} could not be stopped ({exc})")
+            log.exception("shutdown: stopping bot %s failed", name)
+
+    if stopped:
+        log.warning(
+            "TickEngine %s: SHUTDOWN stopped %d bot(s): %s",
+            getattr(engine, "agent_id", "?"),
+            len(stopped),
+            ", ".join(stopped),
+        )
+    return stopped, failures
 
 
 async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
@@ -504,7 +576,11 @@ def claimed_order_ids(executors: Iterable[Mapping[str, Any]] | None) -> set[str]
 
 
 async def cancel_resting_orders(
-    engine: Any, client: Any, policy: ShutdownPolicy, executors: list[dict]
+    engine: Any,
+    client: Any,
+    policy: ShutdownPolicy,
+    executors: list[dict],
+    stopped_bots: set[str] | None = None,
 ) -> CancelOutcome:
     """Cancel this session's resting orders when the policy asks for it.
 
@@ -513,11 +589,17 @@ async def cancel_resting_orders(
     order left behind and the caller reports it. ``executors`` are this session's
     rows, and they are the whole scope (see the module comment above).
 
-    A controller-mode session is reported as unsupported rather than swept: its
-    orders live inside the bot's own Hummingbot instance, which the API's
-    ``/trading`` routes neither list nor cancel -- stopping the bot with
-    ``skip_order_cancellation=False`` is that path, and it is not this stop.
+    A controller-mode session's orders live inside the bot's own Hummingbot
+    instance, which the API's ``/trading`` routes neither list nor cancel.
+    Stopping the bot with ``skip_order_cancellation=False`` is that path, and
+    since MM-3 the winddown takes it before reaching here: a base in
+    ``stopped_bots`` has had its orders cancelled by its own instance on the way
+    down, so reporting it as unsupported would describe orders that are no
+    longer resting. A base that is NOT in that set either could not be stopped
+    or was never found, and is still reported -- the whole point of the field is
+    to say which orders nobody swept.
     """
+    settled = stopped_bots or set()
     outcome = CancelOutcome(requested=bool(policy.cancel_open_orders))
     if not outcome.requested:
         return outcome
@@ -537,8 +619,17 @@ async def cancel_resting_orders(
         # the executor rows above describe the bots' controllers, not anything
         # the API holds. Sweeping that scope would reach only orders that are
         # somebody else's. Record it and stop.
+        #
+        # Minus the bots the winddown already stopped: those cancelled their own
+        # orders on the way down, so naming them here would report resting
+        # orders that are not resting. ``in_namespace`` rather than equality,
+        # because what was stopped is an *instance* and what is listed here is a
+        # base -- Hummingbot appends a timestamp to the name it was given.
+        unswept = [
+            b for b in bases if not any(in_namespace(name, b) for name in settled)
+        ]
         outcome.unsupported = sorted(
-            set(outcome.unsupported) | {f"bot {b} (own instance)" for b in bases}
+            set(outcome.unsupported) | {f"bot {b} (own instance)" for b in unswept}
         )
         return outcome
 
@@ -747,13 +838,17 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     Sequence (the LLM judgment pass is inserted between baseline and verify):
 
     1. Load the resolved policy + body; journal ``shutdown_start``.
-    2. Deterministic baseline: stop this session's executors with ``keep_position``
+    2. Stop every bot this session owns, cancelling their own orders on the way
+       down (MM-3). First, because a bot that is still up keeps quoting while
+       the passes below work — the position QA watched grew *during* its own
+       shutdown.
+    3. Deterministic baseline: stop this session's executors with ``keep_position``
        per policy (the guaranteed floor).
-    3. Execute ``cancel_open_orders`` over this session's markets, and record what
+    4. Execute ``cancel_open_orders`` over this session's markets, and record what
        it achieved -- including where it could not be carried out (CORR-727).
-    4. Verify: re-query positions, retry the close once, and loudly alert the user
+    5. Verify: re-query positions, retry the close once, and loudly alert the user
        if anything the policy said to close is still open.
-    5. Journal ``shutdown_done``.
+    6. Journal ``shutdown_done``.
 
     The caller (:meth:`TickEngine._run_shutdown`) owns the idempotency guard and
     the self-stop; this function performs the winddown itself and never raises for
@@ -791,14 +886,27 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         return
 
     # One executor refresh for the whole winddown: the stop acts on these rows
-    # and the order sweep scopes itself to the same markets.
+    # and the order sweep scopes itself to the same markets. Taken BEFORE the
+    # bots are stopped, since archiving a bot takes its controllers' rows with
+    # it and the baseline below still has to know what it is winding down.
     running = await _get_running_executors(engine, client)
+
+    # Then the bots, before anything else acts (MM-3). A bot that is still up
+    # keeps quoting while the passes below work, which is precisely what went
+    # wrong: the position grew during the shutdown that was meant to end it.
+    # Stopping it first is what makes the rest of this a winddown rather than a
+    # race.
+    bots_stopped, bot_failures = await _stop_owned_bots(engine, client)
+
     stopped, failures = await _deterministic_baseline(engine, client, policy, running)
+    failures = bot_failures + failures
 
     # The policy's own order cancel, executed before anything is told about it.
     # Recorded on the engine so ``TickEngine._finish`` does not sweep a second
     # time on its way out.
-    cancel = await cancel_resting_orders(engine, client, policy, running)
+    cancel = await cancel_resting_orders(
+        engine, client, policy, running, stopped_bots=set(bots_stopped)
+    )
     engine._cancel_outcome = cancel
 
     # LLM nuance pass on top of the guaranteed floor (best-effort, bounded).
@@ -815,9 +923,15 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         )
         log.error(msg)
     else:
+        bots_note = (
+            f", {len(bots_stopped)} bot(s): {', '.join(bots_stopped)}"
+            if bots_stopped
+            else ""
+        )
         msg = (
             f"✅ Agent {agent_id}: emergency shutdown complete — wound down per "
-            f"'{policy.on_kill_switch}' (stopped {stopped} executor(s)). ({reason})"
+            f"'{policy.on_kill_switch}' (stopped {stopped} executor(s)"
+            f"{bots_note}). ({reason})"
         )
     if failures:
         msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
@@ -839,6 +953,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
             engine.journal.append_action(
                 engine.journal.tick_count + 1,
                 "shutdown_done",
-                f"stopped={stopped}, failures={len(failures)}, verify={verified}",
+                f"stopped={stopped}, bots={len(bots_stopped)}, "
+                f"failures={len(failures)}, verify={verified}",
             )
             engine.journal.record_tick("shutdown: " + reason)
