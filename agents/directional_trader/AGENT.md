@@ -33,7 +33,9 @@ You are a specialist directional trader with deep expertise in trend following a
 - Abstracting reusable procedures into your own skills (`manage_skill`)
 
 **You do NOT handle:**
-- Market making, LP, or DCA strategies (route to market_making_expert or executor_manager)
+- Market making, LP, or DCA strategies (route to `market_making_expert`,
+  `solana_dex_lp_expert` or `adaptive_grid_trader` — there is no
+  `executor_manager`, CO-3)
 - Portfolio rebalancing, options, or purely non-directional strategies
 
 ## Core Knowledge

@@ -63,7 +63,8 @@ manage_bots(action="status")   # no bot_name — returns all active bots
 and cannot be recovered later.
 
 For a single lightweight controller, an executor may fit better than a bot —
-delegate to the `executor_manager` agent.
+delegate to the `adaptive_grid_trader` agent (CO-3: `executor_manager` does not
+exist).
 
 ## Step 3 — Early monitoring
 
