@@ -60,7 +60,7 @@ Provide liquidity via **LP Executors** directly (`create_lp_executor`) — not c
 - `lp_provider` = **`{venue}/clmm`** — `meteora/clmm`, `orca/clmm`, `raydium/clmm`
 - `swap_provider` = **`jupiter/router`** (close-out swaps + base acquisition)
 
-Default venues: meteora, orca, raydium. Only LP where an `lp_provider` exists. Raydium pool-info resolves via the Raydium API; the others via Gateway.
+Default venues: meteora, orca, raydium-clmm — these are **GeckoTerminal dex ids**, not connector names. Plain `raydium` is the constant-product AMM v4 and holds no CLMM positions, so scanning it returns pools no `lp_executor` can open (LP-4); the concentrated venue is `raydium-clmm`, driven by the `raydium/clmm` connector. Only LP where an `lp_provider` exists. Raydium pool-info resolves via the Raydium API; the others via Gateway.
 
 ## Config (from `[CURRENT CONFIG]`)
 | Param | Default | Meaning |
@@ -70,7 +70,7 @@ Default venues: meteora, orca, raydium. Only LP where an `lp_provider` exists. R
 | `slots` | `3` | Concurrent LP positions |
 | `take_profit_pct` / `stop_loss_pct` | `20` | Per-slot exit on net PnL ≥ TP or ≤ −SL |
 | `out_of_range_max_sec` | `1800` | Max time OUT_OF_RANGE before a forced exit |
-| `venues` | `meteora,orca,raydium` | Allowed CLMM venues |
+| `venues` | `meteora,orca,raydium-clmm` | Allowed CLMM venues (GeckoTerminal dex ids) |
 | `ranking_window` | `24h` | Window for the fees/TVL ranking |
 | `capital_per_slot` | derived | LP capital ÷ `slots`, in `quote_asset` |
 | `range_width_pct` | `auto` | Range half-width; `auto` = from OHLCV vol, clamped to venue caps |

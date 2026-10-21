@@ -23,6 +23,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 from telegram.ext import ContextTypes
 
+from condor.pool_data import lp_provider_for_dex
 from config_manager import get_client
 from handlers.dex.geckoterminal import _extract_pool_data
 
@@ -46,7 +47,13 @@ class Config(BaseModel):
         default="SOL", description="Quote token to require (SOL or USDC)"
     )
     venues: list[str] = Field(
-        default=["meteora", "orca", "raydium"], description="CLMM venues to allow"
+        default=["meteora", "orca", "raydium-clmm"],
+        description=(
+            "GeckoTerminal dex ids to allow. NOT connector names: plain "
+            "'raydium' is the constant-product AMM v4 and has no CLMM "
+            "positions, so scanning it returned pools no lp_executor could "
+            "ever open (LP-4). The concentrated venue is 'raydium-clmm'."
+        ),
     )
     ranking_window: str = Field(
         default="24h", description="Volume window for fees/TVL: 1h, 6h, or 24h"
@@ -224,7 +231,24 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             f"{memecoin_mint}-{quote}" if memecoin_mint else c["trading_pair"]
         )
         c["fee_yield"] = (c["vol_window"] * (fee_pct / 100.0)) / max(c["tvl_usd"], 1.0)
-        c["lp_provider"] = f"{c['dex']}/clmm"
+        # The dex id is not the connector name: 'raydium-clmm' is driven by
+        # 'raydium/clmm', and a brand that shares a name with a supported venue
+        # but not its mechanics ('meteora-damm-v2') maps to nothing at all. The
+        # repo already owns that vocabulary, and the API rejects an lp_provider
+        # that does not match the pool, so a guess here becomes a failed
+        # executor (LP-4).
+        c["lp_provider"] = lp_provider_for_dex(c["dex"], GECKO_NETWORK)
+        if not c["lp_provider"]:
+            # No connector drives this pool's position model, so an
+            # lp_executor could never open it. Dropped rather than returned
+            # with an empty provider, which is what a row the agent cannot act
+            # on would be.
+            logger.info(
+                "lp_scanner: dropping %s — dex '%s' has no CLMM lp_provider",
+                c.get("address", "?"),
+                c["dex"],
+            )
+            return None
         return c
 
     enriched = [r for r in await asyncio.gather(*[_enrich(c) for c in shortlist]) if r]

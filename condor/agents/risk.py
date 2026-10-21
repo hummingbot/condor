@@ -145,6 +145,14 @@ class RiskState:
     # show them to the agent. A bare ``RiskState()`` reports ``RiskLimits``'
     # own defaults; ``RiskEngine.get_state`` passes the engine's limits.
     limits: RiskLimits = field(default_factory=RiskLimits)
+    #: The token every figure here is denominated in ([[LP-2]]). The gate's
+    #: limits have always been "quote", and quote is whatever the strategy
+    #: trades against -- SOL for the LP operator. Rendering them with a "$" was
+    #: therefore wrong wherever that is not a dollar: a 500 SOL ceiling was
+    #: shown to operators as ``$500``, three orders of magnitude out. Empty
+    #: keeps the dollar rendering, which is right for the CEX strategies that
+    #: quote in USDT and is what every caller that does not set this gets.
+    quote_asset: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -172,6 +180,7 @@ class RiskState:
             # plan around it, and one that is never told its reserve is a dead
             # letter will spend the wallet it thought was held back.
             "unrecognized_limits": sorted(self.limits.unrecognized),
+            "quote_asset": self.quote_asset,
         }
 
 
@@ -313,8 +322,11 @@ class RiskEngine:
     drawdown); its ``check_*`` methods refuse individual tool calls.
     """
 
-    def __init__(self, limits: RiskLimits | None = None):
+    def __init__(self, limits: RiskLimits | None = None, quote_asset: str = ""):
         self.limits = limits or RiskLimits()
+        #: Carried only so ``get_state`` can stamp it on the state it builds,
+        #: which is what reaches the prompt and the snapshots (LP-2).
+        self.quote_asset = (quote_asset or "").strip().upper()
 
     def get_state(self, tracker: Any) -> RiskState:
         """Compute current risk metrics from tracker data.
@@ -330,7 +342,7 @@ class RiskEngine:
         reports nothing are equally unable to tell us where the drawdown is
         ([[CORR-725]]).
         """
-        state = RiskState(limits=self.limits)
+        state = RiskState(limits=self.limits, quote_asset=self.quote_asset)
 
         try:
             checked = getattr(tracker, "get_drawdown_pct_checked", None)

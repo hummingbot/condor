@@ -20,7 +20,9 @@ default_config:
   # the loop's own out_of_range_max_sec grace window governs normal operation --
   # these are the backstop, not the strategy.
   autonomous_exit_margin_pct: 10
-  venues: meteora,orca,raydium
+  # GeckoTerminal dex ids, not connector names: plain `raydium` is the
+  # constant-product AMM v4 and has no CLMM positions (LP-4).
+  venues: meteora,orca,raydium-clmm
   ranking_window: 24h
   range_width_pct: auto
   capital_per_slot: null
@@ -40,7 +42,9 @@ You are the Solana DEX LP Expert's execution loop. Each tick you **monitor open 
 ~5-minute tick limit. **Aim for ≤ 8 tool calls per tick.** Do **NOT** hand-scan GeckoTerminal — use the **`lp_scanner` routine** (one call). Fill **at most ONE slot per tick**.
 
 ## Configuration at launch
-Read from `[CURRENT CONFIG]`: `quote_asset` (SOL), `base_pct` (20), `slots` (3), `take_profit_pct` (20), `stop_loss_pct` (20), `venues` (meteora,orca,raydium), `ranking_window` (24h), `range_width_pct` (auto), `capital_per_slot`, `autonomous_exit_margin_pct` (10). If `capital_per_slot` is null, derive from usable `quote_asset` balance ÷ `slots`, keeping `min_wallet_sol_reserve` SOL for rent+fees.
+Read from `[CURRENT CONFIG]`: `quote_asset` (SOL), `base_pct` (20), `slots` (3), `take_profit_pct` (20), `stop_loss_pct` (20), `venues` (meteora,orca,raydium-clmm), `ranking_window` (24h), `range_width_pct` (auto), `capital_per_slot`, `autonomous_exit_margin_pct` (10). If `capital_per_slot` is null, derive it as **`min(total_amount_quote, usable quote_asset balance) ÷ slots`**, keeping `min_wallet_sol_reserve` SOL for rent+fees.
+
+> **`total_amount_quote` is the budget — never the wallet.** Deriving from the balance alone meant the loop sized every slot against whatever happened to be in the wallet, so a session declaring `total_amount_quote: 1` would happily commit a 50 SOL balance across its slots: the one number an operator sets to say how much this strategy may trade did nothing at all (LP-2). Take the smaller of the two — the budget bounds the intent, the balance bounds what is actually there.
 
 ## Constants
 - `connector_name` = `solana-mainnet-beta`  ·  `lp_provider` = `{venue}/clmm`  ·  `swap_provider` = `jupiter/router`  ·  `keep_position` = `false`

@@ -367,7 +367,11 @@ class TickEngine:
                 self.agent_id,
                 ", ".join(sorted(risk_limits.unrecognized)),
             )
-        self.risk = RiskEngine(risk_limits)
+        # The unit the gate's figures carry, so the prompt and every snapshot
+        # name it instead of assuming dollars (LP-2).
+        self.risk = RiskEngine(
+            risk_limits, quote_asset=self.config.get("quote_asset", "")
+        )
         self.provider_registry = ProviderRegistry()
 
         # Scratch KV for cheap facts this strategy carries across ticks (a
