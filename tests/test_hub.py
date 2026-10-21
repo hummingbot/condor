@@ -195,7 +195,15 @@ class FakeHub:
         self.bundles: dict[str, bytes] = {}
         #: ``(method, path)`` -> ``Reply`` or an exception to raise instead.
         self.overrides: dict[tuple[str, str], object] = {}
-        self.receipt = {"listing_id": "fresh", "slug": "traveller", "version": 1}
+        #: The default ``POST /agents`` answer: ``202`` accepted-for-processing,
+        #: truthfully pending (contract §5.2) — not an immediate listing.
+        self.receipt = {
+            "submission_id": "sub_test",
+            "status": "pending",
+            "slug": "traveller",
+            "version": 1,
+            "submitted_at": "2026-10-21T12:03:00Z",
+        }
 
     def offer(self, listing_id: str, text: str, **fields) -> dict:
         """Publish one bundle into the fake catalogue, digest included."""
@@ -246,6 +254,17 @@ class FakeHub:
             return _ok(self.receipt)
         if method == "DELETE" and path.startswith("/agents/"):
             return hub.Reply(204, b"")
+        # ── Submission lifecycle (FEAT-150, contract §5.3) — a sane default
+        # that repeats "still pending"; a test wanting a transition sets an
+        # ``overrides`` entry for the exact ``("GET", "/submissions/<id>")``.
+        if method == "GET" and path.startswith("/submissions/"):
+            return _ok(
+                {
+                    "submission_id": path[len("/submissions/") :],
+                    "status": "pending",
+                    "submitted_at": "2026-10-21T12:03:00Z",
+                }
+            )
         # ── Account pairing (FEAT-148, contract §4) — sane defaults; a test
         # wanting a specific transition (accepted/denied/expired/409/429) sets
         # an ``overrides`` entry for the exact path instead.
@@ -565,7 +584,9 @@ def test_publish_carries_the_identity_the_version_and_the_digest(
     assert body["agent_uid"] == bundle.agent.agent_uid
     assert body["notes"] == "Widened the grid" == bundle.notes
     assert body["digest"] == hashlib.sha256(body["bundle"].encode("utf-8")).hexdigest()
-    assert receipt.listing_id == "fresh"
+    assert receipt.submission_id == "sub_test"
+    assert receipt.status == "pending"
+    assert receipt.listing_id == ""
 
 
 def test_publish_refuses_a_certain_secret_and_sends_nothing(traveller, fake_hub):
@@ -640,6 +661,155 @@ def test_a_revoked_token_is_reported_as_the_operators_to_fix(traveller, fake_hub
 
     assert exc.value.status == 401
     assert "token" in str(exc.value)
+
+
+# ── Submission lifecycle (FEAT-150, contract §5) ──────────────────────────
+
+
+def test_a_deterministic_rejection_is_a_rejected_receipt_not_a_raise(
+    traveller, fake_hub, cm
+):
+    """The hub's own secret-scan/structural refusal (§5.2's ``400``).
+
+    Distinct from ``test_publish_refuses_a_certain_secret_and_sends_nothing``:
+    that one is Condor's own FEAT-144 refusal before anything is sent. This is
+    the hub, after receiving bytes, saying no — which is an answer about the
+    submission, truthfully reported, not a transport failure.
+    """
+    fake_hub.overrides[("POST", "/agents")] = hub.Reply(
+        400,
+        json.dumps(
+            {
+                "status": "rejected",
+                "reasons": [
+                    {"rule": "secret-scan", "detail": "skills/s/SKILL.md: a key-like value"}
+                ],
+            }
+        ).encode("utf-8"),
+    )
+
+    receipt = hub.publish("traveller", "tok")
+
+    assert receipt.status == "rejected"
+    assert receipt.submission_id == ""
+    assert receipt.reasons == [
+        hub.SubmissionReason(rule="secret-scan", detail="skills/s/SKILL.md: a key-like value")
+    ]
+    assert hub.local_submission("traveller").status == "rejected"
+
+
+def test_submission_status_merges_the_poll_over_what_publish_stored(
+    traveller, fake_hub, cm
+):
+    """``GET /submissions/{id}`` never repeats slug/version/digest (§5.3) —
+    those have to survive the poll from the record ``publish`` already made.
+    """
+    hub.publish("traveller", "tok", notes="widened the grid")
+    fake_hub.offer("lst_8f3a9c2e1b", "{}", badge=hub.VALIDATED)
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "submission_id": "sub_test",
+                "status": "published",
+                "submitted_at": "2026-10-21T12:03:00Z",
+                "decided_at": "2026-10-21T14:40:00Z",
+                "listing_id": "lst_8f3a9c2e1b",
+            }
+        ).encode("utf-8"),
+    )
+
+    receipt = hub.submission_status("traveller", "tok")
+
+    assert receipt.status == "published"
+    assert receipt.listing_id == "lst_8f3a9c2e1b"
+    assert receipt.slug == "traveller"  # carried over, not repeated by the poll
+    assert receipt.badge == hub.VALIDATED  # fetched via the listing (§3.1)
+    assert hub.local_submission("traveller") == receipt
+
+
+def test_submission_status_reports_a_rejection_with_reasons(traveller, fake_hub, cm):
+    hub.publish("traveller", "tok")
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "submission_id": "sub_test",
+                "status": "rejected",
+                "submitted_at": "2026-10-21T12:03:00Z",
+                "decided_at": "2026-10-21T14:40:00Z",
+                "reasons": [
+                    {"rule": "human-review", "detail": "Tool-steering language in a skill."}
+                ],
+            }
+        ).encode("utf-8"),
+    )
+
+    receipt = hub.submission_status("traveller", "tok")
+
+    assert receipt.status == "rejected"
+    assert receipt.reasons[0].rule == "human-review"
+    assert receipt.listing_id == ""
+
+
+def test_submission_status_refuses_without_a_submission_on_file(cm):
+    with pytest.raises(hub.HubError) as exc:
+        hub.submission_status("nobody-published-this", "tok")
+
+    assert "No submission is on record" in str(exc.value)
+
+
+def test_a_failed_poll_leaves_the_stored_submission_alone(traveller, fake_hub, cm):
+    """A transient status-check failure is the caller's to retry — it must not
+    corrupt the last known-good record (FEAT-150's "transient network error
+    does not cause a re-upload").
+    """
+    hub.publish("traveller", "tok")
+    before = hub.local_submission("traveller")
+
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = TimeoutError("timed out")
+    with pytest.raises(hub.HubError):
+        hub.submission_status("traveller", "tok")
+
+    assert hub.local_submission("traveller") == before
+
+
+def test_a_resubmission_replaces_the_prior_submission_record(traveller, fake_hub, cm):
+    """A new upload is a new submission (§5.4) — its record must not inherit
+    the previous attempt's ``listing_id``/``badge``/``submission_id``.
+    """
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "submission_id": "sub_test",
+                "status": "published",
+                "submitted_at": "2026-10-21T12:03:00Z",
+                "decided_at": "2026-10-21T14:40:00Z",
+                "listing_id": "lst_old",
+            }
+        ).encode("utf-8"),
+    )
+    hub.publish("traveller", "tok")
+    hub.submission_status("traveller", "tok")
+    assert hub.local_submission("traveller").status == "published"
+
+    fake_hub.receipt = {
+        "submission_id": "sub_new",
+        "status": "pending",
+        "slug": "traveller",
+        "version": 2,
+        "submitted_at": "2026-10-22T09:00:00Z",
+    }
+    receipt = hub.publish("traveller", "tok", notes="a new revision")
+
+    assert receipt.submission_id == "sub_new"
+    assert receipt.status == "pending"
+    assert receipt.listing_id == ""
+    assert receipt.badge == ""
+    stored = hub.local_submission("traveller")
+    assert stored.submission_id == "sub_new"
+    assert stored.listing_id == ""
 
 
 def test_unpublish_authenticates_with_the_account_token_and_no_capability(fake_hub):
@@ -1352,9 +1522,66 @@ def test_the_publish_route_answers_a_receipt(traveller, fake_hub):
     res = _client().post("/agents/traveller/publish", json={"notes": "first cut"})
 
     assert res.status_code == 200
-    assert res.json()["receipt"]["listing_id"] == "fresh"
+    assert res.json()["published"] is False  # pending is not published (FEAT-150)
+    assert res.json()["receipt"]["submission_id"] == "sub_test"
+    assert res.json()["receipt"]["status"] == "pending"
     assert fake_hub.calls[-1].body["notes"] == "first cut"
     assert "botcamp-tok" not in res.text
+
+
+def test_the_submission_route_answers_null_before_any_publish(traveller, fake_hub):
+    assert _client().get("/agents/traveller/submission").json() == {"receipt": None}
+    assert fake_hub.calls == []  # nothing on file, nothing to poll
+
+
+def test_the_submission_route_polls_while_pending_and_stops_once_decided(
+    traveller, fake_hub
+):
+    """The route's own half of "stop on a terminal state": once the stored
+    record is a verdict, a second read costs no hub call at all.
+    """
+    hub.set_token("botcamp-tok")
+    _client().post("/agents/traveller/publish")
+
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "submission_id": "sub_test",
+                "status": "published",
+                "submitted_at": "2026-10-21T12:03:00Z",
+                "decided_at": "2026-10-21T14:40:00Z",
+                "listing_id": "lst_8f3a9c2e1b",
+            }
+        ).encode("utf-8"),
+    )
+    first = _client().get("/agents/traveller/submission")
+    assert first.json()["receipt"]["status"] == "published"
+
+    calls_after_first_poll = len(fake_hub.calls)
+    second = _client().get("/agents/traveller/submission")
+    assert second.json()["receipt"]["status"] == "published"
+    assert len(fake_hub.calls) == calls_after_first_poll  # no re-poll
+
+
+def test_the_submission_route_is_admin_only(traveller, fake_hub):
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+    from condor.web.models import WebUser
+    from condor.web.routes import agents as routes
+
+    hub.set_token("botcamp-tok")
+    _client().post("/agents/traveller/publish")
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: WebUser(
+        id=SEAT_ID, username="u", first_name="U", role="user"
+    )
+
+    assert TestClient(app).get("/agents/traveller/submission").status_code == 403
 
 
 def test_the_publish_route_says_400_when_no_token_is_set(traveller, fake_hub):
@@ -1465,8 +1692,9 @@ def test_manage_agents_publishes_to_the_hub(traveller, fake_hub, cm):
         action="publish_hub", agent_slug="traveller", notes="first cut"
     )
 
-    assert result["published"] is True
-    assert result["listing_id"] == "fresh"
+    assert result["published"] is False  # pending is not published (FEAT-150)
+    assert result["status"] == "pending"
+    assert result["submission_id"] == "sub_test"
     assert fake_hub.calls[-1].token == "botcamp-tok"
 
 

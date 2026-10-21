@@ -5344,4 +5344,41 @@ async def publish_agent_to_hub(
         raise _hub_refusal(exc) from exc
     except ValueError as exc:
         raise _bundle_refusal(exc) from exc
-    return {"published": True, "receipt": receipt.model_dump()}
+    return {"published": receipt.status == "published", "receipt": receipt.model_dump()}
+
+
+@router.get("/{slug}/submission")
+async def get_hub_submission(slug: str, user: WebUser = Depends(get_current_user)):
+    """Where this agent's most recent hub submission stands right now (FEAT-150).
+
+    **Admin-only**, like publish itself: the status read uses the same
+    install-wide author credential, and the credential never reaches the
+    browser here either.
+
+    ``{"receipt": null}`` when this agent has never been published from this
+    install — no hub call, since there is nothing to ask about. Otherwise the
+    stored record: polled against the hub while it is still ``pending`` (a
+    terminal ``rejected``/``published`` answer does not change, so a second
+    read of this route costs no network call once the first poll observed
+    it), and returned as-is if a stored record exists but carries no
+    ``submission_id`` to poll — a shape a hand-edited ``config.yml`` could
+    produce, not a sentence the operator asked for.
+
+    Addressed by the agent's own slug rather than requiring the caller to
+    already hold a ``submission_id``: a dashboard reload knows only the
+    agent, not what it last submitted as.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    require_admin(user)
+    stored = hub.local_submission(slug)
+    if stored is None:
+        return {"receipt": None}
+    if stored.status != "pending" or not stored.submission_id:
+        return {"receipt": stored.model_dump()}
+    try:
+        receipt = await asyncio.to_thread(hub.submission_status, slug, hub.token())
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return {"receipt": receipt.model_dump()}

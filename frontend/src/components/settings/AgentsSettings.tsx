@@ -287,7 +287,8 @@ export function ExportAgentButton({ slug }: { slug: string }) {
 }
 
 /**
- * Publish one agent to the hub, after showing what will be uploaded.
+ * Publish one agent to the hub, after showing what will be uploaded, and
+ * track its review from receipt through verdict (FEAT-150).
  *
  * Beside Export because it is the same act with a different destination — and
  * the destination is the whole difference, which is why this one confirms and
@@ -300,19 +301,33 @@ export function ExportAgentButton({ slug }: { slug: string }) {
  * means FEAT-144's refusal for a value that can only be a secret surfaces
  * here, before the Publish button is ever offered, because `build` is what
  * refuses and both doors call it.
+ *
+ * **Publishing does not mean published.** The hub answers an upload with a
+ * pending submission, not a listing — this component polls
+ * `GET /agents/{slug}/submission` (which itself polls the hub only while the
+ * stored record is still pending) so a reload still shows a review in
+ * flight, a rejection with its reasons, or the eventual listing and badge.
  */
 export function PublishAgentButton({ slug }: { slug: string }) {
+  const queryClient = useQueryClient();
   const [preview, setPreview] = useState<{ files: string[]; bytes: number; version: number } | null>(
     null,
   );
-  const [done, setDone] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const submission = useQuery({
+    queryKey: ["hub-submission", slug],
+    queryFn: () => api.getHubSubmission(slug),
+    refetchInterval: (query) =>
+      query.state.data?.receipt?.status === "pending" ? 4000 : false,
+  });
+
+  const [busy, setBusy] = useState(false);
+  const receipt = submission.data?.receipt ?? null;
 
   async function look() {
     setBusy(true);
     setError(null);
-    setDone(null);
     try {
       const text = await api.exportAgentBundle(slug);
       const bundle = JSON.parse(text) as {
@@ -337,7 +352,7 @@ export function PublishAgentButton({ slug }: { slug: string }) {
     try {
       const result = await api.publishAgentToHub(slug);
       setPreview(null);
-      setDone(String(result.receipt.listing_id ?? ""));
+      queryClient.setQueryData(["hub-submission", slug], { receipt: result.receipt });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -345,18 +360,43 @@ export function PublishAgentButton({ slug }: { slug: string }) {
     }
   }
 
+  // A resubmission is offered once the last one reached a verdict — a fresh
+  // Publish always starts a new submission (§5.4 of the contract), never a
+  // retry of the same one.
+  const canPublish = !preview && (receipt === null || receipt.status !== "pending");
+
   return (
     <span className="flex items-center gap-2">
-      {error && (
+      {(error || submission.isError) && (
         <span role="alert" data-publish-error className="text-xs text-[var(--color-red)]">
-          {error}
+          {error ?? (submission.error as Error | undefined)?.message}
         </span>
       )}
-      {done !== null && (
-        <span data-publish-done className="text-xs text-[var(--color-text-muted)]">
-          Published{done && ` as ${done}`}.
+
+      {receipt?.status === "pending" && (
+        <span data-publish-status="pending" className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Pending review ({receipt.submission_id})
         </span>
       )}
+
+      {receipt?.status === "rejected" && !preview && (
+        <span data-publish-status="rejected" className="text-xs text-[var(--color-red)]">
+          Rejected
+          {receipt.reasons.length > 0 && (
+            <>: {receipt.reasons.map((r) => r.detail).join(" ")}</>
+          )}
+        </span>
+      )}
+
+      {receipt?.status === "published" && !preview && (
+        <span data-publish-status="published" className="flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
+          <Check className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+          Published as <span className="font-mono">{receipt.listing_id}</span>
+          {receipt.badge && ` (${receipt.badge})`}
+        </span>
+      )}
+
       {preview ? (
         <span
           data-publish-preview
@@ -383,19 +423,21 @@ export function PublishAgentButton({ slug }: { slug: string }) {
           </button>
         </span>
       ) : (
-        <button
-          onClick={look}
-          disabled={busy}
-          title={`Publish ${slug} to the agent hub`}
-          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)] disabled:opacity-50"
-        >
-          {busy ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Upload className="h-3.5 w-3.5" />
-          )}
-          Publish
-        </button>
+        canPublish && (
+          <button
+            onClick={look}
+            disabled={busy}
+            title={`Publish ${slug} to the agent hub`}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)] disabled:opacity-50"
+          >
+            {busy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Upload className="h-3.5 w-3.5" />
+            )}
+            {receipt ? "Publish again" : "Publish"}
+          </button>
+        )
       )}
     </span>
   );

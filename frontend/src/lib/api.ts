@@ -284,6 +284,37 @@ export interface HubLinkState {
   profile_handle: string;
 }
 
+/** Why a submission is `"rejected"` — never a secret value (FEAT-150). */
+export interface HubSubmissionReason {
+  rule: string;
+  detail: string;
+}
+
+/**
+ * What the hub said about one publish attempt (FEAT-150, contract §5).
+ *
+ * A submission is not a listing: `status` is `"pending"`, `"rejected"` or
+ * `"published"`, and nothing may read a successful upload as a claim of
+ * `"published"` on its own — that claim is this field. `listing_id` and
+ * `badge` exist only once a human verdict publishes it; `reasons` only on
+ * `"rejected"`.
+ */
+export interface HubReceipt {
+  submission_id: string;
+  status: "pending" | "rejected" | "published";
+  agent_uid: string;
+  slug: string;
+  version: number;
+  digest: string;
+  bytes: number;
+  submitted_at: string;
+  decided_at: string;
+  reasons: HubSubmissionReason[];
+  listing_id: string;
+  badge: string;
+  published_at: string;
+}
+
 /**
  * What installing a listing would do — or did.
  *
@@ -3973,11 +4004,21 @@ export const api = {
     ),
 
   /** Upload one of this install's agents. Admin-only, and irreversible in
-   *  practice — unpublishing removes the listing, not anybody's download. */
+   *  practice — unpublishing removes the listing, not anybody's download.
+   *  `published` is true only once the hub's own verdict says so — a 2xx
+   *  here means the submission was accepted for review, not that it is live. */
   publishAgentToHub: (slug: string, notes = "", authorName = "") =>
-    apiFetch<{ published: boolean; receipt: Record<string, unknown> }>(
+    apiFetch<{ published: boolean; receipt: HubReceipt }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/publish`,
       { method: "POST", body: JSON.stringify({ notes, author_name: authorName }) },
+    ),
+
+  /** Where this agent's most recent hub submission stands right now, or
+   *  `null` if it was never published from this install (FEAT-150). Polls
+   *  the hub itself while the stored record is still pending. */
+  getHubSubmission: (slug: string) =>
+    apiFetch<{ receipt: HubReceipt | null }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/submission`,
     ),
 
   /** Withdraw a listing. Admin-only. */

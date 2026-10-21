@@ -481,7 +481,11 @@ def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dic
         receipt = hub.publish(agent_slug, hub.token(), notes or "", author_name or "")
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
-    return {"published": True, **receipt.model_dump()}
+    # A submission is not a listing (FEAT-150): the hub answering the upload
+    # does not by itself mean this is published, only that it is on file as
+    # pending, rejected or published — ``receipt.status`` is the hub's own
+    # word on which.
+    return {"published": receipt.status == "published", **receipt.model_dump()}
 
 
 def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:

@@ -177,19 +177,55 @@ class Listing(BaseModel):
     review_version: str = ""
 
 
-class Receipt(BaseModel):
-    """What the hub says it did with a publish."""
+class SubmissionReason(BaseModel):
+    """One line of why a submission is ``rejected`` (contract §5.2, §6.3).
 
-    listing_id: str
+    ``rule`` is ``"secret-scan"``, ``"structural"`` or ``"human-review"``;
+    ``detail`` is the hub's own sentence and never carries the secret value
+    itself (§6.2) — this module trusts that promise the same way it trusts
+    the hub's listing fields, by rendering it rather than re-deriving it.
+    """
+
+    rule: str = ""
+    detail: str = ""
+
+
+class Receipt(BaseModel):
+    """What the hub said about one submission (FEAT-150, contract §5).
+
+    A submission is not a listing (§5.1): ``status`` is ``"pending"``,
+    ``"rejected"`` or ``"published"``, and nothing here may read a 2xx
+    response status as a claim of ``"published"`` on its own — that claim is
+    the hub's own word in the body, via this field. A ``pending`` or
+    ``rejected`` receipt need not carry ``listing_id``/``badge``/
+    ``published_at``; those exist only once a human verdict publishes it.
+    ``GET /submissions/{id}`` (§5.3) answers with only ``submission_id``,
+    ``status``, ``submitted_at``, ``decided_at``, ``reasons`` and
+    ``listing_id`` — never ``slug``/``agent_uid``/``version``/``digest``/
+    ``bytes`` again — which is why :func:`submission_status` merges its
+    answer over the record :func:`publish` already stored rather than
+    replacing it outright.
+    """
+
+    submission_id: str = ""
+    status: str = "pending"
     agent_uid: str = ""
     slug: str = ""
     version: int = 1
-    badge: str = COMMUNITY
     digest: str = ""
     bytes: int = 0
+    submitted_at: str = ""
+    decided_at: str = ""
+    #: Present only on ``"rejected"`` (§6.3, §11.3).
+    reasons: list[SubmissionReason] = Field(default_factory=list)
+    #: Present only on ``"published"``.
+    listing_id: str = ""
+    #: :data:`VALIDATED` or :data:`COMMUNITY`, filled in once ``published`` —
+    #: the submission answer itself does not repeat it, so this is carried
+    #: over from a follow-up :func:`get` when a poll first observes the
+    #: transition (see :func:`submission_status`).
+    badge: str = ""
     published_at: str = ""
-    #: Where a human can go and look at it. Rendered, never fetched.
-    url: str = ""
 
 
 class LinkStart(BaseModel):
@@ -381,10 +417,14 @@ def _log_safe(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
-def _json(reply: Reply, what: str) -> dict:
-    """The decoded body of a successful reply, or the sentence saying why not."""
-    if reply.status < 200 or reply.status >= 300:
-        raise HubError(_refusal(reply, what), status=reply.status)
+def _decode(reply: Reply, what: str) -> dict:
+    """``reply.body`` as a JSON object, regardless of its status.
+
+    Split out of :func:`_json` so a caller that must read a body the hub sent
+    with a *non-2xx* status — the submission lifecycle's ``400`` deterministic
+    rejection (§5.2) is exactly that shape — can do so without re-deriving
+    this decoding.
+    """
     if len(reply.body) > MAX_LISTING_BYTES:
         raise HubError(
             f"The hub's answer for {what} is over the "
@@ -398,6 +438,13 @@ def _json(reply: Reply, what: str) -> dict:
     if not isinstance(payload, dict):
         raise HubError(f"The hub's answer for {what} is not a JSON object")
     return payload
+
+
+def _json(reply: Reply, what: str) -> dict:
+    """The decoded body of a successful reply, or the sentence saying why not."""
+    if reply.status < 200 or reply.status >= 300:
+        raise HubError(_refusal(reply, what), status=reply.status)
+    return _decode(reply, what)
 
 
 def _refusal(reply: Reply, what: str) -> str:
@@ -596,17 +643,40 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
     # No token, no bundle text, no digest — the agent's name and the hub's
     # answer are the whole of what this is allowed to record.
     log.info(
-        "hub: published '%s' version %d (%d bytes) — hub said %d",
+        "hub: submitted '%s' version %d (%d bytes) — hub said %d",
         bundle.agent.slug,
         bundle.version,
         len(payload),
         reply.status,
     )
-    return _model(
-        _json(reply, f"publishing '{bundle.agent.slug}'"),
-        Receipt,
-        f"the receipt for '{bundle.agent.slug}'",
-    )
+    receipt = _submission_from_reply(reply, bundle.agent.slug)
+    # A fresh submission replaces whatever this slug's prior record said,
+    # wholesale — never merged with it. A new revision is a new submission
+    # (§5.4) and the old submission_id/listing_id/badge must not leak into
+    # this one just because the key is the same agent.
+    _store_submission(bundle.agent.slug, receipt)
+    return receipt
+
+
+def _submission_from_reply(reply: Reply, slug: str) -> Receipt:
+    """``reply`` as a :class:`Receipt`, true to what the hub actually said.
+
+    A 2xx is the normal ``202`` accepted-for-processing case (§5.2). A ``400``
+    is read as the submission lifecycle's own shape — ``{"status":
+    "rejected", "reasons": [...]}`` — rather than the generic hub-refusal
+    sentence, because that is what a deterministic refusal *is* here: an
+    answer about this submission, not a failure to reach the hub. Anything
+    else (401, 403, 500, a transport failure, or a 400 that is not that shape)
+    still raises, the same as it always did.
+    """
+    what = f"publishing '{slug}'"
+    if 200 <= reply.status < 300:
+        return _model(_json(reply, what), Receipt, f"the receipt for '{slug}'")
+    if reply.status == 400:
+        payload = _decode(reply, what)
+        if str(payload.get("status") or "") == "rejected":
+            return _model(payload, Receipt, f"the receipt for '{slug}'")
+    raise HubError(_refusal(reply, what), status=reply.status)
 
 
 def unpublish(listing_id: str, token: str) -> None:
@@ -634,6 +704,94 @@ def unpublish(listing_id: str, token: str) -> None:
             _refusal(reply, f"withdrawing '{listing_id}'"), status=reply.status
         )
     log.info("hub: withdrew listing '%s'", listing_id)
+
+
+def local_submission(slug: str) -> Receipt | None:
+    """This agent's most recently stored submission, or ``None``. No network.
+
+    Reads what :func:`publish` or the last :func:`submission_status` poll
+    stored, so a dashboard reload can show a pending or rejected submission
+    without a hub round trip — the durable half of "resume status after a
+    reload" (FEAT-150's design). ``None`` when this agent has never been
+    published from this install, or the stored row cannot be read as a
+    :class:`Receipt` (a hand-edited ``config.yml``, say).
+    """
+    submissions = _section().get("submissions")
+    row = submissions.get(slug) if isinstance(submissions, dict) else None
+    if not isinstance(row, dict):
+        return None
+    try:
+        return Receipt.model_validate(row)
+    except Exception:  # noqa: BLE001 - an unreadable stored row is "none on file"
+        return None
+
+
+def _store_submission(slug: str, receipt: Receipt) -> None:
+    from config_manager import get_config_manager
+
+    submissions = _section().get("submissions")
+    submissions = dict(submissions) if isinstance(submissions, dict) else {}
+    submissions[slug] = receipt.model_dump()
+    get_config_manager().update_hub(submissions=submissions)
+
+
+def submission_status(slug: str, token: str) -> Receipt:
+    """Poll the hub for ``slug``'s current submission and persist the answer.
+
+    ``GET /submissions/{id}`` (§5.3) repeats only ``submission_id``,
+    ``status``, ``submitted_at``, ``decided_at``, ``reasons`` and
+    ``listing_id`` — never ``slug``/``agent_uid``/``version``/``digest``/
+    ``bytes`` again — so those survive here by merging the fresh answer over
+    the record :func:`publish` stored, rather than replacing it outright.
+
+    Raises :class:`HubError` if this slug has no submission on file (nothing
+    to poll — a caller should check :func:`local_submission` first, the way
+    the web route does, to answer "never published" without a network call),
+    or if the hub refuses the read, including its own ``403`` for a
+    submission a different author credential uploaded (§5.3).
+    """
+    stored = local_submission(slug)
+    if stored is None or not stored.submission_id:
+        raise HubError(f"No submission is on record for '{slug}'")
+    if not (token or "").strip():
+        raise NoTokenError(
+            "Checking a submission needs a linked Botcamp profile. Connect one "
+            "in Settings → Agents."
+        )
+    submission_id = _segment(stored.submission_id, "submission id")
+    what = f"the status of '{slug}' submission"
+    reply = _send("GET", f"{HUB_URL}/submissions/{submission_id}", token=token.strip())
+    fresh = _model(_json(reply, what), Receipt, what)
+    merged = stored.model_copy(
+        update={
+            "status": fresh.status,
+            "decided_at": fresh.decided_at,
+            "reasons": fresh.reasons,
+            "listing_id": fresh.listing_id,
+        }
+    )
+    if merged.status == "published" and merged.listing_id and not merged.badge:
+        # The submission answer does not repeat the badge or an outside host
+        # can look at; one listing read is the provenance a dashboard needs
+        # to render "Published" honestly. A failure here must not turn a
+        # genuinely published submission back into an error — the status
+        # itself is already settled.
+        try:
+            listing = get(merged.listing_id)
+            merged = merged.model_copy(
+                update={
+                    "badge": listing.badge,
+                    "published_at": listing.published_at or merged.published_at,
+                }
+            )
+        except HubError:
+            log.debug(
+                "hub: could not fetch listing '%s' for badge provenance",
+                merged.listing_id,
+                exc_info=True,
+            )
+    _store_submission(slug, merged)
+    return merged
 
 
 # ── Account pairing (FEAT-148): link to a Botcamp profile, no pasted token ──
