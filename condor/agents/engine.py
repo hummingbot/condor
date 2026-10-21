@@ -354,6 +354,19 @@ class TickEngine:
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
+        if risk_limits.unrecognized:
+            # The operator's half of LP-3. The agent is told in [RISK STATE];
+            # whoever configured the limit is reading logs, not the prompt, and
+            # a setting that does nothing is worth one line at the one moment
+            # it is read. WARNING, not INFO: the config asked for a bound on
+            # real capital and did not get one.
+            log.warning(
+                "TickEngine %s: risk_limits %s are not enforced — this build "
+                "has no such limit, so they bound nothing. Implement them or "
+                "move them to the strategy config the loop reads itself.",
+                self.agent_id,
+                ", ".join(sorted(risk_limits.unrecognized)),
+            )
         self.risk = RiskEngine(risk_limits)
         self.provider_registry = ProviderRegistry()
 

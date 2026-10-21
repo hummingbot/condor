@@ -80,10 +80,42 @@ class RiskLimits:
     # upgrade. Deliberately NOT 1: a strategy whose owner approved a 5x default
     # at setup would otherwise stop trading the moment this shipped.
     max_leverage: float = -1.0
+    #: Keys the config asked for that this build has no limit for ([[LP-3]]).
+    #: Not a limit itself — it bounds nothing and is never read by a check. It
+    #: exists so that what was asked for and cannot be honoured is *sayable*,
+    #: which is the whole of the defect: ``from_dict`` used to drop an
+    #: unrecognised key on the floor, so ``min_wallet_sol_reserve: 0.3`` in a
+    #: loop's ``risk_limits`` read to its author as a configured reserve and to
+    #: the runtime as nothing at all. Populated by :meth:`from_dict`; surfaced
+    #: by ``RiskState.to_dict`` and the log line at engine start.
+    unrecognized: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        """Build the limits, keeping what could not be understood (LP-3).
+
+        Unknown keys are *recorded*, not raised on and not dropped. Raising
+        would be the louder answer and the wrong one: ``lp_slot_operator``
+        ships ``min_wallet_sol_reserve`` and ``max_open_slots`` in its
+        ``risk_limits`` today, and a build that refused them would stop a
+        shipped agent from starting at all — turning a limit that silently does
+        nothing into a loop that does nothing, which is worse. Dropping them is
+        what made the setting a no-op nobody could see.
+
+        So they ride along, visibly unenforced, until each is either implemented
+        as a real limit or moved to the strategy config the loop reads itself.
+        A typo (``max_postion_size_quote``) lands here too, and shows up in the
+        same place rather than passing for a limit that was set.
+        """
+        known, unknown = {}, {}
+        for key, value in d.items():
+            # ``unrecognized`` is a field but never a *setting*: accepting it
+            # from config would let a config describe its own leftovers.
+            if key in cls.__dataclass_fields__ and key != "unrecognized":
+                known[key] = value
+            else:
+                unknown[key] = value
+        return cls(**known, unrecognized=unknown)
 
 
 @dataclass
@@ -134,6 +166,12 @@ class RiskState:
             "shutdown_drawdown_pct": self.limits.shutdown_drawdown_pct,
             "max_drift_quote": self.limits.max_drift_quote,
             "max_leverage": self.limits.max_leverage,
+            # What the config asked for and this build cannot enforce (LP-3).
+            # Carried into the prompt and every snapshot for the same reason
+            # the limits themselves are: an agent told a slot cap exists will
+            # plan around it, and one that is never told its reserve is a dead
+            # letter will spend the wallet it thought was held back.
+            "unrecognized_limits": sorted(self.limits.unrecognized),
         }
 
 

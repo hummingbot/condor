@@ -212,6 +212,18 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
             f"Max Leverage: {max_leverage:g}x "
             "(declare `leverage` on every create; omitting it is refused)"
         )
+    # A limit the agent is NOT told about is a limit it will trip; a limit it is
+    # wrongly told it has is one it will rely on. ``min_wallet_sol_reserve`` and
+    # ``max_open_slots`` sat in lp_slot_operator's risk_limits bounding nothing,
+    # and the loop planned its slots around them (LP-3). Named here, in the same
+    # block as the real limits, because that is where the agent looks.
+    unrecognized = rs.get("unrecognized_limits") or []
+    if unrecognized:
+        lines.append(
+            f"NOT ENFORCED: {', '.join(unrecognized)} — set in this strategy's "
+            "risk_limits but unknown to the risk engine, so they bound nothing. "
+            "Do not plan around them."
+        )
     # "Risk Check", not "Status": a snapshot outlives its session, and a stopped
     # run's history reading "Status: ACTIVE" looked like the run was still live.
     # This is the risk gate's verdict for this one tick, nothing more.
