@@ -8,8 +8,14 @@ default_config:
   frequency_sec: 120
   total_amount_quote: 500
   execution_mode: loop
+  # The platform kill switch this loop deploys with: a fraction of the capital
+  # it trades, not a figure above it (MM-4). It used to pass
+  # max_position_size_quote, which was 600 against 500 of capital — a switch
+  # that could only fire once the whole position was gone.
+  max_global_drawdown_quote: 100
   risk_limits:
-    max_position_size_quote: 600
+    # The session ceiling, which must not sit above the capital it bounds.
+    max_position_size_quote: 500
     max_open_executors: 10
 default_trading_context: ''
 created_by: 0
@@ -178,7 +184,7 @@ Derive `config_name` and `bot_name` from `trading_pair` at runtime (see Naming c
 
 ### First deployment (no controller config exists):
 1. Create config: `manage_controllers(action="upsert", target="config", config_name="{config_name}", config_data={...})`
-2. Deploy bot: `manage_bots(action="deploy", bot_name="{bot_name}", controllers_config=["{config_name}"], max_global_drawdown_quote=<max_position_size_quote from risk_limits>)` — the loss cap is required; deploys without it are blocked by the risk engine
+2. Deploy bot: `manage_bots(action="deploy", bot_name="{bot_name}", controllers_config=["{config_name}"], max_global_drawdown_quote=<max_global_drawdown_quote from [CURRENT CONFIG]>)` — the loss cap is required and must be **below** the `total_amount_quote` the controllers trade; a cap at or above the capital is a kill switch that can only fire once the position is gone, and the risk engine refuses both it and a missing one
 
 ### Update running controller:
 `manage_bots(action="update_config", bot_name="{bot_name}", config_name="{config_name}", config_data={...full config...}, confirm_override=true)`

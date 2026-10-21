@@ -20,7 +20,9 @@ default_config:
   loss_no_new_high_ticks: 25
   trend_derisk_legs: 3
   risk_limits:
-    max_position_size_quote: 600
+    # Not above the total_amount_quote above: a ceiling over the capital it
+    # bounds is no ceiling (MM-4).
+    max_position_size_quote: 500
     max_open_executors: 10
 default_trading_context: ''
 created_by: 0
