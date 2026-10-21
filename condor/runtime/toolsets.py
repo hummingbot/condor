@@ -230,6 +230,27 @@ def _muted_tool_args(muted_tools: Sequence[str]) -> list[str]:
     return ["--mute-tools", ",".join(muted_tools)] if muted_tools else []
 
 
+def _execution_mode_args(execution_mode: str) -> list[str]:
+    """``--execution-mode dry_run`` — or nothing at all for a live seat.
+
+    The same shape as :func:`_muted_tool_args` and for the same reason: only a
+    mode the subprocess would actually *restrict* reaches argv, so every live
+    seat — chat, delegation, run-once, loop — spawns the line it always did and
+    this flag can never be blamed for one of them behaving differently.
+
+    Which modes restrict is ``danger.MOUNT_ENFORCED_MODES``, asked here rather
+    than hardcoded: the spawner and the subprocess have to agree on which modes
+    are enforced, and reading the same table is how they cannot drift. Passing
+    an unenforced mode would be harmless — the subprocess maps it to no policy —
+    but it would put a flag on the line for a run nothing changes about.
+    """
+    from condor.runtime.danger import MOUNT_ENFORCED_MODES
+
+    if execution_mode not in MOUNT_ENFORCED_MODES:
+        return []
+    return ["--execution-mode", execution_mode]
+
+
 def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
@@ -240,6 +261,7 @@ def _condor_mcp_args(
     profile: str = "full",
     session_key: str = "",
     muted_tools: Sequence[str] = (),
+    execution_mode: str = "",
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess.
 
@@ -287,6 +309,7 @@ def _condor_mcp_args(
         args.extend(["--session-key", str(session_key)])
     args.extend(["--profile", profile])
     args.extend(_muted_tool_args(muted_tools))
+    args.extend(_execution_mode_args(execution_mode))
     return args
 
 
@@ -351,6 +374,7 @@ def build_mcp_servers_for_session(
     server_pinned: bool = False,
     server_required: bool = False,
     caller_id: str = "",
+    execution_mode: str = "",
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -387,6 +411,15 @@ def build_mcp_servers_for_session(
 
     ``tick`` marks the unattended loop seat, which mounts the narrowest tool
     profile on both subprocesses (FEAT-066). See :func:`seat_profile`.
+
+    ``execution_mode`` is what *kind* of run this is, and the one restriction
+    here that is a property of the run rather than of the agent: one tick engine
+    builds a rehearsal and a live loop from the same config and the same seat.
+    ``dry_run`` reaches the condor subprocess, which then refuses to execute a
+    snippet or a routine while still answering every read (CORR-748). Empty —
+    the default, and what every caller but the tick engine passes — restricts
+    nothing and puts nothing on the spawn line. See :func:`_execution_mode_args`
+    for why it is enforced in the subprocess and not at the permission callback.
 
     ``caller_id`` is the session's own ``agent_id``, stamped onto the
     hummingbot subprocess so a venue refusal it counts lands in *this*
@@ -470,6 +503,7 @@ def build_mcp_servers_for_session(
             profile=profile,
             session_key=session_key,
             muted_tools=muted_tools,
+            execution_mode=execution_mode,
         ),
         # Both agent roots travel *resolved* rather than as whatever the parent
         # happened to have in its environment. A stdio MCP child gets the ``env``

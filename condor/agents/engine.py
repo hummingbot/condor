@@ -2218,6 +2218,11 @@ def build_gated_client(
         # So a 429 this seat's tools are handed is counted against this session
         # and not merely against the agent ([[FEAT-138]]).
         caller_id=engine.agent_id,
+        # The run's kind, not the agent's (CORR-748). A dry run's subprocess
+        # declines to execute a snippet or a routine itself, so the promise that
+        # a rehearsal mutates nothing no longer rests on the bridge below
+        # choosing to ask the permission callback about the call.
+        execution_mode=execution_mode,
     )
     permission_cb = auto_approve_with_risk_check(
         engine.risk,

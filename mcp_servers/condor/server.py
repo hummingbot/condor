@@ -1426,20 +1426,34 @@ def register_tools(
     server: FastMCP,
     profile: str = DEFAULT_TOOL_PROFILE,
     muted: Iterable[str] = (),
+    execution_mode: str = "",
 ) -> None:
     """Register this profile's tools on ``server``, minus the muted ones.
 
     This server's rings and its own default; the rules — unknown profile raises
     rather than widening to ``full``, ``muted`` only ever subtracts — live once,
     in ``mcp_servers/_profiles.py``.
+
+    ``execution_mode`` narrows *within* a tool rather than dropping one
+    (CORR-748). This is the seat that mounts both doors onto arbitrary Python —
+    ``run_code`` and ``manage_routines`` — and a rehearsal must not open either
+    while still needing their read-only halves, so neither can be muted and the
+    cut has to be per action. ``mounted_tool_refusal`` is the policy; an empty
+    mode returns ``None`` and nothing is wrapped.
     """
-    _register_tools(server, TOOL_PROFILES, profile, muted)
+    from condor.runtime.danger import mounted_tool_refusal
+
+    _register_tools(
+        server, TOOL_PROFILES, profile, muted, mounted_tool_refusal(execution_mode)
+    )
 
 
 # Registration happens at import: ``mcp`` is a module-level singleton and the
 # profile and the mute list are resolved from argv at import (settings), so the
 # server object is complete for anything that inspects it before startup.
-register_tools(mcp, settings.tool_profile, settings.muted_tools)
+register_tools(
+    mcp, settings.tool_profile, settings.muted_tools, settings.execution_mode
+)
 
 
 if __name__ == "__main__":
