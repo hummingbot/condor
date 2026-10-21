@@ -92,7 +92,7 @@ log = logging.getLogger(__name__)
 #: for the ``validated`` tier, how a publish token is issued, whether the hub
 #: runs FEAT-144's review as a Python dependency or a reimplementation — is
 #: TASK-004. Changing it is a code change by design.
-HUB_URL = "https://hub.hummingbot.org/v1"
+HUB_URL = "https://hub.botcamp.xyz/v1"
 
 #: One call's budget. Longer than the collector's 10s because a bundle download
 #: is up to :data:`condor.agents.bundle.MAX_BUNDLE_BYTES`, not one transcript.

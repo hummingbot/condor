@@ -305,7 +305,7 @@ def test_no_environment_variable_redirects_the_hub():
         check=True,
         env={**_base_env(), **env},
     )
-    assert done.stdout.strip() == "https://hub.hummingbot.org/v1"
+    assert done.stdout.strip() == "https://hub.botcamp.xyz/v1"
     assert "127.0.0.1" not in done.stdout
 
 
