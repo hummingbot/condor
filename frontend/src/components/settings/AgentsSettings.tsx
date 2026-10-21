@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, Check, Download, ExternalLink, Globe, Loader2, Upload } from "lucide-react";
+import {
+  AlertTriangle,
+  Brain,
+  Check,
+  Download,
+  ExternalLink,
+  Globe,
+  Loader2,
+  Upload,
+} from "lucide-react";
 import { useState } from "react";
 
 import { api } from "@/lib/api";
@@ -441,4 +450,60 @@ export function PublishAgentButton({ slug }: { slug: string }) {
       )}
     </span>
   );
+}
+
+/**
+ * Warn when Botcamp later delisted or re-badged the listing this agent was
+ * installed from (CORR-812). Renders nothing for an agent never installed
+ * from the hub, and nothing once a confirmed check still reads ordinary —
+ * this is a thing to notice, not a steady-state status line.
+ *
+ * `live_check_failed` is its own, quieter branch rather than the warning:
+ * the server already refused to turn an unreachable hub into a moderation
+ * claim (that is the whole point of `GET /{slug}/hub-status` existing), so
+ * the UI must not do it either. `checked_at` is always the last time the hub
+ * gave a *confirmed* answer, shown in both branches, since that is the fact
+ * an operator deciding whether to trust this warning actually needs.
+ */
+export function HubInstallStatus({ slug }: { slug: string }) {
+  const status = useQuery({
+    queryKey: ["hub-agent-status", slug],
+    queryFn: () => api.getAgentHubStatus(slug),
+    // A background fact, not something the operator is watching resolve in
+    // real time the way a pending submission is — no need for the faster
+    // poll `PublishAgentButton` uses above.
+    refetchInterval: 5 * 60 * 1000,
+  });
+
+  const data = status.data;
+  if (!data?.tracked) return null;
+
+  if (data.status === "delisted" || data.status === "badge_changed") {
+    return (
+      <span
+        data-hub-status={data.status}
+        title={`Last confirmed with Botcamp: ${data.checked_at || "never"}`}
+        className="flex items-center gap-1.5 text-xs text-[var(--color-red)]"
+      >
+        <AlertTriangle className="h-3.5 w-3.5" />
+        {data.status === "delisted"
+          ? "Botcamp withdrew this listing. The files installed here are unaffected — review before trusting this agent further."
+          : `Botcamp changed this listing's badge since install (now ${data.badge || "unbadged"}). Review before trusting this agent further.`}
+      </span>
+    );
+  }
+
+  if (data.live_check_failed) {
+    return (
+      <span
+        data-hub-status="unknown"
+        title={`Last confirmed with Botcamp: ${data.checked_at || "never"}`}
+        className="text-xs text-[var(--color-text-muted)]"
+      >
+        Could not reach Botcamp to recheck this listing.
+      </span>
+    );
+  }
+
+  return null;
 }

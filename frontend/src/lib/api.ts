@@ -328,6 +328,28 @@ export interface HubInstallResponse {
   plan: AgentImportPlan | AgentUpdatePlan;
 }
 
+/**
+ * What this install knows right now about an installed agent's hub listing
+ * (CORR-812) — whether the hub later pulled it or changed its badge.
+ *
+ * `tracked: false` means the agent was never installed or updated from a hub
+ * listing, so there is nothing here to warn about. `status` is `"ok"`,
+ * `"badge_changed"` or `"delisted"` — the server's own last *confirmed*
+ * answer, never invented from a failed check. `live_check_failed` means this
+ * one read could not reach the hub; `checked_at` still names the last time
+ * it could, which is the time to show, not the time of this request.
+ */
+export type HubAgentStatus =
+  | { tracked: false }
+  | {
+      tracked: true;
+      listing_id: string;
+      badge: string;
+      status: "ok" | "badge_changed" | "delisted";
+      checked_at: string;
+      live_check_failed: boolean;
+    };
+
 /** `authFetch` because the body is `FormData` — see `uploadAttachment`. */
 async function postAgentBundle(
   path: string,
@@ -4026,6 +4048,13 @@ export const api = {
     apiFetch<{ unpublished: boolean }>(
       `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
       { method: "DELETE" },
+    ),
+
+  /** Whether the hub later delisted or re-badged an installed agent
+   *  (CORR-812). Any authenticated user — this reads no credential. */
+  getAgentHubStatus: (slug: string) =>
+    apiFetch<HubAgentStatus>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/hub-status`,
     ),
 
   /** Whether a publish token is set. **Never its value** — there is no route

@@ -5279,6 +5279,15 @@ async def install_from_hub(
         ) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # So a later visit can learn the hub withdrew this listing (CORR-812).
+    # Recorded after the write succeeds, never before: a failed apply must
+    # not leave the stamp claiming an install that did not happen.
+    agent_bundle.record_hub_install(
+        plan.slug,
+        listing_id=listing.listing_id,
+        badge=listing.badge,
+        digest=listing.digest,
+    )
     return {"verb": verb, "listing": listing.model_dump(), "plan": result}
 
 
@@ -5382,3 +5391,24 @@ async def get_hub_submission(slug: str, user: WebUser = Depends(get_current_user
     except HubError as exc:
         raise _hub_refusal(exc) from exc
     return {"receipt": receipt.model_dump()}
+
+
+@router.get("/{slug}/hub-status")
+async def get_agent_hub_status(slug: str, user: WebUser = Depends(get_current_user)):
+    """Whether the hub listing ``slug`` was installed from is still there (CORR-812).
+
+    Any authenticated user, not admin-only: this reads no credential and
+    no account — it is a fact about one installed agent, the same gate
+    browse/preview/install already use. ``{"tracked": false}`` when the agent
+    was never installed or updated from a hub listing — a plain file import
+    has nothing here to check. A live check failing (a timeout, a 5xx, a
+    malformed reply) answers with the last *confirmed* status and
+    ``live_check_failed: true`` rather than a 502 — unlike every other hub
+    route, a hub this install cannot reach right now is not this request's
+    failure, since the whole point is telling that case apart from a real
+    delisting.
+    """
+    from condor import hub
+
+    _get_agent(slug)
+    return await asyncio.to_thread(hub.installed_agent_status, slug)

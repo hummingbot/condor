@@ -70,6 +70,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 from pydantic import BaseModel, Field
@@ -590,6 +591,163 @@ def fetch(listing_id: str, listing: "Listing | None" = None) -> bytes:
         )
     log.info("hub: fetched %s (%d bytes, digest ok)", _log_safe(url), len(reply.body))
     return reply.body
+
+
+# ── Status of an already-installed listing (CORR-812) ──────────────────────
+#
+# An install that downloaded a listing has no way to learn the hub later
+# pulled it — delisted it, or revoked its badge, both of which the contract
+# (§8) makes the hub stop serving as the same ``404`` either way. This is the
+# read for that question, asked about a listing this install already has a
+# local copy of, which is why it is shaped differently from :func:`get`: a
+# ``404`` here is itself the useful answer, not a failure to report.
+
+#: How long a confirmed status answer is trusted before the next page view
+#: re-asks the hub. Bounds the fan-out the CORR-812 proposed solution warns
+#: about: an operator re-opening the agents page every few seconds must not
+#: turn into a hub request every few seconds.
+STATUS_CACHE_S = 600
+
+
+class ListingStatus(BaseModel):
+    """What one live check of a listing found, for an install that already has it.
+
+    ``state`` is ``"ok"`` (still listed, badge unchanged from what the caller
+    compared against), ``"badge_changed"`` (still listed, under a different
+    badge than this install last recorded), ``"delisted"`` (the hub confirmed
+    removal — its ``404`` body named ``reason: "unpublished"``, contract
+    §8.3), or ``"unknown"`` — a network failure, a 5xx, a malformed reply, or
+    a ``404`` the hub left unexplained. Contract §8.3 only *recommends* the
+    ``reason`` field; it does not require it, so an unexplained ``404`` must
+    read as "cannot tell" and never as a confirmed moderation action — the
+    distinction a transient hub hiccup needs from an actual delisting.
+    """
+
+    state: str = "unknown"
+    badge: str = ""
+    checked_at: str = ""
+    detail: str = ""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def listing_status(listing_id: str, badge: str = "") -> ListingStatus:
+    """Ask the hub about one listing, never raising. A check, not a fetch.
+
+    Every other reader of ``GET /agents/{listing_id}`` (:func:`get`) treats a
+    non-2xx as a failure the caller must handle; this one exists for exactly
+    the case where "the hub says this is gone" is itself the useful answer.
+    Nothing is downloaded and no digest is verified here — that already
+    happened at install time, and this call reports on the *listing*, not the
+    bytes.
+
+    Goes through the identifier guard and the no-redirect opener the same as
+    every other call in this module: the one caller-controlled path segment
+    is checked before anything is sent, and a hub answer cannot re-aim this
+    request to another address.
+    """
+    listing_id = _listing_id(listing_id)
+    checked_at = _now()
+    try:
+        reply = _send("GET", f"{HUB_URL}/agents/{listing_id}")
+    except HubError:
+        return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+
+    if 200 <= reply.status < 300:
+        try:
+            listing = _model(
+                _decode(reply, f"listing '{listing_id}'"),
+                Listing,
+                f"listing '{listing_id}'",
+            )
+        except HubError:
+            return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+        state = "ok" if (not badge or listing.badge == badge) else "badge_changed"
+        return ListingStatus(state=state, badge=listing.badge, checked_at=checked_at)
+
+    if reply.status == 404:
+        try:
+            payload = _decode(reply, f"listing '{listing_id}'")
+        except HubError:
+            payload = {}
+        if str(payload.get("reason") or "") == "unpublished":
+            return ListingStatus(
+                state="delisted",
+                badge=badge,
+                checked_at=checked_at,
+                detail=str(payload.get("detail") or ""),
+            )
+        return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+
+    return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+
+
+def _stale(checked_at: str) -> bool:
+    if not checked_at:
+        return True
+    try:
+        when = datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - when).total_seconds() >= STATUS_CACHE_S
+
+
+def _status_payload(stamp) -> dict:
+    return {
+        "tracked": True,
+        "listing_id": stamp.hub_listing_id,
+        "badge": stamp.hub_badge,
+        "status": stamp.hub_status or "ok",
+        "checked_at": stamp.hub_checked_at,
+        "live_check_failed": False,
+    }
+
+
+def installed_agent_status(slug: str, force: bool = False) -> dict:
+    """What this install knows right now about ``slug``'s hub provenance.
+
+    ``{"tracked": False}`` when ``slug`` was never installed or updated from a
+    hub listing — a plain file import has nothing here to check. Otherwise
+    re-asks the hub through :func:`listing_status` at most once per
+    :data:`STATUS_CACHE_S` (``force`` bypasses that), and persists only a
+    *confirmed* answer — ``"ok"``, ``"badge_changed"`` or ``"delisted"`` — back
+    into the agent's stamp. An ``"unknown"`` live check is returned for this
+    one read with ``live_check_failed`` set, **without** overwriting the
+    stamp: the local files and execution state stay exactly as they were, and
+    ``checked_at`` keeps naming the last time the hub gave a definite answer
+    rather than the last time it was asked — which is what lets a dashboard
+    say "last confirmed Tuesday" through an outage instead of silently
+    forgetting it.
+    """
+    from condor.agents.bundle import agent_home, read_stamp, write_stamp
+
+    home = agent_home(slug)
+    stamp = read_stamp(home)
+    if stamp is None or not stamp.hub_listing_id:
+        return {"tracked": False}
+
+    if not force and not _stale(stamp.hub_checked_at):
+        return _status_payload(stamp)
+
+    result = listing_status(stamp.hub_listing_id, badge=stamp.hub_badge)
+    if result.state == "unknown":
+        payload = _status_payload(stamp)
+        payload["live_check_failed"] = True
+        return payload
+
+    stamp = stamp.model_copy(
+        update={
+            "hub_status": result.state,
+            "hub_badge": result.badge or stamp.hub_badge,
+            "hub_checked_at": result.checked_at,
+        }
+    )
+    write_stamp(home, stamp)
+    return _status_payload(stamp)
 
 
 # ── Publishing ───────────────────────────────────────────────────────────

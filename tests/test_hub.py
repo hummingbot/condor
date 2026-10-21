@@ -1457,6 +1457,210 @@ def test_every_hub_surface_carries_the_one_trust_sentence(offered):
         assert "muted and unstarted" in body["trust"]
 
 
+# ── Hub-listing status for an installed agent (CORR-812) ─────────────────
+#
+# An install that downloaded a listing has no local record of it at all
+# before this item — these tests cover both halves: that installing from the
+# hub actually writes the record, and that a later check of it tells
+# "the hub confirmed this is gone" apart from "the hub could not be reached,"
+# never claiming the second as the first.
+
+
+def test_installing_from_the_hub_records_its_provenance_outside_the_bundle(
+    offered, fake_hub
+):
+    _client().post("/hub/agents/listed/install")
+
+    home = agent_home("traveller")
+    stamp = ab.read_stamp(home)
+    assert stamp.hub_listing_id == "listed"
+    assert stamp.hub_badge == hub.COMMUNITY
+    assert stamp.hub_digest == fake_hub.listings["listed"]["digest"]
+    assert stamp.hub_status == "ok"
+    assert stamp.hub_checked_at
+
+    # Outside publishable_files, so a re-export of this very agent cannot
+    # carry somebody else's listing as its own provenance.
+    bundle = ab.build("traveller")
+    assert "hub_listing_id" not in ab.render(bundle)
+    assert "listed" not in ab.render(bundle)
+
+
+def test_a_plain_file_update_does_not_invent_hub_provenance(traveller):
+    """``apply_update`` is shared with the plain file-upload path, which has
+    no listing at all — it must not fabricate one."""
+    original = ab.parse(_bundle_text().encode("utf-8"))
+    bumped = original.model_copy(update={"version": original.version + 1})
+    plan = ab.plan_update(bumped, "traveller")
+
+    ab.apply_update(plan, user_id=7)
+
+    stamp = ab.read_stamp(agent_home("traveller"))
+    assert stamp.hub_listing_id == ""
+    assert stamp.hub_status == ""
+
+
+def test_listing_status_reads_unchanged_as_ok(offered, fake_hub):
+    result = hub.listing_status("listed", badge=hub.COMMUNITY)
+
+    assert result.state == "ok"
+    assert result.badge == hub.COMMUNITY
+
+
+def test_listing_status_reads_a_different_badge_as_badge_changed(offered, fake_hub):
+    fake_hub.listings["listed"]["badge"] = hub.VALIDATED
+
+    result = hub.listing_status("listed", badge=hub.COMMUNITY)
+
+    assert result.state == "badge_changed"
+    assert result.badge == hub.VALIDATED
+
+
+def test_listing_status_reads_an_explained_404_as_delisted(offered, fake_hub):
+    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
+        404, json.dumps({"detail": "gone", "reason": "unpublished"}).encode("utf-8")
+    )
+
+    result = hub.listing_status("listed")
+
+    assert result.state == "delisted"
+
+
+def test_listing_status_reads_an_unexplained_404_as_unknown_not_delisted(
+    offered, fake_hub
+):
+    """Contract §8.3 only *recommends* the ``reason`` field; an unexplained
+    404 must not be read as a confirmed moderation action."""
+    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
+        404, b'{"detail": "no such listing"}'
+    )
+
+    result = hub.listing_status("listed")
+
+    assert result.state == "unknown"
+
+
+def test_listing_status_reads_a_network_failure_as_unknown(offered, fake_hub):
+    fake_hub.overrides[("GET", "/agents/listed")] = ConnectionError("down")
+
+    result = hub.listing_status("listed")
+
+    assert result.state == "unknown"
+
+
+def test_listing_status_reads_a_5xx_as_unknown_not_delisted(offered, fake_hub):
+    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
+        503, b'{"detail": "maintenance"}'
+    )
+
+    result = hub.listing_status("listed")
+
+    assert result.state == "unknown"
+
+
+def test_listing_status_refuses_a_malicious_id_before_any_request(fake_hub):
+    with pytest.raises(IdentifierError):
+        hub.listing_status("../agents")
+
+    assert fake_hub.calls == []
+
+
+def test_listing_status_reads_a_malformed_reply_as_unknown(offered, fake_hub):
+    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(200, b"not json")
+
+    result = hub.listing_status("listed")
+
+    assert result.state == "unknown"
+
+
+def test_installed_agent_status_is_untracked_without_hub_provenance(traveller):
+    assert hub.installed_agent_status("traveller") == {"tracked": False}
+
+
+def test_installed_agent_status_confirms_and_persists_delisted(offered, fake_hub):
+    _client().post("/hub/agents/listed/install")
+    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
+        404, json.dumps({"detail": "gone", "reason": "unpublished"}).encode("utf-8")
+    )
+
+    status = hub.installed_agent_status("traveller", force=True)
+
+    assert status["tracked"] is True
+    assert status["listing_id"] == "listed"
+    assert status["status"] == "delisted"
+    assert status["live_check_failed"] is False
+    assert status["checked_at"]
+    # Persisted, not just returned — a reload must see it without a new call.
+    assert ab.read_stamp(agent_home("traveller")).hub_status == "delisted"
+
+
+def test_installed_agent_status_does_not_overwrite_on_an_unknown_check(
+    offered, fake_hub
+):
+    """A transient failure must not erase the last confirmed answer, and must
+    not touch any installed file or execution state."""
+    _client().post("/hub/agents/listed/install")
+    confirmed_at = ab.read_stamp(agent_home("traveller")).hub_checked_at
+    fake_hub.overrides[("GET", "/agents/listed")] = ConnectionError("down")
+
+    status = hub.installed_agent_status("traveller", force=True)
+
+    assert status["status"] == "ok"
+    assert status["live_check_failed"] is True
+    assert status["checked_at"] == confirmed_at
+    stamp = ab.read_stamp(agent_home("traveller"))
+    assert stamp.hub_status == "ok"
+    assert stamp.hub_checked_at == confirmed_at
+
+
+def test_installed_agent_status_does_not_recheck_within_the_cache_window(
+    offered, fake_hub
+):
+    _client().post("/hub/agents/listed/install")
+    calls_before = len(fake_hub.calls)
+
+    hub.installed_agent_status("traveller")
+
+    assert len(fake_hub.calls) == calls_before
+
+
+def test_the_hub_status_route_answers_untracked_for_a_file_imported_agent(traveller):
+    res = _client().get("/agents/traveller/hub-status")
+
+    assert res.status_code == 200
+    assert res.json() == {"tracked": False}
+
+
+def test_the_hub_status_route_is_open_to_any_authenticated_user(offered, fake_hub):
+    """Unlike publish/submission, this reads no credential — it is a fact
+    about one installed agent, the same gate browse/preview/install use."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+    from condor.web.models import WebUser
+    from condor.web.routes import agents as routes
+
+    _client().post("/hub/agents/listed/install")
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.include_router(routes.hub_router)
+    app.dependency_overrides[get_current_user] = lambda: WebUser(
+        id=SEAT_ID, username="u", first_name="U", role="user"
+    )
+    res = TestClient(app).get("/agents/traveller/hub-status")
+
+    assert res.status_code == 200
+    assert res.json()["tracked"] is True
+
+
+def test_the_hub_status_route_answers_404_for_an_agent_that_does_not_exist():
+    res = _client().get("/agents/nobody/hub-status")
+
+    assert res.status_code == 404
+
+
 # ── The routes' own refusals ─────────────────────────────────────────────
 
 
