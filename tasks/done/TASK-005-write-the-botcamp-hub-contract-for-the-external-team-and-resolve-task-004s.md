@@ -3,7 +3,7 @@ id: TASK-005
 kind: action
 title: Write the Botcamp hub contract for the external team and resolve TASK-004's owner decisions
 summary: Condor's hub client exists but Botcamp has no buildable service contract. Write a self-contained handoff for hummingbot/botcamp-site covering pairing, submission review, the public catalogue, reviewer verdicts and delisting; record the settled decisions against TASK-004.
-status: todo
+status: done
 brain: developer
 actor: session
 effort: M
@@ -16,7 +16,8 @@ files:
   - condor/web/routes/settings.py
   - config_manager.py
 depends_on: []
-commits: []
+commits:
+  - "a9de6bf5 docs(hub): write the Botcamp hub contract for the external team (TASK-005)"
 created: 2026-10-21
 ---
 
@@ -38,12 +39,14 @@ Create a handoff document in this Condor repository for the team building the hu
 
 ## Acceptance criteria
 
-- [ ] The handoff names hummingbot/botcamp-site as service owner and is sufficient for that team to implement the endpoints, security checks, state transitions and reviewer API without reading FEAT-133 through FEAT-147.
-- [ ] It contains concrete success and refusal examples for pairing, a pending submission, deterministic rejection, reviewer verdict, publication and delisting, with credential scope and response status stated.
-- [ ] A fixture bundle that is structurally valid but contains a key or BIP-39 phrase is rejected before entering the review queue; the contract names the file and never returns the secret bytes.
-- [ ] TASK-004's resolved decisions cite the contract, while its remaining external deployment and live verification are represented truthfully.
-- [ ] The document and TASK-004 edit are committed on this workstream; no code in hummingbot/botcamp-site is changed from this repository.
+- [x] The handoff names hummingbot/botcamp-site as service owner and is sufficient for that team to implement the endpoints, security checks, state transitions and reviewer API without reading FEAT-133 through FEAT-147. `docs/botcamp-agent-hub-contract.md`'s opening section states the audience and scope explicitly and is self-contained end to end (§1–§11).
+- [x] It contains concrete success and refusal examples for pairing, a pending submission, deterministic rejection, reviewer verdict, publication and delisting, with credential scope and response status stated. `docs/botcamp-agent-hub-contract.md` §4.2–4.4 (pairing), §5.2 (submission `202`/`400`), §6.2–6.3 (deterministic rejection), §7.4 (reviewer `approve`/`refuse`), §8.1 (delisting `200`/`403`/`404`).
+- [x] A fixture bundle that is structurally valid but contains a key or BIP-39 phrase is rejected before entering the review queue; the contract names the file and never returns the secret bytes. `docs/botcamp-agent-hub-contract.md` §6.3 ("Test vector").
+- [x] TASK-004's resolved decisions cite the contract, while its remaining external deployment and live verification are represented truthfully. TASK-004 amended (revision 2): `## Decisions (resolved by TASK-005)` section added, `blocked_reason` updated to name only the external deployment and live round trip as the remaining block.
+- [x] The document and TASK-004 edit are committed on this workstream; no code in hummingbot/botcamp-site is changed from this repository. Doc committed as `a9de6bf5`. TASK-004 is a db-backed row in this project (no file materialized in this worktree); `edit_backlog_doc` persisted the edit as its revision 2, which is that doc's own commit-equivalent. No file outside this Condor checkout was touched.
 
 ## Notes
 
 FEAT-146 shipped Condor's publish, browse and install client and deliberately left the outside service to TASK-004. The existing client treats the badge as provenance and keeps the import gate local. The contract must preserve that property while requiring review before a submission is publicly listed. The paired credential removes the pasted-token UX without a redirect URI. The review worker itself belongs to MetaBrain and is outside this Condor-only filing scope.
+
+Condor's own `condor/hub.py` client (FEAT-146, built against a stub) does not yet speak this contract's submission/pending protocol — its `publish()`/`Receipt` assumes an immediate listing. The contract's closing section ("Known gap in the current Condor client") names this; updating that client is separate Condor-side work this action did not perform.
