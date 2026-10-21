@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, Check, Download, Globe, Loader2, Upload } from "lucide-react";
+import { Brain, Check, Download, ExternalLink, Globe, Loader2, Upload } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "@/lib/api";
@@ -93,85 +93,139 @@ export function AgentsSettings() {
           Publishing to the hub
         </h2>
         <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-          Publishing needs a Botcamp token, which is install-wide: every publish
-          from this box is made with it, under that account. Paste one here, then
-          use Publish on an agent's own page. Publishing sends the agent's files
-          off this box — unpublishing removes the listing, it does not recall
+          Publishing acts under one Botcamp profile, install-wide: every publish
+          from this box is made as that account. Connect one below, then use
+          Publish on an agent's own page. Publishing sends the agent's files off
+          this box — unpublishing removes the listing, it does not recall
           anybody's download.
         </p>
-        <HubTokenField />
+        <HubLinkField />
       </section>
     </div>
   );
 }
 
 /**
- * The install's Botcamp token: set it, replace it, clear it.
+ * Connect this install to a Botcamp profile with a pairing code (FEAT-148).
  *
- * It is never read back. There is no reveal control and no route behind one —
- * the GET answers "set" or "not set" and nothing else, because a second copy
- * of the credential on a screen buys no capability the operator does not
- * already have. They can paste a new one. Same posture as
- * `ApiKeysSettings` takes with an exchange key.
+ * Replaces the pasted-token UX: starting a pairing shows a verification
+ * string and opens Botcamp's approval page in a new tab, where the signed-in
+ * admin compares that same string before accepting. This component only ever
+ * polls Condor's own `/hub-link` — the credential itself is stored
+ * server-side the moment the hub hands it over and never reaches this
+ * component or any other response this dashboard reads.
  */
-export function HubTokenField() {
+export function HubLinkField() {
   const queryClient = useQueryClient();
-  const [value, setValue] = useState("");
-  const { data } = useQuery({ queryKey: ["hub-token"], queryFn: api.getHubToken });
+  const { data } = useQuery({
+    queryKey: ["hub-link"],
+    queryFn: api.getHubLink,
+    refetchInterval: (query) =>
+      query.state.data?.status === "pending" ? 3000 : false,
+  });
 
-  const save = useMutation({
-    mutationFn: (token: string) => api.setHubToken(token),
-    onSuccess: () => {
-      setValue("");
-      queryClient.invalidateQueries({ queryKey: ["hub-token"] });
+  const start = useMutation({
+    mutationFn: api.startHubLink,
+    onSuccess: (started) => {
+      queryClient.setQueryData(["hub-link"], {
+        status: "pending",
+        code: started.code,
+        verification: started.verification,
+        expires_at: started.expires_at,
+        link_url: started.link_url,
+        profile_handle: "",
+      });
+      window.open(started.link_url, "_blank", "noopener,noreferrer");
     },
   });
 
-  const locked = data ? !data.can_change : false;
+  const disconnect = useMutation({
+    mutationFn: api.disconnectHubLink,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["hub-link"] }),
+  });
+
+  const status = data?.status ?? "none";
+  const busy = start.isPending || disconnect.isPending;
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center gap-2">
-        <input
-          type="password"
-          aria-label="Botcamp token"
-          value={value}
-          disabled={locked || save.isPending}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={data?.set ? "A token is set — paste one to replace it" : "Paste your token"}
-          className="w-72 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
-        />
-        <button
-          onClick={() => save.mutate(value)}
-          disabled={locked || save.isPending || !value.trim()}
-          className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
-        >
-          {save.isPending ? "Saving…" : "Save"}
-        </button>
-        {data?.set && !locked && (
+      {status === "linked" && (
+        <div className="flex items-center gap-2">
+          <p
+            data-hub-link-status="linked"
+            className="flex items-center gap-1 text-xs text-[var(--color-text)]"
+          >
+            <Check className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+            Connected to Botcamp as{" "}
+            <span className="font-mono">{data?.profile_handle}</span>
+          </p>
           <button
-            onClick={() => save.mutate("")}
-            disabled={save.isPending}
+            onClick={() => disconnect.mutate()}
+            disabled={busy}
             className="text-xs text-[var(--color-text-muted)] underline hover:text-[var(--color-red)] disabled:opacity-50"
           >
-            Clear
+            Disconnect
           </button>
-        )}
-      </div>
-      {data?.set && (
-        <p data-hub-token-set className="flex items-center gap-1 text-[11px] text-[var(--color-text-muted)]">
-          <Check className="h-3 w-3 text-[var(--color-primary)]" /> A token is set.
-          It is never shown again — replace it by pasting another.
-        </p>
+        </div>
       )}
-      {locked && (
-        <p className="text-[11px] text-[var(--color-text-muted)]">
-          Only the admin can change it: there is one token for the whole install.
-        </p>
+
+      {status === "pending" && (
+        <div className="space-y-1.5" data-hub-link-status="pending">
+          <p className="text-xs text-[var(--color-text)]">
+            Compare this string with the one shown on Botcamp, then accept there:
+          </p>
+          <div className="flex items-center gap-2">
+            <span className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)]">
+              {data?.verification}
+            </span>
+            <a
+              href={data?.link_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs font-semibold text-[var(--color-primary)] hover:underline"
+            >
+              Open Botcamp <ExternalLink className="h-3 w-3" />
+            </a>
+            <button
+              onClick={() => disconnect.mutate()}
+              disabled={busy}
+              className="text-xs text-[var(--color-text-muted)] underline hover:text-[var(--color-red)] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+          <p className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
+            <Loader2 className="h-3 w-3 animate-spin" /> Waiting for approval on
+            Botcamp…
+          </p>
+        </div>
       )}
-      {save.isError && (
-        <p role="alert" data-hub-token-error className="text-xs text-[var(--color-red)]">
-          {save.error.message}
+
+      {(status === "none" || status === "denied" || status === "expired") && (
+        <div className="space-y-1" data-hub-link-status={status}>
+          <button
+            onClick={() => start.mutate()}
+            disabled={busy}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
+          >
+            {start.isPending ? "Starting…" : "Connect to Botcamp"}
+          </button>
+          {status === "denied" && (
+            <p className="text-[11px] text-[var(--color-red)]">
+              The pairing was denied on Botcamp.
+            </p>
+          )}
+          {status === "expired" && (
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              That pairing expired before it was accepted.
+            </p>
+          )}
+        </div>
+      )}
+
+      {(start.isError || disconnect.isError) && (
+        <p role="alert" data-hub-link-error className="text-xs text-[var(--color-red)]">
+          {(start.error ?? disconnect.error)?.message}
         </p>
       )}
     </div>

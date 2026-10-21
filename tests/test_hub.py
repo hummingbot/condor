@@ -129,6 +129,19 @@ def cm(tmp_path, monkeypatch):
     return manager
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_pairing(monkeypatch):
+    """Isolate ``hub._pending_link`` (FEAT-148) between tests.
+
+    It is module-level, in-memory state by design (the pairing is a short-lived
+    interactive act, not something ``config.yml`` should ever hold) — but that
+    means two tests sharing one process would otherwise share one install's
+    pairing attempt. ``monkeypatch.setattr`` restores the prior value after the
+    test, same shape as ``no_sockets`` above guarding the real module state.
+    """
+    monkeypatch.setattr(hub, "_pending_link", None)
+
+
 @pytest.fixture
 def traveller():
     """A library agent with one of everything the layout defines."""
@@ -233,6 +246,23 @@ class FakeHub:
             return _ok(self.receipt)
         if method == "DELETE" and path.startswith("/agents/"):
             return hub.Reply(204, b"")
+        # ── Account pairing (FEAT-148, contract §4) — sane defaults; a test
+        # wanting a specific transition (accepted/denied/expired/409/429) sets
+        # an ``overrides`` entry for the exact path instead.
+        if method == "POST" and path == "/link/start":
+            return _ok(
+                {
+                    "link_id": "lnk_test",
+                    "code": "WXYZ-4821",
+                    "verification": "porcupine-harbor-violet-trellis",
+                    "expires_at": "2026-10-21T12:10:00Z",
+                    "poll_interval_s": 3,
+                }
+            )
+        if method == "GET" and path.startswith("/link/"):
+            return _ok({"status": "pending", "expires_at": "2026-10-21T12:10:00Z"})
+        if method == "DELETE" and path.startswith("/link/"):
+            return _ok({"cancelled": True})
         return _missing()
 
 
@@ -768,6 +798,328 @@ def _settings_client(admin: bool):
         role="admin" if admin else "user",
     )
     return TestClient(app)
+
+
+# ── Account pairing: connect to a Botcamp profile, no pasted token (FEAT-148) ──
+
+
+def _force_poll():
+    """Make the next ``hub.link_state()`` hit the hub rather than the locally
+    cached ``pending`` answer, regardless of ``poll_interval_s``."""
+    hub._pending_link["last_polled"] = 0.0
+
+
+def test_link_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
+    start = hub.link_start()
+
+    assert fake_hub.calls[-1].method == "POST"
+    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/link/start"
+    assert fake_hub.calls[-1].token == ""
+    assert start.code == "WXYZ-4821"
+    assert start.verification == "porcupine-harbor-violet-trellis"
+    assert start.link_url == f"{hub.HUB_URL}/link?code=WXYZ-4821"
+    assert hub._pending_link["link_id"] == "lnk_test"
+
+
+def test_the_hub_cannot_redirect_the_tab_condor_opens(fake_hub):
+    """``link_url`` is built from the compiled-in ``HUB_URL`` and the hub's own
+    ``code`` — never from a URL the hub's reply might carry — so nothing the
+    hub answers can redirect where Condor opens an admin's browser tab."""
+    fake_hub.overrides[("POST", "/link/start")] = _ok(
+        {
+            "link_id": "lnk_test",
+            "code": "WXYZ-4821",
+            "verification": "porcupine-harbor-violet-trellis",
+            "expires_at": "2026-10-21T12:10:00Z",
+            "poll_interval_s": 3,
+            "link_url": "https://evil.example/phish",
+        }
+    )
+
+    start = hub.link_start()
+
+    assert start.link_url == f"{hub.HUB_URL}/link?code=WXYZ-4821"
+
+
+def test_link_state_is_none_with_nothing_pending_or_linked(cm):
+    assert hub.link_state() == hub.LinkState(status="none")
+
+
+def test_link_state_reports_pending_with_the_code_and_verification(fake_hub):
+    hub.link_start()
+
+    state = hub.link_state()
+
+    assert state.status == "pending"
+    assert state.code == "WXYZ-4821"
+    assert state.verification == "porcupine-harbor-violet-trellis"
+    assert state.link_url == f"{hub.HUB_URL}/link?code=WXYZ-4821"
+
+
+def test_link_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
+    hub.link_start()
+    hub.link_state()
+    calls_before = len(fake_hub.calls)
+
+    hub.link_state()
+
+    assert len(fake_hub.calls) == calls_before
+
+
+def test_an_accepted_pairing_stores_the_credential_and_never_returns_it(fake_hub, cm):
+    hub.link_start()
+    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok(
+        {
+            "status": "accepted",
+            "profile_handle": "cardosofede",
+            "credential": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+            "credential_scope": "author",
+        }
+    )
+    _force_poll()
+
+    state = hub.link_state()
+
+    assert state.status == "linked"
+    assert state.profile_handle == "cardosofede"
+    assert "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60" not in state.model_dump_json()
+    assert hub.token() == "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60"
+    assert cm.get_hub()["profile_handle"] == "cardosofede"
+    # The attempt is forgotten: a later read comes straight off config, with
+    # no second request to the hub for the now-consumed link_id.
+    assert hub._pending_link is None
+    calls_before = len(fake_hub.calls)
+    assert hub.link_state() == hub.LinkState(
+        status="linked", profile_handle="cardosofede"
+    )
+    assert len(fake_hub.calls) == calls_before
+
+
+def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, cm):
+    """ARCH-738's own criterion, now for the two keys the pairing flow adds.
+
+    ``CONFIG_SECTIONS["hub"]`` merges whatever keys ``update_hub`` is given,
+    so this is really asserting that ``link_state`` wrote both of them
+    (rather than only ``token``) and that an unrelated save does not drop
+    either.
+    """
+    import config_manager as cm_module
+
+    hub.link_start()
+    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok(
+        {
+            "status": "accepted",
+            "profile_handle": "cardosofede",
+            "credential": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+        }
+    )
+    _force_poll()
+    hub.link_state()
+
+    cm.update_hub(**cm.get_hub())  # an unrelated save of the same section
+
+    reloaded = cm_module.ConfigManager(config_path=str(cm.config_path))
+    assert reloaded.get_hub() == {
+        "token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+        "profile_handle": "cardosofede",
+    }
+
+
+def test_a_denied_pairing_is_reported_once_then_forgotten(fake_hub):
+    hub.link_start()
+    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok({"status": "denied"})
+    _force_poll()
+
+    assert hub.link_state().status == "denied"
+    assert hub.link_state().status == "none"
+
+
+def test_an_expired_pairing_is_reported_once_then_forgotten(fake_hub):
+    hub.link_start()
+    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok({"status": "expired"})
+    _force_poll()
+
+    assert hub.link_state().status == "expired"
+    assert hub.link_state().status == "none"
+
+
+def test_a_link_id_the_hub_no_longer_knows_reads_as_expired(fake_hub):
+    """Contract §4.3: a ``link_id`` the hub never issued, or one already fully
+    consumed and forgotten, answers ``404`` rather than a status in the body."""
+    hub.link_start()
+    fake_hub.overrides[("GET", "/link/lnk_test")] = hub.Reply(
+        404, b'{"detail": "no such link"}'
+    )
+    _force_poll()
+
+    assert hub.link_state().status == "expired"
+    assert hub._pending_link is None
+
+
+def test_restarting_a_pairing_forgets_the_previous_attempt(fake_hub):
+    hub.link_start()
+    first_link_id = hub._pending_link["link_id"]
+    fake_hub.overrides[("POST", "/link/start")] = _ok(
+        {
+            "link_id": "lnk_second",
+            "code": "ABCD-1234",
+            "verification": "second-attempt-string",
+            "expires_at": "2026-10-21T12:20:00Z",
+            "poll_interval_s": 3,
+        }
+    )
+
+    second = hub.link_start()
+
+    assert second.link_id == "lnk_second" != first_link_id
+    assert hub._pending_link["link_id"] == "lnk_second"
+
+
+def test_a_malicious_link_id_from_the_hub_is_refused_before_a_second_request(
+    fake_hub,
+):
+    """``link_id`` is hub-minted, not operator-typed, but it still rides in a
+    URL path this process dials — ``_segment`` guards it exactly as it guards
+    a listing id (module docstring: "no unchecked value reaches a path
+    segment, whoever wrote it")."""
+    fake_hub.overrides[("POST", "/link/start")] = _ok(
+        {
+            "link_id": "../agents",
+            "code": "WXYZ-4821",
+            "verification": "porcupine-harbor-violet-trellis",
+            "expires_at": "2026-10-21T12:10:00Z",
+            "poll_interval_s": 3,
+        }
+    )
+    hub.link_start()
+    calls_before = len(fake_hub.calls)
+
+    with pytest.raises(IdentifierError):
+        hub.link_state()
+    with pytest.raises(IdentifierError):
+        hub.link_cancel()
+
+    assert len(fake_hub.calls) == calls_before
+
+
+def test_cancelling_a_pending_pairing_calls_the_hub_and_forgets_it(fake_hub):
+    hub.link_start()
+
+    hub.link_cancel()
+
+    assert fake_hub.calls[-1].method == "DELETE"
+    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/link/lnk_test"
+    assert hub._pending_link is None
+    assert hub.link_state().status == "none"
+
+
+def test_cancelling_a_pairing_the_hub_already_accepted_is_not_an_error(fake_hub):
+    """Contract §4.4: a 409 means "assume it went through," not a failure."""
+    hub.link_start()
+    fake_hub.overrides[("DELETE", "/link/lnk_test")] = hub.Reply(
+        409, b'{"detail": "already accepted"}'
+    )
+
+    hub.link_cancel()  # must not raise
+
+    assert hub._pending_link is None
+
+
+def test_disconnecting_a_linked_profile_clears_it_without_a_hub_call(fake_hub, cm):
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+
+    hub.link_cancel()
+
+    assert hub.token() == ""
+    assert cm.get_hub().get("profile_handle", "") == ""
+    assert not any(c.url.startswith(f"{hub.HUB_URL}/link") for c in fake_hub.calls)
+
+
+def test_disconnecting_survives_an_unreachable_hub(cm):
+    """A disconnect with nothing pending never calls ``_send`` at all — the
+    ``no_sockets`` autouse fixture (which would fail any real connection) is
+    enough to prove no network was involved; no ``fake_hub`` stub needed."""
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+
+    hub.link_cancel()  # must not raise
+
+    assert hub.token() == ""
+
+
+def test_a_pairing_start_that_the_hub_refuses_raises_and_tracks_nothing(fake_hub):
+    fake_hub.overrides[("POST", "/link/start")] = hub.Reply(500, b"{}")
+
+    with pytest.raises(hub.HubError):
+        hub.link_start()
+
+    assert hub._pending_link is None
+
+
+def test_starting_a_hub_link_is_admin_only(cm, fake_hub):
+    res = _settings_client(admin=False).post("/settings/hub-link/start")
+
+    assert res.status_code == 403
+    assert hub._pending_link is None
+
+
+def test_polling_the_hub_link_is_admin_only(cm, fake_hub):
+    res = _settings_client(admin=False).get("/settings/hub-link")
+
+    assert res.status_code == 403
+
+
+def test_disconnecting_the_hub_link_is_admin_only(cm):
+    res = _settings_client(admin=False).delete("/settings/hub-link")
+
+    assert res.status_code == 403
+
+
+def test_the_dashboard_can_start_and_poll_a_pairing_through_to_linked(cm, fake_hub):
+    client = _settings_client(admin=True)
+
+    started = client.post("/settings/hub-link/start")
+    assert started.status_code == 200
+    body = started.json()
+    assert body["code"] == "WXYZ-4821"
+    assert body["verification"] == "porcupine-harbor-violet-trellis"
+    assert "credential" not in body
+
+    pending = client.get("/settings/hub-link")
+    assert pending.json()["status"] == "pending"
+
+    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok(
+        {
+            "status": "accepted",
+            "profile_handle": "cardosofede",
+            "credential": "bc_live_super_secret",
+        }
+    )
+    _force_poll()
+
+    linked = client.get("/settings/hub-link")
+    assert linked.json() == {
+        "status": "linked",
+        "code": "",
+        "verification": "",
+        "expires_at": "",
+        "link_url": "",
+        "profile_handle": "cardosofede",
+    }
+    assert "bc_live_super_secret" not in linked.text
+
+
+def test_the_dashboard_can_disconnect_a_linked_profile(cm):
+    hub.set_token("bc_live_x")
+    from config_manager import get_config_manager
+
+    get_config_manager().update_hub(profile_handle="cardosofede")
+    client = _settings_client(admin=True)
+
+    res = client.delete("/settings/hub-link")
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "none"}
+    assert hub.token() == ""
 
 
 @pytest.fixture

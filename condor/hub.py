@@ -65,6 +65,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -190,6 +192,71 @@ class Receipt(BaseModel):
     url: str = ""
 
 
+class LinkStart(BaseModel):
+    """What ``POST /v1/link/start`` handed back (contract §4.2).
+
+    ``code`` rides in the URL Condor opens in a browser tab; ``verification``
+    is the string shown on both ends for the human to compare, the phishing
+    defense the short ``code`` cannot be on its own. ``link_id`` is used only
+    to poll — it is never rendered, logged, or returned past
+    :func:`link_start`'s own caller.
+    """
+
+    link_id: str
+    code: str
+    verification: str
+    expires_at: str
+    poll_interval_s: int = 3
+    #: ``{HUB_URL}/link?code=...`` — built here, from the compiled-in
+    #: :data:`HUB_URL`, rather than by the dashboard reassembling the host
+    #: itself out of a bare ``code``. One place decides what Condor opens a
+    #: browser tab to.
+    link_url: str = ""
+
+
+class LinkState(BaseModel):
+    """What a caller may learn about this install's Botcamp link.
+
+    Never the credential — see :func:`link_state`. ``status`` is one of
+    ``"none"`` (nothing pending, nothing linked), ``"pending"`` (a pairing is
+    in flight; ``code``/``verification``/``expires_at``/``link_url`` are
+    set), ``"denied"`` or ``"expired"`` (a pairing just ended that way —
+    reported once, to the poll that observed it), or ``"linked"``
+    (``profile_handle`` is set).
+    """
+
+    status: str = "none"
+    code: str = ""
+    verification: str = ""
+    expires_at: str = ""
+    link_url: str = ""
+    profile_handle: str = ""
+
+
+def _link_url(code: str) -> str:
+    """``{HUB_URL}/link?code=...``, the tab Condor opens for the admin.
+
+    ``code`` is a short, URL-safe string by contract (``"WXYZ-4821"``), but it
+    is still hub-supplied text headed into a URL this process tells a browser
+    to open — ``urlencode`` rather than an f-string, so nothing in it can add
+    a second query parameter or otherwise reshape the address.
+    """
+    return f"{HUB_URL}/link?{urllib.parse.urlencode({'code': code})}"
+
+
+#: The one pairing attempt this install is tracking, or ``None``. Deliberately
+#: in-memory and not in ``config.yml``: a pairing is a short-lived, interactive
+#: act with an admin watching the result, the same reasoning the module
+#: docstring gives for there being no durable publish outbox. A restart mid-pairing
+#: simply loses the attempt, which matches the contract's "Condor's own backend
+#: is responsible for invalidating its local memory of the previous attempt."
+#: Guarded by :data:`_link_lock` because the web routes dispatch these calls
+#: through ``asyncio.to_thread``, i.e. a worker thread pool rather than the
+#: event loop.
+_pending_link: dict | None = None
+_link_lock = threading.Lock()
+
+
 class Reply(NamedTuple):
     """One HTTP exchange's outcome. The seam the tests drive instead of a socket."""
 
@@ -197,7 +264,7 @@ class Reply(NamedTuple):
     body: bytes
 
 
-def _listing_id(value: str) -> str:
+def _segment(value: str, what: str) -> str:
     """``value`` if it is safe to interpolate into the hub's URL path.
 
     ``validate_identifier`` is the charset guard and it is not sufficient on
@@ -213,13 +280,23 @@ def _listing_id(value: str) -> str:
     with every connector and account name the Hummingbot client interpolates,
     and an identifier that is literally ``.`` is pathological there but not
     this module's call to outlaw.
+
+    Used for a listing id *and* for a ``link_id`` (:data:`_pending_link`):
+    the latter is minted by the hub, not typed by a human, but it still rides
+    in a URL path this process dials, and "no unchecked value reaches a path
+    segment, whoever wrote it" (module docstring) does not carve out an
+    exception for values this install did not choose itself.
     """
-    validate_identifier(value, "listing id")
+    validate_identifier(value, what)
     if value in (".", ".."):
         raise IdentifierError(
-            f"Invalid listing id {value!r}: a listing id may not be '.' or '..'."
+            f"Invalid {what} {value!r}: a {what} may not be '.' or '..'."
         )
     return value
+
+
+def _listing_id(value: str) -> str:
+    return _segment(value, "listing id")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -494,7 +571,7 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
 
     if not (token or "").strip():
         raise NoTokenError(
-            "Publishing needs a Botcamp token. Paste one in Settings → Agents."
+            "Publishing needs a linked Botcamp profile. Connect one in Settings → Agents."
         )
     # Before the build, so a missing agent is answered without stamping its
     # bookkeeping — ``build`` writes ``bundle_version``/``bundle_digest`` on
@@ -548,7 +625,7 @@ def unpublish(listing_id: str, token: str) -> None:
     listing_id = _listing_id(listing_id)
     if not (token or "").strip():
         raise NoTokenError(
-            "Withdrawing a listing needs a Botcamp token. Paste one in "
+            "Withdrawing a listing needs a linked Botcamp profile. Connect one in "
             "Settings → Agents."
         )
     reply = _send("DELETE", f"{HUB_URL}/agents/{listing_id}", token=token.strip())
@@ -557,6 +634,174 @@ def unpublish(listing_id: str, token: str) -> None:
             _refusal(reply, f"withdrawing '{listing_id}'"), status=reply.status
         )
     log.info("hub: withdrew listing '%s'", listing_id)
+
+
+# ── Account pairing (FEAT-148): link to a Botcamp profile, no pasted token ──
+
+
+def link_start() -> LinkStart:
+    """Begin a pairing attempt, replacing any one this install was tracking.
+
+    No token: contract §4.2 is the one pairing endpoint that needs none, since
+    there isn't a credential yet. A second call while an earlier attempt is
+    still ``pending`` simply forgets that earlier ``link_id`` — the contract
+    puts that bookkeeping on Condor's side, not the hub's — so this install
+    only ever tracks the most recent attempt it started.
+    """
+    global _pending_link
+
+    reply = _send("POST", f"{HUB_URL}/link/start", payload=b"{}")
+    start = _model(_json(reply, "starting a pairing"), LinkStart, "a pairing start")
+    start = start.model_copy(update={"link_url": _link_url(start.code)})
+    with _link_lock:
+        _pending_link = {
+            "link_id": start.link_id,
+            "code": start.code,
+            "verification": start.verification,
+            "expires_at": start.expires_at,
+            "poll_interval_s": max(1, start.poll_interval_s or 3),
+            "last_polled": 0.0,
+        }
+    log.info("hub: pairing started (code %s)", start.code)
+    return start
+
+
+def link_state() -> LinkState:
+    """This install's current pairing/link state. **Never the credential.**
+
+    Three cases, in the order checked:
+
+    1. Already linked (``config.yml`` carries a token and a profile handle) —
+       answered from local config, no hub call at all.
+    2. A pairing is in flight — polled from the hub at most once per
+       ``poll_interval_s`` (contract §4.3's own rate limit on this endpoint;
+       a caller that asks more often than that gets the locally cached answer
+       rather than a second request). On ``accepted``, **this is the one call
+       that ever sees the credential**: it is stored via
+       :func:`config_manager.ConfigManager.update_hub` immediately and never
+       put in the :class:`LinkState` this function returns.
+    3. Nothing pending and nothing linked — ``"none"``.
+
+    A transition to ``denied``/``expired``/``accepted`` is reported for
+    exactly the one poll that observed it and then forgotten (the pending
+    attempt is cleared), the same "answered once" shape the credential itself
+    gets in the contract.
+    """
+    section = _section()
+    linked_handle = str(section.get("profile_handle") or "")
+    if linked_handle and section.get("token"):
+        return LinkState(status="linked", profile_handle=linked_handle)
+
+    with _link_lock:
+        pending = dict(_pending_link) if _pending_link else None
+    if pending is None:
+        return LinkState(status="none")
+
+    now = time.monotonic()
+    if now - pending["last_polled"] < pending["poll_interval_s"]:
+        return LinkState(
+            status="pending",
+            code=pending["code"],
+            verification=pending["verification"],
+            expires_at=pending["expires_at"],
+            link_url=_link_url(pending["code"]),
+        )
+
+    link_id = _segment(pending["link_id"], "link id")
+    reply = _send("GET", f"{HUB_URL}/link/{link_id}")
+    if reply.status == 404:
+        # A link_id the hub never issued, or one already fully consumed and
+        # forgotten (contract §4.3) — either way, nothing left to track.
+        _clear_pending()
+        return LinkState(status="expired")
+    payload = _json(reply, "the pairing status")
+    status = str(payload.get("status") or "")
+
+    if status == "pending":
+        with _link_lock:
+            if _pending_link is not None:
+                _pending_link["last_polled"] = now
+                _pending_link["expires_at"] = (
+                    payload.get("expires_at") or pending["expires_at"]
+                )
+        return LinkState(
+            status="pending",
+            code=pending["code"],
+            verification=pending["verification"],
+            expires_at=str(payload.get("expires_at") or pending["expires_at"]),
+            link_url=_link_url(pending["code"]),
+        )
+
+    if status in ("denied", "expired"):
+        _clear_pending()
+        return LinkState(status=status)
+
+    if status == "accepted":
+        credential = str(payload.get("credential") or "")
+        profile_handle = str(payload.get("profile_handle") or "")
+        if credential:
+            # The one write of the credential, as soon as it exists — never
+            # handed back past this function, per the contract's "the
+            # credential arrives only in the backend poll response; no token
+            # in URL, fragment, browser response or log."
+            from config_manager import get_config_manager
+
+            get_config_manager().update_hub(
+                token=credential, profile_handle=profile_handle
+            )
+            log.info("hub: linked to Botcamp profile '%s'", profile_handle)
+        _clear_pending()
+        return LinkState(
+            status="linked",
+            profile_handle=profile_handle
+            or str(_section().get("profile_handle") or ""),
+        )
+
+    raise HubError(
+        f"The hub described the pairing in a status this Condor does not "
+        f"know: {status!r}"
+    )
+
+
+def link_cancel() -> None:
+    """Cancel a pairing in flight, or disconnect a linked profile.
+
+    Whichever this install is currently holding: a ``pending`` attempt is
+    cancelled at the hub (contract §4.4) and forgotten locally; a ``linked``
+    profile is disconnected by clearing the stored credential and handle —
+    **locally, and regardless of whether the hub can be reached**, per
+    contract §4.5's "Clearing the link removes local credential and reflects
+    disconnected status even if the hub is unavailable." There is nothing to
+    tell the hub in that second case: the credential being cleared is the
+    whole of what "disconnect" means on Condor's side.
+    """
+    with _link_lock:
+        pending = dict(_pending_link) if _pending_link else None
+
+    if pending is not None:
+        link_id = _segment(pending["link_id"], "link id")
+        reply = _send("DELETE", f"{HUB_URL}/link/{link_id}")
+        _clear_pending()
+        # A 409 means the hub says it was already accepted — the contract
+        # says to treat that as "assume it went through", not as an error to
+        # surface, since the credential may already be in flight to us.
+        if reply.status not in (200, 404, 409):
+            raise HubError(
+                _refusal(reply, "cancelling the pairing"), status=reply.status
+            )
+        log.info("hub: pairing cancelled")
+        return
+
+    from config_manager import get_config_manager
+
+    get_config_manager().update_hub(token="", profile_handle="")
+    log.info("hub: disconnected from Botcamp")
+
+
+def _clear_pending() -> None:
+    global _pending_link
+    with _link_lock:
+        _pending_link = None
 
 
 # ── The token, which lives in config.yml and is never rendered ───────────

@@ -268,6 +268,23 @@ export interface HubCatalogue {
 }
 
 /**
+ * This install's Botcamp pairing/link, as `condor.hub.link_state` reports it
+ * — never the credential, which no route ever answers with (FEAT-148).
+ *
+ * `"pending"` carries `code`/`verification`/`expires_at` to show again;
+ * `"denied"`/`"expired"` are reported for the one poll that observed them;
+ * `"linked"` carries `profile_handle`.
+ */
+export interface HubLinkState {
+  status: "none" | "pending" | "denied" | "expired" | "linked";
+  code: string;
+  verification: string;
+  expires_at: string;
+  link_url: string;
+  profile_handle: string;
+}
+
+/**
  * What installing a listing would do — or did.
  *
  * `verb` is the server's answer and not a client's comparison of two uids: a
@@ -3981,6 +3998,24 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ token }),
     }),
+
+  /** Begin a pairing: the code to open, and the verification string to show
+   *  beside it so the admin can compare the two before accepting on Botcamp. */
+  startHubLink: () =>
+    apiFetch<{
+      code: string;
+      verification: string;
+      expires_at: string;
+      poll_interval_s: number;
+      link_url: string;
+    }>("/api/v1/settings/hub-link/start", { method: "POST" }),
+
+  /** Where the pairing/link stands right now. Polled while `"pending"`. */
+  getHubLink: () => apiFetch<HubLinkState>("/api/v1/settings/hub-link"),
+
+  /** Cancel a pairing in flight, or disconnect a linked profile. */
+  disconnectHubLink: () =>
+    apiFetch<{ status: string }>("/api/v1/settings/hub-link", { method: "DELETE" }),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 
