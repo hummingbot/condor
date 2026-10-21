@@ -64,6 +64,7 @@ def host_load() -> dict[str, Any]:
         load_1m = float(os.getloadavg()[0])
     except (OSError, AttributeError, IndexError, ValueError):
         return {"available": False, "load_1m": 0.0, "vcpus": 0, "load_per_vcpu": 0.0}
+    load_1m = round(load_1m, 2)
     vcpus = os.cpu_count() or 0
     if vcpus <= 0:
         # A load average with nothing to divide it by is not a reading: 3.0 is
@@ -71,14 +72,16 @@ def host_load() -> dict[str, Any]:
         # would invite exactly that misreading.
         return {
             "available": False,
-            "load_1m": round(load_1m, 2),
+            "load_1m": load_1m,
             "vcpus": 0,
             "load_per_vcpu": 0.0,
         }
     return {
         "available": True,
-        "load_1m": round(load_1m, 2),
+        "load_1m": load_1m,
         "vcpus": vcpus,
+        # Derived from the already-rounded load_1m above it, not the raw
+        # reading, so the two fields agree bit-for-bit under a re-divide.
         "load_per_vcpu": round(load_1m / vcpus, 3),
     }
 
