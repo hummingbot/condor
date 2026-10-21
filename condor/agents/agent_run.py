@@ -39,16 +39,25 @@ import logging
 import os
 import time
 import uuid
+from typing import Any
 
 from condor.acp.pydantic_ai_client import (
     healthcheck_local_backend,
     is_pydantic_ai_model,
 )
 from condor.agents.agent import AgentStore
+from condor.agents.risk import (
+    RefusalLog,
+    RiskEngine,
+    RiskLimits,
+    RiskState,
+    auto_approve_with_risk_check,
+)
 from condor.agents.run_records import KIND_CONSULT, record_run
 from condor.preferences import resolve_custom_endpoint
 from condor.runtime import context as runtime_context
 from condor.runtime import toolsets
+from config_manager import resolve_stored_server
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +72,56 @@ MAX_RECORDED_RESULT = 2000
 # turns them into an exception its callers already record as an error. Every
 # other reason (end_turn, max_tokens, refusal, cancelled) returns the text.
 FAILED_STOP_REASONS = frozenset({"error", "disconnected", "timeout"})
+
+
+def _delegated_envelope() -> tuple[RiskEngine, RiskState]:
+    """The risk envelope a delegated run trades inside (MM-1).
+
+    ``RiskLimits()``' own defaults — the same $500 position ceiling and
+    five-executor cap an unconfigured loop gets — because a delegation has
+    nowhere else to read them from: it is not a session, it has no strategy,
+    and the ``Agent`` record carries no limits of its own. Inventing a looser
+    envelope for the one seat nobody is watching would defeat the point;
+    borrowing some loop's would bind this run to limits chosen for a different
+    job. Making it configurable per agent is the obvious next step and a
+    product decision, not this fix.
+
+    The state is a bare :class:`RiskState`, which starts at zero and then
+    accumulates: ``check_executor_action`` adds each approved create to it, so
+    a run's own creates do sum against the envelope and the executor cap.
+
+    What it cannot see is what was already out there. A tick recomputes its
+    state from the venue every tick; a delegation has no tracker, so exposure
+    the agent opened *before* this run — or in another run alongside it — reads
+    as zero. The envelope therefore bounds this run's own appetite, not the
+    agent's total position. Stated plainly because the gap is easy to mistake
+    for a guarantee it does not make.
+    """
+    return RiskEngine(RiskLimits()), RiskState()
+
+
+async def _price_client(user_id: int, server_name: str | None, slug: str) -> Any:
+    """The API client the gate prices a create with, or ``None``.
+
+    Best-effort by design: a delegation that cannot reach a server should fail
+    on the tools that need one, not on the gate that guards them. ``None`` only
+    costs the gate the ability to value a *base*-denominated create, which it
+    then refuses as unpriced — the same answer a tick gives, and the safe one.
+    """
+    from config_manager import get_config_manager
+
+    try:
+        cm = get_config_manager()
+        resolved = resolve_stored_server(cm, user_id, server_name)
+        return await cm.get_client(resolved) if resolved else None
+    except Exception:
+        log.warning(
+            "Delegation to %s: no API client for the risk gate; a create it "
+            "cannot price will be refused",
+            slug,
+            exc_info=True,
+        )
+        return None
 
 
 async def run_agent_to_completion(
@@ -195,12 +254,41 @@ async def run_agent_to_completion(
     # fallback model never inherits the original's credentials.
     from condor.runtime.llm_client import build_llm_client
 
+    # Unattended, and therefore GATED (MM-1). "Nobody is watching" used to be
+    # the argument for building no permission callback at all, which read as
+    # "there is no one to ask" and meant "nothing is asked": every delegated
+    # deploy, create and swap reached the venue with no risk check, no ledger
+    # and no refusal record, while the identical call from a tick was bounded.
+    # QA deployed a live pmm_mister through this door with no platform loss cap
+    # at all. Nobody watching is the reason to gate it, not the reason not to.
+    refusals = RefusalLog()
+    risk_engine, risk_state = _delegated_envelope()
+    # The same server the tools above resolved onto, for the same reason a tick
+    # resolves once for both (CORR-737): a gate pricing a create on fleet A
+    # while the create lands on fleet B is checking the wrong book.
+    price_client = await _price_client(user_id, effective_server, slug)
+    permission_cb = auto_approve_with_risk_check(
+        risk_engine,
+        risk_state,
+        # A delegation is a live seat: it may trade, and only the named writes
+        # the gate bounds are bounded. Not "dry_run" — that mode is a rehearsal
+        # this is not — and not "shutdown".
+        execution_mode="loop",
+        # No session tag and no bot ledger: a delegation is not a session, so
+        # per-session attribution and namespace ownership have nothing to key
+        # on. Both empty keep exactly today's behaviour on those two checks
+        # (see ``auto_approve_with_risk_check``), so this adds bounds without
+        # inventing an identity the run does not have.
+        agent_id="",
+        ledger=None,
+        price_client=price_client,
+        refusals=refusals,
+    )
+
     client = build_llm_client(
         model_key,
         mcp_servers=mcp_servers,
-        # Unattended: nobody is watching, so there is no one to ask. An ACP
-        # agent auto-approves its own tool calls.
-        permission_callback=None,
+        permission_callback=permission_cb,
         allowed_tools=agent.tools or None,
         user_id=user_id,
     )
@@ -234,7 +322,38 @@ async def run_agent_to_completion(
             f"agent session ended: {stop_reason}" + (f" — {detail}" if detail else "")
         )
 
-    return fallback_note + (answer or "(the agent returned no answer)")
+    return (
+        fallback_note
+        + (answer or "(the agent returned no answer)")
+        + _refusal_note(refusals)
+    )
+
+
+def _refusal_note(refusals: RefusalLog) -> str:
+    """What the gate refused during this run, for the caller — or nothing.
+
+    A delegation answers a caller who was not watching it, and a refusal
+    otherwise reaches nobody at all: the ACP bridge carries only the outcome,
+    never the reason (``RequestPermissionResponse`` has no field for it), so a
+    gated call reads to the agent as an approval that never came and to the
+    caller as an answer with an unexplained hole in it. A tick has a journal
+    and a next prompt to carry this; a delegation has one return value.
+
+    Appended rather than raised: the run still answered, and the answer is
+    still worth having — the refusal is a caveat on it, not a failure of it.
+    """
+    noted = refusals.drain()
+    if not noted:
+        return ""
+    lines = "\n".join(
+        f"- `{row.get('tool') or '<unknown tool>'}`: {row.get('reason') or ''}".rstrip()
+        for row in noted
+    )
+    return (
+        "\n\n---\n**The risk gate refused "
+        f"{len(noted)} call{'s' if len(noted) != 1 else ''} during this run:**\n"
+        f"{lines}"
+    )
 
 
 def _clip(text: str) -> str:
