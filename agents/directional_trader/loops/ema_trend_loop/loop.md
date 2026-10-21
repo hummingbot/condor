@@ -9,6 +9,14 @@ default_config:
   execution_mode: loop
   total_amount_quote: 200
   max_pairs: 3
+  # Controller mode, with the bot name DERIVED as this session's namespace
+  # (DT-5). The loop deploys bots, but it ran in executor mode with no
+  # bot_name, so no [CONTROLLER MODE] block reached the prompt, the ledger
+  # enforced nothing, and the playbook invented the name 'ema_trend_loop' --
+  # which sits outside any namespace and which manage_bots(status) never
+  # returns, because Hummingbot appends a deploy timestamp to it. The loop
+  # therefore found "no bot running" on every tick and deployed another.
+  bot_mode: bot
 default_trading_context: ''
 created_by: 0
 created_at: '2026-07-31T12:14:56.290226+00:00'
@@ -22,7 +30,11 @@ Run a portfolio of EMA trend-following controllers across any available pairs on
 The agent is NOT locked to specific pairs or configs. It discovers what's available, backtests the candidates, selects the best ones based on live backtest metrics and accumulated live experience, and evolves its selection over time.
 
 ## Bot config
-- Bot name: `ema_trend_loop`
+- Bot name: **read it from `[CONTROLLER MODE]`** — that block states the bot you
+  operate, the namespace you may deploy under, and which bots you own right now.
+  Never hard-code a name: Hummingbot appends a deploy timestamp to whatever you
+  ask for, so the running instance is never called what you typed, and a name
+  outside your namespace is refused by the risk engine.
 - Exchange: `binance_perpetual`
 - Max concurrent controllers: up to `max_pairs` (default: 3)
 
@@ -74,30 +86,37 @@ Additionally:
 If no configs pass all criteria, lower the Sharpe threshold to 0.5 and retry. If still none qualify, do NOT deploy — journal the situation and skip deployment this tick.
 
 ### Step 4 — Check bot status
-Call `manage_bots(action="status")`. Look for bot named `ema_trend_loop`.
+**`[CONTROLLER MODE]` is the authority on whether you already have a bot**, not
+`manage_bots(action="status")`. It lists "Bots you own right now"; a status call
+returns the whole fleet under their deployed names (yours carries a timestamp
+suffix you never typed), so matching it by eye is how a second instance of the
+same book gets deployed on top of the first.
 
-- If NOT running and active set is non-empty → deploy:
+- If you own NO bot yet and the active set is non-empty → deploy under the
+  namespace `[CONTROLLER MODE]` names:
   ```
   manage_bots(
     action="deploy",
-    bot_name="ema_trend_loop",
+    bot_name="<the namespace from [CONTROLLER MODE]>",
     controllers_config=[<selected config names>],
     max_global_drawdown_quote=<total_amount_quote * 0.15>,
     max_controller_drawdown_quote=<total_amount_quote * 0.10>
   )
   ```
-  Journal: action="deployed ema_trend_loop with <configs> — backtest Sharpes: <list>"
+  Journal: action="deployed <bot_name> with <configs> — backtest Sharpes: <list>"
+  The name you own is recorded for you; next tick it is in "Bots you own right
+  now" and this branch does not fire again.
 
-- If running but active set differs from deployed set → note the discrepancy in journal; do NOT redeploy mid-session unless a controller was explicitly stopped.
+- If you own a bot but the active set differs from its deployed set → note the discrepancy in journal; do NOT redeploy mid-session unless a controller was explicitly stopped.
 
-- If running → proceed to Step 5.
+- If you own a running bot → proceed to Step 5.
 
 ### Step 5 — Check positions and performance
 Call `list_positions_held()`. For each open position:
 - Note unrealized PnL, side, pair
 - If any single position exceeds -10% unrealized loss → stop that controller:
   ```
-  manage_bots(action="stop_controllers", bot_name="ema_trend_loop", controller_names=["<controller>"])
+  manage_bots(action="stop_controllers", bot_name="<the bot you own>", controller_names=["<controller>"])
   ```
   Journal: action="stopped <controller> — exceeded -10% position loss"
   Learning: record which config/pair triggered the stop and under what conditions
@@ -106,7 +125,7 @@ Call `list_positions_held()`. For each open position:
 Call `get_performance_report()`.
 - If total realized + unrealized PnL < -(total_amount_quote * 0.15) → stop the entire bot:
   ```
-  manage_bots(action="stop_bot", bot_name="ema_trend_loop")
+  manage_bots(action="stop_bot", bot_name="<the bot you own>")
   ```
   Journal: action="stopped bot — global drawdown limit hit", risk_note="max DD breached"
 
