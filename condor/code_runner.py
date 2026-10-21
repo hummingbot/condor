@@ -50,6 +50,7 @@ import time
 import traceback
 
 import condor.reports as reports
+from condor.asyncutil import TaskSet
 from condor.code_runs import CodeRun, get_code_run_store, new_run_id
 from condor.memory.paths import CHAT_SLUG
 from condor.runtime import code_guard
@@ -61,6 +62,20 @@ CODE_FILENAME = "<code_run>"
 
 DEFAULT_TIMEOUT = 60.0
 MAX_TIMEOUT = 120.0
+
+# How long a cancelled snippet's own cleanup (a ``finally``) gets to land
+# before execute_code gives up waiting on it. Longer than the guard's own
+# INTERRUPT_GRACE, which is what bounds cleanup *while it is executing* —
+# this instead bounds cleanup that is suspended in an await the guard cannot
+# reach at all (see _run_until_done below).
+_CLEANUP_GRACE = code_guard.INTERRUPT_GRACE + 1.0
+
+# Strong references to a snippet whose cleanup outlived _CLEANUP_GRACE, so the
+# orphaned task is not garbage-collected mid-run and its eventual outcome is
+# still logged instead of silently lost.
+_orphaned_cleanups = TaskSet(
+    logger, "code run %s: cleanup finished after the run was already reported (%s)"
+)
 
 # Where a run's ``print`` goes. Per-context, so concurrent runs cannot read each
 # other's output — which only holds because every run gets its own asyncio.Task
@@ -286,30 +301,60 @@ async def execute_code(
         )
     )
     try:
-        await asyncio.wait_for(task, timeout=timeout)
-        run.status = "ok"
-    except (asyncio.TimeoutError, TimeoutError):
-        run.status = "timeout"
-        run.error = f"Timed out after {timeout:g}s"
-    except code_guard.CodeRunDeadline as e:
-        # The same outcome as above, reached by the guard instead of wait_for:
-        # the snippet was busy on the main thread and never yielded to be
-        # cancelled. The traceback is the useful part — it points at the line.
-        run.status = "timeout"
-        run.error = f"Timed out after {timeout:g}s ({e})"
-        run.traceback = _trim_traceback(
-            "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        )
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if task not in done:
+            # Past its deadline but not yet unwound. ``asyncio.wait_for``
+            # would cancel and then await the task with no bound of its own,
+            # so a ``finally`` that swallows the CancelledError and then
+            # awaits something unbounded — a stray ``asyncio.sleep(3600)`` —
+            # hangs this call forever instead of timing out (the guard's own
+            # interrupt only fires on executing code, never on a suspended
+            # await). Cancel it ourselves and give cleanup a bounded grace
+            # window instead of an open one.
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=_CLEANUP_GRACE)
+        if task not in done:
+            # Cleanup did not land within the grace window either. Stop
+            # blocking this run on it rather than hang the caller; the
+            # expired scope below still cuts the snippet at its next
+            # executing line, however long that unbounded await runs.
+            run.status = "timeout"
+            run.error = (
+                f"Timed out after {timeout:g}s "
+                f"(cleanup did not finish within {_CLEANUP_GRACE:g}s)"
+            )
+            _orphaned_cleanups.track(task, label=run_id)
+        else:
+            try:
+                task.result()
+                run.status = "ok"
+            except asyncio.CancelledError:
+                run.status = "timeout"
+                run.error = f"Timed out after {timeout:g}s"
+            except code_guard.CodeRunDeadline as e:
+                # The same outcome as above, reached by the guard instead of
+                # the cancellation: the snippet was busy on the main thread
+                # and never yielded to be cancelled. The traceback is the
+                # useful part — it points at the line.
+                run.status = "timeout"
+                run.error = f"Timed out after {timeout:g}s ({e})"
+                run.traceback = _trim_traceback(
+                    "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                )
+            except BaseException as e:
+                run.status = "error"
+                run.error = f"{type(e).__name__}: {e}"
+                run.traceback = _trim_traceback(
+                    "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                )
     except asyncio.CancelledError:
+        # execute_code's own caller was cancelled (e.g. shutdown), not the
+        # snippet's own timeout. Cancel the snippet too rather than leave it
+        # running unsupervised, and propagate rather than swallow.
+        task.cancel()
         run.status = "timeout"
         run.error = "Cancelled"
         raise
-    except BaseException as e:
-        run.status = "error"
-        run.error = f"{type(e).__name__}: {e}"
-        run.traceback = _trim_traceback(
-            "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        )
     finally:
         # A task the snippet spawned and never awaited still carries the scope;
         # expiring it cuts that straggler at its next line instead of letting it
