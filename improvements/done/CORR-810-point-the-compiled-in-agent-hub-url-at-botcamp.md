@@ -7,13 +7,14 @@ category: correctness
 impact: high
 effort: S
 risk: low
-status: todo
+status: done
 brain: developer
 files:
   - condor/hub.py:95
   - tests/test_hub.py
 depends_on: []
-commits: []
+commits:
+  - "3c35179a fix(hub): point the compiled-in agent hub URL at Botcamp (CORR-810)"
 created: 2026-10-21
 ---
 
