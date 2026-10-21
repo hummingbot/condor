@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -6,12 +7,16 @@ from telegram.ext import ContextTypes
 
 from condor.reports import ReportBuilder
 
+logger = logging.getLogger(__name__)
+
 CATEGORY = "Analysis"
 
 _INDUSTRY_PEERS: dict[str, list[str]] = {
     "Internet Content & Information": ["GOOGL", "META", "SNAP"],
     "Software—Application": ["MSFT", "ORCL", "SAP"],
-    "Software—Infrastructure": ["MSFT", "CSCO", "VMW"],
+    # VMW was acquired by Broadcom in Nov 2023 and delisted; Yahoo returns an
+    # empty record for it, so the peer row was blank (FA-6).
+    "Software—Infrastructure": ["MSFT", "CSCO", "AVGO"],
     "Semiconductors": ["NVDA", "AMD", "INTC", "TSM", "QCOM"],
     "Consumer Electronics": ["AAPL", "SONY", "SSNGY"],
     "Financial Data & Stock Exchanges": ["MSCI", "SPGI", "ICE"],
@@ -19,7 +24,8 @@ _INDUSTRY_PEERS: dict[str, list[str]] = {
     "Banks—Diversified": ["JPM", "BAC", "WFC"],
     "Credit Services": ["V", "MA", "AXP"],
     "Cryptocurrency": ["COIN", "MSTR", "HOOD"],
-    "Financial Services": ["PYPL", "SQ", "AFRM"],
+    # SQ was renamed to XYZ when Block changed its ticker in Jan 2025.
+    "Financial Services": ["PYPL", "XYZ", "AFRM"],
     "Insurance—Life": ["MET", "PRU", "LNC"],
     "Drug Manufacturers—General": ["JNJ", "PFE", "MRK"],
     "Biotechnology": ["AMGN", "GILD", "REGN"],
@@ -66,6 +72,27 @@ def _fmt_usd(val) -> str:
     return f"${val:.2f}"
 
 
+def _pct_points_to_fraction(val):
+    """yfinance's ``dividendYield`` as the fraction every other rate here is.
+
+    It is reported in PERCENTAGE POINTS -- 1.46 means 1.46% -- while
+    ``payoutRatio``, the margins and the growth rates beside it are fractions,
+    and ``_fmt_pct`` multiplies by 100. So the one field that arrived already
+    scaled was scaled again: live reports showed CSCO at 146.0% and PYPL at
+    100.0% (FA-6).
+
+    Normalised here rather than formatted differently at each call site, so
+    every consumer of ``div_yield`` -- the KPI, the peer table, anything added
+    later -- reads the same units as its neighbours.
+    """
+    if val is None:
+        return None
+    try:
+        return float(val) / 100.0
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt_pct(val) -> str:
     if val is None:
         return "N/A"
@@ -92,23 +119,48 @@ def _safe_div(num, denom):
         return None
 
 
+#: Quarters in a trailing twelve months. Stated because the point of FA-5 is
+#: that four is not "however many there are".
+TTM_QUARTERS = 4
+
+
 def _ttm_sum(df, *labels) -> float | None:
-    """Sum 4 most recent quarterly values for any matching label."""
+    """Sum the four most recent quarters, or ``None`` when there are not four.
+
+    Strict since FA-5. This used to sum ``row.iloc[:4]`` — whatever that
+    returned — so a company with two quarters of filed history had a half-year
+    reported as its trailing twelve months. Nothing said so, and every multiple
+    built on it (P/E, EV/Rev, margins) was wrong by the same factor, in the
+    direction that makes a stock look cheap.
+
+    ``None`` rather than a scaled estimate: annualising two quarters assumes the
+    other two, and a fundamentals report is the wrong place to invent half the
+    input. The caller shows N/A, which is the true answer.
+    """
     if df is None or df.empty:
         return None
     for label in labels:
         if label in df.index:
             row = df.loc[label]
             vals = []
-            for v in row.iloc[:4]:
+            for v in row.iloc[:TTM_QUARTERS]:
                 try:
                     f = float(v)
                     if f == f:  # not NaN
                         vals.append(f)
                 except (TypeError, ValueError):
                     pass
-            if vals:
+            if len(vals) == TTM_QUARTERS:
                 return sum(vals)
+            if vals:
+                logger.info(
+                    "%s: only %d of %d quarters available — reporting N/A "
+                    "rather than labelling a partial period TTM",
+                    label,
+                    len(vals),
+                    TTM_QUARTERS,
+                )
+                return None
     return None
 
 
@@ -204,7 +256,7 @@ def _get_ticker_data(symbol: str) -> dict:
         "net_margin": net_margin,
         "gross_margin": gross_margin,
         "fcf_yield": fcf_yield,
-        "div_yield": info.get("dividendYield"),
+        "div_yield": _pct_points_to_fraction(info.get("dividendYield")),
         "payout_ratio": info.get("payoutRatio"),
     }
 
