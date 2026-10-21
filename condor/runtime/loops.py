@@ -161,6 +161,27 @@ class LoopSupervisor:
             if e.agent.slug == agent_slug and e.strategy.slug == strategy_slug
         ]
 
+    def for_owner(self, user_id: int, chat_id: int = 0) -> list:
+        """Engines this person owns, so a chat can say what is running (SH-4).
+
+        ``/stop`` cancels the answer being streamed and nothing else, which read
+        to operators as "the loop is stopped" — it never was, and Telegram has
+        no loop control to have stopped it with. Answering that honestly means
+        naming what is still running, and that is this.
+
+        Keyed on ``user_id``, the authenticated owner, with ``chat_id`` as an
+        additional filter rather than an alternative: ``chat_defaults`` is a
+        global map keyed by chat, so selecting on the chat alone is the
+        substitution SEC-164 removed from every other resolution path. A
+        dashboard-launched loop carries ``chat_id`` 0 and still belongs to its
+        owner, so the default lists it.
+        """
+        return [
+            e
+            for e in self._engines.values()
+            if e.user_id == user_id and (not chat_id or e.chat_id in (chat_id, 0))
+        ]
+
     # ── Status recording ──
 
     def record(self, engine, state: str) -> None:
