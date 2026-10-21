@@ -7,7 +7,11 @@ import {
   runLabel,
 } from "@/components/agent/lab/runs";
 import {
+  driftLines,
   dueInSec,
+  effectiveModel,
+  throttleLines,
+  throttledVenues,
   tickCountdownLabel,
 } from "@/components/agent/workspace/fleet";
 import { useSeconds } from "@/hooks/useSeconds";
@@ -30,8 +34,9 @@ import type {
  *
  * The run's ticks (`TickSpine`) are not drawn here: they share one row with
  * the section tabs below this bar (ARCH-425), because each alone left most of
- * a full-width row empty. This bar keeps the pickers, the status, the cadence
- * and the countdown.
+ * a full-width row empty. This bar keeps the pickers, the status, the cadence,
+ * the countdown, and what the session is actually running — the model the
+ * adapter reports and whether its config still matches the file (FEAT-136).
  *
  * The two pickers are native selects on purpose. They are the scope of
  * everything below them and they have to be operable at any width, and the
@@ -67,6 +72,15 @@ export function LoopBar({
 
   const duration = run ? formatDuration(runDurationSec(run, nowSec)) : "";
   const dueIn = dueInSec(instance, nowSec);
+  // What this session is actually running, beside what it was asked to run
+  // (FEAT-136). Both read off the live engine, so they are only here while
+  // there is one — a stopped run's drift is not a thing an operator can act on.
+  const drift = driftLines(instance);
+  const model = effectiveModel(instance);
+  // Which venues are refusing this session (FEAT-138). A venue condition, so it
+  // is worded as the venue's doing and sits apart from the run's own error —
+  // before this a throttled host reached the operator as a slow tick.
+  const throttled = throttledVenues(instance);
 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border)] px-4 py-1.5 text-xs">
@@ -134,6 +148,54 @@ export function LoopBar({
             }`}
           >
             {tickCountdownLabel(dueIn)}
+          </span>
+        </>
+      )}
+
+      {model && (
+        <>
+          <span className="opacity-40">·</span>
+          <span
+            data-effective-model
+            title={
+              model.requested
+                ? `Requested ${model.requested}; the adapter reports ${model.active}`
+                : `The adapter reports ${model.active}`
+            }
+            className={`font-mono ${
+              model.mismatch ? "text-amber-400" : "text-[var(--color-text-muted)]"
+            }`}
+          >
+            {model.active}
+            {model.mismatch ? ` (pinned ${model.requested})` : ""}
+          </span>
+        </>
+      )}
+
+      {throttled.length > 0 && (
+        <>
+          <span className="opacity-40">·</span>
+          <span
+            data-venue-throttled
+            title={`These venues are refusing our calls — not a strategy fault:\n${throttleLines(throttled).join("\n")}`}
+            className="rounded bg-amber-400/15 px-1.5 py-0.5 font-medium text-amber-400"
+          >
+            {throttled.length === 1
+              ? `${throttled[0].venue} throttling (${throttled[0].refusals} refused)`
+              : `${throttled.length} venues throttling`}
+          </span>
+        </>
+      )}
+
+      {drift.length > 0 && (
+        <>
+          <span className="opacity-40">·</span>
+          <span
+            data-config-drift
+            title={`This session is still running its start-time config. Restart to apply:\n${drift.join("\n")}`}
+            className="rounded bg-amber-400/15 px-1.5 py-0.5 font-medium text-amber-400"
+          >
+            config drifted ({drift.length})
           </span>
         </>
       )}

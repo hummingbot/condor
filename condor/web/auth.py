@@ -146,10 +146,27 @@ def require_admin(user: WebUser) -> None:
     copy.
     """
     if not get_config_manager().is_admin(user.id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
+        # Name the role rather than the screen. Local mode admits both `user`
+        # and `admin` at login while every admin route demands `admin`, so a
+        # hand-edited config.yml produces an install that boots, logs in, and
+        # silently has no Updates tab — with nothing anywhere saying why.
+        # Best effort: naming the role is a courtesy, and a gate must never
+        # fail open (or crash) because the courtesy could not be paid.
+        try:
+            found = get_config_manager().get_user_role(user.id)
+            # ``get_user_role`` hands back the enum, and interpolating that
+            # renders "UserRole.USER" — a name that appears nowhere in
+            # config.yml, so the reader cannot search for it and the value it
+            # tells them to change looks nothing like the one on disk.
+            role = str(getattr(found, "value", found) or "")
+        except Exception:  # noqa: BLE001
+            role = ""
+        detail = "Admin access required"
+        if role:
+            detail += (
+                f" — this user's role is '{role}'. Set it to 'admin' in config.yml."
+            )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def report_owner_filter(user: WebUser) -> int | None:

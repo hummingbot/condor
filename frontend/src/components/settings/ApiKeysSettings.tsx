@@ -130,18 +130,40 @@ export function ApiKeysSettings() {
   // invalidateCredentialQueries (CORR-353).
   const invalidate = () => invalidateCredentialQueries(qc, server);
 
+  // A credential write the API server says needs a restart is reported, not
+  // dropped (CORR-732): the flow closes on success, so without this the operator
+  // reads "added", sees the key in the list, and has no way to learn the bots
+  // already running are still on the old one. Cleared on the next write.
+  const [restartNotice, setRestartNotice] = useState("");
+
   const addMut = useMutation({
     mutationFn: () =>
       api.addCredential(server!, {
         connector_name: flow.connectorName,
         credentials: flow.values,
       }),
-    onSuccess: () => { invalidate(); setFlow(INITIAL_FLOW); },
+    onSuccess: (res) => {
+      setRestartNotice(
+        res.restart_required
+          ? `Saved ${flow.connectorName}. Restart the running bots to apply it — they keep the credentials they started with.`
+          : "",
+      );
+      invalidate();
+      setFlow(INITIAL_FLOW);
+    },
   });
 
   const deleteMut = useMutation({
     mutationFn: (connector: string) => api.deleteCredential(server!, connector),
-    onSuccess: () => { invalidate(); setConfirmDelete(null); },
+    onSuccess: (res, connector) => {
+      setRestartNotice(
+        res.restart_required
+          ? `Deleted ${connector}. Restart the running bots to apply it — they keep the credentials they started with.`
+          : "",
+      );
+      invalidate();
+      setConfirmDelete(null);
+    },
   });
 
   const invalidateWallets = () =>
@@ -543,6 +565,12 @@ export function ApiKeysSettings() {
           </button>
         </div>
       </div>
+
+      {restartNotice && (
+        <p className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
+          {restartNotice}
+        </p>
+      )}
 
       {loadingCreds ? (
         <div className="flex items-center justify-center py-12 text-[var(--color-text-muted)]">

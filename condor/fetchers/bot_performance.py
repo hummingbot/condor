@@ -26,6 +26,7 @@ from typing import Any, Iterable, Mapping
 
 from condor.asyncutil import SingleFlight
 from condor.fetchers._pagination import collect_pages
+from condor.fetchers._server import _server_key
 from condor.fetchers.executors import normalize_executor_side
 from condor.quote_conversion import quote_of, resolve_client_usd_rates
 
@@ -95,6 +96,53 @@ def count_trade_closes(perf: dict) -> int:
     return sum(int(v or 0) for k, v in counts.items() if k in _TRADE_CLOSE_TYPES)
 
 
+#: The fields that make a performance object a *reading*. One of them present
+#: means the controller reported something; none means the object is there but
+#: says nothing.
+_READING_FIELDS = (
+    "realized_pnl_quote",
+    "unrealized_pnl_quote",
+    "global_pnl_quote",
+    "global_pnl_pct",
+    "volume_traded",
+    "positions_summary",
+    "close_type_counts",
+)
+
+#: ``ok`` beats ``empty`` beats ``missing`` when several readings roll into one.
+_READING_RANK = {"missing": 0, "empty": 1, "ok": 2}
+
+
+def _best_reading(a: str, b: str) -> str:
+    """The stronger of two reading states: one controller reporting is enough."""
+    return a if _READING_RANK.get(a, 0) >= _READING_RANK.get(b, 0) else b
+
+
+def _reading_state(snap: dict) -> str:
+    """Whether one snapshot carries a reading -- ``ok``, ``empty`` or ``missing``.
+
+    The three are the same 0.0 to every numeric field, which is exactly the
+    confusion that cost GitHub #272 a race entry: a controller that returned an
+    empty performance object scored as a strategy sitting flat. "No reading" is
+    unknown, not zero ([[CORR-725]]), so the state travels alongside the figures
+    rather than changing their type -- existing readers keep working and a
+    reader that cares can tell absence from flat.
+
+    ``missing`` is no performance object at all (or one of the wrong type);
+    ``empty`` is an object carrying none of :data:`_READING_FIELDS`. A
+    flat-shaped snapshot, whose reading fields sit on the snapshot itself, reads
+    ``ok`` -- the data is there, just not nested.
+    """
+    raw = snap.get("performance")
+    if raw is None:
+        return "ok" if any(f in snap for f in _READING_FIELDS) else "missing"
+    if not isinstance(raw, dict):
+        return "missing"
+    if not any(f in raw for f in _READING_FIELDS):
+        return "empty"
+    return "ok"
+
+
 def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
     """Roll up per-controller snapshots into one aggregate per bot_name.
 
@@ -137,9 +185,14 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "closed_trades": 0,
                 "close_type_counts": Counter(),
                 "num_controllers": 0,
+                # Whether anything was actually read for this bot. Starts at
+                # ``missing`` and is raised by each controller that reports
+                # ([[CORR-725]]).
+                "reading": "missing",
                 "timestamp": "",
                 "controllers": [],
             }
+        reading = _reading_state(snap)
         realized = float(perf.get("realized_pnl_quote", 0) or 0)
         unrealized = float(perf.get("unrealized_pnl_quote", 0) or 0)
         volume = float(perf.get("volume_traded", 0) or 0)
@@ -162,6 +215,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
         agg[bn]["cum_fees_quote"] += fees
         agg[bn]["closed_trades"] += closes
         agg[bn]["num_controllers"] += 1
+        agg[bn]["reading"] = _best_reading(agg[bn]["reading"], reading)
         # Track the freshest snapshot timestamp so suffix-tolerant resolution can
         # pick the most recent deploy of a re-launched bot.
         ts = str(snap.get("timestamp", "") or "")
@@ -180,6 +234,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "trading_pair": pair,
                 "quote": quote_of(pair),
                 "status": str(snap.get("status", "") or ""),
+                "reading": reading,
                 "realized_pnl_quote": realized,
                 "unrealized_pnl_quote": unrealized,
                 "volume_traded": volume,
@@ -219,17 +274,6 @@ _snapshot_cache: dict[str, tuple[float, dict[str, dict]]] = {}
 _snapshot_inflight = SingleFlight()
 _raw_snapshot_cache: dict[str, tuple[float, list[dict]]] = {}
 _raw_snapshot_inflight = SingleFlight()
-
-
-def _server_key(client: Any) -> str:
-    """Identify the API server a client talks to, or ``""`` if unidentifiable.
-
-    Keyed on ``base_url`` — never ``id(client)``, whose reuse after GC would hand
-    one server's snapshot to another. A client with no ``base_url`` (test doubles)
-    cannot be told apart from any other, so it is not cached at all rather than
-    sharing a blank key with unrelated servers.
-    """
-    return str(getattr(client, "base_url", "") or "")
 
 
 def clear_snapshot_cache() -> None:
@@ -387,6 +431,9 @@ def _merge_instance_aggregates(bots: list[dict]) -> dict:
         ):
             merged[key] = (merged.get(key, 0) or 0) + (b.get(key, 0) or 0)
         merged["controllers"] += list(b.get("controllers", []))
+        merged["reading"] = _best_reading(
+            merged.get("reading", "missing"), b.get("reading", "missing")
+        )
         if str(b.get("timestamp", "")) > str(merged.get("timestamp", "")):
             merged["timestamp"] = b.get("timestamp", "")
     return merged
@@ -416,8 +463,14 @@ def resolve_bots(
     Realized PnL from stopped instances comes through :func:`fetch_base_histories`,
     whose universe includes archived names. Bases with no live instance are absent
     from the result.
+
+    An unfiltered aggregate may therefore include a stopped instance's frozen
+    book, so each one is stamped ``liveness_unknown: True`` — the marker that
+    lets a consumer render the figure as unverified instead of as confirmed-live
+    ([[CORR-723]]). Absent means the liveness listing answered.
     """
     out: dict[str, dict] = {}
+    unknown = live_names is None
     for base, insts in partition_instances(all_bot_perf, bases).items():
         live = [
             i
@@ -429,7 +482,12 @@ def resolve_bots(
         # Name-bearer first: _merge_instance_aggregates keeps bots[0]'s bot_name.
         head = base if base in live else live[-1]
         ordered = [all_bot_perf[head]] + [all_bot_perf[i] for i in live if i != head]
-        out[base] = _merge_instance_aggregates(ordered)
+        agg = _merge_instance_aggregates(ordered)
+        if unknown:
+            # Copied: a single-instance merge hands back the snapshot's own dict,
+            # and this marker belongs to the resolution, not to the cached bot.
+            agg = {**agg, "liveness_unknown": True}
+        out[base] = agg
     return out
 
 
@@ -538,24 +596,49 @@ async def fetch_live_instance_names(client: Any) -> set[str] | None:
     without the listing, or a response that is not a listing yields ``None`` —
     never an empty set — so the caller keeps its unfiltered behaviour instead of
     silently zeroing every bot's open book. A failure is not cached.
+
+    That fallback is right for a *read*, which would rather show a figure that is
+    too high than zero every open book. A consequential action cannot infer the
+    difference from ``None``: it takes :func:`fetch_live_instance_names_checked`
+    and fails closed on unknown ([[CORR-723]]).
+    """
+    names, known = await fetch_live_instance_names_checked(client)
+    return names if known else None
+
+
+async def fetch_live_instance_names_checked(client: Any) -> tuple[set[str], bool]:
+    """:func:`fetch_live_instance_names` with its three outcomes kept apart.
+
+    Returns ``(names, known)``. ``known=False`` is "the orchestrator did not
+    answer" — a call that raised, a client without the listing, or a response
+    that is not one (:func:`_is_bots_listing`); ``names`` is then empty and must
+    not be used as a filter. ``known=True`` with an empty set is the *answer*
+    "nothing is running on this server".
+
+    The flat :func:`fetch_live_instance_names` collapses the first two into
+    ``None``, which is all a read surface needs. Anything that opens an ownership
+    window or licenses a lifecycle action needs them apart, because "unknown" and
+    "nothing is live" license opposite behaviour ([[CORR-723]]). A failure is not
+    cached.
     """
     from condor.fetchers.bots import extract_bots_list
 
     key = _server_key(client)
     entry = _live_names_cache.get(key) if key else None
     if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
-        return entry[1]
+        return entry[1], True
     try:
         result = await client.bot_orchestration.get_active_bots_status()
     except Exception as e:
         logger.debug("fetch_live_instance_names failed: %s", e)
-        return None
+        return set(), False
     if not _is_bots_listing(result):
-        return None
+        logger.debug("fetch_live_instance_names: not a bots listing: %r", result)
+        return set(), False
     names = {str(b["bot_name"]) for b in extract_bots_list(result) if b.get("bot_name")}
     if key:
         _live_names_cache[key] = (time.monotonic(), names)
-    return names
+    return names, True
 
 
 async def fetch_bot_universe(client: Any) -> tuple[dict[str, dict], list[str]]:
@@ -1075,6 +1158,49 @@ def _cum_at(
     return (chosen[1], chosen[2], chosen[3], chosen[4])
 
 
+def _reset_offsets(
+    history: list[tuple[float, float, float, float, float]],
+    start: float,
+    end: float,
+) -> tuple[float, float, float]:
+    """Volume, trades and fees that counter resets inside ``(start, end]`` hide.
+
+    Differencing a cumulative counter is only the volume generated while that
+    counter keeps counting. A bot restart — or a new instance deployed under
+    the same name, which the history walk cannot tell apart — starts volume,
+    trade count and fees again from zero, so a row sitting *below* its
+    predecessor did not trade a negative amount: it opened a new segment, and
+    everything it reports was traded after the reset.
+
+    Plain differencing cancels exactly the value standing immediately before
+    each drop, so the sum of those values is what restores the figure. Returning
+    it as an offset rather than re-summing the window keeps a monotonic
+    history's arithmetic bit-for-bit what it was: no reset, no offset
+    ([[CORR-731]]).
+
+    Realized PnL is deliberately not corrected. It falls whenever a position
+    closes at a loss, so a drop there is a measurement, not a reset, and
+    offsetting it would invent profit.
+    """
+    v_lost = t_lost = f_lost = 0.0
+    prev: tuple[float, float, float] | None = None
+    for row in history:
+        if row[0] > end:
+            break
+        cur = (row[2], row[3], row[4])
+        # Rows at or before ``start`` are the baseline ``_cum_at(start)`` reads,
+        # so a reset among them belongs to the window that ended there.
+        if prev is not None and row[0] > start:
+            if cur[0] < prev[0]:
+                v_lost += prev[0]
+            if cur[1] < prev[1]:
+                t_lost += prev[1]
+            if cur[2] < prev[2]:
+                f_lost += prev[2]
+        prev = cur
+    return v_lost, t_lost, f_lost
+
+
 def slice_history(
     histories: list[list[tuple[float, float, float, float, float]]],
     start: float,
@@ -1086,15 +1212,21 @@ def slice_history(
     an instance that lies wholly outside the window, and exact for partial overlap.
     Because session windows tile the timeline, summing every session's slice
     reproduces each instance's full cumulative with no double counting.
+
+    That differencing holds only while the cumulative is monotonic, so each
+    instance's volume, trades and fees also carry what
+    :func:`_reset_offsets` found a restart had hidden. A monotonic history is
+    untouched by that term and slices exactly as it always did.
     """
     realized = volume = trades = fees = 0.0
     for h in histories:
         r_e, v_e, t_e, f_e = _cum_at(h, end)
         r_s, v_s, t_s, f_s = _cum_at(h, start)
+        v_lost, t_lost, f_lost = _reset_offsets(h, start, end)
         realized += r_e - r_s
-        volume += v_e - v_s
-        trades += t_e - t_s
-        fees += f_e - f_s
+        volume += v_e - v_s + v_lost
+        trades += t_e - t_s + t_lost
+        fees += f_e - f_s + f_lost
     return realized, volume, trades, fees
 
 
@@ -1122,6 +1254,10 @@ def slice_history_series(
     carried: list[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * len(
         histories
     )
+    # ``_reset_offsets(h, start, t)`` accumulated as the cursor goes: each row is
+    # stepped over exactly once across every stamp, so the offset is carried
+    # forward rather than recomputed per stamp.
+    lost: list[tuple[float, float, float]] = [(0.0, 0.0, 0.0)] * len(histories)
 
     out: list[tuple[float, float, float, float, float]] = []
     for t in stamps:
@@ -1130,16 +1266,27 @@ def slice_history_series(
             j = cursors[i]
             while j + 1 < len(h) and h[j + 1][0] <= t:
                 j += 1
+                if j >= 1 and h[j][0] > start:
+                    prev, cur = h[j - 1], h[j]
+                    v_l, t_l, f_l = lost[i]
+                    if cur[2] < prev[2]:
+                        v_l += prev[2]
+                    if cur[3] < prev[3]:
+                        t_l += prev[3]
+                    if cur[4] < prev[4]:
+                        f_l += prev[4]
+                    lost[i] = (v_l, t_l, f_l)
             if j != cursors[i]:
                 cursors[i] = j
                 row = h[j]
                 carried[i] = (row[1], row[2], row[3], row[4])
             r_e, v_e, t_e, f_e = carried[i]
             r_s, v_s, t_s, f_s = bases[i]
+            v_l, t_l, f_l = lost[i]
             realized += r_e - r_s
-            volume += v_e - v_s
-            trades += t_e - t_s
-            fees += f_e - f_s
+            volume += v_e - v_s + v_l
+            trades += t_e - t_s + t_l
+            fees += f_e - f_s + f_l
         out.append((t, realized, volume, trades, fees))
     return out
 
@@ -1152,15 +1299,15 @@ MAX_HISTORY_INSTANCES = 24
 MAX_CONCURRENT_HISTORY_FETCHES = 10
 
 
-async def fetch_base_histories(
+async def fetch_instance_histories(
     client: Any,
     all_bot_perf: dict[str, dict],
     bases: list[str],
     earliest: float,
     now: float,
     extra_names: Iterable[str] = (),
-) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
-    """``{base: [history per deployed instance]}`` covering ``[earliest, now]``, in USD.
+) -> dict[str, dict[str, list[tuple[float, float, float, float, float]]]]:
+    """``{base: {instance: history}}`` covering ``[earliest, now]``, in USD.
 
     Every controller is restated in USD at its own quote's rate before an
     instance's controllers are summed, so a base — or a session over several
@@ -1241,9 +1388,32 @@ async def fetch_base_histories(
         inst: merge_controller_series(s, rates.rates) for inst, s in series.items()
     }
     return {
-        base: [history[k] for k in insts if k in history]
+        base: {k: history[k] for k in insts if k in history}
         for base, insts in instances_by_base.items()
     }
+
+
+async def fetch_base_histories(
+    client: Any,
+    all_bot_perf: dict[str, dict],
+    bases: list[str],
+    earliest: float,
+    now: float,
+    extra_names: Iterable[str] = (),
+) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
+    """``{base: [history per deployed instance]}`` — the keys dropped.
+
+    What every caller that only slices wants: :func:`slice_history` sums over the
+    instances of a base and does not care which is which. A caller that must name
+    the instances a figure was summed over — a scope label ([[FEAT-135]]) — takes
+    :func:`fetch_instance_histories` instead, because re-deriving the name
+    positionally from :func:`partition_instances` is wrong the moment
+    ``MAX_HISTORY_INSTANCES`` caps the fan-out.
+    """
+    by_base = await fetch_instance_histories(
+        client, all_bot_perf, bases, earliest, now, extra_names=extra_names
+    )
+    return {base: list(hs.values()) for base, hs in by_base.items()}
 
 
 def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
@@ -1255,6 +1425,11 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
     same way as direct executors. Realized PnL from already-closed positions is
     not row-level here (the snapshot only summarizes open positions); it is still
     reflected in the aggregate totals the caller applies.
+
+    Each row carries its own ``amount_known`` verdict, because its quote size is
+    derived -- ``amount`` x ``breakeven_price`` off the upstream snapshot -- and
+    so has its own absence mode, which no verdict from the raw-executor builder
+    describes (CORR-742).
     """
     from datetime import datetime
 
@@ -1275,6 +1450,15 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
             entry = float(pos.get("breakeven_price", 0) or 0)
             amount = float(pos.get("amount", 0) or 0)
             unrealized = float(pos.get("unrealized_pnl_quote", 0) or 0)
+            # The row's own sizing verdict, decided where its two fields are
+            # read -- the shape ``executors.build_executor_row`` carries and
+            # ``executors._size_unknown`` reads (CORR-740). A position holding
+            # base at a breakeven of 0 has no valid notional, so an absent or
+            # zero price over a nonzero amount is *unknown* exposure, not $0,
+            # and the brakes must refuse creates over it rather than approve
+            # them against a total that is missing it. A genuinely flat
+            # position (``amount == 0``) is known-zero and refuses nothing.
+            amount_known = not (amount != 0 and entry <= 0)
             rows.append(
                 {
                     "id": f"{controller_id}:{pair}" if pair else controller_id,
@@ -1292,6 +1476,7 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
                     "entry_price": entry,
                     "current_price": 0.0,
                     "amount": abs(amount) * entry,
+                    "amount_known": amount_known,
                     "timestamp": ts_epoch,
                     "close_timestamp": 0.0,
                     "controller_id": controller_id,

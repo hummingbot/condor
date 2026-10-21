@@ -67,6 +67,9 @@ function owner(live: Partial<LiveLoop> | null): FleetOwner {
       status: "running",
       tickCount: 214,
       lastTickAt: Math.floor(Date.now() / 1000),
+      lastReadingAt: 0,
+      lastSuccessfulActionAt: 0,
+      lastTickDuration: 0,
       frequencySec: 60,
       lastAction: "Spreads held; BTC vol falling, widening the ask side.",
       lastDid: null,
@@ -105,6 +108,43 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+});
+
+// ── Quiet or dead, beside the bot list (FEAT-137) ──
+//
+// This band sits above `/bots`'s and the workspace fleet's bot list, so it is
+// where the two ages have to be readable: the status dot says "running" and the
+// countdown says a tick is due for a dead strategy just as loudly as for a
+// healthy one.
+describe("the liveness ages", () => {
+  const liveness = () =>
+    container.querySelector<HTMLElement>("[data-loop-liveness]")?.textContent ?? "";
+
+  it("shows how long since the loop last read and last acted", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await render(
+      owner({ lastReadingAt: now - 45, lastSuccessfulActionAt: now - 600 }),
+    );
+
+    expect(liveness()).toContain("read 45s ago");
+    expect(liveness()).toContain("acted 10m 00s ago");
+  });
+
+  it("says never for a loop that has not acted yet", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await render(owner({ lastReadingAt: now - 5 }));
+
+    expect(liveness()).toContain("read 5s ago");
+    expect(liveness()).toContain("acted never");
+  });
+
+  it("says nothing for a loop that is not running", async () => {
+    // A stopped loop has no liveness left to diagnose; the schedule band above
+    // already falls silent for it and this follows the same rule.
+    await render(owner({ status: "stopped" }));
+
+    expect(container.querySelector("[data-loop-liveness]")).toBeNull();
+  });
 });
 
 describe("the deed line", () => {

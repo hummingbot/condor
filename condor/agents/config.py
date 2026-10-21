@@ -6,6 +6,7 @@ in the agent directory, editable via key=value messages or web UI.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +24,101 @@ EXPERIMENT_MODES: frozenset[str] = frozenset({"dry_run", "run_once"})
 def is_experiment_mode(mode: str) -> bool:
     """True for an execution mode that runs as an experiment (dry_run/run_once)."""
     return mode in EXPERIMENT_MODES
+
+
+# The fields a *session* pins rather than inherits: the Hummingbot API server it
+# trades on and the LLM it thinks with. One definition, because a restart has to
+# carry exactly these across from the dead session while re-reading everything
+# else from the strategy's config as it stands now (CORR-728) — and a set that
+# is re-guessed per call site is a set that diverges.
+PIN_FIELDS: tuple[str, ...] = ("server_name", "agent_key", "model_base_url")
+
+
+def pin_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Just the pins of ``config``, for recording and for overlaying.
+
+    An empty pin is dropped, not recorded as empty: "" means *inherit* for
+    ``agent_key`` and ``model_base_url``, so carrying it over as a value would
+    pin the absence of a pin and shadow a strategy default set since.
+    """
+    return {
+        name: config[name] for name in PIN_FIELDS if config.get(name) not in (None, "")
+    }
+
+
+#: What an effective-vs-file diff compares: the fields a session pins, plus the
+#: risk limits it is enforcing. Deliberately not every key — a cosmetic edit to
+#: ``trading_context`` must not badge a running session as drifted — and
+#: deliberately a set this module already owns, so the drift set and the overlay
+#: set cannot diverge (CORR-728).
+DRIFT_FIELDS: tuple[str, ...] = (*PIN_FIELDS, "risk_limits")
+
+
+def _comparable(value: Any) -> Any:
+    """``value`` as something comparable: a pydantic model as its dict."""
+    dump = getattr(value, "model_dump", None)
+    return dump() if callable(dump) else value
+
+
+def config_drift(
+    running: Mapping[str, Any], on_disk: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Which of :data:`DRIFT_FIELDS` a running session no longer shares with the file.
+
+    ``{field: {"running": <what the process holds>, "file": <what config.yml
+    says now>}}``, empty when the two agree. Both values, not a boolean: what
+    an operator needs is what a restart would change, and a badge that only
+    says "drifted" sends them back to the logs this exists to replace.
+
+    A dict field (``risk_limits``) is compared per sub-key and reported dotted
+    (``risk_limits.max_leverage``), so one changed limit reads as one changed
+    limit rather than as two blobs to diff by eye.
+
+    A field ``running`` does not carry at all is skipped rather than reported
+    as drifted against the file: that is a caller who did not read it, not a
+    session that disagrees.
+
+    An engine copies its config at start and nothing swaps it mid-tick on
+    purpose (CORR-732), so this is the only way to see a session still trading
+    on a pin the file has since changed, short of reading the logs.
+    """
+    drift: dict[str, dict[str, Any]] = {}
+    for name in DRIFT_FIELDS:
+        if name not in running:
+            continue
+        live = _comparable(running.get(name))
+        filed = _comparable(on_disk.get(name))
+        if isinstance(live, dict) or isinstance(filed, dict):
+            live_d = live if isinstance(live, dict) else {}
+            file_d = filed if isinstance(filed, dict) else {}
+            for key in sorted(set(live_d) | set(file_d)):
+                if live_d.get(key) != file_d.get(key):
+                    drift[f"{name}.{key}"] = {
+                        "running": live_d.get(key),
+                        "file": file_d.get(key),
+                    }
+        elif live != filed:
+            drift[name] = {"running": live, "file": filed}
+    return drift
+
+
+def load_session_pins(session_dir: Path) -> dict[str, Any]:
+    """The pins a session recorded in its own ``config.yml``.
+
+    The per-session copy ``save_full_config`` writes at session creation is the
+    only place a start request's overrides land, so it is what a restart reads
+    for a session whose status file predates the recorded snapshot. Unreadable
+    or absent reads as "no pins", never as an error: the restart still happens,
+    on the strategy's config.
+    """
+    path = Path(session_dir) / "config.yml"
+    try:
+        saved = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return {}
+    if not isinstance(saved, dict):
+        return {}
+    return pin_snapshot(saved)
 
 
 class RiskLimitsConfig(BaseModel):
@@ -54,8 +150,60 @@ class RiskLimitsConfig(BaseModel):
     )
 
 
+class TradingRequirementsConfig(BaseModel):
+    """What a loop needs in place before it can trade (FEAT-139).
+
+    Read by :mod:`condor.preflight`, which checks each stated requirement
+    against the venue and the account *before* a start commits capital. Every
+    field is optional and an empty ``connector`` means "nothing stated": a loop
+    that declares no requirements has nothing to check against, so the preflight
+    reports what it can and refuses nothing. Only a requirement written here can
+    fail a start, which is what keeps a working loop safe from a false negative.
+    """
+
+    connector: str = Field(
+        default="",
+        description="Venue this loop trades (e.g. 'binance', 'binance_perpetual'). "
+        "Empty = no trading requirements stated, and the preflight checks none.",
+    )
+    trading_pairs: list[str] = Field(
+        default_factory=list,
+        description="Pairs this loop trades; the venue's rules are reported per pair",
+    )
+    account_name: str = Field(
+        default="",
+        description="Account holding the capital. Empty = master_account",
+    )
+    capital_asset: str = Field(
+        default="",
+        description="The EXACT asset the capital must be in (e.g. 'USDC'). Empty = "
+        "the quote currency of the first configured pair",
+    )
+    capital_amount: float = Field(
+        default=-1.0,
+        description="Units of capital_asset that must be available; -1 = use "
+        "total_amount_quote when capital_asset is the pairs' quote currency",
+    )
+    position_mode: str = Field(
+        default="",
+        description="Position mode the account must be in ('HEDGE' or 'ONEWAY'); "
+        "empty = no requirement",
+    )
+    leverage: float = Field(
+        default=-1.0,
+        description="Leverage the account must be set to; -1 = no requirement",
+    )
+
+
 class AgentConfig(BaseModel):
-    server_name: str = Field(default="local", description="Hummingbot API server name")
+    # Empty, not ``"local"``: a default that is a concrete server *name* is not
+    # an absent setting — it was a name that then fell through the resolution
+    # chain, so "no server configured" and "configured for the server called
+    # local" were the same state and an install whose server is named anything
+    # else silently traded wherever resolution landed (CORR-729). Empty means
+    # unset, and resolution chooses; a config that really names ``local`` still
+    # says so on disk and is honoured as the explicit setting it is.
+    server_name: str = Field(default="", description="Hummingbot API server name")
     agent_key: str = Field(
         default="",
         description="LLM model to use (e.g. 'claude-code', 'ollama:llama3.1'). Empty = use strategy default.",
@@ -121,6 +269,9 @@ class AgentConfig(BaseModel):
         "revise-your-canvas nudge",
     )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
+    trading_requirements: TradingRequirementsConfig = Field(
+        default_factory=TradingRequirementsConfig
+    )
 
     def to_engine_dict(self) -> dict[str, Any]:
         """Convert to the dict format expected by TickEngine."""

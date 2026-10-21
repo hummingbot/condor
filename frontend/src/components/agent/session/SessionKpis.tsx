@@ -28,8 +28,32 @@ function Kpi({ label, value, sub, className = "" }: { label: string; value: stri
   );
 }
 
+/** A scope with nothing to compute it from reads as unavailable, never as 0 and
+ *  never as the other scope's total — that silent fallback is the #262 defect. */
+const SCOPE_UNAVAILABLE = "unavailable";
+
+function scopeMoney(val?: number | null): string {
+  return val == null ? SCOPE_UNAVAILABLE : formatCurrencyPnl(val);
+}
+
+function scopeVolume(val?: number | null): string {
+  return val == null ? SCOPE_UNAVAILABLE : formatCompactUsd(val);
+}
+
+function scopeInstances(names: string[] | undefined, empty: string): string {
+  const got = (names ?? []).filter(Boolean);
+  return got.length > 0 ? got.join(", ") : empty;
+}
+
 export function SessionKpis({ perf }: { perf?: AgentPerformance | null }) {
   const total = perf?.total_pnl ?? 0;
+  // Only a session that operates bots has two scopes to tell apart. A
+  // direct-executor agent's rows carry its own agent_id and have no earlier
+  // generation to fold in, so there is nothing to label.
+  const hasScopes =
+    perf?.session_realized_pnl != null ||
+    perf?.lifetime_realized_pnl != null ||
+    (perf?.lifetime_instances?.length ?? 0) > 0;
   const closes = closeSummary(perf);
   const trades = perf?.trade_count ?? 0;
   const volume = perf?.volume ?? 0;
@@ -62,7 +86,10 @@ export function SessionKpis({ perf }: { perf?: AgentPerformance | null }) {
           className={pnlTextClass(total)}
         />
         <Kpi label="Realized" value={formatCurrencyPnl(perf?.realized_pnl ?? 0)} />
-        <Kpi label="Unrealized" value={formatCurrencyPnl(perf?.unrealized_pnl ?? 0)} />
+        {/* Labelled live because it has exactly one scope and no lifetime twin:
+            unrealized PnL is the open book of the instances running now, and
+            summing it across generations would add up marks nobody holds (#234). */}
+        <Kpi label="Unrealized" value={formatCurrencyPnl(perf?.unrealized_pnl ?? 0)} sub="live only" />
         <Kpi label="Volume" value={formatCompactUsd(volume)} />
         <Kpi
           label="Fees"
@@ -72,6 +99,49 @@ export function SessionKpis({ perf }: { perf?: AgentPerformance | null }) {
         <Kpi label="Closes" value={tradeValue} sub={tradeSub} />
         <Kpi label="Open" value={String(perf?.open_count ?? 0)} />
       </div>
+
+      {/* Scope labelling (FEAT-135). Realized and Volume above are one number
+          folded from both scopes, and nothing in them says which — that is how a
+          session summary came to report $200 for a session that earned $120, $80
+          of it belonging to a stopped earlier generation of the same bot name
+          (#262), while the race leaderboard needed exactly that $200. Both are
+          shown here under their own labels, each naming the instances it covers,
+          so the two can never be read as one number. */}
+      {hasScopes && (
+        <div className="space-y-2 rounded-lg border border-[var(--color-border)]/60 px-4 py-2.5">
+          <div className="flex flex-wrap items-start gap-x-5 gap-y-3">
+            <Kpi
+              label="Realized · session"
+              value={scopeMoney(perf?.session_realized_pnl)}
+              sub={scopeInstances(perf?.session_instances, "no ownership window")}
+              className={pnlTextClass(perf?.session_realized_pnl ?? 0)}
+            />
+            <Kpi
+              label="Volume · session"
+              value={scopeVolume(perf?.session_volume)}
+              sub={scopeInstances(perf?.session_instances, "no ownership window")}
+            />
+            <Kpi
+              label="Realized · lifetime"
+              value={scopeMoney(perf?.lifetime_realized_pnl)}
+              sub={scopeInstances(perf?.lifetime_instances, "no instance aggregate")}
+              className={pnlTextClass(perf?.lifetime_realized_pnl ?? 0)}
+            />
+            <Kpi
+              label="Volume · lifetime"
+              value={scopeVolume(perf?.lifetime_volume)}
+              sub={scopeInstances(perf?.lifetime_instances, "no instance aggregate")}
+            />
+          </div>
+          <p className="text-[10px] leading-snug text-[var(--color-text-muted)]">
+            <strong>Session</strong> is sliced to this session&apos;s ownership window;{" "}
+            <strong>lifetime</strong> covers every generation ever deployed under the bot names it owns,
+            stopped and archived ones included. Neither corrects the other — a cumulative leaderboard
+            wants lifetime, this session&apos;s own result is the session figure. &ldquo;Unavailable&rdquo;
+            is never the other scope&apos;s total.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

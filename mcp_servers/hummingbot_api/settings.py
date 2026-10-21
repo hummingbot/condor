@@ -85,6 +85,16 @@ class Settings(BaseModel):
     # free of the agent registry.
     muted_tools: tuple[str, ...] = Field(default=())
 
+    # Who this process is counting for (FEAT-138). Stamped on argv by
+    # ``condor.runtime.toolsets`` — ``agent_slug`` names which agent spends a
+    # host's budget, ``caller_id`` is the session's own ``agent_id``, so a
+    # refusal reaches the right engine's ``RefusalLog`` and two concurrent
+    # sessions of one agent are not cross-attributed. Both are labels this
+    # server only stamps onto a counter: it still reads no agent registry, and
+    # a standalone launch leaves them empty, which honestly names nobody.
+    agent_slug: str = Field(default="")
+    caller_id: str = Field(default="")
+
     # Connection settings
     connection_timeout: float = Field(default=30.0)
     max_retries: int = Field(default=3)

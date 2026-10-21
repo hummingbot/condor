@@ -1,0 +1,43 @@
+# metabrain manifest for Condor — see metabrain's
+# docs/projects-manifest.example.yml for every key.
+#
+# Live Condor is NOT run from here: `make run` owns it, in tmux session
+# `condor` on :8088 (Telegram bot + dashboard, one process). This manifest
+# exists for workstream previews, so the project is named `condor-dev` —
+# metabrain names its tmux session after the project, and `condor` would put
+# preview windows inside the live session, where `make stop` kills them and
+# `make run`'s check-stopped mistakes them for a running Condor.
+
+name: condor-dev
+
+# Runs once in each new workstream's worktree. A workstream that existed
+# before this file never runs it; the `web` command below builds the
+# frontend itself, so its first preview start just takes longer.
+worktree_setup: uv sync --dev && make build-frontend
+
+# Next to Condor's own 8088; nothing listens in this range today.
+workstream_ports: 8090-8099
+
+services:
+  - name: web
+    # Rebuilds frontend/dist from the worktree's own source (npm ci only when
+    # package-lock.json moved), then runs Condor as a dashboard alone.
+    command: bash -c 'make build-frontend && exec uv run python main.py'
+    # Main's instance, if started from /services. It is refused while the
+    # live Condor holds 8088, which is the normal case.
+    port: 8088
+    per_workstream: true
+    env:
+      # Local mode: no Telegram polling (a second poller on the live token
+      # would fight the live bot for updates), dashboard bound to loopback.
+      CONDOR_MODE: local
+      # Blank on purpose, and set here so the worktree's copied .env cannot
+      # fill it in (dotenv never overrides a set variable). At boot Condor
+      # kills every ACP/MCP process tree tagged with its token's digest; on
+      # the live token, a preview would kill the live bot's agent sessions.
+      TELEGRAM_TOKEN: ""
+      # WEB_URL beats WEB_PORT in utils/config.py, so set both.
+      WEB_PORT: "{port}"
+      WEB_URL: "http://localhost:{port}"
+      # Previews are not installs; keep them out of adoption telemetry.
+      CONDOR_TELEMETRY: "off"

@@ -609,19 +609,46 @@ def build_tick_prompt(
     # the only place the correction can reach it — and an agent that never learns
     # why a call was cancelled either repeats it or mistakes it for a missing
     # human approval and stops trading.
-    if refusals:
+    #
+    # Split by kind ([[FEAT-138]]): a venue that refused is a condition of the
+    # venue and the agent did nothing wrong, so it must not be rendered under a
+    # heading that says the runtime gate decided it. Told apart, the agent can
+    # back off or move venue; folded together, a 429 reads as its own mistake.
+    gate_refusals = [e for e in (refusals or []) if e.get("kind", "risk") != "throttle"]
+    throttle_refusals = [e for e in (refusals or []) if e.get("kind") == "throttle"]
+
+    if gate_refusals:
         refusal_lines = [
             "[REFUSED LAST TICK — the runtime gate decided this, not a missing approval]"
         ]
         refusal_lines += [
             f"- {entry.get('tool') or 'a call'}: {entry.get('reason') or 'no reason recorded'}"
-            for entry in refusals[-MAX_REFUSALS_SHOWN:]
+            for entry in gate_refusals[-MAX_REFUSALS_SHOWN:]
         ]
         refusal_lines.append(
             "Do not resend a refused call unchanged and do not wait for approval: "
             "act on the reason, or journal why you are standing down."
         )
         sections.append("\n".join(refusal_lines))
+
+    if throttle_refusals:
+        venues = sorted({e.get("venue") or "the venue" for e in throttle_refusals})
+        throttle_lines = [
+            "[VENUE THROTTLED LAST TICK — the venue refused these calls, not the gate "
+            "and not you]",
+            f"Refused {len(throttle_refusals)} call(s) on: {', '.join(venues)}",
+        ]
+        throttle_lines += [
+            f"- {entry.get('venue') or 'venue'} {entry.get('tool') or 'a call'}: "
+            f"{entry.get('reason') or 'no reason recorded'}"
+            for entry in throttle_refusals[-MAX_REFUSALS_SHOWN:]
+        ]
+        throttle_lines.append(
+            "Nothing is wrong with the strategy. Read less often, batch what you "
+            "can, or work a venue that is answering — and do not retry the same "
+            "call straight away."
+        )
+        sections.append("\n".join(throttle_lines))
 
     # Loop state -- the scratch cursors this (agent, loop) has persisted
     # (condor.runtime.state): a last-processed executor id, a cooldown deadline.

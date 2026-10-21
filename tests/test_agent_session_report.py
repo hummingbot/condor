@@ -490,8 +490,9 @@ def test_tick_report_reuses_the_provider_series(tmp_path, monkeypatch):
 
 
 def test_a_tick_without_a_carried_series_falls_back_to_the_fetch(tmp_path, monkeypatch):
-    """Provider data without a series (``{}`` here) still gets a curve; no bot, []."""
+    """Provider data without a series still gets a curve; no bot, []."""
     from condor.agents import performance
+    from condor.agents.providers.base import ProviderResult
 
     engine = _engine(tmp_path, monkeypatch, {"execution_mode": "loop"})
     fetched = [{"timestamp": "2026-08-06T22:00:00+00:00", "pnl": -2.0, "volume": 1}]
@@ -503,14 +504,49 @@ def test_a_tick_without_a_carried_series_falls_back_to_the_fetch(tmp_path, monke
 
     monkeypatch.setattr(performance, "fetch_agent_pnl_series", _fetch)
 
+    # No ``pnl_series`` key, which is what this test is about — but a reading,
+    # because ``executors`` is a core provider that always runs: data carrying
+    # no reading state at all is the provider's *failure* shape, and a second
+    # tick on one of those is blocked rather than taken ([[CORR-725]]).
+    def _answered():
+        return _async(
+            {
+                "executors": ProviderResult(
+                    name="executors",
+                    data={"executors": [], "reading": "ok"},
+                    summary="",
+                )
+            }
+        )
+
     # Executor-only: nothing owned, no fetch, an empty curve.
-    report = _drive_tick(engine, monkeypatch, object(), _async({}))
+    report = _drive_tick(engine, monkeypatch, object(), _answered())
     assert report.calls[0]["pnl_series"] == [] and calls == []
 
     engine.ledger.adopt("brigado-grid", now=1_780_000_000.0)
-    report = _drive_tick(engine, monkeypatch, object(), _async({}))
+    report = _drive_tick(engine, monkeypatch, object(), _answered())
     assert report.calls[0]["pnl_series"] == fetched
     assert calls == [(["brigado-grid"], 1_780_000_000.0, 0.0)]
+
+
+def test_a_tick_whose_provider_failed_is_blocked_rather_than_reported(
+    tmp_path, monkeypatch
+):
+    """The other half of the shape above.
+
+    A failed core provider returns ``data={}``, so the tick's figures are zeros
+    that were never read. The first such tick records its snapshot stamped as
+    no reading; from the second there is no reading on record at all, and the
+    guard pauses the tick instead of trading against a drawdown of 0.0%.
+    """
+    engine = _engine(tmp_path, monkeypatch, {"execution_mode": "loop"})
+
+    first = _drive_tick(engine, monkeypatch, object(), _async({}))
+    assert len(first.calls) == 1
+
+    blocked = _drive_tick(engine, monkeypatch, object(), _async({}))
+    assert blocked.calls == []
+    assert "no drawdown reading" in engine.journal.read_full()
 
 
 class _CountingClient:

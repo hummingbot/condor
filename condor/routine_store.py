@@ -39,6 +39,7 @@ from typing import Any
 import condor.reports as reports
 from condor import primitives, routine_hooks
 from condor.memory.paths import (
+    ROUTINES_DIRNAME,
     agent_home_layers,
     iter_agent_slugs,
     shared_routines_roots,
@@ -46,12 +47,15 @@ from condor.memory.paths import (
 from condor.runtime import code_guard
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
+    PendingRoutine,
     RoutineResult,
     _merged_from,
     discover_routines,
     get_routine,
     library_dir,
     normalize_result,
+    pending_routines,
+    raise_if_pending,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 def _agent_routine_dirs(slug: str) -> tuple:
     """An agent's routine dirs in read order: local first, then shipped."""
-    return tuple(home / "routines" for home in agent_home_layers(slug))
+    return tuple(home / ROUTINES_DIRNAME for home in agent_home_layers(slug))
 
 
 def routine_source_roots() -> tuple[Path, ...]:
@@ -348,6 +352,21 @@ class RoutineStore:
 
         return all_routines
 
+    def _pending_all(self) -> dict[str, PendingRoutine]:
+        """Every routine discovery refused to import, prefixed like the rest.
+
+        The other half of :meth:`_discover_all` (FEAT-147), and a separate
+        call because it returns a separate type: these rows carry no
+        ``run_fn``, so a caller that would run one cannot be handed one by
+        accident. Only an agent imported from a bundle has any — see
+        :mod:`condor.agents.code_trust`.
+        """
+        pending: dict[str, PendingRoutine] = {}
+        for slug in iter_agent_slugs():
+            for row in pending_routines(slug):
+                pending[f"{slug}/{row.name}"] = row
+        return pending
+
     def _get_report_counts(self, owner_id: int | None = None) -> dict[str, int]:
         """Get report count per routine source_name.
 
@@ -377,9 +396,20 @@ class RoutineStore:
         row set is deliberately the whole install's: see the module docstring
         (SEC-617) for why definitions are install-wide while the runs counted
         beside them are per-user.
+
+        A routine awaiting execution consent (FEAT-147) is listed here too,
+        flagged ``pending`` and carrying no ``fields`` — more visible than a
+        loaded one, not less, because reading it is exactly what the operator
+        is being asked to do before allowing it.
         """
         all_routines = self._discover_all()
         report_counts = self._get_report_counts(owner_id)
+
+        def tally(name: str) -> int:
+            return report_counts.get(name, 0) or report_counts.get(
+                name.split("/")[-1], 0
+            )
+
         out = []
         for name, info in all_routines.items():
             out.append(
@@ -391,8 +421,24 @@ class RoutineStore:
                     "source": info.source,
                     "fields": info.get_fields(),
                     "last_modified": info.last_modified,
-                    "report_count": report_counts.get(name, 0)
-                    or report_counts.get(name.split("/")[-1], 0),
+                    "report_count": tally(name),
+                    "pending": False,
+                    "pending_reason": "",
+                }
+            )
+        for name, row in self._pending_all().items():
+            out.append(
+                {
+                    "name": name,
+                    "description": row.description,
+                    "is_continuous": row.continuous,
+                    "category": row.category,
+                    "source": row.source,
+                    "fields": {},
+                    "last_modified": row.last_modified,
+                    "report_count": tally(name),
+                    "pending": True,
+                    "pending_reason": row.reason,
                 }
             )
         return out
@@ -845,7 +891,16 @@ class RoutineStore:
             await self._fire_hooks(instance_id, result, report_id, failed)
 
     def _resolve_routine(self, routine_name: str):
-        """Resolve a routine by name, supporting 'agent_slug/routine_name' format."""
+        """Resolve a routine by name, supporting 'agent_slug/routine_name' format.
+
+        Raises :class:`~condor.agents.code_trust.PendingConsentError` for a
+        routine that exists but has not been allowed to execute on this
+        install (FEAT-147). Raising rather than returning ``None`` is the
+        point: every run path — the web runner, the scheduler, the MCP tool
+        and ``condor.primitives`` — goes through here, and "not found" would
+        send the operator looking for a file that is sitting right in front of
+        them in the panel.
+        """
         # Try global first
         routine = get_routine(routine_name)
         if routine:
@@ -854,7 +909,10 @@ class RoutineStore:
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
             agent_routines = _merged_from(_agent_routine_dirs(slug), agent_slug=slug)
-            return agent_routines.get(rname)
+            found = agent_routines.get(rname)
+            if found:
+                return found
+            raise_if_pending(slug, rname)
         return None
 
     async def execute(

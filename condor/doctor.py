@@ -6,14 +6,26 @@ sanity, the AI model's actual readiness, whether the web dashboard is
 sitting on a public interface it shouldn't be, and whether every configured
 Hummingbot API server is actually reachable and authenticating.
 
+``--agent SLUG[.LOOP]`` adds the per-agent *trading* preflight on top of the
+install report (`make doctor AGENT=slug`): whether that agent's loops have their
+capital in the exact asset they need, what position mode and leverage the account
+is actually in, what the venue's rules are per configured pair, and which pins a
+session would really run with. The checks themselves live in
+:mod:`condor.preflight`, which the agent start path runs too — so the section is
+a read of the same gate, not a second opinion (FEAT-139).
+
 Read-only — nothing here mutates `.env`, `config.yml`, or any running
-process. Unlike :mod:`condor.setup_llm` (which always exits 0 because a
+process. The one thing it *starts* is a throwaway ACP session, so that a model
+pin the bridge cannot apply is caught before a session bills for it
+(:func:`check_model_pin`); that bridge is stopped before the row is printed.
+Unlike :mod:`condor.setup_llm` (which always exits 0 because a
 model can be picked later), this exits non-zero when a check actually
 ``fail``s, so `make install`/CI can act on the result.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import re
@@ -176,6 +188,81 @@ def check_dependencies() -> list[Check]:
 _PLACEHOLDER_CREDENTIALS = {"admin", "password", "changeme", ""}
 
 
+def _check_admin_can_administer(data: dict | None) -> list[Check]:
+    """Whether ``ADMIN_USER_ID`` is an id ``config.yml`` treats as an admin.
+
+    Two files have to agree about one number and nothing checked that they
+    did. ``.env`` decides who the dashboard *is* -- local mode logs in as
+    ``ADMIN_USER_ID`` with no password -- while ``config.yml`` decides what
+    that id may *do*. Disagree and every admin route answers 403: the Updates
+    tab is not rendered, the "Updates available" notification links to a tab
+    that is not there, and clicking it lands on Servers with nothing said.
+
+    Nothing was wrong enough to notice. The old check asked only whether the
+    variable was set, so an install in exactly this state reported
+    ``ADMIN_USER_ID`` green on the very value that had no rights.
+
+    A duplicated key is worth naming on its own: ``.env`` is read by three
+    parsers and the last assignment wins in all of them, so a second line is
+    silently authoritative and the first is the one people read.
+    """
+    from utils.config import ADMIN_USER_ID, LOCAL_MODE
+
+    admin_id = str(ADMIN_USER_ID or "").strip()
+    if not admin_id or not isinstance(data, dict):
+        return []
+
+    duplicates: list[Check] = []
+    if ENV_PATH.exists():
+        try:
+            assignments = [
+                line
+                for line in ENV_PATH.read_text(encoding="utf-8").splitlines()
+                if re.match(r"^\s*(export\s+)?ADMIN_USER_ID\s*=", line)
+            ]
+        except OSError:
+            assignments = []
+        if len(assignments) > 1:
+            duplicates.append(
+                Check(
+                    "ADMIN_USER_ID (duplicate)",
+                    FAIL,
+                    f"{len(assignments)} assignments in .env — the last one wins "
+                    f"({admin_id}), the others are dead. Delete all but one.",
+                )
+            )
+
+    users = data.get("users") or {}
+    role = ""
+    for key, record in users.items():
+        if str(key) == admin_id and isinstance(record, dict):
+            role = str(record.get("role") or "")
+            break
+
+    if role.lower() == "admin":
+        return duplicates
+
+    if not role:
+        detail = (
+            f"config.yml has no user {admin_id}, so the dashboard logs in as an "
+            "id with no role at all and every admin route answers 403."
+        )
+    else:
+        detail = (
+            f"config.yml gives user {admin_id} the role '{role}', not 'admin', "
+            "so every admin route answers 403 — no Updates tab, and the "
+            "'Updates available' notice links to a tab that is not rendered."
+        )
+    where = "the dashboard signs in as this id" if LOCAL_MODE else "this id"
+    return duplicates + [
+        Check(
+            "Admin access",
+            FAIL,
+            f"{detail} Set `users.{admin_id}.role: admin` in config.yml " f"({where}).",
+        )
+    ]
+
+
 def _check_placeholder_credentials(data: object) -> list[Check]:
     if not isinstance(data, dict):
         return []
@@ -262,6 +349,7 @@ def check_config() -> list[Check]:
 
             data = yaml.safe_load(config_yml.read_text(encoding="utf-8"))
             checks.append(Check("config.yml", OK, "present and parses"))
+            checks.extend(_check_admin_can_administer(data))
             checks.extend(_check_placeholder_credentials(data))
         except Exception as e:
             checks.append(Check("config.yml", FAIL, f"failed to parse: {e}"))
@@ -272,6 +360,7 @@ def check_config() -> list[Check]:
     from condor.llm import readiness
 
     agent_key = current_default(env)
+    state = None
     try:
         state = asyncio.run(readiness.probe(base_of(agent_key), env))
         badge = {"ready": OK, "unverified": WARN, "missing": FAIL}.get(
@@ -280,8 +369,50 @@ def check_config() -> list[Check]:
         checks.append(Check("AI model", badge, f"{agent_key} — {state.detail}"))
     except Exception as e:
         checks.append(Check("AI model", WARN, f"{agent_key} — could not check: {e}"))
+    checks.extend(check_model_pin(agent_key, state))
 
     return checks
+
+
+def check_model_pin(agent_key: str, state) -> list[Check]:
+    """Whether the bridge can apply ``agent_key``'s ``:model`` pin — a row, or none.
+
+    No row for a key that pins no model: there is nothing to verify, and the
+    ``AI model`` row above already says whether the bridge itself is usable.
+
+    This is the one check here that *starts* something: a bridge, for a session
+    it immediately throws away. It earns that because the failure it catches is
+    expensive and silent — a pin the bridge does not offer used to leave the
+    session on the bridge's default (``opus[1m]``), so a ``:haiku`` or
+    ``:sonnet`` agent billed at Opus rates with only a log line saying so
+    (issue #221). A session is the next thing that spends money, so the pin is
+    checked before one starts rather than after the invoice.
+
+    ``state`` is the ``AI model`` row's :class:`~condor.llm.readiness.Readiness`
+    (``None`` when that probe itself failed). A bridge that is not even
+    installed is not launched: that would restate the row above as a second
+    failure instead of checking anything.
+    """
+    from condor.acp.client import probe_model_pin, resolve_acp
+    from condor.llm.readiness import MISSING
+
+    if not resolve_acp(agent_key)[2]:
+        return []
+    if state is None or state.state == MISSING:
+        return [
+            Check(
+                "Model pin",
+                WARN,
+                f"{agent_key} — could not be checked: the bridge is not "
+                "available (see above)",
+            )
+        ]
+    try:
+        ok, detail = asyncio.run(probe_model_pin(agent_key))
+    except Exception as e:  # a probe that cannot run is not a verdict
+        ok, detail = None, f"could not be checked: {e}"
+    badge = {True: OK, False: FAIL, None: WARN}[ok]
+    return [Check("Model pin", badge, f"{agent_key} — {detail}")]
 
 
 # ── Port exposure ────────────────────────────────────────────────────────────
@@ -317,8 +448,17 @@ def _listening_binds(port: int) -> list[str]:
             binds = []
             for line in proc.stdout.splitlines()[1:]:  # skip header row
                 cols = line.split()
+                # ``-sTCP:LISTEN`` makes lsof print the state as its own
+                # trailing token, so NAME is ``TCP 127.0.0.1:8088 (LISTEN)``
+                # and the last column is ``(LISTEN)`` -- not an address at all.
+                # Taking it and splitting on "(" yielded the empty string,
+                # which ``_is_public_bind`` used to read as a wildcard: every
+                # loopback listener on a host without ``ss`` reported as bound
+                # to all interfaces.
+                if cols and cols[-1].startswith("("):
+                    cols = cols[:-1]
                 if cols:
-                    binds.append(cols[-1].split("(")[0])
+                    binds.append(cols[-1])
             return binds
         except Exception:
             pass
@@ -357,8 +497,15 @@ def _bind_host(addr: str) -> str:
 
 
 def _is_public_bind(addr: str) -> bool:
+    """Whether ``addr`` is a wildcard bind — reachable from off this machine.
+
+    The empty string is deliberately *not* a wildcard. It is what a bind this
+    code failed to parse looks like, and answering True for it turns a parsing
+    bug into a security warning about a port that may well be on loopback.
+    Unknown is not public; a bind nobody could read is reported by nothing.
+    """
     host = _bind_host(addr)
-    return host in ("0.0.0.0", "*", "::", "[::]", "")
+    return host in ("0.0.0.0", "*", "::", "[::]")
 
 
 def check_dashboard_port() -> list[Check]:
@@ -687,6 +834,148 @@ def check_hummingbot_api() -> list[Check]:
     return checks
 
 
+# ── Per-agent trading preflight ──────────────────────────────────────────────
+
+# The preflight's third state is "could not be checked", which maps to WARN
+# here: it must not read as a pass, and it must not fail `make install`/CI the
+# way an unmet requirement does. See :mod:`condor.preflight`.
+_PREFLIGHT_STATES = {"pass": OK, "fail": FAIL, "unknown": WARN}
+
+
+def _agent_loops(target: str):
+    """``(agent, loops)`` for ``slug`` or ``slug.loop_slug``; agent None if unknown."""
+    from condor.agents.agent import AgentStore
+    from condor.agents.strategy import StrategyStore
+
+    slug, _, sslug = target.partition(".")
+    agent = AgentStore().get(slug)
+    if agent is None:
+        return None, []
+    store = StrategyStore()
+    if sslug:
+        strategy = store.get(slug, sslug)
+        return agent, [strategy] if strategy is not None else []
+    return agent, store.list(slug)
+
+
+async def _agent_client(config: dict, user_id: int):
+    """An API client for the server this loop would run on, or ``None``.
+
+    Resolved the way the run resolves it (CORR-729's one rule) when there is a
+    user to scope credentials to. With no user — an agent whose definition names
+    no creator — only an explicitly configured server is used, because picking
+    "some reachable server" would report another server's balances as this
+    loop's.
+    """
+    from config_manager import ServerUnavailable, get_config_manager
+
+    cm = get_config_manager()
+    name = str(config.get("server_name") or "")
+    if user_id:
+        from config_manager import resolve_stored_server
+
+        try:
+            name = resolve_stored_server(cm, user_id, name, chat_id=user_id) or ""
+        except ServerUnavailable:
+            return None
+    elif name and not cm.get_server(name):
+        return None
+    if not name:
+        return None
+    try:
+        return await cm.get_client(name)
+    except Exception:
+        # No client is a reportable state, not an error: the section then says
+        # "could not be checked" for everything that needed the API, and the
+        # `Hummingbot API` section is where an unreachable server is named.
+        return None
+
+
+async def _preflight_report(config: dict, strategy, agent, user_id: int):
+    """Run the preflight for one loop, closing the client it opened.
+
+    The client is closed here for the same reason :func:`_probe_and_close` does
+    it: doctor is a one-shot process, so nothing else would ever close the
+    aiohttp session and the interpreter complains on the way out.
+    """
+    from condor.preflight import run_preflight
+
+    client = None
+    try:
+        client = await _agent_client(config, user_id)
+        return await run_preflight(
+            client,
+            config,
+            label=f"{agent.slug}.{strategy.slug}",
+            strategy=strategy,
+            agent=agent,
+            user_id=user_id,
+        )
+    finally:
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+
+def check_agent_trading(target: str) -> list[tuple[str, list[Check]]]:
+    """Whether ``target``'s loops can trade — one section each (FEAT-139).
+
+    ``target`` is an agent slug, or ``slug.loop`` for one of its loops. The
+    checks are per-agent by nature (which asset, which pairs, which account), so
+    there is no all-agents form of this section: without a loop to check against
+    there is nothing to check.
+    """
+    from condor.agents.config import load_full_config
+
+    agent, loops = _agent_loops(target)
+    if agent is None:
+        return [
+            (
+                f"Trading preflight — {target}",
+                [
+                    Check(
+                        "agent",
+                        FAIL,
+                        f"no agent with slug '{target.partition('.')[0]}' — pass "
+                        "an agent slug, or 'slug.loop' for one of its loops",
+                    )
+                ],
+            )
+        ]
+    if not loops:
+        return [
+            (
+                f"Trading preflight — {agent.slug}",
+                [
+                    Check(
+                        "loops",
+                        WARN,
+                        "this agent owns no loop yet, so it has no trading "
+                        "config to check",
+                    )
+                ],
+            )
+        ]
+
+    sections = []
+    for strategy in loops:
+        config = load_full_config(strategy.home, strategy.default_config)
+        user_id = strategy.created_by or agent.created_by or 0
+        report = asyncio.run(_preflight_report(config, strategy, agent, user_id))
+        sections.append(
+            (
+                f"Trading preflight — {agent.slug}.{strategy.slug}",
+                [
+                    Check(c.name, _PREFLIGHT_STATES.get(c.state, WARN), c.detail)
+                    for c in report.checks
+                ],
+            )
+        )
+    return sections
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -706,14 +995,42 @@ def _tally(all_checks: list[Check]) -> tuple[str, int]:
     return line, (1 if failed else 0)
 
 
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="condor doctor",
+        description="Verify Condor's install, and optionally whether one "
+        "agent's loops can actually trade.",
+    )
+    parser.add_argument(
+        "--agent",
+        metavar="SLUG[.LOOP]",
+        default="",
+        help="also run the trading preflight for this agent: capital in the "
+        "exact asset, account mode, venue rules and the pins the session will "
+        "run with. Append '.loop' to check one of its loops.",
+    )
+    parser.add_argument(
+        "--only-agent",
+        action="store_true",
+        help="skip the install checks and report only the --agent preflight",
+    )
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
-    sections = [
-        ("Dependencies", check_dependencies()),
-        ("Configuration", check_config()),
-        ("Dashboard", check_dashboard_port()),
-        ("Tailscale", check_tailscale()),
-        ("Hummingbot API", check_hummingbot_api()),
-    ]
+    args = _parse_args(argv)
+
+    sections: list[tuple[str, list[Check]]] = []
+    if not (args.only_agent and args.agent):
+        sections += [
+            ("Dependencies", check_dependencies()),
+            ("Configuration", check_config()),
+            ("Dashboard", check_dashboard_port()),
+            ("Tailscale", check_tailscale()),
+            ("Hummingbot API", check_hummingbot_api()),
+        ]
+    if args.agent:
+        sections += check_agent_trading(args.agent)
 
     width = _report_width(sections)
 

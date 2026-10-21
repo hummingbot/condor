@@ -274,7 +274,7 @@ def test_swap_signing_action_is_dangerous():
 
 def test_swap_reads_are_not_gated():
     """Only the writer is dangerous by name; a free quote must not need a human."""
-    for name in ("quote_swap", "get_swap_status", "search_swaps"):
+    for name in ("quote_swap", "get_swap_status", "search_swaps", "resolve_swap"):
         call = normalize_tool_call(_acp_request(f"mcp__mcp-hummingbot__{name}", {}))
         assert not is_dangerous_tool_call(call), f"{name} needlessly gated"
 

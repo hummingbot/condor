@@ -25,6 +25,8 @@ import { countdown } from "@/lib/agent-attribution";
 import { api, type StrategyDetail } from "@/lib/api";
 import { formatCurrency } from "@/lib/formatters";
 
+import { StrategyConfigEditor } from "./StrategyConfigEditor";
+
 /**
  * The Playbook disclosure's body: what the strategy is *told*, not what it did.
  *
@@ -431,6 +433,18 @@ function ConfigCard({
   const config = strategy.config || {};
   const risk = (config.risk_limits || {}) as Record<string, unknown>;
 
+  // Read first, edit on request — the same bargain `DocCard` strikes above. The
+  // resting state is the laid-out settings, because `-1` read as a number is
+  // the misreading this card was built to stop; the YAML is what edits them.
+  const [editing, setEditing] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const closeEditor = () => {
+    setEditing(false);
+    setDirty(false);
+    setConfirmDiscard(false);
+  };
+
   /**
    * "Resume after restart", which used to live on `LoopPulse`'s spine.
    *
@@ -554,6 +568,23 @@ function ConfigCard({
               ? "resumes on restart"
               : "stops on restart"}
         </button>
+        <button
+          type="button"
+          onClick={() =>
+            editing ? (dirty ? setConfirmDiscard(true) : closeEditor()) : setEditing(true)
+          }
+          className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] px-2 py-1 text-[11px] font-semibold text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+        >
+          {editing ? (
+            <>
+              <X className="h-3 w-3" /> Done
+            </>
+          ) : (
+            <>
+              <Pencil className="h-3 w-3" /> Edit
+            </>
+          )}
+        </button>
         {restartMutation.isError && (
           <span role="alert" data-write-error className="text-xs text-red-400">
             {restartMutation.error.message}
@@ -561,6 +592,16 @@ function ConfigCard({
         )}
       </header>
 
+      {editing ? (
+        <div className="p-3">
+          <StrategyConfigEditor
+            slug={slug}
+            sslug={sslug}
+            config={config as Record<string, unknown>}
+            onDirtyChange={setDirty}
+          />
+        </div>
+      ) : (
       <div className="grid gap-x-8 gap-y-5 p-3 @lg:grid-cols-2 @5xl:grid-cols-4">
         {groups.map((group) => (
           <div key={group.title} className="min-w-0">
@@ -592,6 +633,15 @@ function ConfigCard({
           </div>
         ))}
       </div>
+      )}
+
+      {confirmDiscard && (
+        <DiscardChangesDialog
+          fileName="config.yml"
+          onDiscard={closeEditor}
+          onClose={() => setConfirmDiscard(false)}
+        />
+      )}
 
       {context && (
         <div className="border-t border-[var(--color-border)] px-3 py-2">

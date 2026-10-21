@@ -240,7 +240,9 @@ def test_reconcile_restart_is_opt_in(tmp_path, monkeypatch):
 
     called = []
     monkeypatch.setattr(
-        supervisor, "_restart", lambda status: called.append(status) or True
+        supervisor,
+        "_restart",
+        lambda status, session_dir=None: called.append(status) or True,
     )
 
     report = asyncio.run(supervisor.reconcile_boot(agents_root=tmp_path))
@@ -257,7 +259,7 @@ def test_reconcile_restart_opt_in_starts_new_session(tmp_path, monkeypatch):
 
     started = []
 
-    async def fake_restart(status):
+    async def fake_restart(status, session_dir=None):
         started.append(status["agent_slug"])
         return True
 
@@ -273,12 +275,46 @@ def test_reconcile_restart_opt_in_starts_new_session(tmp_path, monkeypatch):
     assert "restarted" in report.summary()
 
 
+def test_reconcile_restarts_the_newest_session_that_opted_in(tmp_path, monkeypatch):
+    """Two settled sessions of one strategy: the newest is the one that returns.
+
+    Session directories are visited ascending by number, so taking the first
+    opted-in session met took the *oldest*. A strategy stopped and started
+    again before the crash has both on disk — only a boot retires a SUSPENDED
+    record, and none ran in between — so it came back on the retired session's
+    server and model pins and its owner, with the session that was actually
+    running skipped.
+    """
+    old = _seed_session(
+        tmp_path, num=1, state=LoopState.SUSPENDED, restart_on_boot=True
+    )
+    new = _seed_session(tmp_path, num=2, restart_on_boot=True)
+    for session_dir, server in ((old, "retired_box"), (new, "live_box")):
+        status = json.loads((session_dir / "status.json").read_text())
+        status["pins"] = {"server_name": server}
+        (session_dir / "status.json").write_text(json.dumps(status))
+
+    supervisor = LoopSupervisor()
+    chosen = []
+
+    async def fake_restart(status, session_dir=None):
+        chosen.append((status["session_num"], status["pins"]["server_name"]))
+        return True
+
+    monkeypatch.setattr(supervisor, "_restart", fake_restart)
+
+    asyncio.run(supervisor.reconcile_boot(agents_root=tmp_path))
+
+    # One restart per strategy still (CORR-728), and it is session 2's pins.
+    assert chosen == [(2, "live_box")]
+
+
 def test_reconcile_restart_failure_is_reported_not_fatal(tmp_path, monkeypatch):
     """A restart that blows up still leaves the run interrupted and reported."""
     session_dir = _seed_session(tmp_path, restart_on_boot=True)
     supervisor = LoopSupervisor()
 
-    async def boom(status):
+    async def boom(status, session_dir=None):
         raise RuntimeError("config no longer valid")
 
     monkeypatch.setattr(supervisor, "_restart", boom)
@@ -324,6 +360,10 @@ def _run_real_restart(tmp_path, monkeypatch, supervisor):
 
     async def _inert_loop(self):
         ticked.append(self.agent_id)
+        # The run came up; only the tick *body* is inert. ``_restart`` waits for
+        # the first tick before it reports success (CORR-728), and the real
+        # ``_loop`` is what settles that.
+        self._note_first_tick("")
 
     monkeypatch.setattr(TickEngine, "_loop", _inert_loop)
 

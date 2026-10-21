@@ -88,6 +88,10 @@ DANGEROUS_BOT_ACTIONS = {
 # is its own tool (FEAT-064), so the gate no longer has to read an `action` out of the
 # arguments to tell a free quote from a signature — reaching `execute_swap` at all is
 # the signature, and `quote_swap` / `get_swap_status` / `search_swaps` are never gated.
+# `resolve_swap` joins the ungated half (FEAT-140): it signs nothing and moves nothing,
+# it asks the *server* to record a swap's real outcome, and it is the only exit from a
+# swap stuck SUBMITTED — a brake nobody is awake to approve is a brake that did not
+# work, exactly as for the `control_agent` verbs above.
 
 # Actions within manage_clmm that require confirmation. These are the tool's
 # own action literals — a name that does not match one lets the call through

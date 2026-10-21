@@ -6,6 +6,7 @@ import {
   ChevronUp,
   Database,
   Layers,
+  Stethoscope,
   Loader2,
   Rocket,
   ScrollText,
@@ -22,6 +23,13 @@ import { useSearchParams } from "react-router-dom";
 import { EditorModal } from "@/components/editor/EditorModal";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { FleetDiagnostics } from "@/components/bots/FleetDiagnostics";
+import {
+  UNKNOWN_DIAGNOSTICS,
+  UNKNOWN_EXECUTOR_HYGIENE,
+  buildSignalGroups,
+  flaggedCount,
+} from "@/components/bots/fleet-diagnostics";
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
@@ -56,7 +64,9 @@ import {
   type ControllerInfo,
   type BotRunInfo,
   type ControllerPerformanceSnapshot,
+  type ExecutorHygiene,
   type ExecutorInfo,
+  type FleetDiagnostics as FleetDiagnosticsData,
 } from "@/lib/api";
 import { useCoarseClock } from "@/hooks/useCoarseClock";
 import { controllerKey } from "@/lib/controller-identity";
@@ -356,6 +366,16 @@ interface PerfBrowserProps {
    * say about itself.
    */
   deeds?: DeedIndex | null;
+  /**
+   * The host, lag and throttle signals the fleet map carries (FEAT-141).
+   *
+   * Off the map the page already polls, never a fetch of this component's own:
+   * the diagnostics drawer may add no polling cost to a dashboard that already
+   * polls per server. An unpassed prop reads as every signal unknown.
+   */
+  diagnostics?: FleetDiagnosticsData;
+  /** This host's executor hygiene, off the bots payload (FEAT-141). */
+  hygiene?: ExecutorHygiene;
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -540,6 +560,8 @@ export function PerfBrowser({
   terminatedControllers = EMPTY_TERMINATED,
   owners = EMPTY_OWNERS,
   deeds = null,
+  diagnostics = UNKNOWN_DIAGNOSTICS,
+  hygiene = UNKNOWN_EXECUTOR_HYGIENE,
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
@@ -559,7 +581,7 @@ export function PerfBrowser({
   // drawer the scope stops supporting simply stops being drawn (see
   // `openDrawer`). Closed by default: a drawer is a thing you occasionally
   // open, and the chart is the thing you came for.
-  const [drawer, setDrawer] = useState<null | "config" | "logs">(null);
+  const [drawer, setDrawer] = useState<null | "config" | "logs" | "diagnostics">(null);
   // Which rows have their children drawn. An allow-list, not a deny-list: the
   // tree is flat now, so a fleet of fourteen controllers holding a hundred and
   // nineteen executors would open on all hundred and nineteen if shut had to be
@@ -1754,6 +1776,27 @@ export function PerfBrowser({
   }, [activeBot]);
 
   /**
+   * The diagnostics fold, once (FEAT-141).
+   *
+   * Folded here rather than inside the drawer because the *count* is wanted on
+   * the button that opens it, and folding twice would let the badge and the
+   * rows disagree. Nothing in it fetches — every input is a prop the page
+   * already holds.
+   */
+  const diagnosticInput = useMemo(
+    () => ({ bots, owners, deeds, diagnostics, hygiene, nowMs: now }),
+    [bots, owners, deeds, diagnostics, hygiene, now],
+  );
+  const diagnosticGroups = useMemo(
+    () => buildSignalGroups(diagnosticInput),
+    [diagnosticInput],
+  );
+  const diagnosticsFlagged = useMemo(
+    () => flaggedCount(diagnosticGroups),
+    [diagnosticGroups],
+  );
+
+  /**
    * Which drawer the current scope actually supports.
    *
    * Derived rather than reset from an effect: a `logs` drawer means nothing at
@@ -1762,7 +1805,16 @@ export function PerfBrowser({
    * support it finds it open again, which is the preference the user expressed.
    */
   const openDrawer =
-    drawer === "config" && liveCtrl ? "config" : drawer === "logs" && activeBot ? "logs" : null;
+    drawer === "config" && liveCtrl
+      ? "config"
+      : drawer === "logs" && activeBot
+        ? "logs"
+        : // Diagnostics is the one occupant every scope supports: it is about
+          // the fleet, and the operator who needs it has not yet worked out
+          // which bot to click on.
+          drawer === "diagnostics"
+          ? "diagnostics"
+          : null;
 
   // ── Keyboard navigation over the picker, in the order it is drawn ──
 
@@ -2842,6 +2894,38 @@ export function PerfBrowser({
               </>
             )}
 
+            {/* Outside the bot block on purpose: the operator who needs this
+                has not yet worked out which bot to click on, and the whole
+                point of FEAT-141 is that the diagnosis is the conjunction of
+                signals across the fleet. The count rides on the button so it
+                is visible without opening the drawer — the race's symptoms went
+                unnoticed for hours because they were somewhere you had to go
+                and look. */}
+            <button
+              onClick={() => setDrawer((d) => (d === "diagnostics" ? null : "diagnostics"))}
+              className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                openDrawer === "diagnostics"
+                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              }`}
+              title={
+                openDrawer === "diagnostics"
+                  ? "Hide diagnostics"
+                  : "Liveness, idle and drift flags, host capacity, executor hygiene and throttling"
+              }
+            >
+              <Stethoscope className="h-3.5 w-3.5" />
+              Diagnostics
+              {diagnosticsFlagged > 0 && (
+                <span
+                  data-diagnostics-flagged={diagnosticsFlagged}
+                  className="text-[10px] text-[var(--color-red)]"
+                >
+                  {diagnosticsFlagged}
+                </span>
+              )}
+            </button>
+
             {activeRun?.archive_db_path && (
               <button
                 onClick={() => setOpenArchive(activeRun)}
@@ -3414,9 +3498,11 @@ export function PerfBrowser({
             )}
           </div>
 
-          {/* The right drawer: one column, whichever of the two the scope
-              supports. A controller's config, or a bot's logs — never both,
-              and never one belonging to a scope the user has left. */}
+          {/* The right drawer: one column, whichever occupant the scope
+              supports. A controller's config, a bot's logs, or the fleet
+              diagnostics — never two, and never one belonging to a scope the
+              user has left. Diagnostics is the one every scope supports: it is
+              about the fleet, not about the row you happen to be standing on. */}
           {openDrawer && (
             <div className="w-[380px] xl:w-[440px] shrink-0 border-l border-[var(--color-border)] flex flex-col bg-[var(--color-surface)]">
               {openDrawer === "config" && activeCtrl ? (
@@ -3437,16 +3523,20 @@ export function PerfBrowser({
                     <button
                       onClick={() => setDrawer(null)}
                       className="rounded p-0.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                      title="Hide logs"
+                      title={openDrawer === "diagnostics" ? "Hide diagnostics" : "Hide logs"}
                     >
                       <ChevronRight className="h-3.5 w-3.5" />
                     </button>
                     <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                      Logs
+                      {openDrawer === "diagnostics" ? "Diagnostics" : "Logs"}
                     </h3>
                   </div>
                   <div className="flex-1 min-h-0 p-3">
-                    <LogsSection logs={botLogs} />
+                    {openDrawer === "diagnostics" ? (
+                      <FleetDiagnostics groups={diagnosticGroups} />
+                    ) : (
+                      <LogsSection logs={botLogs} />
+                    )}
                   </div>
                 </div>
               )}

@@ -156,7 +156,7 @@ def test_the_digest_is_the_same_twice(registry):
     assert all(len(digest) == 16 for digest in first.values())
 
 
-def test_each_kind_of_change_moves_its_own_part(registry, tmp_path):
+def test_each_kind_of_change_moves_its_own_part(registry, tmp_path, monkeypatch):
     """One part per kind of change — so a reload can say *what* it applied."""
     base = binding.resolve(_spec()).fingerprint()
 
@@ -192,6 +192,32 @@ def test_each_kind_of_change_moves_its_own_part(registry, tmp_path):
         server_required=False,
     )
     bound_base = binding.resolve(_spec(agent_slug="perps")).fingerprint()
+
+    # A pinned server must *exist and be reachable* or the binding refuses it
+    # outright (CORR-729), so the name this asserts the digest on is a real one.
+    import config_manager
+
+    class _Cm:
+        def get_server(self, name):
+            if name != "somewhere-else":
+                return None
+            return {
+                "host": "127.0.0.1",
+                "port": 8000,
+                "username": "u",
+                "password": "p",
+            }
+
+        def has_server_access(self, *_a, **_k):
+            return True
+
+        def get_accessible_servers(self, _user_id):
+            return ["somewhere-else"]
+
+        def get_server_permission(self, *_a, **_k):
+            return config_manager.ServerPermission.OWNER
+
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _Cm())
 
     agent = store.get("perps")
     agent.instructions = "You are something else now."

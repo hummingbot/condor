@@ -184,6 +184,13 @@ def resolve(
     # A server pinned on the Agent wins over the chat's ambient server.
     effective_server = agent.server_name or spec.server_name or ""
 
+    # An Agent pinned to a *named* server is the explicit case: it resolves to
+    # that server or the session refuses, naming it, rather than quietly binding
+    # to whatever else the chain reaches (CORR-729). The chat's ambient server is
+    # not a pin and keeps falling through — ``server_pinned`` below has always
+    # drawn the line in exactly this place.
+    pinned = agent.server_required and bool(agent.server_name)
+
     # A pinned server short-circuits resolution; None lets the builder fall back
     # to the ambient server. The slug always goes down to the subprocess, for
     # Condor too: it scopes manage_memory/manage_skill to whoever is answering,
@@ -201,6 +208,7 @@ def resolve(
         server_name=effective_server if agent.server_required else None,
         agent_slug=agent.slug,
         session_key=session_key,
+        server_pinned=pinned,
     )
 
     return SessionBinding(

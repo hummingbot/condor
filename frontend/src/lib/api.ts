@@ -57,6 +57,266 @@ function query(params: object): string {
   return q ? `?${q}` : "";
 }
 
+/** One file inside an agent bundle, as the review dialog lists it. */
+export interface AgentBundleFile {
+  path: string;
+  bytes: number;
+}
+
+/**
+ * What importing a bundle would do — or, once applied, what it did.
+ *
+ * The preview endpoint and the apply endpoint return the same shape from the
+ * same builder, so the dialog cannot show something the write does not do.
+ */
+/** Who the exporter *says* made a bundle. Verified by nothing — label it. */
+export interface AgentBundleAuthor {
+  name: string;
+  handle: string;
+}
+
+/**
+ * What an agent needs, derived from its own files — never authored, and
+ * re-derived on the server at preview time rather than read off the manifest.
+ */
+export interface AgentBundleRequires {
+  connectors: string[];
+  tools: string[];
+  agent_key: string;
+  /** `carried` travel in the bundle; `inherited` come from the shared library. */
+  skills: { carried: string[]; inherited: string[] };
+}
+
+/** One thing the bundle needs that this install cannot supply. Never fatal. */
+export interface AgentUnmetRequirement {
+  /** "connector" | "tool" | "skill" | "model" */
+  kind: string;
+  name: string;
+  /** What this install has instead. */
+  have: string[];
+  /** Whether the agent cannot do its job at all without it. */
+  blocking: boolean;
+}
+
+/**
+ * One thing the review found in the bundle's files (FEAT-144).
+ *
+ * Located, not quoted: `start`/`end` are offsets into that file's text, so the
+ * value itself never travels in a finding — the rule
+ * `condor/runtime/secrets.py` sets, and the reason a private RPC URL's token
+ * does not end up in a log line. `context` is populated for exactly two
+ * categories, where the text *is* the finding: `tool_steer` carries the
+ * matched line (redacted), `risk_limits` carries the limit's figure.
+ */
+export interface AgentBundleFinding {
+  /** "secret" | "endpoint" | "tool_steer" | "code_run" | "risk_limits" */
+  category: string;
+  /** The kind within the category, always from a closed set the server owns. */
+  label: string;
+  path: string;
+  /** 1-based. */
+  line: number;
+  start: number;
+  end: number;
+  /** Whether the shape has no plausible alternative. `secret` only. */
+  certain: boolean;
+  /** `tool_steer`'s line or `risk_limits`' figure; `""` for the rest. */
+  context: string;
+}
+
+export interface AgentImportPlan {
+  slug: string;
+  source_slug: string;
+  name: string;
+  description: string;
+  when_to_consult: string;
+  exported_at: string;
+  schema_version: number;
+  /** The identity that survives the rename `as_slug` performs. */
+  agent_uid: string;
+  /** Advisory, and only within one `agent_uid`'s lineage. */
+  version: number;
+  notes: string;
+  author: AgentBundleAuthor;
+  requires: AgentBundleRequires;
+  unmet: AgentUnmetRequirement[];
+  /** What to look at before unmuting any of this. Most-decisive first. */
+  findings: AgentBundleFinding[];
+  /** Everything that is not a `.py`. */
+  files: AgentBundleFile[];
+  /** The executable files, listed apart because reviewing them is the gate. */
+  executables: AgentBundleFile[];
+  total_bytes: number;
+  stamps: Record<string, string>;
+  mutes: { routines: string[]; skills: string[] };
+  agent_key: string;
+  agent_key_inherited: boolean;
+  /** The taken slug, when the bundle cannot land under the name it asked for. */
+  collision: string;
+  suggested_slug: string;
+  /** The `agent_uid` of the agent already installed under `collision`. */
+  collision_agent_uid: string;
+  /**
+   * Whether the collision is the *same agent*, newer — in which case the
+   * answer is the update verb and not a rename (FEAT-145). The server states
+   * it rather than leaving a client to compare two uids, so the dialog and the
+   * chat cannot disagree about which verb applies.
+   */
+  is_update: boolean;
+  refusals: string[];
+  imported?: boolean;
+  next_step?: string;
+}
+
+/** One path, and what updating this agent from a bundle would do to it. */
+export interface AgentUpdateFile {
+  path: string;
+  /**
+   * `added` | `changed` | `unchanged` | `local_only` | `conflict` | `removed`
+   * | `conflict_removed`. The last three keep what is on disk.
+   */
+  verdict: string;
+  /** The bundle's copy, in bytes. `0` when the bundle carries none. */
+  bytes: number;
+  /** A `.py`: consent is keyed by content, so a replaced one is pending again. */
+  executable: boolean;
+  /** The bundle's copy, carried only for a `conflict` — the local bytes win,
+   *  so this is what the screen can offer instead. Empty otherwise. */
+  incoming: string;
+}
+
+/** Something that refuses the update outright. */
+export interface AgentUpdateBlocker {
+  code: string;
+  message: string;
+}
+
+/** A consequence worth knowing about. Never a reason to refuse. */
+export type AgentUpdateWarning = AgentUpdateBlocker;
+
+/**
+ * What updating an installed agent from a newer bundle would do — or did.
+ *
+ * Same contract as the import pair: the preview endpoint and the apply
+ * endpoint return this from one builder on the server, so the diff on screen
+ * is the diff the write performs.
+ */
+export interface AgentUpdatePlan {
+  slug: string;
+  /** The identity the bundle claims. */
+  agent_uid: string;
+  /** The identity installed here. Equal is what makes this an update. */
+  installed_agent_uid: string;
+  version: number;
+  installed_version: number;
+  exported_at: string;
+  notes: string;
+  author: AgentBundleAuthor;
+  requires: AgentBundleRequires;
+  unmet: AgentUnmetRequirement[];
+  findings: AgentBundleFinding[];
+  /** One entry per path. A file neither side installed is not listed at all. */
+  files: AgentUpdateFile[];
+  /** `{verdict: count}` for the verdicts present. */
+  counts: Record<string, number>;
+  /** What arrives switched off — only what is genuinely new. */
+  mutes: { routines: string[]; skills: string[] };
+  blockers: AgentUpdateBlocker[];
+  warnings: AgentUpdateWarning[];
+  updated?: boolean;
+  /** Where the replaced and deleted bytes were kept. */
+  backup?: string;
+  next_step?: string;
+}
+
+/**
+ * One agent the hub offers (FEAT-146).
+ *
+ * Every field is the hub's claim except `digest`, which the *server* verifies
+ * the downloaded bytes against before anything parses them — the browser never
+ * sees the bundle, so it cannot check it and does not pretend to. `badge` is
+ * provenance and nothing more: no code here or on the server reads it to
+ * decide whether to write.
+ */
+export interface HubListing {
+  listing_id: string;
+  /** Decides whether installing this is a create or an update. Advisory. */
+  agent_uid: string;
+  slug: string;
+  name: string;
+  description: string;
+  version: number;
+  notes: string;
+  /** Attested by the hub at upload — an account claim, not a signature. */
+  author: AgentBundleAuthor;
+  /** `"validated"` | `"community"`. Rendered, never acted on. */
+  badge: string;
+  digest: string;
+  bytes: number;
+  published_at: string;
+  requires: AgentBundleRequires;
+  /** FEAT-144's review **as the hub computed it on submission**. */
+  findings: AgentBundleFinding[];
+  /** Which review produced `findings`, so drift with this install is visible. */
+  review_version: string;
+}
+
+/** The hub's badge is provenance: `HUB_TRUST`, stated server-side, once. */
+export interface HubCatalogue {
+  listings: HubListing[];
+  trust: string;
+}
+
+/**
+ * What installing a listing would do — or did.
+ *
+ * `verb` is the server's answer and not a client's comparison of two uids: a
+ * listing of an agent this install already has is an update (FEAT-145), and
+ * the plan carried is that verb's own shape.
+ */
+export interface HubInstallResponse {
+  verb: "install" | "update";
+  listing: HubListing;
+  plan: AgentImportPlan | AgentUpdatePlan;
+}
+
+/** `authFetch` because the body is `FormData` — see `uploadAttachment`. */
+async function postAgentBundle(
+  path: string,
+  file: File,
+  asSlug: string,
+): Promise<AgentImportPlan> {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("as_slug", asSlug);
+  const res = await authFetch(path, { method: "POST", body });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(
+      new Error(detail.detail || `Import failed: ${res.status}`),
+      { status: res.status },
+    );
+  }
+  return res.json();
+}
+
+/** The update pair's door. One bundle, no rename — the slug is in the path. */
+async function postAgentUpdate(
+  path: string,
+  file: File,
+): Promise<AgentUpdatePlan> {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await authFetch(path, { method: "POST", body });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(new Error(detail.detail || `Update failed: ${res.status}`), {
+      status: res.status,
+    });
+  }
+  return res.json();
+}
+
 /** A finished background task, addressed to the user rather than to a chat. */
 export interface AppNotification {
   id: string;
@@ -195,10 +455,49 @@ export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
+  /** `status: "running"` with no controller to run: the container is up and
+   *  nothing is trading (CORR-725). Rendered by FEAT-141. */
+  running_without_controllers?: boolean;
   error_count: number;
   deployed_at: string | null;
   error_logs: BotLogEntry[];
   general_logs: BotLogEntry[];
+}
+
+/**
+ * A RUNNING executor whose owning session is gone (CORR-726).
+ *
+ * The race's single most expensive defect: one such LP executor polled every
+ * second for 13.5h and ate a host's whole RPC budget, and nothing on any
+ * screen said it existed. The session number is part of the identity — the
+ * lineage is alive, that *session* is not.
+ */
+export interface OrphanedExecutor {
+  executor_id: string;
+  controller_id: string;
+  agent_slug: string;
+  strategy_slug: string;
+  session_num: number;
+  pair: string;
+  kind: string;
+}
+
+/**
+ * One host's executor hygiene (FEAT-141).
+ *
+ * Folded from the rows the poller already cached, so the bots payload pays no
+ * extra call for it. `available: false` means nothing was cached and nothing
+ * was fetched — drawn as *unknown*, never as a clean host. `truncated` says
+ * the counts are a floor: the cache holds the newest page, and nothing
+ * upstream prunes a terminal row (PERF-733).
+ */
+export interface ExecutorHygiene {
+  available: boolean;
+  counted: number;
+  running: number;
+  terminated: number;
+  truncated: boolean;
+  orphaned_running: OrphanedExecutor[];
 }
 
 export interface BotsPageResponse {
@@ -208,6 +507,8 @@ export interface BotsPageResponse {
   total_volume: number;
   server_online?: boolean;
   error_hint?: string;
+  /** This host's executor hygiene (FEAT-141); absent on an older backend. */
+  executor_hygiene?: ExecutorHygiene;
 }
 
 export interface BotRunInfo {
@@ -765,6 +1066,12 @@ export interface DeployBotRequest {
 
 // ── Agents ──
 
+/** One drifted config field: what the process holds, and what the file says now. */
+export interface ConfigDrift {
+  running: unknown;
+  file: unknown;
+}
+
 export interface RunningInstance {
   agent_id: string;
   session_num: number;
@@ -788,11 +1095,34 @@ export interface RunningInstance {
   tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
+  /**
+   * The model the *adapter* says this session is on — not the `agent_key` pin
+   * above (FEAT-136). A bridge that could not match the pin keeps its own
+   * default, and the two then differ, which is what a pin audit looks for.
+   * `""` for a backend with no adapter to ask, and before the first tick.
+   * Optional so an older backend reads as "not reported".
+   */
+  active_model_id?: string;
+  /**
+   * Which pins/limits this process holds that `config.yml` no longer says
+   * (FEAT-136). Keyed by field — `risk_limits` is reported per sub-key, dotted
+   * — with both values, so the reader sees what a restart would change rather
+   * than only that something would. Absent/empty = the two agree.
+   */
+  config_drift?: Record<string, ConfigDrift>;
   // ── The loop's pulse ──
   // The engine has always computed these; the wire model dropped them, so a
   // strategy view could say "running" and nothing about when it last ran.
   /** Unix seconds the current tick started. 0 before the first one. */
   last_tick_at: number;
+  /**
+   * Quiet or dead (FEAT-137). `last_tick_at` is stamped at tick *start*, so it
+   * advances on a tick whose every call failed; these two advance only on an
+   * outcome — a reading that said something, and a mutating call that worked.
+   * 0 = never. Optional so an older backend reads as "never".
+   */
+  last_reading_at?: number;
+  last_successful_action_at?: number;
   /** 0 = unbounded; otherwise the tick this session stops at. */
   max_ticks: number;
   /** What the loop last *said* — the journal's `Last action:` line. */
@@ -800,6 +1130,59 @@ export interface RunningInstance {
   /** What the loop last *did* — one mutating tool call, or null. */
   last_did: AgentActionRow | null;
   last_error: string;
+  /**
+   * The venues that refused *this* session (FEAT-138) — a venue/connector
+   * condition, deliberately not folded into `last_error`. The agent did
+   * nothing wrong, and reading a throttled venue as an agent failure is what
+   * made it look like a strategy bug. Absent on an older backend; `[]` means
+   * checked and nothing refused.
+   */
+  throttled_venues?: VenueCondition[];
+}
+
+/**
+ * One (host, venue) pair's call accounting (`FEAT-138`).
+ *
+ * `condition` is `"throttled"` while the venue has refused recently, else
+ * `"ok"`. The counts are cumulative, so `attempts === successes + refusals +
+ * errors` always holds — which is what makes "8 attempts, 0 successes, 8
+ * refusals" readable off the counters instead of sampled out of the logs.
+ */
+export interface VenueCondition {
+  host: string;
+  venue: string;
+  condition: "throttled" | "ok";
+  attempts: number;
+  successes: number;
+  refusals: number;
+  errors: number;
+  last_refusal_at: number;
+  last_reason: string;
+}
+
+/**
+ * What one (agent, session, host) spent — who consumed whose budget.
+ *
+ * The question CORR-726's incident could not answer: nothing showed that one
+ * 1.0s poller was the sole consumer starving a host. `agent` empty means a
+ * seat with no agent label made the calls.
+ */
+export interface CallerVolume {
+  agent: string;
+  agent_id: string;
+  host: string;
+  attempts: number;
+  successes: number;
+  refusals: number;
+  errors: number;
+  last_refusal_at: number;
+  last_reason: string;
+}
+
+/** `GET /agents/venue-conditions` — two folds of the same counters. */
+export interface VenueConditions {
+  venues: VenueCondition[];
+  callers: CallerVolume[];
 }
 
 /**
@@ -875,10 +1258,76 @@ interface FleetOwnerWire {
     tick_count: number;
     last_tick_at: number;
     frequency_sec: number;
+    /** Outcomes rather than attempts (FEAT-137); see `RunningInstance`. */
+    last_reading_at?: number;
+    last_successful_action_at?: number;
+    /** Seconds the last completed tick took (FEAT-141); 0 = none yet. */
+    last_tick_duration?: number;
     last_action: string;
     last_did: AgentActionRow | null;
     last_error: string;
   } | null;
+}
+
+/**
+ * Condor's own host: 1-minute load average against its vCPU count (FEAT-141).
+ *
+ * `available: false` where the platform has no load average, or will not say
+ * how many CPUs it has — rendered as *unknown* and never as *ok*. The bare
+ * load number is not a reading: 3.0 is idle on 32 vCPUs and on fire on 2.
+ */
+export interface HostLoad {
+  available: boolean;
+  load_1m: number;
+  vcpus: number;
+  load_per_vcpu: number;
+}
+
+/**
+ * One server's measured round-trip, as the order-placement lag it bounds.
+ *
+ * Read off the poll counters the data service already keeps, so it is the one
+ * placement-lag reading available without issuing an order. A *floor*: an
+ * order cannot be placed faster than the API answers.
+ */
+export interface ApiLag {
+  host: string;
+  status: string;
+  last_latency_ms: number;
+  consecutive_failures: number;
+}
+
+/**
+ * The diagnostics block that rides along on the fleet map (FEAT-141).
+ *
+ * On the map rather than on a route of its own, and that is the feature's
+ * defining constraint: the view must add no polling cost to a dashboard that
+ * already polls per server, and the map is the one agent payload `/bots`
+ * already polls while making no Hummingbot call at all.
+ */
+export interface FleetDiagnostics {
+  host: HostLoad;
+  api_lag: ApiLag[];
+  venues: VenueCondition[];
+  callers: CallerVolume[];
+}
+
+interface FleetDiagnosticsWire {
+  host?: Partial<HostLoad>;
+  api_lag?: ApiLag[];
+  venues?: VenueCondition[];
+  callers?: CallerVolume[];
+}
+
+/**
+ * `GET /agents/fleet-map` as this client reads it.
+ *
+ * The attribution join (`FleetMap`, which `lib/agent-attribution` owns and
+ * which imports nothing) plus the diagnostics block that rides along on the
+ * same response (FEAT-141).
+ */
+export interface FleetMapResult extends FleetMap {
+  diagnostics: FleetDiagnostics;
 }
 
 /**
@@ -988,6 +1437,38 @@ export interface AgentPerformance {
   /** False when `fees` is a floor: the backend reports no cumulative fee column,
    *  so 0 means unknown rather than free. */
   fees_known?: boolean;
+  // ── Scope labelling (FEAT-135) ──
+  // `realized_pnl` and `volume` above are one number folded from both scopes,
+  // and nothing in them says which: that is how a session summary came to report
+  // $200 for a session that earned $120, $80 of it belonging to a stopped
+  // earlier generation of the same bot name (#262), while the race leaderboard
+  // needed exactly that $200. Both are reported here, each naming the instances
+  // it covers. `null`/absent = the scope is unavailable — render it as such,
+  // never as the other scope's total.
+  //
+  // There is no lifetime twin for `unrealized_pnl`, the open book or exposure:
+  // per #234 those come only from instances the active-bot inventory confirms
+  // and are never summed across generations.
+  /** Realized PnL sliced to this session's ownership window. */
+  session_realized_pnl?: number | null;
+  /** Volume sliced to this session's ownership window. */
+  session_volume?: number | null;
+  /** The instances the session-scoped figures were summed over. */
+  session_instances?: string[];
+  /** Realized PnL over every generation ever deployed under the owned bases. */
+  lifetime_realized_pnl?: number | null;
+  /** Volume over every generation ever deployed under the owned bases. */
+  lifetime_volume?: number | null;
+  /** The instances the lifetime-scoped figures were summed over. */
+  lifetime_instances?: string[];
+  /**
+   * Whether these figures are a reading at all (FEAT-137, on CORR-725's
+   * tri-state): `ok` is a controller that reported, `empty` one that answered
+   * and said nothing, `missing` no performance object at all. All three print
+   * 0.0 for every number above, so this is the only thing that tells a flat bot
+   * from a dead one. Absent from an older backend, which reads as `ok`.
+   */
+  reading?: "ok" | "empty" | "missing";
 }
 
 /** One controller of one bot instance a session operated. */
@@ -1214,6 +1695,15 @@ export interface RoutineCard {
   category: string;
   /** Switched off for this Agent. `/routines` still lists and runs it. */
   muted: boolean;
+  /**
+   * Came from an imported bundle and has not been allowed to execute on this
+   * install (FEAT-147). Its name and description were read from the file
+   * without importing it, so it has no configuration form until it is
+   * allowed.
+   */
+  pending?: boolean;
+  /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
+  pending_reason?: string;
 }
 
 /** One controller an agent can sync to a server (FEAT-127). */
@@ -1500,6 +1990,15 @@ export interface RoutineInfo {
   /** Source-file modification time (epoch seconds), or null if unavailable. */
   last_modified: number | null;
   report_count: number;
+  /**
+   * Imported code the operator has not allowed to execute here (FEAT-147).
+   * Such a row is listed and its source is readable, but `fields` is empty —
+   * a pydantic model's fields only exist once the module has been imported,
+   * which is exactly what has not happened.
+   */
+  pending?: boolean;
+  /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
+  pending_reason?: string;
 }
 
 export interface RoutineInstance {
@@ -2174,6 +2673,14 @@ export interface AppEnvResponse {
   os: string;
   arch: string;
   in_docker: boolean;
+  /**
+   * Which *process*, not just which code (FEAT-136). Unix seconds this backend
+   * started, and the id it stamps its status files with — together they say
+   * whether it has been restarted since a config was edited. Optional so an
+   * older backend reads as "not reported".
+   */
+  process_started_at?: number;
+  boot_id?: string;
 }
 
 /**
@@ -3073,10 +3580,12 @@ export const api = {
    * session of every strategy and is the most expensive read in the app. This
    * one makes no Hummingbot call at all, which is what lets `/bots` poll it.
    */
-  getFleetMap: async (): Promise<FleetMap> => {
-    const data = await apiFetch<{ owners: FleetOwnerWire[]; deeds?: DeedIndexWire }>(
-      "/api/v1/agents/fleet-map",
-    );
+  getFleetMap: async (): Promise<FleetMapResult> => {
+    const data = await apiFetch<{
+      owners: FleetOwnerWire[];
+      deeds?: DeedIndexWire;
+      diagnostics?: FleetDiagnosticsWire;
+    }>("/api/v1/agents/fleet-map");
     const owners: FleetOwner[] = (data.owners ?? []).map((owner) => ({
       runKey: owner.run_key,
       agentSlug: owner.agent_slug,
@@ -3094,6 +3603,9 @@ export const api = {
             tickCount: owner.live.tick_count,
             lastTickAt: owner.live.last_tick_at,
             frequencySec: owner.live.frequency_sec,
+            lastReadingAt: owner.live.last_reading_at ?? 0,
+            lastSuccessfulActionAt: owner.live.last_successful_action_at ?? 0,
+            lastTickDuration: owner.live.last_tick_duration ?? 0,
             lastAction: owner.live.last_action,
             lastDid: owner.live.last_did ?? null,
             lastError: owner.live.last_error,
@@ -3104,8 +3616,35 @@ export const api = {
     for (const [name, ref] of Object.entries(data.deeds?.bots ?? {})) {
       deeds.bots[name] = { runKey: ref.run_key, runId: ref.run_id ?? "", at: ref.at ?? 0 };
     }
-    return { owners, deeds };
+    // Snake-cased through, like `VenueCondition` beside it: every field is one
+    // word or an already-wire-shaped row, so there is no casing pass to get
+    // wrong. An older backend sends no block at all and reads as the
+    // unavailable host with no rows — which the view draws as *unknown*.
+    const wire = data.diagnostics;
+    const diagnostics: FleetDiagnostics = {
+      host: {
+        available: false,
+        load_1m: 0,
+        vcpus: 0,
+        load_per_vcpu: 0,
+        ...(wire?.host ?? {}),
+      },
+      api_lag: wire?.api_lag ?? [],
+      venues: wire?.venues ?? [],
+      callers: wire?.callers ?? [],
+    };
+    return { owners, deeds, diagnostics };
   },
+
+  /**
+   * Which venues are refusing us, and which agent spent the host's budget
+   * (FEAT-138).
+   *
+   * Like `getFleetMap`, no Hummingbot call at all — one incremental read of a
+   * local log — so a diagnostics view can poll it.
+   */
+  getVenueConditions: () =>
+    apiFetch<VenueConditions>("/api/v1/agents/venue-conditions"),
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),
@@ -3240,6 +3779,28 @@ export const api = {
       { method: "PUT", body: JSON.stringify(data) },
     ),
 
+  /** Allow one imported routine file to execute in the Condor process, or
+   *  withdraw it (FEAT-147).
+   *
+   *  A separate gesture from a mute, deliberately: unmuting says *this agent
+   *  may use it*, allowing says *this code may run here*. An agent imported
+   *  from a bundle has every routine it brought gated until this is called,
+   *  and consent is recorded against the file's content — edit it, or update
+   *  the agent from a newer bundle, and it has to be read and allowed again. */
+  setAgentCodeTrust: (
+    slug: string,
+    data: { kind: "routine"; name: string; allowed: boolean },
+  ) =>
+    apiFetch<{
+      kind: string;
+      name: string;
+      allowed: boolean;
+      digest: string;
+    }>(`/api/v1/agents/${encodeURIComponent(slug)}/code-trust`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
   deleteAgentSkill: (slug: string, name: string) =>
     apiFetch<{ deleted: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
@@ -3316,6 +3877,110 @@ export const api = {
         method: "DELETE",
       },
     ),
+
+  // ── An agent as one file (FEAT-133) ──
+
+  /**
+   * The agent as one portable JSON file, as text.
+   *
+   * `authFetch` and not a bare `<a href>`: the endpoint is bearer-guarded like
+   * everything else here, and a link has no way to carry the header — the same
+   * reason `useAuthedImage` exists. The caller makes an object URL from this.
+   */
+  exportAgentBundle: async (slug: string): Promise<string> => {
+    const res = await authFetch(
+      `/api/v1/agents/${encodeURIComponent(slug)}/bundle`,
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Export failed: ${res.status}`);
+    }
+    return res.text();
+  },
+
+  /** What importing this bundle would do. Writes nothing on the server. */
+  previewAgentImport: (file: File, asSlug = "") =>
+    postAgentBundle("/api/v1/agents/import/preview", file, asSlug),
+
+  /** Register the agent in this bundle, with its routines and skills muted. */
+  importAgent: (file: File, asSlug = "") =>
+    postAgentBundle("/api/v1/agents/import", file, asSlug),
+
+  // ── Updating one from a newer bundle (FEAT-145) ──
+
+  /** What updating `slug` from this bundle would do. Writes nothing. */
+  previewAgentUpdate: (slug: string, file: File) =>
+    postAgentUpdate(
+      `/api/v1/agents/${encodeURIComponent(slug)}/update/preview`,
+      file,
+    ),
+
+  /** Replace this agent's library from the bundle, keeping what it earned. */
+  updateAgentFromBundle: (slug: string, file: File) =>
+    postAgentUpdate(`/api/v1/agents/${encodeURIComponent(slug)}/update`, file),
+
+  // ── The agent hub (FEAT-146) ──
+  //
+  // Every call goes to Condor, never to the hub: the dashboard's bearer stays
+  // the dashboard's, and — the reason that matters — the bytes the dialog
+  // previewed and the bytes installed come out of one client rather than two,
+  // which is FEAT-133's one-builder rule.
+
+  /** What the hub offers, plus the one sentence about what a badge means.
+   *
+   *  The search term is a query *parameter* all the way down — never a path
+   *  segment — so it needs no identifier check and cannot change which
+   *  endpoint is addressed. (Named `search` here only because `query` is this
+   *  module's query-string builder.) */
+  browseHub: (search = "", page = 1) =>
+    apiFetch<HubCatalogue>(`/api/v1/hub/agents${query({ query: search, page })}`),
+
+  /** One listing, with the digest its bundle will be held to. */
+  getHubListing: (listingId: string) =>
+    apiFetch<{ listing: HubListing; trust: string }>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
+    ),
+
+  /** What installing this listing would do. Writes nothing on the server. */
+  previewHubInstall: (listingId: string, asSlug = "") =>
+    apiFetch<HubInstallResponse>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install/preview`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+    ),
+
+  /** Install it, through exactly the gate the file path uses. */
+  installFromHub: (listingId: string, asSlug = "") =>
+    apiFetch<HubInstallResponse>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+    ),
+
+  /** Upload one of this install's agents. Admin-only, and irreversible in
+   *  practice — unpublishing removes the listing, not anybody's download. */
+  publishAgentToHub: (slug: string, notes = "", authorName = "") =>
+    apiFetch<{ published: boolean; receipt: Record<string, unknown> }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/publish`,
+      { method: "POST", body: JSON.stringify({ notes, author_name: authorName }) },
+    ),
+
+  /** Withdraw a listing. Admin-only. */
+  unpublishFromHub: (listingId: string) =>
+    apiFetch<{ unpublished: boolean }>(
+      `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Whether a publish token is set. **Never its value** — there is no route
+   *  that reads it back, here or on the server. */
+  getHubToken: () =>
+    apiFetch<{ set: boolean; can_change: boolean }>("/api/v1/settings/hub-token"),
+
+  /** Store or clear it. An empty string is how it is revoked locally. */
+  setHubToken: (token: string) =>
+    apiFetch<{ set: boolean }>("/api/v1/settings/hub-token", {
+      method: "PUT",
+      body: JSON.stringify({ token }),
+    }),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 
@@ -3473,6 +4138,35 @@ export const api = {
     apiFetch<{ restart_on_boot: boolean; applied_to_running: number }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/restart-on-boot`,
       { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+
+  /**
+   * Rewrite a strategy's stored config — the one the *next* session starts on.
+   *
+   * The route **merges**: a key absent from `config` keeps its stored value
+   * (`agents.py` `config_dict.update(req.config)`), so a caller sends the whole
+   * mapping rather than a patch, and cannot remove a key at all.
+   *
+   * It reaches the file and no running engine — a live trading loop must not
+   * have its limits changed under it — so `live_engines` is how many restarts
+   * applying this takes and `message` says so in words (CORR-732). All five
+   * fields are typed here so a client that only reads `updated` cannot silently
+   * drop the one the operator needs.
+   */
+  updateStrategyConfig: (
+    slug: string,
+    sslug: string,
+    config: Record<string, unknown>,
+  ) =>
+    apiFetch<{
+      updated: boolean;
+      config: Record<string, unknown>;
+      applies_to_running: boolean;
+      live_engines: number;
+      message: string;
+    }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
+      { method: "PUT", body: JSON.stringify({ config }) },
     ),
 
   /**
@@ -3995,11 +4689,14 @@ export const api = {
       `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
     ),
 
+  /** `restart_required` is the API server's own answer: the key is stored, and
+   *  bots already running keep the one they started with until restarted. It
+   *  used to arrive inside the opaque `result` and be dropped (CORR-732). */
   addCredential: (
     server: string,
     data: { connector_name: string; credentials: Record<string, string> },
   ) =>
-    apiFetch<{ added: boolean }>(
+    apiFetch<{ added: boolean; restart_required: boolean }>(
       `/api/v1/settings/credentials?server=${encodeURIComponent(server)}`,
       {
         method: "POST",
@@ -4008,7 +4705,7 @@ export const api = {
     ),
 
   deleteCredential: (server: string, connector: string) =>
-    apiFetch<{ deleted: boolean }>(
+    apiFetch<{ deleted: boolean; restart_required: boolean }>(
       `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
       { method: "DELETE" },
     ),

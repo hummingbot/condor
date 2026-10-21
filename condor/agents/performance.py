@@ -64,6 +64,11 @@ class AgentPerformance:
     # no cumulative fee column leaves bot-mode fees derivable only from open
     # positions, so a flat bot sums to 0.0 — which is "unknown", not "free".
     fees_known: bool = True
+    # False when the orchestrator's active-bots listing did not answer, so the
+    # open book was resolved from the unfiltered snapshot: it may still hold a
+    # stopped instance's frozen unrealized PnL and positions. "Unverified", not
+    # wrong — the same shape as ``fees_known`` ([[CORR-723]]).
+    liveness_known: bool = True
     # Owned bases that resolved to no instance at all — neither running nor
     # archived. Their contribution is unknown, not zero, and the two must not
     # render alike: a session whose bot has vanished reporting "$0.00" reads as
@@ -79,12 +84,46 @@ class AgentPerformance:
     base_windows: dict[str, tuple[float, float, float, float]] = field(
         default_factory=dict
     )
+    # ── Scope labelling ([[FEAT-135]]) ──
+    # Realized PnL and volume at both scopes, because both are wanted and the
+    # defect was that nothing said which one a number had: GitHub #262's session
+    # summary folded earlier stopped generations in, and its race comment reports
+    # a leaderboard that understated until it summed exactly those. ``session_*``
+    # is this session's ownership window; ``lifetime_*`` is every generation ever
+    # deployed under the owned bases. ``None`` means unavailable — no window to
+    # slice, or no instance the universe knows anything about — and must never be
+    # read as the other scope's total, which is the #262 defect itself. Each pair
+    # carries the instances it was summed over, the audit trail that makes two
+    # surfaces disagreeing diagnosable. Both stay ``None`` for an executor-only agent,
+    # which owns no bot and so has no scope ambiguity to label.
+    #
+    # There is deliberately no lifetime twin for unrealized PnL, open positions or
+    # exposure: per #234 those are live-only and are never summed across
+    # generations, and a field offering one would invite that sum.
+    session_realized_pnl: float | None = None
+    session_volume: float | None = None
+    session_instances: list[str] = field(default_factory=list)
+    lifetime_realized_pnl: float | None = None
+    lifetime_volume: float | None = None
+    lifetime_instances: list[str] = field(default_factory=list)
     # The session's realized-PnL curve (:func:`fetch_agent_pnl_series`'s shape),
     # derived from the histories the window slices above were cut from. ``None``
     # means "not computed": only a caller that asks for it (the tick's executors
     # provider, so the session report does not walk every instance's history a
     # second time) gets one, and only when its inputs match the standalone fetch.
     pnl_series: list[dict[str, Any]] | None = None
+    # Whether this fetch obtained a *reading* at all -- ``ok`` / ``empty`` /
+    # ``missing``, [[CORR-725]]'s tri-state rolled up to the agent ([[FEAT-137]]).
+    # The same shape as ``fees_known`` and ``liveness_known``: the certainty
+    # travels beside the figures instead of changing their type.
+    #
+    # ``ok`` for an executor-only agent, and that is not a guess: its book comes
+    # from the executor table, which either answered (this object exists) or
+    # raised (the provider reports the error and no reading at all). A bot-mode
+    # agent's is the best of its live bots' states, so one controller reporting
+    # is enough and a fleet whose every controller returns an empty performance
+    # object reads ``empty`` -- which is GitHub #272's failure exactly.
+    reading: str = "ok"
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
@@ -185,11 +224,18 @@ def _merge_bot_perf(
     the bot snapshot reports how many positions closed but not how each one ended,
     so a bot-mode agent has no per-trade outcome to derive one from.
     """
-    from condor.agents.attribution import apply_fee_fallback, fold_sliced_window
+    from condor.agents.attribution import (
+        apply_fee_fallback,
+        apply_liveness,
+        fold_sliced_window,
+    )
     from condor.fetchers.bot_performance import bot_executor_rows
 
     rows = bot_executor_rows(bot)
     open_rows = [r for r in rows if r["status"] == "RUNNING"]
+    # Unfiltered because liveness was unknown: the book is folded as before, and
+    # only its certainty is recorded ([[CORR-723]]).
+    apply_liveness(perf, bot)
 
     if window is None:
         # Lifetime aggregate, folded through the same shared rule as a window so
@@ -403,6 +449,12 @@ async def fetch_agent_performance_batch(
     are all stopped, keeps its realized slice and nothing else. A base in ``bot_names`` with no window (or no known
     ``since``) keeps the lifetime aggregate.
 
+    Both scopes are *also* reported side by side and labelled — ``session_*`` and
+    ``lifetime_*``, each with the instances it was summed over — because the
+    totals above fold them into one figure that says nothing about which it is
+    ([[FEAT-135]]). Realized PnL and volume only: unrealized PnL, the open book
+    and exposure are live-only and have no lifetime twin by design.
+
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised, or — in controller mode — whose bots' live snapshot failed;
     their entries may be partial/empty. This lets callers avoid caching a failed
@@ -467,8 +519,13 @@ async def fetch_agent_performance_batch(
     if wanted:
         import time
 
-        from condor.agents.attribution import fold_sliced_window
+        from condor.agents.attribution import (
+            fold_sliced_window,
+            lifetime_scope,
+            session_scope,
+        )
         from condor.fetchers.bot_performance import (
+            _best_reading,
             fetch_bot_universe_checked,
             fetch_live_instance_names,
             partition_instances,
@@ -485,6 +542,12 @@ async def fetch_agent_performance_batch(
         live_names = await fetch_live_instance_names(client)
         now = time.time()
         for aid, bases in wanted.items():
+            # A bot-mode agent's reading is its bots', so it starts from the
+            # bottom of the tri-state and is raised by each bot that reports
+            # ([[FEAT-137]]). Left at the ``ok`` default it would say "read fine"
+            # for a fleet that returned nothing, which is the very confusion
+            # [[CORR-725]] exists to end.
+            out[aid].reading = "missing"
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
@@ -499,6 +562,33 @@ async def fetch_agent_performance_batch(
                 client, aid, all_bot_perf, archived, owned, now
             )
             out[aid].base_windows.update(sliced)
+            # Both scopes, each named, before anything is folded into the
+            # single-figure totals: that fold is where the two became one number
+            # nobody could tell apart ([[FEAT-135]]).
+            scoped = session_scope(sliced, histories or {}, owned, now)
+            lifetime = lifetime_scope(instances, all_bot_perf, histories, now)
+            out[aid].session_realized_pnl = scoped.realized_pnl
+            out[aid].session_volume = scoped.volume
+            out[aid].session_instances = scoped.instances
+            out[aid].lifetime_realized_pnl = lifetime.realized_pnl
+            out[aid].lifetime_volume = lifetime.volume
+            out[aid].lifetime_instances = lifetime.instances
+            # The lifetime fallback for a base with no window stays — reporting
+            # zero for a live bot would be worse — but it stops being silent: the
+            # totals below carry that base at lifetime scope, and its instances
+            # are absent from ``session_instances`` above.
+            # Only bases that actually resolved to an instance: one that resolved
+            # to nothing is already reported through ``unresolved_bases`` below,
+            # and contributes no lifetime figure to contaminate the totals with.
+            windowless = [b for b in bases if b not in sliced and instances.get(b)]
+            if windowless:
+                log.warning(
+                    "agent %s has no ownership window for %s — their LIFETIME "
+                    "realized/volume is folded into the totals, so the aggregate "
+                    "is mixed-scope; session_* reports only the windowed bases",
+                    aid,
+                    ", ".join(windowless),
+                )
             if (
                 pnl_series
                 and histories is not None
@@ -506,10 +596,19 @@ async def fetch_agent_performance_batch(
                 and any(w.is_open for w in owned.values())
             ):
                 since = min(w.since for w in owned.values())
-                out[aid].pnl_series = pnl_series_from_histories(histories, since, now)
+                out[aid].pnl_series = pnl_series_from_histories(
+                    {b: list(hs.values()) for b, hs in histories.items()}, since, now
+                )
             for base in bases:
                 bot = live.get(base)
                 window = owned.get(base)
+                # One bot reporting is enough ([[FEAT-137]]). Read off the LIVE
+                # aggregate only: a stopped instance's frozen snapshot is not
+                # this tick obtaining a reading, it is last week's.
+                if bot:
+                    out[aid].reading = _best_reading(
+                        out[aid].reading, str(bot.get("reading") or "missing")
+                    )
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
@@ -561,7 +660,7 @@ async def _slice_owned_windows(
     now: float,
 ) -> tuple[
     dict[str, tuple[float, float, float, float]],
-    dict[str, list[list[tuple[float, float, float, float, float]]]] | None,
+    dict[str, dict[str, list[tuple[float, float, float, float, float]]]] | None,
 ]:
     """``({base: sliced (realized, volume, trades, fees)}, histories)`` per window.
 
@@ -571,18 +670,22 @@ async def _slice_owned_windows(
     no known ``since`` is left out (lifetime aggregate), and so is an empty window
     (closed at or before it opened), which the rollup skips too.
 
-    ``histories`` is the ``{base: [instance history, …]}`` the slices were cut
-    from, or ``None`` when nothing was fetched (no known ``since``, no instance
-    universe, or the fetch raised).
+    ``histories`` is the ``{base: {instance: history}}`` the slices were cut from,
+    or ``None`` when nothing was fetched (no known ``since``, no instance
+    universe, or the fetch raised). Keyed by instance because a scope has to name
+    the instances it covers ([[FEAT-135]]); the slice itself does not care.
     """
-    from condor.fetchers.bot_performance import fetch_base_histories, slice_history
+    from condor.fetchers.bot_performance import (
+        fetch_instance_histories,
+        slice_history,
+    )
 
     cut = {b: w for b, w in owned.items() if w.since > 0}
     if not cut or not (all_bot_perf or archived):
         return {}, None
     earliest = min(w.since for w in cut.values())
     try:
-        histories = await fetch_base_histories(
+        histories = await fetch_instance_histories(
             client, all_bot_perf, sorted(cut), earliest, now, extra_names=archived
         )
     except Exception as e:
@@ -595,5 +698,7 @@ async def _slice_owned_windows(
     for base, window in cut.items():
         start, stop = window.bounds(now)
         if stop > start:
-            out[base] = slice_history(histories.get(base, []), start, stop)
+            out[base] = slice_history(
+                list((histories.get(base) or {}).values()), start, stop
+            )
     return out, histories

@@ -22,6 +22,8 @@ from condor.memory.paths import (
     agent_home_layers,
     shared_routines_roots,
 )
+from condor.paths import local_agents_root
+from condor.routine_meta import meta_from_source
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +43,24 @@ def library_dir() -> Path:
 def assistant_routines_dir(agent_slug: str | None) -> Path:
     """The **writable** routines dir of an assistant — the one it owns.
 
-    There is a single home for the general library — the repo-root ``routines/``,
-    owned by the chat ``condor``. A trading agent / domain expert owns
-    ``<local>/<slug>/routines``.
+    Every assistant writes under the local agent root, the chat included:
 
-    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) → ``routines``
+    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) →
+      ``<local>/condor/routines``
     - trading agent / domain expert (slug) → ``<local>/<slug>/routines``
 
-    The explicit ``"condor"`` carve-out is load-bearing (FEAT-033): Condor is now
-    an ordinary entry under the agent roots, so threading its slug through
-    naively would relocate the general library to ``<slug>/routines`` and empty
-    the catalog — silently, since a missing dir simply lists nothing.
+    The chat used to write into the repo-root ``routines/`` instead, which is
+    tracked and actively maintained upstream (13 files, 48 commits touching them
+    over 60) — so asking the chat agent to improve a shipped routine edited a
+    file upstream also edits, and the next update that touched it raised a
+    dirty-conflict whose escapes were lossy.
+
+    The explicit ``"condor"`` carve-out that remains is still load-bearing
+    (FEAT-033): Condor is an ordinary entry under the agent roots, so threading
+    its slug through naively would relocate the general *library* as well and
+    empty the catalog — silently, since a missing dir simply lists nothing. That
+    is why only the write target moves here, and the shipped root stays as the
+    read fallback in :func:`assistant_routines_dirs`.
 
     This is what an assistant may **write**, not everything it may run: since
     FEAT-038 every assistant also *reads* the shared library, and since FEAT-115
@@ -63,18 +72,21 @@ def assistant_routines_dir(agent_slug: str | None) -> Path:
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return agent_home_layers(agent_slug)[0] / "routines"
-    return _PROJECT_ROOT / "routines"
+    return local_agents_root() / CHAT_SLUG / "routines"
 
 
 def assistant_routines_dirs(agent_slug: str | None) -> tuple[Path, ...]:
     """An assistant's own routine dirs in **read** order: local, then stock.
 
-    The chat's general library is the repo-root ``routines/`` and has no second
-    layer — it is not under either agent root.
+    The chat now has two layers like every other assistant: a writable local one
+    under the agent root, and the shipped ``routines/`` as the read fallback. The
+    fallback is what keeps FEAT-033's carve-out satisfied — the general library
+    stays fully visible, which is the thing that would break silently if the
+    slug were simply threaded through.
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return tuple(home / "routines" for home in agent_home_layers(agent_slug))
-    return (_PROJECT_ROOT / "routines",)
+    return (local_agents_root() / CHAT_SLUG / "routines", _PROJECT_ROOT / "routines")
 
 
 @dataclass
@@ -302,6 +314,11 @@ def check_config_defaults(config_class: type[BaseModel]) -> None:
 
 
 _routines_cache: dict[str, "RoutineInfo"] | None = None
+#: The root library alone, before the shared and local layers merge over it.
+#: Kept apart because the mtime shortcut below restores a *root* file by
+#: stem, and the merged dict may hold a layer that shadowed that stem --
+#: restoring which resurrects an override after its file is gone.
+_root_routines_cache: dict[str, "RoutineInfo"] | None = None
 
 # {stem: mtime} of every file seen on the last scan of routines/ — including
 # files that failed to load, so a broken routine isn't re-executed on every
@@ -309,10 +326,21 @@ _routines_cache: dict[str, "RoutineInfo"] | None = None
 _routines_mtimes: dict[str, float | None] = {}
 
 # Per-directory caches for discover_routines_from_path, keyed by
-# (resolved dir, agent_slug): (mtimes-as-scanned, loaded RoutineInfos).
+# (resolved dir, agent_slug): (mtimes-as-scanned, loaded RoutineInfos, the
+# consent record's fingerprint at the time of the scan).
+#
+# The fingerprint is part of the entry rather than of the key (FEAT-147): a
+# routine the gate skipped has an unchanged mtime, so without it, allowing a
+# file would leave the cache happily reporting "unchanged since last scan,
+# nothing to load" and the operator's consent would take effect at the next
+# restart instead of the next call.
 _path_caches: dict[
     tuple[str, str | None],
-    tuple[dict[str, float | None], dict[str, "RoutineInfo"]],
+    tuple[
+        dict[str, float | None],
+        dict[str, "RoutineInfo"],
+        tuple[tuple[str, str], ...] | None,
+    ],
 ] = {}
 
 # {resolved file path: why it last failed to load}. Discovery only logs the
@@ -338,6 +366,32 @@ def _safe_mtime(file_path: Path) -> float | None:
         return file_path.stat().st_mtime
     except OSError:
         return None
+
+
+def _read_text(file_path: Path) -> str:
+    """The file's text, or ``""`` when it cannot be read.
+
+    Empty is the safe answer for the consent gate downstream: no digest
+    matches it, so an unreadable file stays pending rather than loading.
+    """
+    try:
+        return file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _code_trust():
+    """:mod:`condor.agents.code_trust`, imported on first use.
+
+    Function-local because ``condor/agents/__init__.py`` eagerly pulls in the
+    whole agent framework — importing this leaf at module scope doubles what
+    ``routines.base`` costs to import (552 modules to 1194), which the MCP
+    subprocess pays on every tool call that touches a routine. ``sys.modules``
+    makes every call after the first a dict lookup.
+    """
+    from condor.agents import code_trust
+
+    return code_trust
 
 
 class RoutineInfo:
@@ -446,10 +500,15 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     Returns:
         Dict mapping routine name to RoutineInfo
     """
-    global _routines_cache
+    global _routines_cache, _root_routines_cache
 
-    fresh_start = force_reload or _routines_cache is None
-    prev_routines = {} if fresh_start else _routines_cache
+    # Either being cleared means "rescan": `_routines_cache = None` is the
+    # invalidation every existing caller already uses, and it must keep
+    # working now that the root layer has a cache of its own.
+    fresh_start = (
+        force_reload or _routines_cache is None or _root_routines_cache is None
+    )
+    prev_routines = {} if fresh_start else _root_routines_cache
     prev_mtimes = {} if fresh_start else _routines_mtimes
 
     routines_dir = library_dir()
@@ -521,10 +580,24 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     # within the shared library the local root shadows the shipped one (the same
     # rule again, on the second axis). Each root keeps its own mtime cache in
     # ``_path_caches``, so hot-reload behaves identically for every half.
-    routines = {**shared, **routines}
+    #
+    # ``<local>/condor/routines`` shadows both. It is where FEAT-115 moved the
+    # chat's *writes*, so it has to be part of the general library rather than
+    # bolted onto the catalog: `get_routine` -- and through it
+    # `RoutineStore._resolve_routine`, which is what actually starts a run --
+    # reads this function. Adding the layer only to `assistant_routines` made
+    # an authored routine listable but not runnable, and made a local override
+    # of a shipped name run the shipped code.
+    own = _merged_from((assistant_routines_dir(CHAT_SLUG),), force_reload=force_reload)
+    # Held separately from the merge: the mtime shortcut above restores a root
+    # file by stem, and `routines` after this line may hold a layer that
+    # shadowed that stem.
+    root_only = routines
+    routines = {**shared, **root_only, **own}
 
     _routines_mtimes.clear()
     _routines_mtimes.update(scanned_mtimes)
+    _root_routines_cache = root_only
     _routines_cache = routines
     return routines
 
@@ -561,10 +634,19 @@ def discover_routines_from_path(
     keyed by file mtimes: unchanged modules are NOT re-executed, while
     new/edited files are (re)loaded and deleted files dropped on every call.
 
+    **An agent whose code arrived in a bundle is gated** (FEAT-147): a file
+    the operator has not allowed is skipped *before* ``exec_module``, never
+    after, so listing or reading an imported routine does not run it. The
+    skipped files are what :func:`pending_routines` describes statically. An
+    agent nobody imported has no consent record and nothing here changes for
+    it.
+
     Args:
         routines_dir: Directory containing routine .py files.
         agent_slug: If provided, sets source to "agent:{slug}" and default category to agent name.
         force_reload: Force re-execution of all modules regardless of mtimes.
+            It does not override consent — a forced reload of code nobody
+            allowed is exactly the execution this gate exists to prevent.
 
     Returns:
         Dict mapping routine name to RoutineInfo.
@@ -576,10 +658,15 @@ def discover_routines_from_path(
     if not routines_dir.exists():
         return routines
 
+    trust = _code_trust().load(agent_slug) if agent_slug else None
+    fingerprint = trust.fingerprint() if trust is not None else None
+
     cache_key = (str(routines_dir.resolve()), agent_slug)
-    prev_mtimes, prev_routines = (
-        ({}, {}) if force_reload else _path_caches.get(cache_key, ({}, {}))
-    )
+    cached = _path_caches.get(cache_key)
+    if force_reload or cached is None or cached[2] != fingerprint:
+        prev_mtimes, prev_routines = {}, {}
+    else:
+        prev_mtimes, prev_routines = cached[0], cached[1]
     scanned_mtimes: dict[str, float | None] = {}
 
     source = f"agent:{agent_slug}" if agent_slug else "global"
@@ -600,6 +687,12 @@ def discover_routines_from_path(
             # Unchanged since last scan: reuse cached info (or cached failure).
             if stem in prev_routines:
                 routines[stem] = prev_routines[stem]
+            continue
+
+        if trust is not None and not trust.permits(stem, _read_text(file_path)):
+            # Awaiting the operator's consent. Not an error and not a failed
+            # load: ``pending_routines`` lists it, the source route serves it,
+            # and nothing of it has run.
             continue
 
         try:
@@ -645,7 +738,7 @@ def discover_routines_from_path(
             _load_errors[str(file_path.resolve())] = str(e)
             logger.error(f"Failed to load agent routine {file_path.stem}: {e}")
 
-    _path_caches[cache_key] = (scanned_mtimes, routines)
+    _path_caches[cache_key] = (scanned_mtimes, routines, fingerprint)
     return routines
 
 
@@ -679,8 +772,17 @@ def assistant_routines(
     ``discover_routines`` is deliberately not touched, so the human ``/routines``
     page still lists and runs a muted routine. A mute is about what an assistant
     is told, never about what a person may do.
+
+    A mute is also not an *execution* gate, and never was — the subtraction
+    here happens after discovery has already imported the file. What keeps
+    imported code from running is :mod:`condor.agents.code_trust`, applied
+    inside :func:`discover_routines_from_path`; :func:`pending_routines` is
+    what this function's callers show for the files it skipped.
     """
     if not agent_slug or agent_slug == CHAT_SLUG:
+        # ``discover_routines`` now includes the chat's own local layer, so
+        # this is the general library again and every reader of it -- the
+        # catalog here, `get_routine`, the resolver behind a run -- agrees.
         found = discover_routines(force_reload=force_reload)
     else:
         shared = _merged_from(shared_routines_roots(), force_reload=force_reload)
@@ -699,6 +801,124 @@ def assistant_routines(
         # cache itself: hand back the same object rather than copy it per call.
         return found
     return {name: info for name, info in found.items() if name not in muted}
+
+
+@dataclass(frozen=True)
+class PendingRoutine:
+    """A routine that exists on disk and has not been allowed to run (FEAT-147).
+
+    **A separate type from** :class:`RoutineInfo`, deliberately: every
+    ``dict[str, RoutineInfo]`` in this codebase means "loaded and runnable",
+    and a row that must not be run cannot be allowed to reach a caller that
+    would run it. So there is no ``config_class`` and no ``run_fn`` here —
+    not as ``None``, which every consumer would then have to check, but
+    absent, so the type system says it.
+
+    Everything on it is read statically by :mod:`condor.routine_meta`, which
+    is why there are no ``fields``: pydantic builds a model's fields when the
+    class is created, so a pending routine cannot render its configuration
+    form. You cannot configure code you have not agreed to run.
+    """
+
+    name: str
+    source_path: Path
+    source: str
+    category: str = ""
+    description: str = ""
+    continuous: bool = False
+    muted: bool = False
+    #: ``pending`` (never allowed) or ``changed`` (allowed, then edited).
+    reason: str = "pending"
+    #: sha256 of the file's text — what an allow records.
+    digest: str = ""
+    last_modified: float | None = None
+
+    def refusal(self) -> str:
+        """Why this routine did not run, in the sentence a caller shows."""
+        if self.reason == "changed":
+            return (
+                f"Routine '{self.name}' has changed on disk since it was "
+                "allowed to run, so it is not loaded. Read it again and allow "
+                "the new version in the agent's Routines tab."
+            )
+        return (
+            f"Routine '{self.name}' came from an imported bundle and has not "
+            "been allowed to run on this install. Read its source, then allow "
+            "it in the agent's Routines tab."
+        )
+
+
+def pending_routines(agent_slug: str | None = None) -> list[PendingRoutine]:
+    """Every routine of this agent that discovery refused to import.
+
+    The companion of :func:`assistant_routines` and nothing more: an agent
+    with no consent record — anything the operator created here rather than
+    imported — returns an empty list, as does the chat, whose library is this
+    repo's own code.
+
+    Read order matches ``assistant_routines``: the local layer shadows the
+    shipped one by name. The shared library is not scanned at all, because it
+    is never gated.
+    """
+    if not agent_slug or agent_slug == CHAT_SLUG:
+        return []
+    code_trust = _code_trust()
+    trust = code_trust.load(agent_slug)
+    if trust is None:
+        return []
+
+    muted = load_mutes(agent_slug)["routines"]
+    default_category = agent_slug.replace("_", " ").replace("-", " ").title()
+    found: dict[str, PendingRoutine] = {}
+    # Reversed so the first root in read order overwrites the later ones —
+    # the same shadowing ``_merged_from`` applies to the loaded half.
+    for root in reversed(assistant_routines_dirs(agent_slug)):
+        if not root.exists():
+            continue
+        for file_path in sorted(root.glob("*.py")):
+            stem = file_path.stem
+            if stem.startswith("_"):
+                continue
+            text = _read_text(file_path)
+            state = trust.state(stem, text)
+            if state == code_trust.ALLOWED:
+                continue
+            meta = meta_from_source(text, name=stem)
+            found[stem] = PendingRoutine(
+                name=stem,
+                source_path=file_path,
+                source=f"agent:{agent_slug}",
+                category=meta.category or default_category,
+                description=meta.description or stem,
+                continuous=meta.continuous,
+                muted=stem in muted,
+                reason=state,
+                digest=code_trust.digest_of(text) if text else "",
+                last_modified=_safe_mtime(file_path),
+            )
+    return [found[name] for name in sorted(found)]
+
+
+def pending_routine(agent_slug: str | None, name: str) -> PendingRoutine | None:
+    """The pending row for one routine of one agent, if it is pending."""
+    for row in pending_routines(agent_slug):
+        if row.name == name:
+            return row
+    return None
+
+
+def raise_if_pending(agent_slug: str | None, name: str) -> None:
+    """Refuse a routine awaiting consent, naming the gesture that clears it.
+
+    The one place the refusal sentence is written, so the web runner, the
+    scheduler, the MCP tool and ``condor.primitives`` cannot disagree about
+    what the operator is being asked to do.
+    """
+    row = pending_routine(agent_slug, name)
+    if row is not None:
+        from condor.agents.code_trust import PendingConsentError
+
+        raise PendingConsentError(row.refusal())
 
 
 def get_routine(name: str) -> RoutineInfo | None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from condor.fetchers.executors import describe_executor_error
+from condor.fetchers.executors import describe_executor_error, price_pending_rows
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
@@ -18,45 +18,6 @@ if TYPE_CHECKING:
     from condor.agents.ownership import OwnedBot
 
 log = logging.getLogger(__name__)
-
-
-async def _price_pending_rows(client: Any, running: list[dict]) -> list[str]:
-    """Value the running rows the row builder could not, at the live price.
-
-    A market order still pending at the next tick reports no entry, no limit
-    price and no fill, so ``build_executor_row`` -- pure, no client -- sizes it
-    at 0. The risk gate priced that same create at the live price before
-    approving it (``condor.agents.risk._planned_amount_quote``); dropping it
-    from the book one tick later let a second create through a position cap the
-    two together exceed. So it is priced here the way the gate priced it.
-
-    Rows are updated in place. Returns the ids that still have no price: their
-    exposure is unknown, not zero, and the caller must say so.
-    """
-    from condor.fetchers.market_data import fetch_current_price
-
-    prices: dict[tuple[str, str], float] = {}
-    unpriced: list[str] = []
-    for row in running:
-        if row.get("amount", 0) > 0:
-            continue
-        try:
-            base = float((row.get("config") or {}).get("amount") or 0)
-        except (TypeError, ValueError):
-            base = 0.0
-        if base <= 0:
-            continue
-        market = (row.get("connector") or "", row.get("pair") or "")
-        if market not in prices:
-            try:
-                prices[market] = float(await fetch_current_price(client, *market) or 0)
-            except (TypeError, ValueError):
-                prices[market] = 0.0
-        if prices[market] > 0:
-            row["amount"] = base * prices[market]
-        else:
-            unpriced.append(row.get("id") or "?")
-    return unpriced
 
 
 class ExecutorsProvider(BaseProvider):
@@ -178,12 +139,12 @@ class ExecutorsProvider(BaseProvider):
                 "concluding this session is break-even."
             )
 
-        unpriced = await _price_pending_rows(client, running)
+        unpriced = await price_pending_rows(client, running)
         if unpriced:
             lines.append(
-                f"  ⚠️ No price for pending executor(s) {', '.join(unpriced)} — "
+                f"  ⚠️ No size for executor(s) {', '.join(unpriced)} — "
                 "their exposure is unknown, so new positions are refused until "
-                "they fill or a price is available."
+                "they fill, report their own size, or a price is available."
             )
         total_exposure = sum(r.get("amount", 0) for r in running)
 
@@ -213,6 +174,21 @@ class ExecutorsProvider(BaseProvider):
                 "controllers": perf.controllers,
                 "close_type_counts": perf.close_type_counts,
                 "fees_known": perf.fees_known,
+                # Whether this tick obtained a reading at all ([[CORR-725]]'s
+                # tri-state). Present only on the success path above: a fetch
+                # that raised returns ``{"error": ...}``, so the absence of this
+                # key is itself the statement that nothing was read, and
+                # ``TickEngine`` stamps ``last_reading_at`` on ``ok`` alone
+                # ([[FEAT-137]]).
+                "reading": perf.reading,
+                # Both scopes, labelled, beside the folded totals above
+                # ([[FEAT-135]]). None = unavailable, never the other scope.
+                "session_realized_pnl": perf.session_realized_pnl,
+                "session_volume": perf.session_volume,
+                "session_instances": perf.session_instances,
+                "lifetime_realized_pnl": perf.lifetime_realized_pnl,
+                "lifetime_volume": perf.lifetime_volume,
+                "lifetime_instances": perf.lifetime_instances,
                 # None when it could not be derived here; the engine then fetches
                 # it itself (TickEngine._pnl_series).
                 "pnl_series": perf.pnl_series,

@@ -590,6 +590,12 @@ async def _notify_interrupted_runs(bot, report) -> None:
 
     One summary per chat rather than a message per run: a crash with several
     live loops would otherwise spam the user at the worst possible moment.
+
+    An executor the last process left RUNNING with no live session (CORR-726)
+    goes in the same message. It is not an interrupted run — nothing was
+    interrupted, a graceful stop leaves executors behind by design — but it is
+    live exposure nobody is operating, so the owner hears about it at exactly
+    the moment they are reading about the restart.
     """
     from condor.notifications import announce, user_for_chat
 
@@ -606,11 +612,28 @@ async def _notify_interrupted_runs(bot, report) -> None:
         if chat_id:
             by_chat.setdefault(int(chat_id), []).append(run)
 
-    for chat_id, runs in by_chat.items():
-        lines = [f"Found {len(runs)} interrupted run(s) after restart:"]
+    orphans_by_chat: dict[int, list] = {}
+    for orphan in getattr(report, "orphaned_executors", []):
+        if orphan.chat_id:
+            orphans_by_chat.setdefault(int(orphan.chat_id), []).append(orphan)
+
+    for chat_id in sorted(set(by_chat) | set(orphans_by_chat)):
+        runs = by_chat.get(chat_id, [])
+        lines: list[str] = []
+        if runs:
+            lines.append(f"Found {len(runs)} interrupted run(s) after restart:")
         for run in runs:
             suffix = " — restarted" if run.restarted else ""
             lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        orphans = orphans_by_chat.get(chat_id, [])
+        if orphans:
+            if lines:
+                lines.append("")
+            lines.append(
+                f"⚠️ {len(orphans)} executor(s) still RUNNING with no live "
+                "session — they keep trading and polling until stopped:"
+            )
+            lines.extend(f"• {o.label}" for o in orphans)
         text = "\n".join(lines)
         # Telegram and the bell (FEAT-048) in one call: ``announce`` resolves
         # the sender once and files the notice exactly once, including when the
@@ -768,11 +791,13 @@ async def startup(application: Application) -> None:
 
     try:
         report = await get_supervisor().reconcile_boot()
-        if report.total:
+        if report.total or report.orphaned_executors:
             logger.warning(
-                "Boot reconciliation: %d interrupted, %d restarted",
+                "Boot reconciliation: %d interrupted, %d restarted, "
+                "%d orphaned executors",
                 report.total,
                 len(report.restarted),
+                len(report.orphaned_executors),
             )
             await _notify_interrupted_runs(outbound_bot, report)
     except Exception:
@@ -1261,6 +1286,14 @@ async def _run_dual(application: Application) -> None:
 
     code_guard.install()
     loop_watchdog.start(loop)
+
+    # The boot got this far, so a later crash should take the tmux session with
+    # it again -- otherwise `make status` would report a dead Condor as running.
+    # exec_restart() turned this on so that a failed handover stayed readable;
+    # this is the other half, mirroring what the Makefile does after its probe.
+    from utils.updater import set_tmux_remain_on_exit
+
+    set_tmux_remain_on_exit(False)
 
     # Run uvicorn as a task
     web_task = asyncio.create_task(server.serve())

@@ -125,8 +125,10 @@ what the operator actually has, or leave it inherited. Every key is held to your
 allowlist — a tool it leaves out is never mounted — and an ACP key
 (`claude-code`/`claude-acp`/`gemini`/`copilot`) still confirmation-gates mutations.
 
-**Server:** leave `server_name` empty unless the user pins it. A loop you own runs on
-whichever server your agent resolves.
+**Server:** leave `server_name` empty unless the user pins it. A loop you own then runs on
+the server **its owner** resolves — their default, else the first server they can reach —
+for its data *and* its trading tools alike, not on the default of whichever chat started
+it. One answer per run, so the fleet it reads is the fleet it trades.
 
 **Editing & deleting:** `manage_loops(action="update", loop_id=…, instructions=…)` to revise
 the tick playbook; `manage_loops(action="delete", loop_id=…)` to remove it. Stop any running instance first.

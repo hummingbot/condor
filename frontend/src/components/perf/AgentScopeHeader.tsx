@@ -7,6 +7,7 @@ import { agentBucketLabel, isAgentBucket, runParam } from "@/components/perf/age
 import { agentColor } from "@/lib/agentColor";
 import {
   isPseudoRunKey,
+  livenessFacts,
   loopFacts,
   loopStatus,
   ownerDisplayName,
@@ -114,6 +115,10 @@ export function AgentScopeHeader({
   // The reading of the loop is pure and lives in lib/ where a test can reach it
   // (the ARCH-300 split); what stays here is the clock and the markup.
   const facts = loopFacts(live, now);
+  // Quiet or dead (FEAT-137). Only for a loop that is running: a stopped one
+  // has no liveness left to diagnose, and the schedule band above already
+  // falls silent for it.
+  const liveness = running ? livenessFacts(live, now) : [];
 
   // `snapshotTick` lands on that tick's full snapshot, collapsing the main page
   // → agent → session → snapshot walk a tick needs otherwise.
@@ -191,6 +196,20 @@ export function AgentScopeHeader({
           </button>
         )}
       </h2>
+      {/* How long since it last got a reading and last did something that
+          worked (FEAT-137). Beside the bot list because that is where "this
+          one is quiet" and "this one is dead" have to be told apart: the
+          schedule band above says a tick is due, which a dead strategy's
+          ticks also are. */}
+      {liveness.length > 0 && (
+        <span
+          data-loop-liveness
+          className="block truncate text-[10px] tabular-nums text-[var(--color-text-muted)]"
+          title="When this loop last obtained a reading, and last completed a call that changed the market. Both are outcomes — a tick that achieved nothing moves neither."
+        >
+          {liveness.join(" · ")}
+        </span>
+      )}
       {/* What the agent last *did* — a tool call that ran, not a paraphrase.
           Above the words because the deed is the fact and the narration is the
           commentary on it. Clicking lands on that tick's snapshot. */}

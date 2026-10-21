@@ -10,7 +10,7 @@ import shutil
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import yaml
 from aiohttp import ClientTimeout
@@ -65,6 +65,42 @@ LAST_SEEN_RESOLUTION_SEC = 300
 # refuses these first (SEC-250). Writing one goes through its own audited setter
 # — ``set_code_run_grant`` for ``code_run`` — never through a bulk merge.
 RESERVED_PREFERENCE_KEYS = frozenset({CODE_RUN_PREFERENCE})
+
+#: Every top-level key of the install's ``config.yml``, in the order it is
+#: written, mapped to the factory that produces its default. One declaration,
+#: because this set used to be retyped at three sites — the ``setdefault`` block
+#: in ``_load_config``, ``_default_data`` and the ``data`` dict in
+#: ``_save_config`` — and they had already drifted apart. The one in
+#: ``_save_config`` is the dangerous one: it is an allowlist that *truncates*,
+#: so a section missing from it is silently discarded on the next save rather
+#: than failing. That cost live data twice, and both times the fix was to add
+#: one more line to one more list (ARCH-738). Adding an entry here is now the
+#: whole change a new section needs.
+CONFIG_SECTIONS: "dict[str, Callable[[ConfigManager], Any]]" = {
+    "servers": lambda cm: {},
+    "default_server": lambda cm: None,
+    "admin_id": lambda cm: cm._get_admin_from_env(),
+    "users": lambda cm: {},
+    "server_access": lambda cm: {},
+    "chat_defaults": lambda cm: {},
+    # Omitting this from the save projection dropped every preference on the
+    # next save — including the code_run grant, which _load_config reads back
+    # and routes/code.py gates on (ARCH-177).
+    "user_preferences": lambda cm: {},
+    "web_jwt_secret": lambda cm: None,
+    "telemetry": lambda cm: {},
+    # Same omission as ARCH-177 above, one section newer: without it the
+    # admin's sharing veto, each user's standing answer and the share_secret
+    # behind the stable pseudonyms were re-minted on every restart (CORR-244).
+    "sharing": lambda cm: {},
+    # The Botcamp hub's publish token (FEAT-146). One entry covers the load
+    # setdefault, the save projection and the empty-file default because
+    # ARCH-738 collapsed those three hand-kept lists into this one — before it,
+    # a section declared in two of the three was dropped on the next save,
+    # twice (ARCH-177, CORR-244).
+    "hub": lambda cm: {},
+    "version": lambda cm: cm.VERSION,
+}
 
 
 class ConfigManager:
@@ -187,15 +223,10 @@ class ConfigManager:
 
         self._data = data
 
-        # Ensure all sections exist
-        self._data.setdefault("servers", {})
-        self._data.setdefault("default_server", None)
-        self._data.setdefault("users", {})
-        self._data.setdefault("server_access", {})
-        self._data.setdefault("chat_defaults", {})
-        self._data.setdefault("user_preferences", {})
-        self._data.setdefault("telemetry", {})
-        self._data.setdefault("sharing", {})
+        # Ensure every declared section exists (CONFIG_SECTIONS is the list).
+        for name, default in CONFIG_SECTIONS.items():
+            if name not in self._data:
+                self._data[name] = default(self)
 
         # Drop the `"No username"` sentinel (FEAT-088). It is not a migration of
         # meaning — the string only ever stood for "Telegram told us nothing" —
@@ -228,18 +259,8 @@ class ConfigManager:
         logger.info(f"Loaded config from {self.config_path}")
 
     def _default_data(self) -> dict:
-        """Build an empty config structure."""
-        return {
-            "servers": {},
-            "default_server": None,
-            "admin_id": self._get_admin_from_env(),
-            "users": {},
-            "server_access": {},
-            "chat_defaults": {},
-            "user_preferences": {},
-            "telemetry": {},
-            "version": self.VERSION,
-        }
+        """Build an empty config structure: every declared section at its default."""
+        return {name: default(self) for name, default in CONFIG_SECTIONS.items()}
 
     def _init_default_config(self):
         """Initialize with default configuration."""
@@ -272,25 +293,13 @@ class ConfigManager:
             return
 
         try:
+            # A projection over the declared sections, not dict(self._data):
+            # whatever a caller stuffed into _data at runtime is deliberately
+            # not persisted. The projection is generated so it can no longer
+            # fall behind the declaration (ARCH-738).
             data = {
-                "servers": self._data.get("servers", {}),
-                "default_server": self._data.get("default_server"),
-                "admin_id": self._data.get("admin_id"),
-                "users": self._data.get("users", {}),
-                "server_access": self._data.get("server_access", {}),
-                "chat_defaults": self._data.get("chat_defaults", {}),
-                # Omitting this dropped every preference on the next save —
-                # including the code_run grant, which _load_config reads back
-                # and routes/code.py gates on (ARCH-177).
-                "user_preferences": self._data.get("user_preferences", {}),
-                "web_jwt_secret": self._data.get("web_jwt_secret"),
-                "telemetry": self._data.get("telemetry", {}),
-                # Same omission as ARCH-177 above, one section newer: without
-                # this the admin's sharing veto, each user's standing answer and
-                # the share_secret behind the stable pseudonyms were re-minted
-                # on every restart (CORR-244).
-                "sharing": self._data.get("sharing", {}),
-                "version": self._data.get("version", self.VERSION),
+                name: self._data.get(name, default(self))
+                for name, default in CONFIG_SECTIONS.items()
             }
             # Keep a copy of the last known-good file before truncating it,
             # so a partial write can be recovered from on the next load.
@@ -821,6 +830,28 @@ class ConfigManager:
         if not isinstance(section, dict):
             section = {}
             self._data["sharing"] = section
+        section.update(changes)
+        self._save_config()
+        return dict(section)
+
+    def get_hub(self) -> dict:
+        """The agent-hub section (FEAT-146). Empty until a token is pasted.
+
+        Separate from :meth:`get_sharing` for the same reason sharing is
+        separate from telemetry: this holds one outside service's credential,
+        install-wide and the operator's, while sharing holds per-user consent
+        and this install's own ids. Its only key is ``token``, which no route
+        ever reads back out to a client.
+        """
+        section = self._data.get("hub")
+        return dict(section) if isinstance(section, dict) else {}
+
+    def update_hub(self, **changes) -> dict:
+        """Merge keys into the hub section and persist."""
+        section = self._data.setdefault("hub", {})
+        if not isinstance(section, dict):
+            section = {}
+            self._data["hub"] = section
         section.update(changes)
         self._save_config()
         return dict(section)
@@ -1464,6 +1495,100 @@ def may_use_stored_server(cm, user_id: int, server_name: Optional[str]) -> bool:
     if not server_name or not cm.get_server(server_name):
         return False
     return cm.has_server_access(user_id, server_name)
+
+
+class ServerUnavailable(RuntimeError):
+    """A run that named a server, or needs one, could not get it (CORR-729).
+
+    Carries the name it could not honour in ``server_name`` (empty when there
+    was none to honour), so a caller can report it without re-deriving it.
+    """
+
+    def __init__(self, message: str, server_name: str = ""):
+        super().__init__(message)
+        self.server_name = server_name
+
+
+def resolve_stored_server(
+    cm,
+    user_id: int,
+    server_name: Optional[str] = None,
+    *,
+    pinned: bool = False,
+    required: bool = False,
+    chat_id=None,
+    user_data: dict = None,
+) -> Optional[str]:
+    """Turn a run's server setting into a server name — the one rule (CORR-729).
+
+    ``toolsets.build_mcp_servers_for_session`` and ``TickEngine._resolve_server``
+    each open-coded the same three-candidate chain — the setting, the chat
+    default, the first accessible server — so neither could tell *"no server was
+    chosen, choose sensibly"* from *"this server was chosen and it is not
+    usable"*. A session pinned to a server that is down, renamed or revoked
+    therefore traded on a different server's accounts behind one log line
+    (issue #279). The distinction lives in the two flags rather than in each
+    caller's reading of its own setting:
+
+    ``pinned``
+        ``server_name`` was *chosen* for this run — an Agent pinned to a named
+        server, a start request that asked for one, a restart carrying the dead
+        session's pin. It resolves to that server or raises
+        :class:`ServerUnavailable`; it never silently becomes another one.
+
+    ``required``
+        the seat cannot run at all without a server. Raises when the whole chain
+        comes up empty, instead of handing back ``None`` for the caller to turn
+        into a warning. A serverless session stays a valid outcome for every
+        seat that does not ask for this (a chat whose user has no grants yet).
+
+    With neither flag this is exactly the previous lenient chain, which is what
+    keeps an *inherited* name — a strategy default, or the ``""`` AgentConfig
+    now fills in — falling through to the subject's own servers. That leniency
+    is deliberate and matches ``_start``/``_check_restartable``, which hold a
+    name the run asked for strictly and leave an inherited one alone.
+
+    Every candidate is held to :func:`may_use_stored_server`, so the name that
+    comes out has been checked for existence *and* reach by ``user_id`` — the
+    SEC-164/SEC-178 bar, unchanged. ``chat_id`` is not a principal: it only
+    selects which ambient default to consider, and that default is held to the
+    same bar as the rest.
+
+    Returns the resolved name, or ``None`` when nothing resolved and nothing
+    required it.
+    """
+
+    def usable(name: Optional[str]) -> bool:
+        return may_use_stored_server(cm, user_id, name)
+
+    if server_name and not usable(server_name):
+        if pinned:
+            raise ServerUnavailable(
+                f"server '{server_name}' is not available to user {user_id} "
+                "(it does not exist, or the share was withdrawn)",
+                server_name,
+            )
+        server_name = None
+
+    if not server_name:
+
+        def candidates():
+            # Lazy on purpose: resolving the chat default writes back into
+            # ``user_data``, so it must not run when a pin already answered.
+            if chat_id is not None:
+                yield get_effective_server(chat_id, user_data)
+            accessible = cm.get_accessible_servers(user_id)
+            yield accessible[0] if accessible else None
+
+        server_name = next((name for name in candidates() if usable(name)), None)
+
+    if not server_name and required:
+        raise ServerUnavailable(
+            f"user {user_id} has no accessible Hummingbot server, and this run "
+            "cannot do anything without one"
+        )
+
+    return server_name
 
 
 def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
