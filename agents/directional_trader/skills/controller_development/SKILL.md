@@ -100,9 +100,25 @@ Before uploading:
 - [ ] **All params from config** — no hardcoded numbers in the signal logic
 - [ ] **Signal values** — only `1`, `-1`, `0`
 - [ ] **Column names** — pandas_ta convention: `EMA_{length}`, `RSI_{length}`,
-      `ADX_{length}`, `MACD_{fast}_{slow}_{signal}`, `BBL_{length}_{std}`,
-      `BBU_{length}_{std}`, `SUPERTd_{length}_{multiplier}`. Verify against actual
-      output columns — a mismatch is a runtime `KeyError`
+      `ADX_{length}`, `MACD_{fast}_{slow}_{signal}`,
+      `BBL_{length}_{lower_std}_{upper_std}` / `BBU_{length}_{lower_std}_{upper_std}`
+      (bbands takes the two stds separately and puts BOTH in the name, so a
+      20/2.0 band is `BBL_20_2.0_2.0` and not `BBL_20_2.0` — DT-10),
+      `SUPERTd_{length}_{multiplier}`. **Print `df.columns` once and read it**
+      rather than trusting any of these: a mismatch is a runtime `KeyError`
+- [ ] **No all-NaN or mutually exclusive feature columns** — the backtester
+      `dropna()`s the feature frame as a whole, so one column that is NaN
+      everywhere deletes every row and the run fails with an unexplained HTTP
+      500. `df.ta.supertrend()` emits exactly this trap: `SUPERTl` and `SUPERTs`
+      are a complementary pair, and in a one-directional window one of them is
+      NaN throughout (DT-3). Drop what the signal does not read before
+      publishing `processed_data["features"]`
+- [ ] **Declare the feeds** — implement `get_candles_config()` and return a
+      `CandlesConfig` for every interval `update_processed_data` reads. A
+      controller that fetches a feed it never declared gets an empty frame at
+      1m, which is how a template-derived controller failed there while working
+      at higher resolutions (DT-10). The three shipped controllers all declare
+      theirs; copy that shape
 - [ ] **NaN handling** — indicators emit NaN during warm-up; NaN comparisons yield
       `False`, which correctly maps to `signal = 0`
 - [ ] **`signal` populated for all rows** — default 0, then overwritten by masks

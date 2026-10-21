@@ -5,7 +5,10 @@ description: Autonomously deploys and manages EMA crossover controllers across a
 agent_key: null
 skills: []
 default_config:
-  frequency_sec: 60
+  # 300, not 60 (DT-7): a tick that backtests anything cannot finish in a
+  # minute, and a trend strategy scored over a 14-day window has nothing
+  # new to say every 60 seconds anyway.
+  frequency_sec: 300
   execution_mode: loop
   total_amount_quote: 200
   max_pairs: 3
@@ -42,14 +45,32 @@ The agent is NOT locked to specific pairs or configs. It discovers what's availa
 
 ### Step 1 — Discover available EMA configs
 Call `manage_controllers(action="list", controller_type="directional_trading")`.
-Filter for configs whose name contains `ema_` — these are EMA crossover candidates.
+Take what it returns — **do not filter on a name substring**. This step used to
+require `ema_` in the config name, which matches nothing a clean install ships:
+this agent's controllers are `supertrend_v1`, `macd_bb_v1` and `bollinger_v1`,
+and their sample configs are named for a risk posture, not an indicator. The
+first tick of a fresh session therefore found no candidates at all and deployed
+nothing (DT-6). Prefer configs built on this agent's own controllers; the
+`controller_type` filter above is what keeps the list directional.
 
 From your journal learnings, recall which configs have performed well or poorly live. Pre-filter out:
 - Configs previously stopped for drawdown this session
 - Configs with 2+ consecutive live stop-loss triggers (from journal)
 
 ### Step 2 — Backtest candidates
-For each candidate config (up to 8), run a fresh backtest via the `backtest_chart` routine:
+**At most TWO configs per tick.** A backtest takes 15–20 seconds and they run one
+after another, so five of them made a tick take 87.9 seconds against a frequency
+of 60 — the loop was permanently behind itself, and the sleep that follows a tick
+is added to an overrun rather than absorbing it (DT-7). Two fits with room to
+spare. Rank your candidates and carry the rest to the next tick rather than
+widening this number; a 14-day backtest window does not change between ticks,
+and a config you already measured this session does not need measuring again.
+
+Skip this step entirely when a bot is already running and inside its risk
+limits: re-ranking a portfolio you are not going to change spends the whole tick
+budget for nothing.
+
+For each of the two, run a fresh backtest via the `backtest_chart` routine:
 ```
 manage_routines(
   action="run",
@@ -58,12 +79,20 @@ manage_routines(
     "config_name": "<config_name>",
     "start_date": "<14 days ago, YYYY-MM-DD>",
     "end_date": "<today, YYYY-MM-DD>",
-    "resolution": "1m",
-    "trade_cost": 0.0002,
+    "resolution": "<the config's own interval>",
+    "trade_cost": 0.0006,
     "chart": false
   }
 )
 ```
+**`resolution` must equal the controller's own `interval`** (DT-4). Features are merged onto the backtesting-resolution candles with `merge_asof(direction="backward")` on the candle **open** timestamp, so a resolution finer than the interval lets every row inside a candle see that candle's final close — the backtest is then optimistic by construction. A finer-resolution result is an upper bound, never a measurement.
+
+`trade_cost` is the **taker** fee, not the maker one (DT-8). These controllers
+enter and exit with market orders, so 0.0002 priced trades this strategy cannot
+get: the same trades backtested at 0.0006 returned 5.89% where 0.0002 claimed
+7.21%, and the loop was selecting configs on the cheaper assumption. Raise it
+further if your venue charges more; never lower it to make a config qualify.
+
 Collect the key metrics from each result:
 - **Sharpe ratio** (target > 1.0)
 - **Max drawdown** (target < 15%)

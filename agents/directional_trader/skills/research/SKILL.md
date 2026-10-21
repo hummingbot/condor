@@ -57,7 +57,7 @@ df.ta.atr(length=14, append=True)
 # Custom
 df["zscore"] = (df["close"] - df["close"].rolling(20).mean()) / df["close"].rolling(20).std()
 df["ret"]    = df["close"].pct_change()
-df["rvol"]   = df["ret"].rolling(20).std() * (252 ** 0.5)
+df["rvol"]   = df["ret"].rolling(20).std() * (365 ** 0.5)  # 365: crypto is 24/7 (DT-14)
 ```
 
 ## Step 3 — Classify the regime

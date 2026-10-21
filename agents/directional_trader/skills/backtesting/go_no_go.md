@@ -5,7 +5,8 @@ Companion to the `backtesting` playbook. The last gate before live capital.
 ## Step 1 — Run the held-out window
 
 Take the sweep winner and run it once over the ~30 days deliberately excluded from
-the sweep. Same resolution, same trade cost, `1m` fidelity.
+the sweep. Same resolution and same trade cost as the sweep, with the
+resolution equal to the controller's `interval` (DT-4 — see below).
 
 ```python
 manage_routines(
@@ -14,7 +15,7 @@ manage_routines(
     config={
         "config_name": "{strategy_slug}_best",
         "start_date": <held_out_start>, "end_date": <today>,
-        "resolution": "1m", "trade_cost": 0.0006,
+        "resolution": "<the controller's interval>", "trade_cost": 0.0006,
     },
 )
 # → instance_id; read it back with manage_routines(action="get_instance", name=...)
@@ -55,18 +56,22 @@ save it with `manage_memory`, and return to the phase that owns the problem.
 winning_config: {strategy_slug}_best
 in_sample_period:     {start} → {end}
 out_of_sample_period: {start} → {end}
-resolution: 1m   trade_cost: 0.0006
+resolution: <= controller interval   trade_cost: 0.0006
 metrics (out-of-sample):
   sharpe: X.XX               max_drawdown_pct: XX.X%
   total_trades: NNN          win_rate: XX%
-  profit_factor: X.XX        avg_trade_duration_hours: N.N
+  profit_factor: X.XX        close_types: {TP: N, SL: N, TIME_LIMIT: N}
 in_sample_sharpe: X.XX       retention: XX%
 stability_evidence: adjacent params {a}, {b} → Sharpe {x}, {y}
 deployment_readiness: YES / NO
 ```
 
-`avg_trade_duration_hours` is not decoration — `deploy_and_monitor` uses it to size
-the live comparison window.
+`close_types` is not decoration — it is how `deploy_and_monitor` tells a config
+exited by its signal from one exited by its stop or its time limit. There is no
+`avg_trade_duration_hours`: the backtester does not return one, so a template
+asking for it could never be filled in honestly (DT-11).
+
+**`resolution` must equal the controller's own `interval`** (DT-4). Features are merged onto the backtesting-resolution candles with `merge_asof(direction="backward")` on the candle **open** timestamp, so a resolution finer than the interval lets every row inside a candle see that candle's final close — the backtest is then optimistic by construction. A finer-resolution result is an upper bound, never a measurement.
 
 ## Step 4 — Hand off
 

@@ -73,7 +73,7 @@ data. Dates are `YYYY-MM-DD` strings, not epoch seconds.
 # Blocking — one short run you are waiting on interactively.
 manage_routines(action="run", name="backtest_chart", config={
     "config_name": ..., "start_date": "2025-04-22", "end_date": "2025-07-22",
-    "resolution": "1m", "trade_cost": 0.0006, "chart": False,
+    "resolution": "<the controller's interval>", "trade_cost": 0.0006, "chart": False,
 })
 
 # Fire and forget — long windows and every sweep. submit → read back.

@@ -20,6 +20,12 @@ from config_manager import get_client
 
 logger = logging.getLogger(__name__)
 
+#: Days in a crypto year. 24/7 markets have no weekends and no holidays, so
+#: annualising with equities' 252 trading days understates volatility by
+#: sqrt(365/252) — about 12% (DT-14). Defined once: the two sites below used
+#: to carry the number inline, which is how they would disagree.
+CALENDAR_DAYS = 365
+
 
 COLORS = {"BTC-USDT": "#f7931a", "ETH-USDT": "#627eea", "SOL-USDT": "#9945ff"}
 DEFAULT_COLOR = "#64748b"
@@ -346,7 +352,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         ret = df["ret"].dropna()
         adx_s = _adx(df).dropna()
         rvol_window = bars_per_day * 5  # ~5 days rolling
-        rvol_ann = ret.rolling(rvol_window).std() * math.sqrt(252 * bars_per_day)
+        # 365, not 252 (DT-14): crypto trades every calendar day, so a
+        # trading-day year understates annualised volatility by sqrt(365/252)
+        # — about 12%. A live routine reported 47.4% where the right figure
+        # was 57.0%, which is the difference between two position sizes.
+        rvol_ann = ret.rolling(rvol_window).std() * math.sqrt(
+            CALENDAR_DAYS * bars_per_day
+        )
         autocorr = float(ret.autocorr(lag=1))
 
         dist_stats[pair] = {
@@ -435,7 +447,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         ax_v = axes[1, ci]
         _style_ax(ax_v)
         rvol = (
-            ret.rolling(bars_per_day * 5).std() * math.sqrt(252 * bars_per_day)
+            ret.rolling(bars_per_day * 5).std()
+            * math.sqrt(CALENDAR_DAYS * bars_per_day)
         ).dropna()
         dt_slice = df["datetime"].iloc[-len(rvol) :]
         ax_v.plot(dt_slice.values, rvol.values, color=color, linewidth=0.8)
