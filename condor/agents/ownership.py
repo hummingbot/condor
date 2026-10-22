@@ -270,13 +270,34 @@ class BotLedger:
         return self.session_dir / LEDGER_FILENAME if self.session_dir else None
 
     def owns(self, name: str) -> bool:
-        """In-namespace, or under one of the explicitly declared legacy names."""
+        """In-namespace, declared legacy, **or already recorded in this ledger**.
+
+        The first two answer "may this session touch a bot it has never seen".
+        The third answers "may it touch one it already holds", and without it a
+        session could adopt a bot and then be refused every action on it —
+        including the stop that would wind it down.
+
+        That is not hypothetical: a strategy switching to ``bot_mode: bot``
+        adopts its predecessor's bots by lineage (``_adopt_running_bots``), and
+        those carry the old naming, so a namespace test says no to every one of
+        them. The session then reports owning a book it cannot stop, update or
+        restart — strictly worse than not adopting it at all.
+
+        A recorded bot is the *stronger* fact, not a weaker one. It reached
+        ``self.bots`` either because this session deployed it and this very gate
+        approved that deploy, or because the adoption pass matched the
+        namespace, this strategy's own session lineage, or this session's action
+        log — each bounded by the live listing and overridden by ``disowned``.
+        Nothing enters the ledger on a name pattern alone.
+        """
         name = (name or "").strip()
         if not name:
             return False
         if in_namespace(name, self.namespace):
             return True
-        return any(in_namespace(name, d) for d in self.declared)
+        if any(in_namespace(name, d) for d in self.declared):
+            return True
+        return strip_deploy_suffix(name) in self.bots
 
     def bases(self) -> list[str]:
         return sorted(self.bots)

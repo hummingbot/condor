@@ -242,3 +242,78 @@ def test_lineage_adoption_is_not_gated_on_enforcement():
 
     assert "prior_session_bases" in lineage
     assert "not self.ledger.enforced" not in lineage
+
+
+# ── an adopted bot can actually be managed (review follow-up) ───────────────
+
+
+def _enforcing_ledger(*adopted: str):
+    from condor.agents.ownership import BotLedger, bot_namespace
+
+    ledger = BotLedger(bot_namespace("market_making_expert", "pmm_mister_operator"))
+    ledger.enforced = True
+    for name in adopted:
+        ledger.adopt(name)
+    return ledger
+
+
+def _stop(ledger, bot_name: str) -> str:
+    import asyncio
+
+    from condor.agents.risk import (
+        RiskEngine,
+        RiskLimits,
+        RiskState,
+        auto_approve_with_risk_check,
+    )
+
+    gate = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="loop", ledger=ledger
+    )
+    call = {
+        "tool": "manage_bots",
+        "input": {"action": "stop_bot", "bot_name": bot_name},
+    }
+    options = [{"optionId": "allow", "kind": "allow_once"}]
+    return asyncio.run(gate(call, options))["outcome"]["outcome"]
+
+
+def test_an_adopted_legacy_bot_can_be_stopped():
+    """Adoption without authority is worse than no adoption.
+
+    Lineage adoption hands a session its predecessor's bots, which carry the old
+    naming — so a namespace-only ownership test refused every action on them.
+    The session reported owning a book it could not stop, update or restart.
+    """
+    legacy = "jto-mm-20261022-101500"
+
+    assert _stop(_enforcing_ledger(legacy), legacy) == "selected"
+
+
+def test_the_namespace_still_grants_what_it_always_did():
+    from condor.agents.ownership import bot_namespace
+
+    ns = bot_namespace("market_making_expert", "pmm_mister_operator")
+
+    assert _stop(_enforcing_ledger(), f"{ns}-sol") == "selected"
+
+
+def test_a_bot_this_session_never_recorded_is_still_refused():
+    """The guard's whole purpose: one session must not touch another's book."""
+    ledger = _enforcing_ledger("jto-mm-20261022-101500")
+
+    assert _stop(ledger, "someone-elses-bot") == "cancelled"
+    assert ledger.violations
+
+
+def test_ownership_rests_on_the_record_not_on_a_name_pattern():
+    from condor.agents.ownership import BotLedger, bot_namespace
+
+    ledger = BotLedger(bot_namespace("mm", "op"))
+
+    # Nothing recorded: a foreign name is not owned...
+    assert not ledger.owns("jto-mm")
+    # ...and recording it through the adoption path is what grants it.
+    ledger.adopt("jto-mm-20261022-101500")
+    assert ledger.owns("jto-mm-20261022-101500")
+    assert ledger.owns("jto-mm")
