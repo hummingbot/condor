@@ -287,6 +287,17 @@ export interface HubDeviceState {
   scope: string[];
 }
 
+/**
+ * Who this install's Botcamp token identifies, as `GET /api/condor/me`
+ * (PR #111) answers it live — the account surface for Settings, distinct
+ * from `HubDeviceState.profile_handle`/`.scope`, which are a snapshot taken
+ * once at link time and never re-checked against the hub on their own.
+ */
+export interface HubMe {
+  user: { id: string; name: string; slug: string };
+  scopes: string[];
+}
+
 /** Why a submission is `"rejected"` — never a secret value (FEAT-150). */
 export interface HubSubmissionReason {
   rule: string;
@@ -4086,9 +4097,26 @@ export const api = {
   /** Where the device login/link stands right now. Polled while `"pending"`. */
   getHubDevice: () => apiFetch<HubDeviceState>("/api/v1/settings/hub-device"),
 
-  /** Cancel a device login in flight, or disconnect a linked profile. */
+  /** Cancel a device login in flight, or disconnect a linked profile.
+   *
+   *  `revoked` is `true` only once Botcamp itself confirmed the token was
+   *  revoked (`DELETE /api/condor/me`, PR #111), `false` with `error` set
+   *  when the hub could not be reached or refused, and `null` when there was
+   *  no token to revoke. The local credential is cleared regardless — this
+   *  only says whether Botcamp's own copy was actually told. */
   disconnectHubDevice: () =>
-    apiFetch<{ status: string }>("/api/v1/settings/hub-device", { method: "DELETE" }),
+    apiFetch<{ status: string; revoked: boolean | null; error: string }>(
+      "/api/v1/settings/hub-device",
+      { method: "DELETE" },
+    ),
+
+  /** Who the linked Botcamp token identifies right now, read live from the
+   *  hub (PR #111's `GET /api/condor/me`) rather than the `profile_handle`
+   *  `HubDeviceState` cached once at link time. A 401 means the hub revoked
+   *  this install's token elsewhere — Condor has already cleared its own
+   *  copy by the time this rejects, so the next `getHubDevice` reads
+   *  `"none"`. */
+  getHubMe: () => apiFetch<HubMe>("/api/v1/settings/hub-me"),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 

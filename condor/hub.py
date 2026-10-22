@@ -1160,17 +1160,40 @@ def device_state() -> DeviceLinkState:
     raise HubError(_refusal(reply, "polling the device login"), status=reply.status)
 
 
-def device_cancel() -> None:
+class DisconnectResult(BaseModel):
+    """What happened to this install's Botcamp link when it was cleared.
+
+    ``revoked`` is ``True`` only once the hub itself confirmed
+    ``DELETE /api/condor/me`` (PR #111), ``False`` when a token existed and
+    the hub could not be reached or refused the revoke, and ``None`` when
+    there was nothing to tell the hub — a pending device login simply
+    cancelled, or this install held no token in the first place. The local
+    credential is cleared in every case; this only says whether Botcamp's
+    own copy of it was actually told, because reporting a revoke that did
+    not happen is worse than reporting none.
+    """
+
+    revoked: bool | None = None
+    error: str = ""
+
+
+def device_cancel() -> DisconnectResult:
     """Cancel a device-login attempt in flight, or disconnect a linked profile.
 
-    Whichever this install is currently holding: a ``pending`` attempt is
-    simply forgotten locally — the device-flow contract has no cancel
-    endpoint, and an unpolled device code just expires at the hub on its own
-    at the 600s deadline; a ``linked`` profile is disconnected by clearing the
-    stored credential, scope and user **locally, and regardless of whether
-    the hub can be reached** — the credential being opaque and never reissued
-    means there is nothing to tell the hub either way, the same reasoning
-    FEAT-148's disconnect gave.
+    A ``pending`` attempt is simply forgotten locally — the device-flow
+    contract has no cancel endpoint, and an unpolled device code just expires
+    at the hub on its own at the 600s deadline.
+
+    A ``linked`` profile is disconnected by first asking the hub to revoke
+    the presented token (``DELETE /api/condor/me``, PR #111). That call did
+    not exist before PR #111, which is why FEAT-148's disconnect cleared only
+    the local copy and the module docstring once said "there is nothing to
+    tell the hub" — there is now. The local credential, scope and user are
+    still cleared **regardless of whether the hub call succeeds**: a network
+    failure or a 5xx must not leave this install stuck pretending to be
+    connected. What changes is that the caller learns whether the hub's own
+    copy was actually revoked, via the returned :class:`DisconnectResult`,
+    instead of this function silently assuming it.
     """
     with _device_lock:
         pending = _pending_device is not None
@@ -1178,18 +1201,90 @@ def device_cancel() -> None:
     if pending:
         _clear_pending_device()
         log.info("hub: device login cancelled")
-        return
+        return DisconnectResult(revoked=None)
 
     from config_manager import get_config_manager
 
+    current_token = token()
+    result = DisconnectResult(revoked=None)
+    if current_token:
+        try:
+            reply = _send("DELETE", f"{HUB_URL}/condor/me", token=current_token)
+        except HubError as exc:
+            result = DisconnectResult(revoked=False, error=str(exc))
+            log.warning(
+                "hub: could not revoke the Botcamp token during disconnect: %s", exc
+            )
+        else:
+            if 200 <= reply.status < 300:
+                result = DisconnectResult(revoked=True)
+            else:
+                result = DisconnectResult(
+                    revoked=False, error=_refusal(reply, "revoking this token")
+                )
+                log.warning(
+                    "hub: could not revoke the Botcamp token during disconnect (%d)",
+                    reply.status,
+                )
+
     get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
     log.info("hub: disconnected from Botcamp")
+    return result
 
 
 def _clear_pending_device() -> None:
     global _pending_device
     with _device_lock:
         _pending_device = None
+
+
+# ── Who the linked token identifies, read live (PR #111's `GET /me`) ─────
+
+
+class MeUser(BaseModel):
+    """The account identity ``GET /api/condor/me`` describes a token with."""
+
+    id: str = ""
+    name: str = ""
+    slug: str = ""
+
+
+class MeInfo(BaseModel):
+    """Who this install's token identifies, and what it may do — read fresh
+    from the hub rather than trusted from the device-login record.
+
+    :func:`device_state` stores ``profile_handle`` and ``scope`` once, at
+    link time, and never asks again while ``status`` reads ``"linked"``.
+    This is the live answer: it is what catches a token Botcamp's own
+    profile page revoked out from under this install, before the next
+    publish attempt finds out the hard way.
+    """
+
+    user: MeUser = Field(default_factory=MeUser)
+    scopes: list[str] = Field(default_factory=list)
+
+
+def me(token: str) -> MeInfo:
+    """Who ``token`` identifies right now, and which scopes it carries.
+
+    A 401 means the hub no longer honours this token — revoked from the
+    profile's own token list, most likely, rather than anything this
+    install did — and :func:`_clear_token_if_revoked` clears this install's
+    copy the same as every other token-bearing call does, before the
+    :class:`HubError` reaches the caller. The caller does not need to clear
+    anything itself; it only needs to stop showing a stale identity.
+    """
+    if not (token or "").strip():
+        raise NoTokenError(
+            "No Botcamp profile is linked. Connect one in Settings → Agents."
+        )
+    reply = _send("GET", f"{HUB_URL}/condor/me", token=token.strip())
+    _clear_token_if_revoked(reply)
+    payload = _json(reply, "the signed-in Botcamp account")
+    data = payload.get("data")
+    return _model(
+        data if isinstance(data, dict) else {}, MeInfo, "the signed-in Botcamp account"
+    )
 
 
 def _clear_token_if_revoked(reply: Reply) -> None:

@@ -8,12 +8,19 @@ import {
   Loader2,
   Upload,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 
 import { InlineConfirm } from "@/components/ui/InlineConfirm";
-import { api } from "@/lib/api";
+import { useIsAdmin } from "@/hooks/useIsAdmin";
+import { api, errorStatus } from "@/lib/api";
 
 import { ImportAgentDialog } from "./ImportAgentDialog";
+
+/** The one sentence every Disconnect control renders when the hub could not
+ *  be told — never when it was, and never silently. */
+const COULD_NOT_REVOKE =
+  "Disconnected here, but Botcamp could not be told — revoke it yourself from your Botcamp profile's token list.";
 
 /**
  * Where an agent arrives from somewhere else, and where one leaves.
@@ -85,7 +92,149 @@ export function AgentsSettings() {
           </ul>
         )}
       </section>
+
+      <BotcampAccountSettings />
     </div>
+  );
+}
+
+/**
+ * The Botcamp *account* surface, in Settings: who is signed in, which
+ * scopes the token carries, and Disconnect.
+ *
+ * Deliberately not a second copy of `/hub`'s own connection state —
+ * FEAT-153 put connecting and publishing there on purpose, because
+ * publishing is a destination of its own. This is the account view: it
+ * reads `GET /hub-me` live rather than trusting the `profile_handle`
+ * `HubDeviceField` cached once at link time, so a token revoked from
+ * Botcamp's own profile page (PR #111's `DELETE /api/condor/me`) shows up
+ * here as "not connected" instead of only failing the next publish
+ * opaquely.
+ */
+export function BotcampAccountSettings() {
+  const isAdmin = useIsAdmin();
+  if (!isAdmin) return null;
+  return <BotcampAccountCard />;
+}
+
+function BotcampAccountCard() {
+  const queryClient = useQueryClient();
+  const device = useQuery({ queryKey: ["hub-device"], queryFn: api.getHubDevice });
+  const linked = device.data?.status === "linked";
+
+  const me = useQuery({
+    queryKey: ["hub-me"],
+    queryFn: api.getHubMe,
+    enabled: linked,
+    retry: false,
+  });
+
+  // A 401 here means the hub already cleared this install's token by the
+  // time the response landed (`condor.hub.me`'s own doing) — refetch the
+  // device state so the rest of the page falls back to the sign-in view
+  // instead of quietly going on showing a stale "linked" status.
+  useEffect(() => {
+    if (me.isError && errorStatus(me.error) === 401) {
+      queryClient.invalidateQueries({ queryKey: ["hub-device"] });
+    }
+  }, [me.isError, me.error, queryClient]);
+
+  const [revokeNotice, setRevokeNotice] = useState<string | null>(null);
+  const disconnect = useMutation({
+    mutationFn: api.disconnectHubDevice,
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["hub-device"] });
+      queryClient.removeQueries({ queryKey: ["hub-me"] });
+      setRevokeNotice(result.revoked === false ? COULD_NOT_REVOKE : null);
+    },
+  });
+
+  if (device.isLoading) return null;
+
+  if (!linked) {
+    return (
+      <section className="border-t border-[var(--color-border)] pt-8">
+        <h2 className="mb-1 text-sm font-bold text-[var(--color-text)]">
+          Botcamp account
+        </h2>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Not connected. Connect a Botcamp profile from the{" "}
+          <Link to="/hub" className="text-[var(--color-primary)] hover:underline">
+            Agent Hub
+          </Link>{" "}
+          to publish agents.
+        </p>
+      </section>
+    );
+  }
+
+  const scopes = me.data?.scopes ?? device.data?.scope ?? [];
+  const canPublish = scopes.includes("agents:publish");
+  const name = me.data?.user.name || device.data?.profile_handle;
+
+  return (
+    <section className="border-t border-[var(--color-border)] pt-8">
+      <h2 className="mb-1 text-sm font-bold text-[var(--color-text)]">
+        Botcamp account
+      </h2>
+      <p className="mb-3 text-xs text-[var(--color-text-muted)]">
+        One Botcamp profile acts for this whole install — every publish is made
+        as this account.
+      </p>
+
+      <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5">
+        <div className="flex items-center justify-between gap-3">
+          <p
+            data-botcamp-account-status="linked"
+            className="flex items-center gap-1.5 text-sm text-[var(--color-text)]"
+          >
+            <Check className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+            Connected as <span className="font-mono">{name}</span>
+          </p>
+          <button
+            onClick={() => disconnect.mutate()}
+            disabled={disconnect.isPending}
+            className="shrink-0 text-xs text-[var(--color-text-muted)] underline hover:text-[var(--color-red)] disabled:opacity-50"
+          >
+            {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+          </button>
+        </div>
+
+        {me.isLoading && (
+          <p className="text-[11px] text-[var(--color-text-muted)]">
+            Checking with Botcamp…
+          </p>
+        )}
+        {me.isError && errorStatus(me.error) !== 401 && (
+          <p role="alert" className="text-[11px] text-[var(--color-red)]">
+            Could not verify this account with Botcamp: {(me.error as Error).message}
+          </p>
+        )}
+
+        {scopes.length > 0 && (
+          <p className="text-[11px] text-[var(--color-text-muted)]">
+            Scopes: <span className="font-mono">{scopes.join(", ")}</span>
+          </p>
+        )}
+        {scopes.length > 0 && !canPublish && (
+          <p
+            data-botcamp-missing-publish-scope
+            className="flex items-center gap-1.5 text-[11px] text-amber-500"
+          >
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            This token cannot publish agents (missing{" "}
+            <span className="font-mono">agents:publish</span>). Publishing will be
+            refused until a token with that scope is linked.
+          </p>
+        )}
+      </div>
+
+      {(disconnect.isError || revokeNotice) && (
+        <p role="alert" className="mt-2 text-[11px] text-[var(--color-red)]">
+          {revokeNotice ?? (disconnect.error as Error)?.message}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -132,9 +281,13 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
     },
   });
 
+  const [revokeNotice, setRevokeNotice] = useState<string | null>(null);
   const disconnect = useMutation({
     mutationFn: api.disconnectHubDevice,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["hub-device"] }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["hub-device"] });
+      setRevokeNotice(result.revoked === false ? COULD_NOT_REVOKE : null);
+    },
   });
 
   const status = data?.status ?? "none";
@@ -232,6 +385,12 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
       {(start.isError || disconnect.isError) && (
         <p role="alert" data-hub-device-error className="text-xs text-[var(--color-red)]">
           {(start.error ?? disconnect.error)?.message}
+        </p>
+      )}
+
+      {revokeNotice && (
+        <p role="alert" data-hub-device-revoke-warning className="text-xs text-[var(--color-red)]">
+          {revokeNotice}
         </p>
       )}
     </div>

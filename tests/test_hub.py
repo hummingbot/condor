@@ -286,6 +286,24 @@ class FakeHub:
             return hub.Reply(
                 400, json.dumps({"error": "authorization_pending"}).encode()
             )
+        # ── `GET`/`DELETE /condor/me` (PR #111) — sane defaults; a test
+        # wanting a 401 (revoked token) or a refusal sets an ``overrides``
+        # entry for the exact path instead.
+        if method == "GET" and path == "/condor/me":
+            return _ok(
+                {
+                    "data": {
+                        "user": {
+                            "id": "u_1",
+                            "name": "cardosofede",
+                            "slug": "cardosofede",
+                        },
+                        "scopes": ["agents:read", "agents:publish"],
+                    }
+                }
+            )
+        if method == "DELETE" and path == "/condor/me":
+            return _ok({"data": {"revoked": True}})
         return _missing()
 
 
@@ -1251,32 +1269,66 @@ def test_cancelling_a_pending_device_login_forgets_it_with_no_hub_call(fake_hub)
     assert hub.device_state().status == "none"
 
 
-def test_disconnecting_a_linked_profile_clears_it_without_a_hub_call(fake_hub, cm):
+def test_disconnecting_a_linked_profile_revokes_the_token_then_clears_it_locally(
+    fake_hub, cm
+):
+    """PR #111 gave disconnect something to tell the hub: it must ask first,
+    with the presented token, and only then clear the local copy."""
     cm.update_hub(
         token="bc_live_x",
         profile_handle="cardosofede",
         scope=["agents:read"],
         user={"id": "u_1", "name": "cardosofede"},
     )
-    calls_before = len(fake_hub.calls)
 
-    hub.device_cancel()
+    result = hub.device_cancel()
 
+    assert fake_hub.calls[-1] == (
+        "DELETE",
+        f"{hub.HUB_URL}/condor/me",
+        "bc_live_x",
+        b"",
+    )
+    assert result == hub.DisconnectResult(revoked=True)
     assert hub.token() == ""
     assert cm.get_hub().get("profile_handle", "") == ""
     assert cm.get_hub().get("scope") == []
     assert cm.get_hub().get("user") == {}
-    assert len(fake_hub.calls) == calls_before
+
+
+def test_disconnecting_with_nothing_linked_makes_no_hub_call(cm):
+    """No token means nothing to revoke — the honest answer is ``None``, not
+    a claimed success, and nothing is sent."""
+    result = hub.device_cancel()
+
+    assert result == hub.DisconnectResult(revoked=None)
+    assert hub.token() == ""
 
 
 def test_disconnecting_survives_an_unreachable_hub(cm):
-    """A disconnect with nothing pending never calls ``_send`` at all — the
-    ``no_sockets`` autouse fixture (which would fail any real connection) is
-    enough to prove no network was involved; no ``fake_hub`` stub needed."""
+    """The revoke attempt reaches `_send`, which the autouse ``no_sockets``
+    fixture turns into a transport failure — disconnect must still clear the
+    local credential, and must report that the hub was *not* told rather
+    than claiming a revoke that did not happen."""
     cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
 
-    hub.device_cancel()  # must not raise
+    result = hub.device_cancel()  # must not raise
 
+    assert result.revoked is False
+    assert result.error
+    assert hub.token() == ""
+
+
+def test_disconnecting_when_the_hub_refuses_the_revoke_still_clears_locally(
+    fake_hub, cm
+):
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+    fake_hub.overrides[("DELETE", "/condor/me")] = hub.Reply(500, b"{}")
+
+    result = hub.device_cancel()
+
+    assert result.revoked is False
+    assert result.error
     assert hub.token() == ""
 
 
@@ -1331,6 +1383,72 @@ def test_a_401_during_unpublish_clears_the_stored_token(fake_hub, cm):
     assert hub.token() == ""
 
 
+# ── Who the linked token identifies, read live (PR #111's `GET /me`) ─────
+
+
+def test_me_reads_the_signed_in_account(fake_hub, cm):
+    hub.set_token("bc_live_x")
+
+    info = hub.me(hub.token())
+
+    assert fake_hub.calls[-1] == ("GET", f"{hub.HUB_URL}/condor/me", "bc_live_x", b"")
+    assert info.user.name == "cardosofede"
+    assert info.scopes == ["agents:read", "agents:publish"]
+
+
+def test_me_without_a_token_raises_without_a_request(fake_hub, cm):
+    with pytest.raises(hub.NoTokenError):
+        hub.me("")
+
+    assert fake_hub.calls == []
+
+
+def test_a_401_from_me_clears_the_stored_token(fake_hub, cm):
+    hub.set_token("bc_live_revoked")
+    fake_hub.overrides[("GET", "/condor/me")] = hub.Reply(401, b"{}")
+
+    with pytest.raises(hub.HubError):
+        hub.me(hub.token())
+
+    assert hub.token() == ""
+
+
+def test_the_hub_me_route_answers_the_live_account(cm, fake_hub):
+    hub.set_token("bc_live_x")
+
+    res = _settings_client(admin=True).get("/settings/hub-me")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["user"]["name"] == "cardosofede"
+    assert body["scopes"] == ["agents:read", "agents:publish"]
+    assert "bc_live_x" not in res.text
+
+
+def test_the_hub_me_route_says_400_with_no_token(cm, fake_hub):
+    res = _settings_client(admin=True).get("/settings/hub-me")
+
+    assert res.status_code == 400
+    assert fake_hub.calls == []
+
+
+def test_the_hub_me_route_propagates_a_401_and_clears_the_token(cm, fake_hub):
+    hub.set_token("bc_live_revoked")
+    fake_hub.overrides[("GET", "/condor/me")] = hub.Reply(401, b"{}")
+
+    res = _settings_client(admin=True).get("/settings/hub-me")
+
+    assert res.status_code == 401
+    assert hub.token() == ""
+
+
+def test_the_hub_me_route_is_admin_only(cm, fake_hub):
+    res = _settings_client(admin=False).get("/settings/hub-me")
+
+    assert res.status_code == 403
+    assert fake_hub.calls == []
+
+
 def test_a_401_during_submission_status_clears_the_stored_token(fake_hub, cm):
     hub.set_token("bc_live_revoked")
     hub._store_submission(
@@ -1383,7 +1501,7 @@ def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
     assert "bc_live_super_secret" not in linked.text
 
 
-def test_the_dashboard_can_disconnect_a_linked_profile(cm):
+def test_the_dashboard_can_disconnect_a_linked_profile(cm, fake_hub):
     hub.set_token("bc_live_x")
     from config_manager import get_config_manager
 
@@ -1393,7 +1511,24 @@ def test_the_dashboard_can_disconnect_a_linked_profile(cm):
     res = client.delete("/settings/hub-device")
 
     assert res.status_code == 200
-    assert res.json() == {"status": "none"}
+    assert res.json() == {"status": "none", "revoked": True, "error": ""}
+    assert hub.token() == ""
+
+
+def test_the_dashboard_reports_when_the_hub_could_not_be_told(cm, fake_hub):
+    """A disconnect must clear the local credential either way, but it must
+    never tell the dashboard the hub was revoked when it was not."""
+    hub.set_token("bc_live_x")
+    fake_hub.overrides[("DELETE", "/condor/me")] = hub.Reply(500, b"{}")
+    client = _settings_client(admin=True)
+
+    res = client.delete("/settings/hub-device")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "none"
+    assert body["revoked"] is False
+    assert body["error"]
     assert hub.token() == ""
 
 

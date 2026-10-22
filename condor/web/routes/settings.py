@@ -1382,15 +1382,41 @@ async def disconnect_hub_device(user: WebUser = Depends(get_current_user)):
     """Cancel a device login in flight, or disconnect a linked profile.
 
     Whichever this install is currently holding — ``condor.hub.device_cancel``
-    decides which, and a disconnect clears the local credential even if the
-    hub cannot be reached.
+    decides which, and now also asks the hub to revoke the presented token
+    (``DELETE /api/condor/me``, PR #111) before clearing it locally. The
+    local credential is cleared either way; ``revoked`` says whether the hub
+    actually confirmed the revoke (``true``), refused or could not be reached
+    (``false``, with ``error`` set), or there was nothing to revoke
+    (``null``) — this must never claim a revoke that did not happen.
     """
     from condor import hub
     from condor.hub import HubError
 
     _require_hub_admin(user)
     try:
-        await asyncio.to_thread(hub.device_cancel)
+        result = await asyncio.to_thread(hub.device_cancel)
     except HubError as exc:
         raise _hub_device_refusal(exc) from exc
-    return {"status": "none"}
+    return {"status": "none", "revoked": result.revoked, "error": result.error}
+
+
+@router.get("/hub-me")
+async def get_hub_me(user: WebUser = Depends(get_current_user)):
+    """Who the linked Botcamp token identifies right now, read fresh from the
+    hub (PR #111's ``GET /api/condor/me``) — not the ``profile_handle`` the
+    device-login poll cached once, at link time.
+
+    A 401 means Botcamp revoked the token from the profile's own token list;
+    ``condor.hub.me`` has already cleared this install's copy by the time
+    this route answers with it, so the client's next ``GET /hub-device``
+    already reads back ``"none"`` rather than a stale ``"linked"``.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    _require_hub_admin(user)
+    try:
+        info = await asyncio.to_thread(hub.me, hub.token())
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    return info.model_dump()
