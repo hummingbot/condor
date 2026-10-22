@@ -268,20 +268,23 @@ export interface HubCatalogue {
 }
 
 /**
- * This install's Botcamp pairing/link, as `condor.hub.link_state` reports it
- * — never the credential, which no route ever answers with (FEAT-148).
+ * This install's Botcamp device-login/link state, as `condor.hub.device_state`
+ * reports it — never the credential, which no route ever answers with
+ * (PR #111's device flow, replacing FEAT-148's pairing code).
  *
- * `"pending"` carries `code`/`verification`/`expires_at` to show again;
- * `"denied"`/`"expired"` are reported for the one poll that observed them;
- * `"linked"` carries `profile_handle`.
+ * `"pending"` carries `user_code`/`verification_uri`/
+ * `verification_uri_complete`/`expires_at` to show again; `"denied"`/
+ * `"expired"`/`"invalid"` are reported for the one poll that observed them;
+ * `"linked"` carries `profile_handle` and `scope`.
  */
-export interface HubLinkState {
-  status: "none" | "pending" | "denied" | "expired" | "linked";
-  code: string;
-  verification: string;
-  expires_at: string;
-  link_url: string;
+export interface HubDeviceState {
+  status: "none" | "pending" | "denied" | "expired" | "invalid" | "linked";
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_at: number;
   profile_handle: string;
+  scope: string[];
 }
 
 /** Why a submission is `"rejected"` — never a secret value (FEAT-150). */
@@ -4069,23 +4072,23 @@ export const api = {
       body: JSON.stringify({ token }),
     }),
 
-  /** Begin a pairing: the code to open, and the verification string to show
-   *  beside it so the admin can compare the two before accepting on Botcamp. */
-  startHubLink: () =>
+  /** Begin a device login: the user code to show, and the link to open so
+   *  the admin can approve it on Botcamp (PR #111's device flow). */
+  startHubDevice: () =>
     apiFetch<{
-      code: string;
-      verification: string;
-      expires_at: string;
-      poll_interval_s: number;
-      link_url: string;
-    }>("/api/v1/settings/hub-link/start", { method: "POST" }),
+      user_code: string;
+      verification_uri: string;
+      verification_uri_complete: string;
+      expires_in: number;
+      interval: number;
+    }>("/api/v1/settings/hub-device/start", { method: "POST" }),
 
-  /** Where the pairing/link stands right now. Polled while `"pending"`. */
-  getHubLink: () => apiFetch<HubLinkState>("/api/v1/settings/hub-link"),
+  /** Where the device login/link stands right now. Polled while `"pending"`. */
+  getHubDevice: () => apiFetch<HubDeviceState>("/api/v1/settings/hub-device"),
 
-  /** Cancel a pairing in flight, or disconnect a linked profile. */
-  disconnectHubLink: () =>
-    apiFetch<{ status: string }>("/api/v1/settings/hub-link", { method: "DELETE" }),
+  /** Cancel a device login in flight, or disconnect a linked profile. */
+  disconnectHubDevice: () =>
+    apiFetch<{ status: string }>("/api/v1/settings/hub-device", { method: "DELETE" }),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 

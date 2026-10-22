@@ -279,69 +279,56 @@ class Receipt(BaseModel):
     published_at: str = ""
 
 
-class LinkStart(BaseModel):
-    """What ``POST /v1/link/start`` handed back (contract §4.2).
+class DeviceCode(BaseModel):
+    """What ``POST /api/condor/device/code`` handed back (PR #111's contract).
 
-    ``code`` rides in the URL Condor opens in a browser tab; ``verification``
-    is the string shown on both ends for the human to compare, the phishing
-    defense the short ``code`` cannot be on its own. ``link_id`` is used only
-    to poll — it is never rendered, logged, or returned past
-    :func:`link_start`'s own caller.
+    ``verification_uri_complete`` is the link Condor opens in a browser tab;
+    ``user_code`` is shown beside it so the admin can confirm it is the same
+    device login before approving it there. ``device_code`` is used only to
+    poll — it is never rendered, logged, or returned past
+    :func:`device_start`'s own caller.
     """
 
-    link_id: str
-    code: str
-    verification: str
-    expires_at: str
-    poll_interval_s: int = 3
-    #: ``{HUB_URL}/link?code=...`` — built here, from the compiled-in
-    #: :data:`HUB_URL`, rather than by the dashboard reassembling the host
-    #: itself out of a bare ``code``. One place decides what Condor opens a
-    #: browser tab to.
-    link_url: str = ""
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str = ""
+    expires_in: int = 600
+    interval: int = 5
 
 
-class LinkState(BaseModel):
+class DeviceLinkState(BaseModel):
     """What a caller may learn about this install's Botcamp link.
 
-    Never the credential — see :func:`link_state`. ``status`` is one of
-    ``"none"`` (nothing pending, nothing linked), ``"pending"`` (a pairing is
-    in flight; ``code``/``verification``/``expires_at``/``link_url`` are
-    set), ``"denied"`` or ``"expired"`` (a pairing just ended that way —
+    Never the credential — see :func:`device_state`. ``status`` is one of
+    ``"none"`` (nothing pending, nothing linked), ``"pending"`` (a device
+    login is in flight; ``user_code``/``verification_uri``/
+    ``verification_uri_complete``/``expires_at`` are set), ``"denied"``,
+    ``"expired"``, or ``"invalid"`` (a device login just ended that way —
     reported once, to the poll that observed it), or ``"linked"``
-    (``profile_handle`` is set).
+    (``profile_handle`` and ``scope`` are set).
     """
 
     status: str = "none"
-    code: str = ""
-    verification: str = ""
-    expires_at: str = ""
-    link_url: str = ""
+    user_code: str = ""
+    verification_uri: str = ""
+    verification_uri_complete: str = ""
+    expires_at: float = 0.0
     profile_handle: str = ""
+    scope: list[str] = Field(default_factory=list)
 
 
-def _link_url(code: str) -> str:
-    """``{HUB_URL}/link?code=...``, the tab Condor opens for the admin.
-
-    ``code`` is a short, URL-safe string by contract (``"WXYZ-4821"``), but it
-    is still hub-supplied text headed into a URL this process tells a browser
-    to open — ``urlencode`` rather than an f-string, so nothing in it can add
-    a second query parameter or otherwise reshape the address.
-    """
-    return f"{HUB_URL}/link?{urllib.parse.urlencode({'code': code})}"
-
-
-#: The one pairing attempt this install is tracking, or ``None``. Deliberately
-#: in-memory and not in ``config.yml``: a pairing is a short-lived, interactive
-#: act with an admin watching the result, the same reasoning the module
-#: docstring gives for there being no durable publish outbox. A restart mid-pairing
-#: simply loses the attempt, which matches the contract's "Condor's own backend
-#: is responsible for invalidating its local memory of the previous attempt."
-#: Guarded by :data:`_link_lock` because the web routes dispatch these calls
-#: through ``asyncio.to_thread``, i.e. a worker thread pool rather than the
-#: event loop.
-_pending_link: dict | None = None
-_link_lock = threading.Lock()
+#: The one device-login attempt this install is tracking, or ``None``.
+#: Deliberately in-memory and not in ``config.yml``: a device login is a
+#: short-lived, interactive act with an admin watching the result, the same
+#: reasoning the module docstring gives for there being no durable publish
+#: outbox. A restart mid-login simply loses the attempt — the hub's own
+#: ``expires_in`` deadline is what ends it either way. Guarded by
+#: :data:`_device_lock` because the web routes dispatch these calls through
+#: ``asyncio.to_thread``, i.e. a worker thread pool rather than the event
+#: loop.
+_pending_device: dict | None = None
+_device_lock = threading.Lock()
 
 
 class Reply(NamedTuple):
@@ -848,6 +835,7 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
         separators=(",", ":"),
     ).encode("utf-8")
     reply = _send("POST", f"{HUB_URL}/agents", token=token.strip(), payload=body)
+    _clear_token_if_revoked(reply)
     # No token, no bundle text, no digest — the agent's name and the hub's
     # answer are the whole of what this is allowed to record.
     log.info(
@@ -907,6 +895,7 @@ def unpublish(listing_id: str, token: str) -> None:
             "Settings → Agents."
         )
     reply = _send("DELETE", f"{HUB_URL}/agents/{listing_id}", token=token.strip())
+    _clear_token_if_revoked(reply)
     if reply.status < 200 or reply.status >= 300:
         raise HubError(
             _refusal(reply, f"withdrawing '{listing_id}'"), status=reply.status
@@ -969,6 +958,7 @@ def submission_status(slug: str, token: str) -> Receipt:
     submission_id = _segment(stored.submission_id, "submission id")
     what = f"the status of '{slug}' submission"
     reply = _send("GET", f"{HUB_URL}/submissions/{submission_id}", token=token.strip())
+    _clear_token_if_revoked(reply)
     fresh = _model(_json(reply, what), Receipt, what)
     merged = stored.model_copy(
         update={
@@ -1002,172 +992,217 @@ def submission_status(slug: str, token: str) -> Receipt:
     return merged
 
 
-# ── Account pairing (FEAT-148): link to a Botcamp profile, no pasted token ──
+# ── Device login (PR #111): link to a Botcamp profile, no pasted token ───
 
 
-def link_start() -> LinkStart:
-    """Begin a pairing attempt, replacing any one this install was tracking.
+def device_start() -> DeviceCode:
+    """Begin a device-login attempt, replacing any one this install was tracking.
 
-    No token: contract §4.2 is the one pairing endpoint that needs none, since
-    there isn't a credential yet. A second call while an earlier attempt is
-    still ``pending`` simply forgets that earlier ``link_id`` — the contract
-    puts that bookkeeping on Condor's side, not the hub's — so this install
-    only ever tracks the most recent attempt it started.
+    No ``client_name``/``scope`` in the body: omitting ``scope`` grants both
+    ``agents:read`` and ``agents:publish``, the same all-or-nothing install-wide
+    grant the pasted-token flow it replaces always had. A second call while an
+    earlier attempt is still ``pending`` simply forgets that earlier
+    ``device_code`` — this install only ever tracks the most recent attempt it
+    started, and the hub's own ``expires_in`` deadline retires the old one on
+    its side regardless.
     """
-    global _pending_link
+    global _pending_device
 
-    reply = _send("POST", f"{HUB_URL}/link/start", payload=b"{}")
-    start = _model(_json(reply, "starting a pairing"), LinkStart, "a pairing start")
-    start = start.model_copy(update={"link_url": _link_url(start.code)})
-    with _link_lock:
-        _pending_link = {
-            "link_id": start.link_id,
-            "code": start.code,
-            "verification": start.verification,
-            "expires_at": start.expires_at,
-            "poll_interval_s": max(1, start.poll_interval_s or 3),
+    reply = _send("POST", f"{HUB_URL}/condor/device/code", payload=b"{}")
+    code = _model(_json(reply, "starting a device login"), DeviceCode, "a device code")
+    now = time.monotonic()
+    with _device_lock:
+        _pending_device = {
+            "device_code": code.device_code,
+            "user_code": code.user_code,
+            "verification_uri": code.verification_uri,
+            "verification_uri_complete": code.verification_uri_complete
+            or code.verification_uri,
+            "interval": max(1, code.interval or 5),
+            # Two clocks for two audiences: `deadline` (monotonic) is what this
+            # process gates polling on, immune to a wall-clock step; `wall_expires_at`
+            # (time.time()) is what a caller renders as a countdown.
+            "deadline": now + max(1, code.expires_in or 600),
+            "wall_expires_at": time.time() + max(1, code.expires_in or 600),
             "last_polled": 0.0,
         }
-    log.info("hub: pairing started (code %s)", start.code)
-    return start
+    log.info("hub: device login started (user code %s)", code.user_code)
+    return code
 
 
-def link_state() -> LinkState:
-    """This install's current pairing/link state. **Never the credential.**
+def device_state() -> DeviceLinkState:
+    """This install's current device-login/link state. **Never the credential.**
 
     Three cases, in the order checked:
 
     1. Already linked (``config.yml`` carries a token and a profile handle) —
        answered from local config, no hub call at all.
-    2. A pairing is in flight — polled from the hub at most once per
-       ``poll_interval_s`` (contract §4.3's own rate limit on this endpoint;
-       a caller that asks more often than that gets the locally cached answer
-       rather than a second request). On ``accepted``, **this is the one call
-       that ever sees the credential**: it is stored via
+    2. A device login is in flight — polled from the hub at most once per
+       ``interval`` seconds (the device-flow contract's own rate limit; a
+       caller that asks more often than that gets the locally cached answer
+       rather than a second request). On a 200, **this is the one call that
+       ever sees the credential**: it is stored via
        :func:`config_manager.ConfigManager.update_hub` immediately and never
-       put in the :class:`LinkState` this function returns.
+       put in the :class:`DeviceLinkState` this function returns. Past the
+       600s deadline the attempt reads as ``"expired"`` without a further
+       hub call at all — this install stops polling rather than polling
+       forever.
     3. Nothing pending and nothing linked — ``"none"``.
 
-    A transition to ``denied``/``expired``/``accepted`` is reported for
+    A transition to ``denied``/``expired``/``invalid``/linked is reported for
     exactly the one poll that observed it and then forgotten (the pending
-    attempt is cleared), the same "answered once" shape the credential itself
-    gets in the contract.
+    attempt is cleared).
     """
     section = _section()
     linked_handle = str(section.get("profile_handle") or "")
     if linked_handle and section.get("token"):
-        return LinkState(status="linked", profile_handle=linked_handle)
+        return DeviceLinkState(
+            status="linked",
+            profile_handle=linked_handle,
+            scope=list(section.get("scope") or []),
+        )
 
-    with _link_lock:
-        pending = dict(_pending_link) if _pending_link else None
+    with _device_lock:
+        pending = dict(_pending_device) if _pending_device else None
     if pending is None:
-        return LinkState(status="none")
+        return DeviceLinkState(status="none")
 
     now = time.monotonic()
-    if now - pending["last_polled"] < pending["poll_interval_s"]:
-        return LinkState(
+    if now >= pending["deadline"]:
+        # The 600s device-code deadline: stop polling rather than forever,
+        # and without spending a request on an attempt the hub has already
+        # retired on its own side.
+        _clear_pending_device()
+        return DeviceLinkState(status="expired")
+
+    def _pending_reply() -> DeviceLinkState:
+        return DeviceLinkState(
             status="pending",
-            code=pending["code"],
-            verification=pending["verification"],
-            expires_at=pending["expires_at"],
-            link_url=_link_url(pending["code"]),
+            user_code=pending["user_code"],
+            verification_uri=pending["verification_uri"],
+            verification_uri_complete=pending["verification_uri_complete"],
+            expires_at=pending["wall_expires_at"],
         )
 
-    link_id = _segment(pending["link_id"], "link id")
-    reply = _send("GET", f"{HUB_URL}/link/{link_id}")
-    if reply.status == 404:
-        # A link_id the hub never issued, or one already fully consumed and
-        # forgotten (contract §4.3) — either way, nothing left to track.
-        _clear_pending()
-        return LinkState(status="expired")
-    payload = _json(reply, "the pairing status")
-    status = str(payload.get("status") or "")
+    if now - pending["last_polled"] < pending["interval"]:
+        return _pending_reply()
 
-    if status == "pending":
-        with _link_lock:
-            if _pending_link is not None:
-                _pending_link["last_polled"] = now
-                _pending_link["expires_at"] = (
-                    payload.get("expires_at") or pending["expires_at"]
-                )
-        return LinkState(
-            status="pending",
-            code=pending["code"],
-            verification=pending["verification"],
-            expires_at=str(payload.get("expires_at") or pending["expires_at"]),
-            link_url=_link_url(pending["code"]),
-        )
+    reply = _send(
+        "POST",
+        f"{HUB_URL}/condor/device/token",
+        payload=json.dumps(
+            {"device_code": pending["device_code"]}, separators=(",", ":")
+        ).encode("utf-8"),
+    )
+    with _device_lock:
+        if _pending_device is not None:
+            _pending_device["last_polled"] = now
 
-    if status in ("denied", "expired"):
-        _clear_pending()
-        return LinkState(status=status)
-
-    if status == "accepted":
-        credential = str(payload.get("credential") or "")
-        profile_handle = str(payload.get("profile_handle") or "")
-        if credential:
+    if reply.status == 200:
+        payload = _decode(reply, "the device token")
+        access_token = str(payload.get("access_token") or "")
+        scope_raw = payload.get("scope")
+        if isinstance(scope_raw, str):
+            scope_list = [s for s in scope_raw.split() if s]
+        elif isinstance(scope_raw, list):
+            scope_list = [str(s) for s in scope_raw]
+        else:
+            scope_list = []
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        profile_handle = str(user.get("name") or user.get("id") or "")
+        if access_token:
             # The one write of the credential, as soon as it exists — never
-            # handed back past this function, per the contract's "the
-            # credential arrives only in the backend poll response; no token
-            # in URL, fragment, browser response or log."
+            # handed back past this function. The token is issued once per
+            # device_code and never reissued, so this is the only place it is
+            # ever read.
             from config_manager import get_config_manager
 
             get_config_manager().update_hub(
-                token=credential, profile_handle=profile_handle
+                token=access_token,
+                profile_handle=profile_handle,
+                scope=scope_list,
+                user=user,
             )
             log.info("hub: linked to Botcamp profile '%s'", profile_handle)
-        _clear_pending()
-        return LinkState(
+        _clear_pending_device()
+        return DeviceLinkState(
             status="linked",
             profile_handle=profile_handle
             or str(_section().get("profile_handle") or ""),
+            scope=scope_list or list(_section().get("scope") or []),
         )
 
-    raise HubError(
-        f"The hub described the pairing in a status this Condor does not "
-        f"know: {status!r}"
-    )
+    if reply.status == 400:
+        payload = _decode(reply, "the device token")
+        error = str(payload.get("error") or "")
+        if error == "authorization_pending":
+            return _pending_reply()
+        if error == "slow_down":
+            with _device_lock:
+                if _pending_device is not None:
+                    _pending_device["interval"] += 5
+            return _pending_reply()
+        if error == "access_denied":
+            _clear_pending_device()
+            return DeviceLinkState(status="denied")
+        if error == "expired_token":
+            _clear_pending_device()
+            return DeviceLinkState(status="expired")
+        if error == "invalid_grant":
+            _clear_pending_device()
+            return DeviceLinkState(status="invalid")
+        raise HubError(
+            f"The hub described the device login in an error this Condor "
+            f"does not know: {error!r}",
+            status=reply.status,
+        )
+
+    raise HubError(_refusal(reply, "polling the device login"), status=reply.status)
 
 
-def link_cancel() -> None:
-    """Cancel a pairing in flight, or disconnect a linked profile.
+def device_cancel() -> None:
+    """Cancel a device-login attempt in flight, or disconnect a linked profile.
 
     Whichever this install is currently holding: a ``pending`` attempt is
-    cancelled at the hub (contract §4.4) and forgotten locally; a ``linked``
-    profile is disconnected by clearing the stored credential and handle —
-    **locally, and regardless of whether the hub can be reached**, per
-    contract §4.5's "Clearing the link removes local credential and reflects
-    disconnected status even if the hub is unavailable." There is nothing to
-    tell the hub in that second case: the credential being cleared is the
-    whole of what "disconnect" means on Condor's side.
+    simply forgotten locally — the device-flow contract has no cancel
+    endpoint, and an unpolled device code just expires at the hub on its own
+    at the 600s deadline; a ``linked`` profile is disconnected by clearing the
+    stored credential, scope and user **locally, and regardless of whether
+    the hub can be reached** — the credential being opaque and never reissued
+    means there is nothing to tell the hub either way, the same reasoning
+    FEAT-148's disconnect gave.
     """
-    with _link_lock:
-        pending = dict(_pending_link) if _pending_link else None
+    with _device_lock:
+        pending = _pending_device is not None
 
-    if pending is not None:
-        link_id = _segment(pending["link_id"], "link id")
-        reply = _send("DELETE", f"{HUB_URL}/link/{link_id}")
-        _clear_pending()
-        # A 409 means the hub says it was already accepted — the contract
-        # says to treat that as "assume it went through", not as an error to
-        # surface, since the credential may already be in flight to us.
-        if reply.status not in (200, 404, 409):
-            raise HubError(
-                _refusal(reply, "cancelling the pairing"), status=reply.status
-            )
-        log.info("hub: pairing cancelled")
+    if pending:
+        _clear_pending_device()
+        log.info("hub: device login cancelled")
         return
 
     from config_manager import get_config_manager
 
-    get_config_manager().update_hub(token="", profile_handle="")
+    get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
     log.info("hub: disconnected from Botcamp")
 
 
-def _clear_pending() -> None:
-    global _pending_link
-    with _link_lock:
-        _pending_link = None
+def _clear_pending_device() -> None:
+    global _pending_device
+    with _device_lock:
+        _pending_device = None
+
+
+def _clear_token_if_revoked(reply: Reply) -> None:
+    """A 401 from any token-bearing hub call means this install's copy is
+    revoked or wrong, never a network or request-shape problem — the token is
+    opaque and has no refresh path, so the one thing to do is stop presenting
+    it. Cleared **locally only**; there is nothing to tell the hub.
+    """
+    if reply.status == 401:
+        from config_manager import get_config_manager
+
+        get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
+        log.warning("hub: the hub answered 401 — clearing the stored Botcamp token")
 
 
 # ── The token, which lives in config.yml and is never rendered ───────────

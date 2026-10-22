@@ -8,7 +8,7 @@ import {
   Loader2,
   Upload,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { api } from "@/lib/api";
@@ -90,55 +90,62 @@ export function AgentsSettings() {
 }
 
 /**
- * Connect this install to a Botcamp profile with a pairing code (FEAT-148).
+ * Connect this install to a Botcamp profile with a device login (PR #111),
+ * gating `children` on being linked rather than showing them unconditionally.
  *
- * Replaces the pasted-token UX: starting a pairing shows a verification
- * string and opens Botcamp's approval page in a new tab, where the signed-in
- * admin compares that same string before accepting. This component only ever
- * polls Condor's own `/hub-link` — the credential itself is stored
- * server-side the moment the hub hands it over and never reaches this
- * component or any other response this dashboard reads.
+ * Replaces FEAT-148's pairing-code flow, itself a replacement for the pasted
+ * token: starting a device login shows a user code and opens Botcamp's
+ * `/connect` page in a new tab, where the signed-in admin enters that code
+ * before approving. This component only ever polls Condor's own
+ * `/hub-device` — the credential itself is stored server-side the moment the
+ * hub hands it over and never reaches this component or any other response
+ * this dashboard reads.
  *
- * Composed on the admin-only part of `/hub` now, not Settings (FEAT-153).
+ * Composed on the admin-only part of `/hub` (FEAT-153).
  */
-export function HubLinkField() {
+export function HubDeviceField({ children }: { children?: ReactNode }) {
   const queryClient = useQueryClient();
   const { data } = useQuery({
-    queryKey: ["hub-link"],
-    queryFn: api.getHubLink,
+    queryKey: ["hub-device"],
+    queryFn: api.getHubDevice,
     refetchInterval: (query) =>
-      query.state.data?.status === "pending" ? 3000 : false,
+      query.state.data?.status === "pending" ? 2000 : false,
   });
 
   const start = useMutation({
-    mutationFn: api.startHubLink,
+    mutationFn: api.startHubDevice,
     onSuccess: (started) => {
-      queryClient.setQueryData(["hub-link"], {
+      queryClient.setQueryData(["hub-device"], {
         status: "pending",
-        code: started.code,
-        verification: started.verification,
-        expires_at: started.expires_at,
-        link_url: started.link_url,
+        user_code: started.user_code,
+        verification_uri: started.verification_uri,
+        verification_uri_complete: started.verification_uri_complete,
+        expires_at: 0,
         profile_handle: "",
+        scope: [],
       });
-      window.open(started.link_url, "_blank", "noopener,noreferrer");
+      window.open(
+        started.verification_uri_complete || started.verification_uri,
+        "_blank",
+        "noopener,noreferrer",
+      );
     },
   });
 
   const disconnect = useMutation({
-    mutationFn: api.disconnectHubLink,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["hub-link"] }),
+    mutationFn: api.disconnectHubDevice,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["hub-device"] }),
   });
 
   const status = data?.status ?? "none";
   const busy = start.isPending || disconnect.isPending;
 
-  return (
-    <div className="space-y-1.5">
-      {status === "linked" && (
+  if (status === "linked") {
+    return (
+      <div className="space-y-4">
         <div className="flex items-center gap-2">
           <p
-            data-hub-link-status="linked"
+            data-hub-device-status="linked"
             className="flex items-center gap-1 text-xs text-[var(--color-text)]"
           >
             <Check className="h-3.5 w-3.5 text-[var(--color-primary)]" />
@@ -153,19 +160,24 @@ export function HubLinkField() {
             Disconnect
           </button>
         </div>
-      )}
+        {children}
+      </div>
+    );
+  }
 
+  return (
+    <div className="space-y-1.5">
       {status === "pending" && (
-        <div className="space-y-1.5" data-hub-link-status="pending">
+        <div className="space-y-1.5" data-hub-device-status="pending">
           <p className="text-xs text-[var(--color-text)]">
-            Compare this string with the one shown on Botcamp, then accept there:
+            Enter this code on Botcamp to connect this install:
           </p>
           <div className="flex items-center gap-2">
             <span className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)]">
-              {data?.verification}
+              {data?.user_code}
             </span>
             <a
-              href={data?.link_url}
+              href={data?.verification_uri_complete || data?.verification_uri}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1 text-xs font-semibold text-[var(--color-primary)] hover:underline"
@@ -187,30 +199,38 @@ export function HubLinkField() {
         </div>
       )}
 
-      {(status === "none" || status === "denied" || status === "expired") && (
-        <div className="space-y-1" data-hub-link-status={status}>
+      {(status === "none" ||
+        status === "denied" ||
+        status === "expired" ||
+        status === "invalid") && (
+        <div className="space-y-1" data-hub-device-status={status}>
           <button
             onClick={() => start.mutate()}
             disabled={busy}
             className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
           >
-            {start.isPending ? "Starting…" : "Connect to Botcamp"}
+            {start.isPending ? "Starting…" : "Sign in to Botcamp"}
           </button>
           {status === "denied" && (
             <p className="text-[11px] text-[var(--color-red)]">
-              The pairing was denied on Botcamp.
+              The device login was denied on Botcamp.
             </p>
           )}
           {status === "expired" && (
             <p className="text-[11px] text-[var(--color-text-muted)]">
-              That pairing expired before it was accepted.
+              That code expired before it was approved.
+            </p>
+          )}
+          {status === "invalid" && (
+            <p className="text-[11px] text-[var(--color-red)]">
+              Botcamp did not recognize that device code. Try again.
             </p>
           )}
         </div>
       )}
 
       {(start.isError || disconnect.isError) && (
-        <p role="alert" data-hub-link-error className="text-xs text-[var(--color-red)]">
+        <p role="alert" data-hub-device-error className="text-xs text-[var(--color-red)]">
           {(start.error ?? disconnect.error)?.message}
         </p>
       )}

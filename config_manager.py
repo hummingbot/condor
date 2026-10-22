@@ -840,10 +840,10 @@ class ConfigManager:
         Separate from :meth:`get_sharing` for the same reason sharing is
         separate from telemetry: this holds one outside service's credential,
         install-wide and the operator's, while sharing holds per-user consent
-        and this install's own ids. ``token`` is set via the pairing flow
-        (FEAT-148, ``condor.hub.link_state``) and, alongside it,
-        ``profile_handle`` names the linked Botcamp account; neither is ever
-        read back out to a client by a route.
+        and this install's own ids. ``token`` is set via the device-login flow
+        (``condor.hub.device_state``) and, alongside it, ``profile_handle``,
+        ``scope`` and ``user`` describe the linked Botcamp account; none of
+        them is ever read back out to a client by a route.
         """
         section = self._data.get("hub")
         return dict(section) if isinstance(section, dict) else {}

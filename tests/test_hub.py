@@ -28,6 +28,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -131,15 +132,16 @@ def cm(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_leaked_pairing(monkeypatch):
-    """Isolate ``hub._pending_link`` (FEAT-148) between tests.
+    """Isolate ``hub._pending_device`` (device login, PR #111) between tests.
 
-    It is module-level, in-memory state by design (the pairing is a short-lived
-    interactive act, not something ``config.yml`` should ever hold) — but that
-    means two tests sharing one process would otherwise share one install's
-    pairing attempt. ``monkeypatch.setattr`` restores the prior value after the
-    test, same shape as ``no_sockets`` above guarding the real module state.
+    It is module-level, in-memory state by design (a device login is a
+    short-lived interactive act, not something ``config.yml`` should ever
+    hold) — but that means two tests sharing one process would otherwise
+    share one install's login attempt. ``monkeypatch.setattr`` restores the
+    prior value after the test, same shape as ``no_sockets`` above guarding
+    the real module state.
     """
-    monkeypatch.setattr(hub, "_pending_link", None)
+    monkeypatch.setattr(hub, "_pending_device", None)
 
 
 @pytest.fixture
@@ -265,23 +267,25 @@ class FakeHub:
                     "submitted_at": "2026-10-21T12:03:00Z",
                 }
             )
-        # ── Account pairing (FEAT-148, contract §4) — sane defaults; a test
-        # wanting a specific transition (accepted/denied/expired/409/429) sets
-        # an ``overrides`` entry for the exact path instead.
-        if method == "POST" and path == "/link/start":
+        # ── Device login (PR #111) — sane defaults; a test wanting a specific
+        # transition (200/authorization_pending/slow_down/access_denied/
+        # expired_token/invalid_grant) sets an ``overrides`` entry for the
+        # exact path instead.
+        if method == "POST" and path == "/condor/device/code":
             return _ok(
                 {
-                    "link_id": "lnk_test",
-                    "code": "WXYZ-4821",
-                    "verification": "porcupine-harbor-violet-trellis",
-                    "expires_at": "2026-10-21T12:10:00Z",
-                    "poll_interval_s": 3,
+                    "device_code": "dev_test",
+                    "user_code": "WXYZ-4821",
+                    "verification_uri": "https://botcamp.xyz/connect",
+                    "verification_uri_complete": "https://botcamp.xyz/connect?code=WXYZ-4821",
+                    "expires_in": 600,
+                    "interval": 5,
                 }
             )
-        if method == "GET" and path.startswith("/link/"):
-            return _ok({"status": "pending", "expires_at": "2026-10-21T12:10:00Z"})
-        if method == "DELETE" and path.startswith("/link/"):
-            return _ok({"cancelled": True})
+        if method == "POST" and path == "/condor/device/token":
+            return hub.Reply(
+                400, json.dumps({"error": "authorization_pending"}).encode()
+            )
         return _missing()
 
 
@@ -725,7 +729,10 @@ def test_a_deterministic_rejection_is_a_rejected_receipt_not_a_raise(
             {
                 "status": "rejected",
                 "reasons": [
-                    {"rule": "secret-scan", "detail": "skills/s/SKILL.md: a key-like value"}
+                    {
+                        "rule": "secret-scan",
+                        "detail": "skills/s/SKILL.md: a key-like value",
+                    }
                 ],
             }
         ).encode("utf-8"),
@@ -736,7 +743,9 @@ def test_a_deterministic_rejection_is_a_rejected_receipt_not_a_raise(
     assert receipt.status == "rejected"
     assert receipt.submission_id == ""
     assert receipt.reasons == [
-        hub.SubmissionReason(rule="secret-scan", detail="skills/s/SKILL.md: a key-like value")
+        hub.SubmissionReason(
+            rule="secret-scan", detail="skills/s/SKILL.md: a key-like value"
+        )
     ]
     assert hub.local_submission("traveller").status == "rejected"
 
@@ -782,7 +791,10 @@ def test_submission_status_reports_a_rejection_with_reasons(traveller, fake_hub,
                 "submitted_at": "2026-10-21T12:03:00Z",
                 "decided_at": "2026-10-21T14:40:00Z",
                 "reasons": [
-                    {"rule": "human-review", "detail": "Tool-steering language in a skill."}
+                    {
+                        "rule": "human-review",
+                        "detail": "Tool-steering language in a skill.",
+                    }
                 ],
             }
         ).encode("utf-8"),
@@ -1013,121 +1025,136 @@ def _settings_client(admin: bool):
     return TestClient(app)
 
 
-# ── Account pairing: connect to a Botcamp profile, no pasted token (FEAT-148) ──
+# ── Device login: connect to a Botcamp profile, no pasted token (PR #111) ──
 
 
 def _force_poll():
-    """Make the next ``hub.link_state()`` hit the hub rather than the locally
-    cached ``pending`` answer, regardless of ``poll_interval_s``."""
-    hub._pending_link["last_polled"] = 0.0
+    """Make the next ``hub.device_state()`` hit the hub rather than the
+    locally cached ``pending`` answer, regardless of ``interval``."""
+    hub._pending_device["last_polled"] = 0.0
 
 
-def test_link_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
-    start = hub.link_start()
+def test_device_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
+    code = hub.device_start()
 
     assert fake_hub.calls[-1].method == "POST"
-    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/link/start"
+    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/condor/device/code"
     assert fake_hub.calls[-1].token == ""
-    assert start.code == "WXYZ-4821"
-    assert start.verification == "porcupine-harbor-violet-trellis"
-    assert start.link_url == f"{hub.HUB_URL}/link?code=WXYZ-4821"
-    assert hub._pending_link["link_id"] == "lnk_test"
-
-
-def test_the_hub_cannot_redirect_the_tab_condor_opens(fake_hub):
-    """``link_url`` is built from the compiled-in ``HUB_URL`` and the hub's own
-    ``code`` — never from a URL the hub's reply might carry — so nothing the
-    hub answers can redirect where Condor opens an admin's browser tab."""
-    fake_hub.overrides[("POST", "/link/start")] = _ok(
-        {
-            "link_id": "lnk_test",
-            "code": "WXYZ-4821",
-            "verification": "porcupine-harbor-violet-trellis",
-            "expires_at": "2026-10-21T12:10:00Z",
-            "poll_interval_s": 3,
-            "link_url": "https://evil.example/phish",
-        }
+    assert fake_hub.calls[-1].body == {}
+    assert code.user_code == "WXYZ-4821"
+    assert code.verification_uri_complete == (
+        "https://botcamp.xyz/connect?code=WXYZ-4821"
     )
-
-    start = hub.link_start()
-
-    assert start.link_url == f"{hub.HUB_URL}/link?code=WXYZ-4821"
+    assert hub._pending_device["device_code"] == "dev_test"
 
 
-def test_link_state_is_none_with_nothing_pending_or_linked(cm):
-    assert hub.link_state() == hub.LinkState(status="none")
+def test_device_state_is_none_with_nothing_pending_or_linked(cm):
+    assert hub.device_state() == hub.DeviceLinkState(status="none")
 
 
-def test_link_state_reports_pending_with_the_code_and_verification(fake_hub):
-    hub.link_start()
+def test_device_state_reports_pending_with_the_user_code_and_link(fake_hub):
+    hub.device_start()
 
-    state = hub.link_state()
+    state = hub.device_state()
 
     assert state.status == "pending"
-    assert state.code == "WXYZ-4821"
-    assert state.verification == "porcupine-harbor-violet-trellis"
-    assert state.link_url == f"{hub.HUB_URL}/link?code=WXYZ-4821"
+    assert state.user_code == "WXYZ-4821"
+    assert state.verification_uri_complete == (
+        "https://botcamp.xyz/connect?code=WXYZ-4821"
+    )
 
 
-def test_link_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
-    hub.link_start()
-    hub.link_state()
+def test_device_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
+    hub.device_start()
+    hub.device_state()
     calls_before = len(fake_hub.calls)
 
-    hub.link_state()
+    hub.device_state()
 
     assert len(fake_hub.calls) == calls_before
 
 
-def test_an_accepted_pairing_stores_the_credential_and_never_returns_it(fake_hub, cm):
-    hub.link_start()
-    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok(
+def test_authorization_pending_keeps_polling(fake_hub):
+    """The fake hub's default ``/condor/device/token`` answer — a plain 400
+    ``authorization_pending`` — must read as still-``pending``, not an error."""
+    hub.device_start()
+    _force_poll()
+
+    state = hub.device_state()
+
+    assert state.status == "pending"
+    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/condor/device/token"
+    assert fake_hub.calls[-1].body == {"device_code": "dev_test"}
+
+
+def test_slow_down_increases_the_poll_interval(fake_hub):
+    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
+        400, json.dumps({"error": "slow_down"}).encode()
+    )
+    hub.device_start()
+    interval_before = hub._pending_device["interval"]
+    _force_poll()
+
+    state = hub.device_state()
+
+    assert state.status == "pending"
+    assert hub._pending_device["interval"] > interval_before
+
+
+def test_a_successful_poll_stores_the_credential_scope_and_user(fake_hub, cm):
+    hub.device_start()
+    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
         {
-            "status": "accepted",
-            "profile_handle": "cardosofede",
-            "credential": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
-            "credential_scope": "author",
+            "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+            "token_type": "bearer",
+            "scope": "agents:read agents:publish",
+            "user": {"id": "u_1", "name": "cardosofede"},
         }
     )
     _force_poll()
 
-    state = hub.link_state()
+    state = hub.device_state()
 
     assert state.status == "linked"
     assert state.profile_handle == "cardosofede"
+    assert state.scope == ["agents:read", "agents:publish"]
     assert "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60" not in state.model_dump_json()
     assert hub.token() == "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60"
     assert cm.get_hub()["profile_handle"] == "cardosofede"
+    assert cm.get_hub()["scope"] == ["agents:read", "agents:publish"]
+    assert cm.get_hub()["user"] == {"id": "u_1", "name": "cardosofede"}
     # The attempt is forgotten: a later read comes straight off config, with
-    # no second request to the hub for the now-consumed link_id.
-    assert hub._pending_link is None
+    # no second poll for the now-consumed device_code.
+    assert hub._pending_device is None
     calls_before = len(fake_hub.calls)
-    assert hub.link_state() == hub.LinkState(
-        status="linked", profile_handle="cardosofede"
+    assert hub.device_state() == hub.DeviceLinkState(
+        status="linked",
+        profile_handle="cardosofede",
+        scope=["agents:read", "agents:publish"],
     )
     assert len(fake_hub.calls) == calls_before
 
 
 def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, cm):
-    """ARCH-738's own criterion, now for the two keys the pairing flow adds.
+    """ARCH-738's own criterion, now for the keys the device-login flow adds.
 
     ``CONFIG_SECTIONS["hub"]`` merges whatever keys ``update_hub`` is given,
-    so this is really asserting that ``link_state`` wrote both of them
+    so this is really asserting that ``device_state`` wrote all of them
     (rather than only ``token``) and that an unrelated save does not drop
-    either.
+    any.
     """
     import config_manager as cm_module
 
-    hub.link_start()
-    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok(
+    hub.device_start()
+    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
         {
-            "status": "accepted",
-            "profile_handle": "cardosofede",
-            "credential": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+            "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+            "scope": "agents:read agents:publish",
+            "user": {"id": "u_1", "name": "cardosofede"},
         }
     )
     _force_poll()
-    hub.link_state()
+    hub.device_state()
 
     cm.update_hub(**cm.get_hub())  # an unrelated save of the same section
 
@@ -1135,117 +1162,111 @@ def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, 
     assert reloaded.get_hub() == {
         "token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
         "profile_handle": "cardosofede",
+        "scope": ["agents:read", "agents:publish"],
+        "user": {"id": "u_1", "name": "cardosofede"},
     }
 
 
-def test_a_denied_pairing_is_reported_once_then_forgotten(fake_hub):
-    hub.link_start()
-    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok({"status": "denied"})
+def test_access_denied_is_reported_once_then_forgotten(fake_hub):
+    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
+        400, json.dumps({"error": "access_denied"}).encode()
+    )
+    hub.device_start()
     _force_poll()
 
-    assert hub.link_state().status == "denied"
-    assert hub.link_state().status == "none"
+    assert hub.device_state().status == "denied"
+    assert hub.device_state().status == "none"
 
 
-def test_an_expired_pairing_is_reported_once_then_forgotten(fake_hub):
-    hub.link_start()
-    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok({"status": "expired"})
+def test_expired_token_is_reported_once_then_forgotten(fake_hub):
+    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
+        400, json.dumps({"error": "expired_token"}).encode()
+    )
+    hub.device_start()
     _force_poll()
 
-    assert hub.link_state().status == "expired"
-    assert hub.link_state().status == "none"
+    assert hub.device_state().status == "expired"
+    assert hub.device_state().status == "none"
 
 
-def test_a_link_id_the_hub_no_longer_knows_reads_as_expired(fake_hub):
-    """Contract §4.3: a ``link_id`` the hub never issued, or one already fully
-    consumed and forgotten, answers ``404`` rather than a status in the body."""
-    hub.link_start()
-    fake_hub.overrides[("GET", "/link/lnk_test")] = hub.Reply(
-        404, b'{"detail": "no such link"}'
+def test_invalid_grant_is_reported_as_its_own_distinct_status(fake_hub):
+    """``invalid_grant`` is a device code the hub does not recognize — a
+    different, actionable state from a denial or a plain expiry, so it gets
+    its own status rather than being folded into one of those."""
+    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
+        400, json.dumps({"error": "invalid_grant"}).encode()
     )
+    hub.device_start()
     _force_poll()
 
-    assert hub.link_state().status == "expired"
-    assert hub._pending_link is None
+    assert hub.device_state().status == "invalid"
+    assert hub.device_state().status == "none"
 
 
-def test_restarting_a_pairing_forgets_the_previous_attempt(fake_hub):
-    hub.link_start()
-    first_link_id = hub._pending_link["link_id"]
-    fake_hub.overrides[("POST", "/link/start")] = _ok(
-        {
-            "link_id": "lnk_second",
-            "code": "ABCD-1234",
-            "verification": "second-attempt-string",
-            "expires_at": "2026-10-21T12:20:00Z",
-            "poll_interval_s": 3,
-        }
-    )
-
-    second = hub.link_start()
-
-    assert second.link_id == "lnk_second" != first_link_id
-    assert hub._pending_link["link_id"] == "lnk_second"
-
-
-def test_a_malicious_link_id_from_the_hub_is_refused_before_a_second_request(
-    fake_hub,
-):
-    """``link_id`` is hub-minted, not operator-typed, but it still rides in a
-    URL path this process dials — ``_segment`` guards it exactly as it guards
-    a listing id (module docstring: "no unchecked value reaches a path
-    segment, whoever wrote it")."""
-    fake_hub.overrides[("POST", "/link/start")] = _ok(
-        {
-            "link_id": "../agents",
-            "code": "WXYZ-4821",
-            "verification": "porcupine-harbor-violet-trellis",
-            "expires_at": "2026-10-21T12:10:00Z",
-            "poll_interval_s": 3,
-        }
-    )
-    hub.link_start()
+def test_the_600s_deadline_expires_locally_without_a_further_hub_call(fake_hub):
+    """Stop polling at the device-code deadline rather than forever: once the
+    deadline has passed, reading the state must not spend a request on an
+    attempt the hub has already retired on its own side."""
+    hub.device_start()
+    hub._pending_device["deadline"] = time.monotonic() - 1
     calls_before = len(fake_hub.calls)
 
-    with pytest.raises(IdentifierError):
-        hub.link_state()
-    with pytest.raises(IdentifierError):
-        hub.link_cancel()
+    state = hub.device_state()
 
+    assert state.status == "expired"
+    assert hub._pending_device is None
     assert len(fake_hub.calls) == calls_before
 
 
-def test_cancelling_a_pending_pairing_calls_the_hub_and_forgets_it(fake_hub):
-    hub.link_start()
-
-    hub.link_cancel()
-
-    assert fake_hub.calls[-1].method == "DELETE"
-    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/link/lnk_test"
-    assert hub._pending_link is None
-    assert hub.link_state().status == "none"
-
-
-def test_cancelling_a_pairing_the_hub_already_accepted_is_not_an_error(fake_hub):
-    """Contract §4.4: a 409 means "assume it went through," not a failure."""
-    hub.link_start()
-    fake_hub.overrides[("DELETE", "/link/lnk_test")] = hub.Reply(
-        409, b'{"detail": "already accepted"}'
+def test_restarting_a_device_login_forgets_the_previous_attempt(fake_hub):
+    hub.device_start()
+    first_device_code = hub._pending_device["device_code"]
+    fake_hub.overrides[("POST", "/condor/device/code")] = _ok(
+        {
+            "device_code": "dev_second",
+            "user_code": "ABCD-1234",
+            "verification_uri": "https://botcamp.xyz/connect",
+            "verification_uri_complete": "https://botcamp.xyz/connect?code=ABCD-1234",
+            "expires_in": 600,
+            "interval": 5,
+        }
     )
 
-    hub.link_cancel()  # must not raise
+    second = hub.device_start()
 
-    assert hub._pending_link is None
+    assert second.device_code == "dev_second" != first_device_code
+    assert hub._pending_device["device_code"] == "dev_second"
+
+
+def test_cancelling_a_pending_device_login_forgets_it_with_no_hub_call(fake_hub):
+    """The device-flow contract has no cancel endpoint: an unpolled device
+    code just expires at the hub on its own, so cancelling is purely local."""
+    hub.device_start()
+    calls_before = len(fake_hub.calls)
+
+    hub.device_cancel()
+
+    assert len(fake_hub.calls) == calls_before
+    assert hub._pending_device is None
+    assert hub.device_state().status == "none"
 
 
 def test_disconnecting_a_linked_profile_clears_it_without_a_hub_call(fake_hub, cm):
-    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+    cm.update_hub(
+        token="bc_live_x",
+        profile_handle="cardosofede",
+        scope=["agents:read"],
+        user={"id": "u_1", "name": "cardosofede"},
+    )
+    calls_before = len(fake_hub.calls)
 
-    hub.link_cancel()
+    hub.device_cancel()
 
     assert hub.token() == ""
     assert cm.get_hub().get("profile_handle", "") == ""
-    assert not any(c.url.startswith(f"{hub.HUB_URL}/link") for c in fake_hub.calls)
+    assert cm.get_hub().get("scope") == []
+    assert cm.get_hub().get("user") == {}
+    assert len(fake_hub.calls) == calls_before
 
 
 def test_disconnecting_survives_an_unreachable_hub(cm):
@@ -1254,69 +1275,110 @@ def test_disconnecting_survives_an_unreachable_hub(cm):
     enough to prove no network was involved; no ``fake_hub`` stub needed."""
     cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
 
-    hub.link_cancel()  # must not raise
+    hub.device_cancel()  # must not raise
 
     assert hub.token() == ""
 
 
-def test_a_pairing_start_that_the_hub_refuses_raises_and_tracks_nothing(fake_hub):
-    fake_hub.overrides[("POST", "/link/start")] = hub.Reply(500, b"{}")
+def test_a_device_login_start_that_the_hub_refuses_raises_and_tracks_nothing(fake_hub):
+    fake_hub.overrides[("POST", "/condor/device/code")] = hub.Reply(500, b"{}")
 
     with pytest.raises(hub.HubError):
-        hub.link_start()
+        hub.device_start()
 
-    assert hub._pending_link is None
-
-
-def test_starting_a_hub_link_is_admin_only(cm, fake_hub):
-    res = _settings_client(admin=False).post("/settings/hub-link/start")
-
-    assert res.status_code == 403
-    assert hub._pending_link is None
+    assert hub._pending_device is None
 
 
-def test_polling_the_hub_link_is_admin_only(cm, fake_hub):
-    res = _settings_client(admin=False).get("/settings/hub-link")
+def test_starting_a_hub_device_login_is_admin_only(cm, fake_hub):
+    res = _settings_client(admin=False).post("/settings/hub-device/start")
 
     assert res.status_code == 403
+    assert hub._pending_device is None
 
 
-def test_disconnecting_the_hub_link_is_admin_only(cm):
-    res = _settings_client(admin=False).delete("/settings/hub-link")
+def test_polling_the_hub_device_login_is_admin_only(cm, fake_hub):
+    res = _settings_client(admin=False).get("/settings/hub-device")
 
     assert res.status_code == 403
 
 
-def test_the_dashboard_can_start_and_poll_a_pairing_through_to_linked(cm, fake_hub):
+def test_disconnecting_the_hub_device_login_is_admin_only(cm):
+    res = _settings_client(admin=False).delete("/settings/hub-device")
+
+    assert res.status_code == 403
+
+
+# ── Revocation: a 401 from any token-bearing call clears it locally ──────
+
+
+def test_a_401_during_publish_clears_the_stored_token(traveller, fake_hub, cm):
+    hub.set_token("bc_live_revoked")
+    fake_hub.overrides[("POST", "/agents")] = hub.Reply(401, b"{}")
+
+    with pytest.raises(hub.HubError):
+        hub.publish("traveller", hub.token())
+
+    assert hub.token() == ""
+
+
+def test_a_401_during_unpublish_clears_the_stored_token(fake_hub, cm):
+    hub.set_token("bc_live_revoked")
+    fake_hub.overrides[("DELETE", "/agents/listed")] = hub.Reply(401, b"{}")
+
+    with pytest.raises(hub.HubError):
+        hub.unpublish("listed", hub.token())
+
+    assert hub.token() == ""
+
+
+def test_a_401_during_submission_status_clears_the_stored_token(fake_hub, cm):
+    hub.set_token("bc_live_revoked")
+    hub._store_submission(
+        "traveller", hub.Receipt(submission_id="sub_test", status="pending")
+    )
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(401, b"{}")
+
+    with pytest.raises(hub.HubError):
+        hub.submission_status("traveller", hub.token())
+
+    assert hub.token() == ""
+
+
+def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
+    cm, fake_hub
+):
     client = _settings_client(admin=True)
 
-    started = client.post("/settings/hub-link/start")
+    started = client.post("/settings/hub-device/start")
     assert started.status_code == 200
     body = started.json()
-    assert body["code"] == "WXYZ-4821"
-    assert body["verification"] == "porcupine-harbor-violet-trellis"
-    assert "credential" not in body
+    assert body["user_code"] == "WXYZ-4821"
+    assert body["verification_uri_complete"] == (
+        "https://botcamp.xyz/connect?code=WXYZ-4821"
+    )
+    assert "access_token" not in body
 
-    pending = client.get("/settings/hub-link")
+    pending = client.get("/settings/hub-device")
     assert pending.json()["status"] == "pending"
 
-    fake_hub.overrides[("GET", "/link/lnk_test")] = _ok(
+    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
         {
-            "status": "accepted",
-            "profile_handle": "cardosofede",
-            "credential": "bc_live_super_secret",
+            "access_token": "bc_live_super_secret",
+            "scope": "agents:read agents:publish",
+            "user": {"id": "u_1", "name": "cardosofede"},
         }
     )
     _force_poll()
 
-    linked = client.get("/settings/hub-link")
+    linked = client.get("/settings/hub-device")
     assert linked.json() == {
         "status": "linked",
-        "code": "",
-        "verification": "",
-        "expires_at": "",
-        "link_url": "",
+        "user_code": "",
+        "verification_uri": "",
+        "verification_uri_complete": "",
+        "expires_at": 0.0,
         "profile_handle": "cardosofede",
+        "scope": ["agents:read", "agents:publish"],
     }
     assert "bc_live_super_secret" not in linked.text
 
@@ -1328,7 +1390,7 @@ def test_the_dashboard_can_disconnect_a_linked_profile(cm):
     get_config_manager().update_hub(profile_handle="cardosofede")
     client = _settings_client(admin=True)
 
-    res = client.delete("/settings/hub-link")
+    res = client.delete("/settings/hub-device")
 
     assert res.status_code == 200
     assert res.json() == {"status": "none"}

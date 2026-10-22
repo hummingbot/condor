@@ -1,12 +1,14 @@
 /**
- * Botcamp Hub as one destination (FEAT-153): Pull agents is public, Connect
- * to Botcamp and Upload yours are admin-only, and withdraw finally has a
+ * Botcamp Hub as one destination (FEAT-153): Pull agents is public, the
+ * Botcamp section (connect + upload) is admin-only and gated on being
+ * signed in to Botcamp (PR #111's device flow), and withdraw finally has a
  * dashboard control.
  *
  * The thing worth testing is not that the sections render — it is that the
- * admin-only sections mount no admin-only query for a non-admin seat, that an
- * unreachable hub reads differently from an empty one, and that publish and
- * withdraw actually hit the routes the contract defines.
+ * admin-only section mounts no admin-only query for a non-admin seat, that an
+ * unreachable hub reads differently from an empty one, that Upload yours
+ * stays hidden until this install is linked, and that publish and withdraw
+ * actually hit the routes the contract defines.
  *
  * @vitest-environment jsdom
  */
@@ -17,7 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { AgentSummary, HubLinkState, HubReceipt } from "@/lib/api";
+import type { AgentSummary, HubDeviceState, HubReceipt } from "@/lib/api";
 import { AgentHub } from "./AgentHub";
 
 declare global {
@@ -30,15 +32,16 @@ let requests: { url: string; method: string }[] = [];
 let isAdmin: boolean;
 let submissionReceipt: HubReceipt | null;
 let bundleText: string;
-let hubLinkState: HubLinkState;
+let hubDeviceState: HubDeviceState;
 
-const NONE_LINK: HubLinkState = {
+const NONE_DEVICE: HubDeviceState = {
   status: "none",
-  code: "",
-  verification: "",
-  expires_at: "",
-  link_url: "",
+  user_code: "",
+  verification_uri: "",
+  verification_uri_complete: "",
+  expires_at: 0,
   profile_handle: "",
+  scope: [],
 };
 
 function agent(over: Partial<AgentSummary>): AgentSummary {
@@ -102,16 +105,16 @@ function router(url: string, init?: RequestInit): Response | Promise<Response> {
       agent({ slug: "condor", name: "Condor" }),
     ]);
   }
-  if (method === "GET" && url === "/api/v1/settings/hub-link") {
-    return json(hubLinkState);
+  if (method === "GET" && url === "/api/v1/settings/hub-device") {
+    return json(hubDeviceState);
   }
-  if (method === "POST" && url === "/api/v1/settings/hub-link/start") {
+  if (method === "POST" && url === "/api/v1/settings/hub-device/start") {
     return json({
-      code: "abc",
-      verification: "tiger-lamp",
-      expires_at: "2026-10-22T12:00:00Z",
-      poll_interval_s: 3,
-      link_url: "https://botcamp.xyz/pair/abc",
+      user_code: "ABC-123",
+      verification_uri: "https://botcamp.xyz/connect",
+      verification_uri_complete: "https://botcamp.xyz/connect?code=ABC-123",
+      expires_in: 600,
+      interval: 5,
     });
   }
   if (url.endsWith("/submission")) {
@@ -137,7 +140,7 @@ beforeEach(() => {
   isAdmin = false;
   submissionReceipt = null;
   bundleText = JSON.stringify({ version: 1, files: [{ path: "AGENT.md" }] });
-  hubLinkState = { ...NONE_LINK };
+  hubDeviceState = { ...NONE_DEVICE };
 
   vi.stubGlobal("fetch", vi.fn(router));
   vi.spyOn(window, "open").mockImplementation(() => null);
@@ -189,7 +192,10 @@ async function waitFor(done: () => boolean) {
 }
 
 function heading(text: string): Element | null {
-  return [...container.querySelectorAll("h2")].find((h) => h.textContent === text) ?? null;
+  return (
+    [...container.querySelectorAll("h2, h3")].find((h) => h.textContent === text) ??
+    null
+  );
 }
 
 function buttonByText(label: string): HTMLButtonElement {
@@ -236,14 +242,14 @@ it("a non-admin sees only Pull agents, with no admin-only request fired", async 
   await render();
 
   expect(heading("Pull agents")).not.toBeNull();
-  expect(heading("Connect to Botcamp")).toBeNull();
+  expect(heading("Botcamp")).toBeNull();
   expect(heading("Upload yours")).toBeNull();
   // The empty catalogue reads as "nothing published", not as an outage —
   // the contrast the next test's 502 is there to prove.
   expect(container.textContent).toContain("nothing matching");
 
   expect(requests.some((r) => r.url === "/api/v1/agents")).toBe(false);
-  expect(requests.some((r) => r.url === "/api/v1/settings/hub-link")).toBe(false);
+  expect(requests.some((r) => r.url === "/api/v1/settings/hub-device")).toBe(false);
 });
 
 it("an unreachable hub reads differently from an empty catalogue, for every seat", async () => {
@@ -267,53 +273,62 @@ it("an unreachable hub reads differently from an empty catalogue, for every seat
   expect(container.textContent).not.toContain("nothing matching");
 });
 
-it("an admin sees every section and can start a Botcamp pairing", async () => {
+it("an admin sees the Botcamp sign-in step, with Upload yours hidden until linked", async () => {
   isAdmin = true;
   await render();
 
-  expect(heading("Connect to Botcamp")).not.toBeNull();
-  expect(heading("Upload yours")).not.toBeNull();
+  expect(heading("Botcamp")).not.toBeNull();
+  expect(heading("Upload yours")).toBeNull();
 
-  await click(buttonByText("Connect to Botcamp"));
-  await waitFor(() => container.querySelector("[data-hub-link-status='pending']") !== null);
+  await click(buttonByText("Sign in to Botcamp"));
+  await waitFor(() => container.querySelector("[data-hub-device-status='pending']") !== null);
 
-  expect(container.querySelector("[data-hub-link-status='pending']")?.textContent).toContain(
-    "tiger-lamp",
+  expect(container.querySelector("[data-hub-device-status='pending']")?.textContent).toContain(
+    "ABC-123",
   );
   expect(window.open).toHaveBeenCalledWith(
-    "https://botcamp.xyz/pair/abc",
+    "https://botcamp.xyz/connect?code=ABC-123",
     "_blank",
     "noopener,noreferrer",
   );
+  expect(heading("Upload yours")).toBeNull();
 });
 
-it("shows a linked pairing with its profile handle", async () => {
+it("reveals Upload yours once linked, with the profile handle shown", async () => {
   isAdmin = true;
-  hubLinkState = { ...NONE_LINK, status: "linked", profile_handle: "@fede" };
+  hubDeviceState = {
+    ...NONE_DEVICE,
+    status: "linked",
+    profile_handle: "@fede",
+    scope: ["agents:read", "agents:publish"],
+  };
   await render();
+
   expect(
-    container.querySelector("[data-hub-link-status='linked']")?.textContent,
+    container.querySelector("[data-hub-device-status='linked']")?.textContent,
   ).toContain("@fede");
+  expect(heading("Upload yours")).not.toBeNull();
 });
 
-it("shows a denied pairing", async () => {
+it("shows a denied device login", async () => {
   isAdmin = true;
-  hubLinkState = { ...NONE_LINK, status: "denied" };
+  hubDeviceState = { ...NONE_DEVICE, status: "denied" };
   await render();
-  expect(container.querySelector("[data-hub-link-status='denied']")).not.toBeNull();
+  expect(container.querySelector("[data-hub-device-status='denied']")).not.toBeNull();
   expect(container.textContent).toContain("denied on Botcamp");
 });
 
-it("shows an expired pairing", async () => {
+it("shows an expired device login", async () => {
   isAdmin = true;
-  hubLinkState = { ...NONE_LINK, status: "expired" };
+  hubDeviceState = { ...NONE_DEVICE, status: "expired" };
   await render();
-  expect(container.querySelector("[data-hub-link-status='expired']")).not.toBeNull();
-  expect(container.textContent).toContain("expired before it was accepted");
+  expect(container.querySelector("[data-hub-device-status='expired']")).not.toBeNull();
+  expect(container.textContent).toContain("expired before it was approved");
 });
 
-it("an admin can choose a local agent and publish it", async () => {
+it("an admin can choose a local agent and publish it, once linked", async () => {
   isAdmin = true;
+  hubDeviceState = { ...NONE_DEVICE, status: "linked", profile_handle: "@fede" };
   await render();
   await chooseAgent("river_scalper");
 
@@ -326,6 +341,7 @@ it("an admin can choose a local agent and publish it", async () => {
 
 it("withdraws a published listing through the admin-only DELETE route", async () => {
   isAdmin = true;
+  hubDeviceState = { ...NONE_DEVICE, status: "linked", profile_handle: "@fede" };
   submissionReceipt = PUBLISHED;
   await render();
   await chooseAgent("river_scalper");
