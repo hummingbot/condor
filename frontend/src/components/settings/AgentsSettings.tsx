@@ -12,7 +12,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { InlineConfirm } from "@/components/ui/InlineConfirm";
-import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { api, errorStatus } from "@/lib/api";
 
@@ -254,12 +253,14 @@ function BotcampAccountCard() {
  * Composed on the admin-only part of `/hub` (FEAT-153).
  */
 /**
- * The device-login state machine, shared by `HubDeviceField` (connected
- * status + Upload yours, in Settings → Agents / the Botcamp section of
- * `/hub`) and `BotcampSignInModal` (the same sign-in step, reached from
- * `/hub`'s Pull agents gate without leaving it) — one place that owns the
- * `start`/`disconnect` mutations and the `["hub-device"]` poll, so the two
- * presentations can never disagree about where the link stands.
+ * The device-login state machine, shared by `HubDeviceSignIn` (the not-yet-
+ * linked half, rendered in `/hub`'s Pull agents gate) and `HubDeviceField`
+ * (the linked half — connected status, Disconnect and Upload yours, in
+ * `/hub`'s Botcamp section) — one place that owns the `start`/`disconnect`
+ * mutations and the `["hub-device"]` poll. The two never render at once:
+ * `/hub` shows the gate until this install is linked and the Botcamp section
+ * only once it is, so there is one "Sign in to Botcamp" control on the page,
+ * never two (FEAT-153).
  *
  * It also invalidates `["hub-device-linked"]` the moment this poll observes
  * `"linked"` flip, either way — `/hub`'s Pull gate reads that separate,
@@ -331,6 +332,13 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
   const device = useHubDevice();
   const { data, status, disconnect, busy } = device;
 
+  // Until this poll answers, say nothing. `/hub` only mounts this once its
+  // own `["hub-device-linked"]` bit reads linked, so a "none" default here is
+  // not the real state — rendering the sign-in panel on it would flash a
+  // second "Sign in to Botcamp" button under a section that is about to show
+  // "Connected as …".
+  if (!data) return null;
+
   if (status === "linked") {
     return (
       <div className="space-y-4">
@@ -362,11 +370,12 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
 /**
  * The not-yet-linked half of the state machine on its own: the sign-in
  * button, the pending user code, and the denied/expired/invalid/error
- * messages — everything short of "connected". Exported so
- * `BotcampSignInModal` can render exactly this inside its own chrome rather
- * than a second implementation of the same polling and mutations.
+ * messages — everything short of "connected". Split out from
+ * `HubDeviceField` because `/hub` renders the two halves in different places:
+ * this one in the Pull agents gate (through `HubDeviceSignIn`), the linked
+ * half in the Botcamp section below it.
  */
-export function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
+function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
   const { data, status, start, disconnect, busy, revokeNotice } = device;
 
   return (
@@ -449,52 +458,19 @@ export function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
 }
 
 /**
- * "Sign in to Botcamp" as a modal, reached from `/hub`'s Pull agents gate
- * (FEAT-153) without leaving the page. Wraps the same `HubDeviceSignInPanel`
- * `HubDeviceField` renders inline in the Botcamp section further down — one
- * state machine, two doors to it — and closes itself the moment the poll
- * reports `"linked"`, since that is also what the Pull gate reads to unlock.
+ * "Sign in to Botcamp" where the gate is, rather than behind a modal that
+ * repeated the Botcamp section's own control (FEAT-153). Mounts the device
+ * state machine itself, so `/hub` can place it inside the `isAdmin` branch of
+ * the Pull gate without firing the admin-only `["hub-device"]` query for a
+ * non-admin seat.
  *
- * Admin-only to open, same as the state machine underneath it: starting a
+ * Admin-only to render, same as the state machine underneath it: starting a
  * device login is a 403 for a non-admin seat (`_require_hub_admin`), so a
- * non-admin never gets a trigger for this in the first place.
+ * non-admin is told to ask an admin instead of being given a button that
+ * cannot work.
  */
-export function BotcampSignInModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  const device = useHubDevice();
-  useEscapeKey(open, onClose);
-
-  useEffect(() => {
-    if (open && device.status === "linked") onClose();
-  }, [open, device.status, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="text-sm font-bold text-[var(--color-text)]">
-          Sign in to Botcamp
-        </h2>
-        <p className="mt-1 mb-4 text-xs text-[var(--color-text-muted)]">
-          Connects this Condor install to a Botcamp profile, install-wide — every
-          publish and every gated pull acts as that account.
-        </p>
-        <HubDeviceSignInPanel device={device} />
-      </div>
-    </div>
-  );
+export function HubDeviceSignIn() {
+  return <HubDeviceSignInPanel device={useHubDevice()} />;
 }
 
 /**

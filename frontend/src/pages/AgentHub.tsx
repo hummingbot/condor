@@ -4,8 +4,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
-  BotcampSignInModal,
   HubDeviceField,
+  HubDeviceSignIn,
   PublishAgentButton,
   WithdrawListingButton,
 } from "@/components/settings/AgentsSettings";
@@ -23,12 +23,20 @@ import { api } from "@/lib/api";
  * Botcamp — the backend's own read endpoints accept an anonymous lookup, but
  * this dashboard asks for a signed-in install before it will use them, so
  * "connect to Botcamp" is the one gate every visitor meets before anything
- * else on this page works; the Botcamp section — connecting this install and
- * uploading yours — is admin-only, by `useIsAdmin` (cosmetic — the server's
- * own `require_admin` on each route is what actually gates publish/withdraw),
- * and shows a sign-in step until this install is linked (PR #111's device
- * login), its normal content — connected status and the upload picker — only
- * once it is.
+ * else on this page works; the Botcamp section — the connected profile,
+ * Disconnect and uploading yours — is admin-only, by `useIsAdmin` (cosmetic —
+ * the server's own `require_admin` on each route is what actually gates
+ * publish/withdraw).
+ *
+ * There is exactly one "Sign in to Botcamp" control here. The link is
+ * install-wide, so a second door to it is not a second choice — it is the
+ * same button twice, which is what the first cut of this page shipped: the
+ * Pull gate opened a modal onto the device flow while the Botcamp section
+ * rendered the identical flow inline underneath it. The two halves of that
+ * flow are now split by state rather than by place: not linked is the Pull
+ * gate's `HubDeviceSignIn`, linked is the Botcamp section, and the section
+ * does not exist until `linked` is true — so signing in from the gate is also
+ * what makes publishing appear.
  *
  * The admin query is mounted *only* inside the `isAdmin` branch, not merely
  * hidden behind it — `useIsAdmin` resolves with its own round trip, and firing
@@ -37,19 +45,12 @@ import { api } from "@/lib/api";
  * the same admin-only `["hub-device"]` state for that reason (it would be a
  * 403 for every non-admin seat, on every visit) — it reads
  * `getHubDeviceLinked` instead, the one bit of that state every signed-in
- * seat is allowed to see.
- *
- * Signing in itself happens in `BotcampSignInModal`, opened from the Pull
- * gate without leaving the page, closing itself the moment the poll reports
- * `"linked"` — at which point `linked` below flips too and the lookup form
- * replaces the gate. The Botcamp section further down keeps its own inline
- * `HubDeviceField` besides: that one also manages disconnect and Upload
- * yours, which the modal does not.
+ * seat is allowed to see, and `HubDeviceSignIn` mounts the admin-only state
+ * machine inside the gate's own `isAdmin` branch.
  */
 export function AgentHub() {
   const queryClient = useQueryClient();
   const isAdmin = useIsAdmin();
-  const [signInOpen, setSignInOpen] = useState(false);
   const { data: hubDevice } = useQuery({
     queryKey: ["hub-device-linked"],
     queryFn: api.getHubDeviceLinked,
@@ -93,15 +94,11 @@ export function AgentHub() {
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-4 py-8 text-center">
             <Lock className="h-4 w-4 text-[var(--color-text-muted)]" />
             <p className="text-sm text-[var(--color-text)]">
-              Sign in to Botcamp to look up or pull agents.
+              Sign in to Botcamp to look up or pull agents
+              {isAdmin ? ", and to publish this install's own" : ""}.
             </p>
             {isAdmin ? (
-              <button
-                onClick={() => setSignInOpen(true)}
-                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              >
-                Sign in to Botcamp
-              </button>
+              <HubDeviceSignIn />
             ) : (
               <p className="text-xs text-[var(--color-text-muted)]">
                 Ask an admin to connect this install to Botcamp.
@@ -111,11 +108,7 @@ export function AgentHub() {
         )}
       </section>
 
-      {isAdmin && (
-        <BotcampSignInModal open={signInOpen} onClose={() => setSignInOpen(false)} />
-      )}
-
-      {isAdmin && (
+      {isAdmin && linked && (
         <section className="border-t border-[var(--color-border)] pt-8">
           <h2 className="mb-1 text-sm font-bold text-[var(--color-text)]">Botcamp</h2>
           <p className="mb-3 text-xs text-[var(--color-text-muted)]">

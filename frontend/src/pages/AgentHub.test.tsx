@@ -1,16 +1,17 @@
 /**
  * Botcamp Hub as one destination (FEAT-153): Pull agents is gated on this
  * install being signed in to Botcamp (PR #111's device flow) for every seat,
- * admin or not, and the Botcamp section itself (connect + upload) is
- * admin-only, with withdraw finally having a dashboard control.
+ * admin or not, and the Botcamp section itself (the connected profile +
+ * upload) is admin-only, with withdraw finally having a dashboard control.
  *
  * The thing worth testing is not that the sections render — it is that the
  * admin-only section mounts no admin-only query for a non-admin seat, that
  * Pull agents shows a sign-in prompt instead of the lookup form until this
- * install is linked (for every seat, not just admins), that an unreachable
- * hub reads differently from an empty one, that Upload yours stays hidden
- * until this install is linked, and that publish and withdraw actually hit
- * the routes the contract defines.
+ * install is linked (for every seat, not just admins), that there is exactly
+ * one "Sign in to Botcamp" control on the page rather than the two the first
+ * cut shipped, that an unreachable hub reads differently from an empty one,
+ * that Upload yours stays hidden until this install is linked, and that
+ * publish and withdraw actually hit the routes the contract defines.
  *
  * @vitest-environment jsdom
  */
@@ -208,12 +209,8 @@ function buttonByText(label: string): HTMLButtonElement {
   return found as HTMLButtonElement;
 }
 
-/**
- * The same lookup as `buttonByText`, but scoped to the `<section>` under a
- * given `<h2>` — needed once "Sign in to Botcamp" exists in two places on
- * `/hub` (the Pull gate's own trigger, and the Botcamp section's inline
- * flow), each meaning a different thing.
- */
+/** The same lookup as `buttonByText`, but scoped to the `<section>` under a
+ *  given `<h2>`. */
 function buttonInSection(sectionHeading: string, label: string): HTMLButtonElement {
   const h = heading(sectionHeading);
   const section = h?.closest("section");
@@ -273,32 +270,21 @@ it("a non-admin sees a sign-in prompt in Pull agents when this install is not li
   expect(requests.some((r) => r.url.includes("/api/v1/hub/agents/"))).toBe(false);
 });
 
-it("an admin signs in through the Pull gate's own modal, without scrolling to Botcamp", async () => {
+it("offers an admin exactly one Sign in to Botcamp control, in the Pull gate", async () => {
   isAdmin = true;
   await render();
 
-  // Not open yet — the dialog's own content is absent until triggered.
-  expect(container.textContent).not.toContain("Connects this Condor install");
-
-  await click(buttonInSection("Pull agents", "Sign in to Botcamp"));
-  expect(container.textContent).toContain("Connects this Condor install");
-
-  // The modal's own sign-in button, not the Botcamp section's or the gate's
-  // own trigger — there are three "Sign in to Botcamp" strings on the page
-  // at this point, and only this one is inside the open dialog.
-  const dialog = container.querySelector(".fixed.inset-0") as HTMLElement;
-  const start = [...dialog.querySelectorAll("button")].find((b) =>
+  // The regression this page shipped with: the Pull gate's modal trigger and
+  // the Botcamp section's inline flow were two buttons for one install-wide
+  // link. The Botcamp section does not exist until this install is linked.
+  const signIns = [...container.querySelectorAll("button")].filter((b) =>
     b.textContent?.includes("Sign in to Botcamp"),
-  ) as HTMLButtonElement;
-  await click(start);
-  await waitFor(() => dialog.querySelector("[data-hub-device-status='pending']") !== null);
-
-  expect(dialog.querySelector("[data-hub-device-status='pending']")?.textContent).toContain(
-    "ABC-123",
   );
-  // The same `["hub-device"]` state the Botcamp section's own HubDeviceField
-  // reads — one poll, shown in two places, now both pending.
-  expect(heading("Botcamp")).not.toBeNull();
+  expect(signIns).toHaveLength(1);
+  expect(heading("Botcamp")).toBeNull();
+  expect(heading("Upload yours")).toBeNull();
+  // No modal either — the flow runs where the gate is.
+  expect(container.querySelector(".fixed.inset-0")).toBeNull();
 });
 
 it("a non-admin sees the lookup form in Pull agents once this install is linked", async () => {
@@ -355,24 +341,24 @@ it("an unreachable hub reads differently from a not-found slug, for every seat",
   expect(error?.textContent).toContain("maintenance");
 });
 
-it("an admin sees the Botcamp sign-in step, with Upload yours hidden until linked", async () => {
+it("runs the device flow inline in the gate, with Upload yours hidden until linked", async () => {
   isAdmin = true;
   await render();
 
-  expect(heading("Botcamp")).not.toBeNull();
-  expect(heading("Upload yours")).toBeNull();
-
-  await click(buttonInSection("Botcamp", "Sign in to Botcamp"));
+  await click(buttonInSection("Pull agents", "Sign in to Botcamp"));
   await waitFor(() => container.querySelector("[data-hub-device-status='pending']") !== null);
 
-  expect(container.querySelector("[data-hub-device-status='pending']")?.textContent).toContain(
-    "ABC-123",
-  );
+  const pending = container.querySelectorAll("[data-hub-device-status='pending']");
+  // Still one, now that the code is up: the pending code and its Cancel are
+  // not repeated further down the page either.
+  expect(pending).toHaveLength(1);
+  expect(pending[0].textContent).toContain("ABC-123");
   expect(window.open).toHaveBeenCalledWith(
     "https://botcamp.xyz/connect?code=ABC-123",
     "_blank",
     "noopener,noreferrer",
   );
+  expect(heading("Botcamp")).toBeNull();
   expect(heading("Upload yours")).toBeNull();
 });
 
