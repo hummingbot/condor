@@ -15,7 +15,6 @@ pin each part where it lives:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -203,12 +202,9 @@ def test_a_run_whose_consumer_walked_away_still_counts():
         async for event in stream:
             if isinstance(event, TextChunk):
                 break
-        # Unwinding pydantic-ai's run from a closed generator raises on its own
-        # (its anyio cancel scope; it did before FEAT-120 too, and in
-        # production the finalizer only logs it). What this pins is that the
-        # usage was folded first: the fold is the innermost exit.
-        with contextlib.suppress(RuntimeError, GeneratorExit):
-            await stream.aclose()
+        # Closing the stream cancels the turn, and the fold is the run's
+        # innermost exit, so the tokens are counted on the way out.
+        await stream.aclose()
 
     asyncio.run(run())
 
