@@ -27,7 +27,7 @@ credential and link this contract defines is install-wide on the Condor side.
 
 1. [The portable agent bundle](#1-the-portable-agent-bundle)
 2. [API base, transport rules, and errors](#2-api-base-transport-rules-and-errors)
-3. [Catalogue: browse, get, download](#3-catalogue-browse-get-download)
+3. [Catalogue: agent lookup and version download](#3-catalogue-agent-lookup-and-version-download)
 4. [Account linking (OAuth2 device flow)](#4-account-linking-oauth2-device-flow)
 5. [Submission lifecycle](#5-submission-lifecycle)
 6. [Deterministic refusal checks](#6-deterministic-refusal-checks)
@@ -79,6 +79,13 @@ serves back on download, and reviews.
 }
 ```
 
+This is the document the hub stores and reviews on submission (§5, §6).
+**It is not what the implemented download path actually serves.** §3.3's
+`GET /api/agents/{slug}/versions/{version}` — the one download endpoint PR
+#111 ships — answers with a ZIP of the agent's library files, a different
+wire shape entirely; see §3.3 and §3.4 for what Condor's client reads off
+that response instead.
+
 Field notes, normative for the hub as much as for Condor:
 
 - **`kind`** must equal `"condor-agent-bundle"`. Anything else is refused before
@@ -114,9 +121,11 @@ Field notes, normative for the hub as much as for Condor:
 - **`files[].sha256`** is the full lowercase hex sha256 of `text`, encoded as
   UTF-8. The hub SHOULD verify each file's digest against its own text on
   submission (cheap, and it catches a malformed submission before the review
-  even starts) but this is advisory for the hub's own data integrity — the
-  one digest the client actually verifies (§3.3) is the digest of the whole
-  rendered document, not of an individual file.
+  even starts) but this is advisory for the hub's own data integrity. The
+  implemented download path (§3.3) does not serve this rendered document at
+  all, so there is no digest of it for the client to check today — it checks
+  a header-carried digest of the ZIP bytes §3.3 actually returns instead,
+  which has no relationship to any field in this shape.
 
 ### 1.2 Limits
 
@@ -127,8 +136,9 @@ Field notes, normative for the hub as much as for Condor:
   install-side download fail a digest comparison — there is no reason to
   implement that unless the hub is deliberately refusing in a way clients can
   diagnose, which is exactly what the explicit `413` gives them instead.
-- **Catalogue page replies (browse, one listing) are capped at 1,000,000
-  bytes** by the client; see §3.1.
+- **Catalogue page replies (one agent lookup; a future browse page, if
+  §3.1 is ever built) are capped at 1,000,000 bytes** by the client; see
+  §3.2.
 - The whole document must be valid UTF-8 JSON. A submission that is not valid
   UTF-8, or not valid JSON, is refused `400` before any field is read.
 
@@ -168,22 +178,36 @@ surface — §3, §5, §7, §8). Two consequences for the hub's design:
 
 ### 2.2 Identifiers in a URL path
 
-Every `listing_id` and `submission_id` this contract defines is validated by
-Condor against the charset `[A-Za-z0-9._-]` **before any request is built**,
-and `.` / `..` alone are refused as values even though they match that
-charset. (§4's device flow interpolates no caller-controlled identifier into
-a URL path at all — `device_code` travels only in a POST body, read back by
-the hub from what it itself issued, so this rule does not constrain it.) Two
-things follow for the hub:
+Every `listing_id`, `submission_id`, and **agent slug** this contract
+addresses by path segment is validated by Condor against the charset
+`[A-Za-z0-9._-]` **before any request is built**, and `.` / `..` alone are
+refused as values even though they match that charset (`condor/hub.py`'s
+`_segment`). A **version** path segment (§3.3) is validated separately and
+more narrowly: only the literal `latest`, or a positive integer with no
+leading zero, is ever sent — anything else is refused locally
+(`_version_segment`) before a request leaves the box. (§4's device flow
+interpolates no caller-controlled identifier into a URL path at all —
+`device_code` travels only in a POST body, read back by the hub from what it
+itself issued, so neither rule constrains it.) What follows for the hub:
 
-- **Mint identifiers from that charset.** An opaque id containing `/`, `?`,
-  `#`, or whitespace cannot be used by the Condor client at all — it will
-  never reach the hub, because Condor refuses to build the request locally.
-  A UUID4, a ULID, or a base32/base62 string are all safe choices.
-- **Never answer with a different id than was asked for.** `fetch` (§3.3)
-  compares the id it requested against the id the listing it already holds
-  describes, and refuses the whole exchange on a mismatch. Don't try to be
-  helpful by normalizing or redirecting a near-miss id — answer `404`.
+- **Mint `listing_id`/`submission_id` from that charset.** An opaque id
+  containing `/`, `?`, `#`, or whitespace cannot be used by the Condor client
+  at all — it will never reach the hub, because Condor refuses to build the
+  request locally. A UUID4, a ULID, or a base32/base62 string are all safe
+  choices.
+- **An agent slug is not hub-minted**, but it is held to the same charset for
+  the same reason: a slug containing `/` would never reach
+  `GET /api/agents/{slug}` (§3.2) or its version download (§3.3) either.
+- **Never answer with a different slug or version than was asked for.**
+  There is no earlier listing call `fetch` (§3.3) cross-checks a download
+  against — the integrity check lives entirely inside that one response (its
+  own `X-Agent-Sha256` header), never a comparison against a value read from
+  a separate call. Don't try to be helpful by normalizing or redirecting a
+  near-miss slug or version — answer `404`.
+- **A malformed slug or version never reaches the hub at all.** Condor's
+  client raises locally before building the request; the hub is free to
+  reject one of these itself for defense in depth, but it will never
+  actually receive the malformed case from this client.
 
 ### 2.3 Headers
 
@@ -221,25 +245,50 @@ status before any of the above applies.
 
 ---
 
-## 3. Catalogue: browse, get, download
+## 3. Catalogue: agent lookup and version download
 
-Every endpoint in this section is **anonymous**. No credential is accepted or
-required, and none should be requested — the public catalogue is Botcamp's
-one surface with no login wall, by design (most Condor installs will browse
-and install long before anyone on the box has a Botcamp account at all).
+Every endpoint in this section is **anonymous**. No credential is required —
+the public catalogue is Botcamp's one surface with no login wall, by design
+(most Condor installs will install an agent long before anyone on the box has
+a Botcamp account at all). A credential is *accepted*, optionally, on §3.2
+and §3.3: a linked profile's own token is what turns a membership/purchase
+gate into a 200 for an account that actually has access to a gated agent.
 
-### 3.1 `GET /v1/agents?query=&page=`
+§3.2 and §3.3 are **implemented today** — `condor/hub.py`'s `get()` and
+`fetch()`, exercised against PR #111 of `hummingbot/botcamp-site`. §3.1 is
+not: there is no browse or search endpoint yet, and this section states that
+plainly rather than describing one as if it existed.
 
-Lists published listings, newest first.
+### 3.1 Browse — prospective, not implemented
+
+PR #111 ships no `GET /agents?query=&page=` or any other discovery endpoint.
+A caller must already know an agent's **slug** — there is nothing in
+`condor/hub.py` a Condor install can call to find one, and no Condor surface
+offers a search box today. Closing that gap is [[TASK-004]]'s remaining
+work, not this contract's.
+
+This subsection is kept, unimplemented, as the target shape for that future
+catalogue, because the submission, review and moderation sections later in
+this document (§5, §7, §8) already define and produce the richer `Listing`
+object (`listing_id`, `badge`, `author`, `digest`, `findings`,
+`review_version`, …) it would serve — see §11.2 for that shape. **None of it
+is reachable through any endpoint today.** Do not read the JSON example
+below, or any field name in it, as something `GET /api/agents/{slug}` (§3.2)
+answers with — §3.2 returns a different, narrower shape, defined in its own
+section.
+
+```
+GET /v1/agents?query=&page=
+```
 
 - `query` (optional, default `""`) — free text, URL-encoded by the client.
   Match it however the hub likes (title, description, slug); it is never used
   to address a resource, so it needs no identifier validation on the hub
   side either.
-- `page` (optional, default `1`, 1-indexed) — the client clamps any value
-  below 1 up to 1 before sending.
+- `page` (optional, default `1`, 1-indexed) — the client would clamp any
+  value below 1 up to 1 before sending.
 
-Response, `200`, capped at **1,000,000 bytes**:
+A future response, `200`, capped at **1,000,000 bytes**:
 
 ```json
 {
@@ -254,7 +303,7 @@ Response, `200`, capped at **1,000,000 bytes**:
       "notes": "Added a drawdown guard to the grid loop.",
       "author": { "name": "federico", "handle": "cardosofede" },
       "badge": "validated",
-      "digest": "…64 hex sha256 of the exact bytes the bundle download returns…",
+      "digest": "…64 hex sha256 of the exact bytes a future unified download would return…",
       "bytes": 48213,
       "published_at": "2026-10-20T09:14:00Z",
       "requires": {
@@ -281,75 +330,153 @@ Response, `200`, capped at **1,000,000 bytes**:
 }
 ```
 
-No pagination metadata (no `total`, no `has_more`) is required — Condor reads
-only the `listings` array and stops paging when a page comes back empty or
-shorter than the hub's own page size. Return however many rows you like per
-page; there is no contractual minimum or maximum, though something in the
-range of 20–50 is a reasonable default. **Do not include a `"trust"` key or
-any other top-level key** — that field is appended by Condor's own web layer
-from a sentence it owns, not read from the hub's response, and a hub-supplied
-one is simply ignored (cheap to omit, worth stating so nobody wonders why
-their version is discarded).
+No pagination metadata (no `total`, no `has_more`) would be required — a
+future client reads only the `listings` array and stops paging when a page
+comes back empty or shorter than the hub's own page size. **Do not include a
+`"trust"` key or any other top-level key** — that field would be appended by
+Condor's own web layer from a sentence it owns, not read from the hub's
+response.
 
-One malformed row does not fail the whole page on Condor's side — it is
-logged and dropped — so if a defensive posture is wanted, the hub can lean on
-this slightly rather than needing the whole listings table to be perfectly
-clean before this endpoint can go live. That said, do not rely on it: a
-`listing_id` is still required on every row, or that row's `listing_id` ends
-up empty and useless to the reader.
+### 3.2 `GET /api/agents/{slug}` — look up one agent (implemented)
 
-### 3.2 `GET /v1/agents/{listing_id}`
+**Implemented today** (`condor/hub.py`'s `get()`). Given a slug the caller
+already knows — there is no discovery endpoint yet, §3.1 — this answers with
+the agent's catalogue entry and its `APPROVED` versions.
 
-One listing, in the shape of exactly one entry of §3.1's `listings` array —
-not wrapped in another `listings` key, just the object itself:
+`slug` is validated against the charset `[A-Za-z0-9._-]` (§2.2) before any
+request is sent.
+
+`token` (optional, `Authorization: Bearer <credential>`): omitted, this is
+the anonymous read a free agent answers; a linked profile's own token is
+what turns a membership/purchase gate into a 200 for an account that
+actually has access.
+
+Response `200`:
 
 ```json
 {
-  "listing_id": "lst_8f3a9c2e1b",
-  "agent_uid": "…",
   "slug": "adaptive_grid_trader",
-  "...": "... (same shape as one row of §3.1)"
+  "title": "Adaptive Grid Trader",
+  "summary": "Runs a grid strategy with a volatility-aware spread.",
+  "latest": 3,
+  "versions": [
+    {
+      "version": 3,
+      "sha256": "…64 hex…",
+      "size": 48213,
+      "fileCount": 6,
+      "sourceRef": "",
+      "createdAt": "2026-10-20T09:14:00Z",
+      "manifest": {}
+    }
+  ]
 }
 ```
 
-- `404` with `{"detail": "..."}` if `listing_id` does not exist or was
-  unpublished (§8).
-- Capped at the same **1,000,000 bytes**.
+See §11.1 for the full field reference (`AgentListing`/`AgentVersion`). In
+brief:
 
-### 3.3 `GET /v1/agents/{listing_id}/bundle`
+- `title`/`summary` map to Condor's own `name`/`description` — send either
+  the alias shown or the bare field name; Condor's client (`populate_by_name`)
+  accepts both.
+- `versions` lists only `APPROVED` revisions, newest first; `latest` is the
+  hub's own pick among them, never computed by Condor.
+- `sha256` here is a hint for a version picker to render. It is **not** what
+  the download (§3.3) is checked against — that check is answered entirely
+  within the download response itself, via a header, never by comparing
+  against a field read from this call first.
+- `manifest` is the hub's own coarse summary (name/agent_key/tools/loops, at
+  the hub's discretion), rendered as a hint only. The bundle Condor actually
+  acts on is the one `condor.botcamp_import.from_zip` (§3.4) builds from the
+  downloaded files, never this field.
+- **There is no `listing_id`, `agent_uid`, `author`, `badge`, `digest`, or
+  `findings` on this read path.** Those are §11.2's prospective `Listing`
+  fields, produced only once the submission/review surface (§5, §7, §8)
+  exists. Do not add them to this response — rendering a badge here would
+  claim a human review happened on an agent nothing has reviewed at all
+  (§9).
 
-Returns the **raw bundle bytes**, not JSON — the exact UTF-8-encoded document
-described in §1, served with no transformation. `Content-Type:
-application/json` is correct for it but Condor's client does not actually
-check it; it only checks the bytes.
+Capped at **1,000,000 bytes** (`MAX_LISTING_BYTES`).
 
-- Capped at **2,000,000 bytes** of response body.
-- `404` if the listing does not exist or was unpublished.
-- The response's byte-for-byte sha256 **must equal** the `digest` field the
-  matching `GET /v1/agents/{listing_id}` call reports. This is the entire
-  integrity mechanism between hub and client — there is no signature, only a
-  content digest over HTTPS. Condor's client:
-  1. Fetches the listing first (or reuses one already in hand) and reads its
-     `digest`.
-  2. Refuses to download at all if that `digest` is empty — a hub that cannot
-     say what it is serving is treated as offering no integrity, not as
-     trusted by default.
-  3. Downloads the bundle, computes its own sha256 over the exact bytes
-     received, and refuses the whole exchange (raising before anything
-     parses the document) if the two hashes disagree.
+Errors (`condor/hub.py`'s `_access_refusal`):
 
-  **The hub must therefore serve, byte for byte, the document whose sha256
-  equals the `digest` it reports for that `listing_id` — always**, even
-  across a hub restart, a CDN cache, or a database migration. If a listing's
-  underlying bytes ever need to change, that is a new submission with a new
-  `listing_id` (or a new version sharing the `agent_uid`), never an edit of
-  bytes already served under one.
-- Never redirect. Never gzip in a way the client doesn't transparently
-  decode to the original bytes before the digest check — if compression is
-  used at the HTTP layer, it must be content-encoding that the client's HTTP
-  stack already reverses (standard `gzip`/`deflate` `Content-Encoding` is
-  fine; serving a *different* compressed document and expecting the client to
-  decompress it itself is not).
+| Status | Meaning |
+|---|---|
+| `402` | This agent requires a Botcamp membership or purchase to clone. |
+| `401` | Sign in — no token was sent, or the hub no longer honours the one sent. |
+| `403` | Private agent, or a token without `agents:read` scope. |
+| `404` | No such agent, or no `APPROVED` version exists yet. |
+
+### 3.3 `GET /api/agents/{slug}/versions/{version}` — download one version (implemented)
+
+**Implemented today** (`condor/hub.py`'s `fetch()`). Returns the **raw ZIP
+bytes** of one approved version's library files — not the JSON bundle
+document §1 describes, and not wrapped in a JSON envelope. This replaces the
+abandoned `GET /v1/agents/{listing_id}/bundle` design entirely: there is no
+earlier listing call this cross-checks a `digest` field against, because the
+integrity check is answered in this **same** response, not a second round
+trip.
+
+`version` is the literal `latest` (the hub resolves it) or a positive
+integer as a string, with no leading zero (§2.2); anything else is refused
+locally before a request is even sent. `token` is accepted the same way as
+§3.2.
+
+Response `200`, a zip archive, not JSON:
+
+- **`X-Agent-Sha256`** (required): the lowercase hex sha256 of the exact
+  response body. Condor's client computes its own sha256 over the bytes it
+  received and refuses the whole exchange — raising before `from_zip` (§3.4)
+  ever runs — if the two disagree, or if this header is absent entirely. A
+  hub that cannot say what it served is treated as offering no integrity,
+  not as trusted by default.
+- **`X-Agent-Version`**: the concrete version number this response resolved
+  to. When the caller asked for `latest`, this is how Condor's client learns
+  which integer version it actually received, for its own bookkeeping;
+  absent or unparseable, the client falls back to the literal version it
+  requested if that was already a number, or records `0`.
+- Capped at **2,000,000 bytes** (`MAX_BUNDLE_BYTES`) — a reply over this is
+  refused locally before the digest is even checked.
+- Never redirect. Condor's client refuses every `3xx` outright, on every
+  verb, this one included (§2.1).
+
+Errors: the same table as §3.2 (`402`/`401`/`403`/`404`), via
+`_access_refusal`.
+
+### 3.4 Receiving the download: Condor's own conversion
+
+What §3.3 returns is a zip of an agent's library files — `AGENT.md`,
+`skills/`, `routines/`, `loops/`, and either Condor's own
+`controllers/<name>/<name>.py` layout or Hummingbot V2's upload-side layout,
+`controllers/<generic|market_making|directional_trading>/<name>.py`. Turning
+it into a Condor `Bundle` (`condor.botcamp_import.from_zip`) is entirely
+install-side and runs independently of whatever the hub already validated at
+upload:
+
+- Every `.py` found one level under one of the three Hummingbot V2
+  controller-type directories is rewritten to `controllers/<name>/<name>.py`
+  — the only layout Condor's own controller loader looks for. A file already
+  in Condor's own layout, or a loose one neither layout recognizes, travels
+  unchanged.
+- Local validation runs again, regardless of what the hub's own upload-time
+  checks already enforced: at most 300 files, each at most 1,048,576 bytes,
+  a running total under the same 2,000,000-byte cap §3.3's own download
+  limit uses, no symlink, no path that `plan`-time path containment would
+  refuse (absolute, a `..` segment, a NUL or control character), every file
+  valid UTF-8 text, and an `AGENT.md` present among the members — otherwise
+  the whole archive is refused before a single file is installed. (This
+  pass does not itself refuse two members that collide on the same path
+  after the controller rewrite above; `plan`'s own later check does.)
+- The resulting `Bundle`'s `agent.slug` is the **caller's own** already-
+  validated slug — the one §3.2/§3.3 were called with — never a value read
+  out of the zip; nothing inside the archive states one.
+
+This conversion is the receiving half of the trust model §9 states: an
+`APPROVED` version is still untrusted code to the install that downloads it,
+and every one of FEAT-133/FEAT-144/FEAT-147's own gates — naming every
+executable file before anything is written, muted routines and skills on
+arrival, no execution consent for any imported `.py` — runs on a Botcamp
+download exactly as it runs on a plain file import.
 
 ---
 
@@ -983,9 +1110,12 @@ that same credential's account. `200` with `{"unpublished": true}`. `403` if
 the credential does not own this listing. `404` if the listing is already
 gone.
 
-Effect: the listing immediately stops appearing in `GET /v1/agents` (§3.1)
-and `GET /v1/agents/{listing_id}` / `.../bundle` (§3.2, §3.3) start answering
-`404`. **This does not, and cannot, recall a copy some other install already
+Effect: the listing immediately stops appearing in the future browse/get
+endpoints this section's `listing_id` addresses (§3.1, §11.2) — **not** the
+slug-keyed `GET /api/agents/{slug}` and `.../versions/{version}` §3.2/§3.3
+implement today, which are a different identifier space entirely and are
+unaffected by a `listing_id`-keyed unpublish until the hub unifies the two.
+**This does not, and cannot, recall a copy some other install already
 downloaded.** Condor's own user-facing documentation (`PRIVACY.md`) already
 states this to the operator in those words; the hub's job is only to make the
 *technical* half true — stop serving it, immediately and permanently — not
@@ -1040,11 +1170,14 @@ sentences, verbatim in spirit if not in wording:
    — that promise cannot be kept by any catalogue, and this contract does
    not pretend otherwise.
 3. **Integrity between hub and client is a content digest over HTTPS, not a
-   signature.** §3.3's digest check is the entire guarantee that what a
-   client downloads is what a listing claims. `author` and `author.handle`
-   are claims the hub attaches at upload time and nothing cryptographically
-   binds them to the bytes — every surface rendering them must say so (and
-   Condor's dashboard already does).
+   signature.** §3.3's `fetch` verifies the downloaded ZIP bytes against the
+   `X-Agent-Sha256` header the **same response** carries, before anything
+   parses them — there is no earlier listing call this cross-checks against,
+   and no cryptographic signature anywhere in this contract. `author` and
+   `author.handle` are claims the hub would attach at upload time, once the
+   submission surface (§5) exists; they are not part of today's implemented
+   `AgentListing` (§3.2, §11.1) at all, and no surface should render one as
+   if a Botcamp lookup carries it today.
 
 **Versioning and unknown-client tolerance.** `findings[].category` is a
 closed set today (`secret`, `endpoint`, `tool_steer`, `code_run`,
@@ -1100,7 +1233,42 @@ someone reads this contract wondering why it looks the way it does.
 
 ## 11. Appendix: field reference
 
-### 11.1 `Listing` (returned by §3.1, §3.2, and embedded in §7.2)
+### 11.1 `AgentListing` / `AgentVersion` (implemented — returned by §3.2)
+
+`AgentListing`:
+
+| Field | Type | Who sets it |
+|---|---|---|
+| `slug` | string | Echoed from the caller's own request path. |
+| `title` | string | Hub. Maps to Condor's `name`. |
+| `summary` | string | Hub. Maps to Condor's `description`. |
+| `latest` | integer | Hub's own pick among `versions`; Condor never computes it. |
+| `versions` | array of `AgentVersion` | `APPROVED` revisions only, newest first. |
+
+`AgentVersion`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `version` | integer | |
+| `sha256` | string (64 lowercase hex) | A hint for a version picker. **Not** what the download (§3.3) is checked against — that check never reads this field. |
+| `size` | integer | |
+| `fileCount` | integer | |
+| `sourceRef` | string | |
+| `createdAt` | string (ISO-8601 UTC) | |
+| `manifest` | object | Hub's own coarse summary (name/agent_key/tools/loops, at the hub's discretion), rendered as a hint only. |
+
+There is no `listing_id`, `agent_uid`, `author`, `badge`, `digest`, `bytes`,
+`published_at`, `requires`, or `findings` on this read path. Those belong to
+§11.2's `Listing` below — the prospective object the publish/review/
+moderation surface (§5, §7, §8) would produce, not what
+`GET /api/agents/{slug}` answers with today.
+
+### 11.2 `Listing` (prospective — not returned by any implemented endpoint today)
+
+The browse endpoint that would serve this shape (§3.1) is not built. This
+table exists so the submission, review and moderation sections that already
+reference these field names (§5, §7, §8) have one place defining them, and
+so a future catalogue browse ([[TASK-004]]) has a target to build against.
 
 | Field | Type | Who sets it |
 |---|---|---|
@@ -1115,13 +1283,13 @@ someone reads this contract wondering why it looks the way it does.
 | `author.handle` | string | **Hub-attached**, from the account that authenticated the submission. Never client-supplied. |
 | `badge` | `"validated"` \| `"community"` | Hub, at publish. Today always `"validated"` via this contract's one approval path (§7.4); `"community"` is reserved, not currently reachable through this API. |
 | `digest` | string (64 lowercase hex) | **Hub-recomputed** from the submitted bytes (§5.2), never trusted from the submission as-is. |
-| `bytes` | integer | Hub-measured length of the exact bytes `GET .../bundle` returns. |
+| `bytes` | integer | Hub-measured length of the exact bytes a future unified download would return for this listing. |
 | `published_at` | string (ISO-8601 UTC) | Hub, at publish. |
 | `requires` | object | Parsed from the submitted bundle's `requires`, carried opaquely. |
-| `findings` | array of `Finding` (§11.2) | **The hub's own run** of the deterministic review (§6) over the submission — never the author's export-side copy. |
+| `findings` | array of `Finding` (§11.3) | **The hub's own run** of the deterministic review (§6) over the submission — never the author's export-side copy. |
 | `review_version` | string | Hub, identifying which rule-set + review process produced `findings` and the badge (§6.4). |
 
-### 11.2 `Finding`
+### 11.3 `Finding`
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1133,7 +1301,7 @@ someone reads this contract wondering why it looks the way it does.
 | `certain` | boolean | Only meaningful for `category: "secret"`; `false` for every other category. |
 | `context` | string | Populated only for `tool_steer` (the matched line) and `risk_limits` (the figure); empty otherwise. **Never populated for a `secret` finding** — that category's whole point is never carrying the value. |
 
-### 11.3 `Submission`
+### 11.4 `Submission`
 
 | Field | Type | Notes |
 |---|---|---|
