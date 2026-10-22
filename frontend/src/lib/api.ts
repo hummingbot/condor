@@ -230,40 +230,42 @@ export interface AgentUpdatePlan {
 }
 
 /**
- * One agent the hub offers (FEAT-146).
+ * One approved version of a Botcamp agent (PR #111's own shape,
+ * `GET /api/agents/{slug}`'s `versions[]`).
  *
- * Every field is the hub's claim except `digest`, which the *server* verifies
- * the downloaded bytes against before anything parses them — the browser never
- * sees the bundle, so it cannot check it and does not pretend to. `badge` is
- * provenance and nothing more: no code here or on the server reads it to
- * decide whether to write.
+ * `sha256` is shown for the version picker; it is **not** what the download
+ * is verified against — that is the `X-Agent-Sha256` header the download's
+ * own response carries, checked server-side before anything parses it.
+ */
+export interface HubAgentVersion {
+  version: number;
+  sha256: string;
+  size: number;
+  file_count: number;
+  source_ref: string;
+  created_at: string;
+  manifest: Record<string, unknown>;
+}
+
+/**
+ * One Botcamp agent, as `GET /api/agents/{slug}` describes it (FEAT-146).
+ *
+ * PR #111 carries no listing id, no badge and no author claim on this read
+ * path — there is no browse/search either, only this lookup by a slug the
+ * operator must already have. `versions` lists only `APPROVED` revisions,
+ * newest first; `latest` is Botcamp's own pick among them.
  */
 export interface HubListing {
-  listing_id: string;
-  /** Decides whether installing this is a create or an update. Advisory. */
-  agent_uid: string;
   slug: string;
   name: string;
   description: string;
-  version: number;
-  notes: string;
-  /** Attested by the hub at upload — an account claim, not a signature. */
-  author: AgentBundleAuthor;
-  /** `"validated"` | `"community"`. Rendered, never acted on. */
-  badge: string;
-  digest: string;
-  bytes: number;
-  published_at: string;
-  requires: AgentBundleRequires;
-  /** FEAT-144's review **as the hub computed it on submission**. */
-  findings: AgentBundleFinding[];
-  /** Which review produced `findings`, so drift with this install is visible. */
-  review_version: string;
+  latest: number;
+  versions: HubAgentVersion[];
 }
 
-/** The hub's badge is provenance: `HUB_TRUST`, stated server-side, once. */
+/** The one sentence `HUB_TRUST` states server-side about what this is. */
 export interface HubCatalogue {
-  listings: HubListing[];
+  listing: HubListing;
   trust: string;
 }
 
@@ -343,23 +345,24 @@ export interface HubInstallResponse {
 }
 
 /**
- * What this install knows right now about an installed agent's hub listing
- * (CORR-812) — whether the hub later pulled it or changed its badge.
+ * What this install knows right now about an installed agent's Botcamp
+ * provenance (CORR-812) — whether the hub stopped serving that version.
  *
- * `tracked: false` means the agent was never installed or updated from a hub
- * listing, so there is nothing here to warn about. `status` is `"ok"`,
- * `"badge_changed"` or `"delisted"` — the server's own last *confirmed*
- * answer, never invented from a failed check. `live_check_failed` means this
- * one read could not reach the hub; `checked_at` still names the last time
- * it could, which is the time to show, not the time of this request.
+ * `tracked: false` means the agent was never installed or updated from a
+ * Botcamp agent, so there is nothing here to warn about. `status` is `"ok"`
+ * or `"delisted"` — the server's own last *confirmed* answer, never invented
+ * from a failed check; there is no `"badge_changed"`, since PR #111 carries
+ * no badge on this read path at all. `live_check_failed` means this one read
+ * could not reach the hub; `checked_at` still names the last time it could,
+ * which is the time to show, not the time of this request.
  */
 export type HubAgentStatus =
   | { tracked: false }
   | {
       tracked: true;
-      listing_id: string;
-      badge: string;
-      status: "ok" | "badge_changed" | "delisted";
+      slug: string;
+      version: number;
+      status: "ok" | "delisted";
       checked_at: string;
       live_check_failed: boolean;
     };
@@ -4010,33 +4013,26 @@ export const api = {
   // previewed and the bytes installed come out of one client rather than two,
   // which is FEAT-133's one-builder rule.
 
-  /** What the hub offers, plus the one sentence about what a badge means.
-   *
-   *  The search term is a query *parameter* all the way down — never a path
-   *  segment — so it needs no identifier check and cannot change which
-   *  endpoint is addressed. (Named `search` here only because `query` is this
-   *  module's query-string builder.) */
-  browseHub: (search = "", page = 1) =>
-    apiFetch<HubCatalogue>(`/api/v1/hub/agents${query({ query: search, page })}`),
+  /** One agent's catalogue entry, with its approved versions, plus the one
+   *  sentence about what that approval is not. There is no browse/search —
+   *  PR #111 ships none — so this is a lookup by a slug the operator must
+   *  already have. */
+  getHubListing: (slug: string) =>
+    apiFetch<HubCatalogue>(`/api/v1/hub/agents/${encodeURIComponent(slug)}`),
 
-  /** One listing, with the digest its bundle will be held to. */
-  getHubListing: (listingId: string) =>
-    apiFetch<{ listing: HubListing; trust: string }>(
-      `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
-    ),
-
-  /** What installing this listing would do. Writes nothing on the server. */
-  previewHubInstall: (listingId: string, asSlug = "") =>
+  /** What installing this agent version would do. Writes nothing on the
+   *  server. `version` defaults to `"latest"`, which Botcamp resolves. */
+  previewHubInstall: (slug: string, asSlug = "", version = "latest") =>
     apiFetch<HubInstallResponse>(
-      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install/preview`,
-      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+      `/api/v1/hub/agents/${encodeURIComponent(slug)}/install/preview`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug, version }) },
     ),
 
   /** Install it, through exactly the gate the file path uses. */
-  installFromHub: (listingId: string, asSlug = "") =>
+  installFromHub: (slug: string, asSlug = "", version = "latest") =>
     apiFetch<HubInstallResponse>(
-      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install`,
-      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+      `/api/v1/hub/agents/${encodeURIComponent(slug)}/install`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug, version }) },
     ),
 
   /** Upload one of this install's agents. Admin-only, and irreversible in

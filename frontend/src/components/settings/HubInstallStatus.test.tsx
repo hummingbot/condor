@@ -1,10 +1,10 @@
 /**
- * CORR-812: an install that downloaded a hub listing has no way to learn the
- * hub later pulled it or changed its badge. This component's whole job is to
- * say nothing for an agent never installed from the hub, say nothing while a
- * confirmed check still reads ordinary, and tell the two warning states
- * (delisted, badge changed) apart from "could not reach Botcamp right now" —
- * the last one must never read as a moderation claim.
+ * CORR-812: an install that downloaded a hub agent has no way to learn
+ * Botcamp later stopped serving that version. This component's whole job is
+ * to say nothing for an agent never installed from Botcamp, say nothing
+ * while a confirmed check still reads ordinary, and tell "delisted" apart
+ * from "could not reach Botcamp right now" — the second must never read as a
+ * moderation claim.
  *
  * @vitest-environment jsdom
  */
@@ -97,8 +97,8 @@ it("shows nothing for an agent never installed from the hub", async () => {
 it("shows nothing once a confirmed check still reads ordinary", async () => {
   status = {
     tracked: true,
-    listing_id: "lst_1",
-    badge: "validated",
+    slug: "river_scalper",
+    version: 3,
     status: "ok",
     checked_at: "2026-10-21T12:00:00Z",
     live_check_failed: false,
@@ -108,11 +108,11 @@ it("shows nothing once a confirmed check still reads ordinary", async () => {
   expect(container.querySelector("[data-hub-status]")).toBeNull();
 });
 
-it("warns when the hub confirmed the listing was delisted", async () => {
+it("warns when the hub confirmed the version was delisted", async () => {
   status = {
     tracked: true,
-    listing_id: "lst_1",
-    badge: "validated",
+    slug: "river_scalper",
+    version: 3,
     status: "delisted",
     checked_at: "2026-10-21T12:00:00Z",
     live_check_failed: false,
@@ -121,30 +121,15 @@ it("warns when the hub confirmed the listing was delisted", async () => {
 
   const shown = container.querySelector("[data-hub-status='delisted']");
   expect(shown).not.toBeNull();
-  expect(shown?.textContent).toContain("withdrew this listing");
+  expect(shown?.textContent).toContain("no longer serves");
   expect(shown?.textContent).not.toContain("deleted");
-});
-
-it("warns when the badge changed since install, and names the new one", async () => {
-  status = {
-    tracked: true,
-    listing_id: "lst_1",
-    badge: "community",
-    status: "badge_changed",
-    checked_at: "2026-10-21T12:00:00Z",
-    live_check_failed: false,
-  };
-  await render();
-
-  const shown = container.querySelector("[data-hub-status='badge_changed']");
-  expect(shown?.textContent).toContain("community");
 });
 
 it("reports an unreachable hub without claiming moderation occurred", async () => {
   status = {
     tracked: true,
-    listing_id: "lst_1",
-    badge: "validated",
+    slug: "river_scalper",
+    version: 3,
     status: "ok",
     checked_at: "2026-10-18T09:00:00Z",
     live_check_failed: true,

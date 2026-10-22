@@ -96,9 +96,6 @@ function router(url: string, init?: RequestInit): Response | Promise<Response> {
   if (url.endsWith("/api/v1/admin/people")) {
     return isAdmin ? json([]) : json({ detail: "admin only" }, 403);
   }
-  if (method === "GET" && url.includes("/api/v1/hub/agents?")) {
-    return json({ listings: [], trust: "Provenance, not a signature." });
-  }
   if (method === "GET" && url === "/api/v1/agents") {
     return json([
       agent({ slug: "river_scalper", name: "River Scalper" }),
@@ -237,28 +234,29 @@ it("links back to Agents", async () => {
   expect(link?.textContent).toContain("Back to Agents");
 });
 
-it("a non-admin sees only Pull agents, with no admin-only request fired", async () => {
+it("a non-admin sees only Pull agents, with no hub request fired until a slug is looked up", async () => {
   isAdmin = false;
   await render();
 
   expect(heading("Pull agents")).not.toBeNull();
   expect(heading("Botcamp")).toBeNull();
   expect(heading("Upload yours")).toBeNull();
-  // The empty catalogue reads as "nothing published", not as an outage —
-  // the contrast the next test's 502 is there to prove.
-  expect(container.textContent).toContain("nothing matching");
+  // There is no browsable catalogue (Botcamp ships lookup-by-slug only), and
+  // that is stated rather than left as an empty grid that looks broken.
+  expect(container.textContent).toContain("does not serve a browsable catalogue");
 
   expect(requests.some((r) => r.url === "/api/v1/agents")).toBe(false);
   expect(requests.some((r) => r.url === "/api/v1/settings/hub-device")).toBe(false);
+  expect(requests.some((r) => r.url.includes("/api/v1/hub/agents/"))).toBe(false);
 });
 
-it("an unreachable hub reads differently from an empty catalogue, for every seat", async () => {
+it("an unreachable hub reads differently from a not-found slug, for every seat", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string, init?: RequestInit) => {
       requests.push({ url, method: init?.method ?? "GET" });
       if (url.endsWith("/api/v1/admin/people")) return json({ detail: "no" }, 403);
-      if (url.includes("/api/v1/hub/agents?")) {
+      if (url.includes("/api/v1/hub/agents/")) {
         return json({ detail: "the hub is down for maintenance" }, 502);
       }
       // Already recorded above; avoid double-counting in `router`.
@@ -268,9 +266,26 @@ it("an unreachable hub reads differently from an empty catalogue, for every seat
   );
   await render();
 
+  const input = container.querySelector(
+    "input[aria-label='Botcamp agent slug']",
+  ) as HTMLInputElement;
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  await act(async () => {
+    setter.call(input, "river_scalper");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    container.querySelector("form")!.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+  });
+  await waitFor(() => container.querySelector("[data-hub-error]") !== null);
+
   const error = container.querySelector("[data-hub-error]");
   expect(error?.textContent).toContain("maintenance");
-  expect(container.textContent).not.toContain("nothing matching");
 });
 
 it("an admin sees the Botcamp sign-in step, with Upload yours hidden until linked", async () => {

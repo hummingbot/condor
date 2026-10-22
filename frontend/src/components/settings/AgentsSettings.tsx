@@ -609,9 +609,9 @@ export function PublishAgentButton({ slug }: { slug: string }) {
 }
 
 /**
- * Warn when Botcamp later delisted or re-badged the listing this agent was
+ * Warn when Botcamp later stopped serving the version this agent was
  * installed from (CORR-812). Renders nothing for an agent never installed
- * from the hub, and nothing once a confirmed check still reads ordinary —
+ * from Botcamp, and nothing once a confirmed check still reads ordinary —
  * this is a thing to notice, not a steady-state status line.
  *
  * `live_check_failed` is its own, quieter branch rather than the warning:
@@ -634,7 +634,7 @@ export function HubInstallStatus({ slug }: { slug: string }) {
   const data = status.data;
   if (!data?.tracked) return null;
 
-  if (data.status === "delisted" || data.status === "badge_changed") {
+  if (data.status === "delisted") {
     return (
       <span
         data-hub-status={data.status}
@@ -642,9 +642,9 @@ export function HubInstallStatus({ slug }: { slug: string }) {
         className="flex items-center gap-1.5 text-xs text-[var(--color-red)]"
       >
         <AlertTriangle className="h-3.5 w-3.5" />
-        {data.status === "delisted"
-          ? "Botcamp withdrew this listing. The files installed here are unaffected — review before trusting this agent further."
-          : `Botcamp changed this listing's badge since install (now ${data.badge || "unbadged"}). Review before trusting this agent further.`}
+        Botcamp no longer serves the version this was installed from. The
+        files installed here are unaffected — review before trusting this
+        agent further.
       </span>
     );
   }

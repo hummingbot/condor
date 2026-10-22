@@ -59,10 +59,11 @@ export function AgentHub() {
           Pull agents
         </h2>
         <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-          Agents other people published. Installing one goes through the same
-          review as a file: every executable is named before anything is written,
-          the routines and skills arrive switched off, and nothing is started. No
-          Botcamp connection is needed to browse or install.
+          Agents other people published, looked up by slug. Installing one goes
+          through the same review as a file: every executable is named before
+          anything is written, the routines and skills arrive switched off, and
+          nothing is started. No Botcamp connection is needed to look one up or
+          install a free one.
         </p>
         <HubBrowser
           onInstalled={() => queryClient.invalidateQueries({ queryKey: ["agents"] })}

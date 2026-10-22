@@ -1,150 +1,127 @@
-import { useQuery } from "@tanstack/react-query";
-import { BadgeCheck, Loader2, Search, Users } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { Loader2, Search } from "lucide-react";
 import { useState } from "react";
 
 import {
   api,
+  errorStatus,
   type AgentImportPlan,
   type AgentUpdatePlan,
-  type HubListing,
+  type HubCatalogue,
 } from "@/lib/api";
 
 import { type BundleSource } from "./bundleSource";
 import { ImportAgentDialog } from "./ImportAgentDialog";
 
 /**
- * A listing, as the four calls the review dialog makes (FEAT-146).
+ * A hub agent, as the four calls the review dialog makes (FEAT-146).
  *
  * The dialog is reused rather than reimplemented, and this is the whole of the
- * difference between a file on disk and a listing on the hub. The reason is
- * not economy: the review *is* the sandbox, so a second review screen would be
- * a second chance to omit the executables list, the findings or the
- * muted-on-arrival sentence — and the screen that got it wrong would be the
- * one the operator actually used.
+ * difference between a file on disk and an agent pulled from Botcamp. The
+ * reason is not economy: the review *is* the sandbox, so a second review
+ * screen would be a second chance to omit the executables list, the findings
+ * or the muted-on-arrival sentence — and the screen that got it wrong would be
+ * the one the operator actually used.
  *
  * Both `install` and `applyUpdate` post to the same endpoint, because the
  * server decides which verb it is from the bundle's identity and not from
  * which button was pressed. Each re-fetches rather than reusing the preview's
- * bytes; what makes that safe is the digest check on the server, which holds
- * both fetches to the same listing digest.
+ * bytes; what makes that safe is the integrity check on the server, which
+ * holds both fetches to the download's own header.
  */
-function hubSource(listingId: string): BundleSource {
+function hubSource(slug: string, version: string): BundleSource {
   return {
-    key: `hub:${listingId}`,
+    key: `hub:${slug}:${version}`,
     preview: async (asSlug) => {
-      const res = await api.previewHubInstall(listingId, asSlug);
+      const res = await api.previewHubInstall(slug, asSlug, version);
       return res.verb === "update"
         ? { verb: "update", plan: res.plan as AgentUpdatePlan }
         : { verb: "install", plan: res.plan as AgentImportPlan };
     },
     install: async (asSlug) =>
-      (await api.installFromHub(listingId, asSlug)).plan as AgentImportPlan,
+      (await api.installFromHub(slug, asSlug, version)).plan as AgentImportPlan,
     previewUpdate: async () =>
-      (await api.previewHubInstall(listingId)).plan as AgentUpdatePlan,
+      (await api.previewHubInstall(slug, "", version)).plan as AgentUpdatePlan,
     applyUpdate: async () =>
-      (await api.installFromHub(listingId)).plan as AgentUpdatePlan,
+      (await api.installFromHub(slug, "", version)).plan as AgentUpdatePlan,
   };
 }
 
 /**
- * What a badge is, in the two words beside it. The sentence is the server's.
- *
- * Rendered as provenance and never as a verdict: `validated` says a human
- * looked at one submitted revision once, which is a fact about the past and
- * about bytes that are not necessarily these bytes.
- */
-function Badge({ badge }: { badge: string }) {
-  const validated = badge === "validated";
-  return (
-    <span
-      data-hub-badge={badge}
-      title={
-        validated
-          ? "A human reviewed one submitted revision of this, once. Not a signature."
-          : "Nobody reviewed this. It installs on exactly the same terms."
-      }
-      className={`flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-        validated
-          ? "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-          : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
-      }`}
-    >
-      {validated ? (
-        <BadgeCheck className="h-3 w-3" />
-      ) : (
-        <Users className="h-3 w-3" />
-      )}
-      {validated ? "Reviewed once" : "Community"}
-    </span>
-  );
-}
-
-/**
- * Browse the hub and install from it, without leaving Condor.
+ * Pull an agent from Botcamp by slug, and install it, without leaving Condor.
  *
  * Mounted on `/hub`'s public Pull agents section (FEAT-153) — reachable for
- * every signed-in Condor user, admin or not, with no Botcamp link required.
- * It answers the same question Import does — how does an agent get here —
- * and shares its review screen deliberately: a hub listing is not a safer
- * kind of bundle, it is the same kind with a provenance label attached, and a
+ * every signed-in Condor user, admin or not, with no Botcamp link required to
+ * resolve a free agent. Botcamp (PR #111) ships no browse or search at all,
+ * only a lookup by a slug the operator must already have — pasted from a
+ * Botcamp agent page, say — so this is that lookup, not a catalogue grid. It
+ * answers the same question Import does — how does an agent get here — and
+ * shares its review screen deliberately: a Botcamp agent is not a safer kind
+ * of bundle, it is the same kind with a provenance label attached, and a
  * second review screen would imply otherwise.
  */
 export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
-  const [search, setSearch] = useState("");
-  /** What the operator typed, once they pressed Search. */
-  const [applied, setApplied] = useState("");
-  const [chosen, setChosen] = useState<HubListing | null>(null);
+  const [slug, setSlug] = useState("");
+  const [looked, setLooked] = useState("");
+  const [chosen, setChosen] = useState<HubCatalogue["listing"] | null>(null);
 
-  const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ["hub-agents", applied],
-    queryFn: () => api.browseHub(applied),
-    // The hub is somebody else's service over the network: a refetch on every
-    // tab focus would be a request to it for nothing an operator asked for.
-    staleTime: 60_000,
-    retry: false,
+  const lookup = useMutation({
+    mutationFn: (value: string) => api.getHubListing(value),
   });
 
   return (
     <div className="space-y-4">
+      <p className="text-xs text-[var(--color-text-muted)]">
+        Botcamp does not serve a browsable catalogue yet — paste the slug of
+        an agent someone shared, and Condor will fetch it directly.
+      </p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          setApplied(search.trim());
+          const value = slug.trim();
+          if (!value) return;
+          setLooked(value);
           setChosen(null);
+          lookup.mutate(value);
         }}
         className="flex items-center gap-2"
       >
         <input
-          aria-label="Search the hub"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search agents…"
+          aria-label="Botcamp agent slug"
+          value={slug}
+          onChange={(e) => setSlug(e.target.value)}
+          placeholder="Agent slug, e.g. river_scalper"
           className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
         />
         <button
           type="submit"
-          disabled={isFetching}
+          disabled={lookup.isPending || !slug.trim()}
           className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
         >
           <Search className="h-3.5 w-3.5" />
-          Search
+          Look up
         </button>
       </form>
 
-      {isLoading && (
+      {lookup.isPending && (
         <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-          <Loader2 className="h-4 w-4 animate-spin" /> Asking the hub…
+          <Loader2 className="h-4 w-4 animate-spin" /> Asking Botcamp…
         </p>
       )}
 
-      {/* The hub is a service that can be down, and that is not Condor being
-          broken — so it says which one it is, and offers the retry rather than
-          leaving an empty list that reads as "nothing published yet". */}
-      {error && (
-        <p role="alert" data-hub-error className="text-sm text-[var(--color-red)]">
-          {(error as Error).message}{" "}
+      {/* The server already tells apart "not found", "needs a membership or
+          purchase" and "sign in" — this renders that sentence rather than a
+          generic failure. */}
+      {lookup.isError && (
+        <p
+          role="alert"
+          data-hub-error
+          data-hub-error-status={errorStatus(lookup.error)}
+          className="text-sm text-[var(--color-red)]"
+        >
+          {(lookup.error as Error).message}{" "}
           <button
-            onClick={() => refetch()}
+            onClick={() => lookup.mutate(looked)}
             className="underline hover:text-[var(--color-text)]"
           >
             Try again
@@ -152,99 +129,51 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
         </p>
       )}
 
-      {data && data.listings.length === 0 && !error && (
-        <p className="text-sm text-[var(--color-text-muted)]">
-          The hub has nothing matching that.
-        </p>
+      {lookup.isSuccess && (
+        <div
+          data-hub-listing={lookup.data.listing.slug}
+          className="flex items-start justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
+        >
+          <span className="min-w-0">
+            <span className="truncate text-sm font-semibold text-[var(--color-text)]">
+              {lookup.data.listing.name || lookup.data.listing.slug}
+            </span>
+            <span className="block truncate text-xs text-[var(--color-text-muted)]">
+              {lookup.data.listing.description || "No description."}
+            </span>
+            <span className="block text-[11px] text-[var(--color-text-muted)]">
+              <span className="font-mono">{lookup.data.listing.slug}</span> ·
+              latest version {lookup.data.listing.latest}
+            </span>
+          </span>
+          <button
+            onClick={() => setChosen(lookup.data.listing)}
+            className="shrink-0 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+          >
+            Review
+          </button>
+        </div>
       )}
 
-      {data && data.listings.length > 0 && (
-        <ul className="space-y-1.5">
-          {data.listings.map((listing) => (
-            <li
-              key={listing.listing_id}
-              data-hub-listing={listing.listing_id}
-              className="flex items-start justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
-            >
-              <span className="min-w-0">
-                <span className="flex items-center gap-2">
-                  <span className="truncate text-sm font-semibold text-[var(--color-text)]">
-                    {listing.name || listing.slug}
-                  </span>
-                  <Badge badge={listing.badge} />
-                </span>
-                <span className="block truncate text-xs text-[var(--color-text-muted)]">
-                  {listing.description || "No description."}
-                </span>
-                <span className="block text-[11px] text-[var(--color-text-muted)]">
-                  <span className="font-mono">{listing.slug}</span> · version{" "}
-                  {listing.version} · {listing.bytes} bytes
-                  {listing.published_at && ` · published ${listing.published_at}`}
-                </span>
-                {/* Labelled, because a handle rendered beside a download reads
-                    as an identity Condor checked, and Condor checks nothing
-                    here: the hub says it authenticated this account, and
-                    nothing binds the account to these bytes. */}
-                {(listing.author.handle || listing.author.name) && (
-                  <span
-                    data-hub-author
-                    className="block text-[11px] text-[var(--color-text-muted)]"
-                  >
-                    By{" "}
-                    <span className="text-[var(--color-text)]">
-                      {listing.author.handle || listing.author.name}
-                    </span>{" "}
-                    — an account the hub authenticated, not a signature over
-                    this file.
-                  </span>
-                )}
-              </span>
-              <button
-                onClick={() => setChosen(listing)}
-                className="shrink-0 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-              >
-                Review
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* The same dialog the file path uses, with the listing's provenance
-          above it. Keyed on the listing so choosing a second one re-previews
+      {/* The same dialog the file path uses, with the agent's provenance
+          above it. Keyed on the slug so choosing a second one re-previews
           from scratch rather than showing the first one's plan. */}
       {chosen && (
         <ImportAgentDialog
-          key={chosen.listing_id}
-          source={hubSource(chosen.listing_id)}
+          key={chosen.slug}
+          source={hubSource(chosen.slug, "latest")}
           onImported={onInstalled}
           provenance={
             <div
               data-hub-provenance
               className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
             >
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-[var(--color-text)]">
-                  {chosen.name || chosen.slug}
-                </span>
-                <Badge badge={chosen.badge} />
-              </div>
+              <span className="text-sm font-semibold text-[var(--color-text)]">
+                {chosen.name || chosen.slug}
+              </span>
               <p className="text-[11px] text-[var(--color-text-muted)]">
-                {data?.trust}
+                {lookup.data?.trust}
               </p>
-              {chosen.findings.length > 0 && (
-                <p
-                  data-hub-findings
-                  className="text-[11px] text-[var(--color-text-muted)]"
-                >
-                  The hub's own review of this submission found{" "}
-                  {chosen.findings.length} thing
-                  {chosen.findings.length !== 1 ? "s" : ""}
-                  {chosen.review_version && ` (${chosen.review_version})`}. The
-                  list below is this install's review of the file it actually
-                  received; read that one.
-                </p>
-              )}
             </div>
           }
         />

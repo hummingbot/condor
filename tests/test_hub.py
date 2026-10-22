@@ -35,7 +35,7 @@ from typing import NamedTuple
 
 import pytest
 
-from condor import hub
+from condor import botcamp_import, hub
 from condor.agents import bundle as ab
 from condor.agents.agent import AgentStore
 from condor.fetchers._identifiers import IdentifierError
@@ -207,18 +207,33 @@ class FakeHub:
             "submitted_at": "2026-10-21T12:03:00Z",
         }
 
-    def offer(self, listing_id: str, text: str, **fields) -> dict:
-        """Publish one bundle into the fake catalogue, digest included."""
-        data = text.encode("utf-8")
-        listing = {
-            "listing_id": listing_id,
-            "digest": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-            "badge": hub.COMMUNITY,
-            **fields,
+    def offer(self, slug: str, data: bytes, *, version: int = 1, **fields) -> dict:
+        """Publish one agent version into the fake catalogue (PR #111's
+        ``GET /api/agents/{slug}`` shape — a slug and its approved versions,
+        never a listing id or a badge).
+
+        ``data`` is the zip Botcamp would serve — see :func:`_zip_agent` —
+        not Condor's own JSON bundle text.
+        """
+        row = {
+            "version": version,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+            "fileCount": 0,
+            "manifest": {},
+            "sourceRef": "",
+            "createdAt": "2026-10-18T09:00:00Z",
         }
-        self.listings[listing_id] = listing
-        self.bundles[listing_id] = data
+        listing = {
+            "slug": slug,
+            "title": fields.pop("name", slug),
+            "summary": fields.pop("description", ""),
+            "latest": version,
+            "versions": [row],
+        }
+        listing.update(fields)
+        self.listings[slug] = listing
+        self.bundles[(slug, version)] = data
         return listing
 
     def send(self, method, url, *, token="", payload=b"") -> hub.Reply:
@@ -243,12 +258,23 @@ class FakeHub:
         return self._route(method, path.split("?")[0])
 
     def _route(self, method: str, path: str) -> hub.Reply:
-        if method == "GET" and path == "/agents":
-            return _ok({"listings": list(self.listings.values())})
-        if method == "GET" and path.endswith("/bundle"):
-            listing_id = path[len("/agents/") : -len("/bundle")]
-            body = self.bundles.get(listing_id)
-            return hub.Reply(200, body) if body else _missing()
+        if method == "GET" and path.startswith("/agents/") and "/versions/" in path:
+            slug, _, version_seg = path[len("/agents/") :].partition("/versions/")
+            listing = self.listings.get(slug)
+            if not listing:
+                return _missing()
+            resolved = (
+                listing["latest"] if version_seg == "latest" else int(version_seg)
+            )
+            data = self.bundles.get((slug, resolved))
+            if data is None:
+                return _missing()
+            row = next(v for v in listing["versions"] if v["version"] == resolved)
+            return hub.Reply(
+                200,
+                data,
+                {"X-Agent-Sha256": row["sha256"], "X-Agent-Version": str(resolved)},
+            )
         if method == "GET" and path.startswith("/agents/"):
             listing = self.listings.get(path[len("/agents/") :])
             return _ok(listing) if listing else _missing()
@@ -324,6 +350,23 @@ def fake_hub(monkeypatch):
 
 def _bundle_text(slug: str = "traveller") -> str:
     return ab.render(ab.build(slug))
+
+
+def _zip_agent(slug: str) -> bytes:
+    """``slug``'s library files, zipped the way Botcamp serves one version
+    (PR #111's wire shape) — never Condor's own JSON bundle.
+    """
+    import io
+    import zipfile
+
+    from condor.layering import publishable_files
+
+    home = agent_home(slug)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for rel in publishable_files(home):
+            zf.writestr(rel.as_posix(), (home / rel).read_bytes())
+    return buf.getvalue()
 
 
 # ── Headless, and compiled in ────────────────────────────────────────────
@@ -484,40 +527,46 @@ def test_a_redirect_is_refused_rather_than_followed():
 # ── The catalogue ────────────────────────────────────────────────────────
 
 
-def test_browse_reads_the_catalogue_and_sends_no_token(fake_hub):
-    fake_hub.offer("one", "{}", slug="a", name="A")
-    fake_hub.offer("two", "{}", slug="b", name="B", badge=hub.VALIDATED)
+def test_get_reads_one_agent_and_sends_no_token_when_none_is_linked(fake_hub):
+    fake_hub.offer("river_scalper", b"zip-bytes", name="River Scalper")
 
-    listings = hub.browse()
+    listing = hub.get("river_scalper")
 
-    assert [listing.listing_id for listing in listings] == ["one", "two"]
-    assert [listing.badge for listing in listings] == [hub.COMMUNITY, hub.VALIDATED]
+    assert listing.slug == "river_scalper"
+    assert listing.name == "River Scalper"
+    assert listing.versions[0].version == 1
     assert fake_hub.calls[0].token == ""
 
 
-def test_a_search_term_is_a_query_parameter_and_never_a_path_segment(fake_hub):
-    """So it needs no identifier check: it cannot change the endpoint."""
-    hub.browse("../../admin #1")
+def test_get_sends_the_linked_token_so_a_gated_agent_can_resolve(fake_hub):
+    fake_hub.offer("river_scalper", b"zip-bytes")
 
-    url = fake_hub.calls[0].url
-    assert url.startswith(f"{hub.HUB_URL}/agents?")
-    assert "/admin" not in url
+    hub.get("river_scalper", "a-token")
+
+    assert fake_hub.calls[0].token == "a-token"
 
 
-def test_one_unreadable_row_does_not_make_the_catalogue_unbrowsable(fake_hub):
-    fake_hub.offer("good", "{}", slug="a")
-    fake_hub.listings["bad"] = {"version": "not a number at all"}
+def test_there_is_no_browse_endpoint_to_call(fake_hub):
+    """PR #111 ships no catalogue search — ``browse`` does not exist at all."""
+    assert not hasattr(hub, "browse")
 
-    assert [listing.listing_id for listing in hub.browse()] == ["good"]
+
+def test_a_malformed_catalogue_reply_is_refused_readably(fake_hub):
+    fake_hub.overrides[("GET", "/agents/bad")] = hub.Reply(200, b"not json")
+
+    with pytest.raises(hub.HubError) as exc:
+        hub.get("bad")
+
+    assert "not JSON" in str(exc.value)
 
 
 def test_the_hubs_refusal_is_reported_with_its_status(fake_hub):
-    fake_hub.overrides[("GET", "/agents")] = hub.Reply(
+    fake_hub.overrides[("GET", "/agents/x")] = hub.Reply(
         503, b'{"detail": "the hub is down for maintenance"}'
     )
 
     with pytest.raises(hub.HubError) as exc:
-        hub.browse()
+        hub.get("x")
 
     assert "maintenance" in str(exc.value)
     assert exc.value.status == 503
@@ -537,7 +586,7 @@ def test_a_transport_failure_is_translated_where_it_happens(monkeypatch):
     monkeypatch.setattr(hub, "_dial", _refused)
 
     with pytest.raises(hub.HubError) as exc:
-        hub.browse()
+        hub.get("x")
 
     assert "Could not reach the agent hub" in str(exc.value)
     assert "connection refused" in str(exc.value)
@@ -551,7 +600,7 @@ def test_an_error_status_is_an_answer_and_not_a_transport_failure(monkeypatch):
 
     def _conflict(_request):
         raise urllib.error.HTTPError(
-            f"{hub.HUB_URL}/agents",
+            f"{hub.HUB_URL}/agents/x",
             409,
             "Conflict",
             {},
@@ -561,7 +610,7 @@ def test_an_error_status_is_an_answer_and_not_a_transport_failure(monkeypatch):
     monkeypatch.setattr(hub, "_dial", _conflict)
 
     with pytest.raises(hub.HubError) as exc:
-        hub.browse()
+        hub.get("x")
 
     assert "already published" in str(exc.value)
     assert exc.value.status == 409
@@ -570,49 +619,60 @@ def test_an_error_status_is_an_answer_and_not_a_transport_failure(monkeypatch):
 # ── The digest, which is the whole integrity story ───────────────────────
 
 
-def test_fetch_returns_matching_bytes_and_they_parse_through_the_one_parser(
+def test_fetch_returns_matching_bytes_verified_against_their_own_header(
     traveller, fake_hub
 ):
-    text = _bundle_text()
-    fake_hub.offer("listed", text, slug="traveller", agent_uid="x" * 32)
+    data = _zip_agent("traveller")
+    fake_hub.offer("traveller", data)
 
-    data = hub.fetch("listed")
+    fetched = hub.fetch("traveller")
 
-    assert data == text.encode("utf-8")
-    assert ab.parse(data).agent.slug == "traveller"
+    assert fetched.data == data
+    assert fetched.version == 1
+    bundle = botcamp_import.from_zip(fetched.data, agent_slug="traveller")
+    assert bundle.agent.slug == "traveller"
 
 
-def test_fetch_refuses_bytes_that_do_not_match_the_listings_digest(traveller, fake_hub):
+def test_fetch_refuses_bytes_that_do_not_match_their_own_sha256_header(
+    traveller, fake_hub
+):
     """Named, and nothing is handed back — so no caller can parse them."""
-    text = _bundle_text()
-    fake_hub.offer("listed", text, slug="traveller")
-    fake_hub.bundles["listed"] = text.replace("Travel.", "Trade.").encode("utf-8")
+    data = _zip_agent("traveller")
+    fake_hub.offer("traveller", data)
+    fake_hub.bundles[("traveller", 1)] = data + b"\x00"
 
     with pytest.raises(hub.HubError) as exc:
-        hub.fetch("listed")
+        hub.fetch("traveller")
 
-    assert "listed" in str(exc.value)
-    assert "digest" in str(exc.value)
+    assert "traveller" in str(exc.value)
+    assert "X-Agent-Sha256" in str(exc.value)
 
 
-def test_a_listing_with_no_digest_is_refused_rather_than_trusted(fake_hub):
-    fake_hub.offer("listed", "{}", slug="a")
-    fake_hub.listings["listed"]["digest"] = ""
+def test_a_reply_with_no_digest_header_is_refused_rather_than_trusted(
+    traveller, fake_hub
+):
+    data = _zip_agent("traveller")
+    fake_hub.offer("traveller", data)
+    fake_hub.overrides[("GET", "/agents/traveller/versions/latest")] = hub.Reply(
+        200, data, {}
+    )
 
     with pytest.raises(hub.HubError) as exc:
-        hub.fetch("listed")
+        hub.fetch("traveller")
 
-    assert "no digest" in str(exc.value)
-    assert not any(call.url.endswith("/bundle") for call in fake_hub.calls)
+    assert "carries no X-Agent-Sha256" in str(exc.value)
 
 
 def test_an_oversized_bundle_is_refused_before_it_is_hashed(fake_hub):
     big = b"x" * (ab.MAX_BUNDLE_BYTES + 1)
-    fake_hub.listings["listed"] = {
-        "listing_id": "listed",
-        "digest": hashlib.sha256(big).hexdigest(),
-    }
-    fake_hub.bundles["listed"] = big
+    fake_hub.overrides[("GET", "/agents/listed/versions/latest")] = hub.Reply(
+        200,
+        big,
+        {
+            "X-Agent-Sha256": hashlib.sha256(big).hexdigest(),
+            "X-Agent-Version": "1",
+        },
+    )
 
     with pytest.raises(hub.HubError) as exc:
         hub.fetch("listed")
@@ -775,7 +835,10 @@ def test_submission_status_merges_the_poll_over_what_publish_stored(
     those have to survive the poll from the record ``publish`` already made.
     """
     hub.publish("traveller", "tok", notes="widened the grid")
-    fake_hub.offer("lst_8f3a9c2e1b", "{}", badge=hub.VALIDATED)
+    # The old, forward-looking ``listing_id``-keyed shape ``submission_status``
+    # still reads for badge provenance (_published_listing_provenance) — not
+    # the pull side's ``AgentListing``, which has no badge at all.
+    fake_hub.listings["lst_8f3a9c2e1b"] = {"badge": hub.VALIDATED}
     fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
         200,
         json.dumps(
@@ -1534,28 +1597,22 @@ def test_the_dashboard_reports_when_the_hub_could_not_be_told(cm, fake_hub):
 
 @pytest.fixture
 def offered(traveller, fake_hub):
-    """``traveller`` published to the fake hub, and the agent gone from disk.
+    """``traveller`` published to the fake hub, under its own slug, and the
+    agent gone from disk.
 
     Removed so the install is a *create*: the test that wants the update verb
     leaves it in place instead.
     """
     import shutil
 
-    text = _bundle_text()
-    listing = fake_hub.offer(
-        "listed",
-        text,
-        slug="traveller",
-        name="Traveller",
-        agent_uid=ab.parse(text.encode("utf-8")).agent.agent_uid,
-        author={"name": "Fede", "handle": "@fede"},
-    )
+    data = _zip_agent("traveller")
+    listing = fake_hub.offer("traveller", data, name="Traveller")
     shutil.rmtree(traveller)
     return listing
 
 
 def test_a_listing_this_install_does_not_have_is_an_install(offered):
-    preview = _client().post("/hub/agents/listed/install/preview")
+    preview = _client().post("/hub/agents/traveller/install/preview")
 
     assert preview.status_code == 200
     body = preview.json()
@@ -1569,72 +1626,42 @@ def test_a_listing_this_install_does_not_have_is_an_install(offered):
 
 def test_a_listing_of_an_agent_already_here_is_an_update(traveller, fake_hub):
     """FEAT-145's verb, chosen by the plan's ``is_update`` and not by this layer."""
-    client = _client()
-    text = client.get("/agents/traveller/bundle").text
-    bundle = ab.parse(text.encode("utf-8"))
-    # A newer bundle of the same agent: the identity matches what is installed.
-    bumped = bundle.model_copy(update={"version": bundle.version + 1})
-    fake_hub.offer(
-        "listed",
-        ab.render(bumped),
-        slug="traveller",
-        agent_uid=bundle.agent.agent_uid,
-    )
-    ab.write_stamp(
-        traveller,
-        ab.BundleStamp(
-            agent_uid=bundle.agent.agent_uid,
-            version=bundle.version,
-            exported_at=bundle.exported_at,
-            digests={f.path: f.sha256 for f in bundle.files},
-        ),
-    )
+    ab.build("traveller")  # mints and stamps this agent's agent_uid on disk
+    fake_hub.offer("traveller", _zip_agent("traveller"))
 
-    body = client.post("/hub/agents/listed/install/preview").json()
+    body = _client().post("/hub/agents/traveller/install/preview").json()
 
     assert body["verb"] == "update"
     # FEAT-145's ``UpdatePlan`` shape, which the import plan does not have.
     assert "blockers" in body["plan"] and "counts" in body["plan"]
-    assert body["plan"]["installed_agent_uid"] == bundle.agent.agent_uid
+    installed_uid = AgentStore().get("traveller").agent_uid
+    assert installed_uid
+    assert body["plan"]["installed_agent_uid"] == installed_uid
 
 
 def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
     client = _client()
 
-    preview = client.post("/hub/agents/listed/install/preview").json()
-    installed = client.post("/hub/agents/listed/install").json()
+    preview = client.post("/hub/agents/traveller/install/preview").json()
+    installed = client.post("/hub/agents/traveller/install").json()
 
     for field, value in preview["plan"].items():
         assert installed["plan"][field] == value, field
     assert installed["plan"]["imported"] is True
     # Two fetches, not one cached preview: the digest check is what makes that
     # safe, and it ran on both.
-    assert sum(1 for call in fake_hub.calls if call.url.endswith("/bundle")) == 2
-    # And one listing GET apiece, not two: the route hands the listing it
-    # already holds to ``fetch`` rather than asking the hub again.
-    assert sum(1 for call in fake_hub.calls if call.url.endswith("/listed")) == 2
-
-
-def test_the_badge_changes_no_decision(offered, fake_hub):
-    """A community listing plans, mutes and reports exactly what a validated
-    one does. Asserted by comparing two responses with only the badge differing.
-    """
-    client = _client()
-    community = client.post("/hub/agents/listed/install/preview").json()
-
-    fake_hub.listings["listed"]["badge"] = hub.VALIDATED
-    validated = client.post("/hub/agents/listed/install/preview").json()
-
-    assert community["listing"]["badge"] == hub.COMMUNITY
-    assert validated["listing"]["badge"] == hub.VALIDATED
-    assert community["plan"] == validated["plan"]
-    assert community["verb"] == validated["verb"]
+    assert sum(1 for call in fake_hub.calls if "/versions/" in call.url) == 2
+    # And one listing GET apiece, not two: both the preview and the install
+    # ask the hub fresh for the catalogue entry.
+    assert (
+        sum(1 for call in fake_hub.calls if call.url.endswith("/agents/traveller")) == 2
+    )
 
 
 def test_an_installed_hub_agent_arrives_muted_with_nothing_running(offered):
     from condor.agents.engine import get_all_engines
 
-    res = _client().post("/hub/agents/listed/install")
+    res = _client().post("/hub/agents/traveller/install")
 
     assert res.status_code == 200
     assert AgentStore().get("traveller") is not None
@@ -1649,52 +1676,17 @@ def test_an_imported_routine_has_no_execution_consent_on_the_hub_path(offered):
     """FEAT-147, which is a separate gesture from the mute and both are needed."""
     from condor.agents import code_trust
 
-    _client().post("/hub/agents/listed/install")
+    _client().post("/hub/agents/traveller/install")
 
     source = agent_home("traveller") / "routines" / "r.py"
     assert not code_trust.allowed("traveller", "r", source.read_text())
 
 
-def test_the_findings_the_hub_computed_ride_on_the_listing(offered, fake_hub):
-    """The hub's review is the one whose input the author does not control.
-
-    The export-side review is advice to the author, who runs their own copy of
-    the exporter; this is why the service re-runs it on submission (TASK-004)
-    and why the listing carries the result.
-    """
-    fake_hub.listings["listed"]["findings"] = [
-        {
-            "category": "endpoint",
-            "label": "public host",
-            "path": "AGENT.md",
-            "line": 3,
-            "start": 10,
-            "end": 30,
-        }
-    ]
-    fake_hub.listings["listed"]["review_version"] = "bundle_review/2026-10-18"
-
-    body = _client().post("/hub/agents/listed/install/preview").json()
-
-    assert body["listing"]["findings"][0]["label"] == "public host"
-    assert body["listing"]["review_version"] == "bundle_review/2026-10-18"
-
-
-def test_the_author_handle_is_carried_as_the_hubs_attestation(offered):
-    body = _client().post("/hub/agents/listed/install/preview").json()
-
-    assert body["listing"]["author"] == {"name": "Fede", "handle": "@fede"}
-
-
 def test_every_hub_surface_carries_the_one_trust_sentence(offered):
-    client = _client()
+    body = _client().get("/hub/agents/traveller").json()
 
-    for body in (
-        client.get("/hub/agents").json(),
-        client.get("/hub/agents/listed").json(),
-    ):
-        assert "not a security boundary" in body["trust"]
-        assert "muted and unstarted" in body["trust"]
+    assert "not a security boundary" in body["trust"]
+    assert "muted and unstarted" in body["trust"]
 
 
 # ── Hub-listing status for an installed agent (CORR-812) ─────────────────
@@ -1709,26 +1701,25 @@ def test_every_hub_surface_carries_the_one_trust_sentence(offered):
 def test_installing_from_the_hub_records_its_provenance_outside_the_bundle(
     offered, fake_hub
 ):
-    _client().post("/hub/agents/listed/install")
+    _client().post("/hub/agents/traveller/install")
 
     home = agent_home("traveller")
     stamp = ab.read_stamp(home)
-    assert stamp.hub_listing_id == "listed"
-    assert stamp.hub_badge == hub.COMMUNITY
-    assert stamp.hub_digest == fake_hub.listings["listed"]["digest"]
+    assert stamp.hub_slug == "traveller"
+    assert stamp.hub_version == 1
+    assert stamp.hub_digest == fake_hub.listings["traveller"]["versions"][0]["sha256"]
     assert stamp.hub_status == "ok"
     assert stamp.hub_checked_at
 
     # Outside publishable_files, so a re-export of this very agent cannot
     # carry somebody else's listing as its own provenance.
     bundle = ab.build("traveller")
-    assert "hub_listing_id" not in ab.render(bundle)
-    assert "listed" not in ab.render(bundle)
+    assert "hub_slug" not in ab.render(bundle)
 
 
 def test_a_plain_file_update_does_not_invent_hub_provenance(traveller):
     """``apply_update`` is shared with the plain file-upload path, which has
-    no listing at all — it must not fabricate one."""
+    no hub agent at all — it must not fabricate one."""
     original = ab.parse(_bundle_text().encode("utf-8"))
     bumped = original.model_copy(update={"version": original.version + 1})
     plan = ab.plan_update(bumped, "traveller")
@@ -1736,79 +1727,79 @@ def test_a_plain_file_update_does_not_invent_hub_provenance(traveller):
     ab.apply_update(plan, user_id=7)
 
     stamp = ab.read_stamp(agent_home("traveller"))
-    assert stamp.hub_listing_id == ""
+    assert stamp.hub_slug == ""
     assert stamp.hub_status == ""
 
 
 def test_listing_status_reads_unchanged_as_ok(offered, fake_hub):
-    result = hub.listing_status("listed", badge=hub.COMMUNITY)
+    result = hub.listing_status("traveller", 1)
 
     assert result.state == "ok"
-    assert result.badge == hub.COMMUNITY
 
 
-def test_listing_status_reads_a_different_badge_as_badge_changed(offered, fake_hub):
-    fake_hub.listings["listed"]["badge"] = hub.VALIDATED
+def test_listing_status_reads_a_superseded_version_as_delisted(offered, fake_hub):
+    """The installed version no longer among the hub's approved ones."""
+    fake_hub.listings["traveller"]["versions"][0]["version"] = 2
+    fake_hub.listings["traveller"]["latest"] = 2
 
-    result = hub.listing_status("listed", badge=hub.COMMUNITY)
-
-    assert result.state == "badge_changed"
-    assert result.badge == hub.VALIDATED
-
-
-def test_listing_status_reads_an_explained_404_as_delisted(offered, fake_hub):
-    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
-        404, json.dumps({"detail": "gone", "reason": "unpublished"}).encode("utf-8")
-    )
-
-    result = hub.listing_status("listed")
+    result = hub.listing_status("traveller", 1)
 
     assert result.state == "delisted"
 
 
-def test_listing_status_reads_an_unexplained_404_as_unknown_not_delisted(
-    offered, fake_hub
-):
-    """Contract §8.3 only *recommends* the ``reason`` field; an unexplained
-    404 must not be read as a confirmed moderation action."""
-    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
-        404, b'{"detail": "no such listing"}'
+def test_listing_status_reads_a_404_as_delisted(offered, fake_hub):
+    fake_hub.overrides[("GET", "/agents/traveller")] = hub.Reply(
+        404, b'{"detail": "no approved version"}'
     )
 
-    result = hub.listing_status("listed")
+    result = hub.listing_status("traveller", 1)
 
-    assert result.state == "unknown"
+    assert result.state == "delisted"
 
 
 def test_listing_status_reads_a_network_failure_as_unknown(offered, fake_hub):
-    fake_hub.overrides[("GET", "/agents/listed")] = ConnectionError("down")
+    fake_hub.overrides[("GET", "/agents/traveller")] = ConnectionError("down")
 
-    result = hub.listing_status("listed")
+    result = hub.listing_status("traveller", 1)
 
     assert result.state == "unknown"
 
 
 def test_listing_status_reads_a_5xx_as_unknown_not_delisted(offered, fake_hub):
-    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
+    fake_hub.overrides[("GET", "/agents/traveller")] = hub.Reply(
         503, b'{"detail": "maintenance"}'
     )
 
-    result = hub.listing_status("listed")
+    result = hub.listing_status("traveller", 1)
+
+    assert result.state == "unknown"
+
+
+def test_listing_status_reads_an_access_refusal_as_unknown_not_delisted(
+    offered, fake_hub
+):
+    """401/402/403 say this install cannot currently read the agent, never
+    that the hub confirmed it is gone."""
+    fake_hub.overrides[("GET", "/agents/traveller")] = hub.Reply(
+        402, b'{"detail": "membership required"}'
+    )
+
+    result = hub.listing_status("traveller", 1)
 
     assert result.state == "unknown"
 
 
 def test_listing_status_refuses_a_malicious_id_before_any_request(fake_hub):
     with pytest.raises(IdentifierError):
-        hub.listing_status("../agents")
+        hub.listing_status("../agents", 1)
 
     assert fake_hub.calls == []
 
 
 def test_listing_status_reads_a_malformed_reply_as_unknown(offered, fake_hub):
-    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(200, b"not json")
+    fake_hub.overrides[("GET", "/agents/traveller")] = hub.Reply(200, b"not json")
 
-    result = hub.listing_status("listed")
+    result = hub.listing_status("traveller", 1)
 
     assert result.state == "unknown"
 
@@ -1818,15 +1809,15 @@ def test_installed_agent_status_is_untracked_without_hub_provenance(traveller):
 
 
 def test_installed_agent_status_confirms_and_persists_delisted(offered, fake_hub):
-    _client().post("/hub/agents/listed/install")
-    fake_hub.overrides[("GET", "/agents/listed")] = hub.Reply(
-        404, json.dumps({"detail": "gone", "reason": "unpublished"}).encode("utf-8")
+    _client().post("/hub/agents/traveller/install")
+    fake_hub.overrides[("GET", "/agents/traveller")] = hub.Reply(
+        404, b'{"detail": "gone"}'
     )
 
     status = hub.installed_agent_status("traveller", force=True)
 
     assert status["tracked"] is True
-    assert status["listing_id"] == "listed"
+    assert status["slug"] == "traveller"
     assert status["status"] == "delisted"
     assert status["live_check_failed"] is False
     assert status["checked_at"]
@@ -1839,9 +1830,9 @@ def test_installed_agent_status_does_not_overwrite_on_an_unknown_check(
 ):
     """A transient failure must not erase the last confirmed answer, and must
     not touch any installed file or execution state."""
-    _client().post("/hub/agents/listed/install")
+    _client().post("/hub/agents/traveller/install")
     confirmed_at = ab.read_stamp(agent_home("traveller")).hub_checked_at
-    fake_hub.overrides[("GET", "/agents/listed")] = ConnectionError("down")
+    fake_hub.overrides[("GET", "/agents/traveller")] = ConnectionError("down")
 
     status = hub.installed_agent_status("traveller", force=True)
 
@@ -1856,7 +1847,7 @@ def test_installed_agent_status_does_not_overwrite_on_an_unknown_check(
 def test_installed_agent_status_does_not_recheck_within_the_cache_window(
     offered, fake_hub
 ):
-    _client().post("/hub/agents/listed/install")
+    _client().post("/hub/agents/traveller/install")
     calls_before = len(fake_hub.calls)
 
     hub.installed_agent_status("traveller")
@@ -1873,7 +1864,7 @@ def test_the_hub_status_route_answers_untracked_for_a_file_imported_agent(travel
 
 def test_the_hub_status_route_is_open_to_any_authenticated_user(offered, fake_hub):
     """Unlike publish/submission, this reads no credential — it is a fact
-    about one installed agent, the same gate browse/preview/install use."""
+    about one installed agent, the same gate get/preview/install use."""
     from fastapi import FastAPI
     from starlette.testclient import TestClient
 
@@ -1881,7 +1872,7 @@ def test_the_hub_status_route_is_open_to_any_authenticated_user(offered, fake_hu
     from condor.web.models import WebUser
     from condor.web.routes import agents as routes
 
-    _client().post("/hub/agents/listed/install")
+    _client().post("/hub/agents/traveller/install")
 
     app = FastAPI()
     app.include_router(routes.router)
@@ -1925,7 +1916,7 @@ def test_an_unreachable_hub_is_a_502_and_not_a_500(monkeypatch):
 
     monkeypatch.setattr(hub, "_dial", _refused)
 
-    res = _client().get("/hub/agents")
+    res = _client().get("/hub/agents/x")
     assert res.status_code == 502
     assert "Could not reach the agent hub" in res.json()["detail"]
 
@@ -1935,20 +1926,21 @@ def test_a_missing_listing_keeps_the_hubs_404(fake_hub):
 
 
 def test_the_hub_cannot_serve_something_that_is_not_a_bundle(fake_hub):
-    text = '{"kind": "something-else"}'
-    fake_hub.offer("listed", text, slug="x")
+    """A wrong-kind-of-file refusal (``NotJsonError``) is 415, like the file
+    import door's own ``_bundle_refusal`` convention."""
+    fake_hub.offer("listed", b"not a zip at all")
 
     res = _client().post("/hub/agents/listed/install")
 
-    assert res.status_code == 400
-    assert "Condor agent bundle" in res.json()["detail"]
+    assert res.status_code == 415
+    assert "zip archive" in res.json()["detail"]
 
 
 def test_a_tampered_bundle_never_reaches_the_importer(traveller, fake_hub):
     """The digest check, through the route — a 502, and nothing written."""
-    text = _bundle_text()
-    fake_hub.offer("listed", text, slug="traveller")
-    fake_hub.bundles["listed"] = text.replace("Travel.", "Trade.").encode("utf-8")
+    data = _zip_agent("traveller")
+    fake_hub.offer("listed", data)
+    fake_hub.bundles[("listed", 1)] = data + b"\x00"
     import shutil
 
     shutil.rmtree(traveller)
@@ -1956,7 +1948,7 @@ def test_a_tampered_bundle_never_reaches_the_importer(traveller, fake_hub):
     res = _client().post("/hub/agents/listed/install")
 
     assert res.status_code == 502
-    assert "digest" in res.json()["detail"]
+    assert "X-Agent-Sha256" in res.json()["detail"]
     assert not agent_home("traveller").exists()
 
 
@@ -2095,14 +2087,15 @@ def test_the_publish_route_refuses_an_agent_that_does_not_exist(fake_hub):
 # ── The chat/MCP door ────────────────────────────────────────────────────
 
 
-def test_manage_agents_browses_the_hub(fake_hub):
+def test_manage_agents_gets_one_hub_agent(fake_hub):
     from mcp_servers.condor.tools import trading_agent
 
-    fake_hub.offer("listed", "{}", slug="a", name="A", badge=hub.VALIDATED)
+    fake_hub.offer("listed", b"zip-bytes", name="A")
 
-    result = trading_agent.manage_agents(action="hub_browse")
+    result = trading_agent.manage_agents(action="hub_get", path="listed")
 
-    assert [row["listing_id"] for row in result["listings"]] == ["listed"]
+    assert result["listing"]["slug"] == "listed"
+    assert result["listing"]["name"] == "A"
     assert "not a security boundary" in result["trust"]
 
 
@@ -2112,15 +2105,15 @@ def test_manage_agents_installs_from_the_hub(offered, monkeypatch):
 
     monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
 
-    result = trading_agent.manage_agents(action="hub_install", path="listed")
+    result = trading_agent.manage_agents(action="hub_install", path="traveller")
 
     assert result["verb"] == "install"
     assert result["imported"] is True
-    assert result["listing"]["badge"] == hub.COMMUNITY
+    assert result["listing"]["slug"] == "traveller"
     assert load_mutes("traveller")["routines"] == {"r"}
 
 
-def test_manage_agents_hub_install_needs_a_listing_id(fake_hub):
+def test_manage_agents_hub_install_needs_a_slug(fake_hub):
     from mcp_servers.condor.tools import trading_agent
 
     assert "required" in trading_agent.manage_agents(action="hub_install")["error"]
@@ -2157,26 +2150,25 @@ def test_the_hub_actions_are_routed_and_not_misfiled(fake_hub):
     """A sibling family's action answers with the call that would have worked."""
     from mcp_servers.condor.tools import trading_agent
 
-    misrouted = trading_agent.manage_loops(action="hub_browse")
+    misrouted = trading_agent.manage_loops(action="hub_get")
 
     assert "manage_agents" in misrouted["error"]
 
 
-def test_the_bundle_is_addressed_with_the_id_the_caller_validated(traveller, fake_hub):
-    """Never with the one the reply carried, which nothing checked.
+def test_fetch_is_addressed_only_by_what_the_caller_gave(traveller, fake_hub):
+    """``fetch`` never consults ``get``'s reply at all.
 
-    A hub answer is a string from another service. Interpolating its
-    ``listing_id`` into the download path would put an unvalidated value in a
-    URL segment — the exact thing ``condor/fetchers/_identifiers.py`` exists to
-    prevent — and the compiled-in base would be holding the host on its own.
+    Unlike the abandoned ``listing_id`` contract, there is no second value in
+    PR #111's wire shape a hub answer could redirect a download with:
+    ``fetch``'s URL is built from the caller's own ``slug``/``version`` alone,
+    and the integrity check is the *same* response's own header, never a
+    field read out of an earlier call.
     """
-    text = _bundle_text()
-    fake_hub.offer("listed", text, slug="traveller")
-    fake_hub.listings["listed"]["listing_id"] = "../../admin"
+    data = _zip_agent("traveller")
+    fake_hub.offer("listed", data)
+    fake_hub.listings["listed"]["slug"] = "../../admin"
 
-    with pytest.raises(hub.HubError) as exc:
-        hub.fetch("listed")
+    fetched = hub.fetch("listed")
 
-    assert "listed" in str(exc.value)
+    assert fetched.data == data
     assert not any("/admin" in call.url for call in fake_hub.calls)
-    assert not any(call.url.endswith("/bundle") for call in fake_hub.calls)

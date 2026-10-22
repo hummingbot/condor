@@ -371,44 +371,49 @@ def _upgrade_agent(agent_slug: str, path: str) -> dict:
         return {"error": str(exc), "preview": plan.summary()}
 
 
-def _hub_browse(query: str = "") -> dict:
-    """What the agent hub offers, as rows to read out (FEAT-146).
+def _hub_get(slug: str) -> dict:
+    """One Botcamp agent's catalogue entry, as rows to read out (FEAT-146).
 
-    Anonymous — browsing needs no token, because the listing is public content
-    and gating it would make the feature useless for an operator who has no
-    Botcamp account, which is most of them on day one.
+    PR #111 ships no browse — only a lookup by a slug the caller must
+    already know, so this is a lookup and not a search. This install's own
+    Botcamp token rides along if one is linked (optional on this endpoint),
+    which is what lets a membership/purchase-gated agent an account actually
+    has access to resolve at all; omitted, this is the anonymous read a free
+    agent answers.
 
-    ``badge`` is **provenance and nothing else**. A ``validated`` badge means a
-    human reviewed one submitted revision once; it is not a signature, Condor
-    verifies no bundle against it, and it must never be read back to the user
-    as a reason something is safe to run. Say what it is, and say that the
-    review on install is the gate.
+    Only an ``APPROVED`` version is ever listed. That is a gate on what
+    reaches the catalogue, never a verdict this tool should repeat back to
+    the user as a reason something is safe to run — the review on install is
+    the gate.
     """
     from condor import hub
 
     try:
-        listings = hub.browse(query or "")
+        listing = hub.get(slug, hub.token())
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
     return {
-        "listings": [listing.model_dump() for listing in listings],
+        "listing": listing.model_dump(),
         "trust": (
-            "A badge is provenance, not a verdict: the hub is a discovery "
-            "service and not a security boundary. Whatever you install arrives "
-            "muted and unstarted, and the review on install is the gate."
+            "Only an approved version is ever listed here, but that is a gate "
+            "on the catalogue, not a security boundary. Whatever you install "
+            "arrives muted and unstarted, and the review on install is the gate."
         ),
     }
 
 
-def _hub_install(listing_id: str, as_slug: str = "") -> dict:
-    """Install a hub listing, through exactly the gate the file path uses.
+def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
+    """Install a Botcamp agent version, through exactly the gate the file
+    path uses.
 
-    The bytes are digest-verified against the listing before anything parses
-    them (``hub.fetch``), and then this is FEAT-133's ``plan``/``apply`` — or
-    FEAT-145's ``plan_update``/``apply_update`` when the listing's agent is
-    already installed here, which the plan decides, not this function and not
-    the caller. ``as_slug`` is only ever a rename for a collision that is a
-    *different* agent.
+    The bytes are verified against the response's own ``X-Agent-Sha256``
+    header before anything parses them (``hub.fetch``), then converted from
+    Botcamp's zip layout into a bundle
+    (``condor.botcamp_import.from_zip``), and then this is FEAT-133's
+    ``plan``/``apply`` — or FEAT-145's ``plan_update``/``apply_update`` when
+    this agent is already installed here, which the plan decides, not this
+    function and not the caller. ``as_slug`` is only ever a rename for a
+    collision that is a *different* agent.
 
     Everything the import door promises holds unchanged: every executable file
     is named in the result, routines and skills arrive muted, no imported
@@ -419,18 +424,19 @@ def _hub_install(listing_id: str, as_slug: str = "") -> dict:
     them: resolving them needs an async Hummingbot client and this is a
     synchronous tool.
     """
-    from condor import hub
+    from condor import botcamp_import, hub
     from condor.agents import bundle as agent_bundle
     from condor.runtime.toolsets import every_tool_name
 
+    hub_token = hub.token()
     try:
-        listing = hub.get(listing_id)
-        data = hub.fetch(listing_id, listing)
+        listing = hub.get(slug, hub_token)
+        fetched = hub.fetch(slug, version or "latest", token=hub_token)
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
 
     try:
-        bundle = agent_bundle.parse(data)
+        bundle = botcamp_import.from_zip(fetched.data, agent_slug=slug)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -660,23 +666,26 @@ def _manage_agent(
             return {"error": "path (the newer bundle file) is required"}
         return _upgrade_agent(agent_slug, path)
 
-    if action == "hub_browse":
-        # ``agent_slug`` doubles as the search here: there is no listing to
-        # look up yet, and a second string parameter for one optional filter
-        # would be a field every other action has to ignore.
-        return _hub_browse(agent_slug or "")
+    if action == "hub_get":
+        if not path:
+            return {"error": "path (the Botcamp agent slug to look up) is required"}
+        # ``path`` carries the slug: there is no browse/search endpoint on
+        # Botcamp (PR #111), only a lookup by a slug the caller must already
+        # know.
+        return _hub_get(path)
 
     if action == "hub_install":
         if not path:
             return {
                 "error": (
-                    "path (the hub listing_id to install) is required — "
-                    'find one with manage_agents(action="hub_browse")'
+                    "path (the Botcamp agent slug to install) is required — "
+                    'look one up first with manage_agents(action="hub_get")'
                 )
             }
-        # ``path`` carries the listing id and ``agent_slug`` the name to land
-        # under, which is the same split ``import`` already uses: the bundle
-        # names itself, and ``agent_slug`` is how a collision is answered.
+        # ``path`` carries the agent's Botcamp slug and ``agent_slug`` the
+        # name to land under, which is the same split ``import`` already
+        # uses: the bundle names itself, and ``agent_slug`` is how a
+        # collision is answered.
         return _hub_install(path, agent_slug or "")
 
     if action == "publish_hub":
@@ -1054,10 +1063,13 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="upgrade", agent_slug=..., path=...)',
     ),
-    "hub_browse": ("manage_agents", 'manage_agents(action="hub_browse")'),
+    "hub_get": (
+        "manage_agents",
+        'manage_agents(action="hub_get", path=<agent slug>)',
+    ),
     "hub_install": (
         "manage_agents",
-        'manage_agents(action="hub_install", path=<listing_id>)',
+        'manage_agents(action="hub_install", path=<agent slug>)',
     ),
     "publish_hub": (
         "manage_agents",
@@ -1112,10 +1124,10 @@ _AGENT_ACTIONS = {
     "import": "import_agent",
     "upgrade": "upgrade_agent",
     # The hub's three (FEAT-146). Spelled with their prefix even in the short
-    # table: "browse" and "install" on their own would read as local verbs, and
+    # table: "get" and "install" on their own would read as local verbs, and
     # ``publish`` is already taken by the publish-to-stock action — which is a
     # different act entirely, writing into this repo's tracked library.
-    "hub_browse": "hub_browse",
+    "hub_get": "hub_get",
     "hub_install": "hub_install",
     "publish_hub": "publish_hub",
 }

@@ -17,18 +17,21 @@ module hangs off, and every surface that renders a listing repeats it.
    (FEAT-144), routines and skills muted on arrival, no execution consent for
    any imported ``.py`` (FEAT-147), nothing started, and the operator unmuting
    item by item after reading each one.
-2. *The hub is a discovery and moderation service, not a security boundary.* A
-   :data:`VALIDATED` badge is a claim that a human reviewed one submitted
-   revision at one point in time. It is carried in the listing, rendered as
-   provenance, and read by **nothing in this module that decides whether to
-   write**. A badge never shortens the import review — a bundle validated as
-   submitted is not the bundle the operator will run after editing it here.
+2. *The hub is a discovery and moderation service, not a security boundary.*
+   Only an ``APPROVED`` version is ever served at all (PR #111's
+   ``AgentVersionStatus``) — a human or an AI reviewer passed it before
+   :func:`get` can even see it — but that is a gate on what reaches the
+   catalogue, not a claim read by anything in this module that decides
+   whether to write. An approved bundle is not the bundle the operator will
+   run after editing it here.
 3. *Integrity between hub and client is a content digest over HTTPS, not a
-   signature.* :func:`get` reports the bundle's sha256 and :func:`fetch`
-   verifies the bytes against it before any caller parses them; FEAT-133's
-   per-file digests then catch any later edit. ``author`` is an account claim
-   the hub records at upload and nothing binds it to the bytes
-   cryptographically — which is why every surface labels it unverified.
+   signature.* :func:`fetch` verifies the downloaded bytes against the
+   ``X-Agent-Sha256`` header the same response carries, before any caller
+   parses them; FEAT-133's per-file digests then catch any later edit. There
+   is no author claim on this read path at all (PR #111 attaches no account
+   to a catalogue read) — :data:`VALIDATED`/:data:`COMMUNITY` and the
+   ``author`` field that renders one still exist for :func:`publish`'s own
+   :class:`Receipt`, unrelated to anything a pull reads.
 
 **Why the base URL is compiled in, and why no environment variable moves it.**
 The rule is ``condor/sharing/outbox.py``'s, and here it is not tidiness but the
@@ -75,14 +78,9 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from condor.agents.bundle import (
-    MAX_BUNDLE_BYTES,
-    BundleAuthor,
-    BundleFinding,
-    BundleRequires,
-)
+from condor.agents.bundle import MAX_BUNDLE_BYTES
 from condor.fetchers._identifiers import IdentifierError, validate_identifier
 
 log = logging.getLogger(__name__)
@@ -188,44 +186,52 @@ class NoTokenError(HubError):
     """
 
 
-class Listing(BaseModel):
-    """One agent the hub offers, as the catalogue describes it.
+class AgentVersion(BaseModel):
+    """One ``APPROVED`` version of a Botcamp agent (PR #111's own shape,
+    ``GET /api/agents/{slug}``'s ``versions[]``).
 
-    Every field is the hub's claim except the two that are checked:
-    ``digest``, which :func:`fetch` verifies the downloaded bytes against, and
-    ``agent_uid``, which the import path re-derives from the bundle itself
-    (FEAT-143's ``plan`` reads the manifest, never this). ``requires`` and
-    ``findings`` are carried in FEAT-143's and FEAT-144's own shapes rather
-    than copies of them, so a field added to either reaches a hub listing
-    without a second definition here.
+    ``sha256`` is carried here for the version picker to show, but it is
+    **not** what :func:`fetch` verifies a download against — that is the
+    ``X-Agent-Sha256`` header the *download itself* answers with, a value
+    this install read off the response it is checking, never a field from an
+    earlier, separate call. ``manifest`` is Botcamp's own coarse summary
+    (name/agent_key/tools/loops) and is rendered as a hint only; the bundle
+    :func:`condor.botcamp_import.from_zip` builds from the downloaded files
+    is the one this install actually acts on.
     """
 
-    listing_id: str
-    #: The identity that decides whether installing this is a create or an
-    #: update (FEAT-145). Advisory here; the plan derives its own.
-    agent_uid: str = ""
-    slug: str = ""
-    name: str = ""
-    description: str = ""
-    version: int = 1
-    notes: str = ""
-    #: Attested by the hub at upload — an account claim, not a signature.
-    author: BundleAuthor = Field(default_factory=BundleAuthor)
-    #: :data:`VALIDATED` or :data:`COMMUNITY`. Provenance, and nothing in this
-    #: module reads it to decide anything.
-    badge: str = COMMUNITY
-    #: Full lowercase hex sha256 of the bundle bytes. The one integrity check.
-    digest: str = ""
-    bytes: int = 0
-    published_at: str = ""
-    requires: BundleRequires = Field(default_factory=BundleRequires)
-    #: FEAT-144's review, **as the hub computed it on submission**. The
-    #: export-side review is advice to the author, who controls its input; this
-    #: one is the only review whose input the author does not control.
-    findings: list[BundleFinding] = Field(default_factory=list)
-    #: Which review produced ``findings``, so a client can see when the hub's
-    #: copy and this install's have drifted apart (TASK-004).
-    review_version: str = ""
+    model_config = ConfigDict(populate_by_name=True)
+
+    version: int
+    sha256: str = ""
+    size: int = 0
+    file_count: int = Field(0, alias="fileCount")
+    source_ref: str = Field("", alias="sourceRef")
+    created_at: str = Field("", alias="createdAt")
+    manifest: dict = Field(default_factory=dict)
+
+
+class AgentListing(BaseModel):
+    """One Botcamp agent, as ``GET /api/agents/{slug}`` describes it.
+
+    PR #111 carries no listing id, no badge, no author claim and no
+    FEAT-144-shaped findings on this read path at all — there is no
+    ``/agents?query=`` to browse and no second call that would attach any of
+    those. ``slug`` is therefore the only identity there is, and it is this
+    install's own charge to put through :func:`condor.fetchers._identifiers.validate_identifier`
+    before it reaches a URL, the same as every other caller-controlled path
+    segment in this module. ``versions`` lists only ``APPROVED`` revisions,
+    newest first; ``latest`` is Botcamp's own pick among them, never computed
+    here.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    slug: str
+    name: str = Field("", alias="title")
+    description: str = Field("", alias="summary")
+    latest: int = 1
+    versions: list[AgentVersion] = Field(default_factory=list)
 
 
 class SubmissionReason(BaseModel):
@@ -336,6 +342,13 @@ class Reply(NamedTuple):
 
     status: int
     body: bytes
+    #: Response headers, by name, case preserved as sent. ``None`` (the
+    #: default — every construction site that predates this field keeps
+    #: working unchanged) reads the same as ``{}`` to :func:`_header`.
+    #: :func:`fetch`'s ``X-Agent-Sha256`` check is the one reader that needs
+    #: this; every error-reporting path that came before it only ever needed
+    #: ``body``.
+    headers: dict | None = None
 
 
 def _segment(value: str, what: str) -> str:
@@ -373,6 +386,24 @@ def _listing_id(value: str) -> str:
     return _segment(value, "listing id")
 
 
+def _agent_slug(value: str) -> str:
+    return _segment(value, "agent slug")
+
+
+def _version_segment(value: str) -> str:
+    """``value`` if it is safe as a version path segment: ``latest`` or a
+    positive integer, verbatim. Never a value the hub's reply echoed back —
+    see :func:`fetch`.
+    """
+    if value == "latest":
+        return value
+    if value.isdigit() and value != "0" and not value.startswith("0"):
+        return value
+    raise IdentifierError(
+        f"Invalid version {value!r}: must be 'latest' or a positive integer"
+    )
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse every redirect, so a hub reply cannot re-aim the fetch.
 
@@ -404,7 +435,11 @@ def _dial(request: urllib.request.Request) -> Reply:
     pass whether or not that translation existed.
     """
     with _OPENER.open(request, timeout=HUB_TIMEOUT_S) as response:
-        return Reply(response.status, response.read(MAX_BUNDLE_BYTES + 1))
+        return Reply(
+            response.status,
+            response.read(MAX_BUNDLE_BYTES + 1),
+            dict(response.headers),
+        )
 
 
 def _send(method: str, url: str, *, token: str = "", payload: bytes = b"") -> Reply:
@@ -437,7 +472,9 @@ def _send(method: str, url: str, *, token: str = "", payload: bytes = b"") -> Re
         # An error status is an answer, not a failure to reach the hub: the body
         # usually carries the sentence the operator needs ("that slug is
         # already published", "this token was revoked").
-        return Reply(exc.code, exc.read(MAX_LISTING_BYTES) or b"")
+        return Reply(
+            exc.code, exc.read(MAX_LISTING_BYTES) or b"", dict(exc.headers or {})
+        )
     except HubError:
         raise
     except Exception as exc:  # noqa: BLE001 - every transport failure reads alike
@@ -488,17 +525,13 @@ def _json(reply: Reply, what: str) -> dict:
 def _refusal(reply: Reply, what: str) -> str:
     """The hub's own sentence for a non-2xx, or a generic one naming the status.
 
-    The hub's ``detail`` is preferred because it is the only text that can say
-    *why* — but it is truncated and never trusted to be the whole message: it
-    is a string from another service that ends up in an operator's error slot.
+    The hub's ``detail`` (:func:`_detail`) is preferred because it is the
+    only text that can say *why* — but it is truncated and never trusted to
+    be the whole message: it is a string from another service that ends up
+    in an operator's error slot. This is the *publish*-credential wording;
+    :func:`_access_refusal` is the one a gated-agent read uses instead.
     """
-    detail = ""
-    try:
-        body = json.loads(reply.body.decode("utf-8"))
-        if isinstance(body, dict):
-            detail = str(body.get("detail") or body.get("error") or "")
-    except Exception:  # noqa: BLE001 - a hub that answers HTML still gets a sentence
-        detail = ""
+    detail = _detail(reply)
     if reply.status == 401 or reply.status == 403:
         detail = detail or (
             "The hub refused this token. Set a current one in Settings → Agents."
@@ -521,123 +554,175 @@ def _model(payload: dict, model, what: str):
 # ── The catalogue ────────────────────────────────────────────────────────
 
 
-def browse(query: str = "", page: int = 1) -> list[Listing]:
-    """What the hub offers, newest first. No account, no token.
+#
+# PR #111 ships no browse/search endpoint — only a lookup by a slug the
+# caller must already know (``GET /api/agents/{slug}``) and a download of
+# one of its approved versions (``GET /api/agents/{slug}/versions/{version}``).
+# There is nothing here that answers "what does the hub have" — a caller
+# that wants that has no answer until Botcamp ships a catalogue browse
+# (TASK-004); every surface that used to call ``browse`` now asks the
+# operator for a slug instead.
 
-    Browsing is anonymous deliberately: the listing is public content, and
-    gating it behind a Botcamp login would make the read half useless for the
-    operator who has no login — which is most of them on day one. Publishing is
-    the act that needs an identity, because it is the act that creates a claim.
 
-    ``query`` is sent as a query *parameter*, URL-encoded, so it never becomes
-    a path segment and needs no identifier check — it cannot change which
-    endpoint the URL addresses. A listing a reader cannot parse is dropped with
-    a log line rather than failing the whole page: one malformed row on the hub
-    must not make the catalogue unbrowsable.
+def _detail(reply: Reply) -> str:
+    """The hub's own ``detail``/``error`` sentence, or ``""``. Truncated and
+    never trusted to be the whole story — see :func:`_refusal`.
     """
-    page = max(1, int(page or 1))
-    params = urllib.parse.urlencode({"query": query or "", "page": page})
-    url = f"{HUB_URL}/agents?{params}"
-    payload = _json(_send("GET", url), "the agent catalogue")
-    rows = payload.get("listings")
-    if not isinstance(rows, list):
-        raise HubError("The hub's catalogue did not carry a list of listings")
-    listings: list[Listing] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            listings.append(Listing.model_validate(row))
-        except Exception:  # noqa: BLE001 - one bad row is not a broken catalogue
-            log.info("hub: skipping a listing this Condor cannot read")
-    return listings
+    try:
+        body = json.loads(reply.body.decode("utf-8"))
+        if isinstance(body, dict):
+            return str(body.get("detail") or body.get("error") or "")[:400]
+    except Exception:  # noqa: BLE001 - a hub that answers HTML still gets ""
+        pass
+    return ""
 
 
-def get(listing_id: str) -> Listing:
-    """One listing, with the digest :func:`fetch` will hold the bytes to.
+def _access_refusal(reply: Reply, what: str) -> HubError:
+    """``reply`` as the sentence a gated-agent read deserves.
 
-    ``listing_id`` goes through ``validate_identifier`` **before anything is
+    Deliberately not :func:`_refusal`'s wording, which is about a revoked
+    *publish* credential and would mislead here. PR #111's own
+    ``ACCESS_ERRORS`` draws exactly these lines, and this keeps them apart
+    rather than collapsing them into one generic refusal: ``402`` is a
+    membership or purchase gate, ``403`` is a private agent or a token
+    without the ``agents:read`` scope, ``401`` is "sign in" (no token, or one
+    the hub no longer honours), and ``404`` is "no such agent, or no approved
+    version yet".
+    """
+    detail = _detail(reply)
+    if reply.status == 402:
+        return HubError(
+            f"{what}: this agent requires a Botcamp membership or purchase to "
+            "clone it" + (f" ({detail})" if detail else ""),
+            status=402,
+        )
+    if reply.status == 401:
+        return HubError(
+            detail
+            or f"{what}: sign in to Botcamp to clone this agent — connect a "
+            "profile in Settings → Agents.",
+            status=401,
+        )
+    if reply.status == 403:
+        return HubError(
+            detail or f"{what}: Botcamp says this agent is private.", status=403
+        )
+    if reply.status == 404:
+        return HubError(detail or f"{what}: not found on Botcamp.", status=404)
+    return HubError(_refusal(reply, what), status=reply.status)
+
+
+def _header(headers: dict | None, name: str) -> str:
+    """``headers[name]``, matched case-insensitively. ``""`` when absent."""
+    lname = name.lower()
+    for key, value in (headers or {}).items():
+        if key.lower() == lname:
+            return value
+    return ""
+
+
+def get(slug: str, token: str = "") -> AgentListing:
+    """One agent's catalogue entry, with its approved versions.
+
+    ``slug`` goes through ``validate_identifier`` **before anything is
     sent** — the order the identifier guard's own docstring requires, and the
     reason a ``../``, a ``?``, a ``#`` or a space is an ``IdentifierError``
     here rather than a request to somewhere else.
+
+    ``token`` is optional — PR #111's own contract for this endpoint:
+    omitted, this is the anonymous read a free agent answers; a linked
+    profile's own token is what turns a membership/purchase gate into a 200
+    for an account that actually has access. Raises :class:`HubError`
+    through :func:`_access_refusal` — 404 not found, 403 private, 402 needs a
+    membership or purchase, 401 sign in — never the publish-token wording a
+    revoked *publish* credential gets.
     """
-    listing_id = _listing_id(listing_id)
-    url = f"{HUB_URL}/agents/{listing_id}"
-    payload = _json(_send("GET", url), f"listing '{listing_id}'")
-    return _model(payload, Listing, f"listing '{listing_id}'")
-
-
-def fetch(listing_id: str, listing: "Listing | None" = None) -> bytes:
-    """The bundle behind a listing, **verified against the listing's digest**.
-
-    The digest check is what makes it safe for the preview and the install to
-    each do their own fetch rather than passing bytes through the browser: both
-    are held to the same listing digest, so they are the same bundle or the
-    second one raises. It happens here, before any caller parses anything —
-    :func:`condor.agents.bundle.parse` is a tolerant reader by design and
-    handing it unverified bytes would mean the integrity check ran, at best,
-    after the manifest had already been read.
-
-    A listing with no digest is refused rather than fetched on trust. A hub
-    that cannot say what it is serving is not offering integrity, and silently
-    skipping the check is how a verification becomes decoration.
-
-    The download is addressed with the id the **caller** gave, after
-    ``_listing_id``, and never with the ``listing_id`` the reply carried. The
-    reply's is an unvalidated string from another service, and interpolating it
-    into a path would let a hub answer re-aim the download — the compiled-in
-    base would still hold the host, but the whole point of the guard is that no
-    unchecked value reaches a path segment, whoever wrote it. A reply naming a
-    different listing is refused instead, since one of the two answers is then
-    about an agent nobody asked for.
-    """
-    listing_id = _listing_id(listing_id)
-    # A caller that already holds the listing passes it rather than making this
-    # ask again: the route needs it for the provenance it renders, and a second
-    # GET to somebody else's service for a value in hand is a request nobody
-    # asked for. It is re-checked below regardless, so passing one in cannot
-    # skip anything.
-    listing = listing if listing is not None else get(listing_id)
-    if listing.listing_id and listing.listing_id != listing_id:
-        raise HubError(
-            f"Asked the hub for listing '{listing_id}' and it described "
-            f"'{listing.listing_id}' — nothing was downloaded"
-        )
-    digest = (listing.digest or "").strip().lower()
-    if not digest:
-        raise HubError(
-            f"Listing '{listing_id}' carries no digest, so the bundle it serves "
-            "cannot be verified — nothing was downloaded"
-        )
-    url = f"{HUB_URL}/agents/{listing_id}/bundle"
-    reply = _send("GET", url)
+    slug = _agent_slug(slug)
+    what = f"agent '{slug}'"
+    reply = _send("GET", f"{HUB_URL}/agents/{slug}", token=(token or "").strip())
     if reply.status < 200 or reply.status >= 300:
-        raise HubError(
-            _refusal(reply, f"the bundle of '{listing_id}'"), status=reply.status
-        )
+        raise _access_refusal(reply, what)
+    return _model(_decode(reply, what), AgentListing, what)
+
+
+class FetchedVersion(NamedTuple):
+    """One downloaded, digest-verified agent version — the whole of what
+    :func:`fetch` hands back.
+    """
+
+    data: bytes
+    #: The hub's own ``X-Agent-Version`` — the concrete number ``"latest"``
+    #: resolved to, so a caller that asked for it can still record one.
+    version: int
+    #: The hex sha256 the response's own header reported, already verified
+    #: against ``data``.
+    sha256: str
+
+
+def fetch(slug: str, version: str = "latest", *, token: str = "") -> FetchedVersion:
+    """One agent version's bytes, verified against the response's own
+    ``X-Agent-Sha256`` header before anything parses them.
+
+    There is no earlier listing call this cross-checks against. Unlike the
+    abandoned ``listing_id``/``digest`` contract :func:`get` once carried,
+    PR #111 answers the integrity check in the *same* response as the bytes
+    — there is nothing to pass in to skip a second round trip, because there
+    is no second round trip to skip. ``slug`` and ``version`` are both
+    addressed with what the **caller** gave, after the guards below, and
+    never with anything a reply echoed back — the one rule every
+    caller-controlled path segment in this module holds to.
+
+    ``version`` is ``"latest"`` (the default — Botcamp resolves it) or a
+    positive integer as a string; anything else is an ``IdentifierError``
+    before a request is sent. A reply naming no digest at all is refused
+    rather than trusted: a hub that cannot say what it served is not
+    offering integrity, and silently skipping the check is how a
+    verification becomes decoration.
+    """
+    slug = _agent_slug(slug)
+    version = _version_segment(version)
+    what = f"the bundle of '{slug}' version {version}"
+    reply = _send(
+        "GET",
+        f"{HUB_URL}/agents/{slug}/versions/{version}",
+        token=(token or "").strip(),
+    )
+    if reply.status < 200 or reply.status >= 300:
+        raise _access_refusal(reply, what)
     if len(reply.body) > MAX_BUNDLE_BYTES:
-        raise HubError(
-            f"The bundle of '{listing_id}' is over the {MAX_BUNDLE_BYTES}-byte limit"
-        )
+        raise HubError(f"{what} is over the {MAX_BUNDLE_BYTES}-byte limit")
+    digest = _header(reply.headers, "X-Agent-Sha256").strip().lower()
+    if not digest:
+        raise HubError(f"{what} carries no X-Agent-Sha256 header — nothing was parsed")
     got = hashlib.sha256(reply.body).hexdigest()
     if got != digest:
         raise HubError(
-            f"The bundle the hub served for '{listing_id}' does not match the "
-            f"digest its listing reported (expected {digest[:12]}…, got "
-            f"{got[:12]}…) — nothing was parsed"
+            f"{what} does not match its own X-Agent-Sha256 header (expected "
+            f"{digest[:12]}…, got {got[:12]}…) — nothing was parsed"
         )
-    log.info("hub: fetched %s (%d bytes, digest ok)", _log_safe(url), len(reply.body))
-    return reply.body
+    resolved = _header(reply.headers, "X-Agent-Version").strip()
+    resolved_version = (
+        int(resolved)
+        if resolved.isdigit()
+        else (int(version) if version.isdigit() else 0)
+    )
+    log.info(
+        "hub: fetched %s (%d bytes, digest ok)",
+        _log_safe(f"{HUB_URL}/agents/{slug}/versions/{version}"),
+        len(reply.body),
+    )
+    return FetchedVersion(data=reply.body, version=resolved_version, sha256=digest)
 
 
-# ── Status of an already-installed listing (CORR-812) ──────────────────────
+# ── Status of an already-installed agent (CORR-812) ────────────────────────
 #
-# An install that downloaded a listing has no way to learn the hub later
-# pulled it — delisted it, or revoked its badge, both of which the contract
-# (§8) makes the hub stop serving as the same ``404`` either way. This is the
-# read for that question, asked about a listing this install already has a
-# local copy of, which is why it is shaped differently from :func:`get`: a
-# ``404`` here is itself the useful answer, not a failure to report.
+# An install that downloaded an agent's version has no way to learn Botcamp
+# later stopped serving it — the agent delisted, or that version no longer
+# ``APPROVED``. This is the read for that question, asked about a version
+# this install already has a local copy of, which is why it is shaped
+# differently from :func:`get`: a ``404``, or a 200 whose ``versions`` no
+# longer names the installed one, is itself the useful answer, not a
+# failure to report.
 
 #: How long a confirmed status answer is trusted before the next page view
 #: re-asks the hub. Bounds the fan-out the CORR-812 proposed solution warns
@@ -647,21 +732,18 @@ STATUS_CACHE_S = 600
 
 
 class ListingStatus(BaseModel):
-    """What one live check of a listing found, for an install that already has it.
+    """What one live check of an installed agent version found.
 
-    ``state`` is ``"ok"`` (still listed, badge unchanged from what the caller
-    compared against), ``"badge_changed"`` (still listed, under a different
-    badge than this install last recorded), ``"delisted"`` (the hub confirmed
-    removal — its ``404`` body named ``reason: "unpublished"``, contract
-    §8.3), or ``"unknown"`` — a network failure, a 5xx, a malformed reply, or
-    a ``404`` the hub left unexplained. Contract §8.3 only *recommends* the
-    ``reason`` field; it does not require it, so an unexplained ``404`` must
-    read as "cannot tell" and never as a confirmed moderation action — the
-    distinction a transient hub hiccup needs from an actual delisting.
+    ``state`` is ``"ok"`` (the installed version is still listed among
+    ``versions``), ``"delisted"`` (the hub confirmed it is not — a ``404``,
+    or a 200 that no longer names this version among its approved ones), or
+    ``"unknown"`` — a network failure, a 5xx, a malformed reply, or an access
+    answer (401/402/403) this install cannot currently read and so cannot
+    use to confirm anything either way. There is no ``"badge_changed"``:
+    PR #111 carries no badge on this read path at all.
     """
 
     state: str = "unknown"
-    badge: str = ""
     checked_at: str = ""
     detail: str = ""
 
@@ -670,55 +752,43 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def listing_status(listing_id: str, badge: str = "") -> ListingStatus:
-    """Ask the hub about one listing, never raising. A check, not a fetch.
+def listing_status(slug: str, version: int, *, token: str = "") -> ListingStatus:
+    """Ask the hub about one installed agent version, never raising.
 
-    Every other reader of ``GET /agents/{listing_id}`` (:func:`get`) treats a
+    Every other reader of ``GET /agents/{slug}`` (:func:`get`) treats a
     non-2xx as a failure the caller must handle; this one exists for exactly
-    the case where "the hub says this is gone" is itself the useful answer.
-    Nothing is downloaded and no digest is verified here — that already
-    happened at install time, and this call reports on the *listing*, not the
-    bytes.
-
-    Goes through the identifier guard and the no-redirect opener the same as
-    every other call in this module: the one caller-controlled path segment
-    is checked before anything is sent, and a hub answer cannot re-aim this
-    request to another address.
+    the case where "the hub no longer serves this" is itself the useful
+    answer. An access refusal (401/402/403) reads as ``"unknown"`` rather
+    than a confirmed removal: it says this install cannot currently read the
+    agent, not that the agent is gone.
     """
-    listing_id = _listing_id(listing_id)
+    slug = _agent_slug(slug)
     checked_at = _now()
     try:
-        reply = _send("GET", f"{HUB_URL}/agents/{listing_id}")
+        reply = _send("GET", f"{HUB_URL}/agents/{slug}", token=(token or "").strip())
     except HubError:
-        return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+        return ListingStatus(state="unknown", checked_at=checked_at)
 
     if 200 <= reply.status < 300:
         try:
             listing = _model(
-                _decode(reply, f"listing '{listing_id}'"),
-                Listing,
-                f"listing '{listing_id}'",
+                _decode(reply, f"agent '{slug}'"), AgentListing, f"agent '{slug}'"
             )
         except HubError:
-            return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
-        state = "ok" if (not badge or listing.badge == badge) else "badge_changed"
-        return ListingStatus(state=state, badge=listing.badge, checked_at=checked_at)
+            return ListingStatus(state="unknown", checked_at=checked_at)
+        state = (
+            "ok"
+            if any(entry.version == version for entry in listing.versions)
+            else "delisted"
+        )
+        return ListingStatus(state=state, checked_at=checked_at)
 
     if reply.status == 404:
-        try:
-            payload = _decode(reply, f"listing '{listing_id}'")
-        except HubError:
-            payload = {}
-        if str(payload.get("reason") or "") == "unpublished":
-            return ListingStatus(
-                state="delisted",
-                badge=badge,
-                checked_at=checked_at,
-                detail=str(payload.get("detail") or ""),
-            )
-        return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+        return ListingStatus(
+            state="delisted", checked_at=checked_at, detail=_detail(reply)
+        )
 
-    return ListingStatus(state="unknown", badge=badge, checked_at=checked_at)
+    return ListingStatus(state="unknown", checked_at=checked_at)
 
 
 def _stale(checked_at: str) -> bool:
@@ -736,8 +806,8 @@ def _stale(checked_at: str) -> bool:
 def _status_payload(stamp) -> dict:
     return {
         "tracked": True,
-        "listing_id": stamp.hub_listing_id,
-        "badge": stamp.hub_badge,
+        "slug": stamp.hub_slug,
+        "version": stamp.hub_version,
         "status": stamp.hub_status or "ok",
         "checked_at": stamp.hub_checked_at,
         "live_check_failed": False,
@@ -745,43 +815,38 @@ def _status_payload(stamp) -> dict:
 
 
 def installed_agent_status(slug: str, force: bool = False) -> dict:
-    """What this install knows right now about ``slug``'s hub provenance.
+    """What this install knows right now about ``slug``'s Botcamp provenance.
 
-    ``{"tracked": False}`` when ``slug`` was never installed or updated from a
-    hub listing — a plain file import has nothing here to check. Otherwise
-    re-asks the hub through :func:`listing_status` at most once per
+    ``{"tracked": False}`` when ``slug`` was never installed or updated from
+    a Botcamp agent — a plain file import has nothing here to check.
+    Otherwise re-asks the hub through :func:`listing_status` at most once per
     :data:`STATUS_CACHE_S` (``force`` bypasses that), and persists only a
-    *confirmed* answer — ``"ok"``, ``"badge_changed"`` or ``"delisted"`` — back
-    into the agent's stamp. An ``"unknown"`` live check is returned for this
-    one read with ``live_check_failed`` set, **without** overwriting the
-    stamp: the local files and execution state stay exactly as they were, and
-    ``checked_at`` keeps naming the last time the hub gave a definite answer
-    rather than the last time it was asked — which is what lets a dashboard
-    say "last confirmed Tuesday" through an outage instead of silently
-    forgetting it.
+    *confirmed* answer — ``"ok"`` or ``"delisted"`` — back into the agent's
+    stamp. An ``"unknown"`` live check is returned for this one read with
+    ``live_check_failed`` set, **without** overwriting the stamp: the local
+    files and execution state stay exactly as they were, and ``checked_at``
+    keeps naming the last time the hub gave a definite answer rather than
+    the last time it was asked — which is what lets a dashboard say "last
+    confirmed Tuesday" through an outage instead of silently forgetting it.
     """
     from condor.agents.bundle import agent_home, read_stamp, write_stamp
 
     home = agent_home(slug)
     stamp = read_stamp(home)
-    if stamp is None or not stamp.hub_listing_id:
+    if stamp is None or not stamp.hub_slug:
         return {"tracked": False}
 
     if not force and not _stale(stamp.hub_checked_at):
         return _status_payload(stamp)
 
-    result = listing_status(stamp.hub_listing_id, badge=stamp.hub_badge)
+    result = listing_status(stamp.hub_slug, stamp.hub_version, token=token())
     if result.state == "unknown":
         payload = _status_payload(stamp)
         payload["live_check_failed"] = True
         return payload
 
     stamp = stamp.model_copy(
-        update={
-            "hub_status": result.state,
-            "hub_badge": result.badge or stamp.hub_badge,
-            "hub_checked_at": result.checked_at,
-        }
+        update={"hub_status": result.state, "hub_checked_at": result.checked_at}
     )
     write_stamp(home, stamp)
     return _status_payload(stamp)
@@ -932,6 +997,30 @@ def _store_submission(slug: str, receipt: Receipt) -> None:
     get_config_manager().update_hub(submissions=submissions)
 
 
+def _published_listing_provenance(listing_id: str) -> tuple[str, str]:
+    """``(badge, published_at)`` for a submission's own listing, best-effort.
+
+    ``get()`` is :func:`get`'s pull-side reader of PR #111's
+    ``GET /agents/{slug}``, keyed on a catalogue slug and shaped as
+    :class:`AgentListing` — neither of which this is. Botcamp ships no
+    route a publish actually reaches (bullet 6 of FEAT-146's retarget:
+    publishing exists today only as a session-authenticated website upload,
+    with nothing for Condor to call), so this keeps :func:`submission_status`
+    reading the *old*, forward-looking ``listing_id``-keyed shape it always
+    read, independent of whatever the pull side's own model becomes. A hub
+    that never answers this at all — true today — degrades to no badge,
+    never a crash; :func:`submission_status` already catches
+    :class:`HubError` around its one call here for exactly that.
+    """
+    listing_id = _listing_id(listing_id)
+    what = f"listing '{listing_id}'"
+    reply = _send("GET", f"{HUB_URL}/agents/{listing_id}")
+    if reply.status < 200 or reply.status >= 300:
+        raise HubError(_refusal(reply, what), status=reply.status)
+    payload = _decode(reply, what)
+    return str(payload.get("badge") or ""), str(payload.get("published_at") or "")
+
+
 def submission_status(slug: str, token: str) -> Receipt:
     """Poll the hub for ``slug``'s current submission and persist the answer.
 
@@ -975,11 +1064,11 @@ def submission_status(slug: str, token: str) -> Receipt:
         # genuinely published submission back into an error — the status
         # itself is already settled.
         try:
-            listing = get(merged.listing_id)
+            badge, published_at = _published_listing_provenance(merged.listing_id)
             merged = merged.model_copy(
                 update={
-                    "badge": listing.badge,
-                    "published_at": listing.published_at or merged.published_at,
+                    "badge": badge,
+                    "published_at": published_at or merged.published_at,
                 }
             )
         except HubError:

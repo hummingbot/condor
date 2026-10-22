@@ -1357,25 +1357,26 @@ class BundleStamp(BaseModel):
     updated, which is what keeps the divergence visible to the next update.
 
     The ``hub_*`` fields are CORR-812's addition: this install's own record of
-    which Botcamp listing this agent came from, so a later check can warn when
-    the hub has pulled it. They live here rather than in a field of their own
+    which Botcamp agent (slug and version — PR #111 carries no listing id)
+    this agent came from, so a later check can warn when the hub no longer
+    serves that version. They live here rather than in a field of their own
     for the same reason the rest of this file does — a dotfile
     ``publishable_files`` never yields, so neither this nor any other stamp
     field can travel in a re-export of the agent (a hub-installed agent's
     *next* export is this install's own new submission, not a relabelled copy
-    of somebody else's listing). ``hub_status`` is ``"ok"``, ``"badge_changed"``
-    or ``"delisted"`` — never ``"unknown"``: a check that could not get a
-    confirmed answer leaves the stamp exactly as it was, so ``hub_checked_at``
-    always names the last time the hub gave a definite answer, not the last
-    time it was asked (:func:`condor.hub.installed_agent_status`).
+    of somebody else's listing). ``hub_status`` is ``"ok"`` or ``"delisted"``
+    — never ``"unknown"``: a check that could not get a confirmed answer
+    leaves the stamp exactly as it was, so ``hub_checked_at`` always names the
+    last time the hub gave a definite answer, not the last time it was asked
+    (:func:`condor.hub.installed_agent_status`).
     """
 
     agent_uid: str = ""
     version: int = 0
     exported_at: str = ""
     digests: dict[str, str] = Field(default_factory=dict)
-    hub_listing_id: str = ""
-    hub_badge: str = ""
+    hub_slug: str = ""
+    hub_version: int = 0
     hub_digest: str = ""
     hub_status: str = ""
     hub_checked_at: str = ""
@@ -1535,19 +1536,21 @@ def write_stamp(home: Path, stamp: BundleStamp) -> None:
     )
 
 
-def record_hub_install(slug: str, *, listing_id: str, badge: str, digest: str) -> None:
-    """Note that ``slug`` was just installed or updated from a hub listing.
+def record_hub_install(
+    slug: str, *, hub_slug: str, hub_version: int, digest: str
+) -> None:
+    """Note that ``slug`` was just installed or updated from a Botcamp agent.
 
     Called once, right after :func:`apply` or :func:`apply_update` returns, by
-    the route that holds the :class:`~condor.hub.Listing` this came from.
+    the route that holds the :class:`~condor.hub.AgentListing` this came from.
     Folded into the stamp :func:`write_stamp` just finished writing rather than
     threaded through ``ImportPlan``/``UpdatePlan`` themselves — both are shared
-    with the plain file-import and file-update paths, which have no listing to
-    carry, and reading the stamp back here keeps those two generic models
+    with the plain file-import and file-update paths, which have no hub agent
+    to carry, and reading the stamp back here keeps those two generic models
     untouched.
 
     Recording ``"ok"`` is not a second check: the install that just finished
-    already ran the digest the caller passes through
+    already verified the ``X-Agent-Sha256`` the caller passes through
     :func:`condor.hub.fetch`, so this only names the answer that verification
     already gave.
     """
@@ -1557,8 +1560,8 @@ def record_hub_install(slug: str, *, listing_id: str, badge: str, digest: str) -
         home,
         stamp.model_copy(
             update={
-                "hub_listing_id": listing_id,
-                "hub_badge": badge,
+                "hub_slug": hub_slug,
+                "hub_version": hub_version,
                 "hub_digest": digest,
                 "hub_status": "ok",
                 "hub_checked_at": datetime.now(timezone.utc).strftime(

@@ -347,8 +347,8 @@ def test_no_condor_skill_names_a_funnel_era_action_as_a_tool():
     kinds of entry and only one of them is dead. Most are the funnel-era
     *prefixed* spellings (``export_agent``), which no table admits and which a
     skill must never write. But an action whose sanctioned spelling simply is
-    prefix-shaped — ``hub_browse``, ``hub_install``, ``publish_hub``
-    (FEAT-146), named that way because "browse" alone reads as a local verb and
+    prefix-shaped — ``hub_get``, ``hub_install``, ``publish_hub``
+    (FEAT-146), named that way because "get" alone reads as a local verb and
     ``publish`` was already taken by publish-to-stock — appears in
     ``_AGENT_ACTIONS`` *and* here, so that a sibling family answers it with the
     call that works instead of a bare "unknown action". Those are current

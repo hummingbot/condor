@@ -931,23 +931,25 @@ class UpdateAgentMdRequest(BaseModel):
 #: means, and a copy of it in a component is a second claim nobody audits. See
 #: ``condor/hub.py``'s trust model for the long form.
 HUB_TRUST = (
-    "The hub is a discovery service, not a security boundary. A validated "
-    "badge means a human reviewed one submitted revision once; it is not a "
-    "signature, Condor verifies no bundle against it, and it does not shorten "
-    "this review. Whatever you install arrives muted and unstarted, and what "
-    "protects you is reading it."
+    "The hub is a discovery service, not a security boundary. Only a version "
+    "a reviewer already approved is ever served, but that is a gate on what "
+    "reaches the catalogue, not a signature — Condor verifies no bundle "
+    "against it, and it does not shorten this review. Whatever you install "
+    "arrives muted and unstarted, and what protects you is reading it."
 )
 
 
 class HubInstallRequest(BaseModel):
-    """What to call a hub agent on the way in, when its name is taken.
+    """What to call a hub agent on the way in, and which version to clone.
 
-    Only ever a rename. A collision that is the *same agent* newer is an
-    update, not a second copy, and that branch is chosen by the plan rather
-    than by the caller (FEAT-145).
+    ``as_slug`` is only ever a rename. A collision that is the *same agent*
+    newer is an update, not a second copy, and that branch is chosen by the
+    plan rather than by the caller (FEAT-145). ``version`` defaults to
+    ``"latest"``, which Botcamp itself resolves.
     """
 
     as_slug: str = ""
+    version: str = "latest"
 
 
 class PublishAgentRequest(BaseModel):
@@ -5066,12 +5068,13 @@ async def upload_agent_controller_config(
 
 # ── The agent hub (FEAT-146) ──
 #
-# Its own router, not more paths under ``/agents``: the hub's noun is a
-# *listing*, addressed by a ``listing_id`` that is not a slug, and hanging
-# ``/agents/hub/agents/{listing_id}`` off the prefix would read as an agent
-# called "hub" and sit one rename away from shadowing ``/agents/{slug}``
-# (CORR-061's whole subject). ``POST /agents/{slug}/publish`` stays on the
-# agents router, because that one really does act on a local agent.
+# Its own router, not more paths under ``/agents``: hanging
+# ``/agents/hub/agents/{slug}`` off the prefix would read as an agent called
+# "hub" and sit one rename away from shadowing ``/agents/{slug}`` (CORR-061's
+# whole subject) — even though the hub's own noun is, on PR #111's wire, the
+# very same Botcamp catalogue slug this router's ``{slug}`` already means.
+# ``POST /agents/{slug}/publish`` stays on the agents router, because that one
+# really does act on a local agent.
 #
 # Every handler sends the blocking hub call through ``asyncio.to_thread``. The
 # rule is PERF-235's, stated in ``condor/web/routes/sharing.py``: these
@@ -5111,54 +5114,52 @@ def _listing_refusal(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-async def _hub_bundle(listing_id: str):
-    """``(listing, bundle)`` for one listing, digest-verified before parsing.
+async def _hub_bundle(slug: str, version: str):
+    """``(listing, fetched, bundle)`` for one agent version, digest-verified
+    before anything parses it.
 
     One helper behind the preview and the install so the two cannot differ in
     *how* they get the bytes. They each run it — a second fetch, not a cached
-    one — and the digest check inside ``hub.fetch`` is what makes that safe:
-    both requests are held to the same listing digest, so they are the same
-    bundle or the second one fails loudly.
+    one — and the ``X-Agent-Sha256`` check inside ``hub.fetch`` is what makes
+    that safe: both requests are held to the same response's own digest, so
+    they are the same bundle or the second one fails loudly.
+
+    This install's own Botcamp token rides along on both calls — optional on
+    PR #111's read endpoints, but the only way a membership/purchase-gated
+    agent this account actually has access to can clone at all.
     """
-    from condor import hub
-    from condor.agents import bundle as agent_bundle
+    from condor import botcamp_import, hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
+    hub_token = hub.token()
     try:
-        listing = await asyncio.to_thread(hub.get, listing_id)
-        # The listing goes back in rather than being looked up twice: this
-        # layer renders it as provenance and ``fetch`` needs its digest, and
-        # they are the same answer.
-        data = await asyncio.to_thread(hub.fetch, listing_id, listing)
+        listing = await asyncio.to_thread(hub.get, slug, hub_token)
+        fetched = await asyncio.to_thread(hub.fetch, slug, version, token=hub_token)
     except IdentifierError as exc:
         raise _listing_refusal(exc) from exc
     except HubError as exc:
         raise _hub_refusal(exc) from exc
     try:
-        return listing, agent_bundle.parse(data)
+        bundle = botcamp_import.from_zip(fetched.data, agent_slug=slug)
     except ValueError as exc:
         raise _bundle_refusal(exc) from exc
+    return listing, fetched, bundle
 
 
-async def _hub_plan(listing_id: str, as_slug: str, user: WebUser):
-    """Which verb this listing is, and the plan for it. Writes nothing.
+async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
+    """Which verb this agent version is, and the plan for it. Writes nothing.
 
     The choice is FEAT-133's ``is_update``, not a comparison this layer makes:
     ``plan`` already resolves the bundle's ``agent_uid`` against what is
     installed and states whether the collision is the *same agent* newer. When
     it is, the answer is FEAT-145's ``plan_update`` and not a rename — which is
     the same branch the import dialog's collision step takes, reached here
-    without a round trip because the hub listing carries the identity.
-
-    The listing's ``badge`` is deliberately read by nothing in here. It is
-    returned beside the plan as provenance and changes no decision: a
-    ``community`` bundle plans, mutes and reports exactly what a ``validated``
-    one does.
+    without a round trip because the derived bundle carries the identity.
     """
     from condor.agents import bundle as agent_bundle
 
-    listing, bundle = await _hub_bundle(listing_id)
+    listing, fetched, bundle = await _hub_bundle(slug, version)
     connectors, tools = await _install_capabilities(user)
     plan = agent_bundle.plan(
         bundle,
@@ -5170,6 +5171,7 @@ async def _hub_plan(listing_id: str, as_slug: str, user: WebUser):
     if plan.is_update:
         return (
             listing,
+            fetched,
             "update",
             agent_bundle.plan_update(
                 bundle,
@@ -5178,45 +5180,24 @@ async def _hub_plan(listing_id: str, as_slug: str, user: WebUser):
                 available_tools=tools,
             ),
         )
-    return listing, "install", plan
+    return listing, fetched, "install", plan
 
 
-@hub_router.get("/agents")
-async def browse_hub(
-    query: str = "",
-    page: int = 1,
-    user: WebUser = Depends(get_current_user),
-):
-    """What the hub offers. Anonymous upstream, bearer-guarded here.
+@hub_router.get("/agents/{slug}")
+async def get_hub_listing(slug: str, user: WebUser = Depends(get_current_user)):
+    """One agent's catalogue entry, with its approved versions.
 
-    The browser never talks to the hub: it asks Condor, and Condor's bearer
-    stays Condor's. That is not only tidiness — the alternative (the page
-    fetching the hub directly) would mean the bytes the dialog previewed and
-    the bytes installed came from two different clients, which breaks
-    FEAT-133's one-builder rule outright.
+    There is no browse here, or anywhere else in this router: PR #111 ships
+    no catalogue search, only this lookup by a slug the caller must already
+    know. This install's own Botcamp token rides along, so a membership- or
+    purchase-gated agent an account actually has access to still resolves.
     """
-    from condor import hub
-    from condor.hub import HubError
-
-    try:
-        listings = await asyncio.to_thread(hub.browse, query, page)
-    except HubError as exc:
-        raise _hub_refusal(exc) from exc
-    return {
-        "listings": [listing.model_dump() for listing in listings],
-        "trust": HUB_TRUST,
-    }
-
-
-@hub_router.get("/agents/{listing_id}")
-async def get_hub_listing(listing_id: str, user: WebUser = Depends(get_current_user)):
-    """One listing, with the digest its bundle will be held to."""
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
     try:
-        listing = await asyncio.to_thread(hub.get, listing_id)
+        listing = await asyncio.to_thread(hub.get, slug, hub.token())
     except IdentifierError as exc:
         raise _listing_refusal(exc) from exc
     except HubError as exc:
@@ -5224,31 +5205,34 @@ async def get_hub_listing(listing_id: str, user: WebUser = Depends(get_current_u
     return {"listing": listing.model_dump(), "trust": HUB_TRUST}
 
 
-@hub_router.post("/agents/{listing_id}/install/preview")
+@hub_router.post("/agents/{slug}/install/preview")
 async def preview_hub_install(
-    listing_id: str,
+    slug: str,
     req: HubInstallRequest | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """What installing this listing would do. Writes nothing.
+    """What installing this agent version would do. Writes nothing.
 
     ``verb`` says which of the two plans came back, so the dialog does not have
     to sniff the shape: ``install`` carries FEAT-133's ``ImportPlan`` and
     ``update`` FEAT-145's ``UpdatePlan``.
     """
-    listing, verb, plan = await _hub_plan(
-        listing_id, (req.as_slug if req else ""), user
+    listing, _fetched, verb, plan = await _hub_plan(
+        slug,
+        (req.version if req else "") or "latest",
+        (req.as_slug if req else ""),
+        user,
     )
     return {"verb": verb, "listing": listing.model_dump(), "plan": plan.summary()}
 
 
-@hub_router.post("/agents/{listing_id}/install")
+@hub_router.post("/agents/{slug}/install")
 async def install_from_hub(
-    listing_id: str,
+    slug: str,
     req: HubInstallRequest | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Install this listing, with its code switched off.
+    """Install this agent version, with its code switched off.
 
     Re-fetches and re-plans rather than trusting anything the client carried
     back — the same rule ``/import`` and ``/{slug}/update`` follow, and it
@@ -5256,15 +5240,17 @@ async def install_from_hub(
     running *right now*.
 
     It lands through FEAT-133's ``apply`` or FEAT-145's ``apply_update``, which
-    is to say through exactly the gate the file path uses. Nothing about the
-    listing — least of all its badge — shortens that: routines and skills
-    arrive muted, no imported ``.py`` has execution consent, and nothing is
-    started.
+    is to say through exactly the gate the file path uses. Nothing about
+    where this came from shortens that: routines and skills arrive muted, no
+    imported ``.py`` has execution consent, and nothing is started.
     """
     from condor.agents import bundle as agent_bundle
 
-    listing, verb, plan = await _hub_plan(
-        listing_id, (req.as_slug if req else ""), user
+    listing, fetched, verb, plan = await _hub_plan(
+        slug,
+        (req.version if req else "") or "latest",
+        (req.as_slug if req else ""),
+        user,
     )
     try:
         if verb == "update":
@@ -5279,14 +5265,14 @@ async def install_from_hub(
         ) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    # So a later visit can learn the hub withdrew this listing (CORR-812).
-    # Recorded after the write succeeds, never before: a failed apply must
-    # not leave the stamp claiming an install that did not happen.
+    # So a later visit can learn Botcamp stopped serving this version
+    # (CORR-812). Recorded after the write succeeds, never before: a failed
+    # apply must not leave the stamp claiming an install that did not happen.
     agent_bundle.record_hub_install(
         plan.slug,
-        listing_id=listing.listing_id,
-        badge=listing.badge,
-        digest=listing.digest,
+        hub_slug=slug,
+        hub_version=fetched.version,
+        digest=fetched.sha256,
     )
     return {"verb": verb, "listing": listing.model_dump(), "plan": result}
 
