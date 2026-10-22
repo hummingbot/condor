@@ -1,7 +1,9 @@
 """The tool surface both MCP servers advertise, pinned across the SDK major (FEAT-130).
 
 ``tests/fixtures/mcp_tool_surface_v1.json`` was dumped on ``mcp`` 1.26, the last
-lock before the move to 2.x. A model picks and fills a tool from exactly three
+lock before the move to 2.x; its ``_provenance`` key records the commit and the
+versions it was captured at, since a fixture dumped under 2.x would assert
+nothing. A model picks and fills a tool from exactly three
 things — its name, its description and its input schema — so a migration that
 "changes nothing" must leave those byte-identical, and this is where a drift
 nobody asserted on would otherwise go unnoticed.
@@ -13,6 +15,8 @@ dumped on. What the SDK could break is the hand-off, and that is asserted here.
 
 import asyncio
 import json
+import subprocess
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -39,8 +43,20 @@ def live_surface(module) -> dict[str, dict]:
 
 
 def dump_fixture() -> None:
-    """Rewrite the fixture from the live surface (run by hand, never by a test)."""
+    """Rewrite the fixture from the live surface (run by hand, never by a test).
+
+    Only ever correct to run on the SDK major the fixture pins, which is why the
+    dump carries the commit and the installed versions it was taken at.
+    """
     surface = {key: live_surface(module) for key, module in SERVERS.items()}
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    )
+    surface["_provenance"] = {
+        "commit": head.stdout.strip(),
+        "mcp": version("mcp"),
+        "pydantic-ai": version("pydantic-ai"),
+    }
     FIXTURE.parent.mkdir(exist_ok=True)
     FIXTURE.write_text(json.dumps(surface, indent=2, sort_keys=True) + "\n")
 

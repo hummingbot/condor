@@ -1,4 +1,9 @@
 {
+  "_provenance": {
+    "commit": "8e4860fa3d7efd4b55c2b74dd7f1f439e5a4f32c",
+    "mcp": "1.26.0",
+    "pydantic-ai": "1.78.0"
+  },
   "condor": {
     "control_agent": {
       "description": "Run and steer live agent instances (start / stop / pause / resume).\n\n    An *instance* is one running session of an agent's loop, identified by\n    ``agent_id``. Start one from a loop \u2014 or from a bare agent slug, since\n    every agent is loopable. See `manage_agents` for the identities and\n    `manage_loops` for the playbooks; read what a running instance did with\n    `trading_agent_journal_read`.\n\n    STOP vs SHUTDOWN: \"stop\" halts the loop and KEEPS its open positions.\n    \"shutdown\" is the emergency exit \u2014 it winds down this session's positions and\n    executors per the agent's shutdown.md policy (closes perp, keeps spot by\n    default). Reach for \"stop\" unless the user wants to be out of the market.\n\n    Actions:\n    - \"list\": All running instances with status.\n    - \"start\": Start a session (requires loop_id, optional config overrides).\n      loop_id may be a BARE AGENT SLUG \u2014 the agent then runs its only\n      loop, or a default playbook created from its identity on first start.\n    - \"stop\": Stop a running instance, keeping positions (requires agent_id).\n    - \"shutdown\": Stop AND wind down positions/executors (requires agent_id).\n    - \"pause\": Pause a running instance (requires agent_id).\n    - \"resume\": Resume a paused instance (requires agent_id).\n    - \"get_state\" / \"set_state\": Read/write the instance's own scratch state\n      (requires agent_id; set_state also requires key). State is for cursors and\n      counters a loop would otherwise re-derive every tick \u2014 anything worth\n      *remembering* belongs in `manage_memory`. The namespace is derived from\n      agent_id, so an instance only ever sees its own.\n\n    Args:\n        action: The lifecycle action to take on the loop.\n        agent_id: The running instance (everything except list and start).\n        loop_id: Loop key \"agent_slug.loop_slug\", or a bare agent slug\n            (start only).\n        config: Overrides on the loop's defaults, for \"start\" only: agent_key,\n            model_base_url (for LM Studio/vLLM), execution_mode, frequency_sec,\n            tick_timeout_sec (wall-clock budget for one tick's agent session;\n            0 = runtime default of 600s), total_amount_quote, trading_context,\n            risk_limits, server_name, max_ticks.\n        key: State key. get_state reads one key, or the whole state if omitted;\n            set_state requires it.\n        value: JSON-serializable value to store (set_state).\n        expires_in: TTL in seconds for the stored value (set_state); None = no expiry.\n        clear: Delete ``key`` instead of writing it (set_state).\n\n    Returns:\n        Action-specific result dict.\n    ",
@@ -329,7 +334,7 @@
       "outputSchema": null
     },
     "manage_agents": {
-      "description": "Create and edit agent identities (.condor/agents/{slug}/AGENT.md).\n\n    An *agent* (e.g. \"executor_manager\", \"brigado\") is an identity \u2014 the brain,\n    and the primary artifact. It is created FIRST; everything else hangs off its\n    slug. From the moment it exists it can be delegated to\n    (`delegate`) and looped (`control_agent(action=\"start\")`) \u2014 there is no\n    capability flag and nothing to enable. See `manage_loops` for the\n    playbooks an agent owns, `control_agent` for its running instances.\n\n    Actions:\n    - \"list\": All agents with their when_to_consult hint, owned loops,\n      agent_key and tools. Use this to answer \"what agents exist?\" \u2014 loops\n      and running instances do NOT show agents that own no loop.\n    - \"create\": New agent (AGENT.md identity + brain). Requires name. Returns\n      agent_slug \u2014 use it for routines and loops.\n    - \"get\": Full definition including the AGENT.md body (requires agent_slug).\n    - \"update\": Change AGENT.md / metadata (requires agent_slug + fields to change).\n    - \"delete\": Delete an agent (requires agent_slug; refuses if it still owns\n      loops). Refused outright for an agent the repo ships \u2014 mute or edit\n      it instead; an update would bring a deleted one straight back.\n    - \"publish\": ADMIN ONLY. Copy a local agent into the tracked library the\n      repo ships (requires agent_slug; `path` narrows it to one skill or\n      loop). Every other write lands under .condor/agents/, so this is the\n      only way to author what other installs receive. It leaves the repo dirty\n      on purpose \u2014 review and commit. There is no \"install\": a shipped agent is\n      present the moment an install pulls.\n\n    Args:\n        action: What to do with the agent definition.\n        agent_slug: The agent to act on (get/update/delete).\n        name: Agent name (create/update).\n        description: Agent description (create/update).\n        instructions: The AGENT.md body \u2014 identity + domain knowledge (create/update).\n        agent_key: Default LLM. Examples: \"claude-code\", \"gemini\", \"copilot\",\n            \"ollama:llama3.1\", \"ollama:qwen3:32b\", \"groq:llama-3.3-70b-versatile\".\n            Any model can run an agent, and every one is held to the tools\n            allowlist. Default \"claude-code\".\n        tools: Tool-name allowlist for the agent. Empty/None = unrestricted. A\n            tool it omits is never mounted on any model, so keep the family the\n            inherited framework playbooks call \u2014 delegate, send_notification,\n            run_code, manage_memory, manage_skill, manage_routines,\n            manage_agent_controllers,\n            trading_agent_journal_read, trading_agent_journal_write,\n            manage_agents, manage_loops, control_agent,\n            get_available_models \u2014 plus every tool the agent's own playbooks name.\n        when_to_consult: One-line hint describing when to route work to this agent.\n            Purely for routing \u2014 every agent is delegable with or without it; it\n            falls back to the description.\n        server_required: Whether the agent needs a Hummingbot server. Default True.\n        server_name: Pin the agent to a specific hummingbot-api server. LEAVE EMPTY\n            unless the user explicitly asks to pin this agent to one server \u2014 empty\n            means follow the ambient chat server, which is what travels to other\n            installs. When set, the agent's mcp-hummingbot subprocess and any\n            loop it deploys use THIS server regardless of the chat's active\n            server, and on a machine without that server the agent is broken. Do\n            not fill it in with whatever server the chat happens to be on.\n        path: For \"publish\" only \u2014 narrow to one item of the agent, relative to\n            its directory (\"skills/lp_rebalance\", \"loops/grid\", \"AGENT.md\").\n            Empty publishes the whole agent's library half; its store, journals,\n            mutes and session output are never published.\n\n    Returns:\n        Action-specific result dict.\n    ",
+      "description": "Create and edit agent identities (.condor/agents/{slug}/AGENT.md).\n\n    An *agent* (e.g. \"executor_manager\", \"brigado\") is an identity \u2014 the brain,\n    and the primary artifact. It is created FIRST; everything else hangs off its\n    slug. From the moment it exists it can be delegated to\n    (`delegate`) and looped (`control_agent(action=\"start\")`) \u2014 there is no\n    capability flag and nothing to enable. See `manage_loops` for the\n    playbooks an agent owns, `control_agent` for its running instances.\n\n    Actions:\n    - \"list\": All agents with their when_to_consult hint, owned loops,\n      agent_key and tools. Use this to answer \"what agents exist?\" \u2014 loops\n      and running instances do NOT show agents that own no loop.\n    - \"create\": New agent (AGENT.md identity + brain). Requires name. Returns\n      agent_slug \u2014 use it for routines and loops.\n    - \"get\": Full definition including the AGENT.md body (requires agent_slug).\n    - \"update\": Change AGENT.md / metadata (requires agent_slug + fields to change).\n    - \"delete\": Delete an agent (requires agent_slug; refuses if it still owns\n      loops). Refused outright for an agent the repo ships \u2014 mute or edit\n      it instead; an update would bring a deleted one straight back.\n    - \"publish\": ADMIN ONLY. Copy a local agent into the tracked library the\n      repo ships (requires agent_slug; `path` narrows it to one skill or\n      loop). Every other write lands under .condor/agents/, so this is the\n      only way to author what other installs receive. It leaves the repo dirty\n      on purpose \u2014 review and commit. There is no \"install\": a shipped agent is\n      present the moment an install pulls.\n    - \"export\": Write the agent out as ONE portable file under data/exports/\n      (requires agent_slug), and return its path \u2014 hand that file to the user.\n      It carries the agent's library only: its store, journals, mutes, session\n      output and this install's server pin and creator id never travel. The\n      bundle also says WHICH agent it is (a stable agent_uid that survives a\n      rename on import), which version (bumped only when the content actually\n      changed since the last export \u2014 pass `notes` to say what changed), who\n      claims to have made it (`author_name`, verified by nothing), and what it\n      needs: the connectors, tools, model and skills read out of its own files.\n    - \"import\": Register the agent in a bundle file (requires `path`;\n      `agent_slug` renames it on the way in, which is how a name collision is\n      answered). It never overwrites an existing agent, and everything it\n      brings arrives MUTED \u2014 tell the user to read each imported routine and\n      skill before unmuting it, because an imported routine runs inside this\n      process with no sandbox. Nothing is started. The result's `unmet` lists\n      what this install cannot supply the agent; it never blocks the import,\n      so report it and let the user decide.\n    - \"upgrade\": Replace an INSTALLED agent's library from a newer bundle of\n      the same agent (requires agent_slug + `path`). Spelled \"upgrade\" because\n      \"update\" already means editing an agent's instructions here. It keeps\n      everything the install earned \u2014 the agent's store, config, mutes,\n      sessions and journals \u2014 and keeps any file the user had edited locally,\n      reporting it as a conflict with the bundle's copy on offer. Whatever\n      arrives new comes in MUTED, every replaced routine needs allowing again\n      before it can run, and nothing is started. It refuses outright when the\n      bundle is a different agent, when nothing says this bundle is the\n      agent's upstream, when the bundle is older, for an agent the repo ships,\n      and while a loop is running: read `blockers` back verbatim. On success\n      read `files` back \u2014 a conflict is content nobody else can reproduce.\n    - \"hub_browse\": What the Botcamp agent hub offers (`agent_slug` doubles as\n      an optional search term). No account needed. Each row carries a `badge`:\n      \"validated\" means a human reviewed ONE submitted revision once, and\n      \"community\" means nobody did. Say which it is and say what it is NOT \u2014\n      the hub is a discovery service, not a security boundary; it is not a\n      signature, Condor verifies nothing against it, and it never shortens the\n      review on install. Never read a badge back as a reason something is safe.\n    - \"hub_install\": Install a listing (requires `path` = the listing_id;\n      `agent_slug` renames it if the name is taken). The bytes are verified\n      against the listing's digest before anything parses them, and then this\n      is exactly the import door: a listing of an agent already installed here\n      becomes an UPGRADE automatically (`verb` says which happened), everything\n      arrives MUTED, no imported routine may execute until the user allows it,\n      and nothing is started. Report `findings` and `unmet`; neither blocks it.\n    - \"publish_hub\": ADMIN ONLY, and not the same thing as \"publish\" \u2014 that\n      one copies an agent into this repo's tracked library, this one uploads it\n      to the hub for strangers (requires agent_slug; `notes` and `author_name`\n      as for \"export\"). It needs the install's token, set in Settings \u2192\n      Agents, and cannot take one as an argument. It sends the SAME bytes\n      \"export\" writes, so it refuses outright on a value that can only be a\n      secret. **Confirm with the user before calling it**: publishing sends\n      content off this box and is irreversible in practice \u2014 unpublishing\n      removes the listing, it does not recall a download.\n\n    Args:\n        action: What to do with the agent definition.\n        agent_slug: The agent to act on (get/update/delete/upgrade).\n        name: Agent name (create/update).\n        description: Agent description (create/update).\n        instructions: The AGENT.md body \u2014 identity + domain knowledge (create/update).\n        agent_key: Default LLM. Examples: \"claude-code\", \"gemini\", \"copilot\",\n            \"ollama:llama3.1\", \"ollama:qwen3:32b\", \"groq:llama-3.3-70b-versatile\".\n            Any model can run an agent, and every one is held to the tools\n            allowlist. Default \"claude-code\".\n        tools: Tool-name allowlist for the agent. Empty/None = unrestricted. A\n            tool it omits is never mounted on any model, so keep the family the\n            inherited framework playbooks call \u2014 delegate, send_notification,\n            run_code, manage_memory, manage_skill, manage_routines,\n            manage_agent_controllers,\n            trading_agent_journal_read, trading_agent_journal_write,\n            manage_agents, manage_loops, control_agent,\n            get_available_models \u2014 plus every tool the agent's own playbooks name.\n        when_to_consult: One-line hint describing when to route work to this agent.\n            Purely for routing \u2014 every agent is delegable with or without it; it\n            falls back to the description.\n        server_required: Whether the agent needs a Hummingbot server. Default True.\n        server_name: Pin the agent to a specific hummingbot-api server. LEAVE EMPTY\n            unless the user explicitly asks to pin this agent to one server \u2014 empty\n            means follow the ambient chat server, which is what travels to other\n            installs. When set, the agent's mcp-hummingbot subprocess and any\n            loop it deploys use THIS server regardless of the chat's active\n            server, and on a machine without that server the agent is broken. Do\n            not fill it in with whatever server the chat happens to be on.\n        path: For \"publish\" \u2014 narrow to one item of the agent, relative to\n            its directory (\"skills/lp_rebalance\", \"loops/grid\", \"AGENT.md\").\n            Empty publishes the whole agent's library half; its store, journals,\n            mutes and session output are never published. For \"import\" and\n            \"upgrade\" \u2014 the bundle file to read. For \"hub_install\" \u2014 the\n            listing_id from \"hub_browse\", not a path at all.\n        notes: For \"export\" and \"publish_hub\" \u2014 the changelog for this version,\n            carried verbatim in the bundle. What changed since the last bundle\n            of this agent.\n        author_name: For \"export\" and \"publish_hub\" \u2014 who to credit. An\n            unverified claim: Condor signs nothing and the receiving install\n            cannot check it. On a hub publish the hub attaches the account\n            handle it authenticated beside it, as a separate fact.\n\n    Returns:\n        Action-specific result dict.\n    ",
       "inputSchema": {
         "properties": {
           "action": {
@@ -340,12 +345,21 @@
               "update",
               "delete",
               "publish",
+              "export",
+              "import",
+              "upgrade",
+              "hub_browse",
+              "hub_install",
+              "publish_hub",
               "list_agent_definitions",
               "create_agent",
               "get_agent",
               "update_agent",
               "delete_agent",
-              "publish_agent"
+              "publish_agent",
+              "export_agent",
+              "import_agent",
+              "upgrade_agent"
             ],
             "title": "Action",
             "type": "string"
@@ -373,6 +387,18 @@
             ],
             "default": null,
             "title": "Agent Slug"
+          },
+          "author_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Author Name"
           },
           "description": {
             "anyOf": [
@@ -409,6 +435,18 @@
             ],
             "default": null,
             "title": "Name"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
           },
           "path": {
             "anyOf": [
@@ -4374,6 +4412,48 @@
           "result"
         ],
         "title": "resolve_orphaned_positionOutput",
+        "type": "object"
+      }
+    },
+    "resolve_swap": {
+      "description": "Get a swap out of SUBMITTED when no status read can confirm it. Signs nothing.\n\n    Use this tool when: `get_swap_status` or `search_swaps` reports a swap as\n    unverifiable \u2014 it has been SUBMITTED past the threshold and no status read has\n    succeeded. A swap leaves SUBMITTED only on a *successful* read, so a Gateway that\n    cannot be reached keeps one there indefinitely (GitHub #278), and before this tool\n    the only exit was redeploying the agent.\n\n    UNVERIFIABLE IS NOT FAILED. The swap may have landed on-chain. Read the explorer\n    before you tell the user anything about the outcome, and never report a stuck swap\n    as lost.\n\n    THE SERVER DECIDES, NOT CONDOR. This asks the API to read the chain and record the\n    swap's real outcome; it writes no state of its own and moves no funds. A server too\n    old to offer the route says so plainly and nothing changes \u2014 that is a capability\n    answer, not an outage, and not a reason to retry.\n\n    Args:\n        transaction_hash: The stuck swap's hash, from `search_swaps` or `execute_swap`.\n        network: Network id, e.g. 'solana-mainnet-beta'. Optional \u2014 the server\n            identifies the swap by hash; pass it only if you know it.\n    ",
+      "inputSchema": {
+        "properties": {
+          "network": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Network"
+          },
+          "transaction_hash": {
+            "title": "Transaction Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_hash"
+        ],
+        "title": "resolve_swapArguments",
+        "type": "object"
+      },
+      "name": "resolve_swap",
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "resolve_swapOutput",
         "type": "object"
       }
     },
