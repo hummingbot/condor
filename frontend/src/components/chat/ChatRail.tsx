@@ -2,6 +2,7 @@ import {
   ArrowUpRight,
   Bot,
   ChevronDown,
+  Globe,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -200,6 +201,17 @@ export const ChatRail = memo(function ChatRail({
             onNew={() => onTalk(agent.slug, agent, true)}
           />
         ))}
+        {/* The one door into Botcamp Hub (FEAT-153): installing and publishing
+            agents, below the agents themselves rather than in a bar of its own
+            above the conversation. */}
+        <Link
+          to="/hub"
+          title="Botcamp Hub — install published agents, or publish your own"
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+        >
+          <Globe className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">Hub</span>
+        </Link>
       </div>
 
       {/* What you already said — the rail's own list, in flow */}

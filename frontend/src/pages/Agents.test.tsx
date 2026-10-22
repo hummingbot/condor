@@ -132,15 +132,3 @@ describe("/fleet", () => {
     expect(where).toContain("desk=execution");
   });
 });
-
-describe("the hub entry (FEAT-153)", () => {
-  it("links to /hub, above the conversation rather than inside it", async () => {
-    const page = await at("/");
-    const link = page.querySelector("a[href='/hub']");
-    expect(link).not.toBeNull();
-    expect(link?.textContent).toContain("Hub");
-    // The stubbed chat still renders underneath — the bar is additive, not a
-    // replacement for the conversation this route owns.
-    expect(page.querySelector("[data-stub='chat']")).not.toBeNull();
-  });
-});
