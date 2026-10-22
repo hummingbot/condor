@@ -39,8 +39,7 @@ let hubDeviceSequence: HubDeviceState[] | null;
 const LINKED: HubDeviceState = {
   status: "linked",
   user_code: "",
-  verification_uri: "",
-  verification_uri_complete: "",
+  approval_url: "",
   expires_at: 0,
   profile_handle: "cardosofede",
   scope: ["agents:read", "agents:publish"],
@@ -49,8 +48,7 @@ const LINKED: HubDeviceState = {
 const NONE: HubDeviceState = {
   status: "none",
   user_code: "",
-  verification_uri: "",
-  verification_uri_complete: "",
+  approval_url: "",
   expires_at: 0,
   profile_handle: "",
   scope: [],

@@ -288,11 +288,14 @@ class Receipt(BaseModel):
 class DeviceCode(BaseModel):
     """What ``POST /api/condor/device/code`` handed back (PR #111's contract).
 
-    ``verification_uri_complete`` is the link Condor opens in a browser tab;
-    ``user_code`` is shown beside it so the admin can confirm it is the same
-    device login before approving it there. ``device_code`` is used only to
-    poll — it is never rendered, logged, or returned past
-    :func:`device_start`'s own caller.
+    The faithful parse of an **untrusted** reply, and internal to this module
+    on purpose. ``verification_uri``/``verification_uri_complete`` are the
+    hub's suggestion of where to send the admin's browser, and nothing before
+    this point vetted them — :func:`device_start` derives the link it actually
+    hands out from :data:`HUB_URL` instead and returns a :class:`DeviceStart`,
+    so neither field ever reaches a response, a template or a browser
+    (SEC-819). ``device_code`` is used only to poll — it is never rendered,
+    logged, or returned past :func:`device_start`'s own caller.
     """
 
     device_code: str
@@ -303,22 +306,38 @@ class DeviceCode(BaseModel):
     interval: int = 5
 
 
+class DeviceStart(BaseModel):
+    """A device login, as everything outside this module may see it.
+
+    :class:`DeviceCode` minus the two fields that came from the hub's mouth:
+    ``approval_url`` is built here from :data:`HUB_URL`, so a caller that
+    opens it is going to the address this install was configured with and
+    nowhere else.
+    """
+
+    user_code: str
+    approval_url: str
+    expires_in: int = 600
+    interval: int = 5
+
+
 class DeviceLinkState(BaseModel):
     """What a caller may learn about this install's Botcamp link.
 
     Never the credential — see :func:`device_state`. ``status`` is one of
     ``"none"`` (nothing pending, nothing linked), ``"pending"`` (a device
-    login is in flight; ``user_code``/``verification_uri``/
-    ``verification_uri_complete``/``expires_at`` are set), ``"denied"``,
-    ``"expired"``, or ``"invalid"`` (a device login just ended that way —
-    reported once, to the poll that observed it), or ``"linked"``
-    (``profile_handle`` and ``scope`` are set).
+    login is in flight; ``user_code``/``approval_url``/``expires_at`` are
+    set), ``"denied"``, ``"expired"``, or ``"invalid"`` (a device login just
+    ended that way — reported once, to the poll that observed it), or
+    ``"linked"`` (``profile_handle`` and ``scope`` are set).
+
+    ``approval_url`` is derived from :data:`HUB_URL`, never echoed from the
+    hub's reply — see :func:`approval_url`.
     """
 
     status: str = "none"
     user_code: str = ""
-    verification_uri: str = ""
-    verification_uri_complete: str = ""
+    approval_url: str = ""
     expires_at: float = 0.0
     profile_handle: str = ""
     scope: list[str] = Field(default_factory=list)
@@ -490,6 +509,57 @@ def _log_safe(url: str) -> str:
     """
     parts = urllib.parse.urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
+def approval_url(user_code: str) -> str:
+    """Where to send an admin to approve a device login, built locally.
+
+    The hub tells Condor where it would like the browser sent
+    (``verification_uri``/``verification_uri_complete``). Condor does not
+    take it up on that. Those strings arrive from a service this install does
+    not control, over a call that carries no credential and so proves nothing
+    about who answered; opening one is a navigation Condor performs on behalf
+    of the one person on the box who can publish, behind a button that says
+    "Sign in to Botcamp". A hostile or compromised hub that could choose that
+    destination would have a phishing page with Condor's own endorsement on
+    it. So the destination is the caller's to decide, exactly as FEAT-146
+    made the *API* base non-overridable: this is the same rule applied to the
+    one path that hands a URL to a browser rather than to :func:`_send`
+    (SEC-819, contract §4.1 step 3).
+
+    Built from :data:`HUB_URL`'s **origin** — scheme, host and port — because
+    ``HUB_URL`` addresses the API (``https://botcamp.xyz/api``) while the
+    approval page is a page on the site (``https://botcamp.xyz/connect``).
+    The dev override is picked up for free, so pointing this install at a LAN
+    hub retargets the approval link with it.
+    """
+    parts = urllib.parse.urlsplit(HUB_URL)
+    code = urllib.parse.urlencode({"code": user_code})
+    return f"{parts.scheme}://{parts.netloc}/connect?{code}"
+
+
+def _warn_if_offsite(code: DeviceCode) -> None:
+    """Log once when the hub asked for a browser somewhere else.
+
+    Not an error: :func:`approval_url` has already decided where the admin
+    goes, so a mismatch changes nothing this process does. It is logged
+    because a hub that starts answering with a third-party host is either
+    misconfigured or hostile, and neither should pass silently. One line per
+    attempt, through :func:`_log_safe` so the ``?code=`` query — the only
+    part of either URL that is a secret-shaped value — stays out of a shared
+    log, and never the ``device_code``.
+    """
+    origin = urllib.parse.urlsplit(HUB_URL).netloc
+    for candidate in (code.verification_uri_complete, code.verification_uri):
+        if candidate and urllib.parse.urlsplit(candidate).netloc != origin:
+            log.warning(
+                "hub: the device-code reply pointed at %s, which is not this "
+                "install's hub (%s) — ignoring it and using the locally built "
+                "approval link",
+                _log_safe(candidate),
+                origin,
+            )
+            return
 
 
 def _decode(reply: Reply, what: str) -> dict:
@@ -1084,7 +1154,7 @@ def submission_status(slug: str, token: str) -> Receipt:
 # ── Device login (PR #111): link to a Botcamp profile, no pasted token ───
 
 
-def device_start() -> DeviceCode:
+def device_start() -> DeviceStart:
     """Begin a device-login attempt, replacing any one this install was tracking.
 
     No ``client_name``/``scope`` in the body: omitting ``scope`` grants both
@@ -1094,19 +1164,26 @@ def device_start() -> DeviceCode:
     ``device_code`` — this install only ever tracks the most recent attempt it
     started, and the hub's own ``expires_in`` deadline retires the old one on
     its side regardless.
+
+    Returns a :class:`DeviceStart`, not the :class:`DeviceCode` that was
+    parsed: the reply's own ``verification_uri``/``verification_uri_complete``
+    stop here, and the ``approval_url`` handed on is built from
+    :data:`HUB_URL` (SEC-819). The two are compared only to log a mismatch.
     """
     global _pending_device
 
     reply = _send("POST", f"{HUB_URL}/condor/device/code", payload=b"{}")
     code = _model(_json(reply, "starting a device login"), DeviceCode, "a device code")
+    _warn_if_offsite(code)
+    link = approval_url(code.user_code)
     now = time.monotonic()
     with _device_lock:
         _pending_device = {
             "device_code": code.device_code,
             "user_code": code.user_code,
-            "verification_uri": code.verification_uri,
-            "verification_uri_complete": code.verification_uri_complete
-            or code.verification_uri,
+            # The locally built link, cached so every later pending poll
+            # answers with the same string the first one did.
+            "approval_url": link,
             "interval": max(1, code.interval or 5),
             # Two clocks for two audiences: `deadline` (monotonic) is what this
             # process gates polling on, immune to a wall-clock step; `wall_expires_at`
@@ -1116,7 +1193,12 @@ def device_start() -> DeviceCode:
             "last_polled": 0.0,
         }
     log.info("hub: device login started (user code %s)", code.user_code)
-    return code
+    return DeviceStart(
+        user_code=code.user_code,
+        approval_url=link,
+        expires_in=code.expires_in,
+        interval=code.interval,
+    )
 
 
 def device_state() -> DeviceLinkState:
@@ -1168,8 +1250,7 @@ def device_state() -> DeviceLinkState:
         return DeviceLinkState(
             status="pending",
             user_code=pending["user_code"],
-            verification_uri=pending["verification_uri"],
-            verification_uri_complete=pending["verification_uri_complete"],
+            approval_url=pending["approval_url"],
             expires_at=pending["wall_expires_at"],
         )
 

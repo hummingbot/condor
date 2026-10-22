@@ -40,8 +40,7 @@ let hubDeviceState: HubDeviceState;
 const NONE_DEVICE: HubDeviceState = {
   status: "none",
   user_code: "",
-  verification_uri: "",
-  verification_uri_complete: "",
+  approval_url: "",
   expires_at: 0,
   profile_handle: "",
   scope: [],
@@ -114,8 +113,7 @@ function router(url: string, init?: RequestInit): Response | Promise<Response> {
   if (method === "POST" && url === "/api/v1/settings/hub-device/start") {
     return json({
       user_code: "ABC-123",
-      verification_uri: "https://botcamp.xyz/connect",
-      verification_uri_complete: "https://botcamp.xyz/connect?code=ABC-123",
+      approval_url: "https://botcamp.xyz/connect?code=ABC-123",
       expires_in: 600,
       interval: 5,
     });
@@ -287,6 +285,34 @@ it("offers an admin exactly one Sign in to Botcamp control, in the Pull gate", a
   expect(container.querySelector(".fixed.inset-0")).toBeNull();
 });
 
+it("rebuilds the pending link from the poll alone, after a page refresh", async () => {
+  // A refresh mid-login: nothing of the start response survives in memory,
+  // so the "Open Botcamp" link can only come from GET /settings/hub-device.
+  // The hub's own verification_uri is not in that payload at all (SEC-819);
+  // this asserts the one URL the dashboard can reach for is the safe one,
+  // and that a hostile field smuggled alongside it is never read.
+  isAdmin = true;
+  hubDeviceState = {
+    ...NONE_DEVICE,
+    status: "pending",
+    user_code: "ABC-123",
+    approval_url: "https://botcamp.xyz/connect?code=ABC-123",
+    ...({ verification_uri_complete: "https://evil.example/phish" } as object),
+  };
+  await render();
+
+  const pending = container.querySelector("[data-hub-device-status='pending']");
+  expect(pending?.textContent).toContain("ABC-123");
+
+  const link = [...container.querySelectorAll("a")].find((a) =>
+    a.textContent?.includes("Open Botcamp"),
+  ) as HTMLAnchorElement;
+  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect?code=ABC-123");
+  expect(container.innerHTML).not.toContain("evil.example");
+  // No tab is opened on a refresh — only starting a login does that.
+  expect(window.open).not.toHaveBeenCalled();
+});
+
 it("a non-admin sees the lookup form in Pull agents once this install is linked", async () => {
   isAdmin = false;
   hubDeviceState = { ...NONE_DEVICE, status: "linked", profile_handle: "@fede" };
@@ -353,11 +379,17 @@ it("runs the device flow inline in the gate, with Upload yours hidden until link
   // not repeated further down the page either.
   expect(pending).toHaveLength(1);
   expect(pending[0].textContent).toContain("ABC-123");
+  // The safe link, built by the backend from the configured hub base — the
+  // only URL the start response carries (SEC-819).
   expect(window.open).toHaveBeenCalledWith(
     "https://botcamp.xyz/connect?code=ABC-123",
     "_blank",
     "noopener,noreferrer",
   );
+  const link = [...container.querySelectorAll("a")].find((a) =>
+    a.textContent?.includes("Open Botcamp"),
+  ) as HTMLAnchorElement;
+  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect?code=ABC-123");
   expect(heading("Botcamp")).toBeNull();
   expect(heading("Upload yours")).toBeNull();
 });

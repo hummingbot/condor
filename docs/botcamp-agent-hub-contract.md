@@ -516,18 +516,24 @@ before being treated as settled.
    the approval page matches the login Condor started), and a
    `verification_uri`/`verification_uri_complete` to open. It returns all of
    these plus `expires_in` and a polling `interval`.
-3. Condor's dashboard builds the approval link **from its own configured hub
-   base plus the returned `user_code`** (`<configured base>/connect?code=<user_code>`)
+3. Condor builds the approval link **from its own configured hub base plus
+   the returned `user_code`** (`<configured base origin>/connect?code=<user_code>`)
    and opens that in a new browser tab, showing the `user_code` beside it so
    the admin can confirm it matches. It does **not** open or display
-   `verification_uri`/`verification_uri_complete` verbatim unless that URI's
-   host matches Condor's own configured hub base — a hub response is not
-   something Condor treats as safe to redirect an admin's browser to sight
-   unseen, since nothing before that point vetted it. The hub's own pages
-   SHOULD therefore live on `botcamp.xyz` itself; a `verification_uri` on a
-   different host will be ignored by Condor clients that implement this
-   policy, logged once, and the admin will see only the base-plus-code link
-   built locally.
+   `verification_uri`/`verification_uri_complete` at all — not even when
+   their host matches. A hub response is not something Condor treats as safe
+   to redirect an admin's browser to sight unseen, since nothing before that
+   point vetted it: the device-code call carries no credential, so nothing
+   proves who answered. The hub's own pages MUST therefore live on the same
+   origin as its API; a `verification_uri` pointing anywhere else is ignored
+   and logged once, and the admin sees only the locally built link.
+
+   Condor implements this at the backend boundary (SEC-819): the two fields
+   are parsed and then dropped inside `condor.hub`, and the only link that
+   reaches a response — `approval_url`, on both `POST
+   /settings/hub-device/start` and every `pending` `GET /settings/hub-device`
+   — is the derived one. A dashboard therefore cannot reintroduce the hole by
+   preferring a field it was never sent.
 4. On that page, the hub requires the human to already be signed into
    Botcamp (or sign in first), shows the `user_code` again for the human to
    compare against what Condor showed, and offers Accept / Deny. This page
@@ -571,9 +577,10 @@ Response `200`:
   must not be sufficient to approve a login (one that leaked into a browser
   history or a screen share must not authorize anything by itself without
   the human seeing and confirming the matching approval page).
-- `verification_uri_complete` is optional; when absent, Condor falls back to
-  `verification_uri`, and — per §4.1 step 3 — treats either as display-only
-  and subject to its own host check, never as a value it opens unconditionally.
+- `verification_uri`/`verification_uri_complete` are read but never used:
+  per §4.1 step 3 Condor derives the link it opens from its own configured
+  base, so a hub may send either, both or neither without changing what the
+  admin sees. An off-origin value is logged once and otherwise discarded.
 - `expires_in` (seconds; default assumed `600` if omitted) and `interval`
   (seconds; default assumed `5` if omitted, floored at `1`) govern how long
   Condor keeps polling and how often. A login still `pending` past

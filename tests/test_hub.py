@@ -341,9 +341,18 @@ def _missing() -> hub.Reply:
     return hub.Reply(404, b'{"detail": "no such listing"}')
 
 
+#: What every hub test addresses. Pinned rather than read from the module,
+#: because an operator's `.env` may legitimately carry the
+#: `CONDOR_HUB_DEV_MODE`/`CONDOR_HUB_DEV_URL` override (pointing this install
+#: at a LAN hub), and a suite whose expected URLs move with it would pass or
+#: fail on local config rather than on the code.
+PROD_HUB_URL = "https://botcamp.xyz/api"
+
+
 @pytest.fixture
 def fake_hub(monkeypatch):
     stub = FakeHub()
+    monkeypatch.setattr(hub, "HUB_URL", PROD_HUB_URL)
     monkeypatch.setattr(hub, "_send", stub.send)
     return stub
 
@@ -467,9 +476,25 @@ def test_dev_mode_flag_without_a_url_changes_nothing():
 
 
 def _base_env() -> dict:
+    """This process's environment, with the dev override neutralized.
+
+    These probes run with ``cwd=REPO_ROOT``, so the subprocess loads the
+    repo's ``.env`` — and an operator testing against a LAN hub legitimately
+    has ``CONDOR_HUB_DEV_MODE``/``CONDOR_HUB_DEV_URL`` in there. Without this
+    the suite would assert the compiled-in rule against whatever that
+    operator happens to be pointed at today. Empty strings rather than
+    deletions, because ``load_dotenv`` never overrides a variable that is
+    already set: the file's values are what has to be shut out, and only a
+    present-but-empty value does that. A test wanting the override merges its
+    own values over this.
+    """
     import os
 
-    return {k: v for k, v in os.environ.items()}
+    return {
+        **{k: v for k, v in os.environ.items()},
+        "CONDOR_HUB_DEV_MODE": "",
+        "CONDOR_HUB_DEV_URL": "",
+    }
 
 
 # ── The identifier guard: refused before a request exists ────────────────
@@ -1123,10 +1148,111 @@ def test_device_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
     assert fake_hub.calls[-1].token == ""
     assert fake_hub.calls[-1].body == {}
     assert code.user_code == "WXYZ-4821"
-    assert code.verification_uri_complete == (
-        "https://botcamp.xyz/connect?code=WXYZ-4821"
-    )
+    assert code.approval_url == "https://botcamp.xyz/connect?code=WXYZ-4821"
     assert hub._pending_device["device_code"] == "dev_test"
+
+
+def _hostile_code(**over) -> object:
+    """A ``/condor/device/code`` reply aimed at somebody else's site.
+
+    The default fake reply is same-origin, so nothing in the suite before
+    SEC-819 ever exercised the branch where the hub asks Condor to open a
+    URL it did not choose. ``over`` replaces individual fields so a test can
+    poison one of the two URLs, or both.
+    """
+    return _ok(
+        {
+            "device_code": "dev_test",
+            "user_code": "WXYZ-4821",
+            "verification_uri": "https://evil.example/phish",
+            "verification_uri_complete": "https://evil.example/phish?code=WXYZ-4821",
+            "expires_in": 600,
+            "interval": 5,
+            **over,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({}, id="both-hostile"),
+        pytest.param(
+            {"verification_uri": "https://botcamp.xyz/connect"},
+            id="only-complete-hostile",
+        ),
+        pytest.param(
+            {"verification_uri_complete": ""},
+            id="complete-absent-uri-hostile",
+        ),
+    ],
+)
+def test_a_hostile_device_code_reply_never_reaches_the_browser(
+    fake_hub, caplog, override
+):
+    """SEC-819: the link Condor hands out is its own, whichever of the two
+    URLs the hub poisoned — and the hostile one is not merely deprioritized,
+    it is absent from every response."""
+    fake_hub.overrides[("POST", "/condor/device/code")] = _hostile_code(**override)
+
+    with caplog.at_level(logging.WARNING, logger="condor.hub"):
+        started = hub.device_start()
+
+    safe = "https://botcamp.xyz/connect?code=WXYZ-4821"
+    assert started.approval_url == safe
+    assert "evil.example" not in started.model_dump_json()
+
+    pending = hub.device_state()
+    assert pending.status == "pending"
+    assert pending.approval_url == safe
+    assert "evil.example" not in pending.model_dump_json()
+
+    # Exactly one warning, naming the destination without its `?code=` query
+    # and never the polling secret.
+    mismatches = [r for r in caplog.records if "not this install's hub" in r.message]
+    assert len(mismatches) == 1
+    assert "https://evil.example/phish" in mismatches[0].getMessage()
+    assert "WXYZ-4821" not in mismatches[0].getMessage()
+    assert "dev_test" not in mismatches[0].getMessage()
+
+
+def test_an_ordinary_same_origin_reply_logs_no_mismatch(fake_hub, caplog):
+    with caplog.at_level(logging.WARNING, logger="condor.hub"):
+        started = hub.device_start()
+
+    assert started.approval_url == "https://botcamp.xyz/connect?code=WXYZ-4821"
+    assert not [r for r in caplog.records if "not this install's hub" in r.message]
+
+
+@pytest.mark.parametrize(
+    "hub_url, user_code, expected",
+    [
+        (
+            "https://botcamp.xyz/api",
+            "WXYZ-4821",
+            "https://botcamp.xyz/connect?code=WXYZ-4821",
+        ),
+        # A dev hub: scheme, host *and port* survive; `/api` does not.
+        (
+            "http://masiva.local:3000/api",
+            "WXYZ-4821",
+            "http://masiva.local:3000/connect?code=WXYZ-4821",
+        ),
+        # The code is a query *value*, so anything shaped like a separator in
+        # it is encoded rather than ending the parameter.
+        (
+            "https://botcamp.xyz/api",
+            "a b&x=1#f/g",
+            "https://botcamp.xyz/connect?code=a+b%26x%3D1%23f%2Fg",
+        ),
+    ],
+)
+def test_approval_url_is_built_from_the_configured_origin(
+    monkeypatch, hub_url, user_code, expected
+):
+    monkeypatch.setattr(hub, "HUB_URL", hub_url)
+
+    assert hub.approval_url(user_code) == expected
 
 
 def test_device_state_is_none_with_nothing_pending_or_linked(cm):
@@ -1140,9 +1266,7 @@ def test_device_state_reports_pending_with_the_user_code_and_link(fake_hub):
 
     assert state.status == "pending"
     assert state.user_code == "WXYZ-4821"
-    assert state.verification_uri_complete == (
-        "https://botcamp.xyz/connect?code=WXYZ-4821"
-    )
+    assert state.approval_url == "https://botcamp.xyz/connect?code=WXYZ-4821"
 
 
 def test_device_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
@@ -1315,8 +1439,12 @@ def test_restarting_a_device_login_forgets_the_previous_attempt(fake_hub):
 
     second = hub.device_start()
 
-    assert second.device_code == "dev_second" != first_device_code
-    assert hub._pending_device["device_code"] == "dev_second"
+    # `device_start` hands back a `DeviceStart`, which carries no
+    # `device_code` at all — the polling secret stays inside this module
+    # (SEC-819), so the swap is read off the tracked attempt.
+    assert second.user_code == "ABCD-1234"
+    assert second.approval_url == "https://botcamp.xyz/connect?code=ABCD-1234"
+    assert hub._pending_device["device_code"] == "dev_second" != first_device_code
 
 
 def test_cancelling_a_pending_device_login_forgets_it_with_no_hub_call(fake_hub):
@@ -1534,9 +1662,7 @@ def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
     assert started.status_code == 200
     body = started.json()
     assert body["user_code"] == "WXYZ-4821"
-    assert body["verification_uri_complete"] == (
-        "https://botcamp.xyz/connect?code=WXYZ-4821"
-    )
+    assert body["approval_url"] == "https://botcamp.xyz/connect?code=WXYZ-4821"
     assert "access_token" not in body
 
     pending = client.get("/settings/hub-device")
@@ -1555,13 +1681,43 @@ def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
     assert linked.json() == {
         "status": "linked",
         "user_code": "",
-        "verification_uri": "",
-        "verification_uri_complete": "",
+        "approval_url": "",
         "expires_at": 0.0,
         "profile_handle": "cardosofede",
         "scope": ["agents:read", "agents:publish"],
     }
     assert "bc_live_super_secret" not in linked.text
+
+
+def test_the_dashboard_routes_never_hand_back_a_hostile_approval_url(
+    cm, fake_hub, caplog
+):
+    """SEC-819 at the wire, not just in the module: neither the start route
+    nor a subsequent pending poll may carry a URL the hub chose."""
+    fake_hub.overrides[("POST", "/condor/device/code")] = _hostile_code()
+    client = _settings_client(admin=True)
+
+    with caplog.at_level(logging.WARNING, logger="condor.hub"):
+        started = client.post("/settings/hub-device/start")
+    assert started.status_code == 200
+    assert started.json() == {
+        "user_code": "WXYZ-4821",
+        "approval_url": "https://botcamp.xyz/connect?code=WXYZ-4821",
+        "expires_in": 600,
+        "interval": 5,
+    }
+    assert "evil.example" not in started.text
+
+    pending = client.get("/settings/hub-device")
+    assert pending.json()["status"] == "pending"
+    assert pending.json()["approval_url"] == (
+        "https://botcamp.xyz/connect?code=WXYZ-4821"
+    )
+    assert "evil.example" not in pending.text
+
+    assert (
+        len([r for r in caplog.records if "not this install's hub" in r.message]) == 1
+    )
 
 
 def test_the_dashboard_can_disconnect_a_linked_profile(cm, fake_hub):

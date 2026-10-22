@@ -274,16 +274,19 @@ export interface HubCatalogue {
  * reports it — never the credential, which no route ever answers with
  * (PR #111's device flow, replacing FEAT-148's pairing code).
  *
- * `"pending"` carries `user_code`/`verification_uri`/
- * `verification_uri_complete`/`expires_at` to show again; `"denied"`/
- * `"expired"`/`"invalid"` are reported for the one poll that observed them;
- * `"linked"` carries `profile_handle` and `scope`.
+ * `"pending"` carries `user_code`/`approval_url`/`expires_at` to show again;
+ * `"denied"`/`"expired"`/`"invalid"` are reported for the one poll that
+ * observed them; `"linked"` carries `profile_handle` and `scope`.
+ *
+ * `approval_url` is built by the backend from this install's configured hub
+ * base, never echoed from the hub's own reply — so it is safe to navigate to
+ * (SEC-819). The hub's `verification_uri`/`verification_uri_complete` are
+ * deliberately not part of this type: they never leave `condor.hub`.
  */
 export interface HubDeviceState {
   status: "none" | "pending" | "denied" | "expired" | "invalid" | "linked";
   user_code: string;
-  verification_uri: string;
-  verification_uri_complete: string;
+  approval_url: string;
   expires_at: number;
   profile_handle: string;
   scope: string[];
@@ -4080,12 +4083,13 @@ export const api = {
     }),
 
   /** Begin a device login: the user code to show, and the link to open so
-   *  the admin can approve it on Botcamp (PR #111's device flow). */
+   *  the admin can approve it on Botcamp (PR #111's device flow).
+   *  `approval_url` is derived server-side from the configured hub base —
+   *  see `HubDeviceState`. */
   startHubDevice: () =>
     apiFetch<{
       user_code: string;
-      verification_uri: string;
-      verification_uri_complete: string;
+      approval_url: string;
       expires_in: number;
       interval: number;
     }>("/api/v1/settings/hub-device/start", { method: "POST" }),

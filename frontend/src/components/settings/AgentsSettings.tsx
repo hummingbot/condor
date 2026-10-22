@@ -293,17 +293,17 @@ function useHubDevice() {
       queryClient.setQueryData(["hub-device"], {
         status: "pending",
         user_code: started.user_code,
-        verification_uri: started.verification_uri,
-        verification_uri_complete: started.verification_uri_complete,
+        approval_url: started.approval_url,
         expires_at: 0,
         profile_handle: "",
         scope: [],
       });
-      window.open(
-        started.verification_uri_complete || started.verification_uri,
-        "_blank",
-        "noopener,noreferrer",
-      );
+      // `approval_url` is the backend's own, built from the configured hub
+      // base — the hub's echoed `verification_uri` never reaches this far,
+      // so this navigation cannot be aimed off-site by a reply (SEC-819).
+      // The same string comes back on every later pending poll, so a page
+      // refresh mid-login opens the identical link.
+      window.open(started.approval_url, "_blank", "noopener,noreferrer");
     },
   });
 
@@ -390,7 +390,7 @@ function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
               {data?.user_code}
             </span>
             <a
-              href={data?.verification_uri_complete || data?.verification_uri}
+              href={data?.approval_url}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1 text-xs font-semibold text-[var(--color-primary)] hover:underline"

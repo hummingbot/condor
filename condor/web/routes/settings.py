@@ -1334,7 +1334,7 @@ def _require_hub_admin(user: WebUser) -> None:
 
 @router.post("/hub-device/start")
 async def start_hub_device(user: WebUser = Depends(get_current_user)):
-    """Begin a device login. Returns the user code and link to show.
+    """Begin a device login. Returns the user code and the link to show.
 
     Admin-only, like every other write in this section: the resulting
     credential acts for the whole install under one Botcamp account.
@@ -1347,10 +1347,12 @@ async def start_hub_device(user: WebUser = Depends(get_current_user)):
         code = await asyncio.to_thread(hub.device_start)
     except HubError as exc:
         raise _hub_device_refusal(exc) from exc
+    # `approval_url` is Condor's own, built from the configured hub base —
+    # the hub's `verification_uri`/`verification_uri_complete` never leave
+    # `condor.hub`, so this response cannot aim a browser off-site (SEC-819).
     return {
         "user_code": code.user_code,
-        "verification_uri": code.verification_uri,
-        "verification_uri_complete": code.verification_uri_complete,
+        "approval_url": code.approval_url,
         "expires_in": code.expires_in,
         "interval": code.interval,
     }
