@@ -22,11 +22,13 @@ Confirm every item with the user:
 - [ ] **Winner confirmed** — passed the `backtesting` go/no-go, config exists
       (`manage_controllers(action="describe", config_name="...")`)
 - [ ] **Exchange connectivity** — connector configured, API keys set
-- [ ] **Leverage chosen deliberately** — the backtester does NOT simulate it, so
-      there is no simulated leverage to match (DT-11). It changes margin and
-      liquidation distance, not order size or PnL%, so decide it from the
-      account's risk tolerance and declare it on the deploy; the risk gate holds
-      it to `max_leverage` when that limit is set
+- [ ] **Leverage chosen deliberately, and set where it is read** — the
+      backtester does NOT simulate it, so there is no simulated leverage to match
+      (DT-11). It changes margin and liquidation distance, not order size or
+      PnL%. Set it in the **saved controller config**: `manage_bots(action="deploy")`
+      has no `leverage` argument, and its risk check does not compare a
+      controller's leverage against `max_leverage`, so check that yourself before
+      deploying rather than expecting the gate to
 - [ ] **Position mode** — HEDGE if the strategy goes both long and short:
       `set_account_position_mode_and_leverage(...)`
 - [ ] **Stops set** — `stop_loss` and `take_profit` present; never deploy without them
@@ -62,9 +64,12 @@ manage_bots(action="status")   # no bot_name — returns all active bots
 **Record the deployment timestamp.** It is the start of the live comparison window
 and cannot be recovered later.
 
-For a single lightweight controller, an executor may fit better than a bot —
-delegate to the `adaptive_grid_trader` agent (CO-3: `executor_manager` does not
-exist).
+For a single lightweight controller, an executor may fit better than a bot.
+Deploy it yourself with the `create_*_executor` tools — do **not** hand it to
+`adaptive_grid_trader`, whose AGENT.md excludes "position executors without
+grid structure" in as many words. (`executor_manager`, which this used to
+name, does not exist — CO-3.) `adaptive_grid_trader` is the right target for
+GRID work specifically.
 
 ## Step 3 — Early monitoring
 

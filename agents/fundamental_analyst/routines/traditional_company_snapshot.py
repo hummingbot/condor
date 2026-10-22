@@ -124,6 +124,20 @@ def _safe_div(num, denom):
 TTM_QUARTERS = 4
 
 
+def _has_row(df, *labels) -> bool:
+    """Whether any of ``labels`` is a row in ``df`` at all.
+
+    The companion to :func:`_ttm_sum`'s strictness: that returns ``None`` both
+    for a line a filer never reports and for one with fewer than four quarters,
+    and the free-cash-flow fallback has to tell those apart. Treating a *short*
+    capex line as an absent one credits the whole of operating cash flow to FCF
+    and flatters P/FCF and FCF yield (FA-5 follow-up).
+    """
+    if df is None or getattr(df, "empty", True):
+        return False
+    return any(label in df.index for label in labels)
+
+
 def _ttm_sum(df, *labels) -> float | None:
     """Sum the four most recent quarters, or ``None`` when there are not four.
 
@@ -198,11 +212,20 @@ def _get_ticker_data(symbol: str) -> dict:
             "Operating Cash Flow",
             "Cash Flow From Continuing Operating Activities",
         )
-        capex = _ttm_sum(q_cf, "Capital Expenditure", "Capital Expenditures")
+        capex_labels = ("Capital Expenditure", "Capital Expenditures")
+        capex = _ttm_sum(q_cf, *capex_labels)
         if op_cf is not None and capex is not None:
             fcf_ttm = op_cf + capex  # capex is stored as negative
-        elif op_cf is not None:
-            fcf_ttm = op_cf  # best-effort if no capex line
+        elif op_cf is not None and not _has_row(q_cf, *capex_labels):
+            # No capex line at all: operating cash flow is the best estimate of
+            # free cash flow this filer gives us.
+            fcf_ttm = op_cf
+        else:
+            # The capex line is THERE but does not cover four quarters. Falling
+            # back to op_cf here would silently drop spending that exists and
+            # overstate FCF — and every multiple built on it — so the honest
+            # answer is that this period has no FCF figure.
+            fcf_ttm = None
 
     # Annual revenue for growth
     ann_rev = []

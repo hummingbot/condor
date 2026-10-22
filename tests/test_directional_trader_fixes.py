@@ -281,3 +281,59 @@ def test_the_two_routine_sites_share_one_definition():
     source = (DT / "routines/ema_research_charts.py").read_text()
 
     assert source.count("CALENDAR_DAYS * bars_per_day") == 2
+
+
+# ── review follow-ups ───────────────────────────────────────────────────────
+
+
+def test_an_opposite_signal_is_not_offered_as_an_exit():
+    """``stop_actions_proposal`` returns nothing on a flip, so a -1 after a +1
+    opens a second executor and leaves the first position open."""
+    body = " ".join((DT / "AGENT.md").read_text().split())
+
+    assert "does not close the existing position" in body or (
+        "opens a second executor and leaves the first position open" in body
+    )
+    assert "or an explicit opposite signal" not in body
+
+
+def test_leverage_is_set_where_it_is_actually_read():
+    """``manage_bots(action="deploy")`` has no ``leverage`` argument and its risk
+    check does not compare a controller's leverage against ``max_leverage``."""
+    import inspect
+
+    from mcp_servers.hummingbot_api import server as hb
+
+    assert "leverage" not in inspect.signature(hb.manage_bots).parameters
+
+    body = " ".join((DT / "skills/deploy_and_monitor/SKILL.md").read_text().split())
+    assert "saved controller config" in body
+    assert "has no `leverage` argument" in body
+
+
+def test_non_grid_work_is_not_routed_to_the_grid_agent():
+    """``adaptive_grid_trader`` excludes "position executors without grid
+    structure" and DCA in as many words."""
+    excluded = " ".join(
+        Path("agents/adaptive_grid_trader/AGENT.md").read_text().split()
+    )
+    assert "Non-grid strategies" in excluded
+
+    deploy = " ".join((DT / "skills/deploy_and_monitor/SKILL.md").read_text().split())
+    assert "do **not** hand it to `adaptive_grid_trader`" in deploy
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        Path("agents/_shared/skills/backtest_flow/SKILL.md"),
+        DT / "skills/backtesting/windows_and_costs.md",
+    ],
+)
+def test_no_guide_still_sends_the_winner_back_to_1m(path):
+    """Both taught the rule backwards — 1m as the honest final check, when on a
+    coarser controller it is the optimistic one."""
+    body = " ".join(path.read_text().split())
+
+    assert "re-run the winner at `1m`" not in body
+    assert "merge_asof" in body

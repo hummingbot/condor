@@ -48,14 +48,20 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
             tokens = result.get("result", {}).get("tokens", [])
             result_network_id = result.get("result", {}).get("network_id", "")
             output = f"Tokens on {result_network_id} ({len(tokens)} total):\n\n"
-            output += "symbol   | address\n"
-            output += "-" * 50 + "\n"
+            # ``decimals`` is in the row and was being dropped. It is the whole
+            # answer to "is this token's amount scaled wrong", which the Solana
+            # decimal-mismatch playbook sends an operator here to find — and
+            # without it that diagnosis stalls at its second step (CO-5).
+            output += "symbol   | decimals | address\n"
+            output += "-" * 62 + "\n"
             for token in tokens[:20]:
                 symbol = token.get("symbol", "")[:8]
+                decimals = token.get("decimals")
+                decimals = "?" if decimals is None else str(decimals)
                 address = token.get("address", "")
                 if len(address) > 20:
                     address = f"{address[:8]}...{address[-6:]}"
-                output += f"{symbol:8} | {address}\n"
+                output += f"{symbol:8} | {decimals:>8} | {address}\n"
             if len(tokens) > 20:
                 output += f"... and {len(tokens) - 20} more tokens\n"
             return output

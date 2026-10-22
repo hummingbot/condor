@@ -25,9 +25,18 @@ model happened to read. One order now:
 1. **The controller class** (`controllers/pmm_mister/pmm_mister.py`) is the only
    authority on a *default*. It is what runs when a field is omitted; AGENT.md's
    per-field "default:" annotations document it and nothing else.
-2. **These profiles** are *overrides*, and they match
-   `controllers/pmm_mister/sample_configs/{profile}.yml` field for field. Change
-   one and change the other.
+2. **These profiles** are *overrides*. They agree with
+   `controllers/pmm_mister/sample_configs/{profile}.yml` on the settings that
+   shape RISK — `min_skew`, `leverage`, `portfolio_allocation`,
+   `max_active_executors_by_level`, `executor_refresh_time`, `global_stop_loss`
+   — and a change to one of those must be made in both.
+
+   They are **not** copies of each other, and were never meant to be. A profile
+   here is regime-driven guidance you adapt to the pair in front of you; a sample
+   config is a shipped starting file. Spreads, cooldowns, effectivization
+   windows, tolerances and the inventory band legitimately differ — the
+   aggressive pair differs on fourteen fields — so copy from one, not from both,
+   and do not treat a difference as a bug unless it is in the risk list above.
 3. **`total_amount_quote` comes from neither.** It is the session's budget, read
    from `[CURRENT CONFIG]` — a profile that names its own capital would either
    contradict the loop or breach the risk gate's position limit.

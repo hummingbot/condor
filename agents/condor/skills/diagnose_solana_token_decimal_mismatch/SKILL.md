@@ -11,7 +11,8 @@ source: reflection
 1. Fetch the portfolio overview and note the suspect token's raw amount and value_usd.
 2. Read the token's registered `decimals` with
    `manage_gateway_config(resource_type="tokens", action="list", ...)` — the
-   registry Gateway actually prices from. A `run_code` snippet poking at gateway
+   registry Gateway actually prices from — the listing reports `decimals` per
+   token. A `run_code` snippet poking at gateway
    internals is not the route: there is no `GatewayRouter.get_tokens`, so the
    playbook's old step sent agents hunting for a method that does not exist
    (CO-5). **This tool is mounted on the full (server-owner) seat only** — if
@@ -26,6 +27,9 @@ source: reflection
    hanging on evidence nobody could fetch (CO-5).
 6. Report: which field is wrong (amount, price, or both), the mismatch factor, and the likely root cause (wrong decimal config in the Solana connector or gateway token registry).
 7. A fix means editing the Gateway token registry, which is an **owner-seat
-   write** (`manage_gateway_config(resource_type="tokens", action="update", ...)`).
-   Offer it if you hold that seat; otherwise hand the operator the exact value to
-   change, and say which seat can change it.
+   write**. The tool's token actions are `add`, `delete` and `save` — there is
+   no `update` (CO-5): correct a registered token by `add`-ing it again with the
+   right `decimals` (same symbol and address), or `delete` then `add` if the
+   backend rejects a duplicate, and `save` to persist. Offer it if you hold that
+   seat; otherwise hand the operator the exact value to change and say which
+   seat can change it.

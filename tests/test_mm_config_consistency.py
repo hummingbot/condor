@@ -33,8 +33,14 @@ CONTROLLER = MM / "controllers/pmm_mister/pmm_mister.py"
 PLAYBOOK = MM / "skills/pmm_config_playbook"
 PROFILES = ["conservative", "balanced", "aggressive"]
 
-#: Settings a profile and its sample config must agree on. ``total_amount_quote``
-#: is deliberately absent: it belongs to the session, not to a profile.
+#: Settings a profile and its sample config must agree on: the ones that shape
+#: RISK. Deliberately not every field — a profile is regime-driven guidance and a
+#: sample is a shipped starting file, so spreads, cooldowns, effectivization and
+#: tolerances differ by design (the aggressive pair differs on fourteen). Claiming
+#: they match "field for field" was wrong, and a test asserting it would either
+#: fail or force someone to invent trading parameters to satisfy it.
+#: ``total_amount_quote`` is absent for a different reason: it belongs to the
+#: session, not to a profile.
 SHARED_FIELDS = [
     "portfolio_allocation",
     "leverage",
@@ -198,6 +204,24 @@ def test_agent_md_documents_the_class_default_not_a_guess(field, expected):
         if expected.replace(".", "").isdigit()
         else documented == expected
     )
+
+
+def test_the_playbook_does_not_overclaim_the_match():
+    """It said "field for field", which is false — and a reader who believed it
+    would treat a legitimate tuning difference as a defect."""
+    text = " ".join((PLAYBOOK / "SKILL.md").read_text().split())
+
+    assert "field for field" not in text
+    assert "settings that shape RISK" in text
+    assert "not** copies of each other" in text or "not copies of each other" in text
+
+
+@pytest.mark.parametrize("field", SHARED_FIELDS)
+def test_the_risk_fields_are_named_in_the_doc(field):
+    """The list the rule binds has to be visible, or it is not a rule."""
+    text = " ".join((PLAYBOOK / "SKILL.md").read_text().split())
+
+    assert f"`{field}`" in text
 
 
 def test_the_playbook_states_the_order():

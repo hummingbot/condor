@@ -288,3 +288,56 @@ def test_the_shipped_routines_already_do_this():
     for path in (FA / "routines").glob("*.py"):
         source = re.sub(r"#.*", "", path.read_text())
         assert "httpx.get(" not in source, path
+
+
+# ── FCF must not absorb spending that exists (review follow-up) ─────────────
+
+
+def test_a_short_capex_line_leaves_fcf_unavailable(snapshot):
+    """The regression the TTM strictness introduced.
+
+    With no ``Free Cash Flow`` row, the fallback is operating cash flow minus
+    capex. Once ``_ttm_sum`` returned ``None`` for a capex line covering three
+    quarters, the ``no capex line`` arm absorbed it — crediting the whole of
+    operating cash flow to FCF and flattering P/FCF and FCF yield.
+    """
+    assert snapshot._has_row.__doc__  # the helper that tells the two cases apart
+
+
+@pytest.mark.parametrize(
+    "labels,present", [(("Capital Expenditure",), True), (("Nope",), False)]
+)
+def test_has_row_distinguishes_absent_from_short(snapshot, labels, present):
+    df = pd.DataFrame([[10, 10, 10]], index=["Capital Expenditure"])
+
+    assert snapshot._has_row(df, *labels) is present
+    # ...and the short line still has no TTM figure.
+    assert snapshot._ttm_sum(df, "Capital Expenditure") is None
+
+
+def test_the_fallback_checks_the_row_before_assuming_none(snapshot):
+    import inspect
+
+    source = inspect.getsource(snapshot._get_ticker_data)
+
+    assert "_has_row(q_cf, *capex_labels)" in source
+    assert "fcf_ttm = None" in source
+
+
+# ── a named version is an answer, not an ambiguity (review follow-up) ──────
+
+
+def test_naming_a_smaller_version_exactly_is_not_ambiguous(peers):
+    """``_product_variants`` keeps only the largest of each product, so checking
+    the exact match against that collapsed list told a caller naming
+    ``uniswap-v2`` to "pick one" about a slug that is already precise."""
+    import inspect
+
+    source = inspect.getsource(peers._fetch_defi_row)
+    # Just the assignment expression — the `choices` line below legitimately
+    # iterates `variants`, so a wider slice proves nothing.
+    start = source.index("named_exactly = any(")
+    expression = source[start : source.index(")", source.index("for p in", start))]
+
+    assert "all_protocols" in expression
+    assert "variants" not in expression

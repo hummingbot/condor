@@ -1567,7 +1567,24 @@ class TickEngine:
         disowned = read_disowned(getattr(self.strategy, "home", None))
 
         inherited: set[str] = set(recorded)
-        if not self.ledger.enforced and self.session_dir is not None:
+        if self.session_dir is not None:
+            # Unconditionally, including for a namespace-enforcing session.
+            #
+            # This used to be gated on ``not enforced``, on the argument that an
+            # enforcing session recognises its bots by name and needs no second
+            # rule. That holds only for a strategy that has ALWAYS enforced. The
+            # moment one switches on ``bot_mode: bot`` — which is exactly how
+            # MM-5 and DT-5 were fixed — every bot an earlier session deployed
+            # under the old naming falls outside the new namespace, and dropping
+            # lineage orphaned it: still live, still trading, and no longer
+            # adoptable by the session that replaced its owner.
+            #
+            # A prior session's RECORDED base is a fact, not an inference —
+            # the same standing ``recorded`` already has above, and it is read
+            # from this strategy's own session directory, so it cannot reach
+            # another strategy's fleet. ``disowned`` still outranks it and the
+            # live listing still bounds it, so the pass stays as conservative as
+            # it was.
             inherited |= prior_session_bases(self.session_dir.parent)
 
         now = time.time()

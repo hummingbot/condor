@@ -218,3 +218,27 @@ def test_it_says_what_the_skills_are_still_for():
     body = _flat(LP / "AGENT.md")
 
     assert "carry the *reasoning*" in body
+
+
+# ── a loop switching to controller mode must not orphan its old bots ────────
+
+
+def test_lineage_adoption_is_not_gated_on_enforcement():
+    """Switching ``bot_mode: bot`` on turned namespace enforcement on, and
+    lineage adoption off — so a bot an earlier session deployed under the old
+    naming fell outside the new namespace and became unadoptable: still live,
+    still trading, and no session able to manage it.
+
+    A prior session's *recorded* base is a fact, read from this strategy's own
+    session directory, so it stands on the same footing as this session's action
+    log — which was always applied unconditionally.
+    """
+    import inspect
+
+    from condor.agents import engine as engine_mod
+
+    source = inspect.getsource(engine_mod.TickEngine._adopt_running_bots)
+    lineage = source[source.index("inherited: set[str]") :][:1400]
+
+    assert "prior_session_bases" in lineage
+    assert "not self.ledger.enforced" not in lineage

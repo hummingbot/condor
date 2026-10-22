@@ -22,7 +22,7 @@ name four parameters that do not exist — `agent`, `limit`, `entry`, `instance_
 | Intent | Tool |
 |---|---|
 | Read an agent's journal | `trading_agent_journal_read(agent_id="<agent_id>", section="recent", max_entries=N)` |
-| Write to an agent's journal | `trading_agent_journal_write(agent_id="<agent_id>", entry_type="action", text="...")` |
+| Write to an agent's journal | `trading_agent_journal_write(agent_id="<agent_id>", entry_type="action", text="...", tick=N)` |
 | List all agents | `manage_agents(action="list")` |
 | Get one agent's config/identity | `manage_agents(action="get", agent_slug="<slug>")` |
 | List the loops agents own | `manage_loops(action="list")` (each row names its `agent_slug`) |
@@ -35,6 +35,11 @@ name four parameters that do not exist — `agent`, `limit`, `entry`, `instance_
 | Read YOUR OWN memory | `manage_memory(action="list")` then `manage_memory(action="read", name="...")` |
 | Read an agent's skills | `manage_skill(action="list", agent="<slug>")` |
 | Run a routine belonging to an agent | `manage_routines(action="run", name="<routine>", agent="<slug>")` |
+
+> **An `action` entry needs its `tick`.** `tick` defaults to 0 and the tool
+> refuses `action` and `canvas` entries below tick 1, so an example without it
+> returns an error instead of saving. Pass the current tick number; a
+> `learning` or `note` entry does not need one.
 
 > **`agent_id` is a running instance's id, not a slug.** `control_agent` and the
 > journal tools take the id `control_agent(action="list")` returns — the

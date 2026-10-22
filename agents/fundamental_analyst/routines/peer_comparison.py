@@ -303,8 +303,13 @@ async def _fetch_defi_row(
         # Only when the caller named the brand alone: an explicit slug such as
         # "hyperliquid-hlp" has already answered it.
         variants = _product_variants(slug_input, all_protocols)
+        # Against ALL protocols, not the collapsed variant list: grouping keeps
+        # only the largest of each product, so a caller naming a smaller version
+        # exactly (``uniswap-v2`` where v3 is bigger) would be told to "pick one"
+        # about a slug that is already a precise answer.
         named_exactly = any(
-            p.get("slug", "").lower() == slug_input.lower().strip() for p in variants
+            p.get("slug", "").lower() == slug_input.lower().strip()
+            for p in all_protocols
         )
         if len(variants) > 1 and not named_exactly:
             choices = ", ".join(
