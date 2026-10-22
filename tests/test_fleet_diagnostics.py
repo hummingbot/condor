@@ -48,9 +48,23 @@ def test_the_host_reading_divides_load_by_the_cores_it_has():
     # Darwin and Linux both have a load average; the suite runs on both.
     assert reading["available"] is True
     assert reading["vcpus"] > 0
+
+    # The two fields are rounded differently, and the tolerance has to allow for
+    # it: ``load_1m`` is the raw average to 2dp, while ``load_per_vcpu`` divides
+    # the RAW average and rounds to 3dp. So recomputing from the published
+    # ``load_1m`` carries up to 0.005/vcpus of error from that first rounding,
+    # plus 0.0005 from the second.
+    #
+    # A flat 1e-3 therefore failed on any host with fewer than five cores —
+    # 0.005/4 = 0.00125 — which is every standard CI runner, while passing on a
+    # developer box with 8+. It read as flaky and was arithmetic.
+    tolerance = 0.005 / reading["vcpus"] + 0.0005
     assert reading["load_per_vcpu"] == pytest.approx(
-        reading["load_1m"] / reading["vcpus"], abs=1e-3
+        reading["load_1m"] / reading["vcpus"], abs=tolerance
     )
+
+    # The relationship the rounding cannot blur: a reading is still a quotient.
+    assert 0 <= reading["load_per_vcpu"] <= reading["load_1m"] + tolerance
 
 
 def test_a_platform_with_no_load_average_reports_unavailable(monkeypatch):
