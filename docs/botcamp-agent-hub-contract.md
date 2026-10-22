@@ -28,7 +28,7 @@ credential and link this contract defines is install-wide on the Condor side.
 1. [The portable agent bundle](#1-the-portable-agent-bundle)
 2. [API base, transport rules, and errors](#2-api-base-transport-rules-and-errors)
 3. [Catalogue: browse, get, download](#3-catalogue-browse-get-download)
-4. [Account pairing](#4-account-pairing)
+4. [Account linking (OAuth2 device flow)](#4-account-linking-oauth2-device-flow)
 5. [Submission lifecycle](#5-submission-lifecycle)
 6. [Deterministic refusal checks](#6-deterministic-refusal-checks)
 7. [Review queue and reviewer API](#7-review-queue-and-reviewer-api)
@@ -139,32 +139,42 @@ Field notes, normative for the hub as much as for Condor:
 ### 2.1 Base URL
 
 ```
-https://hub.botcamp.xyz/v1
+https://botcamp.xyz/api
 ```
 
 Condor compiles this in as a constant (`condor/hub.py`'s `HUB_URL`) and ships
-no environment variable or setting that redirects it. This is a deliberate
-SSRF defense, not an oversight to design around: a server-side fetch of a
-**user-supplied** URL is the surface Condor refuses to build; a fetch of a
-**compiled-in** one, to a single path segment that has already passed an
-identifier check, is not. Two consequences for the hub's design:
+no environment variable or setting that redirects it in production (a narrow,
+loudly-logged dev-only override exists for testing against a non-production
+hub; it never changes what a production install talks to). This is a
+deliberate SSRF defense, not an oversight to design around: a server-side
+fetch of a **user-supplied** URL is the surface Condor refuses to build; a
+fetch of a **compiled-in** one, to a single path segment that has already
+passed an identifier check, is not. There is no `hub.` subdomain and no
+versioned `/v1` path segment — the hub lives on the `botcamp.xyz` app itself,
+under two path families: `/api/condor/*` (this install's own account and
+device-login state — §4) and `/api/agents/*` (the catalogue and submission
+surface — §3, §5, §7, §8). Two consequences for the hub's design:
 
 - **Never require a redirect.** Condor's HTTP client refuses every redirect
   response outright (it raises rather than following a `3xx`), on every verb,
   including the bundle download. If a future CDN or load balancer in front of
   the hub issues a `302`, every Condor install breaks at once. Terminate
   redirects before they reach the client, or don't use them.
-- **The path prefix is part of the contract.** Every endpoint below is
-  relative to `/v1`. A `v2` is a new base Condor would need a release to pick
-  up — version the API by path, not by header, so an old client simply keeps
-  working against `/v1` indefinitely.
+- **The path prefix is part of the contract.** Every endpoint below is given
+  as a full path under this base. A new, incompatible shape for an existing
+  path is a new path segment Condor would need a release to pick up — version
+  by path, not by header, so an old client simply keeps working indefinitely
+  against the paths it already calls.
 
 ### 2.2 Identifiers in a URL path
 
-Every `listing_id`, `submission_id`, and `link_id` this contract defines is
-validated by Condor against the charset `[A-Za-z0-9._-]` **before any request
-is built**, and `.` / `..` alone are refused as values even though they match
-that charset. Two things follow for the hub:
+Every `listing_id` and `submission_id` this contract defines is validated by
+Condor against the charset `[A-Za-z0-9._-]` **before any request is built**,
+and `.` / `..` alone are refused as values even though they match that
+charset. (§4's device flow interpolates no caller-controlled identifier into
+a URL path at all — `device_code` travels only in a POST body, read back by
+the hub from what it itself issued, so this rule does not constrain it.) Two
+things follow for the hub:
 
 - **Mint identifiers from that charset.** An opaque id containing `/`, `?`,
   `#`, or whitespace cannot be used by the Condor client at all — it will
@@ -197,10 +207,10 @@ that charset. Two things follow for the hub:
 | Status | Condor's reading |
 |---|---|
 | `2xx` | Success; body parsed as the endpoint's documented shape. |
-| `400` | The caller's request was malformed, or (publish) a deterministic refusal. Not retried automatically. |
+| `400` | One of three distinct shapes, told apart by body, not by status alone: the caller's request was malformed; a deterministic publish refusal (§5.2), shaped `{"status": "rejected", "reasons": [...]}`; or, from the device-token poll alone (§4.3), an OAuth2 device-flow error shaped `{"error": "authorization_pending" \| "slow_down" \| "access_denied" \| "expired_token" \| "invalid_grant"}`. Condor retries automatically only on `authorization_pending`/`slow_down`; every other case ends the polling attempt. |
 | `401` / `403` | The credential is missing, wrong, or revoked. Rendered to the admin as "set a new one in Settings." |
 | `404` | The thing named in the path does not exist (or no longer does). |
-| `409` | A conflict Condor's own retry logic does not resolve by itself — reserved for the pairing replay case (§4.4) and a submission resubmitted with changed bytes under an id already decided (§5.4). |
+| `409` | A conflict Condor's own retry logic does not resolve by itself — reserved for a submission resubmitted with changed bytes under an id already decided (§5.4). The device flow (§4) has no endpoint that returns `409`: a login in flight is simply forgotten locally rather than cancelled on the hub, and a device code is never replayed for a second credential. |
 | `413` | The body exceeds a size limit named in this contract. |
 | `429` | Rate limited. Include `Retry-After` if you can; Condor does not currently read it, but a future client version will, and it costs the hub nothing to send now. |
 | `5xx` | Upstream failure. Condor's web layer turns this into its own `502` to the dashboard, i.e. it is reported as "the hub is unreachable," not attributed to the operator. |
@@ -343,7 +353,7 @@ check it; it only checks the bytes.
 
 ---
 
-## 4. Account pairing
+## 4. Account linking (OAuth2 device flow)
 
 Publishing and withdrawing act under one Botcamp account's identity, and that
 identity is **install-wide** on the Condor side — one credential per Condor
@@ -351,144 +361,218 @@ install, usable only by that install's admin, with no per-user identity inside
 Condor yet (deferred). The design problem this section solves: Condor's web
 dashboard runs on an operator-chosen `WEB_PORT` that varies per install and is
 frequently not even internet-reachable, so a standard OAuth redirect back to
-the dashboard has no stable URI to register. See §10 for why OAuth and a
-pasted token were both considered and rejected in favor of this flow.
+the dashboard has no stable URI to register. See §10 for why a redirect-based
+OAuth flow and a pasted token were both considered and rejected in favor of
+this one.
+
+This section describes the standard OAuth2 device authorization grant
+([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)) as Condor's client
+(`condor/hub.py`'s `device_start`/`device_state`/`device_cancel`/`me`,
+exercised by `tests/test_hub.py`) actually calls it against PR #111 of
+`hummingbot/botcamp-site`. It replaces both the one-time pasted-token UX and
+FEAT-148's own `/v1/link` pairing-code protocol, which was built and shipped
+against this contract's earlier draft before the hub's actual PR #111
+endpoints were available to reconcile against — that flow was never wired to
+a live hub and no Condor release ever called it against one. The Botcamp PR's
+own source was not accessible from this workspace during this rewrite; the
+request and response shapes below are reconstructed from Condor's client
+implementation and the fixtures its tests assert against, not read from the
+hub's source, and should be verified against the actual hub implementation
+before being treated as settled.
 
 ### 4.1 Flow, end to end
 
-1. Condor's backend calls `POST /v1/link/start` with **no credential** (there
-   isn't one yet).
-2. The hub mints a `link_id` (opaque, used only for polling — never shown to
-   a human), a short `code` (used in the URL Condor opens), and a longer
-   `verification` string (shown to the human on both ends, to resist a
-   phished `code`). It returns all three plus an expiry.
-3. Condor's dashboard opens `https://hub.botcamp.xyz/v1/link?code=<code>` in
-   a new browser tab and shows the **same** `verification` string beside an
-   "open Botcamp" button, so the admin can compare the two strings and not
-   just click through blind.
+1. Condor's backend calls `POST /api/condor/device/code` with **no
+   credential** (there isn't one yet) and an empty JSON body.
+2. The hub mints a `device_code` (opaque, used only for polling — never shown
+   to a human), a short `user_code` (shown to the human so they can confirm
+   the approval page matches the login Condor started), and a
+   `verification_uri`/`verification_uri_complete` to open. It returns all of
+   these plus `expires_in` and a polling `interval`.
+3. Condor's dashboard builds the approval link **from its own configured hub
+   base plus the returned `user_code`** (`<configured base>/connect?code=<user_code>`)
+   and opens that in a new browser tab, showing the `user_code` beside it so
+   the admin can confirm it matches. It does **not** open or display
+   `verification_uri`/`verification_uri_complete` verbatim unless that URI's
+   host matches Condor's own configured hub base — a hub response is not
+   something Condor treats as safe to redirect an admin's browser to sight
+   unseen, since nothing before that point vetted it. The hub's own pages
+   SHOULD therefore live on `botcamp.xyz` itself; a `verification_uri` on a
+   different host will be ignored by Condor clients that implement this
+   policy, logged once, and the admin will see only the base-plus-code link
+   built locally.
 4. On that page, the hub requires the human to already be signed into
-   Botcamp (or sign in first), shows the `code`'s `verification` string again
-   for the human to compare against what Condor showed, and offers Accept /
-   Deny. This page itself is out of this contract's scope beyond "it must
-   repeat the verification string before Accept" — it is server-rendered UI,
-   not an API response Condor parses.
-5. Condor's backend polls `GET /v1/link/{link_id}` (no credential — the
-   point of the flow is that none exists yet) at a bounded interval until it
-   sees a terminal state.
-6. On `accepted`, that **one** poll response carries the credential and the
-   linked profile handle. Condor stores the credential server-side,
-   immediately, and never sends it to its own browser. Every later poll of
-   that same `link_id` must **not** repeat the credential (§4.4) — a leaked
-   `link_id` does not reveal the credential a second time.
-7. Condor's backend may call `DELETE /v1/link/{link_id}` at any point before
-   acceptance to cancel its own pending attempt (e.g. the admin navigated
-   away, or started a new link).
+   Botcamp (or sign in first), shows the `user_code` again for the human to
+   compare against what Condor showed, and offers Accept / Deny. This page
+   itself is out of this contract's scope beyond "it must show the
+   `user_code` before Accept" — it is server-rendered UI, not an API response
+   Condor parses.
+5. Condor's backend polls `POST /api/condor/device/token` (no credential —
+   the point of the flow is that none exists yet) with the `device_code`, at
+   the hub's own `interval`, until it sees a terminal state.
+6. On success, that **one** poll response carries the access token, its
+   granted scope, and the identity it was issued to. Condor stores the token
+   server-side, immediately, through `update_hub`, and never sends it to its
+   own browser — see §4.6. The pending attempt is then forgotten; there is no
+   further poll of the same `device_code` to repeat anything to.
+7. Condor's backend may stop polling a `device_code` at any point before a
+   terminal state (e.g. the admin navigated away, or started a new login) —
+   see §4.5; the device-flow contract has no hub-side cancel endpoint, and an
+   abandoned `device_code` simply expires at the hub on its own, at
+   `expires_in`.
 
-### 4.2 `POST /v1/link/start`
+### 4.2 `POST /api/condor/device/code` — start a device login
 
-Request body: none required (an empty JSON object `{}` is fine).
+Request body: none required (an empty JSON object `{}` is fine; Condor sends
+no `client_id`/`client_name`/`scope` — see the note below on scope).
 
 Response `200`:
 
 ```json
 {
-  "link_id": "lnk_3f8c1a9e2b7d4f60",
-  "code": "WXYZ-4821",
-  "verification": "porcupine-harbor-violet-trellis",
-  "expires_at": "2026-10-21T12:10:00Z",
-  "poll_interval_s": 3
+  "device_code": "dev_3f8c1a9e2b7d4f60",
+  "user_code": "WXYZ-4821",
+  "verification_uri": "https://botcamp.xyz/connect",
+  "verification_uri_complete": "https://botcamp.xyz/connect?code=WXYZ-4821",
+  "expires_in": 600,
+  "interval": 5
 }
 ```
 
-- `code` is short because it rides in a URL an admin may need to retype on a
-  second device; it is **not** the secret — `verification` is the thing a
-  human actually compares, and `code` alone must not be sufficient to approve
-  a link (a code that leaked into a browser history or a screen share must
-  not approve anything by itself without the human seeing and confirming the
-  matching `verification` string).
-- `expires_at` SHOULD be short — 10 minutes is a reasonable default. A link
-  that is still `pending` past this time answers `expired` on every
-  subsequent poll (§4.3), never `accepted`.
-- **Rate limit `POST /v1/link/start` per source** (IP, or whatever the hub
-  already keys abuse limits on) — it is the one pairing endpoint that needs
-  no credential to call at all, which makes it the cheapest one to hammer.
-- **One active pairing per install.** If Condor starts a second `link/start`
-  while an earlier `link_id` is still `pending`, the hub is not required to
-  track which Condor install issued which `link_id` (it has no way to know
-  yet) — Condor's own backend is responsible for invalidating its *local*
-  memory of the previous attempt and simply stops polling it. The hub does
-  not need to implement "only one pending link per install" itself; it has no
-  install identity to key that on before acceptance.
+- `device_code` is never shown to a human and never logged by Condor — it is
+  the polling secret. `user_code` is the one the human compares; it alone
+  must not be sufficient to approve a login (one that leaked into a browser
+  history or a screen share must not authorize anything by itself without
+  the human seeing and confirming the matching approval page).
+- `verification_uri_complete` is optional; when absent, Condor falls back to
+  `verification_uri`, and — per §4.1 step 3 — treats either as display-only
+  and subject to its own host check, never as a value it opens unconditionally.
+- `expires_in` (seconds; default assumed `600` if omitted) and `interval`
+  (seconds; default assumed `5` if omitted, floored at `1`) govern how long
+  Condor keeps polling and how often. A login still `pending` past
+  `expires_in` is answered `expired_token` on every subsequent poll (§4.3),
+  never a token.
+- **No explicit scope request.** Condor's client omits `scope` entirely from
+  this request; it expects the hub to grant the one all-or-nothing,
+  install-wide scope (`agents:read` and `agents:publish` together) that the
+  pasted-token flow it replaces always implied. There is no way, today, for
+  Condor to request a narrower grant, and the hub does not need to support
+  one.
+- **Rate limit this endpoint per source** (IP, or whatever the hub already
+  keys abuse limits on) — it is the one step of this flow that needs no
+  credential to call at all, which makes it the cheapest one to hammer.
+- **One active login per install, enforced on Condor's side, not the hub's.**
+  If Condor starts a second device login while an earlier `device_code` is
+  still pending, Condor's own backend simply forgets the earlier
+  `device_code` and stops polling it — the hub has no install identity to key
+  "one pending login per install" on before a token is issued, and does not
+  need to implement that itself.
 
-### 4.3 `GET /v1/link/{link_id}`
+### 4.3 `POST /api/condor/device/token` — poll / exchange
 
-No credential. Response `200` always (a `link_id` the hub never issued, or
-one already fully consumed and forgotten, is the one case to answer `404`
-instead — see §4.4):
+Request body: `{"device_code": "<the value from §4.2>"}`. No credential.
 
-```json
-{ "status": "pending", "expires_at": "2026-10-21T12:10:00Z" }
-```
-
-```json
-{ "status": "denied" }
-```
-
-```json
-{ "status": "expired" }
-```
+Response `200` once the human has approved:
 
 ```json
 {
-  "status": "accepted",
-  "profile_handle": "cardosofede",
-  "credential": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
-  "credential_scope": "author"
+  "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+  "token_type": "bearer",
+  "scope": "agents:read agents:publish",
+  "user": { "id": "u_1", "name": "cardosofede" }
 }
 ```
 
-- `credential_scope` is always `"author"` for this endpoint — a pairing never
-  grants the reviewer scope (§7.1), which is minted differently and never via
-  this flow.
-- **One-time delivery.** The very next poll of the same `link_id` after an
-  `accepted` response was already returned must come back **without** the
-  `credential` field (keep `status: "accepted"` and `profile_handle`, drop
-  `credential`), or the hub may choose to answer `404` for that `link_id`
-  from that point on. Either is acceptable; what is not acceptable is
-  answering the credential a second time. This is the pairing flow's replay
-  defense: a `link_id` is not a secret (it rode in a server-to-server poll,
-  but it could still end up in a log), and the actual credential must not be
-  extractable twice from it.
-- **Poll rate limiting.** Reject polls faster than roughly `poll_interval_s /
-  2` for one `link_id` with `429`. Condor's backend is the only caller and
-  honors `poll_interval_s`; this guards against a bug or a malicious replay
-  hammering the endpoint, not against a well-behaved client.
+- `access_token` is read exactly once, by this one response, and immediately
+  handed to `update_hub` — see §4.6. It is never repeated on any later call
+  for the same `device_code`; the hub MAY therefore invalidate `device_code`
+  the moment it answers `200` the first time (a replay of the same
+  `device_code` after that point has nothing to answer with that Condor would
+  accept as new — it has already stopped polling).
+- `scope` may be a space-separated string (as above, the standard OAuth2
+  shape) or a JSON array of strings; Condor's client accepts either.
+- `user` carries at least one of `name` or `id`; Condor renders whichever is
+  present as the linked profile's handle (`name` preferred). `token_type` is
+  read by nothing on Condor's side today but SHOULD be sent as `"bearer"` for
+  forward compatibility.
 
-### 4.4 `DELETE /v1/link/{link_id}`
+Response `400` while the login has not yet reached a terminal state, or has
+ended in one Condor must stop on, shaped `{"error": "<code>"}`:
 
-No credential. Cancels a `pending` link. `200` with `{"cancelled": true}` on
-success. `409` with `{"detail": "..."}` if the link was already `accepted` —
-cancelling a link whose credential may already be in flight to Condor's
-backend is a race the hub should refuse rather than silently resolve either
-way, and Condor's backend treats a `409` here as "assume it went through,"
-not as an error to surface.
+| `error` | Condor's reading |
+|---|---|
+| `authorization_pending` | Normal — the human has not yet acted. Keep polling at `interval`. |
+| `slow_down` | Condor is polling too fast; it widens its own `interval` by 5s and keeps polling. |
+| `access_denied` | The human denied it. Reported once, to the poll that observed it, then the attempt is forgotten. |
+| `expired_token` | Past `expires_in` with no decision. Reported once, then forgotten. Condor also stops polling locally once its own copy of `expires_in` elapses, without spending a further request on an attempt the hub has likely already retired on its side. |
+| `invalid_grant` | A `device_code` the hub does not (or no longer) recognize. Reported once, as its own distinct state, then forgotten. |
 
-### 4.5 Credential storage and use
+An `error` value outside this set is treated as a protocol violation Condor's
+client does not know how to handle, and raises rather than guessing at a
+state. Any other status code (a transport failure, a `5xx`, a `401`/`403`) is
+read per §2.4's general table, not as a device-flow-specific case.
 
-The resulting `credential` is what Condor's `Authorization: Bearer` header
-carries on every subsequent **author-scoped** call — `POST /v1/agents`
-(§5.2), `GET /v1/submissions/{submission_id}` (§5.3), `DELETE
-/v1/agents/{listing_id}` (§8.1). It is stored in Condor's own `config.yml`
-under `hub.token` (the field name predates this document and is being kept
-rather than renamed; "token" and "credential" name the same thing in this
-contract). It is never returned by any Condor route to its own browser, never
-logged, and never placed in a URL.
+### 4.4 `GET /api/condor/me` — who a token identifies
+
+Credential-authenticated (`Authorization: Bearer <access_token>`). Used both
+to show the admin who is currently linked (read fresh, not from the
+device-login record cached at link time) and to detect a token Botcamp's own
+profile page revoked out from under this install.
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "user": { "id": "u_1", "name": "cardosofede", "slug": "cardosofede" },
+    "scopes": ["agents:read", "agents:publish"]
+  }
+}
+```
+
+`401` means the hub no longer honours this token (revoked from the account's
+own token list, most likely, rather than anything the request itself did
+wrong) — Condor clears its local copy of the token on any `401` from this or
+any other token-bearing call, the same way, and the admin sees "connect a
+profile" rather than a stale linked identity on the next read. `400` with no
+token presented at all is a local Condor refusal (`NoTokenError`) that never
+reaches the hub.
+
+### 4.5 `DELETE /api/condor/me` — revoke
+
+Credential-authenticated. Called when the admin disconnects a linked profile
+(never for cancelling a login still in flight — that case has no hub call at
+all; see §4.1 step 7). A `2xx` is read as "the hub's own copy of this token is
+now revoked"; Condor does not require a specific response body to confirm
+this, though returning one (e.g. `{"data": {"revoked": true}}`) costs the hub
+nothing and gives the hub's own audit trail a consistent shape with §4.4.
+
+Condor clears its local copy of the credential **unconditionally**, whether
+this call succeeds, is refused, or the hub cannot be reached at all — a
+disconnect must never leave an install stuck pretending to be connected because
+the network dropped a request. What differs is only what the admin is told:
+a successful revoke, a refusal or unreachable hub (the local credential is
+still gone, but Botcamp's own copy may still be valid until it expires or is
+revoked some other way), or nothing to revoke in the first place (there was no
+token — e.g. only a pending login was cancelled).
+
+### 4.6 Credential storage and use
+
+The resulting `access_token` is what Condor's `Authorization: Bearer` header
+carries on every subsequent **author-scoped** call — submit (§5.2), check
+submission status (§5.3), unpublish (§8.1), and §4.4/§4.5 above; see those
+sections for the exact paths, which are reconciled separately
+([[TASK-010]]). It is stored in Condor's own `config.yml` under `hub.token`
+(the field name predates this
+document and is being kept rather than renamed; "token", "credential" and
+"access token" name the same thing in this contract). It is never returned by
+any Condor route to its own browser, never logged, and never placed in a URL.
 
 A hub-side revocation (the admin revokes access from within Botcamp itself,
 rather than through Condor's "disconnect") takes effect the next time the
-credential is used: any author-scoped call with a revoked credential answers
-`401`, which Condor's client already renders as "the hub refused this token,
-set a current one."
+token is used: any author-scoped call with a revoked token answers `401`,
+which Condor's client reads as "the hub refused this token" and clears its
+own copy — see §4.4.
 
 ---
 
@@ -512,7 +596,7 @@ submission's same bytes — a new revision is a new submission (§5.4).
 
 ### 5.2 `POST /v1/agents` — submit
 
-Authenticated with the author credential (§4.5).
+Authenticated with the author credential (§4.6).
 
 Request body:
 
@@ -792,8 +876,9 @@ A **separate credential scope** from the author credential in §4 — minted
 through whatever account/authorization system the hub runs for its own
 reviewer accounts (out of scope for this contract; the only requirement is
 that it is never the same bearer value as an author's publish credential,
-and that it cannot be obtained through the pairing flow in §4, which only
-ever mints `credential_scope: "author"`). The review worker itself — whether
+and that it cannot be obtained through the device-login flow in §4, which
+only ever grants `agents:read`/`agents:publish` scope — see §4.3's `scope`
+field). The review worker itself — whether
 run by a human directly or orchestrated by MetaBrain on a human's behalf — is
 explicitly out of this Condor-only filing's scope; this section defines only
 the API surface such a worker calls.
@@ -893,7 +978,7 @@ of anything Condor ever sees.
 
 ### 8.1 Author-initiated: `DELETE /v1/agents/{listing_id}`
 
-Author-credential-authenticated (§4.5), scoped to listings published under
+Author-credential-authenticated (§4.6), scoped to listings published under
 that same credential's account. `200` with `{"unpublished": true}`. `403` if
 the credential does not own this listing. `404` if the listing is already
 gone.
@@ -983,13 +1068,17 @@ submission for omitting something optional.
 Recorded here so the decision does not need re-litigating the next time
 someone reads this contract wondering why it looks the way it does.
 
-- **OAuth redirect back to Condor's dashboard**, instead of the polling
-  pairing flow in §4. Rejected because `WEB_PORT` varies per install and many
-  installs are not internet-reachable at all, so there is no stable redirect
-  URI to register with an OAuth provider. The polling flow needs no inbound
-  reachability on Condor's side at all — it only needs to be able to make
-  outbound HTTPS calls, which every install already does for the Hummingbot
-  Backend API.
+- **A redirect-based OAuth2 authorization-code grant back to Condor's
+  dashboard**, instead of the device flow in §4. Rejected because `WEB_PORT`
+  varies per install and many installs are not internet-reachable at all, so
+  there is no stable redirect URI to register with an OAuth provider. The
+  device flow needs no inbound reachability on Condor's side at all — it
+  only needs to be able to make outbound HTTPS calls, which every install
+  already does for the Hummingbot Backend API. (An earlier draft of this
+  contract specified a bespoke polling pairing protocol, `/v1/link/*`,
+  instead of the standard device grant; that was superseded once PR #111
+  shipped the device-flow endpoints this section now documents, and no
+  Condor release ever called the bespoke protocol against a live hub.)
 - **A shared Python dependency between Condor and the hub for the review
   (§6).** Rejected because the hub is explicitly a separate codebase the
   Condor team may not deploy into, and because trusting an exporter's own
