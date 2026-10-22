@@ -50,9 +50,11 @@ function hubSource(slug: string, version: string): BundleSource {
 /**
  * Pull an agent from Botcamp by slug, and install it, without leaving Condor.
  *
- * Mounted on `/hub`'s public Pull agents section (FEAT-153) — reachable for
- * every signed-in Condor user, admin or not, with no Botcamp link required to
- * resolve a free agent. Botcamp (PR #111) ships no browse or search at all,
+ * Mounted on `/hub`'s Pull agents section (FEAT-153) once `AgentHub` has
+ * confirmed this install is linked to Botcamp — the backend's own read
+ * endpoints still accept an anonymous lookup (PR #111's contract for a free
+ * agent), but the dashboard does not reach this component until sign-in,
+ * admin or not. Botcamp (PR #111) ships no browse or search at all,
  * only a lookup by a slug the operator must already have — pasted from a
  * Botcamp agent page, say — so this is that lookup, not a catalogue grid. It
  * answers the same question Import does — how does an agent get here — and

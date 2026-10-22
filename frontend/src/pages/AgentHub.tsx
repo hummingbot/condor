@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Brain, Globe, Loader2 } from "lucide-react";
+import { ArrowLeft, Brain, Globe, Loader2, Lock } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
+  BotcampSignInModal,
   HubDeviceField,
   PublishAgentButton,
   WithdrawListingButton,
@@ -18,22 +19,42 @@ import { api } from "@/lib/api";
  * Before this, Hub browse and the Botcamp link lived under Settings → Agents,
  * and publish lived only on each agent's own workspace page — three doors to
  * one subject, one of them (withdraw) with no dashboard control at all. This
- * is the one page: Pull agents is public, for every signed-in Condor user,
- * with no Botcamp link required to browse or install; the Botcamp section —
- * connecting this install and uploading yours — is admin-only, by
- * `useIsAdmin` (cosmetic — the server's own `require_admin` on each route is
- * what actually gates it), and shows a sign-in step until this install is
- * linked (PR #111's device login), its normal content — connected status and
- * the upload picker — only once it is.
+ * is the one page: Pull agents requires this install to already be linked to
+ * Botcamp — the backend's own read endpoints accept an anonymous lookup, but
+ * this dashboard asks for a signed-in install before it will use them, so
+ * "connect to Botcamp" is the one gate every visitor meets before anything
+ * else on this page works; the Botcamp section — connecting this install and
+ * uploading yours — is admin-only, by `useIsAdmin` (cosmetic — the server's
+ * own `require_admin` on each route is what actually gates publish/withdraw),
+ * and shows a sign-in step until this install is linked (PR #111's device
+ * login), its normal content — connected status and the upload picker — only
+ * once it is.
  *
  * The admin query is mounted *only* inside the `isAdmin` branch, not merely
  * hidden behind it — `useIsAdmin` resolves with its own round trip, and firing
  * an admin-only request before that answers would be the one way this page
- * could leak that a non-admin seat exists at all.
+ * could leak that a non-admin seat exists at all. The Pull gate cannot read
+ * the same admin-only `["hub-device"]` state for that reason (it would be a
+ * 403 for every non-admin seat, on every visit) — it reads
+ * `getHubDeviceLinked` instead, the one bit of that state every signed-in
+ * seat is allowed to see.
+ *
+ * Signing in itself happens in `BotcampSignInModal`, opened from the Pull
+ * gate without leaving the page, closing itself the moment the poll reports
+ * `"linked"` — at which point `linked` below flips too and the lookup form
+ * replaces the gate. The Botcamp section further down keeps its own inline
+ * `HubDeviceField` besides: that one also manages disconnect and Upload
+ * yours, which the modal does not.
  */
 export function AgentHub() {
   const queryClient = useQueryClient();
   const isAdmin = useIsAdmin();
+  const [signInOpen, setSignInOpen] = useState(false);
+  const { data: hubDevice } = useQuery({
+    queryKey: ["hub-device-linked"],
+    queryFn: api.getHubDeviceLinked,
+  });
+  const linked = hubDevice?.linked ?? false;
 
   return (
     <div className="mx-auto max-w-4xl space-y-8 px-4 py-6">
@@ -62,13 +83,37 @@ export function AgentHub() {
           Agents other people published, looked up by slug. Installing one goes
           through the same review as a file: every executable is named before
           anything is written, the routines and skills arrive switched off, and
-          nothing is started. No Botcamp connection is needed to look one up or
-          install a free one.
+          nothing is started.
         </p>
-        <HubBrowser
-          onInstalled={() => queryClient.invalidateQueries({ queryKey: ["agents"] })}
-        />
+        {linked ? (
+          <HubBrowser
+            onInstalled={() => queryClient.invalidateQueries({ queryKey: ["agents"] })}
+          />
+        ) : (
+          <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-4 py-8 text-center">
+            <Lock className="h-4 w-4 text-[var(--color-text-muted)]" />
+            <p className="text-sm text-[var(--color-text)]">
+              Sign in to Botcamp to look up or pull agents.
+            </p>
+            {isAdmin ? (
+              <button
+                onClick={() => setSignInOpen(true)}
+                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              >
+                Sign in to Botcamp
+              </button>
+            ) : (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Ask an admin to connect this install to Botcamp.
+              </p>
+            )}
+          </div>
+        )}
       </section>
+
+      {isAdmin && (
+        <BotcampSignInModal open={signInOpen} onClose={() => setSignInOpen(false)} />
+      )}
 
       {isAdmin && (
         <section className="border-t border-[var(--color-border)] pt-8">

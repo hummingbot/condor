@@ -1377,6 +1377,27 @@ async def get_hub_device(user: WebUser = Depends(get_current_user)):
     return state.model_dump()
 
 
+@router.get("/hub-device/linked")
+async def get_hub_device_linked(user: WebUser = Depends(get_current_user)):
+    """Whether this install is linked to Botcamp. Nothing else.
+
+    `/hub`'s Pull agents gate (FEAT-153) needs this for every signed-in seat,
+    not just the admin who can act on it — Pull is unlocked install-wide once
+    someone connects a profile. The full state above stays admin-only on
+    purpose (profile handle, a pending user code); this route answers with
+    neither, so a non-admin learns only the one bit that unlocks their own
+    Pull section.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    try:
+        state = await asyncio.to_thread(hub.device_state)
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    return {"linked": state.status == "linked"}
+
+
 @router.delete("/hub-device")
 async def disconnect_hub_device(user: WebUser = Depends(get_current_user)):
     """Cancel a device login in flight, or disconnect a linked profile.

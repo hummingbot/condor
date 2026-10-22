@@ -8,10 +8,11 @@ import {
   Loader2,
   Upload,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { InlineConfirm } from "@/components/ui/InlineConfirm";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { useIsAdmin } from "@/hooks/useIsAdmin";
 import { api, errorStatus } from "@/lib/api";
 
@@ -252,7 +253,22 @@ function BotcampAccountCard() {
  *
  * Composed on the admin-only part of `/hub` (FEAT-153).
  */
-export function HubDeviceField({ children }: { children?: ReactNode }) {
+/**
+ * The device-login state machine, shared by `HubDeviceField` (connected
+ * status + Upload yours, in Settings → Agents / the Botcamp section of
+ * `/hub`) and `BotcampSignInModal` (the same sign-in step, reached from
+ * `/hub`'s Pull agents gate without leaving it) — one place that owns the
+ * `start`/`disconnect` mutations and the `["hub-device"]` poll, so the two
+ * presentations can never disagree about where the link stands.
+ *
+ * It also invalidates `["hub-device-linked"]` the moment this poll observes
+ * `"linked"` flip, either way — `/hub`'s Pull gate reads that separate,
+ * non-admin-safe query (`AgentHub`'s own docstring explains why it cannot
+ * share this one), and without this it would keep its stale answer until
+ * some other refetch happened to come along after a sign-in or a disconnect
+ * that just happened here.
+ */
+function useHubDevice() {
   const queryClient = useQueryClient();
   const { data } = useQuery({
     queryKey: ["hub-device"],
@@ -260,6 +276,15 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
     refetchInterval: (query) =>
       query.state.data?.status === "pending" ? 2000 : false,
   });
+
+  const wasLinked = useRef<boolean | null>(null);
+  useEffect(() => {
+    const isLinked = data?.status === "linked";
+    if (wasLinked.current !== null && wasLinked.current !== isLinked) {
+      queryClient.invalidateQueries({ queryKey: ["hub-device-linked"] });
+    }
+    wasLinked.current = isLinked;
+  }, [data?.status, queryClient]);
 
   const start = useMutation({
     mutationFn: api.startHubDevice,
@@ -290,8 +315,21 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
     },
   });
 
-  const status = data?.status ?? "none";
-  const busy = start.isPending || disconnect.isPending;
+  return {
+    data,
+    status: data?.status ?? "none",
+    start,
+    disconnect,
+    busy: start.isPending || disconnect.isPending,
+    revokeNotice,
+  };
+}
+
+type HubDevice = ReturnType<typeof useHubDevice>;
+
+export function HubDeviceField({ children }: { children?: ReactNode }) {
+  const device = useHubDevice();
+  const { data, status, disconnect, busy } = device;
 
   if (status === "linked") {
     return (
@@ -317,6 +355,19 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
       </div>
     );
   }
+
+  return <HubDeviceSignInPanel device={device} />;
+}
+
+/**
+ * The not-yet-linked half of the state machine on its own: the sign-in
+ * button, the pending user code, and the denied/expired/invalid/error
+ * messages — everything short of "connected". Exported so
+ * `BotcampSignInModal` can render exactly this inside its own chrome rather
+ * than a second implementation of the same polling and mutations.
+ */
+export function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
+  const { data, status, start, disconnect, busy, revokeNotice } = device;
 
   return (
     <div className="space-y-1.5">
@@ -393,6 +444,55 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
           {revokeNotice}
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * "Sign in to Botcamp" as a modal, reached from `/hub`'s Pull agents gate
+ * (FEAT-153) without leaving the page. Wraps the same `HubDeviceSignInPanel`
+ * `HubDeviceField` renders inline in the Botcamp section further down — one
+ * state machine, two doors to it — and closes itself the moment the poll
+ * reports `"linked"`, since that is also what the Pull gate reads to unlock.
+ *
+ * Admin-only to open, same as the state machine underneath it: starting a
+ * device login is a 403 for a non-admin seat (`_require_hub_admin`), so a
+ * non-admin never gets a trigger for this in the first place.
+ */
+export function BotcampSignInModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const device = useHubDevice();
+  useEscapeKey(open, onClose);
+
+  useEffect(() => {
+    if (open && device.status === "linked") onClose();
+  }, [open, device.status, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-sm font-bold text-[var(--color-text)]">
+          Sign in to Botcamp
+        </h2>
+        <p className="mt-1 mb-4 text-xs text-[var(--color-text-muted)]">
+          Connects this Condor install to a Botcamp profile, install-wide — every
+          publish and every gated pull acts as that account.
+        </p>
+        <HubDeviceSignInPanel device={device} />
+      </div>
     </div>
   );
 }

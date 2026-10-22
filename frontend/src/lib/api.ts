@@ -4090,8 +4090,15 @@ export const api = {
       interval: number;
     }>("/api/v1/settings/hub-device/start", { method: "POST" }),
 
-  /** Where the device login/link stands right now. Polled while `"pending"`. */
+  /** Where the device login/link stands right now. Polled while `"pending"`.
+   *  Admin-only — see `getHubDeviceLinked` for the non-admin-safe version. */
   getHubDevice: () => apiFetch<HubDeviceState>("/api/v1/settings/hub-device"),
+
+  /** Whether this install is linked to Botcamp. Nothing else — every
+   *  signed-in seat can call this to know if Pull agents (FEAT-153) is
+   *  unlocked, unlike `getHubDevice`'s full state. */
+  getHubDeviceLinked: () =>
+    apiFetch<{ linked: boolean }>("/api/v1/settings/hub-device/linked"),
 
   /** Cancel a device login in flight, or disconnect a linked profile.
    *
