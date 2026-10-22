@@ -82,11 +82,12 @@ function Badge({ badge }: { badge: string }) {
 /**
  * Browse the hub and install from it, without leaving Condor.
  *
- * It lives beside Import and Export in the Agents panel because it answers the
- * same question — how does an agent get here — and the three doors are
- * deliberately one screen: a hub listing is not a safer kind of bundle, it is
- * the same kind with a provenance label attached, and separating them would
- * imply otherwise.
+ * Mounted on `/hub`'s public Pull agents section (FEAT-153) — reachable for
+ * every signed-in Condor user, admin or not, with no Botcamp link required.
+ * It answers the same question Import does — how does an agent get here —
+ * and shares its review screen deliberately: a hub listing is not a safer
+ * kind of bundle, it is the same kind with a provenance label attached, and a
+ * second review screen would imply otherwise.
  */
 export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
   const [search, setSearch] = useState("");

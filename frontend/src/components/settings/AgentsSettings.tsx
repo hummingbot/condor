@@ -5,15 +5,14 @@ import {
   Check,
   Download,
   ExternalLink,
-  Globe,
   Loader2,
   Upload,
 } from "lucide-react";
 import { useState } from "react";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { api } from "@/lib/api";
 
-import { HubBrowser } from "./HubBrowser";
 import { ImportAgentDialog } from "./ImportAgentDialog";
 
 /**
@@ -24,6 +23,11 @@ import { ImportAgentDialog } from "./ImportAgentDialog";
  * through chat — so there was nowhere to put Import. Export is also offered on
  * each agent's own workspace header, beside Delete; this panel is the place
  * that answers "how do I move an agent" without first knowing which one.
+ *
+ * The hub — browsing/installing what other people published, connecting a
+ * Botcamp profile and publishing — moved to its own `/hub` page (FEAT-153).
+ * This is local file transfer only now; `HubLinkField`, `PublishAgentButton`
+ * and `WithdrawListingButton` below are exported for that page to compose.
  */
 export function AgentsSettings() {
   const queryClient = useQueryClient();
@@ -35,21 +39,6 @@ export function AgentsSettings() {
   return (
     <div className="space-y-8">
       <section>
-        <h2 className="mb-1 flex items-center gap-1.5 text-sm font-bold text-[var(--color-text)]">
-          <Globe className="h-3.5 w-3.5" />
-          The agent hub
-        </h2>
-        <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-          Agents other people published. Installing one goes through the same
-          review as a file: every executable is named before anything is written,
-          the routines and skills arrive switched off, and nothing is started.
-        </p>
-        <HubBrowser
-          onInstalled={() => queryClient.invalidateQueries({ queryKey: ["agents"] })}
-        />
-      </section>
-
-      <section className="border-t border-[var(--color-border)] pt-8">
         <h2 className="mb-1 text-sm font-bold text-[var(--color-text)]">
           Import an agent
         </h2>
@@ -96,20 +85,6 @@ export function AgentsSettings() {
           </ul>
         )}
       </section>
-
-      <section className="border-t border-[var(--color-border)] pt-8">
-        <h2 className="mb-1 text-sm font-bold text-[var(--color-text)]">
-          Publishing to the hub
-        </h2>
-        <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-          Publishing acts under one Botcamp profile, install-wide: every publish
-          from this box is made as that account. Connect one below, then use
-          Publish on an agent's own page. Publishing sends the agent's files off
-          this box — unpublishing removes the listing, it does not recall
-          anybody's download.
-        </p>
-        <HubLinkField />
-      </section>
     </div>
   );
 }
@@ -123,6 +98,8 @@ export function AgentsSettings() {
  * polls Condor's own `/hub-link` — the credential itself is stored
  * server-side the moment the hub hands it over and never reaches this
  * component or any other response this dashboard reads.
+ *
+ * Composed on the admin-only part of `/hub` now, not Settings (FEAT-153).
  */
 export function HubLinkField() {
   const queryClient = useQueryClient();
@@ -506,4 +483,66 @@ export function HubInstallStatus({ slug }: { slug: string }) {
   }
 
   return null;
+}
+
+/**
+ * Withdraw a published listing from the hub (contract §5.4, follow-up to
+ * FEAT-150's publish flow).
+ *
+ * Reads the same `["hub-submission", slug]` query `PublishAgentButton` keeps
+ * warm rather than carrying its own copy of the receipt — the two mount
+ * together on `/hub`'s Upload yours section, and a second fetch of the same
+ * resource would just be a chance for them to disagree. Renders nothing until
+ * that query says `published`: there is nothing to withdraw before then, and
+ * a pending or rejected submission has no listing id to send.
+ *
+ * Withdrawing removes the listing; it does not recall anybody's download —
+ * the two-step `InlineConfirm` exists so that sentence is read before the
+ * call goes out, not after.
+ */
+export function WithdrawListingButton({ slug }: { slug: string }) {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submission = useQuery({
+    queryKey: ["hub-submission", slug],
+    queryFn: () => api.getHubSubmission(slug),
+  });
+  const receipt = submission.data?.receipt ?? null;
+
+  const withdraw = useMutation({
+    mutationFn: (listingId: string) => api.unpublishFromHub(listingId),
+    onSuccess: () => {
+      setConfirming(false);
+      queryClient.invalidateQueries({ queryKey: ["hub-submission", slug] });
+      queryClient.invalidateQueries({ queryKey: ["hub-agents"] });
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  if (receipt?.status !== "published") return null;
+
+  return (
+    <span className="flex items-center gap-2">
+      {error && (
+        <span role="alert" data-withdraw-error className="text-xs text-[var(--color-red)]">
+          {error}
+        </span>
+      )}
+      <InlineConfirm
+        confirming={confirming}
+        onRequest={() => {
+          setError(null);
+          setConfirming(true);
+        }}
+        onConfirm={() => withdraw.mutate(receipt.listing_id)}
+        onCancel={() => setConfirming(false)}
+        pending={withdraw.isPending}
+        triggerLabel={`Withdraw ${slug} from the hub`}
+        confirmLabel="Confirm withdraw — does not recall anybody's download"
+        cancelLabel="Cancel withdraw"
+      />
+    </span>
+  );
 }

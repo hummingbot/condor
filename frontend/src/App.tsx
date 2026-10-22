@@ -12,6 +12,7 @@ import {
   AgentStrategyRedirect,
   AgentWorkspace,
 } from "@/pages/AgentWorkspace";
+import { AgentHub } from "@/pages/AgentHub";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
@@ -144,6 +145,7 @@ export default function App() {
                   path="/agents/:slug/strategies/:sslug"
                   element={<AgentStrategyRedirect />}
                 />
+                <Route path="/hub" element={<AgentHub />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/market" element={<Navigate to="/trade" replace />} />
               </Route>
