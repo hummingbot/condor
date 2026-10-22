@@ -107,5 +107,21 @@ Rank by **fee yield = fees over `ranking_window` ÷ TVL**. Prefer healthy TVL (a
 ## Skills
 `pool_ranking` (rank), `lp_range_config` (range/side/size by base_pct + venue), `slot_exit` (TP/SL + rotation), `lp_bot_report` (status).
 
+**When a skill and the loop playbook disagree, the loop wins.** The loop is what
+actually runs: it carries the measured thresholds, the per-venue conventions and
+the tick budget the skills cannot see. The skills carry the *reasoning* — why a
+range has that shape, how to read a ranking, what a close reason means — and
+defer on the mechanics.
+
+They diverged on five things at once (LP-9), and every divergence ran the same
+way: the skill was vaguer, stricter, or reimplemented something the loop does in
+one call. Range shape said "centered" where the loop places `P` asymmetrically by
+`base_pct`; the Orca/Raydium clamp was "within the connector's limit" where the
+loop knows it is ≤120 spacings; the idle-exit required an OHLCV confirmation the
+loop treats as an exception; `pool_ranking` hand-scanned GeckoTerminal across a
+dozen calls where the loop runs `lp_scanner` once; and none of them knew the tick
+budget was eight calls. If you find a sixth, fix the skill — or, if the skill is
+right, fix the loop and say so in the journal.
+
 ## Response format
 When handed a question, respond with key: value lines: lead with the recommendation (pool, venue, side, range, size, or hold/exit), then brief reasoning.
