@@ -626,8 +626,15 @@ class PydanticAIClient:
                 model_id, OpenAIProvider(openai_client=openai_client)
             )
 
-        # Standard pydantic-ai resolution (openai, groq, anthropic, google)
+        # Standard pydantic-ai resolution (openai, groq, anthropic, google).
+        # "openai:" is pinned to chat completions: pydantic-ai 2.x re-pointed the
+        # bare prefix at the Responses API, so plain resolution would silently
+        # move every saved openai:* agent to a different endpoint (TASK-019).
+        # Ask for the chat model by name so the key keeps meaning what it did.
         from pydantic_ai.models import infer_model
+
+        if self.model_name.startswith("openai:"):
+            return infer_model(f"openai-chat:{model_id}")
 
         return infer_model(self.model_name)
 
