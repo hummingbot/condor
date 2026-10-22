@@ -1306,7 +1306,7 @@ async def update_hub_token(
 # the protocol and the one place the resulting credential is ever read.
 
 
-def _hub_link_refusal(exc: Exception) -> HTTPException:
+def _hub_device_refusal(exc: Exception) -> HTTPException:
     """A hub failure during a device login as HTTP — the same mapping
     ``agents.py``'s hub router uses, kept local here since the two routers do
     not import from each other.
@@ -1346,7 +1346,7 @@ async def start_hub_device(user: WebUser = Depends(get_current_user)):
     try:
         code = await asyncio.to_thread(hub.device_start)
     except HubError as exc:
-        raise _hub_link_refusal(exc) from exc
+        raise _hub_device_refusal(exc) from exc
     return {
         "user_code": code.user_code,
         "verification_uri": code.verification_uri,
@@ -1373,7 +1373,7 @@ async def get_hub_device(user: WebUser = Depends(get_current_user)):
     try:
         state = await asyncio.to_thread(hub.device_state)
     except HubError as exc:
-        raise _hub_link_refusal(exc) from exc
+        raise _hub_device_refusal(exc) from exc
     return state.model_dump()
 
 
@@ -1392,5 +1392,5 @@ async def disconnect_hub_device(user: WebUser = Depends(get_current_user)):
     try:
         await asyncio.to_thread(hub.device_cancel)
     except HubError as exc:
-        raise _hub_link_refusal(exc) from exc
+        raise _hub_device_refusal(exc) from exc
     return {"status": "none"}

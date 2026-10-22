@@ -26,7 +26,7 @@ import { ImportAgentDialog } from "./ImportAgentDialog";
  *
  * The hub — browsing/installing what other people published, connecting a
  * Botcamp profile and publishing — moved to its own `/hub` page (FEAT-153).
- * This is local file transfer only now; `HubLinkField`, `PublishAgentButton`
+ * This is local file transfer only now; `HubDeviceField`, `PublishAgentButton`
  * and `WithdrawListingButton` below are exported for that page to compose.
  */
 export function AgentsSettings() {
