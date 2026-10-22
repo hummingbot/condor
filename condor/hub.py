@@ -41,7 +41,9 @@ before a single request is made, plus an opener that refuses redirects, means
 the server-side fetch is no longer a fetch of a user-supplied URL at all — the
 caller contributes one path segment drawn from ``[A-Za-z0-9._-]`` and nothing
 else. Making the base env-overridable, or following a 302, would hand that
-property straight back.
+property straight back. :func:`_dev_override` is the one narrow exception,
+gated on an explicit two-variable opt-in rather than a bare env read — see
+its docstring — for testing against a hub that is not yet live in production.
 
 **Why there is no durable outbox.** ``condor/sharing/outbox.py`` exists because
 its sweep "sends what nobody has read" from a worker thread, and because "a
@@ -86,16 +88,64 @@ from condor.fetchers._identifiers import IdentifierError, validate_identifier
 log = logging.getLogger(__name__)
 
 #: Where the hub lives. **Compiled in, like the sharing collector's address,
-#: and no environment variable redirects it** — see the module docstring: this
-#: constant is half of the SSRF answer, and ``tests/test_hub.py`` asserts that
-#: setting every plausible env name and re-importing changes nothing.
+#: and no environment variable redirects it in production** — see the module
+#: docstring: this constant is half of the SSRF answer, and
+#: ``tests/test_hub.py`` asserts that setting every plausible env name and
+#: re-importing changes nothing. The one deliberate exception is
+#: :func:`_dev_override`, gated on an explicit dev-mode opt-in rather than a
+#: bare env read — see that function.
 #:
-#: The hostname itself is not Condor's decision to make. The service lives in a
-#: codebase that is not this one, and standing it up — who reviews a submission
-#: for the ``validated`` tier, how a publish token is issued, whether the hub
-#: runs FEAT-144's review as a Python dependency or a reimplementation — is
+#: The hostname itself is not Condor's decision to make. The service lives in
+#: a codebase that is not this one (PR #111 of ``hummingbot/botcamp-site``
+#: puts these routes on the botcamp.xyz app itself, under ``/api/condor/*``
+#: and ``/api/agents/*`` — there is no ``hub.`` subdomain and no ``/v1``
+#: segment), and standing it up — who reviews a submission for the
+#: ``validated`` tier, how a publish token is issued, whether the hub runs
+#: FEAT-144's review as a Python dependency or a reimplementation — is
 #: TASK-004. Changing it is a code change by design.
-HUB_URL = "https://hub.botcamp.xyz/v1"
+HUB_URL = "https://botcamp.xyz/api"
+
+
+def _dev_override() -> str:
+    """The dev-only override of :data:`HUB_URL`, applied once at import.
+
+    Testing against a hub that is not yet live at ``botcamp.xyz`` (a LAN
+    instance, say) needs *some* way to retarget this module — but FEAT-146
+    made the base non-overridable on purpose, as the SSRF answer the module
+    docstring describes, and :func:`test_no_environment_variable_redirects_the_hub`
+    in ``tests/test_hub.py`` holds every plausible env name to that. This is
+    the one deliberate crack in that rule, and it is kept narrow on purpose:
+
+    * It takes **two** env vars, not one. ``CONDOR_HUB_DEV_MODE`` is the
+      knowing opt-in — an operator sets it because they mean to point this
+      install somewhere other than the real hub, not because a deploy script
+      happened to export a URL — and ``CONDOR_HUB_DEV_URL`` is the target.
+      Setting the URL alone, the shape a bare env read would have, changes
+      nothing: :data:`HUB_URL` stays the compiled-in production address.
+    * A plain ``http://`` target is accepted here and nowhere else — the
+      production constant above stays ``https://`` unconditionally, since it
+      is never read from the environment at all.
+    * Lights up the override loudly, once, at import — never silently.
+    """
+    import os
+
+    if os.environ.get("CONDOR_HUB_DEV_MODE", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return ""
+    return os.environ.get("CONDOR_HUB_DEV_URL", "").strip()
+
+
+_dev_hub_url = _dev_override()
+if _dev_hub_url:
+    log.warning(
+        "hub: CONDOR_HUB_DEV_MODE is set — talking to %r instead of the real "
+        "hub. This must never be set on an operator's production install.",
+        _dev_hub_url,
+    )
+    HUB_URL = _dev_hub_url
 
 #: One call's budget. Longer than the collector's 10s because a bundle download
 #: is up to :data:`condor.agents.bundle.MAX_BUNDLE_BYTES`, not one transcript.

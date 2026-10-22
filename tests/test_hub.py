@@ -334,6 +334,12 @@ def test_no_environment_variable_redirects_the_hub():
     Every plausible name, set at once, in a fresh interpreter that then imports
     the module for the first time — an in-process ``importlib.reload`` would
     not prove it, because the constant could have been read at first import.
+
+    ``CONDOR_HUB_DEV_URL`` is in this list deliberately: it is the dev
+    override's *target* variable, and setting it alone — without the knowing
+    opt-in ``CONDOR_HUB_DEV_MODE`` — must be exactly as inert as any of the
+    other plausible names. A bare env read would have redirected on this one
+    alone; :func:`condor.hub._dev_override` must not.
     """
     names = [
         "CONDOR_HUB_URL",
@@ -344,6 +350,7 @@ def test_no_environment_variable_redirects_the_hub():
         "CONDOR_BOTCAMP_URL",
         "BOTCAMP_URL",
         "CONDOR_AGENT_HUB_URL",
+        "CONDOR_HUB_DEV_URL",
     ]
     env = {name: "http://127.0.0.1:1/v1" for name in names}
     done = subprocess.run(
@@ -354,8 +361,44 @@ def test_no_environment_variable_redirects_the_hub():
         check=True,
         env={**_base_env(), **env},
     )
-    assert done.stdout.strip() == "https://hub.botcamp.xyz/v1"
+    assert done.stdout.strip() == "https://botcamp.xyz/api"
     assert "127.0.0.1" not in done.stdout
+
+
+def test_dev_mode_opt_in_overrides_the_hub_url():
+    """The one deliberate crack: both env vars together, and only together.
+
+    ``CONDOR_HUB_DEV_MODE`` is the knowing opt-in an operator sets on purpose;
+    ``CONDOR_HUB_DEV_URL`` is where it then points. A plain ``http://`` target
+    is accepted here — a production default never is, since it is never read
+    from the environment at all — and the override logs loudly at import.
+    """
+    env = {
+        "CONDOR_HUB_DEV_MODE": "1",
+        "CONDOR_HUB_DEV_URL": "http://masiva.local:3000/api",
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", "import condor.hub as h; print(h.HUB_URL)"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**_base_env(), **env},
+    )
+    assert done.stdout.strip() == "http://masiva.local:3000/api"
+
+
+def test_dev_mode_flag_without_a_url_changes_nothing():
+    """The opt-in alone, with no target, must not blank out the real hub."""
+    done = subprocess.run(
+        [sys.executable, "-c", "import condor.hub as h; print(h.HUB_URL)"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**_base_env(), "CONDOR_HUB_DEV_MODE": "1"},
+    )
+    assert done.stdout.strip() == "https://botcamp.xyz/api"
 
 
 def _base_env() -> dict:
