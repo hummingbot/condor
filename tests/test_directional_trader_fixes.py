@@ -323,6 +323,17 @@ def test_non_grid_work_is_not_routed_to_the_grid_agent():
     assert "do **not** hand it to `adaptive_grid_trader`" in deploy
 
 
+def test_the_handoff_template_requires_the_interval_not_merely_no_finer():
+    """``<= controller interval`` permits a coarser run, and the figure this gate
+    records is the FINAL validation — measured at the interval the controller
+    actually trades, not at whatever was convenient."""
+    body = " ".join((DT / "skills/backtesting/go_no_go.md").read_text().split())
+
+    assert "<= controller interval" not in body
+    assert "== controller interval" in body
+    assert "equal to** the controller's `interval`" in body
+
+
 @pytest.mark.parametrize(
     "path",
     [

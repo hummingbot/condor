@@ -635,6 +635,23 @@ class RiskEngine:
         if action == "deploy" and capital_quote is not None and current_state:
             # Approved: reserve it, so a second deploy in this run is gated
             # against what is left rather than against the full allowance.
+            #
+            # The reservation is NOT released if the deploy then fails at the
+            # API, and cannot be from here: this gate decides a call before it
+            # runs and never learns the outcome — ``normalize_tool_call`` keeps
+            # ``{tool, title, input}`` and no id, so there is nothing to
+            # correlate a later failure against. ``check_executor_action`` and
+            # ``check_dex_action`` have had the same property since they were
+            # written.
+            #
+            # The cost is bounded and lands on the safe side: a delegated run
+            # whose deploy failed may refuse a same-size retry until the run
+            # ends (a tick recomputes its state from the venue every tick, so
+            # the tick case self-heals). The alternative — not reserving — is
+            # two deploys each judged against the full allowance, which is real
+            # over-exposure rather than a wasted retry. The refusal names the
+            # headroom and what is already committed, so a smaller retry is
+            # still possible.
             current_state.total_exposure += capital_quote
 
         return True, ""

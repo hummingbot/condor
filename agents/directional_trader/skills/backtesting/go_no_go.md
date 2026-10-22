@@ -5,8 +5,11 @@ Companion to the `backtesting` playbook. The last gate before live capital.
 ## Step 1 — Run the held-out window
 
 Take the sweep winner and run it once over the ~30 days deliberately excluded from
-the sweep. Same resolution and same trade cost as the sweep, with the
-resolution equal to the controller's `interval` (DT-4 — see below).
+the sweep. Same trade cost as the sweep, and the resolution **equal to** the
+controller's `interval` — not merely no finer than it (DT-4, see below). A
+coarser run is fine while sweeping for speed, but the figure this gate
+records is the final validation, and that one is measured at the interval the
+controller actually trades.
 
 ```python
 manage_routines(
@@ -56,7 +59,7 @@ save it with `manage_memory`, and return to the phase that owns the problem.
 winning_config: {strategy_slug}_best
 in_sample_period:     {start} → {end}
 out_of_sample_period: {start} → {end}
-resolution: <= controller interval   trade_cost: 0.0006
+resolution: == controller interval   trade_cost: 0.0006
 metrics (out-of-sample):
   sharpe: X.XX               max_drawdown_pct: XX.X%
   total_trades: NNN          win_rate: XX%
