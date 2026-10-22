@@ -16,7 +16,6 @@ asyncio.run() instead of a pytest-asyncio marker.
 """
 
 import asyncio
-import time
 
 import pytest
 
@@ -232,18 +231,27 @@ def _lp_overview(client):
 
 
 def test_clmm_venues_are_fetched_concurrently_not_one_at_a_time():
-    """K on-chain venue reads must cost ~1 round-trip, not K of them stacked."""
+    """K on-chain venue reads must cost ~1 round-trip, not K of them stacked.
+
+    Asserted by overlap rather than by the clock. The wall-clock form
+    (``elapsed < serial / 2``) measured the machine as much as the code: it
+    passed alone and failed one full-suite run in three on a loaded machine,
+    with all eight reads provably in flight at once. The overlap is the
+    property -- a serial resolver peaks at one, and a slow machine still
+    reaches eight.
+    """
     pools = [("meteora", f"net{i}", f"pool{i}") for i in range(8)]
+    assert (
+        len(pools) <= MAX_CONCURRENT_POSITION_FETCHES
+    ), "the cap would mask the fan-out"
     clmm = FakeGatewayClmm(pools)
 
-    start = time.monotonic()
     result = _lp_overview(FakeGatewayClient(clmm))
-    elapsed = time.monotonic() - start
 
-    serial = len(pools) * POOL_LATENCY
-    assert (
-        elapsed < serial / 2
-    ), f"{len(pools)} venues took {elapsed:.3f}s; serial would be ~{serial:.3f}s"
+    assert clmm.max_in_flight == len(pools), (
+        f"only {clmm.max_in_flight} of {len(pools)} venue reads overlapped; the "
+        f"rest were stacked, so the overview pays a round-trip per venue"
+    )
 
     section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
     assert section["total_positions"] == len(pools)
