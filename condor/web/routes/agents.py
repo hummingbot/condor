@@ -29,7 +29,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+)
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from condor.agents.attribution import (
@@ -963,6 +973,8 @@ class PublishAgentRequest(BaseModel):
 
     notes: str = ""
     author_name: str = ""
+    #: Fingerprints of possible keys the person confirmed are not keys.
+    acknowledge: list[str] = []
 
 
 class SkillWriteRequest(BaseModel):
@@ -2979,6 +2991,22 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
 # which is the only gate there is — an imported routine runs in this process.
 
 
+def _possible_keys_response(exc) -> JSONResponse:
+    """409 for an export stopped on possible keys (SEC review C2).
+
+    ``detail`` stays the sentence every error slot already renders;
+    ``possible_keys`` beside it is what a dialog asks the person about, each by
+    file, line and fingerprint — never the value.
+    """
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": str(exc),
+            "possible_keys": [key._asdict() for key in exc.pending],
+        },
+    )
+
+
 def _bundle_refusal(exc: Exception) -> HTTPException:
     """A bundle refusal as HTTP: 415 for the wrong kind of file, 400 for a bad one."""
     from condor.agents.bundle import NotJsonError
@@ -3158,6 +3186,7 @@ async def export_agent_bundle(
     slug: str,
     notes: str = "",
     author_name: str = "",
+    acknowledge: list[str] = Query(default=[]),
     user: WebUser = Depends(get_current_user),
 ):
     """This agent as one portable file.
@@ -3183,7 +3212,13 @@ async def export_agent_bundle(
 
     _get_agent(slug)
     try:
-        bundle = agent_bundle.build(slug, notes=notes, author_name=author_name)
+        bundle = agent_bundle.build(
+            slug, notes=notes, author_name=author_name, acknowledged=acknowledge
+        )
+    except agent_bundle.PossibleKeysError as exc:
+        # 409 with the list: values that may be keys, waiting for a person to
+        # confirm each by fingerprint (``?acknowledge=``) — SEC review C2.
+        return _possible_keys_response(exc)
     except ValueError as exc:
         raise _bundle_refusal(exc) from exc
     tally: dict[str, int] = {}
@@ -5115,7 +5150,22 @@ def _listing_refusal(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-async def _hub_bundle(slug: str, version: str):
+def _hub_read_token(user: WebUser) -> str:
+    """The install's Botcamp token for an admin caller, ``""`` for anyone else.
+
+    There is one token per install: the admin's, and whatever their account
+    has bought or joined comes with it. Sending it on a non-admin's read would
+    hand every seat on the install the admin's paid and members-only agents
+    (SEC review C4). Without it a seat still sees and installs everything
+    public; the gated ones answer as they would to anyone signed out.
+    """
+    from condor import hub
+    from config_manager import get_config_manager
+
+    return hub.token() if get_config_manager().is_admin(user.id) else ""
+
+
+async def _hub_bundle(slug: str, version: str, user: WebUser):
     """``(listing, fetched, bundle)`` for one agent version, digest-verified
     before anything parses it.
 
@@ -5125,15 +5175,16 @@ async def _hub_bundle(slug: str, version: str):
     that safe: both requests are held to the same response's own digest, so
     they are the same bundle or the second one fails loudly.
 
-    This install's own Botcamp token rides along on both calls — optional on
-    PR #111's read endpoints, but the only way a membership/purchase-gated
-    agent this account actually has access to can clone at all.
+    This install's own Botcamp token rides along on both calls for an admin —
+    optional on PR #111's read endpoints, but the only way a
+    membership/purchase-gated agent this account actually has access to can
+    clone at all. A non-admin's calls go without it (:func:`_hub_read_token`).
     """
     from condor import botcamp_import, hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
-    hub_token = hub.token()
+    hub_token = _hub_read_token(user)
     try:
         listing = await asyncio.to_thread(hub.get, slug, hub_token)
         fetched = await asyncio.to_thread(hub.fetch, slug, version, token=hub_token)
@@ -5160,7 +5211,7 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
     """
     from condor.agents import bundle as agent_bundle
 
-    listing, fetched, bundle = await _hub_bundle(slug, version)
+    listing, fetched, bundle = await _hub_bundle(slug, version, user)
     connectors, tools = await _install_capabilities(user)
     plan = agent_bundle.plan(
         bundle,
@@ -5198,7 +5249,9 @@ async def browse_hub_catalogue(
     from condor.hub import HubError
 
     try:
-        entries = await asyncio.to_thread(hub.browse, query, page, hub.token())
+        entries = await asyncio.to_thread(
+            hub.browse, query, page, _hub_read_token(user)
+        )
     except IdentifierError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HubError as exc:
@@ -5226,16 +5279,16 @@ async def get_hub_listing(slug: str, user: WebUser = Depends(get_current_user)):
 
     The lookup by a slug the caller already has — a private agent someone
     shared is not in the catalogue (:func:`browse_hub_catalogue`), so this is
-    the only way to it. This install's own Botcamp token rides along, so a
-    membership- or purchase-gated agent an account actually has access to
-    still resolves.
+    the only way to it. This install's own Botcamp token rides along for an
+    admin, so a membership- or purchase-gated agent the account actually has
+    access to still resolves (:func:`_hub_read_token`).
     """
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
     try:
-        listing = await asyncio.to_thread(hub.get, slug, hub.token())
+        listing = await asyncio.to_thread(hub.get, slug, _hub_read_token(user))
     except IdentifierError as exc:
         raise _listing_refusal(exc) from exc
     except HubError as exc:
@@ -5361,6 +5414,7 @@ async def publish_agent_to_hub(
     and nothing is sent. The sentence names the file and the byte span.
     """
     from condor import hub
+    from condor.agents import bundle as agent_bundle
     from condor.hub import HubError
 
     require_admin(user)
@@ -5372,9 +5426,12 @@ async def publish_agent_to_hub(
             hub.token(),
             (req.notes if req else ""),
             (req.author_name if req else ""),
+            (req.acknowledge if req else []),
         )
     except HubError as exc:
         raise _hub_refusal(exc) from exc
+    except agent_bundle.PossibleKeysError as exc:
+        return _possible_keys_response(exc)
     except ValueError as exc:
         raise _bundle_refusal(exc) from exc
     return {"published": receipt.status == "published", "receipt": receipt.model_dump()}

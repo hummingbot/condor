@@ -113,7 +113,7 @@ function router(url: string, init?: RequestInit): Response | Promise<Response> {
   if (method === "POST" && url === "/api/v1/settings/hub-device/start") {
     return json({
       user_code: "ABC-123",
-      approval_url: "https://botcamp.xyz/connect?code=ABC-123",
+      approval_url: "https://botcamp.xyz/connect",
       expires_in: 600,
       interval: 5,
     });
@@ -317,7 +317,7 @@ it("rebuilds the pending link from the poll alone, after a page refresh", async 
     ...NONE_DEVICE,
     status: "pending",
     user_code: "ABC-123",
-    approval_url: "https://botcamp.xyz/connect?code=ABC-123",
+    approval_url: "https://botcamp.xyz/connect",
     ...({ verification_uri_complete: "https://evil.example/phish" } as object),
   };
   await render();
@@ -328,7 +328,7 @@ it("rebuilds the pending link from the poll alone, after a page refresh", async 
   const link = [...container.querySelectorAll("a")].find((a) =>
     a.textContent?.includes("Open Botcamp"),
   ) as HTMLAnchorElement;
-  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect?code=ABC-123");
+  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect");
   expect(container.innerHTML).not.toContain("evil.example");
   // No tab is opened on a refresh — only starting a login does that.
   expect(window.open).not.toHaveBeenCalled();
@@ -405,14 +405,14 @@ it("runs the device flow inline in the gate, with Upload yours hidden until link
   // The safe link, built by the backend from the configured hub base — the
   // only URL the start response carries (SEC-819).
   expect(window.open).toHaveBeenCalledWith(
-    "https://botcamp.xyz/connect?code=ABC-123",
+    "https://botcamp.xyz/connect",
     "_blank",
     "noopener,noreferrer",
   );
   const link = [...container.querySelectorAll("a")].find((a) =>
     a.textContent?.includes("Open Botcamp"),
   ) as HTMLAnchorElement;
-  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect?code=ABC-123");
+  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect");
   expect(heading("Upload yours")).toBeNull();
 });
 

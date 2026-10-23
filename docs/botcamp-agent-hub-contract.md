@@ -516,10 +516,12 @@ before being treated as settled.
    the approval page matches the login Condor started), and a
    `verification_uri`/`verification_uri_complete` to open. It returns all of
    these plus `expires_in` and a polling `interval`.
-3. Condor builds the approval link **from its own configured hub base plus
-   the returned `user_code`** (`<configured base origin>/connect?code=<user_code>`)
-   and opens that in a new browser tab, showing the `user_code` beside it so
-   the admin can confirm it matches. It does **not** open or display
+3. Condor builds the approval link **from its own configured hub base**
+   (`<configured base origin>/connect`) and opens that in a new browser tab,
+   showing the `user_code` beside it for the admin to type there. The link
+   carries no code: Botcamp ignores a `?code=` (RFC 8628 §5.4), since a link
+   with the code filled in is exactly what a device-login phishing message
+   would send. It does **not** open or display
    `verification_uri`/`verification_uri_complete` at all — not even when
    their host matches. A hub response is not something Condor treats as safe
    to redirect an admin's browser to sight unseen, since nothing before that
@@ -535,11 +537,13 @@ before being treated as settled.
    — is the derived one. A dashboard therefore cannot reintroduce the hole by
    preferring a field it was never sent.
 4. On that page, the hub requires the human to already be signed into
-   Botcamp (or sign in first), shows the `user_code` again for the human to
-   compare against what Condor showed, and offers Accept / Deny. This page
-   itself is out of this contract's scope beyond "it must show the
-   `user_code` before Accept" — it is server-rendered UI, not an API response
-   Condor parses.
+   Botcamp (or sign in first), has them **type** the `user_code` Condor
+   showed, then shows who asked for it and offers Accept / Deny. Looking up
+   and answering codes is rate-limited per signed-in account, so a code
+   cannot be guessed there, and every Accept emails the account. This page
+   itself is out of this contract's scope beyond "the human types the
+   `user_code` before Accept" — it is server-rendered UI, not an API
+   response Condor parses.
 5. Condor's backend polls `POST /api/condor/device/token` (no credential —
    the point of the flow is that none exists yet) with the `device_code`, at
    the hub's own `interval`, until it sees a terminal state.
@@ -566,7 +570,6 @@ Response `200`:
   "device_code": "dev_3f8c1a9e2b7d4f60",
   "user_code": "WXYZ-4821",
   "verification_uri": "https://botcamp.xyz/connect",
-  "verification_uri_complete": "https://botcamp.xyz/connect?code=WXYZ-4821",
   "expires_in": 600,
   "interval": 5
 }
@@ -580,7 +583,8 @@ Response `200`:
 - `verification_uri`/`verification_uri_complete` are read but never used:
   per §4.1 step 3 Condor derives the link it opens from its own configured
   base, so a hub may send either, both or neither without changing what the
-  admin sees. An off-origin value is logged once and otherwise discarded.
+  admin sees. Botcamp sends only `verification_uri`; it dropped
+  `verification_uri_complete` with the typed-code change. An off-origin value is logged once and otherwise discarded.
 - `expires_in` (seconds; default assumed `600` if omitted) and `interval`
   (seconds; default assumed `5` if omitted, floored at `1`) govern how long
   Condor keeps polling and how often. A login still `pending` past
@@ -629,6 +633,12 @@ Response `200` once the human has approved:
   present as the linked profile's handle (`name` preferred). `token_type` is
   read by nothing on Condor's side today but SHOULD be sent as `"bearer"` for
   forward compatibility.
+- **The token expires and cannot be renewed.** Botcamp issues it for 90 days
+  (`expires_in`/`expires_at` alongside it) and offers no refresh or rotation:
+  once it expires, every token-bearing call answers `401`, Condor clears its
+  copy (`_clear_token_if_revoked`) and the admin runs this login again. Every
+  token Condor holds was therefore approved by a person, who was emailed when
+  they approved it.
 
 Response `400` while the login has not yet reached a terminal state, or has
 ended in one Condor must stop on, shaped `{"error": "<code>"}`:

@@ -835,6 +835,7 @@ async def manage_agents(
     path: str | None = None,
     notes: str | None = None,
     author_name: str | None = None,
+    acknowledge: list[str] | None = None,
 ) -> dict:
     """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
 
@@ -871,6 +872,12 @@ async def manage_agents(
       changed since the last export — pass `notes` to say what changed), who
       claims to have made it (`author_name`, verified by nothing), and what it
       needs: the connectors, tools, model and skills read out of its own files.
+      It refuses on a value that can only be a secret, and STOPS on a value
+      that may be one (64 hex: an EVM key or a tx hash; long base58: a Solana
+      key or a signature), returning `possible_keys` with each one's file,
+      line and fingerprint. Show the user every one and ask which are NOT
+      keys; call again with `acknowledge` set to only the fingerprints they
+      confirm. Never acknowledge one yourself.
     - "import": Register the agent in a bundle file (requires `path`;
       `agent_slug` renames it on the way in, which is how a name collision is
       answered). It never overwrites an existing agent, and everything it
@@ -913,7 +920,8 @@ async def manage_agents(
       as for "export"). It needs the install's token, set in Settings →
       Agents, and cannot take one as an argument. It sends the SAME bytes
       "export" writes, so it refuses outright on a value that can only be a
-      secret. **Confirm with the user before calling it**: publishing sends
+      secret and stops on one that may be, exactly as "export" does — the
+      same `possible_keys` and `acknowledge`. **Confirm with the user before calling it**: publishing sends
       content off this box and is irreversible in practice — unpublishing
       removes the listing, it does not recall a download.
 
@@ -959,6 +967,9 @@ async def manage_agents(
             unverified claim: Condor signs nothing and the receiving install
             cannot check it. On a hub publish the hub attaches the account
             handle it authenticated beside it, as a separate fact.
+        acknowledge: For "export" and "publish_hub" — fingerprints from a
+            previous call's `possible_keys` that the USER confirmed are not
+            keys. Only ever the ones they named.
 
     Returns:
         Action-specific result dict.
@@ -977,6 +988,7 @@ async def manage_agents(
         path=path,
         notes=notes,
         author_name=author_name,
+        acknowledge=acknowledge,
     )
 
 

@@ -462,6 +462,40 @@ def test_dev_mode_opt_in_overrides_the_hub_url():
     assert done.stdout.strip() == "http://masiva.local:3000/api"
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "file:///etc/passwd",
+        "ftp://masiva.local/api",
+        "data:text/plain,hello",
+        "masiva.local:3000/api",  # no scheme: urlsplit reads the host as one
+        "http:///api",  # no host
+    ],
+)
+def test_dev_mode_refuses_anything_but_an_http_url(target):
+    """SEC review C5: the opener also serves file://, ftp:// and data:."""
+    env = {"CONDOR_HUB_DEV_MODE": "1", "CONDOR_HUB_DEV_URL": target}
+    done = subprocess.run(
+        [sys.executable, "-c", "import condor.hub as h; print(h.HUB_URL)"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**_base_env(), **env},
+    )
+    assert done.stdout.strip() == HUB_BASE
+
+
+def test_send_refuses_a_non_http_url_before_opening_anything(monkeypatch):
+    def dial(request):  # pragma: no cover - reaching it is the failure
+        raise AssertionError("dialed")
+
+    monkeypatch.setattr(hub, "_dial", dial)
+
+    with pytest.raises(hub.HubError):
+        hub._send("GET", "file:///etc/passwd")
+
+
 def test_dev_mode_flag_without_a_url_changes_nothing():
     """The opt-in alone, with no target, must not blank out the real hub."""
     done = subprocess.run(
@@ -1200,7 +1234,47 @@ def test_the_token_survives_a_save_and_a_fresh_load(cm):
     cm._save_config()
 
     reloaded = cm_module.ConfigManager(config_path=str(cm.config_path))
-    assert reloaded.get_hub() == {"token": "botcamp-tok"}
+    assert reloaded.get_hub() == {
+        "token": "botcamp-tok",
+        "token_origin": "https://dev.botcamp.xyz",
+    }
+
+
+def test_a_token_is_only_sent_to_the_hub_that_issued_it(cm, monkeypatch):
+    """SEC review C5: turning the dev override on must not hand a production
+    token to a LAN or dev host."""
+    hub.set_token("bc_prod_token")
+    assert hub.token() == "bc_prod_token"
+
+    monkeypatch.setattr(hub, "HUB_URL", "http://masiva.local:3000/api")
+    assert hub.token() == ""
+    assert hub.device_state().status != "linked"
+
+    hub.set_token("bc_dev_token")  # connecting again, to the dev hub
+    assert hub.token() == "bc_dev_token"
+
+
+def test_a_token_stored_before_origins_counts_as_the_compiled_hubs(cm, monkeypatch):
+    cm.update_hub(token="bc_legacy")  # no token_origin, as before the change
+    assert hub.token() == "bc_legacy"
+
+    monkeypatch.setattr(hub, "HUB_URL", "http://masiva.local:3000/api")
+    assert hub.token() == ""
+
+
+def test_the_config_file_and_its_backup_are_owner_only(cm):
+    """SEC review C5: config.yml holds the hub token, at the default 0644."""
+    import os
+    import stat
+
+    cm.config_path.write_text("{}\n")
+    os.chmod(cm.config_path, 0o644)  # as an older install left it
+
+    hub.set_token("botcamp-tok")
+    hub.set_token("botcamp-tok-2")  # a second save makes the backup
+
+    assert stat.S_IMODE(os.stat(cm.config_path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(cm._backup_path).st_mode) == 0o600
 
 
 def test_clearing_the_token_is_persisted_too(cm):
@@ -1274,7 +1348,7 @@ def test_the_token_reaches_no_log_record_during_a_publish(
 # ── Installing: the file path's gate, unchanged ──────────────────────────
 
 
-def _client():
+def _client(admin: bool = True):
     from fastapi import FastAPI
     from starlette.testclient import TestClient
 
@@ -1286,7 +1360,10 @@ def _client():
     app.include_router(routes.router)
     app.include_router(routes.hub_router)
     app.dependency_overrides[get_current_user] = lambda: WebUser(
-        id=ADMIN_ID, username="u", first_name="U", role="admin"
+        id=ADMIN_ID if admin else SEAT_ID,
+        username="u",
+        first_name="U",
+        role="admin" if admin else "user",
     )
     return TestClient(app)
 
@@ -1327,7 +1404,7 @@ def test_device_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
     assert fake_hub.calls[-1].token == ""
     assert fake_hub.calls[-1].body == {}
     assert code.user_code == "WXYZ-4821"
-    assert code.approval_url == "https://dev.botcamp.xyz/connect?code=WXYZ-4821"
+    assert code.approval_url == "https://dev.botcamp.xyz/connect"
     assert hub._pending_device["device_code"] == "dev_test"
 
 
@@ -1377,7 +1454,7 @@ def test_a_hostile_device_code_reply_never_reaches_the_browser(
     with caplog.at_level(logging.WARNING, logger="condor.hub"):
         started = hub.device_start()
 
-    safe = "https://dev.botcamp.xyz/connect?code=WXYZ-4821"
+    safe = "https://dev.botcamp.xyz/connect"
     assert started.approval_url == safe
     assert "evil.example" not in started.model_dump_json()
 
@@ -1399,39 +1476,34 @@ def test_an_ordinary_same_origin_reply_logs_no_mismatch(fake_hub, caplog):
     with caplog.at_level(logging.WARNING, logger="condor.hub"):
         started = hub.device_start()
 
-    assert started.approval_url == "https://dev.botcamp.xyz/connect?code=WXYZ-4821"
+    assert started.approval_url == "https://dev.botcamp.xyz/connect"
     assert not [r for r in caplog.records if "not this install's hub" in r.message]
 
 
 @pytest.mark.parametrize(
-    "hub_url, user_code, expected",
+    "hub_url, expected",
     [
-        (
-            "https://dev.botcamp.xyz/api",
-            "WXYZ-4821",
-            "https://dev.botcamp.xyz/connect?code=WXYZ-4821",
-        ),
+        ("https://dev.botcamp.xyz/api", "https://dev.botcamp.xyz/connect"),
         # A dev hub: scheme, host *and port* survive; `/api` does not.
-        (
-            "http://masiva.local:3000/api",
-            "WXYZ-4821",
-            "http://masiva.local:3000/connect?code=WXYZ-4821",
-        ),
-        # The code is a query *value*, so anything shaped like a separator in
-        # it is encoded rather than ending the parameter.
-        (
-            "https://dev.botcamp.xyz/api",
-            "a b&x=1#f/g",
-            "https://dev.botcamp.xyz/connect?code=a+b%26x%3D1%23f%2Fg",
-        ),
+        ("http://masiva.local:3000/api", "http://masiva.local:3000/connect"),
     ],
 )
 def test_approval_url_is_built_from_the_configured_origin(
-    monkeypatch, hub_url, user_code, expected
+    monkeypatch, hub_url, expected
 ):
     monkeypatch.setattr(hub, "HUB_URL", hub_url)
 
-    assert hub.approval_url(user_code) == expected
+    assert hub.approval_url() == expected
+
+
+def test_the_approval_link_never_carries_the_code(fake_hub):
+    """Botcamp has the person type the code (RFC 8628 §5.4) and ignores a
+    ``?code=``: a prefilled link is what a phishing message would send."""
+    started = hub.device_start()
+
+    assert "WXYZ-4821" not in started.approval_url
+    assert "?" not in started.approval_url
+    assert started.user_code == "WXYZ-4821"  # still shown, to be typed
 
 
 def test_device_state_is_none_with_nothing_pending_or_linked(cm):
@@ -1445,7 +1517,7 @@ def test_device_state_reports_pending_with_the_user_code_and_link(fake_hub):
 
     assert state.status == "pending"
     assert state.user_code == "WXYZ-4821"
-    assert state.approval_url == "https://dev.botcamp.xyz/connect?code=WXYZ-4821"
+    assert state.approval_url == "https://dev.botcamp.xyz/connect"
 
 
 def test_device_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
@@ -1545,6 +1617,7 @@ def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, 
     reloaded = cm_module.ConfigManager(config_path=str(cm.config_path))
     assert reloaded.get_hub() == {
         "token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+        "token_origin": "https://dev.botcamp.xyz",
         "profile_handle": "cardosofede",
         "scope": ["agents:read", "agents:publish"],
         "user": {"id": "u_1", "name": "cardosofede"},
@@ -1622,7 +1695,7 @@ def test_restarting_a_device_login_forgets_the_previous_attempt(fake_hub):
     # `device_code` at all — the polling secret stays inside this module
     # (SEC-819), so the swap is read off the tracked attempt.
     assert second.user_code == "ABCD-1234"
-    assert second.approval_url == "https://dev.botcamp.xyz/connect?code=ABCD-1234"
+    assert second.approval_url == "https://dev.botcamp.xyz/connect"
     assert hub._pending_device["device_code"] == "dev_second" != first_device_code
 
 
@@ -1841,7 +1914,7 @@ def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
     assert started.status_code == 200
     body = started.json()
     assert body["user_code"] == "WXYZ-4821"
-    assert body["approval_url"] == "https://dev.botcamp.xyz/connect?code=WXYZ-4821"
+    assert body["approval_url"] == "https://dev.botcamp.xyz/connect"
     assert "access_token" not in body
 
     pending = client.get("/settings/hub-device")
@@ -1881,7 +1954,7 @@ def test_the_dashboard_routes_never_hand_back_a_hostile_approval_url(
     assert started.status_code == 200
     assert started.json() == {
         "user_code": "WXYZ-4821",
-        "approval_url": "https://dev.botcamp.xyz/connect?code=WXYZ-4821",
+        "approval_url": "https://dev.botcamp.xyz/connect",
         "expires_in": 600,
         "interval": 5,
     }
@@ -1889,9 +1962,7 @@ def test_the_dashboard_routes_never_hand_back_a_hostile_approval_url(
 
     pending = client.get("/settings/hub-device")
     assert pending.json()["status"] == "pending"
-    assert pending.json()["approval_url"] == (
-        "https://dev.botcamp.xyz/connect?code=WXYZ-4821"
-    )
+    assert pending.json()["approval_url"] == ("https://dev.botcamp.xyz/connect")
     assert "evil.example" not in pending.text
 
     assert (
@@ -2015,6 +2086,55 @@ def test_an_imported_routine_has_no_execution_consent_on_the_hub_path(offered):
 
     source = agent_home("traveller") / "routines" / "r.py"
     assert not code_trust.allowed("traveller", "r", source.read_text())
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("get", "/hub/catalogue"),
+        ("get", "/hub/agents/traveller"),
+        ("post", "/hub/agents/traveller/install/preview"),
+        ("post", "/hub/agents/traveller/install"),
+    ],
+)
+def test_a_seat_reads_the_hub_without_the_admins_token(
+    offered, fake_hub, cm, method, path
+):
+    """SEC review C4: the one token carries whatever the admin's Botcamp
+    account bought or joined, so only the admin's reads send it."""
+    hub.set_token("botcamp-tok")
+    before = len(fake_hub.calls)
+
+    getattr(_client(admin=False), method)(path)
+
+    sent = fake_hub.calls[before:]
+    assert sent, "the route reached the hub"
+    assert {call.token for call in sent} == {""}
+
+
+def test_the_admins_reads_still_carry_the_token(offered, fake_hub, cm):
+    hub.set_token("botcamp-tok")
+    before = len(fake_hub.calls)
+
+    _client(admin=True).post("/hub/agents/traveller/install/preview")
+
+    assert {call.token for call in fake_hub.calls[before:]} == {"botcamp-tok"}
+
+
+def test_a_seat_installs_from_chat_without_the_admins_token(
+    offered, fake_hub, cm, monkeypatch
+):
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", SEAT_ID, raising=False)
+    hub.set_token("botcamp-tok")
+    before = len(fake_hub.calls)
+
+    trading_agent.manage_agents(action="hub_install", path="traveller")
+
+    sent = fake_hub.calls[before:]
+    assert sent and {call.token for call in sent} == {""}
 
 
 def test_every_hub_surface_carries_the_one_trust_sentence(offered):
@@ -2487,9 +2607,11 @@ def test_manage_agents_hub_install_needs_a_slug(fake_hub):
     assert fake_hub.calls == []
 
 
-def test_manage_agents_publishes_to_the_hub(traveller, fake_hub, cm):
+def test_manage_agents_publishes_to_the_hub(traveller, fake_hub, cm, monkeypatch):
+    from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent
 
+    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
     hub.set_token("botcamp-tok")
 
     result = trading_agent.manage_agents(
@@ -2503,13 +2625,29 @@ def test_manage_agents_publishes_to_the_hub(traveller, fake_hub, cm):
 
 
 def test_manage_agents_publish_without_a_token_is_an_error_not_a_raise(
-    traveller, fake_hub
+    traveller, fake_hub, monkeypatch
 ):
+    from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent
 
+    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
     result = trading_agent.manage_agents(action="publish_hub", agent_slug="traveller")
 
     assert "Agent Hub" in result["error"]
+    assert fake_hub.calls == []
+
+
+def test_manage_agents_publish_hub_is_admin_only(traveller, fake_hub, cm, monkeypatch):
+    """SEC review C1: the tool's "ADMIN ONLY" was read only by the model."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", SEAT_ID, raising=False)
+    hub.set_token("botcamp-tok")
+
+    result = trading_agent.manage_agents(action="publish_hub", agent_slug="traveller")
+
+    assert "admin-only" in result["error"]
     assert fake_hub.calls == []
 
 
@@ -2539,3 +2677,101 @@ def test_fetch_is_addressed_only_by_what_the_caller_gave(traveller, fake_hub):
 
     assert fetched.data == data
     assert not any("/admin" in call.url for call in fake_hub.calls)
+
+
+# ── Possible keys wait for a person, on every door (SEC review C2) ───────
+#
+# A bare 64-hex is an EVM key as often as a tx hash. Export and publish stop on
+# it until someone acknowledges it by fingerprint; the acknowledgement rides to
+# Botcamp, which runs the same check, as ``acknowledged_secrets``.
+
+_MAYBE_KEY = "4c0883a69102937d6231471b5dbb6204fe512961708279f1b7e0f4e6a6b01f4c"
+
+
+@pytest.fixture
+def keyish(traveller):
+    _write(traveller / "routines" / "r.py", ROUTINE_PY + f'\nTX = "{_MAYBE_KEY}"\n')
+    from condor.agents import bundle_review
+
+    return bundle_review.fingerprint(_MAYBE_KEY)
+
+
+def test_chat_export_lists_possible_keys_and_takes_an_acknowledgement(keyish):
+    from mcp_servers.condor.tools import trading_agent
+
+    stopped = trading_agent.manage_agents(action="export", agent_slug="traveller")
+
+    assert "may be a private key" in stopped["error"]
+    assert [k["fingerprint"] for k in stopped["possible_keys"]] == [keyish]
+    assert _MAYBE_KEY not in json.dumps(stopped)
+    assert "never acknowledge one yourself" in stopped["next"]
+
+    done = trading_agent.manage_agents(
+        action="export", agent_slug="traveller", acknowledge=[keyish]
+    )
+    assert done["exported"] is True
+
+
+def test_chat_publish_stops_before_sending_then_carries_the_acknowledgement(
+    keyish, fake_hub, cm, monkeypatch
+):
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
+    hub.set_token("botcamp-tok")
+
+    stopped = trading_agent.manage_agents(action="publish_hub", agent_slug="traveller")
+    assert stopped["possible_keys"][0]["fingerprint"] == keyish
+    assert fake_hub.calls == []
+
+    trading_agent.manage_agents(
+        action="publish_hub", agent_slug="traveller", acknowledge=[keyish]
+    )
+    body = fake_hub.calls[-1].body
+    assert body["acknowledged_secrets"] == [keyish]
+
+
+def test_publish_sends_only_acknowledgements_the_bundle_carries(keyish, fake_hub, cm):
+    hub.set_token("botcamp-tok")
+
+    hub.publish(
+        "traveller", "botcamp-tok", acknowledged=[keyish, "sha256:ffffffffffffffff"]
+    )
+
+    assert fake_hub.calls[-1].body["acknowledged_secrets"] == [keyish]
+
+
+def test_a_clean_publish_acknowledges_nothing(traveller, fake_hub, cm):
+    hub.publish("traveller", "botcamp-tok")
+
+    assert fake_hub.calls[-1].body["acknowledged_secrets"] == []
+
+
+def test_the_export_route_answers_409_with_the_list_then_takes_it(keyish):
+    client = _client()
+
+    stopped = client.get("/agents/traveller/bundle")
+    assert stopped.status_code == 409
+    assert "may be a private key" in stopped.json()["detail"]
+    assert stopped.json()["possible_keys"][0]["fingerprint"] == keyish
+    assert _MAYBE_KEY not in stopped.text
+
+    assert (
+        client.get(f"/agents/traveller/bundle?acknowledge={keyish}").status_code == 200
+    )
+
+
+def test_the_publish_route_answers_409_with_the_list_then_takes_it(
+    keyish, fake_hub, cm
+):
+    hub.set_token("botcamp-tok")
+    client = _client()
+
+    stopped = client.post("/agents/traveller/publish", json={})
+    assert stopped.status_code == 409
+    assert fake_hub.calls == []
+
+    sent = client.post("/agents/traveller/publish", json={"acknowledge": [keyish]})
+    assert sent.status_code == 200
+    assert fake_hub.calls[-1].body["acknowledged_secrets"] == [keyish]
