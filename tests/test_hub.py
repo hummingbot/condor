@@ -618,9 +618,114 @@ def test_get_reads_botcamps_data_envelope(fake_hub):
     assert hub.listing_status("river_scalper", 1).state == "ok"
 
 
-def test_there_is_no_browse_endpoint_to_call(fake_hub):
-    """PR #111 ships no catalogue search — ``browse`` does not exist at all."""
-    assert not hasattr(hub, "browse")
+def _catalogue(*entries: dict, envelope: bool = False) -> hub.Reply:
+    body = {"listings": list(entries)}
+    return hub.Reply(200, json.dumps({"data": body} if envelope else body).encode())
+
+
+def _entry(slug: str, **fields) -> dict:
+    return {
+        "listing_id": slug,
+        "slug": slug,
+        "name": slug.replace("-", " ").title(),
+        "version": 1,
+        "author": {"name": "James", "handle": "james"},
+        "badge": "validated",
+        "free": True,
+        **fields,
+    }
+
+
+def test_browse_reads_one_page_of_the_catalogue(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("grid-bot", description="Runs a grid."),
+        _entry("paid-bot", free=False),
+    )
+
+    entries = hub.browse("grid", page=2, token="a-token")
+
+    assert [e.slug for e in entries] == ["grid-bot", "paid-bot"]
+    assert entries[0].author.handle == "james"
+    assert entries[0].description == "Runs a grid."
+    assert entries[1].free is False
+    assert fake_hub.calls[0].url == f"{hub.HUB_URL}/agents?query=grid&page=2"
+    assert fake_hub.calls[0].token == "a-token"
+
+
+def test_a_null_column_reads_as_not_sent(fake_hub):
+    """Botcamp answers ``null`` for an empty nullable column — a zip upload's
+    ``sourceRef``, a page with no ``summary`` — and that must not refuse the
+    whole agent."""
+    fake_hub.overrides[("GET", "/agents/zip_bot")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "data": {
+                    "slug": "zip_bot",
+                    "title": "Zip Bot",
+                    "summary": None,
+                    "latest": 1,
+                    "versions": [
+                        {
+                            "version": 1,
+                            "sha256": "ab" * 32,
+                            "sourceRef": None,
+                            "manifest": None,
+                        }
+                    ],
+                }
+            }
+        ).encode(),
+    )
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("zip_bot", description=None, author={"name": None, "handle": "z"})
+    )
+
+    listing = hub.get("zip_bot")
+    assert listing.description == ""
+    assert listing.versions[0].source_ref == ""
+    assert listing.versions[0].manifest == {}
+    [entry] = hub.browse()
+    assert entry.description == "" and entry.author.name == ""
+
+
+def test_browse_reads_botcamps_data_envelope_too(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("grid-bot"), envelope=True
+    )
+
+    assert [e.slug for e in hub.browse()] == ["grid-bot"]
+
+
+def test_browse_drops_an_entry_whose_slug_a_pull_could_not_address(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("../../admin"), _entry("grid-bot")
+    )
+
+    assert [e.slug for e in hub.browse()] == ["grid-bot"]
+
+
+def test_browse_refuses_a_page_longer_than_any_the_hub_sends(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        *[_entry(f"bot-{i}") for i in range(hub.MAX_CATALOGUE_PAGE + 1)]
+    )
+
+    with pytest.raises(hub.HubError):
+        hub.browse()
+
+
+@pytest.mark.parametrize("page", [0, -1, 1001, True])
+def test_browse_holds_the_page_to_a_range_before_sending(fake_hub, page):
+    with pytest.raises(IdentifierError):
+        hub.browse(page=page)
+    assert fake_hub.calls == []
+
+
+def test_browse_encodes_the_query_rather_than_pathing_it(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue()
+
+    assert hub.browse("a/..?x=1") == []
+    assert fake_hub.calls[0].url == f"{hub.HUB_URL}/agents?query=a%2F..%3Fx%3D1&page=1"
 
 
 def test_a_malformed_catalogue_reply_is_refused_readably(fake_hub):
@@ -2096,6 +2201,38 @@ def test_the_hub_status_route_answers_404_for_an_agent_that_does_not_exist():
 
 
 # ── The routes' own refusals ─────────────────────────────────────────────
+
+
+def test_the_catalogue_route_lists_one_page_with_the_trust_sentence(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(_entry("grid-bot"))
+
+    body = _client().get("/hub/catalogue", params={"query": "grid", "page": 2}).json()
+
+    assert [entry["slug"] for entry in body["listings"]] == ["grid-bot"]
+    assert body["page"] == 2
+    # Links a browser follows are built from the configured hub, not the reply.
+    origin = hub.site_url("")
+    assert body["listings"][0]["page_url"] == f"{origin}/strategies/grid-bot"
+    assert body["botcamp_url"] == f"{origin}/strategies?type=AGENT"
+    assert "not a security boundary" in body["trust"]
+    assert fake_hub.calls[0].url == f"{hub.HUB_URL}/agents?query=grid&page=2"
+
+
+def test_a_catalogue_link_never_comes_from_the_reply(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("grid-bot", page_url="https://evil.example/phish")
+    )
+
+    body = _client().get("/hub/catalogue").json()
+
+    assert body["listings"][0]["page_url"] == f"{hub.site_url('')}/strategies/grid-bot"
+
+
+def test_a_catalogue_page_out_of_range_is_a_400_and_nothing_is_sent(fake_hub):
+    res = _client().get("/hub/catalogue", params={"page": 0})
+
+    assert res.status_code == 400
+    assert fake_hub.calls == []
 
 
 def test_a_refused_listing_id_is_a_400_and_nothing_is_sent(fake_hub):
