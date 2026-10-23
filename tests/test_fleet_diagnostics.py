@@ -43,14 +43,27 @@ def _row(executor_id, status, controller_id, **over):
 # ── Host capacity ──
 
 
-def test_the_host_reading_divides_load_by_the_cores_it_has():
-    reading = host_load()
+def test_the_host_reading_divides_load_by_the_cores_it_has(monkeypatch):
+    # Pinned rather than read off the real host: the ratio is taken from the
+    # unrounded load and each field is rounded on its own, so re-deriving one
+    # from the other misses by a rounding step on an unlucky load (1.1847 on 4
+    # vCPUs reads 1.18 and 0.296, not 1.18 / 4 = 0.295).
+    monkeypatch.setattr("os.getloadavg", lambda: (1.1847, 1.0, 1.0))
+    monkeypatch.setattr("os.cpu_count", lambda: 4)
+    assert host_load() == {
+        "available": True,
+        "load_1m": 1.18,
+        "vcpus": 4,
+        "load_per_vcpu": 0.296,
+    }
+
+
+def test_the_real_host_has_a_reading():
     # Darwin and Linux both have a load average; the suite runs on both.
+    reading = host_load()
     assert reading["available"] is True
     assert reading["vcpus"] > 0
-    assert reading["load_per_vcpu"] == pytest.approx(
-        reading["load_1m"] / reading["vcpus"], abs=1e-3
-    )
+    assert reading["load_per_vcpu"] >= 0
 
 
 def test_a_platform_with_no_load_average_reports_unavailable(monkeypatch):

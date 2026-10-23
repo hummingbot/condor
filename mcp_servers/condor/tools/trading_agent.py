@@ -473,7 +473,7 @@ def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dic
     out of somebody's download.
 
     It needs the install's Botcamp token, which lives in ``config.yml`` and is
-    set in Settings → Agents. There is no way to pass one in here and there
+    set in the Agent Hub (Agents → Hub). There is no way to pass one in here and there
     should not be: a token in a tool argument is a token in a transcript.
 
     Publishing sends content off this box and is irreversible in practice —

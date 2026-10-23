@@ -299,7 +299,10 @@ class DeviceCode(BaseModel):
     """
 
     device_code: str
-    user_code: str
+    #: Shown to the admin as-is and put in the approval link, so it is held to
+    #: the shape a code has (Botcamp's are ``XXXX-XXXX``) — a hub cannot use
+    #: it to put a sentence of its own on Condor's screen.
+    user_code: str = Field(pattern=r"^[A-Za-z0-9-]{4,16}$")
     verification_uri: str
     verification_uri_complete: str = ""
     expires_in: int = 600
@@ -604,11 +607,24 @@ def _refusal(reply: Reply, what: str) -> str:
     detail = _detail(reply)
     if reply.status == 401 or reply.status == 403:
         detail = detail or (
-            "The hub refused this token. Set a current one in Settings → Agents."
+            "The hub refused this token. Reconnect Botcamp in the Agent Hub (Agents → Hub)."
         )
     return f"The hub refused {what} ({reply.status})" + (
         f": {detail[:400]}" if detail else ""
     )
+
+
+def _enveloped(payload: dict) -> dict:
+    """``payload``'s ``data`` object when Botcamp wrapped it, else ``payload``.
+
+    Botcamp answers every route as ``{"data": {...}}`` — ``/condor/me``,
+    ``/condor/device/approve`` and ``/agents/{slug}`` alike — while §3.2 of the
+    contract shows the bare listing. Both are read, so neither side has to move
+    first; a listing that happens to carry a non-object ``data`` field is left
+    as it is.
+    """
+    data = payload.get("data")
+    return data if isinstance(data, dict) else payload
 
 
 def _model(payload: dict, model, what: str):
@@ -670,7 +686,7 @@ def _access_refusal(reply: Reply, what: str) -> HubError:
         return HubError(
             detail
             or f"{what}: sign in to Botcamp to clone this agent — connect a "
-            "profile in Settings → Agents.",
+            "profile in the Agent Hub (Agents → Hub).",
             status=401,
         )
     if reply.status == 403:
@@ -712,7 +728,7 @@ def get(slug: str, token: str = "") -> AgentListing:
     reply = _send("GET", f"{HUB_URL}/agents/{slug}", token=(token or "").strip())
     if reply.status < 200 or reply.status >= 300:
         raise _access_refusal(reply, what)
-    return _model(_decode(reply, what), AgentListing, what)
+    return _model(_enveloped(_decode(reply, what)), AgentListing, what)
 
 
 class FetchedVersion(NamedTuple):
@@ -842,7 +858,9 @@ def listing_status(slug: str, version: int, *, token: str = "") -> ListingStatus
     if 200 <= reply.status < 300:
         try:
             listing = _model(
-                _decode(reply, f"agent '{slug}'"), AgentListing, f"agent '{slug}'"
+                _enveloped(_decode(reply, f"agent '{slug}'")),
+                AgentListing,
+                f"agent '{slug}'",
             )
         except HubError:
             return ListingStatus(state="unknown", checked_at=checked_at)
@@ -948,7 +966,7 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
 
     if not (token or "").strip():
         raise NoTokenError(
-            "Publishing needs a linked Botcamp profile. Connect one in Settings → Agents."
+            "Publishing needs a linked Botcamp profile. Connect one in the Agent Hub (Agents → Hub)."
         )
     # Before the build, so a missing agent is answered without stamping its
     # bookkeeping — ``build`` writes ``bundle_version``/``bundle_digest`` on
@@ -1027,7 +1045,7 @@ def unpublish(listing_id: str, token: str) -> None:
     if not (token or "").strip():
         raise NoTokenError(
             "Withdrawing a listing needs a linked Botcamp profile. Connect one in "
-            "Settings → Agents."
+            "the Agent Hub (Agents → Hub)."
         )
     reply = _send("DELETE", f"{HUB_URL}/agents/{listing_id}", token=token.strip())
     _clear_token_if_revoked(reply)
@@ -1112,7 +1130,7 @@ def submission_status(slug: str, token: str) -> Receipt:
     if not (token or "").strip():
         raise NoTokenError(
             "Checking a submission needs a linked Botcamp profile. Connect one "
-            "in Settings → Agents."
+            "in the Agent Hub (Agents → Hub)."
         )
     submission_id = _segment(stored.submission_id, "submission id")
     what = f"the status of '{slug}' submission"
@@ -1446,7 +1464,7 @@ def me(token: str) -> MeInfo:
     """
     if not (token or "").strip():
         raise NoTokenError(
-            "No Botcamp profile is linked. Connect one in Settings → Agents."
+            "No Botcamp profile is linked. Connect one in the Agent Hub (Agents → Hub)."
         )
     reply = _send("GET", f"{HUB_URL}/condor/me", token=token.strip())
     _clear_token_if_revoked(reply)

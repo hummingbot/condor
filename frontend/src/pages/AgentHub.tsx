@@ -1,7 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Brain, Globe, Loader2, Lock } from "lucide-react";
+import { Brain, Globe, Loader2, Lock } from "lucide-react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
 
 import {
   HubDeviceField,
@@ -15,6 +14,10 @@ import { api } from "@/lib/api";
 
 /**
  * Botcamp Hub, as one destination reached from the Agents home (FEAT-153).
+ *
+ * Rendered by the Agents workspace itself, in the conversation's column, so
+ * the rail and the dock stay put and it reads as part of the app rather than
+ * a page you leave to — hence no "back" link: the rail is the way back.
  *
  * Before this, Hub browse and the Botcamp link lived under Settings → Agents,
  * and publish lived only on each agent's own workspace page — three doors to
@@ -58,16 +61,9 @@ export function AgentHub() {
   const linked = hubDevice?.linked ?? false;
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8 px-4 py-6">
+    <div className="mx-auto w-full max-w-3xl space-y-8 px-6 py-8">
       <div>
-        <Link
-          to="/"
-          className="flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Back to Agents
-        </Link>
-        <h1 className="mt-2 flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
+        <h1 className="flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
           <Globe className="h-5 w-5" />
           Agent Hub
         </h1>

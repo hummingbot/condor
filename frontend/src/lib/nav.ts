@@ -64,4 +64,4 @@ export const NAV_ITEMS = [
  * route with a body any more (FEAT-116): a layout rule for it would be a rule
  * about a redirect. What it used to draw is `/bots`, which is on this list.
  */
-export const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
+export const FULL_BLEED_ROUTES = ["/", "/hub", "/bots", "/routines"];

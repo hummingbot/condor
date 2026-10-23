@@ -44,7 +44,10 @@ afterEach(() => {
   container.remove();
 });
 
-async function render() {
+async function render({
+  hubActive = false,
+  activeSlug = "",
+}: { hubActive?: boolean; activeSlug?: string } = {}) {
   await act(async () => {
     root.render(
       <MemoryRouter>
@@ -56,8 +59,9 @@ async function render() {
           <ChatRail
             agents={AGENTS}
             runningTasks={0}
-            activeSlug=""
-            hasSession={false}
+            activeSlug={activeSlug}
+            hasSession={!!activeSlug}
+            hubActive={hubActive}
             liveIds={new Set()}
             activeId=""
             open
@@ -88,5 +92,21 @@ describe("the hub entry (FEAT-153)", () => {
       lastAgentRow!.compareDocumentPosition(link!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("lights the Hub row, and no agent's, while the Hub is in the column", async () => {
+    await render({ hubActive: true, activeSlug: "brigado" });
+    const link = container.querySelector("a[href='/hub']");
+    expect(link?.getAttribute("aria-current")).toBe("page");
+    const brigado = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.includes("Brigado"),
+    );
+    expect(brigado?.className).not.toContain("text-[var(--color-primary)]");
+  });
+
+  it("leaves the Hub row unlit on a conversation", async () => {
+    await render({ activeSlug: "brigado" });
+    const link = container.querySelector("a[href='/hub']");
+    expect(link?.hasAttribute("aria-current")).toBe(false);
   });
 });

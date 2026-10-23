@@ -571,6 +571,53 @@ def test_get_sends_the_linked_token_so_a_gated_agent_can_resolve(fake_hub):
     assert fake_hub.calls[0].token == "a-token"
 
 
+@pytest.mark.parametrize(
+    "user_code",
+    ["", "AB", "CALL +1 555 0100 TO VERIFY", "WXYZ-4821\nvisit evil.example"],
+)
+def test_a_user_code_that_is_not_a_code_is_refused(fake_hub, user_code):
+    """The code is shown to the admin and put in the approval link, so a hub
+    cannot use it to write its own words on Condor's screen (SEC-819)."""
+    fake_hub.overrides[("POST", "/condor/device/code")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "device_code": "dev_1",
+                "user_code": user_code,
+                "verification_uri": f"{hub.HUB_URL}/connect",
+            }
+        ).encode(),
+    )
+
+    with pytest.raises(hub.HubError):
+        hub.device_start()
+
+
+def test_get_reads_botcamps_data_envelope(fake_hub):
+    """Botcamp wraps every answer in ``{"data": ...}`` — the bare §3.2 shape
+    above and the enveloped one Botcamp actually sends both read the same."""
+    fake_hub.overrides[("GET", "/agents/river_scalper")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "data": {
+                    "slug": "river_scalper",
+                    "title": "River Scalper",
+                    "latest": 1,
+                    "versions": [{"version": 1, "sha256": "ab" * 32}],
+                }
+            }
+        ).encode(),
+    )
+
+    listing = hub.get("river_scalper")
+
+    assert listing.slug == "river_scalper"
+    assert listing.name == "River Scalper"
+    assert [v.version for v in listing.versions] == [1]
+    assert hub.listing_status("river_scalper", 1).state == "ok"
+
+
 def test_there_is_no_browse_endpoint_to_call(fake_hub):
     """PR #111 ships no catalogue search — ``browse`` does not exist at all."""
     assert not hasattr(hub, "browse")
@@ -766,7 +813,7 @@ def test_publish_without_a_token_sends_nothing_and_says_what_to_do(traveller, fa
     with pytest.raises(hub.HubError) as exc:
         hub.publish("traveller", "   ")
 
-    assert "Settings" in str(exc.value)
+    assert "Agent Hub" in str(exc.value)
     assert fake_hub.calls == []
 
 
@@ -2185,7 +2232,7 @@ def test_the_publish_route_says_400_when_no_token_is_set(traveller, fake_hub):
     res = _client().post("/agents/traveller/publish")
 
     assert res.status_code == 400
-    assert "Settings" in res.json()["detail"]
+    assert "Agent Hub" in res.json()["detail"]
     assert fake_hub.calls == []
 
 
@@ -2298,7 +2345,7 @@ def test_manage_agents_publish_without_a_token_is_an_error_not_a_raise(
 
     result = trading_agent.manage_agents(action="publish_hub", agent_slug="traveller")
 
-    assert "Settings" in result["error"]
+    assert "Agent Hub" in result["error"]
     assert fake_hub.calls == []
 
 

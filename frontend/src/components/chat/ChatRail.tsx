@@ -51,6 +51,7 @@ export const ChatRail = memo(function ChatRail({
   hasSession,
   liveIds,
   activeId,
+  hubActive = false,
   open,
   onClose,
   onTalk,
@@ -67,6 +68,8 @@ export const ChatRail = memo(function ChatRail({
   liveIds: Set<string>;
   /** Conversation on screen — `null` before a session exists. */
   activeId: string | null;
+  /** The Hub is in the workspace's column, so its row is the one lit. */
+  hubActive?: boolean;
   /** Shown below `md`, where the rail is an overlay rather than a column. */
   open: boolean;
   onClose: () => void;
@@ -180,7 +183,7 @@ export const ChatRail = memo(function ChatRail({
         <RailRow
           label={condor?.name || "Condor"}
           icon={<MessageSquare className="h-3 w-3 shrink-0" />}
-          active={hasSession && !activeSlug}
+          active={!hubActive && hasSession && !activeSlug}
           title={condor?.description || "General trading assistant"}
           onClick={() => onTalk("", null)}
           newTitle={`New chat with ${condor?.name || "Condor"}`}
@@ -194,7 +197,7 @@ export const ChatRail = memo(function ChatRail({
               <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
             }
             live={deriveAgentStatus(agent) === "running"}
-            active={activeSlug === agent.slug}
+            active={!hubActive && activeSlug === agent.slug}
             title={agent.description || agent.name}
             onClick={() => onTalk(agent.slug, agent)}
             newTitle={`New chat with ${agent.name}`}
@@ -207,7 +210,13 @@ export const ChatRail = memo(function ChatRail({
         <Link
           to="/hub"
           title="Botcamp Hub — install published agents, or publish your own"
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          aria-current={hubActive ? "page" : undefined}
+          onClick={onClose}
+          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+            hubActive
+              ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          }`}
         >
           <Globe className="h-3 w-3 shrink-0" />
           <span className="min-w-0 flex-1 truncate">Hub</span>
