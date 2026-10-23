@@ -12,13 +12,21 @@ source: agent:adaptive_grid_trader
 
 ### Step 0 — Order Size Validation
 
-Given: budget, range (start_price → end_price), spacing, min_order_size, exchange_minimum
+Required inputs: budget, range (start_price → end_price), spacing, current price, minimum order quote amount, exchange minimum notional, exchange base-amount increment, and exchange price increment. If any exchange rule or current price is missing, zero, stale, or unreadable, **FAIL**.
 
-1. Compute levels: `levels = (end_price - start_price) / (spacing × mid_price)`
-2. Compute per-level size: `per_level = total_amount_quote / levels`
-3. Check: `per_level ≥ max(min_order_size, exchange_minimum)`
-4. If FAIL:
-   - Reduce levels (widen spacing) until per_level passes
+1. Compute `minimum_notional = max(min_order_size, exchange_minimum_notional)`.
+2. Mirror Hummingbot's 5% margin and base-increment rounding exactly: `effective_minimum_quote = ceil((minimum_notional × 1.05) / (price × base_amount_increment)) × base_amount_increment × price`.
+3. If `total_amount_quote < effective_minimum_quote`, **FAIL: Hummingbot's one-level fallback would exceed the configured budget**. Do not deploy.
+4. Compute the relative grid range exactly as Hummingbot does: `range_fraction = (end_price - start_price) / start_price`.
+5. Compute `effective_spacing = max(spacing, price_increment / price)`.
+6. Compute both caps using integer floors:
+   - `levels_by_budget = floor(total_amount_quote / effective_minimum_quote)`
+   - `levels_by_spacing = floor(range_fraction / effective_spacing)`
+7. Compute the candidate level count: `levels = min(levels_by_budget, levels_by_spacing)`. It must be at least 1 after the explicit over-budget check.
+8. Mirror Hummingbot's later base-amount-per-level floor quantization and reduce `levels` again when the resulting quote amount would exceed the budget.
+9. Compute per-level size from the quantized base amount and require both `per_level ≥ effective_minimum_quote` and `levels × per_level ≤ total_amount_quote`.
+10. If FAIL:
+   - Reduce levels until per-level size passes; widening spacing is one way to lower the spacing cap.
    - If no valid configuration exists → **FAIL: budget too small for this range**
 
 ### Step 1 — Worst-Case Position Size
