@@ -264,7 +264,7 @@ def test_winddown_keep_spot_close_perp(tmp_path, monkeypatch):
     assert calls["e_spot"] is True  # spot kept
     assert any("complete" in n for n in notes)
     assert not any("🚨" in n for n in notes)
-    assert ("shutdown_done", "stopped=2, failures=0, verify=flat") in [
+    assert ("shutdown_done", "stopped=2, bots=0, failures=0, verify=flat") in [
         (a, r) for a, r in engine.journal.actions
     ]
 
@@ -842,7 +842,7 @@ def test_winddown_survives_a_positions_fetch_failure_during_verify(
     monkeypatch.setattr(client.executors, "get_positions_summary", boom)
     asyncio.run(run_shutdown(engine, "test breach"))
 
-    assert ("shutdown_done", "stopped=1, failures=0, verify=flat") in [
+    assert ("shutdown_done", "stopped=1, bots=0, failures=0, verify=flat") in [
         (a, r) for a, r in engine.journal.actions
     ]
 
@@ -987,7 +987,7 @@ def test_baseline_stops_executors_concurrently(tmp_path, monkeypatch):
     asyncio.run(_go())
 
     assert dict(client.executors.stop_calls) == {"e1": False, "e2": True, "e3": False}
-    assert ("shutdown_done", "stopped=3, failures=0, verify=flat") in (
+    assert ("shutdown_done", "stopped=3, bots=0, failures=0, verify=flat") in (
         engine.journal.actions
     )
 

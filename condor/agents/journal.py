@@ -190,6 +190,17 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
     ``risk_state={}`` and must still render.
     """
     rs = risk_state
+    # What the gate's figures are actually denominated in (LP-2). "quote" is
+    # whatever the strategy trades against, and for the LP operator that is SOL
+    # — so a 500 ceiling rendered as "$500" understated it by three orders of
+    # magnitude to the one audience that acts on it. A dollar-quoted strategy,
+    # and any caller that does not say, keeps the "$".
+    unit = str(rs.get("quote_asset") or "").strip().upper()
+    dollars = not unit or unit in {"USD", "USDT", "USDC", "DAI", "BUSD", "FDUSD"}
+
+    def _amount(value: float) -> str:
+        return f"${value:,.2f}" if dollars else f"{value:,.4f} {unit}"
+
     max_dd = rs.get("max_drawdown_pct", -1)
     dd_display = (
         f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
@@ -197,7 +208,8 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
         else "disabled"
     )
     lines = [
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
+        f"Position Size: {_amount(rs.get('total_exposure', 0))} / "
+        f"{_amount(rs.get('max_position_size', 500))} limit",
         f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
         f"Drawdown: {dd_display}",
     ]
@@ -211,6 +223,18 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
         lines.append(
             f"Max Leverage: {max_leverage:g}x "
             "(declare `leverage` on every create; omitting it is refused)"
+        )
+    # A limit the agent is NOT told about is a limit it will trip; a limit it is
+    # wrongly told it has is one it will rely on. ``min_wallet_sol_reserve`` and
+    # ``max_open_slots`` sat in lp_slot_operator's risk_limits bounding nothing,
+    # and the loop planned its slots around them (LP-3). Named here, in the same
+    # block as the real limits, because that is where the agent looks.
+    unrecognized = rs.get("unrecognized_limits") or []
+    if unrecognized:
+        lines.append(
+            f"NOT ENFORCED: {', '.join(unrecognized)} — set in this strategy's "
+            "risk_limits but unknown to the risk engine, so they bound nothing. "
+            "Do not plan around them."
         )
     # "Risk Check", not "Status": a snapshot outlives its session, and a stopped
     # run's history reading "Status: ACTIVE" looked like the run was still live.

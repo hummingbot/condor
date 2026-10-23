@@ -13,29 +13,49 @@ source: agent:solana_dex_lp_expert
 
 Goal: produce a ranked shortlist of Solana CLMM pools to LP into, quoted in `quote_asset`, on an allowed `venue`.
 
-## 1. Source candidates (GeckoTerminal)
-- `explore_geckoterminal(action="trending_pools", network="solana")` — momentum memecoins.
-- `explore_geckoterminal(action="top_pools", network="solana", dex_id="<venue>")` — top by volume per venue (loop `venues`).
-- Optionally `action="new_pools"` for fresh launches (higher risk/higher fee).
+## 1. Run the routine — do NOT hand-scan
 
-## 2. Filter
-- Keep only pools whose **quote == `quote_asset`** (SOL or USDC).
-- Keep only pools on an allowed **venue** (meteora / orca / raydium).
-- Drop pools already held by an open slot.
-- Drop ultra-thin TVL (`reserve_usd`) — thin pools gap out of range immediately and IL dominates. Rule of thumb: skip TVL < ~$25k unless volume is exceptional.
+```
+manage_routines(action="run", name="lp_scanner", agent="solana_dex_lp_expert",
+  config={"quote_asset": <quote>, "venues": <venues>, "ranking_window": <window>,
+          "top_n": 5, "exclude_pools": [<held pool_addresses>],
+          "exclude_mints": [<held base mints>]})
+```
 
-## 3. Score — fee yield
-For each survivor: **fee_yield = fees(`ranking_window`) / reserve_usd**.
-- GeckoTerminal pool fields give volume + reserve; when a direct fee figure isn't present, estimate `fees ≈ volume(window) × pool_fee_pct`.
-- Higher fee_yield = more fee income per dollar of liquidity = better. This is the primary sort key.
+One call. It sources from GeckoTerminal, filters to the quote asset and the
+allowed venues, drops what you already hold, enriches the shortlist with live
+pool-info and ranks by fee yield — returning `Pool`, `lp_provider`, `MintPair`,
+`BaseMint`, `Bin/Tick`, `Price`, `FeeYield` per row. Take the top one.
 
-## 4. Sanity-check the top few
-- `explore_dex_pools(action="get_pool_info", connector=<venue>, network="solana-mainnet-beta", pool_address=...)` → live price, `bin_step`/`tick_spacing`, liquidity distribution.
-- `explore_geckoterminal(action="ohlcv", network="solana", pool_address=..., timeframe="1h")` → volatility (for range width) and trend. **Reject** pools in a steep one-directional dump (fees won't cover IL / you'll be single-sided into a falling knife).
+> This skill used to spell out the scan by hand: several `explore_geckoterminal`
+> calls, then `explore_dex_pools` and an OHLCV read per candidate. That is a
+> dozen tool calls against a loop that budgets **eight for the whole tick**, and
+> it reimplemented a routine that already exists — which the loop forbids in as
+> many words ("do NOT hand-scan GeckoTerminal") and Condor's own routing rule
+> forbids generally (LP-9). What remains below is the judgement the routine
+> cannot make for you.
 
-## 5. Output
-Ranked list: `pool | venue | pair | TVL | vol(window) | fee_pct | fee_yield | bin_step/tick | price | trend`. Lead with the single best for the next free slot.
+## 2. What the ranking means
+- **fee_yield = fees(window) / TVL** is the sort key: fee income per dollar of
+  liquidity. It is already computed for you.
+- **Thin TVL gaps out of range immediately** and IL dominates. The routine floors
+  this at `min_tvl_usd`; raise it if you keep getting gapped.
+- **Reject a steep one-directional dump.** The routine ranks on yield and cannot
+  see that you would be single-sided into a falling knife. If a candidate looks
+  like one, take the next row rather than spending a second OHLCV call — the loop
+  allows **one OHLCV check per tick**, and an exit decision has first claim on it.
+
+## 3. Choosing between rows
+- Never a second slot on a pool **or token** you already hold — pass your holdings
+  as `exclude_pools` / `exclude_mints` and the routine enforces it.
+- Prefer the row whose `Bin/Tick` leaves room for the width you want: a small
+  `tick_spacing` caps the range hard (see `lp_range_config`).
+- Do not re-enter a pool you just stopped out of unless it clearly re-ranks on
+  top; churn pays fees twice for the same exposure.
 
 ## Notes
+- `venues` are **GeckoTerminal dex ids**: `meteora`, `orca`, `raydium-clmm`.
+  Plain `raydium` is the constant-product AMM and holds no CLMM positions (LP-4).
 - Raydium pool-info comes from the Raydium API (not Gateway); Meteora/Orca via Gateway.
-- Re-rank every tick that has free slots — trending sets rotate fast.
+- Re-rank only on a tick with a free slot — trending sets rotate fast, but a
+  ranking you cannot act on costs a call for nothing.

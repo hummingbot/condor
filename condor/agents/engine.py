@@ -354,7 +354,24 @@ class TickEngine:
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
-        self.risk = RiskEngine(risk_limits)
+        if risk_limits.unrecognized:
+            # The operator's half of LP-3. The agent is told in [RISK STATE];
+            # whoever configured the limit is reading logs, not the prompt, and
+            # a setting that does nothing is worth one line at the one moment
+            # it is read. WARNING, not INFO: the config asked for a bound on
+            # real capital and did not get one.
+            log.warning(
+                "TickEngine %s: risk_limits %s are not enforced — this build "
+                "has no such limit, so they bound nothing. Implement them or "
+                "move them to the strategy config the loop reads itself.",
+                self.agent_id,
+                ", ".join(sorted(risk_limits.unrecognized)),
+            )
+        # The unit the gate's figures carry, so the prompt and every snapshot
+        # name it instead of assuming dollars (LP-2).
+        self.risk = RiskEngine(
+            risk_limits, quote_asset=self.config.get("quote_asset", "")
+        )
         self.provider_registry = ProviderRegistry()
 
         # Scratch KV for cheap facts this strategy carries across ticks (a
@@ -1550,7 +1567,24 @@ class TickEngine:
         disowned = read_disowned(getattr(self.strategy, "home", None))
 
         inherited: set[str] = set(recorded)
-        if not self.ledger.enforced and self.session_dir is not None:
+        if self.session_dir is not None:
+            # Unconditionally, including for a namespace-enforcing session.
+            #
+            # This used to be gated on ``not enforced``, on the argument that an
+            # enforcing session recognises its bots by name and needs no second
+            # rule. That holds only for a strategy that has ALWAYS enforced. The
+            # moment one switches on ``bot_mode: bot`` — which is exactly how
+            # MM-5 and DT-5 were fixed — every bot an earlier session deployed
+            # under the old naming falls outside the new namespace, and dropping
+            # lineage orphaned it: still live, still trading, and no longer
+            # adoptable by the session that replaced its owner.
+            #
+            # A prior session's RECORDED base is a fact, not an inference —
+            # the same standing ``recorded`` already has above, and it is read
+            # from this strategy's own session directory, so it cannot reach
+            # another strategy's fleet. ``disowned`` still outranks it and the
+            # live listing still bounds it, so the pass stays as conservative as
+            # it was.
             inherited |= prior_session_bases(self.session_dir.parent)
 
         now = time.time()
@@ -2218,6 +2252,11 @@ def build_gated_client(
         # So a 429 this seat's tools are handed is counted against this session
         # and not merely against the agent ([[FEAT-138]]).
         caller_id=engine.agent_id,
+        # The run's kind, not the agent's (CORR-748). A dry run's subprocess
+        # declines to execute a snippet or a routine itself, so the promise that
+        # a rehearsal mutates nothing no longer rests on the bridge below
+        # choosing to ask the permission callback about the call.
+        execution_mode=execution_mode,
     )
     permission_cb = auto_approve_with_risk_check(
         engine.risk,

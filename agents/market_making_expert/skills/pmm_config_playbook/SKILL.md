@@ -15,6 +15,35 @@ Three vetted `pmm_mister` profiles, one per risk posture. Each profile lives in 
 **companion file** — fetch only the one you need so the others never load into
 context:
 
+## Where a number comes from (MM-6)
+
+Four sources used to state `pmm_mister`'s settings and all four disagreed — on
+allocation, spreads, refresh, cooldowns, take profit, executors per level,
+leverage and profit protection — so the behaviour depended on which text the
+model happened to read. One order now:
+
+1. **The controller class** (`controllers/pmm_mister/pmm_mister.py`) is the only
+   authority on a *default*. It is what runs when a field is omitted; AGENT.md's
+   per-field "default:" annotations document it and nothing else.
+2. **These profiles** are *overrides*. They agree with
+   `controllers/pmm_mister/sample_configs/{profile}.yml` on the settings that
+   shape RISK — `min_skew`, `leverage`, `portfolio_allocation`,
+   `max_active_executors_by_level`, `executor_refresh_time`, `global_stop_loss`
+   — and a change to one of those must be made in both.
+
+   They are **not** copies of each other, and were never meant to be. A profile
+   here is regime-driven guidance you adapt to the pair in front of you; a sample
+   config is a shipped starting file. Spreads, cooldowns, effectivization
+   windows, tolerances and the inventory band legitimately differ — the
+   aggressive pair differs on fourteen fields — so copy from one, not from both,
+   and do not treat a difference as a bug unless it is in the risk list above.
+3. **`total_amount_quote` comes from neither.** It is the session's budget, read
+   from `[CURRENT CONFIG]` — a profile that names its own capital would either
+   contradict the loop or breach the risk gate's position limit.
+
+So: pick a profile for the *shape* of the quoting, take the capital from the
+session, and leave anything the profile does not name at the class default.
+
 ```
 manage_skill(action="read_file", name="pmm_config_playbook", file="config_aggressive.md")
 ```
@@ -32,7 +61,8 @@ manage_skill(action="read_file", name="pmm_config_playbook", file="config_aggres
 - **Balanced** — the default. Moderate spreads, 120s effectivization, standard
   tolerances. Good steady-state when regime is unclear.
 - **Conservative** — wide spreads, slow refresh, long effectivization (300s),
-  tight inventory bands, strong skew enforcement (min_skew=2.0), low
+  tight inventory bands, strong skew enforcement (min_skew=0.3 — a SIZE floor,
+  where LOWER means stronger), low
   allocation/leverage, both global TP and SL active. Capital preservation in
   chop/vol.
 
@@ -55,8 +85,13 @@ Parameters most commonly tuned in real operations:
 - `portfolio_allocation` — fraction of `total_amount_quote` actively deployed per iteration
 - `target_base_pct` / `min_base_pct` / `max_base_pct` — inventory band; skew
   kicks in when base drifts outside min/max
-- `min_skew` — minimum spread multiplier applied to the heavy side when inventory
-  drifts; 1.0 = no minimum, 2.0 = at least 2× wider on the accumulating side
+- `min_skew` — the floor on the order-SIZE skew multiplier — not a spread setting. Each side's
+multiplier is `max(min(skew, 1), min_skew)`, so `1.0` disables skew (both are always
+1), a value **below** 1 (0.3–0.5) enables it and lets the overweight side's orders
+shrink toward that floor, and a value **above** 1 pins both multipliers at `min_skew`
+— multiplying EVERY order by it and disabling skew entirely. Never set it above 1
+(MM-2, hummingbot/condor#283): a playbook shipping 2.0 turned a ~12.5 USDT order into
+~24.7 while providing no inventory protection at all.
 - `max_active_executors_by_level` — max concurrent open executors per level;
   controls total directional exposure (fills × allocation per level)
 

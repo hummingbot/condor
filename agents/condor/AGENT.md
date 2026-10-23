@@ -64,8 +64,10 @@ name="...")`.)
 
 Prefer one delegation or one skill-driven flow over a long chain of low-level tool
 calls. Example — DON'T answer "deploy a grid executor" with five raw
-`create_grid_executor`/`manage_controllers` calls; that's `executor_manager`'s
-domain → delegate it.
+`create_grid_executor`/`manage_controllers` calls; that's `adaptive_grid_trader`'s
+domain → delegate it. (There is no `executor_manager` agent and there has not
+been one — CO-3. Check `manage_agents(action="list")` before naming a target:
+a delegation to a slug that does not exist fails at the door.)
 
 ### How to delegate
 

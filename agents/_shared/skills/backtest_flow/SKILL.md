@@ -73,7 +73,7 @@ data. Dates are `YYYY-MM-DD` strings, not epoch seconds.
 # Blocking — one short run you are waiting on interactively.
 manage_routines(action="run", name="backtest_chart", config={
     "config_name": ..., "start_date": "2025-04-22", "end_date": "2025-07-22",
-    "resolution": "1m", "trade_cost": 0.0006, "chart": False,
+    "resolution": "<the controller's interval>", "trade_cost": 0.0006, "chart": False,
 })
 
 # Fire and forget — long windows and every sweep. submit → read back.
@@ -163,10 +163,17 @@ the single easiest way to manufacture a profitable backtest that loses money liv
 `backtesting_resolution` is the granularity the engine simulates fills at, not the
 controller's candle interval.
 
-- `1m` — maximum fidelity, slowest. Use it for the baseline and the final
-  validation run.
-- Match the controller interval (`15m`, `1h`) for speed during a wide sweep, then
-  re-run the winner at `1m` before deploying.
+- **Match the controller's interval for the baseline and the final validation
+  run.** That is the honest measurement, and it is what `go_no_go` records.
+- A coarser resolution than the interval is fine for speed during a wide sweep —
+  you are ranking candidates, not sizing a position.
+- A **finer** resolution than the interval is the one to be careful with:
+
+  A finer resolution is **not** a more honest one: features are merged onto the
+  backtesting candles with `merge_asof(direction="backward")` on the candle
+  **open** timestamp, so every row inside a candle already sees that candle's
+  close. 1m on a 15m controller is therefore optimistic by construction — an
+  upper bound, never a measurement (DT-4).
 - A winner that only survives at coarse resolution is not a winner — the gap is
   usually intrabar stop/TP ordering.
 

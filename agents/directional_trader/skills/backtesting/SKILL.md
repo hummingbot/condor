@@ -68,7 +68,10 @@ out-of-sample, the trade-count gate, report the bad numbers too — live in
   not sweep a negative-edge signal until it looks positive.
 - **Never deploy a config that has not passed `go_no_go.md`** — a good baseline is
   not a decision.
-- **Judge the exit, not just the entry.** An average trade duration far off the
-  controller interval means `time_limit` or the stop is driving exits, not the
-  signal — a "profitable" config of that shape is not the strategy you think you
-  are deploying.
+- **Judge the exit, not just the entry.** Read `close_types`: a config whose
+  closes are mostly `TIME_LIMIT` or `STOP_LOSS` is being exited by its risk
+  settings rather than by its signal, and a "profitable" config of that shape is
+  not the strategy you think you are deploying. (The backtester returns no
+  average trade duration — `close_types`, `accuracy`, `profit_factor`,
+  `sharpe_ratio`, `max_drawdown_pct` and `total_executors` are what it gives
+  you — DT-11.)

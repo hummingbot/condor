@@ -149,7 +149,17 @@ def _find_gecko_id(
         if x.get("slug", "").startswith(brand) and x.get("gecko_id")
     ]
     if candidates:
-        return candidates[0]["gecko_id"]
+        # The PARENT first, then the largest sibling -- not ``candidates[0]``,
+        # which was whatever DefiLlama happened to list first (FA-1). A token
+        # belongs to the brand, not to one of its versions, so uniswap-v3's
+        # market cap is uniswap's; picking an arbitrary sibling could return a
+        # dead or wrong gecko_id and the request 404s into a silent N/A.
+        parent = next(
+            (x for x in candidates if x.get("slug", "").lower() == brand), None
+        )
+        if parent:
+            return parent["gecko_id"]
+        return max(candidates, key=lambda x: x.get("tvl") or 0)["gecko_id"]
 
     # Fall back to the raw user input as the gecko_id (works for e.g. "hyperliquid")
     inp = user_input.lower().strip()
@@ -174,6 +184,8 @@ async def _fetch_fees(client: httpx.AsyncClient, slug: str, data_type: str) -> l
 
 async def _fetch_coingecko(client: httpx.AsyncClient, gecko_id: str) -> dict:
     if not gecko_id:
+        # Distinguished from a failed lookup: this protocol has no token
+        # identity on record at all.
         return {}
     try:
         r = await client.get(
@@ -194,9 +206,21 @@ async def _fetch_coingecko(client: httpx.AsyncClient, gecko_id: str) -> dict:
                 "circulating_supply": md.get("circulating_supply"),
                 "total_supply": md.get("total_supply"),
             }
-    except Exception:
-        pass
-    return {}
+        # Carry the reason. Every failure used to collapse into ``{}`` and the
+        # report showed "N/A", so an operator could not tell a protocol with no
+        # token from CoinGecko rate-limiting an unkeyed request (FA-1).
+        return {
+            "error": (
+                f"CoinGecko returned HTTP {r.status_code} for '{gecko_id}'"
+                + (
+                    " (rate limited — no API key configured)"
+                    if r.status_code == 429
+                    else ""
+                )
+            )
+        }
+    except Exception as e:
+        return {"error": f"CoinGecko request for '{gecko_id}' failed: {e}"}
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -271,11 +295,17 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # 7. Valuation — DefiLlama first, CoinGecko fallback
         mcap = proto.get("mcap") or detail.get("mcap") or cg_data.get("mcap")
         fdv = detail.get("fdv") or proto.get("fdv") or cg_data.get("fdv")
-        mcap_source = (
-            "CoinGecko"
-            if cg_data.get("mcap") and not (proto.get("mcap") or detail.get("mcap"))
-            else "DefiLlama"
-        )
+        if cg_data.get("mcap") and not (proto.get("mcap") or detail.get("mcap")):
+            mcap_source = "CoinGecko"
+        elif mcap is None:
+            # Say why, rather than printing N/A and leaving the reader to guess
+            # whether the protocol has no token or the lookup simply failed
+            # (FA-1). Every dependent multiple is N/A for the same reason.
+            mcap_source = cg_data.get("error") or (
+                "no token identity on record for this protocol"
+            )
+        else:
+            mcap_source = "DefiLlama"
         treasury = detail.get("treasury")
 
         circ_supply = cg_data.get("circulating_supply")

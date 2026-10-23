@@ -11,7 +11,7 @@ allocation/leverage, and **both** global TP and SL protections enabled.
   "controller_name": "pmm_mister",
   "connector_name": "binance_perpetual",
   "trading_pair": "JTO-USDT",
-  "total_amount_quote": 500,
+  "total_amount_quote": "<total_amount_quote from [CURRENT CONFIG]>",
   "portfolio_allocation": 0.1,
   "target_base_pct": 0.5,
   "min_base_pct": 0.4,
@@ -31,15 +31,15 @@ allocation/leverage, and **both** global TP and SL protections enabled.
   "open_order_type": 3,
   "take_profit": 0.0015,
   "take_profit_order_type": 3,
-  "leverage": 5,
+  "leverage": 2,
   "position_mode": "ONEWAY",
   "position_side": "BUY",
   "max_active_executors_by_level": 2,
   "tick_mode": false,
-  "min_skew": 2.0,
+  "min_skew": 0.3,
   "position_profit_protection": true,
   "global_tp_enabled": true,
-  "global_take_profit": 0.03,
+  "global_take_profit": 0.02,
   "global_tp_activation_from": "min_base",
   "global_sl_enabled": true,
   "global_stop_loss": 0.04,
@@ -64,7 +64,9 @@ allocation/leverage, and **both** global TP and SL protections enabled.
   Never takes liquidity — critical in volatile markets to avoid adverse fills.
 - `tick_mode` (false): Keep false. Tick mode reduces update frequency but adds
   complexity not needed here.
-- `min_skew` (2.0): Forces at least 2× spread multiplier on the accumulating
+- `min_skew` (0.3): Strong inventory protection — the overweight side's orders
+  shrink to 30% of their level size. This is a SIZE floor, not a spread setting;
+  a value above 1 would double every order and disable skew (MM-2).
   side when inventory drifts. Aggressively discourages one-sided fills in
   trending conditions.
 - `position_profit_protection` (true): Blocks inventory reductions at

@@ -68,7 +68,8 @@ Important properties of the signal:
   `bb_length * interval` of every backtest window has no signal (100 x 15m = 25 hours for the
   conservative style). Make windows long enough.
 - The candle `interval` is independent of the backtest `backtesting_resolution`; use a
-  resolution at least as fine as `interval` (1m is the usual choice).
+  resolution EQUAL to `interval`. Finer is not better: it lets each row inside a
+  candle see that candle's close and makes the result optimistic (DT-4).
 
 ## Execution: executors, barriers, sizing
 
@@ -132,7 +133,7 @@ Fields marked "updatable" carry `is_updatable: True` and can be changed on a run
 | `time_limit` | int (s, >0) | 2700 | Max holding time in seconds. Updatable. |
 | `take_profit_order_type` | enum | `LIMIT` | `LIMIT`, `LIMIT_MAKER` or `MARKET`. Updatable. |
 | `trailing_stop` | object or null | null | `{activation_price, trailing_delta}` as fractions. Updatable. |
-| `manual_kill_switch` | bool | false | Inherited; true stops new executors. Updatable. |
+| `manual_kill_switch` | bool | false | Inherited; true stops the controller AND sends a stop to every executor it owns, closing position executors by default; false restarts it. Updatable. |
 | `initial_positions` | list | [] | Inherited; leave empty. |
 | `id` | str | required | Do not put it in samples; Condor sets `macd_bb_v1__<style>` on upload. |
 
