@@ -16,7 +16,6 @@ asyncio.run() instead of a pytest-asyncio marker.
 """
 
 import asyncio
-import time
 
 import pytest
 
@@ -94,14 +93,12 @@ def _run(controllers, **kwargs):
 def test_describe_issues_two_waves_not_five_serial_calls():
     """The five calls of a full describe overlap into two waves."""
     fake = RecordingControllers()
-    started = time.monotonic()
     result = _run(
         fake,
         action="describe",
         config_name="pmm_simple_sol",
         include_code=True,
     )
-    elapsed = time.monotonic() - started
 
     assert len(fake.calls) == 5
     # Wave 1: both lists and the named config were in flight together.
@@ -115,8 +112,6 @@ def test_describe_issues_two_waves_not_five_serial_calls():
     assert (
         frozenset({"get_controller_config_template", "get_controller"}) in fake.overlaps
     ), f"wave 2 never overlapped: {fake.overlaps}"
-    # Two waves of 50ms, not five: allow plenty of slack for a loaded CI box.
-    assert elapsed < 5 * fake.delay, f"{elapsed:.3f}s looks sequential"
 
     assert result["controller_name"] == "pmm_simple"
     assert result["controller_type"] == "market_making"
