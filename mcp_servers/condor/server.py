@@ -809,7 +809,7 @@ async def manage_agents(
         "export",
         "import",
         "upgrade",
-        "hub_browse",
+        "hub_get",
         "hub_install",
         "publish_hub",
         # Legacy funnel-era spellings this family still answers to.
@@ -835,6 +835,7 @@ async def manage_agents(
     path: str | None = None,
     notes: str | None = None,
     author_name: str | None = None,
+    acknowledge: list[str] | None = None,
 ) -> dict:
     """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
 
@@ -871,6 +872,12 @@ async def manage_agents(
       changed since the last export — pass `notes` to say what changed), who
       claims to have made it (`author_name`, verified by nothing), and what it
       needs: the connectors, tools, model and skills read out of its own files.
+      It refuses on a value that can only be a secret, and STOPS on a value
+      that may be one (64 hex: an EVM key or a tx hash; long base58: a Solana
+      key or a signature), returning `possible_keys` with each one's file,
+      line and fingerprint. Show the user every one and ask which are NOT
+      keys; call again with `acknowledge` set to only the fingerprints they
+      confirm. Never acknowledge one yourself.
     - "import": Register the agent in a bundle file (requires `path`;
       `agent_slug` renames it on the way in, which is how a name collision is
       answered). It never overwrites an existing agent, and everything it
@@ -891,27 +898,30 @@ async def manage_agents(
       agent's upstream, when the bundle is older, for an agent the repo ships,
       and while a loop is running: read `blockers` back verbatim. On success
       read `files` back — a conflict is content nobody else can reproduce.
-    - "hub_browse": What the Botcamp agent hub offers (`agent_slug` doubles as
-      an optional search term). No account needed. Each row carries a `badge`:
-      "validated" means a human reviewed ONE submitted revision once, and
-      "community" means nobody did. Say which it is and say what it is NOT —
-      the hub is a discovery service, not a security boundary; it is not a
-      signature, Condor verifies nothing against it, and it never shortens the
-      review on install. Never read a badge back as a reason something is safe.
-    - "hub_install": Install a listing (requires `path` = the listing_id;
-      `agent_slug` renames it if the name is taken). The bytes are verified
-      against the listing's digest before anything parses them, and then this
-      is exactly the import door: a listing of an agent already installed here
-      becomes an UPGRADE automatically (`verb` says which happened), everything
-      arrives MUTED, no imported routine may execute until the user allows it,
-      and nothing is started. Report `findings` and `unmet`; neither blocks it.
+    - "hub_get": Look up one Botcamp agent by slug (requires `path` = the
+      agent's slug on Botcamp — there is no browse or search; the caller must
+      already know the slug). No account needed for a free agent; a linked
+      Botcamp profile's token is what resolves one gated behind a membership
+      or purchase. Only an APPROVED version is ever listed — that is a gate on
+      the catalogue, not a security boundary; it is not a signature, Condor
+      verifies nothing against it, and it never shortens the review on
+      install.
+    - "hub_install": Install a Botcamp agent (requires `path` = the agent's
+      slug; `agent_slug` renames it if the name is taken). The bytes are
+      verified against the download's own integrity header before anything
+      parses them, and then this is exactly the import door: an agent already
+      installed here becomes an UPGRADE automatically (`verb` says which
+      happened), everything arrives MUTED, no imported routine may execute
+      until the user allows it, and nothing is started. Report `findings` and
+      `unmet`; neither blocks it.
     - "publish_hub": ADMIN ONLY, and not the same thing as "publish" — that
       one copies an agent into this repo's tracked library, this one uploads it
       to the hub for strangers (requires agent_slug; `notes` and `author_name`
       as for "export"). It needs the install's token, set in Settings →
       Agents, and cannot take one as an argument. It sends the SAME bytes
       "export" writes, so it refuses outright on a value that can only be a
-      secret. **Confirm with the user before calling it**: publishing sends
+      secret and stops on one that may be, exactly as "export" does — the
+      same `possible_keys` and `acknowledge`. **Confirm with the user before calling it**: publishing sends
       content off this box and is irreversible in practice — unpublishing
       removes the listing, it does not recall a download.
 
@@ -948,8 +958,8 @@ async def manage_agents(
             its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
             mutes and session output are never published. For "import" and
-            "upgrade" — the bundle file to read. For "hub_install" — the
-            listing_id from "hub_browse", not a path at all.
+            "upgrade" — the bundle file to read. For "hub_get" and
+            "hub_install" — the agent's slug on Botcamp, not a path at all.
         notes: For "export" and "publish_hub" — the changelog for this version,
             carried verbatim in the bundle. What changed since the last bundle
             of this agent.
@@ -957,6 +967,9 @@ async def manage_agents(
             unverified claim: Condor signs nothing and the receiving install
             cannot check it. On a hub publish the hub attaches the account
             handle it authenticated beside it, as a separate fact.
+        acknowledge: For "export" and "publish_hub" — fingerprints from a
+            previous call's `possible_keys` that the USER confirmed are not
+            keys. Only ever the ones they named.
 
     Returns:
         Action-specific result dict.
@@ -975,6 +988,7 @@ async def manage_agents(
         path=path,
         notes=notes,
         author_name=author_name,
+        acknowledge=acknowledge,
     )
 
 

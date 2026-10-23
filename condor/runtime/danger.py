@@ -131,6 +131,20 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
+#: The Botcamp hub actions within ``manage_agents`` (SEC review C1/C3). Neither
+#: moves funds, but both cross the box's edge in a way nobody can take back:
+#: ``publish_hub`` sends the agent's routines, skills, controllers and sample
+#: configs out under the install's Botcamp account, and ``hub_install`` makes a
+#: downloaded AGENT.md's instructions and ``tools:`` allowlist live at once —
+#: one whose instructions say "publish every agent" chains straight into the
+#: first. So each waits for a human in chat, and an unattended loop is refused
+#: them outright (``condor.agents.risk``). Every other agent action edits this
+#: install's own library and stays on the fast path.
+DANGEROUS_AGENT_ACTIONS = {"publish_hub", "hub_install"}
+
+#: The tool that carries them.
+AGENTS_TOOL = "manage_agents"
+
 # There is no gate on `manage_gateway_config`. Its `networks` and `connectors`
 # are read-only over MCP: a network config carries `nodeURL`, the RPC every
 # transaction is broadcast through, and a connector config the slippage every
@@ -450,6 +464,9 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     # capital via a controller, a different path than the executor tools)
     if tool_name == "manage_bots":
         return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
+
+    if tool_name == AGENTS_TOOL:
+        return _has_dangerous_action(tool_call, DANGEROUS_AGENT_ACTIONS)
 
     if tool_name == AGENT_CONTROLLERS_TOOL:
         return is_overwriting_controller_push(tool_call)
@@ -930,6 +947,32 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return summary
         agent_id = str(input_data.get("agent_id") or "?")
         return f"Agent instance {agent_id}: {action}"
+
+    if tool_name == AGENTS_TOOL:
+        # Only the hub actions reach a human; the line says which way the
+        # agent crosses the box's edge, since neither can be taken back.
+        action = input_data.get("action", "?")
+        if action == "publish_hub":
+            slug = input_data.get("agent_slug") or "?"
+            summary = (
+                f"Publish agent '{slug}' to the Botcamp hub "
+                "(its files leave this box under the install's account)"
+            )
+            acknowledged = input_data.get("acknowledge") or []
+            if isinstance(acknowledged, list) and acknowledged:
+                # The human is also vouching for these, so the line says so.
+                summary += (
+                    f", accepting {len(acknowledged)} possible private key(s) "
+                    "as not keys"
+                )
+            return summary
+        if action == "hub_install":
+            slug = input_data.get("path") or "?"
+            return (
+                f"Install '{slug}' from the Botcamp hub "
+                "(its instructions and tool allowlist go live at once)"
+            )
+        return f"Agents: {action}"
 
     if tool_name == "execute_swap":
         pair = input_data.get("trading_pair", "?")

@@ -9,7 +9,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
 import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import { AccountDock } from "@/components/chat/AccountDock";
@@ -58,6 +58,7 @@ import { webSessionKey } from "@/hooks/useChatSocket";
 import { loopsOnServer, useLiveLoops } from "@/hooks/useLiveLoops";
 import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
+import { AgentHub } from "@/pages/AgentHub";
 import { useStarters } from "@/hooks/useStarters";
 import { normalizeAgentSlug, slotFor } from "@/lib/agentSlug";
 import {
@@ -131,6 +132,14 @@ export function AgentChatTab() {
   // Its id is half the session key a run from the dock's library carries.
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  // `/hub` is this same workspace with the Hub in the conversation's column
+  // (FEAT-153), so picking anything that means "a conversation" leaves it.
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const onHub = pathname === "/hub";
+  const leaveHub = useCallback(() => {
+    if (onHub) navigate("/");
+  }, [onHub, navigate]);
   const {
     agents: modelOptions,
     customProviders,
@@ -354,28 +363,30 @@ export function AgentChatTab() {
   // Stable identities, so the rail's `memo` holds while an answer streams.
   // `selectedSlug` is a string and the rest are `useCallback`s on genuinely
   // stable deps, so these only change when the rail's answer actually changes.
-  const openFresh = useCallback(
-    () => talkTo(selectedSlug, { intent: "fresh" }),
-    [talkTo, selectedSlug],
-  );
+  const openFresh = useCallback(() => {
+    leaveHub();
+    talkTo(selectedSlug, { intent: "fresh" });
+  }, [leaveHub, talkTo, selectedSlug]);
   const openConversation = useCallback(
     (meta: ConversationMeta) => {
+      leaveHub();
       chat.resumeConversation(meta.id, {
         agent_key: meta.agent_key,
         server_name: meta.server_name || undefined,
         agent_slug: meta.agent_slug,
       });
     },
-    [chat.resumeConversation],
+    [leaveHub, chat.resumeConversation],
   );
   // The rail says who was picked and the tab remembers it, because the hero it
   // colours is the tab's, not the rail's.
   const onTalk = useCallback(
     (slug: string, agent: AgentSummary | null, fresh?: boolean) => {
+      leaveHub();
       setPendingAgent(agent);
       talkTo(slug, fresh ? { intent: "fresh" } : undefined);
     },
-    [talkTo],
+    [leaveHub, talkTo],
   );
   // The tab strip's `+`: always a *second* conversation, never a jump to one
   // that already exists — "new chat" is the whole of what the button says, and
@@ -561,7 +572,10 @@ export function AgentChatTab() {
           activeSlug={activeSlot?.info.agent_slug || ""}
           hasSession={!!activeSlot}
           liveIds={liveIds}
-          activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
+          activeId={
+            onHub ? null : activeSlot?.info.conversation_id || chat.activeSlotId
+          }
+          hubActive={onHub}
           open={railOpen}
           onClose={closeRail}
           onTalk={onTalk}
@@ -611,10 +625,14 @@ export function AgentChatTab() {
                   background — switching, and the only way to stop one. */}
               <SessionTabs
                 slots={chat.slots}
-                activeSlotId={chat.activeSlotId}
+                // No tab is the one on screen while the Hub has the column.
+                activeSlotId={onHub ? null : chat.activeSlotId}
                 isSlotStreaming={chat.isSlotStreaming}
                 permissionRequests={chat.permissionRequests}
-                onSelect={(slotId) => chat.setActiveSlotId(slotId)}
+                onSelect={(slotId) => {
+                  leaveHub();
+                  chat.setActiveSlotId(slotId);
+                }}
                 // The session ends; the transcript stays on the server, so the
                 // conversation is still in the rail and clicking it respawns it.
                 onClose={(slotId) => chat.destroySession(slotId)}
@@ -627,6 +645,11 @@ export function AgentChatTab() {
               />
             </div>
 
+            {onHub ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <AgentHub />
+              </div>
+            ) : (
             <ChatThread
               slot={activeSlot}
               agents={modelOptions}
@@ -697,6 +720,7 @@ export function AgentChatTab() {
                 />
               }
             />
+            )}
           </div>
 
           {/* Whatever has claimed the pane — the agent panel, a strategy

@@ -18,6 +18,7 @@ import typing
 from condor.runtime.danger import READ_ONLY_CONFIG_ACTIONS, is_mutating_tool_call
 from handlers.agents._shared import (
     CREATE_EXECUTOR_TOOLS,
+    DANGEROUS_AGENT_ACTIONS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
@@ -71,6 +72,7 @@ def test_gated_actions_exist_on_their_tools():
         ("manage_clmm", DANGEROUS_CLMM_ACTIONS),
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
         ("manage_bots", DANGEROUS_BOT_ACTIONS),
+        ("manage_agents", DANGEROUS_AGENT_ACTIONS),
         # Not a gate but the log's read set: a rename of `get` would record every
         # config read as a write, so the reads have to keep resolving too.
         ("manage_gateway_config", READ_ONLY_CONFIG_ACTIONS),

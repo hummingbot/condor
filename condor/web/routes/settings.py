@@ -1293,3 +1293,153 @@ async def update_hub_token(
             ),
         )
     return {"set": hub.set_token(req.token)}
+
+
+# ── Connecting to a Botcamp profile with a device login (PR #111) ──
+#
+# Replaces the pasted-token UX above, and FEAT-148's pairing-code flow before
+# it (wire-incompatible with what Botcamp actually built), with the standard
+# OAuth2 device flow: an admin starts a device login, Condor opens Botcamp's
+# approval page with the user code to enter, and Condor's own backend polls
+# until the operator approves, denies, or lets it expire. See
+# ``condor/hub.py``'s ``device_start``/``device_state``/``device_cancel`` for
+# the protocol and the one place the resulting credential is ever read.
+
+
+def _hub_device_refusal(exc: Exception) -> HTTPException:
+    """A hub failure during a device login as HTTP — the same mapping
+    ``agents.py``'s hub router uses, kept local here since the two routers do
+    not import from each other.
+    """
+    from condor.hub import HubError, NoTokenError
+
+    if isinstance(exc, NoTokenError):
+        return HTTPException(status_code=400, detail=str(exc))
+    status = getattr(exc, "status", 0) if isinstance(exc, HubError) else 0
+    return HTTPException(
+        status_code=status if 400 <= status < 500 else 502, detail=str(exc)
+    )
+
+
+def _require_hub_admin(user: WebUser) -> None:
+    cm = get_config_manager()
+    if not cm.is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Connecting to Botcamp is install-wide; only the admin can " "change it"
+            ),
+        )
+
+
+@router.post("/hub-device/start")
+async def start_hub_device(user: WebUser = Depends(get_current_user)):
+    """Begin a device login. Returns the user code and the link to show.
+
+    Admin-only, like every other write in this section: the resulting
+    credential acts for the whole install under one Botcamp account.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    _require_hub_admin(user)
+    try:
+        code = await asyncio.to_thread(hub.device_start)
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    # `approval_url` is Condor's own, built from the configured hub base —
+    # the hub's `verification_uri`/`verification_uri_complete` never leave
+    # `condor.hub`, so this response cannot aim a browser off-site (SEC-819).
+    return {
+        "user_code": code.user_code,
+        "approval_url": code.approval_url,
+        "expires_in": code.expires_in,
+        "interval": code.interval,
+    }
+
+
+@router.get("/hub-device")
+async def get_hub_device(user: WebUser = Depends(get_current_user)):
+    """Where this install's device login/link stands right now.
+
+    ``"none"``, ``"pending"`` (with the user code and link to show again),
+    ``"denied"``/``"expired"``/``"invalid"`` (reported once, for the poll
+    that observed it), or ``"linked"`` (with the profile handle and scope —
+    never the credential, which this route can never answer with; see
+    ``condor.hub.device_state``).
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    _require_hub_admin(user)
+    try:
+        state = await asyncio.to_thread(hub.device_state)
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    return state.model_dump()
+
+
+@router.get("/hub-device/linked")
+async def get_hub_device_linked(user: WebUser = Depends(get_current_user)):
+    """Whether this install is linked to Botcamp. Nothing else.
+
+    `/hub`'s Pull agents gate (FEAT-153) needs this for every signed-in seat,
+    not just the admin who can act on it — Pull is unlocked install-wide once
+    someone connects a profile. The full state above stays admin-only on
+    purpose (profile handle, a pending user code); this route answers with
+    neither, so a non-admin learns only the one bit that unlocks their own
+    Pull section.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    try:
+        state = await asyncio.to_thread(hub.device_state)
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    return {"linked": state.status == "linked"}
+
+
+@router.delete("/hub-device")
+async def disconnect_hub_device(user: WebUser = Depends(get_current_user)):
+    """Cancel a device login in flight, or disconnect a linked profile.
+
+    Whichever this install is currently holding — ``condor.hub.device_cancel``
+    decides which, and now also asks the hub to revoke the presented token
+    (``DELETE /api/condor/me``, PR #111) before clearing it locally. The
+    local credential is cleared either way; ``revoked`` says whether the hub
+    actually confirmed the revoke (``true``), refused or could not be reached
+    (``false``, with ``error`` set), or there was nothing to revoke
+    (``null``) — this must never claim a revoke that did not happen.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    _require_hub_admin(user)
+    try:
+        result = await asyncio.to_thread(hub.device_cancel)
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    return {"status": "none", "revoked": result.revoked, "error": result.error}
+
+
+@router.get("/hub-me")
+async def get_hub_me(user: WebUser = Depends(get_current_user)):
+    """Who the linked Botcamp token identifies right now, read fresh from the
+    hub (PR #111's ``GET /api/condor/me``) — not the ``profile_handle`` the
+    device-login poll cached once, at link time.
+
+    A 401 means Botcamp revoked the token from the profile's own token list;
+    ``condor.hub.me`` has already cleared this install's copy by the time
+    this route answers with it, so the client's next ``GET /hub-device``
+    already reads back ``"none"`` rather than a stale ``"linked"``.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    _require_hub_admin(user)
+    try:
+        info = await asyncio.to_thread(hub.me, hub.token())
+    except HubError as exc:
+        raise _hub_device_refusal(exc) from exc
+    return info.model_dump()

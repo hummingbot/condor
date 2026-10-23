@@ -173,6 +173,19 @@ class BundleError(ValueError):
     """A bundle this install refuses, with the sentence explaining why."""
 
 
+class PossibleKeysError(BundleError):
+    """An export stopped on values that may be private keys (SEC review C2).
+
+    ``pending`` lists each by file, line, kind and fingerprint — never the
+    value — so a surface can ask a person about each one and export again
+    with the ones they confirmed are not keys.
+    """
+
+    def __init__(self, pending):
+        super().__init__(bundle_review.possible_keys_refusal(pending))
+        self.pending = list(pending)
+
+
 class NotJsonError(BundleError):
     """The bytes are not a JSON document at all — a wrong file, not a bad one."""
 
@@ -573,7 +586,12 @@ def _shared_skill_slugs() -> list[str]:
 # ── Export ──
 
 
-def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
+def build(
+    slug: str,
+    notes: str = "",
+    author_name: str = "",
+    acknowledged: Sequence[str] = (),
+) -> Bundle:
     """The bundle for ``slug``, read from disk and scrubbed.
 
     Reads **both** layers, local shadowing stock per file, so a shipped agent
@@ -590,7 +608,8 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     leaves no trace.
 
     ``notes`` and ``author_name`` are the exporting caller's; neither is read
-    by anything that decides what gets written.
+    by anything that decides what gets written. ``acknowledged`` is the
+    fingerprints of possible keys a person confirmed are not keys.
 
     Raises :class:`BundleError` for an agent that does not exist, a file whose
     bytes are not UTF-8 (named, so the operator can remove it), a bundle over
@@ -668,9 +687,18 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     # ``bundle_review.review(bundle)``; only a value that can be nothing but a
     # secret stops the export, which is the same loud posture the non-UTF-8
     # refusal above already takes rather than a new one.
-    refusal = bundle_review.refusal(bundle_review.review(bundle))
+    findings = bundle_review.review(bundle)
+    refusal = bundle_review.refusal(findings)
     if refusal:
         raise BundleError(refusal)
+    # A value that *may* be a key (64 hex, long base58) is a tx hash as often
+    # as not, so it is not refused outright — but it does not leave unseen
+    # either (SEC review C2): each one waits for a person's acknowledgement.
+    pending = bundle_review.possible_keys(
+        ((f.path, f.text) for f in files), findings, acknowledged
+    )
+    if pending:
+        raise PossibleKeysError(pending)
     _stamp_bookkeeping(slug, agent_uid, version, digest)
     return bundle
 
@@ -1355,12 +1383,31 @@ class BundleStamp(BaseModel):
     question: which upstream bytes has this install already taken for this
     file. A path whose local copy was kept in a conflict is deliberately **not**
     updated, which is what keeps the divergence visible to the next update.
+
+    The ``hub_*`` fields are CORR-812's addition: this install's own record of
+    which Botcamp agent (slug and version — PR #111 carries no listing id)
+    this agent came from, so a later check can warn when the hub no longer
+    serves that version. They live here rather than in a field of their own
+    for the same reason the rest of this file does — a dotfile
+    ``publishable_files`` never yields, so neither this nor any other stamp
+    field can travel in a re-export of the agent (a hub-installed agent's
+    *next* export is this install's own new submission, not a relabelled copy
+    of somebody else's listing). ``hub_status`` is ``"ok"`` or ``"delisted"``
+    — never ``"unknown"``: a check that could not get a confirmed answer
+    leaves the stamp exactly as it was, so ``hub_checked_at`` always names the
+    last time the hub gave a definite answer, not the last time it was asked
+    (:func:`condor.hub.installed_agent_status`).
     """
 
     agent_uid: str = ""
     version: int = 0
     exported_at: str = ""
     digests: dict[str, str] = Field(default_factory=dict)
+    hub_slug: str = ""
+    hub_version: int = 0
+    hub_digest: str = ""
+    hub_status: str = ""
+    hub_checked_at: str = ""
 
     def knows(self, path: str) -> bool:
         return path in self.digests
@@ -1514,6 +1561,42 @@ def write_stamp(home: Path, stamp: BundleStamp) -> None:
     atomic_write_text(
         stamp_path(home),
         json.dumps(stamp.model_dump(), indent=2, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def record_hub_install(
+    slug: str, *, hub_slug: str, hub_version: int, digest: str
+) -> None:
+    """Note that ``slug`` was just installed or updated from a Botcamp agent.
+
+    Called once, right after :func:`apply` or :func:`apply_update` returns, by
+    the route that holds the :class:`~condor.hub.AgentListing` this came from.
+    Folded into the stamp :func:`write_stamp` just finished writing rather than
+    threaded through ``ImportPlan``/``UpdatePlan`` themselves — both are shared
+    with the plain file-import and file-update paths, which have no hub agent
+    to carry, and reading the stamp back here keeps those two generic models
+    untouched.
+
+    Recording ``"ok"`` is not a second check: the install that just finished
+    already verified the ``X-Agent-Sha256`` the caller passes through
+    :func:`condor.hub.fetch`, so this only names the answer that verification
+    already gave.
+    """
+    home = agent_home(slug)
+    stamp = read_stamp(home) or BundleStamp()
+    write_stamp(
+        home,
+        stamp.model_copy(
+            update={
+                "hub_slug": hub_slug,
+                "hub_version": hub_version,
+                "hub_digest": digest,
+                "hub_status": "ok",
+                "hub_checked_at": datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            }
+        ),
     )
 
 

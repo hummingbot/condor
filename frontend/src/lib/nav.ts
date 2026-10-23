@@ -2,6 +2,7 @@ import {
   Bot,
   Brain,
   Droplets,
+  Globe,
   Settings,
   Swords,
   Wallet,
@@ -34,9 +35,19 @@ import {
  * own root, split by the level below it — so the floor is the fleet scope of
  * that browser rather than a second door onto the same records. `/floor`
  * redirects to `/bots`.
+ *
+ * Hub joined it (FEAT-153). It had been deliberately absent — `/hub` mounts the
+ * Agents workspace with its transcript column swapped for the catalogue, so the
+ * shell lit the Agents tab for it and the argument was that a view of a page is
+ * not a page. What that reasoning missed is that nothing *else* about the
+ * screen is the agents: the whole body is a different job, and the only door
+ * onto it was a row in a rail the workspace collapses on its own whenever a
+ * pane opens. So it is a destination in the nav like every other full-bleed
+ * route — `/hub` was the one address on `FULL_BLEED_ROUTES` with no entry here.
  */
 export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
+  { to: "/hub", icon: Globe, label: "Hub" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },
@@ -64,4 +75,4 @@ export const NAV_ITEMS = [
  * route with a body any more (FEAT-116): a layout rule for it would be a rule
  * about a redirect. What it used to draw is `/bots`, which is on this list.
  */
-export const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
+export const FULL_BLEED_ROUTES = ["/", "/hub", "/bots", "/routines"];

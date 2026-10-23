@@ -17,7 +17,10 @@ here is a list of places to look.
 
 **Who decides what.** Three callers, one function:
 
-- **Export** refuses on a ``certain`` ``secret`` finding. An export is the one
+- **Export** refuses on a ``certain`` ``secret`` finding — the two wallet
+  shapes :mod:`condor.runtime.secrets` is certain of, plus the credentials
+  :func:`_credentials` finds in a file (an API key, a key in a URL, a secret
+  setting given a real value). An export is the one
   moment the value is still fixable by the person who owns it, and a published
   bundle carrying a live key cannot be unpublished out of somebody's download.
   Everything else warns.
@@ -70,6 +73,7 @@ not.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable, Sequence
 from typing import NamedTuple, Protocol
@@ -251,6 +255,7 @@ def review_files(files: Iterable[tuple[str, str]]) -> list[Finding]:
     findings: list[Finding] = []
     for path, text in files:
         findings += _secrets(path, text)
+        findings += _credentials(path, text)
         findings += _endpoints(path, text)
         if path.endswith(_PROSE_SUFFIXES) or path.endswith(_CODE_SUFFIXES):
             findings += _tool_steer(path, text)
@@ -262,9 +267,169 @@ def review_files(files: Iterable[tuple[str, str]]) -> list[Finding]:
     return findings
 
 
+# ── Credentials: certain in a bundle, never looked for in chat ──
+#
+# ``secrets.scan`` also runs on every chat message and *removes* what it is
+# certain of, so it is certain only of the two wallet shapes and nothing else:
+# an API key pasted into chat to configure an exchange must reach the model.
+# A bundle is different. It is about to leave this box for good, and an
+# exchange key, an LLM key or a bot token in a routine or a sample config is
+# the one thing nobody downloading it should get. These shapes therefore live
+# here, where only the export/publish refusal reads them, and they match the
+# hub's own server-side check (Botcamp's ``src/lib/agent-secrets.ts``).
+
+#: The credential kinds :func:`_credentials` reports.
+API_KEY = "api-key"
+CREDENTIAL = "credential"
+
+_ID_GUARD_BEFORE = r"(?<![A-Za-z0-9_\-])"
+_ID_GUARD_AFTER = r"(?![A-Za-z0-9_\-])"
+
+#: Prefixes only a credential carries: OpenAI/Anthropic, AWS access key ids,
+#: GitHub tokens, Telegram bot tokens, Slack tokens. AWS's documented example
+#: key (``AKIA…EXAMPLE``) is quoted in docs, so it passes.
+_PROVIDER_KEY_RE = re.compile(
+    _ID_GUARD_BEFORE
+    + r"(?:sk-[A-Za-z0-9_\-]{20,}"
+    + r"|AKIA(?![0-9A-Z]{9}EXAMPLE)[0-9A-Z]{16}"
+    + r"|gh[pousr]_[A-Za-z0-9]{30,}"
+    + r"|github_pat_[A-Za-z0-9_]{20,}"
+    + r"|\d{8,10}:AA[A-Za-z0-9_\-]{33}"
+    + r"|xox[abprs]-[A-Za-z0-9\-]{10,})"
+    + _ID_GUARD_AFTER
+)
+
+#: An RPC or API URL carrying its key: ``?api-key=…``, ``&token=…``.
+_KEY_IN_URL_RE = re.compile(
+    r"[?&](?:api[-_]?key|apikey|access[-_]?token|auth[-_]?token|token|key)="
+    r"([A-Za-z0-9_\-]{16,})",
+    re.IGNORECASE,
+)
+
+#: ``private_key: 0x…``, ``API_SECRET = "…"``. Group 1 is the value.
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(?:api[-_]?key|api[-_]?secret|secret[-_]?key|client[-_]?secret|secret"
+    r"|password|passphrase|private[-_]?key)\b[\"']?\s*[:=]\s*[\"']?([^\s\"',#}]+)",
+    re.IGNORECASE,
+)
+
+_SECRET_VALUE_RE = re.compile(r"^[A-Za-z0-9+/=_\-]{12,}$")
+
+
+def _looks_like_secret_value(value: str) -> bool:
+    """A real value rather than a placeholder or code.
+
+    12+ key-like characters mixing letters and digits, so ``YOUR_API_KEY``,
+    ``${ENV}``, ``""``, ``config.password`` and ``os.getenv(...)`` all pass.
+    """
+    return (
+        bool(_SECRET_VALUE_RE.match(value))
+        and any(c.isdigit() for c in value)
+        and any(c.isalpha() for c in value)
+    )
+
+
+def _credentials(path: str, text: str) -> list[Finding]:
+    spans: list[tuple[str, int, int]] = [
+        (API_KEY, *m.span()) for m in _PROVIDER_KEY_RE.finditer(text)
+    ]
+    spans += [(CREDENTIAL, *m.span(1)) for m in _KEY_IN_URL_RE.finditer(text)]
+    spans += [
+        (CREDENTIAL, *m.span(1))
+        for m in _SECRET_ASSIGNMENT_RE.finditer(text)
+        if _looks_like_secret_value(m.group(1))
+    ]
+    seen: set[tuple[int, int]] = set()
+    findings: list[Finding] = []
+    for label, start, end in sorted(spans, key=lambda s: (s[1], s[2])):
+        # A key can match both a provider prefix and an assignment; it is one value.
+        if any(start < e and s < end for s, e in seen):
+            continue
+        seen.add((start, end))
+        findings.append(
+            Finding(
+                category=SECRET,
+                label=label,
+                path=path,
+                line=line_of(text, start),
+                start=start,
+                end=end,
+                certain=True,
+            )
+        )
+    return findings
+
+
 def certain_secrets(findings: Sequence[Finding]) -> list[Finding]:
     """The findings an *export* refuses on. Named here so one list decides it."""
     return [f for f in findings if f.category == SECRET and f.certain]
+
+
+# ── Possible keys: refused until a person says which they are (SEC review C2) ──
+#
+# A bare 64-hex is an EVM private key *or* a tx hash; an 87–88-char base58 is a
+# Solana secret *or* a transaction signature (``secrets.py``'s table). Neither
+# can be refused outright, so neither may leave the box unseen either: export
+# and publish stop on each one until the caller acknowledges it by its
+# fingerprint — a short hash of the value, so a person can confirm "that one is
+# a tx hash" without the value itself ever riding in a request, a log or an
+# error. Botcamp computes the same fingerprint (``src/lib/agent-secrets.ts``),
+# which is how an acknowledgement made here is honoured on the hub.
+
+
+class PossibleKey(NamedTuple):
+    """One uncertain secret a person has to look at, located but not quoted."""
+
+    path: str
+    line: int
+    label: str
+    fingerprint: str
+
+
+def fingerprint(value: str) -> str:
+    """``sha256:<16 hex>`` of the value, normalized the way Botcamp does it.
+
+    A hex value loses its ``0x`` and its case, so the same key written either
+    way is one fingerprint; base58 is case-sensitive and kept as-is.
+    """
+    normalized = value
+    if re.fullmatch(r"(?:0x)?[0-9a-fA-F]{64}", value):
+        normalized = value.removeprefix("0x").lower()
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def possible_keys(
+    files: Iterable[tuple[str, str]],
+    findings: Sequence[Finding],
+    acknowledged: Iterable[str] = (),
+) -> list[PossibleKey]:
+    """The uncertain secrets in ``findings`` not in ``acknowledged``, in order."""
+    texts = dict(files)
+    accepted = set(acknowledged)
+    seen: set[tuple[str, str]] = set()
+    pending: list[PossibleKey] = []
+    for f in findings:
+        if f.category != SECRET or f.certain or f.path not in texts:
+            continue
+        mark = fingerprint(texts[f.path][f.start : f.end])
+        if mark in accepted or (f.path, mark) in seen:
+            continue
+        seen.add((f.path, mark))
+        pending.append(PossibleKey(f.path, f.line, f.label, mark))
+    return pending
+
+
+def possible_keys_refusal(pending: Sequence[PossibleKey]) -> str:
+    """The sentence an export stops with while possible keys are unacknowledged."""
+    where = ", ".join(
+        f"{p.path}:{p.line} ({p.label}, {p.fingerprint})" for p in pending
+    )
+    return (
+        f"This agent's library carries {len(pending)} value(s) that may be a "
+        f"private key: {where}. Check each one. If it is a key, remove it; if it "
+        "is something else (a transaction hash, a digest), confirm it by its "
+        "fingerprint and export again."
+    )
 
 
 def refusal(findings: Sequence[Finding]) -> str:
