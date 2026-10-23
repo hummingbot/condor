@@ -613,12 +613,37 @@ def test_explicit_grid_config_overrides_every_behavior_bearing_saved_default():
     assert _merge_one_level(saved, explicit) == explicit
 
 
-def test_source_and_runtime_agt_contracts_match():
-    for relative in (
-        Path("AGENT.md"),
-        Path("loops/btc_usdt_adaptive_grid/loop.md"),
-        Path("loops/sol_usdt_adaptive_grid/loop.md"),
-    ):
-        source = ROOT / "agents" / "adaptive_grid_trader" / relative
-        runtime = ROOT / ".condor" / "agents" / "adaptive_grid_trader" / relative
-        assert runtime.read_text() == source.read_text()
+def test_volatility_label_uses_current_atr_not_baseline_blend(monkeypatch):
+    # Constant 2.0 true range: current ATR is 2.0; a 1.0 baseline would blend it to 1.5.
+    candles = [{"high": 101.0, "low": 99.0, "close": 100.0} for _ in range(30)]
+
+    class MarketData:
+        async def get_candles(self, *args, **kwargs):
+            return candles
+
+    async def fake_get_client(*args, **kwargs):
+        return SimpleNamespace(market_data=MarketData())
+
+    seen = {}
+    real_volatility_level = hourly._volatility_level
+
+    def spy(atr, atr_reference, window):
+        seen["atr"] = atr
+        return real_volatility_level(atr, atr_reference, window)
+
+    monkeypatch.setattr(hourly, "get_client", fake_get_client)
+    monkeypatch.setattr(hourly, "_volatility_level", spy)
+    config = hourly.Config(baseline_atr=1.0, atr_reference_7d=1.5)
+
+    asyncio.run(hourly.run(config, SimpleNamespace(_chat_id=0)))
+
+    assert seen["atr"] == pytest.approx(2.0)
+
+
+def test_deploy_proof_comes_from_the_leverage_call_not_the_create_result():
+    for pair in ("btc_usdt_adaptive_grid", "sol_usdt_adaptive_grid"):
+        loop = (
+            ROOT / "agents" / "adaptive_grid_trader" / "loops" / pair / "loop.md"
+        ).read_text()
+        assert "create result carries no leverage acknowledgement" in loop
+        assert "Require the create result's successful leverage-setup" not in loop

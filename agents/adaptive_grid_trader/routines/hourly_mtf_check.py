@@ -225,13 +225,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # -- 2. Per-timeframe analysis --
     # 1h: ATR, range, volatility
-    atr_1h = _compute_atr(candles_1h, config.atr_period)
+    current_atr_1h = _compute_atr(candles_1h, config.atr_period)
+    # The baseline blend smooths grid sizing (D) only; the volatility label must
+    # see the current ATR, or a stale daily baseline can mask a regime change.
+    atr_1h = current_atr_1h
     if config.baseline_atr > 0:
         atr_1h = (atr_1h + config.baseline_atr) / 2.0
 
     window_24 = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
     vol_level, range_high, range_low, range_pct, range_pos = _volatility_level(
-        atr_1h, config.atr_reference_7d, window_24
+        current_atr_1h, config.atr_reference_7d, window_24
     )
     current_price = float(candles_1h[-1].get("close", 0) or 0)
 
