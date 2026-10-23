@@ -210,16 +210,28 @@ function buttonByText(label: string): HTMLButtonElement {
   return found as HTMLButtonElement;
 }
 
-/** The same lookup as `buttonByText`, but scoped to the `<section>` under a
- *  given `<h2>`. */
-function buttonInSection(sectionHeading: string, label: string): HTMLButtonElement {
-  const h = heading(sectionHeading);
-  const section = h?.closest("section");
-  if (!section) throw new Error(`no section under heading ${sectionHeading}`);
-  const found = [...section.querySelectorAll("button")].find((b) =>
+/** One tab of the hub's tablist, by its label. */
+function tab(label: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll("button[role='tab']")].find((b) =>
     b.textContent?.includes(label),
   );
-  if (!found) throw new Error(`no button matching text ${label} under ${sectionHeading}`);
+  if (!found) throw new Error(`no tab matching text ${label}`);
+  return found as HTMLButtonElement;
+}
+
+/** The panel of one tab — `pull` or `publish` — or null when it is not open. */
+function panel(id: "pull" | "publish"): Element | null {
+  return container.querySelector(`#hub-panel-${id}`);
+}
+
+/** The same lookup as `buttonByText`, but scoped to one tab's panel. */
+function buttonInPanel(id: "pull" | "publish", label: string): HTMLButtonElement {
+  const open = panel(id);
+  if (!open) throw new Error(`the ${id} panel is not open`);
+  const found = [...open.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(label),
+  );
+  if (!found) throw new Error(`no button matching text ${label} in the ${id} panel`);
   return found as HTMLButtonElement;
 }
 
@@ -235,6 +247,7 @@ async function click(button: HTMLButtonElement) {
 
 /** Waits for the picker to load, then chooses one of this install's agents. */
 async function chooseAgent(slug: string) {
+  if (!panel("publish")) await click(tab("Publish yours"));
   await waitFor(
     () => container.querySelector("select[aria-label='Choose an agent to publish']") !== null,
   );
@@ -258,8 +271,12 @@ it("a non-admin sees a sign-in prompt in Pull agents when this install is not li
   isAdmin = false;
   await render();
 
-  expect(heading("Pull agents")).not.toBeNull();
-  expect(heading("Botcamp")).toBeNull();
+  expect(panel("pull")).not.toBeNull();
+  // Publishing is a tab that says why it cannot be used, not a tab that is
+  // missing: "where do I publish mine?" has an answer before sign-in.
+  expect(tab("Publish yours").disabled).toBe(true);
+  expect(tab("Publish yours").title).toContain("Only an admin");
+  expect(panel("publish")).toBeNull();
   expect(heading("Upload yours")).toBeNull();
   expect(container.textContent).toContain("Sign in to Botcamp to look up or pull agents");
   // No sign-in affordance for a non-admin — there is no Botcamp section on
@@ -282,7 +299,8 @@ it("offers an admin exactly one Sign in to Botcamp control, in the Pull gate", a
     b.textContent?.includes("Sign in to Botcamp"),
   );
   expect(signIns).toHaveLength(1);
-  expect(heading("Botcamp")).toBeNull();
+  expect(tab("Publish yours").disabled).toBe(true);
+  expect(tab("Publish yours").title).toContain("Sign in to Botcamp");
   expect(heading("Upload yours")).toBeNull();
   // No modal either — the flow runs where the gate is.
   expect(container.querySelector(".fixed.inset-0")).toBeNull();
@@ -321,11 +339,13 @@ it("a non-admin sees the lookup form in Pull agents once this install is linked"
   hubDeviceState = { ...NONE_DEVICE, status: "linked", profile_handle: "@fede" };
   await render();
 
-  expect(heading("Pull agents")).not.toBeNull();
-  expect(heading("Botcamp")).toBeNull();
-  expect(container.querySelector("input[aria-label='Botcamp agent slug']")).not.toBeNull();
-  // The catalogue is there too, for every signed-in seat, admin or not.
+  expect(panel("pull")).not.toBeNull();
+  // The catalogue is there for every signed-in seat, admin or not; the
+  // by-slug lookup is folded away behind its own control.
   expect(container.querySelector("input[aria-label='Search Botcamp agents']")).not.toBeNull();
+  expect(container.textContent).toContain("Look up a private agent by slug");
+  // Still no publishing for a non-admin seat, linked or not.
+  expect(tab("Publish yours").disabled).toBe(true);
 
   expect(requests.some((r) => r.url === "/api/v1/agents")).toBe(false);
 });
@@ -347,6 +367,7 @@ it("an unreachable hub reads differently from a not-found slug, for every seat",
   );
   await render();
 
+  await click(buttonByText("Look up a private agent by slug"));
   const input = container.querySelector(
     "input[aria-label='Botcamp agent slug']",
   ) as HTMLInputElement;
@@ -373,7 +394,7 @@ it("runs the device flow inline in the gate, with Upload yours hidden until link
   isAdmin = true;
   await render();
 
-  await click(buttonInSection("Pull agents", "Sign in to Botcamp"));
+  await click(buttonInPanel("pull", "Sign in to Botcamp"));
   await waitFor(() => container.querySelector("[data-hub-device-status='pending']") !== null);
 
   const pending = container.querySelectorAll("[data-hub-device-status='pending']");
@@ -392,7 +413,6 @@ it("runs the device flow inline in the gate, with Upload yours hidden until link
     a.textContent?.includes("Open Botcamp"),
   ) as HTMLAnchorElement;
   expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect?code=ABC-123");
-  expect(heading("Botcamp")).toBeNull();
   expect(heading("Upload yours")).toBeNull();
 });
 
@@ -406,9 +426,14 @@ it("reveals Upload yours once linked, with the profile handle shown", async () =
   };
   await render();
 
-  expect(
-    container.querySelector("[data-hub-device-status='linked']")?.textContent,
-  ).toContain("@fede");
+  // The connected profile is install-wide, so it sits in the page header
+  // above both tabs rather than inside either one.
+  const chip = container.querySelector("[data-hub-device-status='linked']");
+  expect(chip?.textContent).toContain("@fede");
+  expect(chip?.closest("header")).not.toBeNull();
+
+  expect(tab("Publish yours").disabled).toBe(false);
+  await click(tab("Publish yours"));
   expect(heading("Upload yours")).not.toBeNull();
 });
 
@@ -434,8 +459,10 @@ it("an admin can choose a local agent and publish it, once linked", async () => 
   await render();
   await chooseAgent("river_scalper");
 
-  await click(buttonByText("Publish"));
-  await click(buttonByText("Publish")); // the preview's own confirm button
+  // Scoped to the panel: the tablist's own "Publish yours" comes first in
+  // document order, and a bare text match would press the tab.
+  await click(buttonInPanel("publish", "Publish"));
+  await click(buttonInPanel("publish", "Publish")); // the preview's own confirm
 
   await waitFor(() => requests.some((r) => r.method === "POST" && r.url.endsWith("/publish")));
   expect(requests.some((r) => r.method === "POST" && r.url.endsWith("/publish"))).toBe(true);

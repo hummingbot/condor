@@ -230,7 +230,14 @@ async function click(label: string) {
   });
 }
 
+async function openSlugLookup() {
+  if (container.querySelector("[data-hub-by-slug]")) return;
+  await click("Look up a private agent by slug");
+  await waitFor(() => container.querySelector("[data-hub-by-slug]") !== null);
+}
+
 async function lookUp(slug: string) {
+  await openSlugLookup();
   const input = container.querySelector(
     "input[aria-label='Botcamp agent slug']",
   ) as HTMLInputElement;
@@ -291,7 +298,7 @@ it("links to Botcamp's agents and to each agent's own page, in a new tab", async
   const all = container.querySelector("[data-hub-botcamp-link]") as HTMLAnchorElement;
   expect(all.href).toBe("http://hub.test/strategies?type=AGENT");
   const page = container.querySelector(
-    "[data-hub-catalogue-entry='river_scalper'] a",
+    "[data-hub-catalogue-entry='river_scalper'] a[aria-label='View river_scalper on Botcamp']",
   ) as HTMLAnchorElement;
   expect(page.href).toBe("http://hub.test/strategies/river_scalper");
   for (const link of [all, page]) {
@@ -379,8 +386,16 @@ it("opens the review over the page, and closes it with the X or Escape", async (
   expect(container.querySelector("[role='dialog']")).toBeNull();
 });
 
-it("still offers the lookup by slug, for a private agent the catalogue doesn't list", async () => {
+it("folds the lookup by slug away until it is asked for", async () => {
+  // Two always-open search fields side by side was the one control everybody
+  // typed into by mistake: the catalogue's own is the only search box on the
+  // tab until the private-agent path is opened.
   await render();
+
+  expect(container.querySelector("input[aria-label='Botcamp agent slug']")).toBeNull();
+  expect(container.querySelectorAll("input[type='text'], input:not([type])")).toHaveLength(1);
+
+  await openSlugLookup();
 
   expect(container.textContent).toContain("Private agents aren't listed");
   expect(container.querySelector("input[aria-label='Botcamp agent slug']")).not.toBeNull();

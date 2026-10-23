@@ -66,21 +66,45 @@ interface Chosen {
 }
 
 /**
+ * One agent as a card, whichever way it was found.
+ *
+ * The catalogue and the by-slug lookup answer with different payloads —
+ * Botcamp's catalogue carries the author, the badge and the paywall bit, a
+ * single listing carries its version history — but they are the same object to
+ * the operator, and the first cut drew them as two different things: a card in
+ * the grid, a flat row under the lookup form. One shape, with the fields that
+ * only one source has made optional.
+ */
+interface CardAgent {
+  slug: string;
+  name: string;
+  description: string;
+  /** The line under the description — the author and version, or the latest. */
+  meta: string;
+  validated: boolean;
+  members: boolean;
+  pageUrl: string;
+}
+
+/**
  * Pull an agent from Botcamp, and install it, without leaving Condor.
  *
- * Mounted on `/hub`'s Pull agents section (FEAT-153) once `AgentHub` has
+ * Mounted on `/hub`'s Pull agents tab (FEAT-153) once `AgentHub` has
  * confirmed this install is linked to Botcamp — Botcamp never serves agent
  * code without a token, so there is nothing to pull before sign-in. Botcamp's
  * catalogue lists what is published, newest first; a private agent someone
- * shared is not in it, so the lookup by slug stays underneath. Either way it
- * answers the same question Import does — how does an agent get here — and
- * shares its review screen deliberately: a Botcamp agent is not a safer kind
- * of bundle, it is the same kind with a provenance label attached, and a
+ * shared is not in it, so the lookup by slug stays underneath — folded away
+ * until it is asked for, because an always-open second search field beside the
+ * catalogue's own was the one control everybody typed into by mistake. Either
+ * way it answers the same question Import does — how does an agent get here —
+ * and shares its review screen deliberately: a Botcamp agent is not a safer
+ * kind of bundle, it is the same kind with a provenance label attached, and a
  * second review screen would imply otherwise.
  */
 export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
   const [slug, setSlug] = useState("");
   const [looked, setLooked] = useState("");
+  const [bySlug, setBySlug] = useState(false);
   const [chosen, setChosen] = useState<Chosen | null>(null);
 
   const lookup = useMutation({
@@ -88,98 +112,125 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
   });
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <Catalogue onReview={setChosen} />
 
-      <p className="border-t border-[var(--color-border)] pt-4 text-xs text-[var(--color-text-muted)]">
-        Got the slug of an agent someone shared? Private agents aren't listed
-        above — look one up directly.
-      </p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          const value = slug.trim();
-          if (!value) return;
-          setLooked(value);
-          setChosen(null);
-          lookup.mutate(value);
-        }}
-        className="flex items-center gap-2"
-      >
-        <input
-          aria-label="Botcamp agent slug"
-          value={slug}
-          onChange={(e) => setSlug(e.target.value)}
-          placeholder="Agent slug, e.g. river_scalper"
-          className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={lookup.isPending || !slug.trim()}
-          className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
-        >
-          <Search className="h-3.5 w-3.5" />
-          Look up
-        </button>
-      </form>
-
-      {lookup.isPending && (
-        <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-          <Loader2 className="h-4 w-4 animate-spin" /> Asking Botcamp…
-        </p>
-      )}
-
-      {/* The server already tells apart "not found", "needs a membership or
-          purchase" and "sign in" — this renders that sentence rather than a
-          generic failure. */}
-      {lookup.isError && (
-        <p
-          role="alert"
-          data-hub-error
-          data-hub-error-status={errorStatus(lookup.error)}
-          className="text-sm text-[var(--color-red)]"
-        >
-          {(lookup.error as Error).message}{" "}
-          <button
-            onClick={() => lookup.mutate(looked)}
-            className="underline hover:text-[var(--color-text)]"
+      <div className="border-t border-[var(--color-border)] pt-4">
+        {bySlug ? (
+          <div
+            data-hub-by-slug
+            className="space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
           >
-            Try again
-          </button>
-        </p>
-      )}
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-xs font-bold text-[var(--color-text)]">
+                  Look up by slug
+                </h3>
+                <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
+                  Private agents aren't listed in the catalogue. Got the slug of
+                  one somebody shared? Ask Botcamp for it directly.
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setBySlug(false);
+                  lookup.reset();
+                }}
+                aria-label="Close slug lookup"
+                className="shrink-0 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
 
-      {lookup.isSuccess && (
-        <div
-          data-hub-listing={lookup.data.listing.slug}
-          className="flex items-start justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
-        >
-          <span className="min-w-0">
-            <span className="truncate text-sm font-semibold text-[var(--color-text)]">
-              {lookup.data.listing.name || lookup.data.listing.slug}
-            </span>
-            <span className="block truncate text-xs text-[var(--color-text-muted)]">
-              {lookup.data.listing.description || "No description."}
-            </span>
-            <span className="block text-[11px] text-[var(--color-text-muted)]">
-              <span className="font-mono">{lookup.data.listing.slug}</span> ·
-              latest version {lookup.data.listing.latest}
-            </span>
-          </span>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const value = slug.trim();
+                if (!value) return;
+                setLooked(value);
+                setChosen(null);
+                lookup.mutate(value);
+              }}
+              className="flex items-center gap-2"
+            >
+              <input
+                aria-label="Botcamp agent slug"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value)}
+                placeholder="Agent slug, e.g. river_scalper"
+                className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={lookup.isPending || !slug.trim()}
+                className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
+              >
+                <Search className="h-3.5 w-3.5" />
+                Look up
+              </button>
+            </form>
+
+            {lookup.isPending && (
+              <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+                <Loader2 className="h-4 w-4 animate-spin" /> Asking Botcamp…
+              </p>
+            )}
+
+            {/* The server already tells apart "not found", "needs a membership
+                or purchase" and "sign in" — this renders that sentence rather
+                than a generic failure. */}
+            {lookup.isError && (
+              <p
+                role="alert"
+                data-hub-error
+                data-hub-error-status={errorStatus(lookup.error)}
+                className="text-sm text-[var(--color-red)]"
+              >
+                {(lookup.error as Error).message}{" "}
+                <button
+                  onClick={() => lookup.mutate(looked)}
+                  className="underline hover:text-[var(--color-text)]"
+                >
+                  Try again
+                </button>
+              </p>
+            )}
+
+            {lookup.isSuccess && (
+              <ul className="grid grid-cols-1 gap-3">
+                <AgentCard
+                  marker={{ "data-hub-listing": lookup.data.listing.slug }}
+                  agent={{
+                    slug: lookup.data.listing.slug,
+                    name: lookup.data.listing.name,
+                    description: lookup.data.listing.description,
+                    meta: `latest version ${lookup.data.listing.latest}`,
+                    validated: false,
+                    members: false,
+                    pageUrl: "",
+                  }}
+                  onReview={() =>
+                    setChosen({
+                      slug: lookup.data.listing.slug,
+                      name: lookup.data.listing.name,
+                      trust: lookup.data.trust,
+                    })
+                  }
+                />
+              </ul>
+            )}
+          </div>
+        ) : (
           <button
-            onClick={() =>
-              setChosen({
-                slug: lookup.data.listing.slug,
-                name: lookup.data.listing.name,
-                trust: lookup.data.trust,
-              })
-            }
-            className="shrink-0 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            onClick={() => setBySlug(true)}
+            className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
           >
-            Review
+            <Search className="h-3.5 w-3.5" />
+            Look up a private agent by slug
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* The same dialog the file path uses, with the agent's provenance
           above it. Keyed on the slug so choosing a second one re-previews
@@ -215,7 +266,7 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
 }
 
 /**
- * Botcamp's published agents, newest first, a page at a time. Each row's
+ * Botcamp's published agents, newest first, a page at a time. Each card's
  * Review opens the same dialog a looked-up slug does — the list only says
  * which agents exist.
  */
@@ -238,26 +289,31 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* One search field, full width, with the off-site link at the far end:
+          the catalogue's own control is the only thing that looks like a
+          search box on this tab. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <form
           onSubmit={(e) => {
             e.preventDefault();
             setQuery(draft.trim());
           }}
-          className="flex items-center gap-2"
+          className="flex min-w-0 flex-1 items-center gap-2"
         >
-          <input
-            aria-label="Search Botcamp agents"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Search published agents"
-            className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-          />
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--color-text-muted)]" />
+            <input
+              aria-label="Search Botcamp agents"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="Search published agents"
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] py-2 pl-8 pr-3 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+            />
+          </div>
           <button
             type="submit"
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            className="shrink-0 rounded-md border border-[var(--color-border)] px-3 py-2 text-xs font-semibold text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
           >
-            <Search className="h-3.5 w-3.5" />
             Search
           </button>
         </form>
@@ -267,17 +323,44 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
             target="_blank"
             rel="noopener noreferrer"
             data-hub-botcamp-link
-            className="flex items-center gap-1 text-xs font-semibold text-[var(--color-primary)] hover:underline"
+            className="flex shrink-0 items-center gap-1 text-xs font-semibold text-[var(--color-primary)] hover:underline"
           >
             Browse all on Botcamp <ExternalLink className="h-3 w-3" />
           </a>
         )}
       </div>
 
+      {/* What is on screen, said once: the active search and how many agents
+          answered it. Without it, a filtered grid and the whole catalogue
+          look identical. */}
+      {query && (
+        <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+          <span>
+            Matching <span className="text-[var(--color-text)]">"{query}"</span>
+          </span>
+          <button
+            onClick={() => {
+              setDraft("");
+              setQuery("");
+            }}
+            className="flex items-center gap-1 rounded border border-[var(--color-border)] px-1.5 py-0.5 hover:text-[var(--color-text)]"
+          >
+            <X className="h-3 w-3" /> Clear
+          </button>
+        </div>
+      )}
+
       {catalogue.isPending && (
-        <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading Botcamp's agents…
-        </p>
+        <div className="@container" data-hub-catalogue-loading>
+          <ul className="grid grid-cols-1 gap-3 @lg:grid-cols-2 @3xl:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <li
+                key={i}
+                className="h-36 animate-pulse rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]"
+              />
+            ))}
+          </ul>
+        </div>
       )}
 
       {catalogue.isError && (
@@ -299,7 +382,7 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
       {catalogue.isSuccess && entries.length === 0 && (
         <p
           data-hub-catalogue-empty
-          className="text-sm text-[var(--color-text-muted)]"
+          className="rounded-xl border border-dashed border-[var(--color-border)] px-4 py-8 text-center text-sm text-[var(--color-text-muted)]"
         >
           {query
             ? `No published agent matches "${query}".`
@@ -313,9 +396,10 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
         <div className="@container">
           <ul className="grid grid-cols-1 gap-3 @lg:grid-cols-2 @3xl:grid-cols-3">
             {entries.map((entry) => (
-              <CatalogueCard
+              <AgentCard
                 key={entry.slug}
-                entry={entry}
+                marker={{ "data-hub-catalogue-entry": entry.slug }}
+                agent={catalogueAgent(entry)}
                 onReview={() =>
                   onReview({ slug: entry.slug, name: entry.name, trust })
                 }
@@ -326,92 +410,109 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
       )}
 
       {catalogue.hasNextPage && (
-        <button
-          onClick={() => catalogue.fetchNextPage()}
-          disabled={catalogue.isFetchingNextPage}
-          className="text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
-        >
-          {catalogue.isFetchingNextPage ? "Loading…" : "Show more"}
-        </button>
+        <div className="flex justify-center pt-1">
+          <button
+            onClick={() => catalogue.fetchNextPage()}
+            disabled={catalogue.isFetchingNextPage}
+            className="rounded-md border border-[var(--color-border)] px-4 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)] disabled:opacity-50"
+          >
+            {catalogue.isFetchingNextPage ? "Loading…" : "Show more"}
+          </button>
+        </div>
       )}
     </div>
   );
 }
 
-function CatalogueCard({
-  entry,
+function catalogueAgent(entry: HubCatalogueEntry): CardAgent {
+  return {
+    slug: entry.slug,
+    name: entry.name,
+    description: entry.description,
+    meta: `${entry.author.name || entry.author.handle || "Unknown author"} · v${entry.version}`,
+    validated: entry.badge === "validated",
+    members: !entry.free,
+    pageUrl: entry.page_url,
+  };
+}
+
+function AgentCard({
+  agent,
+  marker,
   onReview,
 }: {
-  entry: HubCatalogueEntry;
+  agent: CardAgent;
+  /** The one `data-` hook callers address this card by. */
+  marker: Record<string, string>;
   onReview: () => void;
 }) {
   return (
     <li
-      data-hub-catalogue-entry={entry.slug}
-      // The slug is what a pull addresses and what someone would share, but it
-      // is long and machine-shaped — on hover rather than on the card.
-      title={entry.slug}
-      className="flex h-full flex-col gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 transition-colors hover:border-[var(--color-primary)]/40"
+      {...marker}
+      className="flex h-full flex-col gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 transition-colors hover:border-[var(--color-primary)]/40"
     >
       <div className="flex items-start gap-2.5">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--color-primary)]/10 text-[var(--color-primary)]">
           <Bot className="h-4 w-4" />
         </span>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <p className="line-clamp-2 text-sm font-semibold leading-snug text-[var(--color-text)]">
-            {entry.name || entry.slug}
+            {agent.name || agent.slug}
           </p>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            {entry.badge === "validated" && (
-              <span
-                title="Approved by Botcamp's review"
-                className="flex items-center gap-0.5 text-[10px] font-medium text-[var(--color-primary)]"
-              >
-                <BadgeCheck className="h-3 w-3" /> Validated
-              </span>
-            )}
-            {!entry.free && (
-              <span
-                title="Needs a Botcamp membership or unlock to pull"
-                className="flex items-center gap-0.5 text-[10px] font-medium text-[var(--color-text-muted)]"
-              >
-                <Lock className="h-3 w-3" /> Members
-              </span>
-            )}
-          </div>
+          {/* The slug is what a pull addresses and what somebody would share,
+              so it is on the card rather than only in a hover title. */}
+          <p className="truncate font-mono text-[11px] text-[var(--color-text-muted)]">
+            {agent.slug}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          {agent.validated && (
+            <span
+              title="Approved by Botcamp's review"
+              className="flex items-center gap-0.5 rounded border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
+            >
+              <BadgeCheck className="h-3 w-3" /> Validated
+            </span>
+          )}
+          {agent.members && (
+            <span
+              title="Needs a Botcamp membership or unlock to pull"
+              className="flex items-center gap-0.5 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)]"
+            >
+              <Lock className="h-3 w-3" /> Members
+            </span>
+          )}
         </div>
       </div>
 
       <p className="line-clamp-3 flex-1 text-xs leading-relaxed text-[var(--color-text-muted)]">
-        {entry.description || "No description."}
+        {agent.description || "No description."}
       </p>
 
-      <div className="space-y-2.5">
-        <p className="truncate text-[11px] text-[var(--color-text-muted)]">
-          {entry.author.name || entry.author.handle || "Unknown author"} · v
-          {entry.version}
-        </p>
-        <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2.5">
-          {entry.page_url ? (
+      <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2.5">
+        <span className="min-w-0 truncate text-[11px] text-[var(--color-text-muted)]">
+          {agent.meta}
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          {agent.pageUrl && (
             <a
-              href={entry.page_url}
+              href={agent.pageUrl}
               target="_blank"
               rel="noopener noreferrer"
               title="Open this agent's page on Botcamp"
-              className="flex items-center gap-1 text-[11px] font-medium text-[var(--color-text-muted)] hover:text-[var(--color-primary)]"
+              aria-label={`View ${agent.slug} on Botcamp`}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)]"
             >
-              View on Botcamp <ExternalLink className="h-3 w-3" />
+              <ExternalLink className="h-3.5 w-3.5" />
             </a>
-          ) : (
-            <span />
           )}
           <button
             onClick={onReview}
-            className="shrink-0 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
           >
             Review
           </button>
-        </div>
+        </span>
       </div>
     </li>
   );
