@@ -245,10 +245,10 @@ async function chooseAgent(slug: string) {
   await waitFor(() => container.querySelector(`[data-upload-chosen='${slug}']`) !== null);
 }
 
-it("links back to Agents", async () => {
+it("carries no back link — it sits inside the Agents workspace, whose rail is the way back", async () => {
   await render();
-  const link = container.querySelector("a[href='/']");
-  expect(link?.textContent).toContain("Back to Agents");
+  expect(container.querySelector("a[href='/']")).toBeNull();
+  expect(container.textContent).not.toContain("Back to Agents");
 });
 
 it("a non-admin sees a sign-in prompt in Pull agents when this install is not linked", async () => {
