@@ -1,4 +1,5 @@
 import logging
+import statistics
 
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
@@ -41,6 +42,24 @@ def _compute_atr(candles: list, period: int) -> float:
         true_ranges.append(tr)
     recent_trs = true_ranges[-period:]
     return sum(recent_trs) / len(recent_trs)
+
+
+def _rolling_atr_values(candles: list, period: int) -> list[float]:
+    """Return simple rolling ATR samples for report-only volatility context."""
+    if len(candles) < period + 1:
+        return []
+    true_ranges = []
+    for i in range(1, len(candles)):
+        high = float(candles[i]["high"])
+        low = float(candles[i]["low"])
+        previous_close = float(candles[i - 1]["close"])
+        true_ranges.append(
+            max(high - low, abs(high - previous_close), abs(low - previous_close))
+        )
+    return [
+        sum(true_ranges[i - period : i]) / period
+        for i in range(period, len(true_ranges) + 1)
+    ]
 
 
 def _price_slope_pct(closes: list, lookback: int = 48) -> float:
@@ -97,6 +116,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # --- ATR ---
     atr = _compute_atr(records, config.atr_period)
+    atr_samples = _rolling_atr_values(records, config.atr_period)
+    atr_reference_7d = statistics.median(atr_samples) if atr_samples else atr
+    atr_percentile_7d = (
+        100.0 * sum(sample <= atr for sample in atr_samples) / len(atr_samples)
+        if atr_samples
+        else 50.0
+    )
     current_price = closes[-1]
     atr_pct = (atr / current_price * 100) if current_price else 0.0
 
@@ -204,6 +230,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         )
         builder.kpi("ATR (1h)", f"${atr:,.2f}")
         builder.kpi("ATR % of Price", f"{atr_pct:.3f}%")
+        builder.kpi("7D ATR Median", f"${atr_reference_7d:,.2f}")
+        builder.kpi("Current ATR Percentile", f"{atr_percentile_7d:.1f}%")
 
         builder.section("Trend", "EMA20 vs EMA50 on 1h closes + price slope")
         builder.kpi("EMA20", f"${ema20_val:,.2f}")
@@ -224,6 +252,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"7D Baseline — {config.trading_pair}\n"
         f"Price: ${current_price:,.2f}  |  High: ${seven_d_high:,.2f}  |  Low: ${seven_d_low:,.2f}\n"
         f"Range: {range_pct:.2f}%  |  ATR(1h,{config.atr_period}): ${atr:,.2f} ({atr_pct:.3f}%)\n"
+        f"ATR reference 7d: ${atr_reference_7d:,.2f} median  |  Current percentile: {atr_percentile_7d:.1f}%\n"
         f"Trend: {trend_direction} / {trend_strength}  |  EMA20: ${ema20_val:,.2f}  |  EMA50: ${ema50_val:,.2f}\n"
         f"Price vs EMAs: {price_vs_emas}  |  48h Slope: {price_slope:+.2f}%"
     )
