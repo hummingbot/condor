@@ -61,7 +61,7 @@ export function AgentHub() {
   const linked = hubDevice?.linked ?? false;
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-8 px-6 py-8">
+    <div className="mx-auto w-full max-w-5xl space-y-8 px-6 py-8">
       <div>
         <h1 className="flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
           <Globe className="h-5 w-5" />
@@ -77,8 +77,8 @@ export function AgentHub() {
           Pull agents
         </h2>
         <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-          Agents other people published, looked up by slug. Installing one goes
-          through the same review as a file: every executable is named before
+          Agents other people published on Botcamp. Installing one goes through
+          the same review as a file: every executable is named before
           anything is written, the routines and skills arrive switched off, and
           nothing is started.
         </p>

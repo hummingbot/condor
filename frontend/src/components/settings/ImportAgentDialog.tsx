@@ -110,6 +110,7 @@ export function ImportAgentDialog({
   onImported,
   source,
   provenance,
+  stickyAction = false,
 }: {
   onImported: () => void;
   /**
@@ -124,6 +125,12 @@ export function ImportAgentDialog({
    * exactly the part a file on disk cannot have.
    */
   provenance?: ReactNode;
+  /**
+   * Keep the Import button in view while the review scrolls — for a host that
+   * scrolls the review in a box of its own (the Hub's review modal). The file
+   * panel keeps it inline, after the review.
+   */
+  stickyAction?: boolean;
 }) {
   const [picked, setPicked] = useState<BundleSource | null>(null);
   const active = source ?? picked;
@@ -563,14 +570,22 @@ export function ImportAgentDialog({
             </div>
           )}
 
-          <button
-            onClick={confirm}
-            disabled={busy || blocked}
-            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+          <div
+            className={
+              stickyAction
+                ? "sticky bottom-0 flex justify-end border-t border-[var(--color-border)] bg-[var(--color-surface)] py-3"
+                : undefined
+            }
           >
-            <Upload className="h-4 w-4" />
-            Import {plan.slug}
-          </button>
+            <button
+              onClick={confirm}
+              disabled={busy || blocked}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Upload className="h-4 w-4" />
+              Import {plan.slug}
+            </button>
+          </div>
         </div>
       )}
 
