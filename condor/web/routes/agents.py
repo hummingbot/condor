@@ -5183,14 +5183,41 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
     return listing, fetched, "install", plan
 
 
+@hub_router.get("/catalogue")
+async def browse_hub_catalogue(
+    query: str = "", page: int = 1, user: WebUser = Depends(get_current_user)
+):
+    """One page of Botcamp's published agents, newest first.
+
+    A short or empty page is the last. Pulling one of them is the same lookup
+    and review as a slug typed by hand — this only says which slugs exist.
+    """
+    from condor import hub
+    from condor.fetchers._identifiers import IdentifierError
+    from condor.hub import HubError
+
+    try:
+        entries = await asyncio.to_thread(hub.browse, query, page, hub.token())
+    except IdentifierError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return {
+        "listings": [entry.model_dump() for entry in entries],
+        "page": page,
+        "trust": HUB_TRUST,
+    }
+
+
 @hub_router.get("/agents/{slug}")
 async def get_hub_listing(slug: str, user: WebUser = Depends(get_current_user)):
     """One agent's catalogue entry, with its approved versions.
 
-    There is no browse here, or anywhere else in this router: PR #111 ships
-    no catalogue search, only this lookup by a slug the caller must already
-    know. This install's own Botcamp token rides along, so a membership- or
-    purchase-gated agent an account actually has access to still resolves.
+    The lookup by a slug the caller already has — a private agent someone
+    shared is not in the catalogue (:func:`browse_hub_catalogue`), so this is
+    the only way to it. This install's own Botcamp token rides along, so a
+    membership- or purchase-gated agent an account actually has access to
+    still resolves.
     """
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError

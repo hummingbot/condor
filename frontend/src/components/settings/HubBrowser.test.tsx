@@ -1,10 +1,9 @@
 /**
- * Looking up one Botcamp agent by slug, and installing it, is the import
- * review with a label on it (FEAT-146).
+ * Pulling a Botcamp agent — picked from the catalogue or looked up by slug —
+ * and installing it, is the import review with a label on it (FEAT-146).
  *
- * Botcamp (PR #111) ships no browse/search — only a lookup by a slug the
- * operator must already have — so the thing worth testing here is the
- * lookup itself: a free agent resolves with no token, a distinct server
+ * The catalogue only says which agents exist; a pull from it is the same
+ * lookup and review as a slug typed by hand. Worth testing: a distinct server
  * sentence survives for "not found" vs "needs a membership" vs "sign in",
  * and the review dialog reused from the file path still names every
  * executable before the write. That dialog is reused rather than
@@ -26,7 +25,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type { AgentImportPlan, AgentUpdatePlan, HubListing } from "@/lib/api";
+import type {
+  AgentImportPlan,
+  AgentUpdatePlan,
+  HubCatalogueEntry,
+  HubListing,
+} from "@/lib/api";
 import { HubBrowser } from "./HubBrowser";
 
 declare global {
@@ -126,6 +130,9 @@ const UPDATE: AgentUpdatePlan = {
 let container: HTMLDivElement;
 let root: Root;
 let requests: { url: string; method: string }[] = [];
+/** Catalogue pages are kept apart from `requests`, which pins the pull's own wire. */
+let catalogueRequests: string[] = [];
+let cataloguePages: HubCatalogueEntry[][] = [[]];
 let listingStatus = 200;
 let listingBody: unknown = { listing: LISTING, trust: TRUST };
 /** What the preview and install endpoints answer with. */
@@ -135,12 +142,19 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   localStorage.clear();
   requests = [];
+  catalogueRequests = [];
+  cataloguePages = [[]];
   listingStatus = 200;
   listingBody = { listing: LISTING, trust: TRUST };
   verb = "install";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/v1/hub/catalogue")) {
+        catalogueRequests.push(url);
+        const page = Number(new URL(url, "http://x").searchParams.get("page"));
+        return json({ listings: cataloguePages[page - 1] ?? [], page, trust: TRUST });
+      }
       requests.push({ url, method: init?.method ?? "GET" });
       if (url.includes("/install")) {
         const plan = verb === "update" ? UPDATE : PLAN;
@@ -224,7 +238,7 @@ async function lookUp(slug: string) {
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await act(async () => {
-    container.querySelector("form")!.dispatchEvent(
+    input.closest("form")!.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true }),
     );
   });
@@ -233,10 +247,96 @@ async function lookUp(slug: string) {
   );
 }
 
-it("says there is no browsable catalogue yet", async () => {
+const entry = (slug: string, fields: Partial<HubCatalogueEntry> = {}): HubCatalogueEntry => ({
+  listing_id: slug,
+  slug,
+  name: slug.replace(/_/g, " "),
+  description: "",
+  version: 1,
+  author: { name: "James", handle: "james" },
+  badge: "validated",
+  digest: "",
+  bytes: 0,
+  published_at: "",
+  free: true,
+  ...fields,
+});
+
+it("lists Botcamp's published agents, with who made them and whether they're free", async () => {
+  cataloguePages = [[entry("river_scalper", { name: "River Scalper" }), entry("paid_bot", { free: false })]];
+  await render();
+  await waitFor(() => container.querySelectorAll("[data-hub-catalogue-entry]").length === 2);
+
+  expect(catalogueRequests).toEqual(["/api/v1/hub/catalogue?query=&page=1"]);
+  const river = container.querySelector("[data-hub-catalogue-entry='river_scalper']");
+  expect(river?.textContent).toContain("River Scalper");
+  expect(river?.textContent).toContain("James");
+  expect(river?.textContent).toContain("Validated");
+  expect(container.querySelector("[data-hub-catalogue-entry='paid_bot']")?.textContent).toContain(
+    "Members",
+  );
+});
+
+it("reviews a catalogue agent through the same preview a looked-up slug gets", async () => {
+  cataloguePages = [[entry("river_scalper")]];
+  await render();
+  await waitFor(() => container.querySelector("[data-hub-catalogue-entry]") !== null);
+  await click("Review");
+  await waitFor(() => container.querySelector("[data-hub-provenance]") !== null);
+
+  expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
+    "POST /api/v1/hub/agents/river_scalper/install/preview",
+  ]);
+  expect(container.querySelector("[data-hub-provenance]")?.textContent).toContain(
+    "not a security boundary",
+  );
+});
+
+it("searches the catalogue with what was typed", async () => {
+  await render();
+  await waitFor(() => catalogueRequests.length === 1);
+  const input = container.querySelector(
+    "input[aria-label='Search Botcamp agents']",
+  ) as HTMLInputElement;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, "grid bot");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  await waitFor(() => catalogueRequests.length === 2);
+  await waitFor(() => container.querySelector("[data-hub-catalogue-empty]")?.textContent?.includes("grid bot") ?? false);
+
+  expect(catalogueRequests[1]).toBe("/api/v1/hub/catalogue?query=grid+bot&page=1");
+  expect(container.querySelector("[data-hub-catalogue-empty]")?.textContent).toContain(
+    'No published agent matches "grid bot"',
+  );
+});
+
+it("pages on only while Botcamp sends full pages", async () => {
+  cataloguePages = [
+    Array.from({ length: 20 }, (_, i) => entry(`bot_${i}`)),
+    [entry("last_bot")],
+  ];
+  await render();
+  await waitFor(() => container.querySelectorAll("[data-hub-catalogue-entry]").length === 20);
+  await click("Show more");
+  await waitFor(() => container.querySelectorAll("[data-hub-catalogue-entry]").length === 21);
+
+  expect(catalogueRequests).toEqual([
+    "/api/v1/hub/catalogue?query=&page=1",
+    "/api/v1/hub/catalogue?query=&page=2",
+  ]);
+  expect(container.textContent).not.toContain("Show more");
+});
+
+it("still offers the lookup by slug, for a private agent the catalogue doesn't list", async () => {
   await render();
 
-  expect(container.textContent).toContain("does not serve a browsable catalogue");
+  expect(container.textContent).toContain("Private agents aren't listed");
+  expect(container.querySelector("input[aria-label='Botcamp agent slug']")).not.toBeNull();
 });
 
 it("looks up one agent by slug and shows its latest version", async () => {

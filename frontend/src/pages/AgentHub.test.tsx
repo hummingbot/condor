@@ -118,6 +118,9 @@ function router(url: string, init?: RequestInit): Response | Promise<Response> {
       interval: 5,
     });
   }
+  if (method === "GET" && url.startsWith("/api/v1/hub/catalogue")) {
+    return json({ listings: [], page: 1, trust: "" });
+  }
   if (url.endsWith("/submission")) {
     return json({ receipt: submissionReceipt });
   }
@@ -321,9 +324,8 @@ it("a non-admin sees the lookup form in Pull agents once this install is linked"
   expect(heading("Pull agents")).not.toBeNull();
   expect(heading("Botcamp")).toBeNull();
   expect(container.querySelector("input[aria-label='Botcamp agent slug']")).not.toBeNull();
-  // There is no browsable catalogue (Botcamp ships lookup-by-slug only), and
-  // that is stated rather than left as an empty grid that looks broken.
-  expect(container.textContent).toContain("does not serve a browsable catalogue");
+  // The catalogue is there too, for every signed-in seat, admin or not.
+  expect(container.querySelector("input[aria-label='Search Botcamp agents']")).not.toBeNull();
 
   expect(requests.some((r) => r.url === "/api/v1/agents")).toBe(false);
 });
@@ -357,7 +359,7 @@ it("an unreachable hub reads differently from a not-found slug, for every seat",
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await act(async () => {
-    container.querySelector("form")!.dispatchEvent(
+    input.closest("form")!.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true }),
     );
   });

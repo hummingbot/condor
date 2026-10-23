@@ -77,8 +77,8 @@ export function AgentHub() {
           Pull agents
         </h2>
         <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-          Agents other people published, looked up by slug. Installing one goes
-          through the same review as a file: every executable is named before
+          Agents other people published on Botcamp. Installing one goes through
+          the same review as a file: every executable is named before
           anything is written, the routines and skills arrive switched off, and
           nothing is started.
         </p>

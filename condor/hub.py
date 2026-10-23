@@ -78,7 +78,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from condor.agents.bundle import MAX_BUNDLE_BYTES
 from condor.fetchers._identifiers import IdentifierError, validate_identifier
@@ -186,7 +186,25 @@ class NoTokenError(HubError):
     """
 
 
-class AgentVersion(BaseModel):
+class _HubRead(BaseModel):
+    """A shape the hub describes, where ``null`` means "not sent".
+
+    Botcamp's columns are nullable — a zip upload has no ``sourceRef``, a page
+    with no description has no ``summary`` — and it answers ``null`` for them
+    rather than leaving them out. Every field here already has a default for
+    "not sent", so a ``null`` is dropped and the default applies, instead of
+    one empty column refusing a whole listing.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _null_is_not_sent(cls, data):
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
+
+
+class AgentVersion(_HubRead):
     """One ``APPROVED`` version of a Botcamp agent (PR #111's own shape,
     ``GET /api/agents/{slug}``'s ``versions[]``).
 
@@ -211,13 +229,12 @@ class AgentVersion(BaseModel):
     manifest: dict = Field(default_factory=dict)
 
 
-class AgentListing(BaseModel):
+class AgentListing(_HubRead):
     """One Botcamp agent, as ``GET /api/agents/{slug}`` describes it.
 
     PR #111 carries no listing id, no badge, no author claim and no
-    FEAT-144-shaped findings on this read path at all — there is no
-    ``/agents?query=`` to browse and no second call that would attach any of
-    those. ``slug`` is therefore the only identity there is, and it is this
+    FEAT-144-shaped findings on this read path at all — the catalogue
+    (:func:`browse`) has some of those, but nothing here joins the two. ``slug`` is therefore the only identity there is, and it is this
     install's own charge to put through :func:`condor.fetchers._identifiers.validate_identifier`
     before it reaches a URL, the same as every other caller-controlled path
     segment in this module. ``versions`` lists only ``APPROVED`` revisions,
@@ -232,6 +249,41 @@ class AgentListing(BaseModel):
     description: str = Field("", alias="summary")
     latest: int = 1
     versions: list[AgentVersion] = Field(default_factory=list)
+
+
+class CatalogueAuthor(_HubRead):
+    name: str = ""
+    handle: str = ""
+
+
+class CatalogueEntry(_HubRead):
+    """One published agent, as ``GET /api/agents?query=&page=`` lists it.
+
+    Botcamp's own words, rendered rather than re-derived — the same trust
+    :class:`AgentListing` gets. ``slug`` is what a pull addresses, and it goes
+    through :func:`get`/:func:`fetch`'s identifier guard like any slug typed
+    by hand; :func:`browse` drops an entry whose slug would not. ``free`` is
+    whether any signed-in account can pull it — ``False`` means a membership
+    or unlock (402).
+    """
+
+    listing_id: str = ""
+    slug: str
+    name: str = ""
+    description: str = ""
+    version: int = 1
+    author: CatalogueAuthor = Field(default_factory=CatalogueAuthor)
+    badge: str = ""
+    digest: str = ""
+    bytes: int = 0
+    published_at: str = ""
+    free: bool = True
+
+
+#: Botcamp pages the catalogue 20 at a time; a reply longer than this is
+#: refused rather than rendered, whatever the hub claims.
+MAX_CATALOGUE_PAGE = 100
+MAX_CATALOGUE_QUERY = 100
 
 
 class SubmissionReason(BaseModel):
@@ -729,6 +781,49 @@ def get(slug: str, token: str = "") -> AgentListing:
     if reply.status < 200 or reply.status >= 300:
         raise _access_refusal(reply, what)
     return _model(_enveloped(_decode(reply, what)), AgentListing, what)
+
+
+def browse(query: str = "", page: int = 1, token: str = "") -> list[CatalogueEntry]:
+    """One page of Botcamp's catalogue of published agents, newest first.
+
+    Anonymous on Botcamp's side; this install's token rides along when there
+    is one, so nothing about the answer depends on whether it was sent. A
+    short or empty page is the last one. ``query`` and ``page`` are this
+    caller's, encoded here as a query string — never a path segment — and
+    held to a length and a range before anything is sent.
+    """
+    query = (query or "").strip()
+    if len(query) > MAX_CATALOGUE_QUERY:
+        raise IdentifierError(
+            f"A catalogue search is at most {MAX_CATALOGUE_QUERY} characters"
+        )
+    if not isinstance(page, int) or isinstance(page, bool) or not 1 <= page <= 1000:
+        raise IdentifierError(f"Invalid catalogue page {page!r}")
+    what = "the agent catalogue"
+    params = urllib.parse.urlencode({"query": query, "page": page})
+    reply = _send("GET", f"{HUB_URL}/agents?{params}", token=(token or "").strip())
+    if reply.status < 200 or reply.status >= 300:
+        raise _access_refusal(reply, what)
+    listings = _enveloped(_decode(reply, what)).get("listings")
+    if not isinstance(listings, list):
+        raise HubError(f"The hub's answer for {what} carries no listings")
+    if len(listings) > MAX_CATALOGUE_PAGE:
+        raise HubError(
+            f"The hub's answer for {what} lists {len(listings)} agents, over "
+            f"the {MAX_CATALOGUE_PAGE}-per-page limit"
+        )
+    entries: list[CatalogueEntry] = []
+    for raw in listings:
+        if not isinstance(raw, dict):
+            continue
+        entry = _model(raw, CatalogueEntry, "a catalogue entry")
+        try:
+            _agent_slug(entry.slug)
+        except IdentifierError:
+            log.warning("hub: catalogue entry with an unusable slug dropped")
+            continue
+        entries.append(entry)
+    return entries
 
 
 class FetchedVersion(NamedTuple):

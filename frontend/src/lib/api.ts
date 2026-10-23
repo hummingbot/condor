@@ -269,6 +269,32 @@ export interface HubCatalogue {
   trust: string;
 }
 
+/** One published agent in Botcamp's catalogue, in Botcamp's own words.
+ *  `free: false` means a membership or unlock is needed to pull it (402). */
+export interface HubCatalogueEntry {
+  listing_id: string;
+  slug: string;
+  name: string;
+  description: string;
+  version: number;
+  author: { name: string; handle: string };
+  badge: string;
+  digest: string;
+  bytes: number;
+  published_at: string;
+  free: boolean;
+}
+
+/** One page of the catalogue, newest first; a short or empty page is the last. */
+export interface HubCataloguePage {
+  listings: HubCatalogueEntry[];
+  page: number;
+  trust: string;
+}
+
+/** Botcamp pages its catalogue this many at a time. */
+export const HUB_CATALOGUE_PAGE_SIZE = 20;
+
 /**
  * This install's Botcamp device-login/link state, as `condor.hub.device_state`
  * reports it — never the credential, which no route ever answers with
@@ -4016,10 +4042,16 @@ export const api = {
   // previewed and the bytes installed come out of one client rather than two,
   // which is FEAT-133's one-builder rule.
 
+  /** One page of Botcamp's published agents. Pulling one is the same
+   *  `getHubListing`/install flow as a slug typed by hand. */
+  browseHub: (query = "", page = 1) =>
+    apiFetch<HubCataloguePage>(
+      `/api/v1/hub/catalogue?${new URLSearchParams({ query, page: String(page) })}`,
+    ),
+
   /** One agent's catalogue entry, with its approved versions, plus the one
-   *  sentence about what that approval is not. There is no browse/search —
-   *  PR #111 ships none — so this is a lookup by a slug the operator must
-   *  already have. */
+   *  sentence about what that approval is not. The lookup by a slug someone
+   *  shared — a private agent is not in `browseHub`'s catalogue. */
   getHubListing: (slug: string) =>
     apiFetch<HubCatalogue>(`/api/v1/hub/agents/${encodeURIComponent(slug)}`),
 
