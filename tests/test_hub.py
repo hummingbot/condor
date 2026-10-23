@@ -728,6 +728,33 @@ def test_browse_encodes_the_query_rather_than_pathing_it(fake_hub):
     assert fake_hub.calls[0].url == f"{hub.HUB_URL}/agents?query=a%2F..%3Fx%3D1&page=1"
 
 
+def test_every_catalogue_read_addresses_botcamps_own_paths(fake_hub):
+    """The three paths Botcamp actually serves, pinned as whole URLs.
+
+    This install once composed a contract of its own invention — a ``/v1``
+    segment and a ``hub/catalogue`` path neither of which Botcamp has ever
+    answered — and the symptom was a 404 that read like a missing route. The
+    paths below are botcamp-site's: ``/api/agents?query=&page=``,
+    ``/api/agents/{slug}`` and ``/api/agents/{slug}/versions/{version}``, off
+    whatever base :data:`hub.HUB_URL` carries.
+    """
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(_entry("grid-bot"))
+    fake_hub.offer("grid_bot", b"a zip Botcamp serves")
+
+    hub.browse()
+    hub.get("grid_bot")
+    hub.fetch("grid_bot", "1")
+
+    assert [call.url for call in fake_hub.calls] == [
+        f"{hub.HUB_URL}/agents?query=&page=1",
+        f"{hub.HUB_URL}/agents/grid_bot",
+        f"{hub.HUB_URL}/agents/grid_bot/versions/1",
+    ]
+    for call in fake_hub.calls:
+        assert "/v1/" not in call.url
+        assert "/hub/" not in call.url
+
+
 def test_a_malformed_catalogue_reply_is_refused_readably(fake_hub):
     fake_hub.overrides[("GET", "/agents/bad")] = hub.Reply(200, b"not json")
 

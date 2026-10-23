@@ -715,13 +715,13 @@ def _model(payload: dict, model, what: str):
 
 
 #
-# PR #111 ships no browse/search endpoint — only a lookup by a slug the
-# caller must already know (``GET /api/agents/{slug}``) and a download of
-# one of its approved versions (``GET /api/agents/{slug}/versions/{version}``).
-# There is nothing here that answers "what does the hub have" — a caller
-# that wants that has no answer until Botcamp ships a catalogue browse
-# (TASK-004); every surface that used to call ``browse`` now asks the
-# operator for a slug instead.
+# Three endpoints, and all three are Botcamp's own — no ``/v1``, no ``hub/``
+# segment, nothing this module invented: ``GET /api/agents?query=&page=``
+# lists the catalogue (:func:`browse`), ``GET /api/agents/{slug}`` is one
+# agent (:func:`get`), ``GET /api/agents/{slug}/versions/{version}`` is a
+# download (:func:`fetch`). The catalogue arrived after the rest, on
+# botcamp-site's ``dev`` branch; until that merges to ``main`` it answers
+# only on the dev deploy, which is what :data:`HUB_URL` addresses.
 
 
 def _detail(reply: Reply) -> str:
