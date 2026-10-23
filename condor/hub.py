@@ -593,6 +593,17 @@ def approval_url(user_code: str) -> str:
     return f"{parts.scheme}://{parts.netloc}/connect?{code}"
 
 
+def site_url(path: str) -> str:
+    """A page on Botcamp's site, built from :data:`HUB_URL`'s origin.
+
+    The same rule as :func:`approval_url`: a link this install hands a browser
+    goes where this install was configured to go, never anywhere a reply
+    named. ``path`` is the caller's own, starting with ``/``.
+    """
+    parts = urllib.parse.urlsplit(HUB_URL)
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
 def _warn_if_offsite(code: DeviceCode) -> None:
     """Log once when the hub asked for a browser somewhere else.
 

@@ -2210,8 +2210,22 @@ def test_the_catalogue_route_lists_one_page_with_the_trust_sentence(fake_hub):
 
     assert [entry["slug"] for entry in body["listings"]] == ["grid-bot"]
     assert body["page"] == 2
+    # Links a browser follows are built from the configured hub, not the reply.
+    origin = hub.site_url("")
+    assert body["listings"][0]["page_url"] == f"{origin}/strategies/grid-bot"
+    assert body["botcamp_url"] == f"{origin}/strategies?type=AGENT"
     assert "not a security boundary" in body["trust"]
     assert fake_hub.calls[0].url == f"{hub.HUB_URL}/agents?query=grid&page=2"
+
+
+def test_a_catalogue_link_never_comes_from_the_reply(fake_hub):
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("grid-bot", page_url="https://evil.example/phish")
+    )
+
+    body = _client().get("/hub/catalogue").json()
+
+    assert body["listings"][0]["page_url"] == f"{hub.site_url('')}/strategies/grid-bot"
 
 
 def test_a_catalogue_page_out_of_range_is_a_400_and_nothing_is_sent(fake_hub):

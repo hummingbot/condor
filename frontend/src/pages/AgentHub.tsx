@@ -61,7 +61,7 @@ export function AgentHub() {
   const linked = hubDevice?.linked ?? false;
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-8 px-6 py-8">
+    <div className="mx-auto w-full max-w-5xl space-y-8 px-6 py-8">
       <div>
         <h1 className="flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
           <Globe className="h-5 w-5" />

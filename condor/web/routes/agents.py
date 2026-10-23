@@ -27,6 +27,7 @@ from dataclasses import asdict
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
@@ -5203,9 +5204,19 @@ async def browse_hub_catalogue(
     except HubError as exc:
         raise _hub_refusal(exc) from exc
     return {
-        "listings": [entry.model_dump() for entry in entries],
+        # Each agent's page on Botcamp, and Botcamp's own list of agents —
+        # built here from the configured hub (SEC-819's rule for any link a
+        # browser follows), never taken from the catalogue's reply.
+        "listings": [
+            {
+                **entry.model_dump(),
+                "page_url": hub.site_url(f"/strategies/{quote(entry.slug, safe='')}"),
+            }
+            for entry in entries
+        ],
         "page": page,
         "trust": HUB_TRUST,
+        "botcamp_url": hub.site_url("/strategies?type=AGENT"),
     }
 
 

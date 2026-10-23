@@ -153,7 +153,12 @@ beforeEach(() => {
       if (url.startsWith("/api/v1/hub/catalogue")) {
         catalogueRequests.push(url);
         const page = Number(new URL(url, "http://x").searchParams.get("page"));
-        return json({ listings: cataloguePages[page - 1] ?? [], page, trust: TRUST });
+        return json({
+          listings: cataloguePages[page - 1] ?? [],
+          page,
+          trust: TRUST,
+          botcamp_url: "http://hub.test/strategies?type=AGENT",
+        });
       }
       requests.push({ url, method: init?.method ?? "GET" });
       if (url.includes("/install")) {
@@ -259,6 +264,7 @@ const entry = (slug: string, fields: Partial<HubCatalogueEntry> = {}): HubCatalo
   bytes: 0,
   published_at: "",
   free: true,
+  page_url: `http://hub.test/strategies/${slug}`,
   ...fields,
 });
 
@@ -275,6 +281,23 @@ it("lists Botcamp's published agents, with who made them and whether they're fre
   expect(container.querySelector("[data-hub-catalogue-entry='paid_bot']")?.textContent).toContain(
     "Members",
   );
+});
+
+it("links to Botcamp's agents and to each agent's own page, in a new tab", async () => {
+  cataloguePages = [[entry("river_scalper")]];
+  await render();
+  await waitFor(() => container.querySelector("[data-hub-catalogue-entry]") !== null);
+
+  const all = container.querySelector("[data-hub-botcamp-link]") as HTMLAnchorElement;
+  expect(all.href).toBe("http://hub.test/strategies?type=AGENT");
+  const page = container.querySelector(
+    "[data-hub-catalogue-entry='river_scalper'] a",
+  ) as HTMLAnchorElement;
+  expect(page.href).toBe("http://hub.test/strategies/river_scalper");
+  for (const link of [all, page]) {
+    expect(link.target).toBe("_blank");
+    expect(link.rel).toContain("noopener");
+  }
 });
 
 it("reviews a catalogue agent through the same preview a looked-up slug gets", async () => {
@@ -330,6 +353,30 @@ it("pages on only while Botcamp sends full pages", async () => {
     "/api/v1/hub/catalogue?query=&page=2",
   ]);
   expect(container.textContent).not.toContain("Show more");
+});
+
+it("opens the review over the page, and closes it with the X or Escape", async () => {
+  cataloguePages = [[entry("river_scalper", { name: "River Scalper" })]];
+  await render();
+  await waitFor(() => container.querySelector("[data-hub-catalogue-entry]") !== null);
+  expect(container.querySelector("[role='dialog']")).toBeNull();
+
+  await click("Review");
+  const dialog = container.querySelector("[role='dialog'][aria-modal='true']");
+  expect(dialog?.getAttribute("aria-label")).toBe("Review River Scalper");
+  expect(dialog?.querySelector("[data-hub-provenance]")).not.toBeNull();
+
+  await act(async () => {
+    (container.querySelector("[aria-label='Close review']") as HTMLButtonElement).click();
+  });
+  expect(container.querySelector("[role='dialog']")).toBeNull();
+
+  await click("Review");
+  expect(container.querySelector("[role='dialog']")).not.toBeNull();
+  await act(async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+  expect(container.querySelector("[role='dialog']")).toBeNull();
 });
 
 it("still offers the lookup by slug, for a private agent the catalogue doesn't list", async () => {
@@ -395,6 +442,8 @@ it("installs only when the operator confirms, through the install endpoint", asy
   await click("Review");
   // The dialog's own label, because the dialog is reused rather than wrapped:
   // the hub path and the file path offer the operator one verb, spelled once.
+  // In the Hub's modal it stays in view while the review scrolls.
+  expect(button("Import river_scalper").parentElement?.className).toContain("sticky");
   await click("Import river_scalper");
 
   expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([

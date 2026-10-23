@@ -283,6 +283,9 @@ export interface HubCatalogueEntry {
   bytes: number;
   published_at: string;
   free: boolean;
+  /** The agent's page on Botcamp — built by Condor from its configured hub,
+   *  never taken from the catalogue's reply, so it is safe to open. */
+  page_url: string;
 }
 
 /** One page of the catalogue, newest first; a short or empty page is the last. */
@@ -290,6 +293,8 @@ export interface HubCataloguePage {
   listings: HubCatalogueEntry[];
   page: number;
   trust: string;
+  /** Botcamp's own list of agents, built the same way as `page_url`. */
+  botcamp_url: string;
 }
 
 /** Botcamp pages its catalogue this many at a time. */
