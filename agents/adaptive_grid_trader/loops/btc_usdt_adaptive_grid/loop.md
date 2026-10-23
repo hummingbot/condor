@@ -28,6 +28,8 @@ Follow the Adaptive Grid Trader brain exactly. This loop trades one LONG or SHOR
 ## Fixed envelope
 
 - account: `master_account`; use a dedicated/exclusive account + connector + pair scope
+- run this loop at the shipped `frequency_sec: 3600`; age and stale checks assume one tick per hour, and a faster cadence makes them fire early
+- this account + connector + pair must be used only by this loop: no manual trading and no other bots
 - connector/pair: `bitget_perpetual` / `BTC-USDT`
 - budget: 60 USDT; reserve 10%; trade budget 54 USDT
 - minimum order: 6.5 USDT or exchange minimum, whichever is greater
@@ -74,7 +76,9 @@ Baseline decides first-entry direction. Hourly never vetoes a directional baseli
 
 ### 2. Read live state across sessions
 
-List all RUNNING BTC-USDT grid executors without restricting controller ownership. The routine's live exchange position and pair-order IDs are authoritative. Require its complete pair-order ID set to exactly match the active-order IDs reported by all RUNNING exact-pair executors. Missing ID fields, incomplete schemas, or unmatched IDs are ownerless/ambiguous and block deployment.
+Read the complete, paginated set of all RUNNING BTC-USDT grids without a controller filter, then repeat the same query with `controller_ids=[current_session_id]`. The filtered executor IDs are owned; `all - owned` are predecessor/foreign. Require the filtered set to be a subset of the unfiltered set. Never use nested `Config: controller_id` as ownership evidence; any failed, incomplete, or inconsistent query fails closed.
+
+The routine's live exchange position and complete pair-order read are authoritative, but Hummingbot API does not expose active grid-order IDs. Do not require or claim exact ID matching and do not price-match orders. With no RUNNING grid, require zero pair orders. With exactly one RUNNING grid, pair orders may be attributed to it only when exclusive account + connector + pair control was positively established; BUY and SELL are both valid because opening and TP orders use opposite sides. This is a weaker exclusivity-based attribution, not exact ownership. Unknown order sides/schemas, incomplete pages, multiple grids, absent exclusivity, or contradictory state block mutation.
 
 - Previous-session grid: create nothing, notify once, HOLD, and recheck without alert spam.
 - Multiple/ambiguous grids or contradictory state: create nothing and alert.
@@ -104,22 +108,30 @@ Any non-flat, unreadable, partial, rejected, or dusty result blocks grid creatio
 
 ### 5. Deploy
 
-Immediately before create, rerun `position_mode_check`, repeat the all-session grid query, and require confirmed ONEWAY, confirmed pair/balance reads, exact order-ID ownership correlation, no grid, flat live position, balance/reserve, size, max-loss, and liquidation safety. Only after those gates pass, call `set_account_position_mode_and_leverage` with the exact account, connector, pair, and resolved leverage and omit `position_mode`. Require `Leverage Set` with nested `status: success` or `ok`, then call `create_grid_executor` immediately. On any other setup result, create nothing, report the error, and stop. Never call the leverage tool for a close.
+Immediately before create, rerun `position_mode_check`, repeat both complete all-session and current-session-filtered grid queries, and require confirmed ONEWAY, confirmed pair/balance reads, no grid, zero pair orders, flat live position, balance/reserve, size, max-loss, and liquidation safety. Only after those gates pass, call `set_account_position_mode_and_leverage` with the exact account, connector, pair, and resolved leverage and omit `position_mode`. Require `Leverage Set` with nested `status: success` or `ok`, then call `create_grid_executor` immediately. On any other setup result, create nothing, report the error, and stop. Never call the leverage tool for a close.
 
 Create one `grid_executor` with:
 
 - `total_amount_quote: 54`
-- minimum order 6.5; maximum 8 orders
-- `activation_bounds: 0.002`
-- fee-clear per-level take profit of at least 0.001
+- `take_profit: 0.001`
 - `time_limit: 43200`
-- `keep_position: false`
+- `open_order_type: 3`; `take_profit_order_type: 3`
+- `min_spread_between_orders: 0.001`
+- `min_order_amount_quote`: max(6.5, exchange minimum)
+- `max_open_orders: 8`; `max_orders_per_batch: 1`; `order_frequency: 5`
+- `activation_bounds: 0.002`
+- `safe_extra_spread: 0.0001`
+- `keep_position: false`; `coerce_tp_to_step: false`; `deduct_base_fees: false`
 - resolved explicit leverage (`5` when absent/null, otherwise the valid configured value)
-- current session controller ID
+- session-derived `level_id`; exact account; current session controller ID; request flag `save_as_default: false`
 - valid directional `limit_price`
 - no `stop_loss` or `trailing_stop`
 
-Require the create result's successful leverage-setup acknowledgement before reporting DEPLOY. After an unclear create, query executors. Never retry during the same tick.
+Require the live exchange minimum-notional, base-increment, and price-increment rules. After Hummingbot's 5% minimum-notional margin, the budget cap is at most `floor(54 / (6.5 × 1.05)) = 7` levels before further base-increment rounding. Fail before create if the fully quantized effective minimum for one level exceeds the $54 budget. `max_open_orders: 8` separately caps simultaneous resting orders; it does not promise eight grid levels. The asymmetric range intentionally makes roughly 75% of opening levels immediately marketable; Hummingbot reprices them near the passive current quote and the explicit batch/frequency settings release at most one every five seconds. The existing full-range liquidation calculation is conservative for those nearer-market fills.
+
+Immediately marketable levels keep take-profit targets derived from their nominal grid prices. Those targets can remain outside activation bounds, so `close_liquidity_placed = 0` immediately after entry can be healthy.
+
+Require the create result's successful leverage-setup acknowledgement before reporting DEPLOY, then call `get_executor` and verify every executor-config field above. `save_as_default` is request-only; keep it false but do not expect it in read-back. Verify account through the exact-account query and ownership through the current-session filter. Decode config values: booleans, integer counts, and enums must match exactly; decimals must match numerically within exchange tick size or formatter precision; TP and order types are inside `triple_barrier_config`, and derived `avg_take_profit` must match requested TP within that tolerance. Formatting differences such as `0.0020` versus `2E-3` are equal. Missing, unparseable, or mismatched config is unsafe: stop only the new grid after the filtered query confirms current-session ownership, verify orders and position, and do not redeploy that tick. Do not require a resting TP order; activation bounds legitimately defer or cancel it away from the current mid. After any unclear create, query executors. Never retry during the same tick.
 
 ### 6. Journal
 

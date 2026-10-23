@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from condor.agents.config import load_full_config
+from mcp_servers.hummingbot_api.executor_preferences import _merge_one_level
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTINES = ROOT / "agents" / "adaptive_grid_trader" / "routines"
@@ -132,7 +133,7 @@ def test_confirmed_empty_state_is_safe_and_uses_exact_filters(monkeypatch):
     }
 
 
-def test_active_order_ids_are_exposed_for_exact_ownership_matching(monkeypatch):
+def test_active_order_ids_are_exposed_for_pair_state_reporting(monkeypatch):
     output, _, _ = _run_mode(
         monkeypatch,
         orders=[{"client_order_id": "b"}, {"order_id": "a"}],
@@ -467,13 +468,23 @@ def test_agent_and_loops_encode_the_safety_contract():
     assert "- create_order_executor" in agent
     assert "profit-taking;\n3. stale-grid recycling" in agent
     assert "Never describe an old executor as resumed or adopted" in agent
-    assert "sets must match exactly" in agent
+    assert "do not require or claim an exact executor/order-ID match" in agent
+    assert "do not substitute price matching" in agent
+    assert "controller_ids=[current_session_id]" in agent
+    assert "Never use nested `Config: controller_id` as ownership evidence" in agent
+    assert "cannot detect a stale AGT order" in agent
     assert "rerun `position_mode_check`" in agent
     assert "- set_account_position_mode_and_leverage" in agent
     assert "without** `position_mode`" in agent
     assert "Never call it for a CLOSE" in agent
     assert "These are two calls, not an atomic transaction" in agent
     assert "`exchange_leverage` must equal" in agent
+    assert "### Explicit grid-create contract" in agent
+    assert "A missing resting TP is not itself a fault" in agent
+    assert "roughly 75% of opening levels immediately marketable" in agent
+    assert "controller IDs only when authoritatively exposed" in agent
+    assert "not an executor-config field" in agent
+    assert "derived `avg_take_profit`" in agent
     for loop in loops:
         assert "max_open_executors: 2" in loop
         assert "leverage: null" in loop
@@ -481,10 +492,133 @@ def test_agent_and_loops_encode_the_safety_contract():
         assert "profiles: LONG, SHORT, HOLD" in loop
         assert "no `stop_loss` or `trailing_stop`" in loop
         assert "Previous-session grid: create nothing" in loop
-        assert "exactly match" in loop
+        assert "Do not require or claim exact ID matching" in loop
+        assert "do not price-match orders" in loop
+        assert "controller_ids=[current_session_id]" in loop
+        assert "Never use nested `Config: controller_id`" in loop
+        assert "weaker exclusivity-based attribution" in loop
         assert "rerun `position_mode_check`" in loop
         assert "call `set_account_position_mode_and_leverage`" in loop
         assert "omit `position_mode`" in loop
         assert "Never call it for a CLOSE" in loop
         assert "setter and create are separate calls" in loop
         assert "`exchange_leverage` must equal" in loop
+        assert "`take_profit: 0.001`" in loop
+        assert "`open_order_type: 3`; `take_profit_order_type: 3`" in loop
+        assert "`min_spread_between_orders: 0.001`" in loop
+        assert "`max_orders_per_batch: 1`; `order_frequency: 5`" in loop
+        assert "`safe_extra_spread: 0.0001`" in loop
+        assert "`coerce_tp_to_step: false`" in loop
+        assert "`deduct_base_fees: false`" in loop
+        assert "`save_as_default: false`" in loop
+        assert "then call `get_executor` and verify every executor-config field" in loop
+        assert "`save_as_default` is request-only" in loop
+        assert "derived `avg_take_profit`" in loop
+        assert "Do not require a resting TP order" in loop
+        assert "roughly 75% of opening levels immediately marketable" in loop
+
+
+@pytest.mark.parametrize(
+    ("loop_name", "amount", "minimum", "max_open", "level_bound"),
+    [
+        ("sol_usdt_adaptive_grid", 90, 7, 12, 12),
+        ("btc_usdt_adaptive_grid", 54, 6.5, 8, 7),
+    ],
+)
+def test_loop_grid_level_bound_includes_hummingbot_notional_margin(
+    loop_name, amount, minimum, max_open, level_bound
+):
+    loop = (
+        ROOT / "agents" / "adaptive_grid_trader" / "loops" / loop_name / "loop.md"
+    ).read_text()
+
+    assert int(amount / (minimum * 1.05)) == level_bound
+    assert f"`max_open_orders: {max_open}`" in loop
+    assert f"= {level_bound}` levels before further base-increment rounding" in loop
+    assert "separately caps simultaneous resting orders" in loop
+    assert "Fail before create if the fully quantized effective minimum" in loop
+
+
+def test_liquidation_guard_mirrors_hummingbot_level_count_caps():
+    guard = (
+        ROOT
+        / "agents"
+        / "adaptive_grid_trader"
+        / "skills"
+        / "liquidation_guard"
+        / "SKILL.md"
+    ).read_text()
+    agent = (ROOT / "agents" / "adaptive_grid_trader" / "AGENT.md").read_text()
+
+    assert "minimum_notional × 1.05" in guard
+    assert "base_amount_increment" in guard
+    assert (
+        "levels_by_budget = floor(total_amount_quote / effective_minimum_quote)"
+        in guard
+    )
+    assert "levels_by_spacing = floor(range_fraction / effective_spacing)" in guard
+    assert "levels = min(levels_by_budget, levels_by_spacing)" in guard
+    assert "one-level fallback would exceed the configured budget" in guard
+    assert "If any exchange rule or current price" in guard
+    assert "floor(total_amount_quote / effective_minimum_quote)" in agent
+    assert (
+        "floor(((end_price - start_price) / start_price) / effective_spacing)" in agent
+    )
+    assert "at most 12 levels for SOL and at most 7 for BTC" in agent
+    assert "fail before create if even one effective-minimum level" in agent
+
+
+def test_explicit_grid_config_overrides_every_behavior_bearing_saved_default():
+    saved = {
+        "min_spread_between_orders": 0.9,
+        "min_order_amount_quote": 999,
+        "max_open_orders": 99,
+        "max_orders_per_batch": 99,
+        "order_frequency": 999,
+        "activation_bounds": 0.9,
+        "safe_extra_spread": 0.9,
+        "leverage": 99,
+        "keep_position": True,
+        "coerce_tp_to_step": True,
+        "deduct_base_fees": True,
+        "level_id": "saved-default",
+        "triple_barrier_config": {
+            "take_profit": 0.9,
+            "time_limit": 1,
+            "open_order_type": 1,
+            "take_profit_order_type": 1,
+        },
+    }
+    explicit = {
+        "min_spread_between_orders": 0.001,
+        "min_order_amount_quote": 7,
+        "max_open_orders": 12,
+        "max_orders_per_batch": 1,
+        "order_frequency": 5,
+        "activation_bounds": 0.002,
+        "safe_extra_spread": 0.0001,
+        "leverage": 5,
+        "keep_position": False,
+        "coerce_tp_to_step": False,
+        "deduct_base_fees": False,
+        "level_id": "adaptive_grid_trader.sol_usdt_adaptive_grid_8",
+        "triple_barrier_config": {
+            "take_profit": 0.001,
+            "time_limit": 43200,
+            "open_order_type": 3,
+            "take_profit_order_type": 3,
+        },
+    }
+
+    assert _merge_one_level(saved, explicit) == explicit
+
+
+def test_source_and_runtime_agt_contracts_match():
+    for relative in (
+        Path("AGENT.md"),
+        Path("loops/btc_usdt_adaptive_grid/loop.md"),
+        Path("loops/sol_usdt_adaptive_grid/loop.md"),
+    ):
+        source = ROOT / "agents" / "adaptive_grid_trader" / relative
+        runtime = ROOT / ".condor" / "agents" / "adaptive_grid_trader" / relative
+        assert runtime.read_text() == source.read_text()
