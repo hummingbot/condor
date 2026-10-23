@@ -29,6 +29,12 @@ every agent tick's market read — so this grant, the per-run record in
 ``condor/code_runs.py`` and the action-log row
 (:func:`condor.runtime.danger.is_code_execution_call`) are the whole containment;
 unattended dry-run sessions refuse it outright in ``condor/agents/risk.py``.
+
+Containment against *accidents* is separate and lives in
+:mod:`condor.runtime.code_guard`: the run's timeout can interrupt synchronous
+code (a snippet that loops or walks the filesystem on the main thread used to
+freeze all of Condor), and ``exit()``, ``input()`` and a few other ways to stop
+or stall the process fail on their own line instead.
 """
 
 from __future__ import annotations
@@ -44,8 +50,10 @@ import time
 import traceback
 
 import condor.reports as reports
+from condor.asyncutil import TaskSet
 from condor.code_runs import CodeRun, get_code_run_store, new_run_id
 from condor.memory.paths import CHAT_SLUG
+from condor.runtime import code_guard
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +62,20 @@ CODE_FILENAME = "<code_run>"
 
 DEFAULT_TIMEOUT = 60.0
 MAX_TIMEOUT = 120.0
+
+# How long a cancelled snippet's own cleanup (a ``finally``) gets to land
+# before execute_code gives up waiting on it. Longer than the guard's own
+# INTERRUPT_GRACE, which is what bounds cleanup *while it is executing* —
+# this instead bounds cleanup that is suspended in an await the guard cannot
+# reach at all (see _run_until_done below).
+_CLEANUP_GRACE = code_guard.INTERRUPT_GRACE + 1.0
+
+# Strong references to a snippet whose cleanup outlived _CLEANUP_GRACE, so the
+# orphaned task is not garbage-collected mid-run and its eventual outcome is
+# still logged instead of silently lost.
+_orphaned_cleanups = TaskSet(
+    logger, "code run %s: cleanup finished after the run was already reported (%s)"
+)
 
 # Where a run's ``print`` goes. Per-context, so concurrent runs cannot read each
 # other's output — which only holds because every run gets its own asyncio.Task
@@ -85,6 +107,14 @@ class _StdoutProxy:
         buffer = _CAPTURE.get()
         if buffer is None:
             self._stream.flush()
+
+    def isatty(self):
+        # A captured run is never a terminal. Forwarding this to a real tty is
+        # how ``help()`` decided to start an interactive pager on the main
+        # thread and wait for a keypress that would never come.
+        if _CAPTURE.get() is not None:
+            return False
+        return self._stream.isatty()
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
@@ -142,6 +172,7 @@ async def _run_in_task(
     source: str,
     out: dict,
     owner_id: int = 0,
+    scope: code_guard.GuardScope | None = None,
 ):
     """The snippet itself, in its own task context.
 
@@ -153,6 +184,8 @@ async def _run_in_task(
     reads/deletes against it (SEC-196). ``bind_context`` publishes the same
     context object the snippet sees, so a ``call_routine`` inside it inherits
     this run's server and user instead of an ambient default (FEAT-052).
+    ``scope`` is the run's guard (deadline and policy); it is entered last and
+    left first, so the harness's own bookkeeping never runs under it.
     """
     from condor.primitives import bind_context
 
@@ -164,9 +197,13 @@ async def _run_in_task(
         bind_context(namespace.get("context")),
     ):
         try:
-            outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
-            if inspect.isawaitable(outcome):
-                await outcome
+            with (
+                code_guard.guarded(scope or code_guard.GuardScope(source), compiled),
+                code_guard.contain_exit(),
+            ):
+                outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
+                if inspect.isawaitable(outcome):
+                    await outcome
         finally:
             out["report_id"] = reports.get_last_report_id() or ""
 
@@ -217,6 +254,14 @@ async def execute_code(
         get_code_run_store().save(run)
         return run.to_dict()
 
+    refusal = code_guard.check_source(ast.parse(code, CODE_FILENAME))
+    if refusal:
+        run.status = "error"
+        run.error = f"Refused: {refusal}"
+        run.duration_ms = int((time.monotonic() - started) * 1000)
+        get_code_run_store().save(run)
+        return run.to_dict()
+
     # The exact context a routine gets, so the two paths cannot diverge — the
     # active server travels as a preference, which is how get_client resolves it.
     context = WebRoutineContext(
@@ -238,6 +283,11 @@ async def execute_code(
 
     _install_stdout_proxy()
     out: dict = {"report_id": ""}
+    # Started here, not with ``started``: resolving the client above is the
+    # harness's time, not the snippet's.
+    scope = code_guard.GuardScope(
+        label=run_id, deadline=time.monotonic() + timeout, budget=timeout
+    )
     task = asyncio.create_task(
         _run_in_task(
             compiled,
@@ -247,25 +297,69 @@ async def execute_code(
             label or run_id,
             out,
             owner_id=chat_id,
+            scope=scope,
         )
     )
     try:
-        await asyncio.wait_for(task, timeout=timeout)
-        run.status = "ok"
-    except (asyncio.TimeoutError, TimeoutError):
-        run.status = "timeout"
-        run.error = f"Timed out after {timeout:g}s"
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if task not in done:
+            # Past its deadline but not yet unwound. ``asyncio.wait_for``
+            # would cancel and then await the task with no bound of its own,
+            # so a ``finally`` that swallows the CancelledError and then
+            # awaits something unbounded — a stray ``asyncio.sleep(3600)`` —
+            # hangs this call forever instead of timing out (the guard's own
+            # interrupt only fires on executing code, never on a suspended
+            # await). Cancel it ourselves and give cleanup a bounded grace
+            # window instead of an open one.
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=_CLEANUP_GRACE)
+        if task not in done:
+            # Cleanup did not land within the grace window either. Stop
+            # blocking this run on it rather than hang the caller; the
+            # expired scope below still cuts the snippet at its next
+            # executing line, however long that unbounded await runs.
+            run.status = "timeout"
+            run.error = (
+                f"Timed out after {timeout:g}s "
+                f"(cleanup did not finish within {_CLEANUP_GRACE:g}s)"
+            )
+            _orphaned_cleanups.track(task, label=run_id)
+        else:
+            try:
+                task.result()
+                run.status = "ok"
+            except asyncio.CancelledError:
+                run.status = "timeout"
+                run.error = f"Timed out after {timeout:g}s"
+            except code_guard.CodeRunDeadline as e:
+                # The same outcome as above, reached by the guard instead of
+                # the cancellation: the snippet was busy on the main thread
+                # and never yielded to be cancelled. The traceback is the
+                # useful part — it points at the line.
+                run.status = "timeout"
+                run.error = f"Timed out after {timeout:g}s ({e})"
+                run.traceback = _trim_traceback(
+                    "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                )
+            except BaseException as e:
+                run.status = "error"
+                run.error = f"{type(e).__name__}: {e}"
+                run.traceback = _trim_traceback(
+                    "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                )
     except asyncio.CancelledError:
+        # execute_code's own caller was cancelled (e.g. shutdown), not the
+        # snippet's own timeout. Cancel the snippet too rather than leave it
+        # running unsupervised, and propagate rather than swallow.
+        task.cancel()
         run.status = "timeout"
         run.error = "Cancelled"
         raise
-    except BaseException as e:
-        run.status = "error"
-        run.error = f"{type(e).__name__}: {e}"
-        run.traceback = _trim_traceback(
-            "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        )
     finally:
+        # A task the snippet spawned and never awaited still carries the scope;
+        # expiring it cuts that straggler at its next line instead of letting it
+        # run on, unowned, after its run was reported finished.
+        scope.expire()
         run.duration_ms = int((time.monotonic() - started) * 1000)
         run.stdout = buffer.getvalue()
         run.result = _render_result(namespace)

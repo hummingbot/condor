@@ -4970,6 +4970,10 @@ export const api = {
       body: JSON.stringify({ ids: ids ?? null }),
     }),
 
+  /** Delete all of this user's notifications. */
+  clearNotifications: () =>
+    apiFetch<{ unread: number }>("/api/v1/notifications", { method: "DELETE" }),
+
   // ── Web Push (FEAT-083) ──
   //
   // The bell with the window closed. Every one of these is scoped to the JWT
