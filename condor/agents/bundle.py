@@ -173,6 +173,19 @@ class BundleError(ValueError):
     """A bundle this install refuses, with the sentence explaining why."""
 
 
+class PossibleKeysError(BundleError):
+    """An export stopped on values that may be private keys (SEC review C2).
+
+    ``pending`` lists each by file, line, kind and fingerprint — never the
+    value — so a surface can ask a person about each one and export again
+    with the ones they confirmed are not keys.
+    """
+
+    def __init__(self, pending):
+        super().__init__(bundle_review.possible_keys_refusal(pending))
+        self.pending = list(pending)
+
+
 class NotJsonError(BundleError):
     """The bytes are not a JSON document at all — a wrong file, not a bad one."""
 
@@ -573,7 +586,12 @@ def _shared_skill_slugs() -> list[str]:
 # ── Export ──
 
 
-def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
+def build(
+    slug: str,
+    notes: str = "",
+    author_name: str = "",
+    acknowledged: Sequence[str] = (),
+) -> Bundle:
     """The bundle for ``slug``, read from disk and scrubbed.
 
     Reads **both** layers, local shadowing stock per file, so a shipped agent
@@ -590,7 +608,8 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     leaves no trace.
 
     ``notes`` and ``author_name`` are the exporting caller's; neither is read
-    by anything that decides what gets written.
+    by anything that decides what gets written. ``acknowledged`` is the
+    fingerprints of possible keys a person confirmed are not keys.
 
     Raises :class:`BundleError` for an agent that does not exist, a file whose
     bytes are not UTF-8 (named, so the operator can remove it), a bundle over
@@ -668,9 +687,18 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     # ``bundle_review.review(bundle)``; only a value that can be nothing but a
     # secret stops the export, which is the same loud posture the non-UTF-8
     # refusal above already takes rather than a new one.
-    refusal = bundle_review.refusal(bundle_review.review(bundle))
+    findings = bundle_review.review(bundle)
+    refusal = bundle_review.refusal(findings)
     if refusal:
         raise BundleError(refusal)
+    # A value that *may* be a key (64 hex, long base58) is a tx hash as often
+    # as not, so it is not refused outright — but it does not leave unseen
+    # either (SEC review C2): each one waits for a person's acknowledgement.
+    pending = bundle_review.possible_keys(
+        ((f.path, f.text) for f in files), findings, acknowledged
+    )
+    if pending:
+        raise PossibleKeysError(pending)
     _stamp_bookkeeping(slug, agent_uid, version, digest)
     return bundle
 

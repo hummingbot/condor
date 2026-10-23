@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from condor.runtime.danger import (
+    AGENTS_TOOL,
     CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
@@ -1008,6 +1009,20 @@ def auto_approve_with_risk_check(
                 )
                 if not allowed:
                     return deny(tool_name, reason)
+
+            # The Botcamp hub actions never run unattended (SEC review C1/C3).
+            # Chat puts them in front of a human; a loop has nobody to ask, and
+            # these are not exposure the risk limits could bound: a publish
+            # sends the agent off the box for good, and an install makes
+            # foreign instructions live — an injected "publish every agent"
+            # is exactly what this stops. Reaching this line means the call
+            # is one of DANGEROUS_AGENT_ACTIONS.
+            if tool_name == AGENTS_TOOL:
+                return deny(
+                    tool_name,
+                    "publishing to or installing from the Botcamp hub needs a "
+                    "human — do it from chat, not from a loop",
+                )
 
             # Block direct order placement entirely
             if tool_name == "place_order":

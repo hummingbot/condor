@@ -75,6 +75,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import NamedTuple
 
@@ -114,6 +115,12 @@ log = logging.getLogger(__name__)
 #: and ``POST /api/condor/device/code``.
 HUB_URL = "https://dev.botcamp.xyz/api"
 
+#: The compiled-in address, kept apart from :data:`HUB_URL` (which the dev
+#: override below may retarget): a stored token that predates
+#: ``token_origin`` was issued here, since it is the only hub a token could
+#: come from without the dev override.
+COMPILED_HUB_URL = HUB_URL
+
 
 def _dev_override() -> str:
     """The dev-only override of :data:`HUB_URL`, applied once at import.
@@ -135,6 +142,10 @@ def _dev_override() -> str:
       production constant above stays ``https://`` unconditionally, since it
       is never read from the environment at all.
     * Lights up the override loudly, once, at import — never silently.
+    * Only an ``http(s)://`` URL with a host is taken (SEC review C5). The
+      opener underneath also serves ``file://``, ``ftp://`` and ``data:``, so
+      anything else is refused here, loudly, and the compiled-in address
+      stands.
     """
     import os
 
@@ -144,7 +155,15 @@ def _dev_override() -> str:
         "yes",
     ):
         return ""
-    return os.environ.get("CONDOR_HUB_DEV_URL", "").strip()
+    url = os.environ.get("CONDOR_HUB_DEV_URL", "").strip()
+    parts = urllib.parse.urlsplit(url)
+    if url and (parts.scheme not in ("http", "https") or not parts.netloc):
+        log.error(
+            "hub: CONDOR_HUB_DEV_URL must be an http(s) URL with a host — "
+            "ignoring it and talking to the compiled-in hub"
+        )
+        return ""
+    return url
 
 
 _dev_hub_url = _dev_override()
@@ -548,6 +567,11 @@ def _send(method: str, url: str, *, token: str = "", payload: bytes = b"") -> Re
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    # The opener also serves file://, ftp:// and data:. Every URL here is
+    # built on HUB_URL, so this only ever refuses a bug — and refuses it
+    # before a socket or a file is opened.
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise HubError("Condor only talks to the hub over http(s)", status=0)
     request = urllib.request.Request(
         url, data=payload or None, headers=headers, method=method
     )
@@ -577,7 +601,7 @@ def _log_safe(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
-def approval_url(user_code: str) -> str:
+def approval_url() -> str:
     """Where to send an admin to approve a device login, built locally.
 
     The hub tells Condor where it would like the browser sent
@@ -598,10 +622,14 @@ def approval_url(user_code: str) -> str:
     approval page is a page on the site (``https://dev.botcamp.xyz/connect``).
     The dev override is picked up for free, so pointing this install at a LAN
     hub retargets the approval link with it.
+
+    The link carries no code. Botcamp has the person type it on ``/connect``
+    (RFC 8628 §5.4) and ignores a ``?code=``: a link with the code filled in
+    is what a device-login phishing message would send, so the code the admin
+    reads off this screen is the only way it reaches the approval page.
     """
     parts = urllib.parse.urlsplit(HUB_URL)
-    code = urllib.parse.urlencode({"code": user_code})
-    return f"{parts.scheme}://{parts.netloc}/connect?{code}"
+    return f"{parts.scheme}://{parts.netloc}/connect"
 
 
 def site_url(path: str) -> str:
@@ -1060,7 +1088,13 @@ def installed_agent_status(slug: str, force: bool = False) -> dict:
 # ── Publishing ───────────────────────────────────────────────────────────
 
 
-def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Receipt:
+def publish(
+    slug: str,
+    token: str,
+    notes: str = "",
+    author_name: str = "",
+    acknowledged: Sequence[str] = (),
+) -> Receipt:
     """Upload this install's agent ``slug``, as the bundle an export would hand over.
 
     Built through FEAT-133's :func:`condor.agents.bundle.build` and rendered
@@ -1078,8 +1112,14 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
     Nothing is queued, retried or left on disk when this fails. The failure is
     the caller's to report and the operator's to retry; see the module
     docstring on why the sharing outbox's shape is wrong here.
+
+    ``acknowledged`` is the fingerprints of possible keys a person confirmed
+    are not keys (SEC review C2). ``build`` stops on any other, and the ones
+    this bundle really carries ride along as ``acknowledged_secrets`` so the
+    hub, which runs the same check, does not refuse them a second time.
     """
     from condor.agents import bundle as agent_bundle
+    from condor.agents import bundle_review
 
     if not (token or "").strip():
         raise NoTokenError(
@@ -1088,7 +1128,18 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
     # Before the build, so a missing agent is answered without stamping its
     # bookkeeping — ``build`` writes ``bundle_version``/``bundle_digest`` on
     # success and an export refused for a missing token should leave no trace.
-    bundle = agent_bundle.build(slug, notes=notes, author_name=author_name)
+    bundle = agent_bundle.build(
+        slug, notes=notes, author_name=author_name, acknowledged=acknowledged
+    )
+    carried = sorted(
+        {
+            key.fingerprint
+            for key in bundle_review.possible_keys(
+                ((f.path, f.text) for f in bundle.files),
+                bundle_review.review(bundle),
+            )
+        }
+    )
     text = agent_bundle.render(bundle)
     payload = text.encode("utf-8")
     body = json.dumps(
@@ -1101,6 +1152,8 @@ def publish(slug: str, token: str, notes: str = "", author_name: str = "") -> Re
             # The bundle verbatim, as text, so what the hub stores is what this
             # install would have handed over on a USB stick.
             "bundle": text,
+            # Fingerprints only — never a value (SEC review C2).
+            "acknowledged_secrets": carried,
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -1310,7 +1363,7 @@ def device_start() -> DeviceStart:
     reply = _send("POST", f"{HUB_URL}/condor/device/code", payload=b"{}")
     code = _model(_json(reply, "starting a device login"), DeviceCode, "a device code")
     _warn_if_offsite(code)
-    link = approval_url(code.user_code)
+    link = approval_url()
     now = time.monotonic()
     with _device_lock:
         _pending_device = {
@@ -1361,7 +1414,7 @@ def device_state() -> DeviceLinkState:
     """
     section = _section()
     linked_handle = str(section.get("profile_handle") or "")
-    if linked_handle and section.get("token"):
+    if linked_handle and token():
         return DeviceLinkState(
             status="linked",
             profile_handle=linked_handle,
@@ -1424,6 +1477,7 @@ def device_state() -> DeviceLinkState:
 
             get_config_manager().update_hub(
                 token=access_token,
+                token_origin=_origin(HUB_URL),
                 profile_handle=profile_handle,
                 scope=scope_list,
                 user=user,
@@ -1608,14 +1662,37 @@ def _clear_token_if_revoked(reply: Reply) -> None:
 # ── The token, which lives in config.yml and is never rendered ───────────
 
 
+def _origin(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def token() -> str:
     """This install's Botcamp token, or ``""``.
 
     Stored in ``config.yml``'s ``hub`` section, the way the sharing identity is
     (``condor/sharing/consent.py``). It is never returned by a GET route, never
     logged, and never put in a URL or a body — see :func:`_send`.
+
+    Only for the hub that issued it (SEC review C5): turning the dev override
+    on must not send the compiled-in hub's ``bc_`` token to a LAN or other
+    host. A token stored before ``token_origin`` existed counts as the
+    compiled-in hub's.
     """
-    return str(_section().get("token") or "")
+    section = _section()
+    value = str(section.get("token") or "")
+    if not value:
+        return ""
+    issued_by = str(section.get("token_origin") or _origin(COMPILED_HUB_URL))
+    if issued_by != _origin(HUB_URL):
+        log.warning(
+            "hub: the stored Botcamp token was issued by %s, not this install's "
+            "hub (%s) — not sending it; connect again to use this hub",
+            issued_by,
+            _origin(HUB_URL),
+        )
+        return ""
+    return value
 
 
 def set_token(value: str) -> bool:
@@ -1627,7 +1704,7 @@ def set_token(value: str) -> bool:
     from config_manager import get_config_manager
 
     cleaned = (value or "").strip()
-    get_config_manager().update_hub(token=cleaned)
+    get_config_manager().update_hub(token=cleaned, token_origin=_origin(HUB_URL))
     return bool(cleaned)
 
 
