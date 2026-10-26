@@ -454,3 +454,82 @@ def test_a_tick_whose_provider_did_not_run_carries_no_reading(tmp_path, monkeypa
     assert engine._tick_reading == "", "this tick read nothing, whatever the dict holds"
     snapshots = engine.journal._parse_snapshots()
     assert str(snapshots[-1].get("reading")) == "missing"
+
+
+# ----------------------------------------------------------------------
+# 6. A claim is resolved, not left standing (review follow-up)
+# ----------------------------------------------------------------------
+
+
+class _LiveBots:
+    """The orchestrator's active-bots listing, as the adoption pass reads it."""
+
+    def __init__(self, names):
+        self.bot_orchestration = self
+        self._names = list(names)
+
+    async def get_active_bots_status(self):
+        return {"status": "success", "data": {n: {} for n in self._names}}
+
+
+def test_a_claim_the_live_listing_confirms_is_promoted(tmp_path, monkeypatch):
+    """The dangerous inverse of the failed deploy, found in review.
+
+    A deploy can succeed while its result goes unread — the engine confirms one
+    from the call that returned, and a completion it cannot parse leaves only
+    the gate's claim. Left standing, that claim kept `confirmed_bases()` empty
+    for the life of the session, so the drawdown exemption went on letting ticks
+    run unmeasured while a real bot traded. The live listing is what tells a
+    landed deploy from a failed one, and the adoption pass already reads it.
+    """
+    engine = _engine(tmp_path, monkeypatch, bot_mode="bot", bot_name="brigado-grid")
+    assert engine.ledger is not None
+    engine.ledger.note_claim("brigado-grid")  # ...and no note_deploy
+    assert engine.ledger.confirmed_bases() == []
+    assert engine._adoption_done is False, "a claim is not a settled fleet"
+
+    asyncio.run(engine._adopt_running_bots(_LiveBots(["brigado-grid-20261027-101500"])))
+
+    assert engine.ledger.confirmed_bases() == ["brigado-grid"]
+    assert engine.ledger.owned()[0].origin == "adopted"
+    assert engine._adoption_done is True
+
+
+def test_a_claim_the_listing_does_not_show_stays_a_claim(tmp_path, monkeypatch):
+    """The other outcome, and the one the claim exists for: nothing landed."""
+    engine = _engine(tmp_path, monkeypatch, bot_mode="bot", bot_name="brigado-grid")
+    assert engine.ledger is not None
+    engine.ledger.note_claim("brigado-grid")
+
+    asyncio.run(
+        engine._adopt_running_bots(_LiveBots(["someone-elses-20261027-101500"]))
+    )
+
+    assert engine.ledger.bases() == ["brigado-grid"], "the name is still owned"
+    assert engine.ledger.confirmed_bases() == []
+    assert engine._adoption_done is False, "so the pass runs again next tick"
+
+
+def test_a_confirmed_claim_ends_the_drawdown_exemption(tmp_path, monkeypatch):
+    """End to end: the promotion is what closes the hole."""
+    engine = _engine(tmp_path, monkeypatch, bot_mode="bot", bot_name="brigado-grid")
+    monkeypatch.setattr(engine, "_notify", _async(None))
+    monkeypatch.setattr(
+        engine.provider_registry, "run_core_providers", _providers(reading="missing")
+    )
+    assert engine.ledger is not None
+    engine.ledger.note_claim("brigado-grid")
+    engine.journal.record_tick("deployed, result unread")
+    engine.journal.record_snapshot(0.0, 0.0, 0, 0.0, reading="missing")
+
+    # While the claim stands, the tick runs: nothing is known to be out there.
+    # The adoption pass is NOT stubbed here — it runs against the bare object
+    # the tick is given as a client, cannot read a listing from it, and defers,
+    # which is the same best-effort contract a real unanswered orchestrator
+    # gets. The claim therefore survives this tick.
+    assert asyncio.run(engine._gather_tick_context(object())) is not None
+    assert engine.ledger.confirmed_bases() == []
+
+    # The real adoption pass sees the bot, and the exemption is over.
+    asyncio.run(engine._adopt_running_bots(_LiveBots(["brigado-grid-20261027-101500"])))
+    assert asyncio.run(engine._gather_tick_context(object())) is None

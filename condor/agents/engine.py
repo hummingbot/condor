@@ -1515,8 +1515,19 @@ class TickEngine:
         not a finished state; it is what every missed deployment leaves behind,
         and it is the state :meth:`_adopt_running_bots` exists to leave
         (CORR-724).
+
+        ``confirmed_bases`` and not ``bases``: a base the gate only *claimed* is
+        a deploy that was approved, not a bot that was seen, and whether it
+        landed is precisely what the live listing this pass reads can answer.
+        Counting it as a settled fleet closed adoption over a claim and left a
+        bot that really did deploy unconfirmed for the life of the session —
+        with the drawdown exemption built on ``confirmed_bases`` still letting
+        ticks run unmeasured while it traded ([[CORR-750]]). So the pass keeps
+        running while anything is only claimed; that is one read per tick, the
+        same it already makes while the ledger is empty, and the read is
+        server-cached.
         """
-        return bool(self.ledger is not None and self.ledger.bases())
+        return bool(self.ledger is not None and self.ledger.confirmed_bases())
 
     async def _adopt_running_bots(self, client) -> None:
         """Record the bots already live that belong to us (FEAT-017).
@@ -1625,6 +1636,12 @@ class TickEngine:
 
         now = time.time()
         held = set(self.ledger.bases())
+        # Claims outstanding before this pass. A claim this pass then sees in
+        # the live listing is a deploy confirmed to have landed, which is an
+        # event worth a line of its own: it is not in ``adopted`` below, because
+        # the base was already on the ledger, and it is the moment the session
+        # stops being exempt from the drawdown guard ([[CORR-750]]).
+        claimed_before = held - set(self.ledger.confirmed_bases())
         for instance_name in sorted(live):
             base = strip_deploy_suffix(instance_name)
             if base in disowned:
@@ -1638,6 +1655,13 @@ class TickEngine:
         if adopted:
             log.info(
                 "TickEngine %s adopted bots: %s", self.agent_id, ", ".join(adopted)
+            )
+        confirmed = sorted(claimed_before & set(self.ledger.confirmed_bases()))
+        if confirmed:
+            log.info(
+                "TickEngine %s: claimed deploy(s) confirmed live: %s",
+                self.agent_id,
+                ", ".join(confirmed),
             )
 
     def _live_session_nums(self) -> set[int] | None:

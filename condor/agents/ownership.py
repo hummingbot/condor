@@ -319,6 +319,12 @@ class BotLedger:
         running, so ``owns`` and ``bases`` must include it or the session could
         not stop what it started. Anything reasoning about *exposure* does care,
         because a name is not a position ([[CORR-750]]).
+
+        A claim is not a permanent state. ``_record`` clears it on the first
+        thing that observes the bot, and the engine keeps its adoption pass
+        running while any base is still only claimed, so a deploy that landed
+        while its result went unread is confirmed off the live listing rather
+        than staying exempt forever.
         """
         return sorted(b for b, o in self.bots.items() if o.origin != "claimed")
 
@@ -351,15 +357,9 @@ class BotLedger:
     def note_deploy(self, name: str, now: float | None = None) -> None:
         """Record a deploy that actually completed.
 
-        Upgrades a prior :meth:`note_claim` for the same base — the one place
-        ``_record``'s first-claim-wins rule is deliberately overridden, because
-        "seen to exist" is strictly stronger than "about to be created" and the
-        two always arrive in that order.
+        Clears a prior :meth:`note_claim` for the same base — see ``_record``,
+        where every observation does.
         """
-        base = strip_deploy_suffix((name or "").strip())
-        existing = self.bots.get(base) if base else None
-        if existing is not None and existing.origin == "claimed":
-            existing.origin = "deployed"
         self._record(name, "deployed", now)
 
     def adopt(self, name: str, now: float | None = None) -> None:
@@ -449,6 +449,19 @@ class BotLedger:
         else:
             # First claim wins: a bot this session deployed stays "deployed" even
             # if a later adoption pass sees it running.
+            #
+            # A ``claimed`` entry is the exception, because it is not an
+            # observation at all — only the gate's statement that a deploy was
+            # approved — so the first thing that actually sees the bot replaces
+            # it, keeping whichever origin did the seeing. Without this a deploy
+            # that succeeded while its result went unread stayed ``claimed`` for
+            # the life of the session: ``confirmed_bases()`` reported nothing,
+            # and the drawdown exemption built on it went on letting ticks run
+            # unmeasured while the bot traded ([[CORR-750]]). That is the
+            # dangerous inverse of the failed-deploy case the claim exists for,
+            # and the live listing is what tells the two apart.
+            if existing.origin == "claimed" and origin != "claimed":
+                existing.origin = origin
             existing.last_seen = ts
             # Operating it again re-opens a window closed by an earlier release,
             # so a stop followed by another tick cannot strand the attribution.
