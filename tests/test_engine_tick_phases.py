@@ -77,7 +77,7 @@ def test_gather_tick_context_returns_none_when_blocked(tmp_path, monkeypatch):
     monkeypatch.setattr(
         engine.risk,
         "get_state",
-        lambda tracker: RiskState(is_blocked=True, block_reason="max drawdown"),
+        lambda tracker, **kw: RiskState(is_blocked=True, block_reason="max drawdown"),
     )
     notices: list[str] = []
 

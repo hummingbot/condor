@@ -974,8 +974,31 @@ class TickEngine:
         if adopted_summary:
             core_data_summaries["adopted_executors"] = adopted_summary
 
-        # Risk state (experiments pass None — returns clean state)
-        risk_state = self.risk.get_state(self.journal or _NullTracker())
+        # Risk state (experiments pass None — returns clean state).
+        #
+        # The ledger, not the performance read, is what says whether this
+        # session has anything out there: it is written when a deploy returns
+        # and read back without asking the API. A bot-mode session holding no
+        # base has deployed nothing, so there is no drawdown for the missing
+        # reading to be hiding — and without this the first bot-mode tick after
+        # a session starts is blocked for want of the reading its own first
+        # deploy would have produced ([[CORR-750]]). One recorded base ends it.
+        #
+        # ``enforced`` is the bot-mode test (it is ``bool(config["bot_name"])``
+        # where the ledger is built), and it has to be here: in executor mode
+        # the book is executors, which the ledger does not track, so an empty
+        # ledger is that mode's steady state and says nothing about what is at
+        # stake. Reading it as "nothing deployed" there would switch the guard
+        # off for every executor-mode agent permanently — the opposite of the
+        # narrow exemption this is.
+        nothing_at_stake = (
+            self.ledger is not None
+            and bool(self.ledger.enforced)
+            and not self.ledger.bases()
+        )
+        risk_state = self.risk.get_state(
+            self.journal or _NullTracker(), nothing_at_stake=nothing_at_stake
+        )
         live_executors = self._last_skill_data.get("executors", [])
         live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
         # Inherited positions count against the limits (CORR-726). The provider
@@ -1034,6 +1057,10 @@ class TickEngine:
                     risk_state.block_reason,
                 )
                 self.journal.record_tick("blocked: " + risk_state.block_reason)
+                # The providers already read the book this tick, before the
+                # gate ran. Record it, or a block the missing reading itself
+                # caused can never clear ([[CORR-750]]).
+                self._record_reading_snapshot()
             if risk_state.block_reason != self._last_block_reason:
                 await self._notify(
                     f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
@@ -1355,25 +1382,8 @@ class TickEngine:
             self._journal_mode_mismatch(tick_num)
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-            skill_volume = self._last_skill_data.get("total_volume", 0.0)
             skill_executors = len(self._last_skill_data.get("executors", []))
-            skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
-            self.journal.record_snapshot(
-                total_pnl=skill_pnl,
-                total_volume=skill_volume,
-                open_count=skill_executors,
-                position_size=skill_exposure,
-                # Whether the figures above are a reading at all ([[FEAT-137]],
-                # [[CORR-725]]). Written onto the line because the four of them
-                # are the same zeros either way: without it the guard reading
-                # them back took a tick that read nothing for a flat book, and
-                # a zero exposure clears the drawdown outright.
-                #
-                # An absent key is the provider's *own* error path -- it stamps
-                # every answer it gives, including ``empty`` and ``missing`` --
-                # so absence is the one case that must not read as ``ok``.
-                reading=str(self._last_skill_data.get("reading") or "missing"),
-            )
+            self._record_reading_snapshot()
 
             if failure:
                 action_brief = f"ERROR: {failure}"[:100].replace("\n", " ")
@@ -1855,6 +1865,47 @@ class TickEngine:
             return ledger().session_venues(self.agent_id)
         except Exception:  # noqa: BLE001
             return []
+
+    def _record_reading_snapshot(self) -> None:
+        """Write this tick's performance figures, stamped with the tri-state.
+
+        Called from *both* arms of a tick, which is the whole point. The
+        providers fetch the figures before the risk gate runs, so a tick the
+        gate blocks has already read the book; writing the line only on the arm
+        that reaches the model threw that reading away. A session blocked *for
+        want of a reading* then had no way left to acquire one, because the
+        only path that recorded a reading was the path the block closed
+        ([[CORR-750]]).
+
+        A loop in ``bot_mode`` walked straight into it: the bot deployed on
+        tick 1 has no performance for the API to report yet, so tick 1 writes
+        ``empty``; tick 2 reads ``ok`` but is blocked on "no drawdown reading
+        on record", discards it, and so does every tick after — the bot trading
+        on with nobody managing it, which is the one outcome the guard exists to
+        prevent.
+
+        ``reading`` is why a blocked tick may write at all: the line records
+        what was read, including that nothing was, and
+        :meth:`JournalManager.get_drawdown_pct_checked` subtracts the
+        non-readings again. A blocked tick that still could not read adds an
+        ``empty`` line and stays blocked, correctly.
+        """
+        self.journal.record_snapshot(
+            total_pnl=self._last_skill_data.get("total_pnl", 0.0),
+            total_volume=self._last_skill_data.get("total_volume", 0.0),
+            open_count=len(self._last_skill_data.get("executors", [])),
+            position_size=self._last_skill_data.get("total_exposure", 0.0),
+            # Whether the figures above are a reading at all ([[FEAT-137]],
+            # [[CORR-725]]). Written onto the line because the four of them
+            # are the same zeros either way: without it the guard reading
+            # them back took a tick that read nothing for a flat book, and
+            # a zero exposure clears the drawdown outright.
+            #
+            # An absent key is the provider's *own* error path -- it stamps
+            # every answer it gives, including ``empty`` and ``missing`` --
+            # so absence is the one case that must not read as ``ok``.
+            reading=str(self._last_skill_data.get("reading") or "missing"),
+        )
 
     def _journal_refusals(self, tick_num: int) -> None:
         """Record what the risk gate refused this tick, and why.

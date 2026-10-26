@@ -328,7 +328,7 @@ class RiskEngine:
         #: which is what reaches the prompt and the snapshots (LP-2).
         self.quote_asset = (quote_asset or "").strip().upper()
 
-    def get_state(self, tracker: Any) -> RiskState:
+    def get_state(self, tracker: Any, nothing_at_stake: bool = False) -> RiskState:
         """Compute current risk metrics from tracker data.
 
         The tracker only supplies the drawdown. Exposure and the open executor
@@ -341,6 +341,16 @@ class RiskEngine:
         the same fail-closed arm -- a tracker that raises and a tracker that
         reports nothing are equally unable to tell us where the drawdown is
         ([[CORR-725]]).
+
+        ``nothing_at_stake`` is the caller's statement that this session holds
+        no position for a drawdown to be unknown *about* -- the same exception
+        the tracker itself makes before the first tick, extended to the other
+        way a session can have nothing to have fallen from. Only a caller can
+        make it: it has to rest on something other than the performance read,
+        because a read that failed and a book that is empty both report zeros.
+        The engine rests it on the bot ledger, which records what the session
+        deployed and is written on the way out of a deploy rather than read
+        back from the API ([[CORR-750]]).
         """
         state = RiskState(limits=self.limits, quote_asset=self.quote_asset)
 
@@ -361,11 +371,21 @@ class RiskEngine:
             state.block_reason = f"risk state unavailable: {exc}"
             return state
 
-        if not state.drawdown_known:
+        if not state.drawdown_known and not nothing_at_stake:
             # The reporting path into the arm above. The drawdown the tracker
             # would hand us here is 0.0 -- the one value that passes every
             # limit -- so a strategy that has stopped producing readings would
             # otherwise read as one sitting safely at zero.
+            #
+            # ``nothing_at_stake`` is the one exemption, and it is narrow by
+            # construction: a session that has deployed nothing has no reading
+            # to be missing, and blocking it blocks the only tick that could
+            # ever deploy. A bot-mode read starts at ``missing`` and is raised
+            # per bot that answers, so before the first deploy there is nothing
+            # to raise it -- that is how a fresh bot-mode loop came to be held
+            # at "no drawdown reading on record" from its second tick onward
+            # ([[CORR-750]]). The moment the ledger records a bot the exemption
+            # is gone, and a bot the API cannot see blocks as it should.
             state.is_blocked = True
             state.block_reason = (
                 "risk state unavailable: no drawdown reading on record, "
