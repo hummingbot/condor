@@ -190,6 +190,16 @@ def _creator_agent_key() -> str:
         return ""
 
 
+def _caller_is_admin() -> bool:
+    """Whether this seat's user is an admin; no config is not a licence."""
+    try:
+        from config_manager import get_config_manager
+
+        return bool(get_config_manager().is_admin(settings.user_id))
+    except Exception:  # noqa: BLE001 - no config is not a licence to publish
+        return False
+
+
 def _publish_agent(agent_slug: str, path: str) -> dict:
     """Copy a local agent into the shipped library. Admin only.
 
@@ -204,13 +214,7 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     """
     from condor.layering import publish_to_stock
 
-    try:
-        from config_manager import get_config_manager
-
-        is_admin = get_config_manager().is_admin(settings.user_id)
-    except Exception:  # noqa: BLE001 - no config is not a licence to publish
-        is_admin = False
-    if not is_admin:
+    if not _caller_is_admin():
         return {
             "error": (
                 "Publishing writes into the tracked library the repo ships, so "
@@ -222,7 +226,22 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
-def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+def _possible_keys_answer(exc) -> dict:
+    """A stop on possible keys, as the tool says it (SEC review C2)."""
+    return {
+        "error": str(exc),
+        "possible_keys": [key._asdict() for key in exc.pending],
+        "next": (
+            "Show the user each possible key's file and line and ask which are "
+            "not keys. Call again with `acknowledge` set to only the "
+            "fingerprints they confirm; never acknowledge one yourself."
+        ),
+    }
+
+
+def _export_agent(
+    agent_slug: str, notes: str = "", author_name: str = "", acknowledge: list[str] = ()
+) -> dict:
     """Write this agent out as one portable file, and say where it landed.
 
     Into ``data/exports/``, which is gitignored and is already this install's
@@ -249,7 +268,11 @@ def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> di
     from condor.paths import data_dir
 
     try:
-        bundle = agent_bundle.build(agent_slug, notes=notes, author_name=author_name)
+        bundle = agent_bundle.build(
+            agent_slug, notes=notes, author_name=author_name, acknowledged=acknowledge
+        )
+    except agent_bundle.PossibleKeysError as exc:
+        return _possible_keys_answer(exc)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -389,7 +412,9 @@ def _hub_get(slug: str) -> dict:
     from condor import hub
 
     try:
-        listing = hub.get(slug, hub.token())
+        # The admin's token only for the admin (SEC review C4): it carries
+        # whatever their Botcamp account bought or joined.
+        listing = hub.get(slug, hub.token() if _caller_is_admin() else "")
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
     return {
@@ -428,7 +453,9 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
     from condor.agents import bundle as agent_bundle
     from condor.runtime.toolsets import every_tool_name
 
-    hub_token = hub.token()
+    # The admin's token only for the admin (SEC review C4): it carries
+    # whatever their Botcamp account bought or joined.
+    hub_token = hub.token() if _caller_is_admin() else ""
     try:
         listing = hub.get(slug, hub_token)
         fetched = hub.fetch(slug, version or "latest", token=hub_token)
@@ -462,7 +489,9 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
     return {"verb": "install", "listing": listing_row, **result}
 
 
-def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+def _publish_hub(
+    agent_slug: str, notes: str = "", author_name: str = "", acknowledge: list[str] = ()
+) -> dict:
     """Upload this agent to the hub, as the file an export would hand over.
 
     The bytes are built by FEAT-133's ``build`` and rendered by its ``render``,
@@ -480,11 +509,30 @@ def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dic
     ``unpublish`` removes the listing, it does not recall a download. Confirm
     with the user before calling it, and read the receipt back rather than
     summarising it.
+
+    Admin only, like ``publish_agent`` and the web route: it publishes under
+    the install's one Botcamp account, and the "ADMIN ONLY" in the tool's
+    description is read only by the model. A human confirms it on top of that
+    (``condor.runtime.danger.DANGEROUS_AGENT_ACTIONS``), and an unattended
+    loop is refused it outright (``condor.agents.risk``).
     """
     from condor import hub
+    from condor.agents import bundle as agent_bundle
+
+    if not _caller_is_admin():
+        return {
+            "error": (
+                "Publishing to the Botcamp hub sends this agent out under the "
+                "install's Botcamp account, so it is admin-only."
+            )
+        }
 
     try:
-        receipt = hub.publish(agent_slug, hub.token(), notes or "", author_name or "")
+        receipt = hub.publish(
+            agent_slug, hub.token(), notes or "", author_name or "", acknowledge
+        )
+    except agent_bundle.PossibleKeysError as exc:
+        return _possible_keys_answer(exc)
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
     # A submission is not a listing (FEAT-150): the hub answering the upload
@@ -551,6 +599,7 @@ def _manage_agent(
     path: str | None = None,
     notes: str | None = None,
     author_name: str | None = None,
+    acknowledge: list[str] | None = None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -649,7 +698,9 @@ def _manage_agent(
     if action == "export_agent":
         if not agent_slug:
             return {"error": "agent_slug is required"}
-        return _export_agent(agent_slug, notes or "", author_name or "")
+        return _export_agent(
+            agent_slug, notes or "", author_name or "", acknowledge or []
+        )
 
     if action == "import_agent":
         if not path:
@@ -691,7 +742,9 @@ def _manage_agent(
     if action == "publish_hub":
         if not agent_slug:
             return {"error": "agent_slug is required"}
-        return _publish_hub(agent_slug, notes or "", author_name or "")
+        return _publish_hub(
+            agent_slug, notes or "", author_name or "", acknowledge or []
+        )
 
     if action == "delete_agent":
         if not agent_slug:
@@ -1185,6 +1238,7 @@ def manage_agents(
     path: str | None = None,
     notes: str | None = None,
     author_name: str | None = None,
+    acknowledge: list[str] | None = None,
 ) -> dict:
     resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
     if err:
@@ -1205,6 +1259,7 @@ def manage_agents(
         path,
         notes,
         author_name,
+        acknowledge,
     )
 
 

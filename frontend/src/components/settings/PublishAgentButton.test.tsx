@@ -22,7 +22,9 @@ declare global {
 
 let container: HTMLDivElement;
 let root: Root;
-let requests: { url: string; method: string }[] = [];
+let requests: { url: string; method: string; body?: string }[] = [];
+/** Possible keys the export stops on until each is acknowledged (SEC review C2). */
+let possibleKeys: { path: string; line: number; label: string; fingerprint: string }[] = [];
 /** What `GET .../submission` answers with next. */
 let submissionReceipt: HubReceipt | null = null;
 /** What `POST .../publish` answers with. */
@@ -58,13 +60,21 @@ beforeEach(() => {
   submissionReceipt = null;
   publishReceipt = PENDING;
   bundleText = JSON.stringify({ version: 1, files: [{ path: "AGENT.md" }] });
+  possibleKeys = [];
 
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
       const method = init?.method ?? "GET";
-      requests.push({ url, method });
-      if (url.includes("/bundle")) return new Response(bundleText);
+      requests.push({ url, method, body: init?.body as string | undefined });
+      if (url.includes("/bundle")) {
+        const acknowledged = new URL(url, "http://x").searchParams.getAll("acknowledge");
+        const pending = possibleKeys.filter((k) => !acknowledged.includes(k.fingerprint));
+        if (pending.length) {
+          return json({ detail: "may be a private key", possible_keys: pending }, 409);
+        }
+        return new Response(bundleText);
+      }
       if (url.endsWith("/submission")) return json({ receipt: submissionReceipt });
       if (url.endsWith("/publish")) {
         submissionReceipt = publishReceipt;
@@ -203,4 +213,31 @@ it("recovers from a transient status failure without re-uploading", async () => 
   );
   // Recovering means retrying the same GET — never re-uploading the agent.
   expect(requests.every((r) => !r.url.endsWith("/publish"))).toBe(true);
+});
+
+it("stops on a possible key and publishes only once the person rules it out", async () => {
+  possibleKeys = [
+    { path: "routines/r.py", line: 11, label: "evm-hex64", fingerprint: "sha256:08064dddc912e6a3" },
+  ];
+  await render();
+  await click("Publish");
+
+  const check = container.querySelector("[data-possible-keys]");
+  expect(check?.textContent).toContain("routines/r.py:11");
+  expect(container.querySelector("[data-publish-preview]")).toBeNull();
+  // Continue stays off until every value is ticked as not a key.
+  expect(button("Continue").disabled).toBe(true);
+
+  const box = check!.querySelector("input[type=checkbox]") as HTMLInputElement;
+  await act(async () => box.click());
+  expect(button("Continue").disabled).toBe(false);
+  await click("Continue");
+
+  const preview = container.querySelector("[data-publish-preview]");
+  expect(preview?.textContent).toContain("1 value you confirmed are not keys");
+  expect(requests.at(-1)?.url).toContain("acknowledge=sha256%3A08064dddc912e6a3");
+
+  await click("Publish"); // the preview's own confirm button
+  const publish = requests.find((r) => r.url.endsWith("/publish"));
+  expect(JSON.parse(publish!.body!).acknowledge).toEqual(["sha256:08064dddc912e6a3"]);
 });

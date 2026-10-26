@@ -25,6 +25,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // every existing caller reads exactly what it read before.
     throw Object.assign(new Error(err.detail || `Request failed: ${res.status}`), {
       status: res.status,
+      // The whole JSON body, for the few answers that carry more than a
+      // sentence — a 409 on export/publish lists `possible_keys` (SEC review C2).
+      body: err,
     });
   }
   return res.json();
@@ -349,6 +352,22 @@ export interface HubSubmissionReason {
  * `badge` exist only once a human verdict publishes it; `reasons` only on
  * `"rejected"`.
  */
+/** A value that may be a private key (64 hex, long base58), stopping an
+ *  export or publish until a person confirms it is not (SEC review C2).
+ *  Located and fingerprinted — never the value itself. */
+export interface PossibleKey {
+  path: string;
+  line: number;
+  label: string;
+  fingerprint: string;
+}
+
+/** The possible keys an export/publish error carries, or `[]`. */
+export function possibleKeysOf(error: unknown): PossibleKey[] {
+  const e = error as { possibleKeys?: PossibleKey[]; body?: { possible_keys?: PossibleKey[] } };
+  return e?.possibleKeys ?? e?.body?.possible_keys ?? [];
+}
+
 export interface HubReceipt {
   submission_id: string;
   status: "pending" | "rejected" | "published";
@@ -4008,13 +4027,18 @@ export const api = {
    * everything else here, and a link has no way to carry the header — the same
    * reason `useAuthedImage` exists. The caller makes an object URL from this.
    */
-  exportAgentBundle: async (slug: string): Promise<string> => {
+  exportAgentBundle: async (slug: string, acknowledge: string[] = []): Promise<string> => {
+    const query = new URLSearchParams();
+    for (const fingerprint of acknowledge) query.append("acknowledge", fingerprint);
     const res = await authFetch(
-      `/api/v1/agents/${encodeURIComponent(slug)}/bundle`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/bundle${acknowledge.length ? `?${query}` : ""}`,
     );
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
-      throw new Error(detail.detail || `Export failed: ${res.status}`);
+      throw Object.assign(new Error(detail.detail || `Export failed: ${res.status}`), {
+        status: res.status,
+        possibleKeys: (detail.possible_keys ?? []) as PossibleKey[],
+      });
     }
     return res.text();
   },
@@ -4079,10 +4103,13 @@ export const api = {
    *  practice — unpublishing removes the listing, not anybody's download.
    *  `published` is true only once the hub's own verdict says so — a 2xx
    *  here means the submission was accepted for review, not that it is live. */
-  publishAgentToHub: (slug: string, notes = "", authorName = "") =>
+  publishAgentToHub: (slug: string, notes = "", authorName = "", acknowledge: string[] = []) =>
     apiFetch<{ published: boolean; receipt: HubReceipt }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/publish`,
-      { method: "POST", body: JSON.stringify({ notes, author_name: authorName }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ notes, author_name: authorName, acknowledge }),
+      },
     ),
 
   /** Where this agent's most recent hub submission stands right now, or

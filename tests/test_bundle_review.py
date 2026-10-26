@@ -173,19 +173,118 @@ def test_export_refuses_a_certain_secret_and_writes_nothing(reviewed):
     assert (reviewed / "AGENT.md").read_text() == AGENT_MD
 
 
-def test_export_carries_an_ambiguous_secret_and_only_warns(reviewed):
+# Built up so this file does not itself trip a secret scanner.
+_LLM_KEY = "sk-" + "proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2"
+_EVM_KEY = "0x" + "4c0883a69102937d6231471b5dbb6204fe512961708279f2d3e1c0b6a5f7e8d9"
+
+
+@pytest.mark.parametrize(
+    "path, text, label",
+    [
+        ("routines/r.py", f'client = OpenAI(api_key="{_LLM_KEY}")\n', br.API_KEY),
+        ("routines/r.py", "aws = '" + "AKIA" + "IOSFODNN7Q3XPLE2'\n", br.API_KEY),
+        (
+            "routines/r.py",
+            "bot = Bot('123456789:AA" + "F1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q')\n",
+            br.API_KEY,
+        ),
+        (
+            "sample_configs/c.yml",
+            "rpc_url: https://mainnet.helius-rpc.com/?api-key=3f9a1c2b7d8e4f50a6b1\n",
+            br.CREDENTIAL,
+        ),
+        (
+            "sample_configs/c.yml",
+            f"wallet:\n  private_key: {_EVM_KEY}\n",
+            br.CREDENTIAL,
+        ),
+        ("sample_configs/c.yml", 'api_secret: "Zq81mK2pX7vN4cR9"\n', br.CREDENTIAL),
+    ],
+)
+def test_a_credential_in_a_file_is_a_certain_secret(path, text, label):
+    """SEC review C2: only the two wallet shapes used to stop an export."""
+    findings = _of(br.review(_bundle_of({path: text})), br.SECRET, label)
+
+    assert len(findings) == 1
+    assert findings[0].certain
+    assert br.refusal(findings)
+    # Located, never quoted.
+    assert not any(text.strip() in str(v) for v in findings[0]._asdict().values())
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "api_key: YOUR_API_KEY\n",
+        'api_secret: ""\n',
+        "secret_key: ${BINANCE_SECRET}\n",
+        "password = config.password\n",
+        'api_key = os.getenv("BINANCE_API_KEY")\n',
+        "private_key: <your-private-key>\n",
+        "AWS documents AKIA" + "IOSFODNN7EXAMPLE as its example key.\n",
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m\n",
+    ],
+)
+def test_placeholders_and_code_are_not_credentials(text):
+    findings = br.review(_bundle_of({"sample_configs/c.yml": text}))
+
+    assert not br.certain_secrets(findings)
+
+
+def test_export_refuses_an_api_key_and_names_where(reviewed):
+    _write(
+        reviewed / "routines" / "r.py",
+        ROUTINE_PY + f'\nOPENAI_KEY = "{_LLM_KEY}"\n',
+    )
+
+    with pytest.raises(ab.BundleError) as exc:
+        ab.build("reviewed")
+
+    assert "routines/r.py" in str(exc.value)
+    assert _LLM_KEY not in str(exc.value)
+
+
+def test_chat_ingress_still_lets_an_api_key_through():
+    """The credential shapes are a bundle rule. ``secrets.scan`` also runs on
+    every chat message and removes what it is certain of, and an exchange key
+    pasted to configure an account must still reach the model."""
+    from condor.runtime.secrets import redact
+
+    text = f"set my key to {_LLM_KEY}"
+    assert redact(text)[0] == text
+
+
+def test_export_stops_on_a_possible_key_until_a_person_acknowledges_it(reviewed):
+    """SEC review C2: a bare 64-hex is a key as often as a tx hash, so it no
+    longer leaves with only a warning — it waits for a person."""
     _write(
         reviewed / "routines" / "r.py",
         ROUTINE_PY + f'\nTX = "{HEX64}"  # a hash, or a key — unknowable\n',
     )
 
-    bundle = ab.build("reviewed")
+    with pytest.raises(ab.PossibleKeysError) as exc:
+        ab.build("reviewed")
 
+    [pending] = exc.value.pending
+    assert (pending.path, pending.label) == ("routines/r.py", "evm-hex64")
+    assert pending.fingerprint == br.fingerprint(HEX64)
+    assert HEX64 not in str(exc.value) and HEX64 not in str(pending._asdict())
+    # Nothing stamped: a stopped export leaves no trace.
+    assert (reviewed / "AGENT.md").read_text() == AGENT_MD
+
+    with pytest.raises(ab.PossibleKeysError):
+        ab.build("reviewed", acknowledged=["sha256:0000000000000000"])
+
+    bundle = ab.build("reviewed", acknowledged=[pending.fingerprint])
     secrets = _of(br.review(bundle), br.SECRET)
-    assert len(secrets) == 1
-    assert secrets[0].certain is False
-    assert secrets[0].label == "evm-hex64"
-    assert HEX64 not in str(secrets[0]._asdict())
+    assert len(secrets) == 1 and secrets[0].certain is False
+
+
+def test_a_hex_fingerprint_ignores_the_prefix_and_the_case():
+    """Botcamp normalizes the same way, so one acknowledgement covers both."""
+    assert br.fingerprint(HEX64) == br.fingerprint("0x" + HEX64.upper())
+    assert br.fingerprint(HEX64).startswith("sha256:")
+    assert len(br.fingerprint(HEX64)) == len("sha256:") + 16
 
 
 # ── Endpoints: a stranger's host, apart from this box ──
@@ -521,7 +620,7 @@ def test_an_import_with_findings_still_lands_muted(reviewed):
         reviewed / "skills" / "s" / "SKILL.md",
         SKILL_MD.format(body="Call `place_order` now."),
     )
-    bundle = ab.build("reviewed")
+    bundle = ab.build("reviewed", acknowledged=[br.fingerprint(HEX64)])
 
     plan = ab.plan(bundle, as_slug="landed", user_id=7)
     assert plan.findings, "the fixture is meant to produce findings"

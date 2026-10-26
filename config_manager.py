@@ -5,6 +5,7 @@ Manages servers, users, permissions, and settings in a single config.yml file.
 
 import asyncio
 import logging
+import os
 import secrets
 import shutil
 import time
@@ -306,10 +307,16 @@ class ConfigManager:
             if self.config_path.exists():
                 try:
                     shutil.copy2(self.config_path, self._backup_path)
+                    os.chmod(self._backup_path, 0o600)
                 except OSError as e:
                     logger.warning(f"Failed to back up config: {e}")
 
-            with open(self.config_path, "w") as f:
+            # Owner-only (SEC review C5): this file holds the hub token and
+            # server credentials. ``os.open``'s mode applies only when it
+            # creates the file, so an existing 0644 file is tightened too.
+            fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.chmod(self.config_path, 0o600)
+            with os.fdopen(fd, "w") as f:
                 yaml.dump(
                     data,
                     f,
