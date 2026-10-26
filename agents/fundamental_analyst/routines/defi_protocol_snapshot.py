@@ -128,14 +128,53 @@ def _find_slug(slug_input: str, protocols: list) -> tuple:
     return None, slug_input
 
 
-def _find_gecko_id(
-    matched_slug: str, user_input: str, all_protocols: list
+async def _parent_gecko_id(client: httpx.AsyncClient, parent_id: str) -> str | None:
+    """The token id DefiLlama files under a *parent* protocol, or None.
+
+    ``/protocols`` lists each version as its own record and leaves ``gecko_id``
+    empty on all of them: ``uniswap-v2``, ``uniswap-v3`` and ``uniswap-v4`` have
+    no token of their own, because the token belongs to Uniswap. The id lives on
+    the brand's parent record, which only ``/lite/protocols2`` returns, under
+    ``parentProtocols`` keyed by the ``parentProtocol`` the version points at
+    (``parent#uniswap``).
+
+    Fetched lazily, and only for a protocol that has a parent and no id of its
+    own: the payload is some 7 MB, which is not worth downloading for a
+    single-version protocol that already answered.
+    """
+    try:
+        r = await client.get("https://api.llama.fi/lite/protocols2")
+        if r.status_code != 200:
+            return None
+        parents = r.json().get("parentProtocols") or []
+    except Exception:
+        return None
+    parent = next((x for x in parents if x.get("id") == parent_id), None)
+    return (parent or {}).get("gecko_id") or None
+
+
+async def _find_gecko_id(
+    client: httpx.AsyncClient, matched_slug: str, user_input: str, all_protocols: list
 ) -> str | None:
-    """Find gecko_id: direct → brand-prefix scan → raw user input as gecko_id."""
+    """Find gecko_id: direct → parent record → brand scan → raw user input."""
     # Direct hit
     p = next((x for x in all_protocols if x.get("slug") == matched_slug), None)
     if p and p.get("gecko_id"):
         return p["gecko_id"]
+
+    # The parent's own record, which is where a versioned protocol's token id
+    # actually is (FA-1). Authoritative, so it goes ahead of the brand scan
+    # below rather than after it: the scan guesses from slug spelling and can
+    # only ever find a *sibling version's* id, while this is the identity
+    # DefiLlama itself files the brand's token under. Without it the scan found
+    # no candidate at all for uniswap-v3 -- every uniswap-* record has an empty
+    # gecko_id and there is no plain ``uniswap`` record to find -- and the
+    # function fell through to returning the typed slug, which CoinGecko 404s.
+    parent_id = str((p or {}).get("parentProtocol") or "")
+    if parent_id:
+        parent_gecko = await _parent_gecko_id(client, parent_id)
+        if parent_gecko:
+            return parent_gecko
 
     # Brand prefix scan (strip -vN or -suffix)
     brand = (
@@ -249,7 +288,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         slug_note = (
             f" (matched '{matched_slug}')" if matched_slug != config.protocol else ""
         )
-        gecko_id = _find_gecko_id(matched_slug, config.protocol, all_protocols)
+        gecko_id = await _find_gecko_id(
+            client, matched_slug, config.protocol, all_protocols
+        )
 
         # 3. Parallel fetch: detail + fees + revenue + CoinGecko
         r_detail, fees_chart, rev_chart, cg_data = await asyncio.gather(

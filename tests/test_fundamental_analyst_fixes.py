@@ -28,6 +28,7 @@ summed however many quarters existed while calling the result TTM.
 100 again: CSCO showed 146.0%, PYPL 100.0%. Two peer tickers were also dead.
 """
 
+import asyncio
 import importlib.util
 import re
 from pathlib import Path
@@ -227,23 +228,100 @@ def test_the_suffix_blacklist_is_no_longer_what_decides(peers):
 
 # ── FA-1: the token belongs to the brand, and absence has a reason ──────────
 
+# Shaped on the live ``/protocols`` payload, which is the part the first attempt
+# at FA-1 got wrong: there is no plain ``uniswap`` record to find, and every
+# ``uniswap-*`` record has an empty gecko_id. The fixture that invented a parent
+# record with a token id on it was the only reason the brand scan appeared to
+# work, and it is why a passing test shipped a broken lookup.
 LLAMA = [
-    {"slug": "uniswap", "gecko_id": "uniswap", "tvl": 1e8},
-    {"slug": "uniswap-v2", "gecko_id": "uni-v2-stale", "tvl": 1e9},
-    {"slug": "uniswap-v3", "tvl": 4e9},
-    {"slug": "curve-dex", "tvl": 2e9},
-    {"slug": "curve", "gecko_id": "curve-dao-token", "tvl": 1e8},
+    {"slug": "uniswap-v2", "parentProtocol": "parent#uniswap", "tvl": 1e9},
+    {"slug": "uniswap-v3", "parentProtocol": "parent#uniswap", "tvl": 4e9},
+    {"slug": "curve-dex", "parentProtocol": "parent#curve-finance", "tvl": 2e9},
+    {"slug": "hyperliquid", "gecko_id": "hyperliquid", "tvl": 3e9},
+    # No parent record of its own: the brand scan is still the answer for a
+    # protocol whose sibling carries the id.
+    {"slug": "balancer-v3", "tvl": 1e8},
+    {"slug": "balancer-v2", "gecko_id": "balancer", "tvl": 9e8},
 ]
+
+PARENTS = {
+    "parentProtocols": [
+        {"id": "parent#uniswap", "gecko_id": "uniswap"},
+        {"id": "parent#curve-finance", "gecko_id": "curve-dao-token"},
+        {"id": "parent#pancakeswap", "gecko_id": None},
+    ]
+}
+
+
+class _LlamaClient:
+    """Answers ``/lite/protocols2`` and records that it was asked."""
+
+    def __init__(self, payload=PARENTS, status=200):
+        self.payload = payload
+        self.status = status
+        self.calls: list[str] = []
+
+    async def get(self, url, **kwargs):
+        self.calls.append(url)
+
+        class _R:
+            status_code = self.status
+            json = staticmethod(lambda: self.payload)
+
+        return _R()
 
 
 @pytest.mark.parametrize(
     "slug,expected",
     [("uniswap-v3", "uniswap"), ("curve-dex", "curve-dao-token")],
 )
-def test_the_parent_token_is_preferred_over_an_arbitrary_sibling(defi, slug, expected):
-    """``candidates[0]`` was whatever DefiLlama listed first — which could be a
-    stale id that 404s into a silent N/A."""
-    assert defi._find_gecko_id(slug, slug, LLAMA) == expected
+def test_a_versioned_protocol_resolves_to_its_parents_token(defi, slug, expected):
+    """The finding, from the live payload.
+
+    DefiLlama files no token id on a version record -- the token belongs to the
+    brand -- and keeps the id on the parent record that only
+    ``/lite/protocols2`` returns. Without reading it, ``uniswap-v3`` fell
+    through every branch to the typed slug and CoinGecko answered 404.
+    """
+    client = _LlamaClient()
+
+    got = asyncio.run(defi._find_gecko_id(client, slug, slug, LLAMA))
+
+    assert got == expected
+    assert client.calls == ["https://api.llama.fi/lite/protocols2"]
+
+
+def test_a_protocol_with_its_own_token_never_fetches_the_parents(defi):
+    """The payload is ~7 MB; a protocol that already answered must not pay for
+    it."""
+    client = _LlamaClient()
+
+    got = asyncio.run(defi._find_gecko_id(client, "hyperliquid", "hyperliquid", LLAMA))
+
+    assert got == "hyperliquid"
+    assert client.calls == []
+
+
+def test_the_brand_scan_still_answers_where_there_is_no_parent(defi):
+    """The previous fix is kept, not replaced: a version with no parent record
+    takes the largest sibling that has an id."""
+    client = _LlamaClient()
+
+    got = asyncio.run(defi._find_gecko_id(client, "balancer-v3", "balancer-v3", LLAMA))
+
+    assert got == "balancer"
+
+
+@pytest.mark.parametrize(
+    "client",
+    [_LlamaClient(status=500), _LlamaClient(payload={"parentProtocols": []})],
+)
+def test_an_unreadable_parent_list_falls_through_rather_than_raising(defi, client):
+    """A report that cannot reach DefiLlama still renders; the market cap then
+    reads N/A with CoinGecko's own reason beside it."""
+    got = asyncio.run(defi._find_gecko_id(client, "curve-dex", "curve-dex", LLAMA))
+
+    assert got == "curve-dex", "the typed slug remains the last resort"
 
 
 def test_a_missing_market_cap_says_why(defi):
