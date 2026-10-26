@@ -392,7 +392,7 @@ def test_the_gate_changes_nothing_the_model_can_see(tool):
 
     assert dry.name == live.name
     assert dry.description == live.description
-    assert dry.inputSchema == live.inputSchema
+    assert dry.input_schema == live.input_schema
 
 
 def test_a_dry_run_mounts_exactly_what_a_live_tick_mounts():
@@ -417,7 +417,8 @@ def test_a_refusal_is_a_result_the_model_can_read_not_a_crash():
     result = asyncio.run(
         _seat("dry_run").call_tool("run_code", {"action": "run", "code": "pass"})
     )
-    content = result[0] if isinstance(result, tuple) else result
-    payload = json.loads(content[0].text)
+    # The SDK returns a ``CallToolResult``; its ``content`` carries the text the
+    # model reads.
+    payload = json.loads(result.content[0].text)
     assert set(payload) == {"error"}
     assert "dry-run mode" in payload["error"]
