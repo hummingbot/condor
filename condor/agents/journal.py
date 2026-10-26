@@ -32,6 +32,7 @@ from condor.fsutil import atomic_write_text
 from condor.memory.paths import safe_slug
 from condor.paths import local_agents_root
 
+from .quote_render import format_quote
 from .volume_render import format_volume_usd
 
 log = logging.getLogger(__name__)
@@ -190,16 +191,13 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
     ``risk_state={}`` and must still render.
     """
     rs = risk_state
-    # What the gate's figures are actually denominated in (LP-2). "quote" is
-    # whatever the strategy trades against, and for the LP operator that is SOL
-    # — so a 500 ceiling rendered as "$500" understated it by three orders of
-    # magnitude to the one audience that acts on it. A dollar-quoted strategy,
-    # and any caller that does not say, keeps the "$".
-    unit = str(rs.get("quote_asset") or "").strip().upper()
-    dollars = not unit or unit in {"USD", "USDT", "USDC", "DAI", "BUSD", "FDUSD"}
+    # What the gate's figures are actually denominated in (LP-2), shared with
+    # the gate's own refusals so the two cannot disagree about a limit they are
+    # both describing (``condor.agents.quote_render``).
+    unit = rs.get("quote_asset") or ""
 
     def _amount(value: float) -> str:
-        return f"${value:,.2f}" if dollars else f"{value:,.4f} {unit}"
+        return format_quote(value, unit)
 
     max_dd = rs.get("max_drawdown_pct", -1)
     if max_dd < 0:

@@ -211,6 +211,33 @@ describe("PlaybookView", () => {
     expect(isOff(dd)).toBe(false);
   });
 
+  it("shows the money settings in the strategy's own quote asset", () => {
+    // LP-2: the Solana LP operator's limits are denominated in SOL, and a 0.5
+    // SOL ceiling rendered as "$0.50" is both the wrong unit and, read as
+    // dollars, three orders of magnitude out. Same rule as the agent's journal
+    // and the risk gate's refusals, so one ceiling reads in one unit wherever
+    // an operator meets it.
+    render({
+      ...STRATEGY,
+      config: {
+        ...STRATEGY.config,
+        quote_asset: "SOL",
+        total_amount_quote: 0.03,
+        risk_limits: { ...STRATEGY.config.risk_limits, max_position_size_quote: 0.5 },
+      },
+    } as unknown as StrategyDetail);
+
+    expect(settingValue("budget").textContent).toBe("0.0300 SOL");
+    expect(settingValue("max position").textContent).toBe("0.5000 SOL");
+  });
+
+  it("shows the money settings in dollars when the strategy quotes in one", () => {
+    render();
+
+    expect(settingValue("budget").textContent).toBe("$100.00");
+    expect(settingValue("max position").textContent).toBe("$500.00");
+  });
+
   it("marks a risk limit off exactly when it reads no limit", () => {
     render();
     const drawdown = settingValue("max drawdown"); // -1

@@ -36,6 +36,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from condor.agents.quote_render import format_quote
 from condor.runtime.danger import (
     CREATE_EXECUTOR_TOOLS,
     DANGEROUS_AMM_ACTIONS,
@@ -324,9 +325,25 @@ class RiskEngine:
 
     def __init__(self, limits: RiskLimits | None = None, quote_asset: str = ""):
         self.limits = limits or RiskLimits()
-        #: Carried only so ``get_state`` can stamp it on the state it builds,
-        #: which is what reaches the prompt and the snapshots (LP-2).
+        #: What every figure this engine compares is denominated in (LP-2).
+        #: Stamped on the state ``get_state`` builds, which is what reaches the
+        #: prompt and the snapshots — and used by :meth:`_amount` below for the
+        #: refusals, which is the other half of the same fix: a gate that turns
+        #: a call back is the message the model reasons from when it decides
+        #: what to try instead, and it was telling an LP strategy it had
+        #: exceeded "$500.00" of a ceiling measured in SOL.
         self.quote_asset = (quote_asset or "").strip().upper()
+
+    def _amount(self, value: float) -> str:
+        """One of this engine's figures, in the token it is denominated in.
+
+        Every refusal below goes through this rather than formatting a ``$``
+        itself, so adding a message cannot reintroduce the assumption. An engine
+        built without a ``quote_asset`` — the default, and what the CEX
+        strategies and every existing test get — renders dollars exactly as
+        before.
+        """
+        return format_quote(value, self.quote_asset)
 
     def get_state(
         self,
@@ -547,8 +564,9 @@ class RiskEngine:
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
-                f"Would exceed position limit: ${current_state.total_exposure + amount:.2f} > "
-                f"${self.limits.max_position_size_quote:.2f}"
+                "Would exceed position limit: "
+                f"{self._amount(current_state.total_exposure + amount)} > "
+                f"{self._amount(self.limits.max_position_size_quote)}"
             )
 
         # Approved: accumulate into the snapshot so the next create in this
@@ -618,13 +636,13 @@ class RiskEngine:
             if cap <= 0:
                 return False, (
                     "Bot deploy must declare max_global_drawdown_quote "
-                    f"(≤ ${self.limits.max_position_size_quote:.2f}) so the "
+                    f"(≤ {self._amount(self.limits.max_position_size_quote)}) so the "
                     "platform kill switch bounds the loss"
                 )
             if cap > self.limits.max_position_size_quote:
                 return False, (
-                    f"max_global_drawdown_quote ${cap:.2f} exceeds "
-                    f"position limit ${self.limits.max_position_size_quote:.2f}"
+                    f"max_global_drawdown_quote {self._amount(cap)} exceeds "
+                    f"position limit {self._amount(self.limits.max_position_size_quote)}"
                 )
             if capital_quote is not None:
                 # DT-2: the money the bot will trade, not the loss it declares,
@@ -638,11 +656,12 @@ class RiskEngine:
                 headroom = self.limits.max_position_size_quote - committed
                 if capital_quote > headroom:
                     return False, (
-                        f"the controllers would trade ${capital_quote:.2f}, over "
-                        f"the ${headroom:.2f} left of this session's "
-                        f"${self.limits.max_position_size_quote:.2f} position "
-                        f"limit (${committed:.2f} already committed) — lower "
-                        "their total_amount_quote or raise the limit"
+                        f"the controllers would trade {self._amount(capital_quote)}, "
+                        f"over the {self._amount(headroom)} left of this "
+                        f"session's {self._amount(self.limits.max_position_size_quote)} "
+                        f"position limit ({self._amount(committed)} already "
+                        "committed) — lower their total_amount_quote or raise "
+                        "the limit"
                     )
                 # MM-4: a kill switch at or above the capital it guards fires
                 # only once that capital is gone. "Never above" is the hard
@@ -651,10 +670,11 @@ class RiskEngine:
                 # tidy.
                 if cap >= capital_quote:
                     return False, (
-                        f"max_global_drawdown_quote ${cap:.2f} is not below "
-                        f"the ${capital_quote:.2f} the controllers trade, so "
-                        "the kill switch could only fire after the whole "
-                        "position is lost — set it to a fraction of the capital"
+                        f"max_global_drawdown_quote {self._amount(cap)} is not "
+                        f"below the {self._amount(capital_quote)} the "
+                        "controllers trade, so the kill switch could only fire "
+                        "after the whole position is lost — set it to a "
+                        "fraction of the capital"
                     )
         elif action == "update_config":
             # A stringified config_data is a common model slip; its amount can't
@@ -674,8 +694,9 @@ class RiskEngine:
                 return False, f"manage_bots {action}: {exc}"
             if amount > self.limits.max_position_size_quote:
                 return False, (
-                    f"update_config total_amount_quote ${amount:.2f} exceeds "
-                    f"position limit ${self.limits.max_position_size_quote:.2f}"
+                    f"update_config total_amount_quote {self._amount(amount)} "
+                    "exceeds position limit "
+                    f"{self._amount(self.limits.max_position_size_quote)}"
                 )
 
         if action == "deploy" and capital_quote is not None and current_state:
@@ -794,8 +815,8 @@ class RiskEngine:
         if projected > self.limits.max_position_size_quote:
             return False, (
                 f"DEX {_dex_call_label(tool_name, input_data)} would exceed "
-                f"position limit: ${projected:.2f} > "
-                f"${self.limits.max_position_size_quote:.2f}"
+                f"position limit: {self._amount(projected)} > "
+                f"{self._amount(self.limits.max_position_size_quote)}"
             )
 
         # Approved: accumulate so the next signature in this tick is gated
