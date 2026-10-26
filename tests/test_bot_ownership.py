@@ -266,7 +266,16 @@ def test_in_namespace_deploy_is_allowed_and_recorded(tmp_path):
 
     assert outcome == "selected"
     assert ledger.bases() == [f"{NS}-btc"]
+    # The gate runs before the call does, so what it records is a *claim*: the
+    # session owns the name, and whether a bot exists under it is the engine's
+    # to confirm on the way out ([[CORR-750]]).
+    assert ledger.owned()[0].origin == "claimed"
+    assert ledger.confirmed_bases() == []
+    assert ledger.owns(f"{NS}-btc") is True, "ownership does not wait for the bot"
+
+    ledger.note_deploy(f"{NS}-btc")
     assert ledger.owned()[0].origin == "deployed"
+    assert ledger.confirmed_bases() == [f"{NS}-btc"]
 
 
 def test_declared_legacy_name_deploy_is_allowed(tmp_path):
@@ -738,7 +747,7 @@ def test_unenforced_ledger_records_an_out_of_namespace_deploy(tmp_path):
 
     assert outcome == "selected"
     assert ledger.bases() == ["ema_trend_loop"]
-    assert ledger.owned()[0].origin == "deployed"
+    assert ledger.owned()[0].origin == "claimed"  # the gate claims; see above
     assert ledger.violations == []  # nothing was violated — the rule is off
 
 

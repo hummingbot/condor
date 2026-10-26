@@ -225,6 +225,14 @@ async def _stop_owned_bots(engine: Any, client: Any) -> tuple[list[str], list[st
     against live instance names with ``in_namespace`` because Hummingbot appends
     a deploy timestamp and a base is therefore not an instance.
 
+    ``bases()`` and not ``confirmed_bases()``: a base the gate only *claimed*
+    may well be running — the engine confirms a deploy from the call that
+    returned, and a completion it could not parse leaves the claim alone
+    ([[CORR-750]]). A winddown that walked past one of those would leave a live
+    bot behind, which is the failure this pass exists to prevent, so the claim
+    is included and simply matches nothing in the live listing when the deploy
+    really did fail.
+
     Deliberately not ``ledger.owns()``, which answers a different question — may
     this session *touch* that name — by testing the namespace prefix. Recording
     a deploy is unconditional while namespace enforcement is not, so an

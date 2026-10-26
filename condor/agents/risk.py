@@ -328,7 +328,12 @@ class RiskEngine:
         #: which is what reaches the prompt and the snapshots (LP-2).
         self.quote_asset = (quote_asset or "").strip().upper()
 
-    def get_state(self, tracker: Any, nothing_at_stake: bool = False) -> RiskState:
+    def get_state(
+        self,
+        tracker: Any,
+        nothing_at_stake: bool = False,
+        reading_in_hand: bool = False,
+    ) -> RiskState:
         """Compute current risk metrics from tracker data.
 
         The tracker only supplies the drawdown. Exposure and the open executor
@@ -351,6 +356,19 @@ class RiskEngine:
         The engine rests it on the bot ledger, which records what the session
         deployed and is written on the way out of a deploy rather than read
         back from the API ([[CORR-750]]).
+
+        ``reading_in_hand`` is the caller's statement that *this* tick obtained a
+        reading the tracker has not been given yet. The tracker is the journal,
+        and the journal is written after the gate runs, so a tick whose
+        providers answered still reads its own history as empty: a block raised
+        on the strength of that emptiness costs a whole cycle to clear, and
+        Hummingbot is slow enough to record a new bot's first numbers that it
+        cost three. A single reading has no prior peak to have fallen from, so
+        0.0 is its true drawdown and not an absent one -- the same thing the
+        tracker says of its own first tick.
+
+        Both flags gate only the arm below, never a drawdown that *was* read: a
+        breach of the limits blocks whatever either of them says.
         """
         state = RiskState(limits=self.limits, quote_asset=self.quote_asset)
 
@@ -371,21 +389,29 @@ class RiskEngine:
             state.block_reason = f"risk state unavailable: {exc}"
             return state
 
-        if not state.drawdown_known and not nothing_at_stake:
+        if not state.drawdown_known and not (nothing_at_stake or reading_in_hand):
             # The reporting path into the arm above. The drawdown the tracker
             # would hand us here is 0.0 -- the one value that passes every
             # limit -- so a strategy that has stopped producing readings would
             # otherwise read as one sitting safely at zero.
             #
-            # ``nothing_at_stake`` is the one exemption, and it is narrow by
-            # construction: a session that has deployed nothing has no reading
-            # to be missing, and blocking it blocks the only tick that could
-            # ever deploy. A bot-mode read starts at ``missing`` and is raised
-            # per bot that answers, so before the first deploy there is nothing
-            # to raise it -- that is how a fresh bot-mode loop came to be held
-            # at "no drawdown reading on record" from its second tick onward
-            # ([[CORR-750]]). The moment the ledger records a bot the exemption
-            # is gone, and a bot the API cannot see blocks as it should.
+            # Two exemptions, both narrow by construction, both saying that
+            # 0.0 is a real drawdown here rather than an absent one
+            # ([[CORR-750]]).
+            #
+            # ``nothing_at_stake``: a session that has deployed nothing has no
+            # reading to be missing, and blocking it blocks the only tick that
+            # could ever deploy. A bot-mode read starts at ``missing`` and is
+            # raised per bot that answers, so before the first deploy there is
+            # nothing to raise it -- that is how a fresh bot-mode loop came to
+            # be held at "no drawdown reading on record" from its second tick
+            # onward. The moment the ledger confirms a bot it is gone, and a
+            # bot the API cannot see blocks as it should.
+            #
+            # ``reading_in_hand``: this tick read the book, and the tracker has
+            # not been told yet because the journal is written after this gate.
+            # Without it the first reading always arrives one tick too late to
+            # clear the block it would have cleared.
             state.is_blocked = True
             state.block_reason = (
                 "risk state unavailable: no drawdown reading on record, "
@@ -1144,9 +1170,17 @@ def auto_approve_with_risk_check(
 
                 # Recorded only once the call is actually going through, so a
                 # risk-rejected deploy never lands in the ledger.
+                #
+                # A *claim*, not a confirmation: this runs before the call does,
+                # so the bot may never come into being. The engine confirms it
+                # on the way out from the call that returned. Ownership counts
+                # both (the session must be able to stop what it started); the
+                # drawdown guard counts only the confirmed, or a failed first
+                # deploy pins the loop on a reading the missing bot can never
+                # produce ([[CORR-750]]).
                 if ledger is not None:
                     if input_data.get("action", "") == "deploy":
-                        ledger.note_deploy(input_data.get("bot_name", "") or "")
+                        ledger.note_claim(input_data.get("bot_name", "") or "")
 
             # Gateway signatures move funds straight out of the user's wallet,
             # so they are priced and gated here (SEC-224). Interactive surfaces

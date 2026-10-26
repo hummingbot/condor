@@ -185,6 +185,13 @@ class TickEngine:
     # said something, and a mutating call that worked -- and are persisted
     # through ``LoopSupervisor.record_tick`` so they survive the process.
     _last_reading_at: float = field(default=0.0, init=False)
+    # THIS tick's performance stamp (``ok``/``empty``/``missing``, or ``""``
+    # when the executors provider did not run at all). Kept apart from
+    # ``_last_skill_data``, which is only replaced when that provider answers
+    # and therefore still holds the PREVIOUS tick's stamp when it does not —
+    # harmless while nothing but a display timestamp read it, and not harmless
+    # now that the risk gate and the journal snapshot do ([[CORR-750]]).
+    _tick_reading: str = field(default="", init=False)
     _last_successful_action_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     # The first tick's two moments, so a caller that started this run can report
@@ -956,6 +963,14 @@ class TickEngine:
         drift_result = skill_results.get("drift")
         if drift_result:
             self._last_skill_data["drift"] = drift_result.data
+        # What THIS tick read, taken from this tick's result rather than from
+        # the carried dict. A provider that failed returns ``data={}``, which
+        # replaces the dict and reads as "nothing"; a provider that never ran
+        # leaves the dict alone, and reading the stamp off it would present the
+        # last tick's reading as this one's.
+        self._tick_reading = str(
+            (executors_result.data if executors_result else {}).get("reading") or ""
+        )
 
         # This tick obtained a reading ([[FEAT-137]]). ``ok`` only: ``empty`` is
         # a controller that answered and said nothing and ``missing`` is no
@@ -963,7 +978,7 @@ class TickEngine:
         # altogether is the provider's own error path. All three leave the stamp
         # where it was, which is what lets a reader tell a market maker that is
         # merely quiet from one whose strategy died.
-        if str(self._last_skill_data.get("reading") or "") == "ok":
+        if self._tick_reading == "ok":
             self._last_reading_at = time.time()
 
         # Convert provider results to summary strings
@@ -979,8 +994,11 @@ class TickEngine:
         # The ledger, not the performance read, is what says whether this
         # session has anything out there: it is written when a deploy returns
         # and read back without asking the API. A bot-mode session holding no
-        # base has deployed nothing, so there is no drawdown for the missing
-        # reading to be hiding — and without this the first bot-mode tick after
+        # *confirmed* base has deployed nothing, so there is no drawdown for the
+        # missing reading to be hiding. Confirmed, because the gate also claims
+        # a deploy on the way in, before the call runs: a deploy that failed
+        # leaves the name behind, and counting it would pin the loop on a
+        # reading the bot that was never created can never produce — and without this the first bot-mode tick after
         # a session starts is blocked for want of the reading its own first
         # deploy would have produced ([[CORR-750]]). One recorded base ends it.
         #
@@ -994,10 +1012,18 @@ class TickEngine:
         nothing_at_stake = (
             self.ledger is not None
             and bool(self.ledger.enforced)
-            and not self.ledger.bases()
+            and not self.ledger.confirmed_bases()
         )
+        # And whether the providers answered *this* tick. The journal is written
+        # after this gate, so a tick whose read succeeded still presents an empty
+        # history to it: without saying so here, the first reading always lands
+        # one tick too late to clear the block it would have cleared, and the
+        # bot trades unmanaged until it does ([[CORR-750]]).
+        reading_in_hand = self._tick_reading == "ok"
         risk_state = self.risk.get_state(
-            self.journal or _NullTracker(), nothing_at_stake=nothing_at_stake
+            self.journal or _NullTracker(),
+            nothing_at_stake=nothing_at_stake,
+            reading_in_hand=reading_in_hand,
         )
         live_executors = self._last_skill_data.get("executors", [])
         live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
@@ -1904,7 +1930,7 @@ class TickEngine:
             # An absent key is the provider's *own* error path -- it stamps
             # every answer it gives, including ``empty`` and ``missing`` --
             # so absence is the one case that must not read as ``ok``.
-            reading=str(self._last_skill_data.get("reading") or "missing"),
+            reading=self._tick_reading or "missing",
         )
 
     def _journal_refusals(self, tick_num: int) -> None:

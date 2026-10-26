@@ -202,11 +202,19 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
         return f"${value:,.2f}" if dollars else f"{value:,.4f} {unit}"
 
     max_dd = rs.get("max_drawdown_pct", -1)
-    dd_display = (
-        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-        if max_dd >= 0
-        else "disabled"
-    )
+    if max_dd < 0:
+        dd_display = "disabled"
+    elif not rs.get("drawdown_known", True):
+        # A tick can now RUN with no drawdown on record: before its first
+        # deploy there is nothing to have fallen from, and a tick whose own
+        # providers answered is not flying blind even though the journal has
+        # not been written yet ([[CORR-750]]). Both used to block, so the
+        # "BLOCKED" line said as much; now the figure has to say it itself, or
+        # the agent reads a measured 0.0% and plans against a floor nobody has
+        # measured.
+        dd_display = f"not measured yet (no reading on record) / {max_dd:.1f}% limit"
+    else:
+        dd_display = f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
     lines = [
         f"Position Size: {_amount(rs.get('total_exposure', 0))} / "
         f"{_amount(rs.get('max_position_size', 500))} limit",
