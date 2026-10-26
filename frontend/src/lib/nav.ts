@@ -2,7 +2,6 @@ import {
   Bot,
   Brain,
   Droplets,
-  Globe,
   Settings,
   Swords,
   Wallet,
@@ -36,18 +35,14 @@ import {
  * that browser rather than a second door onto the same records. `/floor`
  * redirects to `/bots`.
  *
- * Hub joined it (FEAT-153). It had been deliberately absent — `/hub` mounts the
- * Agents workspace with its transcript column swapped for the catalogue, so the
- * shell lit the Agents tab for it and the argument was that a view of a page is
- * not a page. What that reasoning missed is that nothing *else* about the
- * screen is the agents: the whole body is a different job, and the only door
- * onto it was a row in a rail the workspace collapses on its own whenever a
- * pane opens. So it is a destination in the nav like every other full-bleed
- * route — `/hub` was the one address on `FULL_BLEED_ROUTES` with no entry here.
+ * Hub joined it in FEAT-153 and left it again. `/hub` mounts the Agents
+ * workspace with its transcript column swapped for the catalogue, so a tab of
+ * its own sat beside Agents saying the same thing twice. Its door is the card
+ * at the top of the Agents rail, above the agents it installs — which is where
+ * you are when you want it. It is the one full-bleed route with no nav entry.
  */
 export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
-  { to: "/hub", icon: Globe, label: "Hub" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },

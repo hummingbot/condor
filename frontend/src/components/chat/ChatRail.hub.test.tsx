@@ -77,13 +77,14 @@ async function render({
 }
 
 describe("the hub entry (FEAT-153)", () => {
-  it("links to /hub, below the agent list rather than in a bar of its own", async () => {
+  it("links to /hub from the foot of the rail, below the agent list", async () => {
     await render();
     const link = container.querySelector("a[href='/hub']");
     expect(link).not.toBeNull();
     expect(link?.textContent).toContain("Hub");
 
-    // Below every agent: it comes after the last one in document order.
+    // Below every agent, and pinned to the bottom rather than left to float
+    // up when there are few conversations.
     const lastAgentRow = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent?.includes("Brigado"),
     );
@@ -92,6 +93,7 @@ describe("the hub entry (FEAT-153)", () => {
       lastAgentRow!.compareDocumentPosition(link!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    expect(link!.parentElement?.className).toContain("mt-auto");
   });
 
   it("lights the Hub row, and no agent's, while the Hub is in the column", async () => {

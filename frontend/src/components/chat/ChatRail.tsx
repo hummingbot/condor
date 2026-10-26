@@ -164,9 +164,21 @@ export const ChatRail = memo(function ChatRail({
         >
           <Plus className="h-4 w-4" />
         </button>
-        {/* No Hub glyph here. The strip briefly carried one, so that
-            collapsing the rail would not cost the way in — the nav's own Hub
-            tab answers that now, and it is on screen at every width. */}
+        {/* The nav's Hub tab is gone, so the collapsed strip carries the
+            glyph again: the rail collapses on its own when a pane opens, and
+            that must not cost the only way in. */}
+        <Link
+          to="/hub"
+          title="Botcamp Hub — install published agents, or publish your own"
+          aria-current={hubActive ? "page" : undefined}
+          className={`rounded p-1 transition-colors hover:bg-[var(--color-surface-hover)] ${
+            hubActive
+              ? "text-[var(--color-primary)]"
+              : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          <Globe className="h-4 w-4" />
+        </Link>
         {liveAgents.length > 0 && (
           <button
             onClick={() => toggle(true)}
@@ -242,13 +254,27 @@ export const ChatRail = memo(function ChatRail({
         })}
       </div>
 
-      {/* The one door into Botcamp Hub (FEAT-153): installing and publishing
-          agents, below the agents themselves rather than in a bar of its own
-          above the conversation — but outside their list, as a card and not a
-          row. The rows above are people you talk to and this is a place you
-          go, and when the two shared a shape the Hub read as a seventh agent
-          whose chat was broken. */}
-      <div className="border-b border-[var(--color-border)] p-2">
+      {/* What you already said — the rail's own list, in flow */}
+      <ConversationList
+        liveIds={liveIds}
+        activeId={activeId}
+        // "New chat" means a fresh one with whoever is selected — Condor only
+        // when Condor is who you are pointing at.
+        onNew={onNew}
+        onOpen={(meta) => {
+          onClose();
+          onOpenConversation(meta);
+        }}
+      />
+
+      {/* The one door into Botcamp Hub: installing and publishing agents.
+          It sat below the agents and had a nav tab beside Agents too; the tab
+          is gone and the card is the foot of the rail, under the
+          conversations and pinned there however short the list is: a place you
+          go, not something you read past. Still outside the agent list, as a
+          card and not a row — when the two shared a shape the Hub read as a
+          seventh agent whose chat was broken. */}
+      <div className="mt-auto border-t border-[var(--color-border)] p-2">
         <Link
           to="/hub"
           title="Botcamp Hub — install published agents, or publish your own"
@@ -286,19 +312,6 @@ export const ChatRail = memo(function ChatRail({
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] transition-transform group-hover:translate-x-0.5" />
         </Link>
       </div>
-
-      {/* What you already said — the rail's own list, in flow */}
-      <ConversationList
-        liveIds={liveIds}
-        activeId={activeId}
-        // "New chat" means a fresh one with whoever is selected — Condor only
-        // when Condor is who you are pointing at.
-        onNew={onNew}
-        onOpen={(meta) => {
-          onClose();
-          onOpenConversation(meta);
-        }}
-      />
 
       <ConfirmDialog
         open={pendingDelete !== null}
