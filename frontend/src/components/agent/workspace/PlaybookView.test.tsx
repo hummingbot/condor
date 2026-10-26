@@ -223,7 +223,15 @@ describe("PlaybookView", () => {
         ...STRATEGY.config,
         quote_asset: "SOL",
         total_amount_quote: 0.03,
-        risk_limits: { ...STRATEGY.config.risk_limits, max_position_size_quote: 0.5 },
+        // Written out rather than spread from the fixture: `config` is typed
+        // loosely enough that `config.risk_limits` is not a spreadable object
+        // type, and the explicit block says what this card is reading anyway.
+        risk_limits: {
+          max_position_size_quote: 0.5,
+          max_open_executors: 5,
+          max_drawdown_pct: -1,
+          max_leverage: -1,
+        },
       },
     } as unknown as StrategyDetail);
 
