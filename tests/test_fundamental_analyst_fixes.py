@@ -324,6 +324,61 @@ def test_an_unreadable_parent_list_falls_through_rather_than_raising(defi, clien
     assert got == "curve-dex", "the typed slug remains the last resort"
 
 
+def test_the_peer_table_resolves_the_same_parent_token(peers):
+    """The second copy of the lookup, which FA-1's first fix left behind.
+
+    ``peer_comparison`` falls back to CoinGecko whenever DefiLlama carries no
+    ``mcap`` -- which is every versioned protocol -- so the same 404 emptied the
+    market-cap column and the ``mcap_rev`` multiple built on it.
+    """
+    client = _LlamaClient()
+    parents = peers._ParentIndex()
+
+    got = asyncio.run(
+        peers._find_gecko_id(client, "uniswap-v3", "uniswap-v3", LLAMA, parents)
+    )
+
+    assert got == "uniswap"
+
+
+def test_the_peer_table_reads_the_parent_list_once_for_the_whole_run(peers):
+    """Rows are fetched concurrently and the payload is ~7 MB: a five-protocol
+    comparison must not download it five times."""
+    client = _LlamaClient()
+    parents = peers._ParentIndex()
+
+    async def go():
+        return await asyncio.gather(
+            *[
+                peers._find_gecko_id(client, s, s, LLAMA, parents)
+                for s in ("uniswap-v3", "uniswap-v2", "curve-dex")
+            ]
+        )
+
+    got = asyncio.run(go())
+
+    assert got == ["uniswap", "uniswap", "curve-dao-token"]
+    assert client.calls == ["https://api.llama.fi/lite/protocols2"]
+
+
+def test_a_parent_list_that_failed_is_not_refetched_per_row(peers):
+    """A failed read is cached as a failure, or every row pays for it again."""
+    client = _LlamaClient(status=500)
+    parents = peers._ParentIndex()
+
+    async def go():
+        return await asyncio.gather(
+            *[
+                peers._find_gecko_id(client, s, s, LLAMA, parents)
+                for s in ("uniswap-v3", "curve-dex")
+            ]
+        )
+
+    asyncio.run(go())
+
+    assert len(client.calls) == 1
+
+
 def test_a_missing_market_cap_says_why(defi):
     source = (FA / "routines/defi_protocol_snapshot.py").read_text()
 

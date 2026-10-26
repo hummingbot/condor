@@ -224,13 +224,76 @@ def _find_slug(slug_input: str, protocols: list, fuzzy: bool = True) -> tuple:
     return None, slug_input
 
 
-def _find_gecko_id(
-    matched_slug: str, user_input: str, all_protocols: list
+async def _fetch_parent_index(client: httpx.AsyncClient) -> Dict[str, str]:
+    """``parentProtocol id -> gecko_id`` from ``/lite/protocols2``, or ``{}``.
+
+    ``{}`` on any failure, and cached by :class:`_ParentIndex` either way: a
+    read that did not answer must not be retried once per asset in the table.
+    """
+    try:
+        r = await client.get("https://api.llama.fi/lite/protocols2")
+        if r.status_code != 200:
+            return {}
+        parents = r.json().get("parentProtocols") or []
+    except Exception:
+        return {}
+    return {
+        str(x.get("id")): str(x.get("gecko_id"))
+        for x in parents
+        if x.get("id") and x.get("gecko_id")
+    }
+
+
+class _ParentIndex:
+    """One lazy ``/lite/protocols2`` read, shared by every row in a run.
+
+    The payload is some 7 MB and the rows are fetched concurrently, so the lock
+    matters: without it a five-protocol comparison downloads it five times.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._by_id: Optional[Dict[str, str]] = None
+
+    async def gecko_id(self, client: httpx.AsyncClient, parent_id: str):
+        if not parent_id:
+            return None
+        async with self._lock:
+            if self._by_id is None:
+                self._by_id = await _fetch_parent_index(client)
+        return self._by_id.get(parent_id) or None
+
+
+async def _find_gecko_id(
+    client: httpx.AsyncClient,
+    matched_slug: str,
+    user_input: str,
+    all_protocols: list,
+    parents: _ParentIndex,
 ) -> Optional[str]:
     """Find gecko_id via DefiLlama data. Falls back to user_input only as a last resort."""
     p = next((x for x in all_protocols if x.get("slug") == matched_slug), None)
     if p and p.get("gecko_id"):
         return p["gecko_id"]
+
+    # The brand's own record, which is where a versioned protocol's token id
+    # actually lives (FA-1). ``/protocols`` files no ``gecko_id`` on a version
+    # -- the token belongs to Uniswap, not to uniswap-v3 -- and there is no
+    # plain ``uniswap`` record for the scan below to find either, so every
+    # versioned protocol fell through to the raw input and CoinGecko 404'd.
+    # ``mcap`` and the ``mcap_rev`` multiple built on it then read N/A for the
+    # whole column.
+    #
+    # Deliberately the same shape as ``defi_protocol_snapshot``'s copy rather
+    # than a shared import: these routines are standalone files and already keep
+    # their own ``_find_slug``, ``_pick_best`` and ``_sum_last``. Changing one
+    # lookup means changing both -- which is exactly how this one was left
+    # behind when the snapshot's was fixed.
+    parent_gecko = await parents.gecko_id(
+        client, str((p or {}).get("parentProtocol") or "")
+    )
+    if parent_gecko:
+        return parent_gecko
 
     # Brand prefix scan (strip common version/variant suffixes)
     brand = (
@@ -244,7 +307,15 @@ def _find_gecko_id(
         if x.get("slug", "").startswith(brand) and x.get("gecko_id")
     ]
     if candidates:
-        return candidates[0]["gecko_id"]
+        # The PARENT first, then the largest sibling -- never ``candidates[0]``,
+        # which is whatever DefiLlama happened to list first and can be a dead
+        # id that 404s into a silent N/A. Same rule as the snapshot routine's.
+        parent = next(
+            (x for x in candidates if x.get("slug", "").lower() == brand), None
+        )
+        if parent:
+            return parent["gecko_id"]
+        return max(candidates, key=lambda x: x.get("tvl") or 0)["gecko_id"]
 
     # Only use raw user_input if it looks like a clean coin slug (no spaces, no suffixes)
     inp = user_input.lower().strip()
@@ -295,7 +366,10 @@ async def _fetch_coingecko_mcap(
 
 
 async def _fetch_defi_row(
-    client: httpx.AsyncClient, slug_input: str, all_protocols: list
+    client: httpx.AsyncClient,
+    slug_input: str,
+    all_protocols: list,
+    parents: _ParentIndex,
 ) -> dict:
     """Fetch one DeFi protocol → normalized row dict. Never raises."""
     try:
@@ -348,7 +422,9 @@ async def _fetch_defi_row(
         # mcap: protocols list → detail page → CoinGecko fallback
         mcap = proto.get("mcap") or detail.get("mcap")
         if not mcap:
-            gecko_id = _find_gecko_id(matched_slug, slug_input, all_protocols)
+            gecko_id = await _find_gecko_id(
+                client, matched_slug, slug_input, all_protocols, parents
+            )
             mcap = await _fetch_coingecko_mcap(client, gecko_id)
 
         fees_ttm = _sum_last(fees_chart, min(365, len(fees_chart)))
@@ -498,9 +574,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # 3. Fetch all in parallel: async httpx for DeFi, run_in_executor for yfinance
     async with httpx.AsyncClient(timeout=60) as client:
-        all_coros = [_fetch_defi_row(client, a, all_protocols) for a in defi_assets] + [
-            loop.run_in_executor(None, _fetch_stock_row, a) for a in stock_assets
-        ]
+        # One parent-record read for the whole table, lazily (FA-1).
+        parents = _ParentIndex()
+        all_coros = [
+            _fetch_defi_row(client, a, all_protocols, parents) for a in defi_assets
+        ] + [loop.run_in_executor(None, _fetch_stock_row, a) for a in stock_assets]
         raw_results = await asyncio.gather(*all_coros, return_exceptions=True)
 
     rows = []
