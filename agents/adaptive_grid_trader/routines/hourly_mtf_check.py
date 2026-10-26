@@ -13,7 +13,7 @@ CATEGORY = "Analysis"
 
 
 class Config(BaseModel):
-    """Multi-timeframe analysis → LONG_GRID / SHORT_GRID / TWO_SIDED_GRID / HOLD recommendation."""
+    """Multi-timeframe analysis for the one-way-only adaptive grid trader."""
 
     trading_pair: str = Field(default="BTC-USDT")
     connector_name: str = Field(default="binance_perpetual")
@@ -25,6 +25,10 @@ class Config(BaseModel):
     baseline_atr: float = Field(
         default=0.0,
         description="From baseline_7d — 0 means compute from 1h candles only",
+    )
+    atr_reference_7d: float = Field(
+        default=0.0,
+        description="Seven-day rolling 1h ATR median; classification only, never range sizing",
     )
 
 
@@ -92,8 +96,8 @@ def _trend_direction(candles: list, fast: int = 9, slow: int = 21) -> str:
     return "NEUTRAL"
 
 
-def _volatility_level(atr: float, candles_24: list) -> tuple:
-    """Return (vol_level, range_high, range_low, range_pct, range_position) from last 24 1h candles."""
+def _volatility_level(atr: float, atr_reference: float, candles_24: list) -> tuple:
+    """Classify ATR against its 7d reference and return 24h range context."""
     highs = [float(c.get("high", 0) or 0) for c in candles_24]
     lows = [float(c.get("low", 0) or 0) for c in candles_24]
     closes = [float(c.get("close", 0) or 0) for c in candles_24]
@@ -103,11 +107,12 @@ def _volatility_level(atr: float, candles_24: list) -> tuple:
     range_size = range_high - range_low
     range_pct = (range_size / current * 100) if current else 0.0
     range_pos = (current - range_low) / range_size if range_size > 0 else 0.5
-    avg_candle_range = range_size / len(candles_24) if candles_24 else 1.0
-    vol_ratio = atr / avg_candle_range if avg_candle_range else 1.0
-    if vol_ratio > 1.5:
+    # This reference is report-only.  It must not feed D or actionable prices.
+    reference = atr_reference if atr_reference > 0 else atr
+    vol_ratio = atr / reference if reference > 0 else 1.0
+    if vol_ratio > 1.2:
         vol_level = "HIGH"
-    elif vol_ratio > 0.8:
+    elif vol_ratio >= 0.8:
         vol_level = "MODERATE"
     else:
         vol_level = "LOW"
@@ -130,6 +135,56 @@ def _confidence(trend_4h: str, trend_1d: str, closes_1h: list) -> str:
         )
         return "HIGH" if aligned else "MEDIUM"
     return "MEDIUM"
+
+
+def _synthesise_profile(trend_4h: str, trend_1d: str) -> tuple[str, str, str]:
+    """Return (profile, suggested_lean, rationale) without two-sided output."""
+    if trend_4h == "BULLISH" and trend_1d == "BULLISH":
+        return (
+            "LONG_GRID",
+            "LONG",
+            "Both medium (4h) and macro (1d) timeframes confirm bullish momentum.",
+        )
+    if trend_4h == "BEARISH" and trend_1d == "BEARISH":
+        return (
+            "SHORT_GRID",
+            "SHORT",
+            "Both medium (4h) and macro (1d) timeframes confirm bearish pressure.",
+        )
+
+    if trend_4h == "BULLISH" and trend_1d != "BEARISH":
+        lean = "LONG"
+    elif trend_4h == "BEARISH" and trend_1d != "BULLISH":
+        lean = "SHORT"
+    elif trend_1d == "BULLISH" and trend_4h != "BEARISH":
+        lean = "LONG"
+    elif trend_1d == "BEARISH" and trend_4h != "BULLISH":
+        lean = "SHORT"
+    else:
+        lean = "NONE"
+    return (
+        "HOLD",
+        lean,
+        "The 4h and 1d timeframes do not agree on one direction. "
+        "HOLD has no actionable levels; the lean is context only.",
+    )
+
+
+def _price_levels(profile: str, current_price: float, distance: float) -> tuple:
+    """Return actionable (start, end, limit), or all None for HOLD."""
+    if profile == "LONG_GRID":
+        return (
+            current_price - distance,
+            current_price + 3.0 * distance,
+            current_price - 1.5 * distance,
+        )
+    if profile == "SHORT_GRID":
+        return (
+            current_price - 3.0 * distance,
+            current_price + distance,
+            current_price + 1.5 * distance,
+        )
+    return None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +225,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # -- 2. Per-timeframe analysis --
     # 1h: ATR, range, volatility
-    atr_1h = _compute_atr(candles_1h, config.atr_period)
+    current_atr_1h = _compute_atr(candles_1h, config.atr_period)
+    # The baseline blend smooths grid sizing (D) only; the volatility label must
+    # see the current ATR, or a stale daily baseline can mask a regime change.
+    atr_1h = current_atr_1h
     if config.baseline_atr > 0:
         atr_1h = (atr_1h + config.baseline_atr) / 2.0
 
     window_24 = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
     vol_level, range_high, range_low, range_pct, range_pos = _volatility_level(
-        atr_1h, window_24
+        current_atr_1h, config.atr_reference_7d, window_24
     )
     current_price = float(candles_1h[-1].get("close", 0) or 0)
 
@@ -187,30 +245,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     trend_1d = _trend_direction(candles_1d) if candles_1d else "NEUTRAL"
 
     # -- 3. Signal synthesis --
-    if trend_4h == "BULLISH" and trend_1d == "BULLISH":
-        profile = "LONG_GRID"
-        rationale = (
-            "Both medium (4h) and macro (1d) timeframes confirm bullish momentum. "
-            "Grid skewed upward — capture breakout while limiting downside exposure."
-        )
-    elif trend_4h == "BEARISH" and trend_1d == "BEARISH":
-        profile = "SHORT_GRID"
-        rationale = (
-            "Both medium (4h) and macro (1d) timeframes confirm bearish pressure. "
-            "Grid skewed downward — profit from continued decline with capped upside risk."
-        )
-    elif vol_level in ("LOW", "MODERATE"):
-        profile = "TWO_SIDED_GRID"
-        rationale = (
-            "Timeframes disagree or both neutral with contained volatility — "
-            "price is likely range-bound. Symmetric two-sided grid maximises fee capture."
-        )
-    else:
-        profile = "HOLD"
-        rationale = (
-            "Conflicting signals combined with elevated volatility — "
-            "directional conviction is insufficient. Avoid new grid entry."
-        )
+    profile, suggested_lean, rationale = _synthesise_profile(trend_4h, trend_1d)
 
     closes_1h = [float(c.get("close", 0) or 0) for c in candles_1h]
     conf = _confidence(trend_4h, trend_1d, closes_1h)
@@ -218,22 +253,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # -- 4. Price level computation: D = ATR(1h) × √(lifetime_hours) --
     D = atr_1h * math.sqrt(config.lifetime_hours)
 
-    if profile == "LONG_GRID":
-        start_price = current_price - D
-        end_price = current_price + 3.0 * D
-        limit_price = current_price - 1.5 * D
-    elif profile == "SHORT_GRID":
-        start_price = current_price - 3.0 * D
-        end_price = current_price + D
-        limit_price = current_price + 1.5 * D
-    elif profile == "TWO_SIDED_GRID":
-        start_price = current_price - 2.0 * D
-        end_price = current_price + 2.0 * D
-        limit_price = None
-    else:  # HOLD — reference only
-        start_price = current_price - D
-        end_price = current_price + D
-        limit_price = None
+    start_price, end_price, limit_price = _price_levels(profile, current_price, D)
 
     # -- Build levels table --
     if profile == "LONG_GRID":
@@ -241,7 +261,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             {
                 "Level": "limit_price",
                 "Price": f"{limit_price:,.4f}",
-                "Description": "Abort / stop-loss if breached",
+                "Description": "Safety / invalidation boundary",
             },
             {
                 "Level": "start_price",
@@ -279,43 +299,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             {
                 "Level": "limit_price",
                 "Price": f"{limit_price:,.4f}",
-                "Description": "Abort / stop-loss if breached",
-            },
-        ]
-    elif profile == "TWO_SIDED_GRID":
-        levels_rows = [
-            {
-                "Level": "start_price",
-                "Price": f"{start_price:,.4f}",
-                "Description": "Grid lower bound (−2D)",
-            },
-            {
-                "Level": "current_price",
-                "Price": f"{current_price:,.4f}",
-                "Description": "Reference / centre",
-            },
-            {
-                "Level": "end_price",
-                "Price": f"{end_price:,.4f}",
-                "Description": "Grid upper bound (+2D)",
+                "Description": "Safety / invalidation boundary",
             },
         ]
     else:
         levels_rows = [
             {
-                "Level": "ref_low",
-                "Price": f"{start_price:,.4f}",
-                "Description": "Reference lower (−D) — NOT ACTIONABLE",
-            },
-            {
                 "Level": "current_price",
                 "Price": f"{current_price:,.4f}",
-                "Description": "Reference at analysis time",
-            },
-            {
-                "Level": "ref_high",
-                "Price": f"{end_price:,.4f}",
-                "Description": "Reference upper (+D) — NOT ACTIONABLE",
+                "Description": "Reference only — HOLD has no actionable levels",
             },
         ]
 
@@ -406,6 +398,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "03 / RECOMMENDATION", "Actionable grid profile with concrete price levels"
         )
         builder.kpi("Profile", profile)
+        builder.kpi("Suggested Lean", suggested_lean)
         builder.kpi("Confidence", conf)
         builder.kpi("D Value", f"{D:.4f}")
         builder.kpi("Current Price", f"{current_price:,.4f}")
@@ -413,10 +406,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         actionable = profile != "HOLD"
         if limit_price is not None:
             builder.kpi("Limit Price", f"{limit_price:,.4f}")
-        builder.kpi(
-            "Start Price", f"{start_price:,.4f}" + ("" if actionable else " (ref)")
-        )
-        builder.kpi("End Price", f"{end_price:,.4f}" + ("" if actionable else " (ref)"))
+        if actionable:
+            builder.kpi("Start Price", f"{start_price:,.4f}")
+            builder.kpi("End Price", f"{end_price:,.4f}")
 
         builder.table(levels_rows, ["Level", "Price", "Description"])
         builder.markdown(f"**Rationale:** {rationale}")
@@ -430,7 +422,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # -- Return structured text for agent parsing --
     lines = [
         f"MTF Check — {config.trading_pair}",
-        f"PROFILE: {profile} | CONFIDENCE: {conf}",
+        f"profile: {profile}",
+        f"suggested_lean: {suggested_lean}",
+        f"confidence: {conf}",
         f"4h: {trend_4h} | 1d: {trend_1d} | Volatility: {vol_level}",
         f"Current price: {current_price:,.4f} | ATR(1h): {atr_1h:.6f} | D: {D:.6f}",
     ]
@@ -442,11 +436,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         lines.append(
             f"start_price={start_price:.4f} | end_price={end_price:.4f} | limit_price={limit_price:.4f}"
         )
-    elif profile == "TWO_SIDED_GRID":
-        lines.append(f"start_price={start_price:.4f} | end_price={end_price:.4f}")
     else:
-        lines.append(
-            f"ref_low={start_price:.4f} | ref_high={end_price:.4f} [NOT ACTIONABLE]"
-        )
+        lines.append("actionable_levels: NONE")
     lines.append(f"Rationale: {rationale}")
     return "\n".join(lines)

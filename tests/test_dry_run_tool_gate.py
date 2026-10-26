@@ -37,7 +37,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from condor.acp.client import ACPClient, ToolCallEvent
 from condor.agents.risk import RiskState
@@ -98,7 +98,7 @@ def _stub_bodies(monkeypatch, *names: str) -> dict[str, list[dict]]:
     wrapper itself and the gate would never run at all.
 
     ``functools.wraps`` keeps each stub's name, docstring and — through
-    ``__wrapped__`` — its signature, so FastMCP derives the same schema it would
+    ``__wrapped__`` — its signature, so MCPServer derives the same schema it would
     from the real body and the arguments under test still validate.
     """
     import functools
@@ -121,14 +121,14 @@ def _stub_bodies(monkeypatch, *names: str) -> dict[str, list[dict]]:
     return calls
 
 
-def _seat(execution_mode: str, profile: str = "tick") -> FastMCP:
+def _seat(execution_mode: str, profile: str = "tick") -> MCPServer:
     """The condor subprocess's tool surface for a seat, as it registers it."""
-    server = FastMCP("dry-run-probe")
+    server = MCPServer("dry-run-probe")
     condor_server.register_tools(server, profile, (), execution_mode)
     return server
 
 
-def _refusal(server: FastMCP, tool: str, args: dict, calls=None) -> str:
+def _refusal(server: MCPServer, tool: str, args: dict, calls=None) -> str:
     """The refusal ``tool`` answered with, or ``""`` when the call reached it.
 
     A refusal is the tool's ordinary ``{"error": ...}`` result, so it comes back
@@ -197,7 +197,7 @@ def test_a_live_seat_is_untouched(tool, args, monkeypatch):
 def test_an_unclassified_action_cannot_be_expressed_on_the_wire():
     """An action the tool does not declare never reaches the gate at all.
 
-    ``run_code``'s ``action`` is a ``Literal``, so FastMCP's schema rejects an
+    ``run_code``'s ``action`` is a ``Literal``, so MCPServer's schema rejects an
     unknown one before any body or wrapper runs. Pinned because it is *why* the
     test below has to reach past ``call_tool`` to assert fail-closed: there is
     no call that exercises that path from the wire, which is a second lock
@@ -383,7 +383,7 @@ def test_the_gate_changes_nothing_the_model_can_see(tool):
     """Same name, same schema, same description on a gated seat as on a live one.
 
     The wrapper takes ``**kwargs``; only ``functools.wraps`` setting
-    ``__wrapped__`` keeps ``inspect.signature`` — and so FastMCP's schema — on
+    ``__wrapped__`` keeps ``inspect.signature`` — and so MCPServer's schema — on
     the real parameters. A wrapper that lost them would mount a tool taking no
     arguments, and every dry run would fail for the wrong reason.
     """

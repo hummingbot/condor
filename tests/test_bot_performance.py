@@ -854,27 +854,37 @@ def test_slice_history_series_matches_per_stamp_slices():
 
 
 def test_slice_history_series_is_linear_not_quadratic():
-    """3 instances × 5000 rows: one merge pass stays well under 100ms."""
+    """A 4x bigger input costs about 4x, not the ~16x of a per-stamp rescan."""
+    import gc
     import time
 
     from condor.fetchers.bot_performance import slice_history_series
 
-    histories = []
-    for k in range(3):
-        histories.append(
+    def build_and_time(rows: int) -> float:
+        histories = [
             [
                 (float(k + i * 3), float(i), float(i * 10), float(i), float(i) / 10)
-                for i in range(5000)
+                for i in range(rows)
             ]
-        )
-    stamps = sorted({t for h in histories for t, *_ in h})
+            for k in range(3)
+        ]
+        stamps = sorted({t for h in histories for t, *_ in h})
 
-    t0 = time.perf_counter()
-    out = slice_history_series(histories, 0.0, stamps)
-    elapsed = time.perf_counter() - t0
+        gc.collect()
+        t0 = time.perf_counter()
+        out = slice_history_series(histories, 0.0, stamps)
+        elapsed = time.perf_counter() - t0
 
-    assert len(out) == len(stamps)
-    assert elapsed < 0.1, f"series build took {elapsed:.3f}s"
+        assert len(out) == len(stamps)
+        return elapsed
+
+    small = build_and_time(2500)
+    large = build_and_time(10000)
+
+    # Linear measures ~4x for this 4x step; a quadratic rescan ~16x.
+    assert (
+        large < small * 8
+    ), f"4x input cost {large / small:.2f}x ({small:.4f}s → {large:.4f}s)"
 
 
 def test_fetch_instance_history_sums_controllers_and_filters_trades():

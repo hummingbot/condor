@@ -2,7 +2,7 @@
 
 ``_run_mcp_lifecycle`` used to record an exception only when it fired *before*
 the ready event. If an MCP stdio server died later — subprocess crash, host
-restart, tool server OOM — ``run_mcp_servers()`` raised on exit, the exception
+restart, tool server OOM — the agent's context raised on exit, the exception
 was discarded with nothing logged, and ``self._agent`` stayed set. ``alive``
 therefore kept reporting True and the session layer kept handing prompts to an
 agent that had no tools left.
@@ -26,17 +26,15 @@ class _FakeAgent:
         self._on_enter = on_enter
         self.entered = False
 
-    def run_mcp_servers(self):
-        @contextlib.asynccontextmanager
-        async def _ctx():
-            if self._fail is not None and self._on_enter:
-                raise self._fail
-            self.entered = True
-            yield
-            if self._fail is not None:
-                raise self._fail
+    async def __aenter__(self):
+        if self._fail is not None and self._on_enter:
+            raise self._fail
+        self.entered = True
+        return self
 
-        return _ctx()
+    async def __aexit__(self, *exc_info):
+        if self._fail is not None:
+            raise self._fail
 
 
 def _client(agent: _FakeAgent) -> PydanticAIClient:
@@ -147,7 +145,7 @@ def test_stop_survives_a_lifecycle_task_cancelled_from_outside():
 
 # --- A really killed MCP subprocess (PR #240 retest) --------------------------
 #
-# Everything above drives ``run_mcp_servers()`` *raising*. A SIGKILLed stdio
+# Everything above drives the agent's context *raising*. A SIGKILLed stdio
 # server never does: the MCP session's receive loop just closes its streams, the
 # lifecycle task stayed parked on ``_shutdown_event`` and ``alive`` stayed True
 # while every tool call failed with ``ClosedResourceError``. These use a real
@@ -155,15 +153,15 @@ def test_stop_survives_a_lifecycle_task_cancelled_from_outside():
 
 _SERVER_SCRIPT = """
 import os, sys
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 with open(sys.argv[1], "w") as f:
     f.write(str(os.getpid()))
 
-mcp = FastMCP("probe")
+mcp = MCPServer("probe", instructions="PROBE RULES")
 
 @mcp.tool()
-def ping() -> str:
+async def ping() -> str:
     return "pong"
 
 mcp.run()
@@ -184,7 +182,9 @@ def _tool_calling_model():
     return FunctionModel(respond)
 
 
-async def _started_client(tmp_path, monkeypatch) -> tuple[PydanticAIClient, int]:
+async def _started_client(
+    tmp_path, monkeypatch, model=None, **kwargs
+) -> tuple[PydanticAIClient, int]:
     import sys
 
     script = tmp_path / "probe_server.py"
@@ -193,10 +193,11 @@ async def _started_client(tmp_path, monkeypatch) -> tuple[PydanticAIClient, int]
     client = PydanticAIClient(
         model="ollama:llama3.1",
         mcp_servers=[{"command": sys.executable, "args": [str(script), str(pid_file)]}],
+        **kwargs,
     )
 
     async def _model(self):
-        return _tool_calling_model()
+        return model or _tool_calling_model()
 
     monkeypatch.setattr(PydanticAIClient, "_build_model", _model)
     await client.start()
@@ -205,6 +206,16 @@ async def _started_client(tmp_path, monkeypatch) -> tuple[PydanticAIClient, int]
             break
         await asyncio.sleep(0.05)
     return client, int(pid_file.read_text())
+
+
+def _running(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 async def _kill(pid: int) -> None:
@@ -280,3 +291,76 @@ def test_a_live_subprocess_is_not_marked_dead(tmp_path, monkeypatch):
         assert client._lifecycle_error is None
 
     asyncio.run(run())
+
+
+# --- What the v2 client layer must still do (FEAT-130) ------------------------
+
+
+def test_stop_leaves_no_subprocess_behind(tmp_path, monkeypatch):
+    """pydantic-ai 2.x keeps a stdio server alive past the agent's context
+    unless told not to; a stopped session must not leak its tool servers."""
+
+    async def run():
+        client, pid = await _started_client(tmp_path, monkeypatch)
+        assert _running(pid)
+        await client.stop()
+        for _ in range(40):
+            if not _running(pid):
+                break
+            await asyncio.sleep(0.05)
+        # Checked while the loop is still up: closing the loop reaps the
+        # subprocess either way, and a session's loop is the bot's, which
+        # never closes.
+        assert not _running(pid), "the MCP subprocess outlived stop()"
+
+    asyncio.run(run())
+
+
+def _recording_model(seen: dict):
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    def respond(messages, info):
+        seen["tools"] = {tool.name for tool in info.function_tools}
+        seen["instructions"] = info.instructions
+        return ModelResponse(parts=[TextPart("ok")])
+
+    return FunctionModel(respond)
+
+
+def test_the_model_is_offered_the_tools_and_the_servers_instructions(
+    tmp_path, monkeypatch
+):
+    seen: dict = {}
+
+    async def run():
+        client, _ = await _started_client(tmp_path, monkeypatch, _recording_model(seen))
+        try:
+            await client.prompt("go")
+        finally:
+            await client.stop()
+
+    asyncio.run(run())
+
+    assert seen["tools"] == {"ping"}
+    assert "PROBE RULES" in seen["instructions"]
+
+
+def test_an_allowlist_hides_every_other_tool(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    async def run():
+        client, _ = await _started_client(
+            tmp_path,
+            monkeypatch,
+            _recording_model(seen),
+            allowed_tools=["manage_skill"],
+        )
+        try:
+            await client.prompt("go")
+        finally:
+            await client.stop()
+
+    asyncio.run(run())
+
+    assert seen["tools"] == set()

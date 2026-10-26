@@ -16,7 +16,7 @@ def __getattr__(name: str):
 
     It used to be a plain ``from .server import main`` up here, which made
     importing *anything* in this package wake the server — and ``server.py``
-    parses argv and builds a ``FastMCP`` singleton at import. ``profiles.py``
+    parses argv and builds a ``MCPServer`` singleton at import. ``profiles.py``
     (FEAT-091) exists so the web process can read the tool tables without any of
     that, and a package-level import of the server would have quietly undone it,
     since importing a submodule imports its package first.
