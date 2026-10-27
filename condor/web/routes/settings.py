@@ -175,7 +175,10 @@ def _raise_if_container_op_failed(action: str, result: dict) -> None:
     container started. The message is the API's own text, not a raw exception.
     """
     if isinstance(result, dict) and result.get("success") is False:
-        raise HTTPException(status_code=502, detail=f"{action}: {result.get('message', 'no message returned')}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"{action}: {result.get('message', 'no message returned')}",
+        )
 
 
 @router.get("/gateway/status")

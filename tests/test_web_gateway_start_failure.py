@@ -69,7 +69,9 @@ START_BODY = {"image": "hummingbot/gateway:development", "port": 15888}
 
 
 def test_start_sends_image_and_port_and_reports_success(monkeypatch):
-    http, client = make_http(monkeypatch, {"success": True, "message": "Gateway started successfully"})
+    http, client = make_http(
+        monkeypatch, {"success": True, "message": "Gateway started successfully"}
+    )
     r = http.post("/settings/gateway/start", params=P, json=START_BODY)
     assert r.status_code == 200
     assert r.json()["started"] is True
@@ -81,7 +83,15 @@ def test_start_sends_image_and_port_and_reports_success(monkeypatch):
     [("start", "start"), ("stop", "stop"), ("restart", "restart")],
 )
 def test_in_band_failure_becomes_an_error_with_the_api_message(monkeypatch, path, verb):
-    http, _ = make_http(monkeypatch, {"success": False, "message": "Gateway is already running."})
-    r = http.post(f"/settings/gateway/{path}", params=P, json=START_BODY if path == "start" else None)
+    http, _ = make_http(
+        monkeypatch, {"success": False, "message": "Gateway is already running."}
+    )
+    r = http.post(
+        f"/settings/gateway/{path}",
+        params=P,
+        json=START_BODY if path == "start" else None,
+    )
     assert r.status_code == 502
-    assert r.json()["detail"] == f"Failed to {verb} gateway: Gateway is already running."
+    assert (
+        r.json()["detail"] == f"Failed to {verb} gateway: Gateway is already running."
+    )
