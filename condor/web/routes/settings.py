@@ -166,6 +166,21 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
 _gateway_was_running: dict[str, bool] = {}
 
 
+def _raise_if_container_op_failed(action: str, result: dict) -> None:
+    """Turn the Hummingbot API's in-band failure into an HTTP error.
+
+    The container endpoints answer 200 with ``{"success": false, "message": ...}``
+    for "already running", a Docker error or a missing container. Treating that
+    200 as success made the tab close its form and show nothing while no
+    container started. The message is the API's own text, not a raw exception.
+    """
+    if isinstance(result, dict) and result.get("success") is False:
+        raise HTTPException(
+            status_code=502,
+            detail=f"{action}: {result.get('message', 'no message returned')}",
+        )
+
+
 @router.get("/gateway/status")
 async def gateway_status(
     server: str = Query(...),
@@ -253,10 +268,11 @@ async def gateway_start(
                 "port": req.port,
             }
         )
-        return {"started": True, "result": result}
     except Exception as e:
         logger.exception("Failed to start gateway on '%s'", server)
         raise upstream_error("Failed to start gateway", e)
+    _raise_if_container_op_failed("Failed to start gateway", result)
+    return {"started": True, "result": result}
 
 
 @router.post("/gateway/stop")
@@ -274,6 +290,7 @@ async def gateway_stop(
     except Exception as e:
         logger.exception("Failed to stop gateway on '%s'", server)
         raise upstream_error("Failed to stop gateway", e)
+    _raise_if_container_op_failed("Failed to stop gateway", result)
     # Outside the try: the stop already succeeded — `container.stop()` blocks,
     # so the new answer (no venues) is already true — and an invalidation
     # error here must not be reported as a failed stop (CORR-614).
@@ -294,10 +311,11 @@ async def gateway_restart(
     # catches the real transition once the container is back up (CORR-614).
     try:
         result = await client.gateway.restart()
-        return {"restarted": True, "result": result}
     except Exception as e:
         logger.exception("Failed to restart gateway on '%s'", server)
         raise upstream_error("Failed to restart gateway", e)
+    _raise_if_container_op_failed("Failed to restart gateway", result)
+    return {"restarted": True, "result": result}
 
 
 @router.get("/gateway/logs")
