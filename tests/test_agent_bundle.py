@@ -965,3 +965,62 @@ def test_the_chat_door_reports_the_version_and_what_is_missing(traveller, monkey
     assert landed["imported"] is True
     assert landed["agent_uid"] == exported["agent_uid"]
     assert [u["name"] for u in landed["unmet"]] == ["lp_rebalance"]
+
+
+def _bundle_asking_for(traveller, agent_key):
+    payload = _bundle_for(traveller, as_dict=True)
+    for entry in payload["files"]:
+        if entry["path"] == "AGENT.md":
+            entry["text"] = entry["text"].replace(
+                "agent_key: claude-code", f"agent_key: {agent_key}"
+            )
+            entry["sha256"] = ab._digest(entry["text"])
+    return ab.parse(json.dumps(payload))
+
+
+def test_an_author_model_this_install_has_no_key_for_falls_back_to_yours(
+    traveller, monkeypatch
+):
+    """An openrouter:* agent on an install without OPENROUTER_API_KEY would
+    only fail at the first chat, so the importer's own model runs it."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "condor.preferences.get_active_agent_key", lambda uid: "claude-acp:sonnet"
+    )
+
+    bundle = _bundle_asking_for(traveller, "openrouter:deepseek/deepseek-v4.1-flash")
+    import_plan = ab.plan(bundle, as_slug="arrival", user_id=7)
+
+    assert import_plan.agent_key == "claude-acp:sonnet"
+    assert import_plan.agent_key_inherited is True
+
+
+def test_an_author_model_this_install_can_run_is_kept(traveller, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(
+        "condor.preferences.get_active_agent_key", lambda uid: "claude-acp:sonnet"
+    )
+
+    bundle = _bundle_asking_for(traveller, "openrouter:deepseek/deepseek-v4.1-flash")
+    import_plan = ab.plan(bundle, as_slug="arrival", user_id=7)
+
+    assert import_plan.agent_key == "openrouter:deepseek/deepseek-v4.1-flash"
+    assert import_plan.agent_key_inherited is False
+
+
+def test_an_author_bridge_that_is_not_installed_falls_back_to_yours(
+    traveller, monkeypatch
+):
+    """copilot with no @github/copilot installed: npx would fetch it on the
+    first chat, and the account may not even have Copilot."""
+    monkeypatch.setattr("condor.llm.readiness.npx_packages_installed", lambda: set())
+    monkeypatch.setattr(
+        "condor.preferences.get_active_agent_key", lambda uid: "claude-acp:sonnet"
+    )
+
+    import_plan = ab.plan(
+        _bundle_asking_for(traveller, "copilot"), as_slug="arrival", user_id=7
+    )
+
+    assert import_plan.agent_key == "claude-acp:sonnet"
+    assert import_plan.agent_key_inherited is True
