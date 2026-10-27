@@ -1060,3 +1060,38 @@ def test_a_picked_model_that_cannot_run_here_is_refused(traveller, monkeypatch):
     )
 
     assert any("OPENROUTER_API_KEY" in r for r in import_plan.refusals)
+
+
+def test_manage_agents_import_stops_to_ask_for_a_model_its_own_cannot_run(
+    traveller, monkeypatch, tmp_path
+):
+    """The chat has no select to show, so it stops and hands back the choices:
+    nothing lands until the user picks one."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "condor.llm.readiness.npx_packages_installed",
+        lambda: {"@agentclientprotocol/codex-acp"},
+    )
+    bundle = _bundle_asking_for(traveller, "openrouter:deepseek/deepseek-v4.1-flash")
+    path = tmp_path / f"traveller{ab.FILENAME_SUFFIX}"
+    path.write_text(ab.render(bundle), "utf-8")
+
+    asked = trading_agent.manage_agents(
+        action="import", path=str(path), agent_slug="arrival"
+    )
+    assert asked["needs_model"] is True
+    assert asked["wanted"] == "openrouter:deepseek/deepseek-v4.1-flash"
+    assert "OPENROUTER_API_KEY" in asked["why"]
+    assert "codex" in asked["models"]
+    assert AgentStore().get("arrival") is None
+
+    landed = trading_agent.manage_agents(
+        action="import", path=str(path), agent_slug="arrival", agent_key="codex"
+    )
+    assert landed["imported"] is True
+    meta, _ = parse_frontmatter((agent_home("arrival") / "AGENT.md").read_text("utf-8"))
+    assert meta["agent_key"] == "codex"

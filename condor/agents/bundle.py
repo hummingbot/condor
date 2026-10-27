@@ -1254,6 +1254,20 @@ def _resolve_agent_key(
     return carried, False, gap
 
 
+def runnable_agent_keys(user_id: int) -> list[str]:
+    """The models this install can start, for a surface that has to ask which
+    one an imported agent should run on: the catalogue's startable keys with no
+    gap, and the importer's own model when it is one the catalogue only names
+    as a family (``openrouter:<model>``)."""
+    from condor.llm.options import selectable_agent_options
+
+    keys = [k for k in selectable_agent_options() if not _agent_key_gap(k, user_id)]
+    active = _active_agent_key(user_id)
+    if active and active not in keys and not _agent_key_gap(active, user_id):
+        keys.insert(0, active)
+    return keys
+
+
 def _agent_key_gap(agent_key: str, user_id: int) -> str:
     """Why this install cannot start ``agent_key``, or ``""`` when it can.
 

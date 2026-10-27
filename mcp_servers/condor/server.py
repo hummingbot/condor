@@ -934,7 +934,9 @@ async def manage_agents(
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot",
             "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile".
             Any model can run an agent, and every one is held to the tools
-            allowlist. Default "claude-code".
+            allowlist. Default "claude-code". For "import" and "hub_install":
+            the model to run it on when its own can't run here — the call
+            answers needs_model with the choices, and the user picks.
         tools: Tool-name allowlist for the agent. Empty/None = unrestricted. A
             tool it omits is never mounted on any model, so keep the family the
             inherited framework playbooks call — delegate, send_notification,
