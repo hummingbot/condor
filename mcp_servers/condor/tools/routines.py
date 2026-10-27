@@ -331,21 +331,28 @@ def _resolve_with_owner(name: str, target: str | None):
     owner = _owner_of(target) if target else None
     if owner:
         from routines.base import (
-            assistant_routines_dir,
+            assistant_routines_dirs,
             discover_routines_from_path,
             raise_if_pending,
         )
 
-        routines_dir = assistant_routines_dir(owner)
-        if routines_dir.exists():
+        # Both layers, in READ order (SS-3). This looked only in the agent's
+        # WRITABLE dir, which is the local one -- so every routine an agent
+        # SHIPS, living in the stock root, was invisible to
+        # ``manage_routines(agent="<slug>")`` and the call answered "not found"
+        # for a file sitting in the repo. Only the web runner's prefixed name
+        # reached it, which is not a form the tool documents or an agent guesses.
+        for routines_dir in assistant_routines_dirs(owner):
+            if not routines_dir.exists():
+                continue
             found = discover_routines_from_path(routines_dir, agent_slug=owner).get(
                 name
             )
             if found:
                 return found, owner
-            # The refusal belongs to the *named* agent, not to the caller's
-            # own scope — that is the one whose file is sitting there unread.
-            raise_if_pending(owner, name)
+        # The refusal belongs to the *named* agent, not to the caller's
+        # own scope — that is the one whose file is sitting there unread.
+        raise_if_pending(owner, name)
 
     return _resolve_routine(name), caller_slug(owner)
 

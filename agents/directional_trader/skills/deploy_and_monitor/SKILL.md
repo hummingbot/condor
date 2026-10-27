@@ -22,15 +22,29 @@ Confirm every item with the user:
 - [ ] **Winner confirmed** — passed the `backtesting` go/no-go, config exists
       (`manage_controllers(action="describe", config_name="...")`)
 - [ ] **Exchange connectivity** — connector configured, API keys set
-- [ ] **Leverage matches the backtest** — never deploy at a different leverage than
-      was simulated
+- [ ] **Leverage chosen deliberately, and set where it is read** — the
+      backtester does NOT simulate it, so there is no simulated leverage to match
+      (DT-11). It changes margin and liquidation distance, not order size or
+      PnL%. Set it in the **saved controller config**: `manage_bots(action="deploy")`
+      has no `leverage` argument, and its risk check does not compare a
+      controller's leverage against `max_leverage`, so check that yourself before
+      deploying rather than expecting the gate to
 - [ ] **Position mode** — HEDGE if the strategy goes both long and short:
       `set_account_position_mode_and_leverage(...)`
 - [ ] **Stops set** — `stop_loss` and `take_profit` present; never deploy without them
-- [ ] **`max_loss_quote`** set as a circuit breaker
+- [ ] **`max_global_drawdown_quote`** set as the circuit breaker — this is the
+      real deploy argument and the risk gate refuses a deploy without it. There
+      is no `max_loss_quote` (DT-11). Add `max_controller_drawdown_quote` for a
+      per-controller cap, and keep both BELOW the controllers' total capital or
+      the switch can only fire once the position is gone
 - [ ] **Sizing** — ≤ 5% of account for one strategy, and start at 25–50% of the
       intended size; scale only after the comparison in Step 4 passes
-- [ ] **`avg_trade_duration_hours` noted** — it sets the minimum monitoring window
+- [ ] **`close_types` read** — the backtester returns no average trade duration
+      (DT-11), but it does report WHY trades closed. A config whose closes are
+      mostly `TIME_LIMIT` or `STOP_LOSS` is being exited by its risk settings
+      rather than by its signal, which is the thing that gate was reaching for.
+      Set the monitoring window from the controller interval and the backtest
+      window instead
 - [ ] User is watching the first 3 trades
 
 ## Step 2 — Deploy
@@ -50,8 +64,12 @@ manage_bots(action="status")   # no bot_name — returns all active bots
 **Record the deployment timestamp.** It is the start of the live comparison window
 and cannot be recovered later.
 
-For a single lightweight controller, an executor may fit better than a bot —
-delegate to the `executor_manager` agent.
+For a single lightweight controller, an executor may fit better than a bot.
+Deploy it yourself with the `create_*_executor` tools — do **not** hand it to
+`adaptive_grid_trader`, whose AGENT.md excludes "position executors without
+grid structure" in as many words. (`executor_manager`, which this used to
+name, does not exist — CO-3.) `adaptive_grid_trader` is the right target for
+GRID work specifically.
 
 ## Step 3 — Early monitoring
 
@@ -71,7 +89,7 @@ backtest (backtest had N trades in M days → expect ~N/M per day).
 - **No trades** after 2× the expected interval → the signal is not firing; suspect
   a column-name mismatch or a data feed issue
 - **Far more trades than backtest** → signal flicker; consider a debounce
-- **Executor open longer than 2× `avg_trade_duration_hours`** → check the exit logic
+- **Executor open far longer than the backtest's `TIME_LIMIT` closes suggest** → check the exit logic
 - **Immediate large drawdown** → stop and investigate before continuing
 
 **Abort immediately** on: any unhandled exception in `update_processed_data`;
@@ -98,7 +116,7 @@ manage_routines(
     config={
         "config_name": "{strategy_slug}_best",
         "start_date": <live_deploy_date>, "end_date": <today>,
-        "resolution": "1m", "trade_cost": 0.0006,
+        "resolution": "<the controller's interval>", "trade_cost": 0.0006,
     },
 )
 # → read it back with manage_routines(action="get_instance", name=<instance_id>)

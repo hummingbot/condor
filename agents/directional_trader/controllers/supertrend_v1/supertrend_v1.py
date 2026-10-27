@@ -75,6 +75,20 @@ class SuperTrend(DirectionalTradingControllerBase):
         df.loc[long_condition, 'signal'] = 1
         df.loc[short_condition, 'signal'] = -1
 
+        # Drop the two band columns before publishing the features (DT-3).
+        # pandas_ta emits SUPERTl (long band) and SUPERTs (short band) as a
+        # MUTUALLY EXCLUSIVE pair -- exactly one is NaN on every row, and in a
+        # one-directional window one of them is NaN on ALL of them. The
+        # backtester dropna()s the feature frame as a whole, so publishing them
+        # deleted every row and the run returned HTTP 500 with no explanation.
+        # Neither is read: the signal below uses SUPERTd for direction and
+        # SUPERT for distance, and the bands are the same information twice.
+        bands = [
+            f"SUPERTl_{self.config.length}_{self.config.multiplier}",
+            f"SUPERTs_{self.config.length}_{self.config.multiplier}",
+        ]
+        df = df.drop(columns=[c for c in bands if c in df.columns])
+
         # Update processed data
         self.processed_data["signal"] = df["signal"].iloc[-1]
         self.processed_data["features"] = df

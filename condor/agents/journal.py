@@ -32,6 +32,7 @@ from condor.fsutil import atomic_write_text
 from condor.memory.paths import safe_slug
 from condor.paths import local_agents_root
 
+from .quote_render import format_quote
 from .volume_render import format_volume_usd
 
 log = logging.getLogger(__name__)
@@ -190,14 +191,31 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
     ``risk_state={}`` and must still render.
     """
     rs = risk_state
+    # What the gate's figures are actually denominated in (LP-2), shared with
+    # the gate's own refusals so the two cannot disagree about a limit they are
+    # both describing (``condor.agents.quote_render``).
+    unit = rs.get("quote_asset") or ""
+
+    def _amount(value: float) -> str:
+        return format_quote(value, unit)
+
     max_dd = rs.get("max_drawdown_pct", -1)
-    dd_display = (
-        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
-        if max_dd >= 0
-        else "disabled"
-    )
+    if max_dd < 0:
+        dd_display = "disabled"
+    elif not rs.get("drawdown_known", True):
+        # A tick can now RUN with no drawdown on record: before its first
+        # deploy there is nothing to have fallen from, and a tick whose own
+        # providers answered is not flying blind even though the journal has
+        # not been written yet ([[CORR-750]]). Both used to block, so the
+        # "BLOCKED" line said as much; now the figure has to say it itself, or
+        # the agent reads a measured 0.0% and plans against a floor nobody has
+        # measured.
+        dd_display = f"not measured yet (no reading on record) / {max_dd:.1f}% limit"
+    else:
+        dd_display = f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
     lines = [
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
+        f"Position Size: {_amount(rs.get('total_exposure', 0))} / "
+        f"{_amount(rs.get('max_position_size', 500))} limit",
         f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
         f"Drawdown: {dd_display}",
     ]
@@ -211,6 +229,18 @@ def render_risk_lines(risk_state: dict[str, Any], bullet: str = "- ") -> list[st
         lines.append(
             f"Max Leverage: {max_leverage:g}x "
             "(declare `leverage` on every create; omitting it is refused)"
+        )
+    # A limit the agent is NOT told about is a limit it will trip; a limit it is
+    # wrongly told it has is one it will rely on. ``min_wallet_sol_reserve`` and
+    # ``max_open_slots`` sat in lp_slot_operator's risk_limits bounding nothing,
+    # and the loop planned its slots around them (LP-3). Named here, in the same
+    # block as the real limits, because that is where the agent looks.
+    unrecognized = rs.get("unrecognized_limits") or []
+    if unrecognized:
+        lines.append(
+            f"NOT ENFORCED: {', '.join(unrecognized)} — set in this strategy's "
+            "risk_limits but unknown to the risk engine, so they bound nothing. "
+            "Do not plan around them."
         )
     # "Risk Check", not "Status": a snapshot outlives its session, and a stopped
     # run's history reading "Status: ACTIVE" looked like the run was still live.

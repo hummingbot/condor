@@ -80,8 +80,78 @@ def _sum_last(chart: list, n: int) -> Optional[float]:
 
 
 def _looks_like_ticker(s: str) -> bool:
-    """True for 1–5 uppercase letters (stock tickers like COIN, HOOD, AAPL)."""
-    return bool(re.match(r"^[A-Z]{1,5}$", s.strip()))
+    """True for 1–5 letters, in either case (COIN, HOOD, AAPL, aapl).
+
+    Case-insensitive since FA-3. Requiring uppercase meant a lowercase ticker
+    skipped this test entirely and fell through to the fuzzy protocol matcher,
+    which happily answered: ``aapl`` became Maple and ``nvda`` became Veda, each
+    then reported with a DeFi protocol's TVL and fees.
+    """
+    return bool(re.match(r"^[A-Za-z]{1,5}$", s.strip()))
+
+
+def _protocol_named_exactly(asset: str, protocols: list):
+    """The protocol a ticker-shaped string *names*, or ``None``.
+
+    Deliberately narrow, because the input is ambiguous by shape: an exact slug,
+    or a versioned slug of the same name (``AAVE`` → ``aave-v3``), and nothing
+    else. A prefix or substring search would read ``COIN`` as ``coinbase`` and a
+    real ticker would disappear into the protocol list — which is the mirror of
+    the bug this sits beside. Requiring an *exact* slug alone was too strict the
+    other way: DefiLlama lists Aave only under versioned slugs, so ``AAVE`` was
+    classified as a stock (FA-3).
+    """
+    low = asset.lower().strip()
+    exact = next((p for p in protocols if p.get("slug", "").lower() == low), None)
+    if exact:
+        return exact
+    versioned = [
+        p for p in protocols if p.get("slug", "").lower().startswith(f"{low}-")
+    ]
+    return _pick_best(versioned) if versioned else None
+
+
+_VERSION_SUFFIX_RE = re.compile(r"^-v\d+(\.\d+)?$")
+
+
+def _brand(slug: str) -> str:
+    """The first token of a slug — the brand a product sits under."""
+    return (slug or "").lower().split("-", 1)[0]
+
+
+def _product_variants(inp: str, protocols: list) -> list:
+    """Distinct PRODUCTS under the brand ``inp`` names, by slug.
+
+    A brand can carry several products that are not the same instrument:
+    Hyperliquid lists a perps venue, an HLP vault and a spot order book, and
+    they have different TVL, different fees and different meaning. Picking the
+    largest is how a request for "hyperliquid" was answered with its vault in
+    one routine and its spot book in the other (FA-2).
+
+    Versions are NOT products: ``uniswap-v2`` and ``uniswap-v3`` are the same
+    instrument at two ages, and taking the largest of those is a sensible
+    default rather than a wrong answer. So a ``-v<n>`` suffix is folded away and
+    anything else counts as its own product.
+
+    A ``_VAULT_SUFFIXES`` blacklist cannot do this job: it has to enumerate every
+    product name anyone might ship, and the spot order book that produced this
+    finding was not on it.
+    """
+    low = inp.lower().strip()
+    if not low:
+        return []
+    kin = [p for p in protocols if _brand(p.get("slug", "")) == _brand(low)]
+    products: dict[str, dict] = {}
+    for p in kin:
+        slug = p.get("slug", "").lower()
+        suffix = slug[len(_brand(slug)) :]
+        if _VERSION_SUFFIX_RE.match(suffix):
+            suffix = ""  # a version of the base product
+        # Keep the largest of each product so versions collapse by TVL.
+        kept = products.get(suffix)
+        if kept is None or (p.get("tvl") or 0) > (kept.get("tvl") or 0):
+            products[suffix] = p
+    return list(products.values())
 
 
 def _pick_best(candidates: list):
@@ -101,8 +171,16 @@ def _pick_best(candidates: list):
     return max(preferred, key=lambda p: p.get("tvl") or 0)
 
 
-def _find_slug(slug_input: str, protocols: list) -> tuple:
-    """Return (protocol_dict, matched_slug) for a given input. Returns (None, input) on miss."""
+def _find_slug(slug_input: str, protocols: list, fuzzy: bool = True) -> tuple:
+    """Return (protocol_dict, matched_slug) for a given input. ``(None, input)`` on miss.
+
+    ``fuzzy=False`` stops before the ``difflib`` fallback. Classification passes
+    it: deciding *whether a string is a protocol at all* must not rest on a
+    near-miss, or every unrecognised stock ticker becomes whichever protocol it
+    happens to resemble (FA-3). Fetching a protocol the caller has already been
+    classified as DeFi may still use it — that is a typo in a known-kind input,
+    which is FA-5's problem and is reported rather than silenced.
+    """
     inp = slug_input.lower().strip()
 
     exact = next((p for p in protocols if p.get("slug", "") == inp), None)
@@ -128,6 +206,9 @@ def _find_slug(slug_input: str, protocols: list) -> tuple:
         best = _pick_best(name_c)
         return best, best["slug"]
 
+    if not fuzzy:
+        return None, slug_input
+
     slugs = [p.get("slug", "") for p in protocols]
     close = difflib.get_close_matches(inp, slugs, n=3, cutoff=0.5)
     if close:
@@ -143,13 +224,76 @@ def _find_slug(slug_input: str, protocols: list) -> tuple:
     return None, slug_input
 
 
-def _find_gecko_id(
-    matched_slug: str, user_input: str, all_protocols: list
+async def _fetch_parent_index(client: httpx.AsyncClient) -> Dict[str, str]:
+    """``parentProtocol id -> gecko_id`` from ``/lite/protocols2``, or ``{}``.
+
+    ``{}`` on any failure, and cached by :class:`_ParentIndex` either way: a
+    read that did not answer must not be retried once per asset in the table.
+    """
+    try:
+        r = await client.get("https://api.llama.fi/lite/protocols2")
+        if r.status_code != 200:
+            return {}
+        parents = r.json().get("parentProtocols") or []
+    except Exception:
+        return {}
+    return {
+        str(x.get("id")): str(x.get("gecko_id"))
+        for x in parents
+        if x.get("id") and x.get("gecko_id")
+    }
+
+
+class _ParentIndex:
+    """One lazy ``/lite/protocols2`` read, shared by every row in a run.
+
+    The payload is some 7 MB and the rows are fetched concurrently, so the lock
+    matters: without it a five-protocol comparison downloads it five times.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._by_id: Optional[Dict[str, str]] = None
+
+    async def gecko_id(self, client: httpx.AsyncClient, parent_id: str):
+        if not parent_id:
+            return None
+        async with self._lock:
+            if self._by_id is None:
+                self._by_id = await _fetch_parent_index(client)
+        return self._by_id.get(parent_id) or None
+
+
+async def _find_gecko_id(
+    client: httpx.AsyncClient,
+    matched_slug: str,
+    user_input: str,
+    all_protocols: list,
+    parents: _ParentIndex,
 ) -> Optional[str]:
     """Find gecko_id via DefiLlama data. Falls back to user_input only as a last resort."""
     p = next((x for x in all_protocols if x.get("slug") == matched_slug), None)
     if p and p.get("gecko_id"):
         return p["gecko_id"]
+
+    # The brand's own record, which is where a versioned protocol's token id
+    # actually lives (FA-1). ``/protocols`` files no ``gecko_id`` on a version
+    # -- the token belongs to Uniswap, not to uniswap-v3 -- and there is no
+    # plain ``uniswap`` record for the scan below to find either, so every
+    # versioned protocol fell through to the raw input and CoinGecko 404'd.
+    # ``mcap`` and the ``mcap_rev`` multiple built on it then read N/A for the
+    # whole column.
+    #
+    # Deliberately the same shape as ``defi_protocol_snapshot``'s copy rather
+    # than a shared import: these routines are standalone files and already keep
+    # their own ``_find_slug``, ``_pick_best`` and ``_sum_last``. Changing one
+    # lookup means changing both -- which is exactly how this one was left
+    # behind when the snapshot's was fixed.
+    parent_gecko = await parents.gecko_id(
+        client, str((p or {}).get("parentProtocol") or "")
+    )
+    if parent_gecko:
+        return parent_gecko
 
     # Brand prefix scan (strip common version/variant suffixes)
     brand = (
@@ -163,7 +307,15 @@ def _find_gecko_id(
         if x.get("slug", "").startswith(brand) and x.get("gecko_id")
     ]
     if candidates:
-        return candidates[0]["gecko_id"]
+        # The PARENT first, then the largest sibling -- never ``candidates[0]``,
+        # which is whatever DefiLlama happened to list first and can be a dead
+        # id that 404s into a silent N/A. Same rule as the snapshot routine's.
+        parent = next(
+            (x for x in candidates if x.get("slug", "").lower() == brand), None
+        )
+        if parent:
+            return parent["gecko_id"]
+        return max(candidates, key=lambda x: x.get("tvl") or 0)["gecko_id"]
 
     # Only use raw user_input if it looks like a clean coin slug (no spaces, no suffixes)
     inp = user_input.lower().strip()
@@ -214,10 +366,38 @@ async def _fetch_coingecko_mcap(
 
 
 async def _fetch_defi_row(
-    client: httpx.AsyncClient, slug_input: str, all_protocols: list
+    client: httpx.AsyncClient,
+    slug_input: str,
+    all_protocols: list,
+    parents: _ParentIndex,
 ) -> dict:
     """Fetch one DeFi protocol → normalized row dict. Never raises."""
     try:
+        # A brand with several PRODUCTS is a question, not a default (FA-2).
+        # Only when the caller named the brand alone: an explicit slug such as
+        # "hyperliquid-hlp" has already answered it.
+        variants = _product_variants(slug_input, all_protocols)
+        # Against ALL protocols, not the collapsed variant list: grouping keeps
+        # only the largest of each product, so a caller naming a smaller version
+        # exactly (``uniswap-v2`` where v3 is bigger) would be told to "pick one"
+        # about a slug that is already a precise answer.
+        named_exactly = any(
+            p.get("slug", "").lower() == slug_input.lower().strip()
+            for p in all_protocols
+        )
+        if len(variants) > 1 and not named_exactly:
+            choices = ", ".join(
+                sorted(p.get("slug", "") for p in variants if p.get("slug"))
+            )
+            return {
+                "asset": slug_input,
+                "type": "defi",
+                "error": (
+                    f"'{slug_input}' names several products, which are different "
+                    f"instruments with different TVL and fees — pick one: {choices}"
+                ),
+            }
+
         proto, matched_slug = _find_slug(slug_input, all_protocols)
         if proto is None:
             return {
@@ -225,6 +405,10 @@ async def _fetch_defi_row(
                 "type": "defi",
                 "error": f"Protocol '{slug_input}' not found on DefiLlama",
             }
+        # A match the caller did not ask for is reported, never silently
+        # substituted: a typo used to resolve to whatever it resembled and the
+        # report named the wrong protocol with no indication (FA-5).
+        inexact = matched_slug.lower() != slug_input.lower().strip()
 
         # Fetch detail page, fees, and revenue in parallel
         r_detail, fees_chart, rev_chart = await asyncio.gather(
@@ -238,7 +422,9 @@ async def _fetch_defi_row(
         # mcap: protocols list → detail page → CoinGecko fallback
         mcap = proto.get("mcap") or detail.get("mcap")
         if not mcap:
-            gecko_id = _find_gecko_id(matched_slug, slug_input, all_protocols)
+            gecko_id = await _find_gecko_id(
+                client, matched_slug, slug_input, all_protocols, parents
+            )
             mcap = await _fetch_coingecko_mcap(client, gecko_id)
 
         fees_ttm = _sum_last(fees_chart, min(365, len(fees_chart)))
@@ -248,7 +434,13 @@ async def _fetch_defi_row(
         mcap_rev = _safe_div(mcap, mcap_rev_base)
 
         return {
-            "asset": proto.get("name", matched_slug),
+            # The name carries the substitution when there was one, so a typo
+            # cannot pass for the protocol the caller meant (FA-5).
+            "asset": (
+                f"{proto.get('name', matched_slug)} (matched from " f"'{slug_input}')"
+                if inexact
+                else proto.get("name", matched_slug)
+            ),
             "type": "defi",
             "mcap": mcap,
             "rev_ttm": fees_ttm,  # gross fees (user-paid) → "Rev TTM" column
@@ -367,17 +559,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         if override:
             classified[asset] = override.lower()
         elif _looks_like_ticker(asset):
-            exact = next(
-                (
-                    p
-                    for p in all_protocols
-                    if p.get("slug", "").lower() == asset.lower()
-                ),
-                None,
-            )
-            classified[asset] = "defi" if exact is not None else "stock"
+            # Ambiguous by shape, so only a name it matches exactly (or a
+            # versioned slug of that name) makes it a protocol.
+            named = _protocol_named_exactly(asset, all_protocols)
+            classified[asset] = "defi" if named is not None else "stock"
         else:
-            proto, _ = _find_slug(asset, all_protocols)
+            # Longer or punctuated input: the fuller search, but never the fuzzy
+            # fallback — a near-miss cannot decide what KIND of thing this is.
+            proto, _ = _find_slug(asset, all_protocols, fuzzy=False)
             classified[asset] = "defi" if proto is not None else "stock"
 
     defi_assets = [a for a in config.assets if classified[a] == "defi"]
@@ -385,9 +574,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # 3. Fetch all in parallel: async httpx for DeFi, run_in_executor for yfinance
     async with httpx.AsyncClient(timeout=60) as client:
-        all_coros = [_fetch_defi_row(client, a, all_protocols) for a in defi_assets] + [
-            loop.run_in_executor(None, _fetch_stock_row, a) for a in stock_assets
-        ]
+        # One parent-record read for the whole table, lazily (FA-1).
+        parents = _ParentIndex()
+        all_coros = [
+            _fetch_defi_row(client, a, all_protocols, parents) for a in defi_assets
+        ] + [loop.run_in_executor(None, _fetch_stock_row, a) for a in stock_assets]
         raw_results = await asyncio.gather(*all_coros, return_exceptions=True)
 
     rows = []

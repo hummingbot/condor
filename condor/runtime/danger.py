@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from typing import Any
 
 #: Every executor-creating tool, by name. The typed split (FEAT-062) gave each
@@ -800,6 +801,48 @@ def shutdown_refusal(tool_call: dict[str, Any]) -> str | None:
         )
 
     return None
+
+
+#: Execution modes whose restriction an MCP subprocess can enforce on its own,
+#: mapped to the policy that decides a call. Only ``dry_run`` for now
+#: (CORR-748): ``shutdown`` has the identical bypass and the identical shape —
+#: :func:`shutdown_refusal` is already written — but a winddown's seat is built
+#: on a path of its own and wiring it is a change to that path, not to this
+#: table. A mode absent from here restricts nothing, which is what keeps every
+#: live seat's subprocess byte-identical to before this existed.
+MOUNT_ENFORCED_MODES: dict[str, Any] = {"dry_run": dry_run_refusal}
+
+
+def mounted_tool_refusal(
+    execution_mode: str,
+) -> Callable[[str, dict[str, Any]], str | None] | None:
+    """The per-call refusal an MCP subprocess running in ``execution_mode`` applies.
+
+    ``None`` for a mode that restricts nothing, so the caller mounts its tools
+    exactly as it always did and the flag can never be blamed for a seat that
+    behaves differently.
+
+    This is :func:`dry_run_refusal` and its siblings moved one layer down, to
+    the process that owns the tool. Up at the session's permission callback they
+    decide only the calls a client *asks* about, and asking is the client's
+    choice: the ACP bridges differ on it, so the same policy that refuses a
+    snippet on one bridge is never consulted on another (CORR-748). Down here
+    the tool simply does not run, whoever is driving.
+
+    The arguments arrive as the subprocess's own kwargs rather than as a wire
+    tool call, so they are shaped into the one form the policies read. Nothing
+    is re-classified on the way: an action these policies do not recognise fails
+    closed there, as it always has, and this function adds no second opinion
+    about what a tool does.
+    """
+    policy = MOUNT_ENFORCED_MODES.get(execution_mode)
+    if policy is None:
+        return None
+
+    def refusal(tool_name: str, kwargs: dict[str, Any]) -> str | None:
+        return policy({"tool": tool_name, "input": dict(kwargs)})
+
+    return refusal
 
 
 def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:

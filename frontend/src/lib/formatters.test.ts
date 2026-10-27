@@ -8,6 +8,7 @@ import {
   formatCurrency,
   formatCurrencyPnl,
   formatCurrencyVolume,
+  formatQuoteAmount,
   formatDateTime,
   formatDuration,
   formatRelativeTime,
@@ -614,5 +615,33 @@ describe("formatDuration", () => {
   it("never lets { ms: true } touch the minute-and-up branches", () => {
     expect(formatDuration(90, { ms: true })).toBe("1m");
     expect(formatDuration(15_120, { ms: true })).toBe("4h12m");
+  });
+});
+
+describe("formatQuoteAmount", () => {
+  it("renders a dollar quote exactly as formatCurrency does", () => {
+    expect(formatQuoteAmount(500, "USDT")).toBe(formatCurrency(500));
+    expect(formatQuoteAmount(1234.5, "USDC")).toBe(formatCurrency(1234.5));
+  });
+
+  it("renders an unset quote as dollars", () => {
+    expect(formatQuoteAmount(500)).toBe(formatCurrency(500));
+    expect(formatQuoteAmount(500, null)).toBe(formatCurrency(500));
+    expect(formatQuoteAmount(500, "")).toBe(formatCurrency(500));
+  });
+
+  it("renders a token quote in that token", () => {
+    expect(formatQuoteAmount(0.5, "SOL")).toBe("0.5000 SOL");
+    expect(formatQuoteAmount(0.5, "sol")).toBe("0.5000 SOL");
+  });
+
+  it("keeps enough decimals for a fraction of a token", () => {
+    // Two places would render this as 0.03, which reads as a rounding of
+    // anything between 0.025 and 0.035.
+    expect(formatQuoteAmount(0.0275, "SOL")).toBe("0.0275 SOL");
+  });
+
+  it("puts the sign in front, like every other formatter here", () => {
+    expect(formatQuoteAmount(-1.5, "SOL")).toBe("-1.5000 SOL");
   });
 });

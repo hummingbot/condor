@@ -11,6 +11,11 @@ default_config:
   frequency_sec: 300
   total_amount_quote: 500
   execution_mode: loop
+  # Controller mode, with the bot name DERIVED as this session's namespace
+  # (MM-5). Both loops deploy bots but ran in executor mode, so no
+  # [CONTROLLER MODE] block reached the prompt and the ownership ledger
+  # enforced nothing on the names they invented.
+  bot_mode: bot
   issuer: xyz
   reselect_every_ticks: 30
   min_spread_bps: 3
@@ -20,7 +25,9 @@ default_config:
   loss_no_new_high_ticks: 25
   trend_derisk_legs: 3
   risk_limits:
-    max_position_size_quote: 600
+    # Not above the total_amount_quote above: a ceiling over the capital it
+    # bounds is no ceiling (MM-4).
+    max_position_size_quote: 500
     max_open_executors: 10
 default_trading_context: ''
 created_by: 0

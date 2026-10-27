@@ -23,7 +23,7 @@ import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { countdown } from "@/lib/agent-attribution";
 import { api, type StrategyDetail } from "@/lib/api";
-import { formatCurrency } from "@/lib/formatters";
+import { formatCurrency, formatQuoteAmount } from "@/lib/formatters";
 
 import { StrategyConfigEditor } from "./StrategyConfigEditor";
 
@@ -493,17 +493,25 @@ function ConfigCard({
       where.push({ label: "base url", value: String(config.model_base_url) });
     }
 
+    // Every "quote" figure below is denominated in whatever this strategy
+    // trades against, which for the Solana LP operator is SOL -- so a 0.5 SOL
+    // ceiling read as "$0.50" here (LP-2). Same rule as the agent's own journal
+    // and the risk gate's refusals, so an operator comparing the dashboard with
+    // a refusal reads one ceiling in one unit.
+    const quote = String(config.quote_asset ?? "");
     const money: Row[] = [
       {
         label: "budget",
-        value: formatCurrency(Number(config.total_amount_quote) || 0),
+        value: formatQuoteAmount(Number(config.total_amount_quote) || 0, quote),
         hint: "What one session may put to work",
       },
-      limitRow("max position", risk.max_position_size_quote, (n) => formatCurrency(n)),
+      limitRow("max position", risk.max_position_size_quote, (n) =>
+        formatQuoteAmount(n, quote),
+      ),
       limitRow("max executors", risk.max_open_executors, (n) => String(n)),
       limitRow("max drawdown", risk.max_drawdown_pct, (n) => `${n}%`),
       limitRow("shutdown drawdown", risk.shutdown_drawdown_pct, (n) => `${n}%`),
-      limitRow("max drift", risk.max_drift_quote, (n) => formatCurrency(n)),
+      limitRow("max drift", risk.max_drift_quote, (n) => formatQuoteAmount(n, quote)),
       limitRow("max leverage", risk.max_leverage, (n) => `${n}×`),
     ];
 

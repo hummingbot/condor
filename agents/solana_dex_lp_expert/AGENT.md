@@ -60,7 +60,7 @@ Provide liquidity via **LP Executors** directly (`create_lp_executor`) — not c
 - `lp_provider` = **`{venue}/clmm`** — `meteora/clmm`, `orca/clmm`, `raydium/clmm`
 - `swap_provider` = **`jupiter/router`** (close-out swaps + base acquisition)
 
-Default venues: meteora, orca, raydium. Only LP where an `lp_provider` exists. Raydium pool-info resolves via the Raydium API; the others via Gateway.
+Default venues: meteora, orca, raydium-clmm — these are **GeckoTerminal dex ids**, not connector names. Plain `raydium` is the constant-product AMM v4 and holds no CLMM positions, so scanning it returns pools no `lp_executor` can open (LP-4); the concentrated venue is `raydium-clmm`, driven by the `raydium/clmm` connector. Only LP where an `lp_provider` exists. Raydium pool-info resolves via the Raydium API; the others via Gateway.
 
 ## Config (from `[CURRENT CONFIG]`)
 | Param | Default | Meaning |
@@ -70,7 +70,7 @@ Default venues: meteora, orca, raydium. Only LP where an `lp_provider` exists. R
 | `slots` | `3` | Concurrent LP positions |
 | `take_profit_pct` / `stop_loss_pct` | `20` | Per-slot exit on net PnL ≥ TP or ≤ −SL |
 | `out_of_range_max_sec` | `1800` | Max time OUT_OF_RANGE before a forced exit |
-| `venues` | `meteora,orca,raydium` | Allowed CLMM venues |
+| `venues` | `meteora,orca,raydium-clmm` | Allowed CLMM venues (GeckoTerminal dex ids) |
 | `ranking_window` | `24h` | Window for the fees/TVL ranking |
 | `capital_per_slot` | derived | LP capital ÷ `slots`, in `quote_asset` |
 | `range_width_pct` | `auto` | Range half-width; `auto` = from OHLCV vol, clamped to venue caps |
@@ -106,6 +106,22 @@ Rank by **fee yield = fees over `ranking_window` ÷ TVL**. Prefer healthy TVL (a
 
 ## Skills
 `pool_ranking` (rank), `lp_range_config` (range/side/size by base_pct + venue), `slot_exit` (TP/SL + rotation), `lp_bot_report` (status).
+
+**When a skill and the loop playbook disagree, the loop wins.** The loop is what
+actually runs: it carries the measured thresholds, the per-venue conventions and
+the tick budget the skills cannot see. The skills carry the *reasoning* — why a
+range has that shape, how to read a ranking, what a close reason means — and
+defer on the mechanics.
+
+They diverged on five things at once (LP-9), and every divergence ran the same
+way: the skill was vaguer, stricter, or reimplemented something the loop does in
+one call. Range shape said "centered" where the loop places `P` asymmetrically by
+`base_pct`; the Orca/Raydium clamp was "within the connector's limit" where the
+loop knows it is ≤120 spacings; the idle-exit required an OHLCV confirmation the
+loop treats as an exception; `pool_ranking` hand-scanned GeckoTerminal across a
+dozen calls where the loop runs `lp_scanner` once; and none of them knew the tick
+budget was eight calls. If you find a sixth, fix the skill — or, if the skill is
+right, fix the loop and say so in the journal.
 
 ## Response format
 When handed a question, respond with key: value lines: lead with the recommendation (pool, venue, side, range, size, or hold/exit), then brief reasoning.

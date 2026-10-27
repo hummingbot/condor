@@ -164,18 +164,27 @@ UNTAGGED_CREATE = {
 }
 
 
-def test_the_risk_gate_is_installed_on_the_loop_seat_and_nowhere_else():
+def test_the_risk_gate_is_installed_on_the_unattended_seats_and_nowhere_else():
     """The finding this item stopped on, pinned so it cannot go unread again.
 
     ``auto_approve_with_risk_check`` refuses a create with no ``controller_id``.
-    If it ran for chat, an untagged chat create would be *cancelled* — a louder
-    and quite different bug from the reporting gap that was reported. It has one
-    production install site, and it is the unattended tick seat.
+    If it ran for **chat**, an untagged chat create would be *cancelled* — a
+    louder and quite different bug from the reporting gap that was reported.
+    Chat is confirmed by a human through ``runtime.confirmations`` instead, and
+    that is the line this guards: the gate stands in for a human who is not
+    there, so it belongs on exactly the seats where nobody is.
+
+    There are two such seats. The tick (``agents/engine.py``) has always been
+    one. The delegated run (``agents/agent_run.py``) was built with
+    ``permission_callback=None`` on the argument that nobody was watching it,
+    which left every delegated deploy unbounded — a live ``pmm_mister`` went out
+    through it with no platform loss cap at all (MM-1).
 
     Asserted over the source rather than by driving a session, because the claim
-    is about where the callback is *wired*: a second install site added later is
+    is about where the callback is *wired*: an install site added later is
     exactly what this must catch, and it would catch no behavioural test aimed
-    at the seat we already know about.
+    at the seats we already know about. A new entry here is not a failure to
+    silence — it is a seat someone has to decide about.
     """
     root = Path(__file__).resolve().parents[2] / "condor"
     installs = set()
@@ -185,7 +194,7 @@ def test_the_risk_gate_is_installed_on_the_loop_seat_and_nowhere_else():
             if call and not line.lstrip().startswith("def "):
                 installs.add(path.relative_to(root).as_posix())
 
-    assert installs == {"agents/engine.py"}
+    assert installs == {"agents/engine.py", "agents/agent_run.py"}
 
 
 def _drive(callback, tool_call: dict, answer: bool | None = True) -> dict:

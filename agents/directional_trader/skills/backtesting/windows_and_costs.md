@@ -43,9 +43,18 @@ start_time = end_time - (90 * 86400)   # 90 days
 
 The general rule is in `backtest_flow`. Its directional application:
 
-- Baseline and final validation at `1m`.
-- Match the controller interval (`15m`, `1h`) while sweeping wide, then re-run the
-  winner at `1m` before it goes anywhere near `go_no_go.md`.
+- Baseline and final validation **at the controller's own interval** — that is
+  the figure `go_no_go.md` records, and the only one that measures the strategy
+  rather than flattering it.
+- Sweep wide at a coarser resolution for speed if you like; re-run the winner at
+  the controller's interval before it goes anywhere near `go_no_go.md`.
+- Never re-run it at `1m` on a coarser controller to "confirm" a result:
+
+  A finer resolution is **not** a more honest one: features are merged onto the
+  backtesting candles with `merge_asof(direction="backward")` on the candle
+  **open** timestamp, so every row inside a candle already sees that candle's
+  close. 1m on a 15m controller is therefore optimistic by construction — an
+  upper bound, never a measurement (DT-4).
 
 ## Comparability
 

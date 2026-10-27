@@ -24,11 +24,16 @@ Never guess connector capabilities from memory. Always pull the authoritative so
 
 | Kind | Examples | Runs through | Tools |
 |---|---|---|---|
-| **AMM / CLMM / DLMM pools, swap routers** | `meteora`, `raydium`, `orca`, `jupiter`, `uniswap`, `pancakeswap` | **Gateway** — `connector_name` is the network (`solana-mainnet-beta`); the DEX rides in `lp_provider` / `swap_provider` | `explore_dex_pools`, `manage_amm`, `manage_clmm`, `quote_swap` / `execute_swap`, `create_lp_executor`, `manage_gateway_config` |
+| **AMM / CLMM / DLMM pools, swap routers** | `meteora`, `raydium`, `orca`, `jupiter`, `uniswap`, `pancakeswap` | **Gateway** — `connector_name` is the network (`solana-mainnet-beta`); the DEX rides in `lp_provider` / `swap_provider` | `explore_dex_pools`, `manage_amm`, `manage_clmm`, `quote_swap` / `execute_swap`, `create_lp_executor`, `manage_gateway_config`† |
 | **CLOB (order-book) DEXs** | `hyperliquid`, `hyperliquid_perpetual`, `xrpl`, `dydx_v4_perpetual`, `injective_v2`, `injective_v2_perpetual`, `derive`, `derive_perpetual`, `dexalot` | **Hummingbot directly**, through the Hummingbot API — exactly like a CEX | `get_prices`, `get_portfolio_overview`, order book / trading rules via `run_code`, every executor, controllers and bots |
 
 A CLOB DEX is a plain Hummingbot connector: its credentials go in Settings → Keys (not a
 Gateway wallet), it has no pools, and Gateway knows nothing about it. Never reach for
+† `manage_gateway_config` is mounted on the **full** (server-owner) seat only.
+An agent or tick seat does not have it, so a playbook that sends one there is
+sending it into a refusal (SS-4). Ask the operator, or use a tool your seat
+actually mounts.
+
 `manage_gateway_config`, `explore_dex_pools`, `manage_amm` / `manage_clmm` or
 `quote_swap` / `execute_swap` for one. Rule of thumb: if you place limit orders on an
 order book, it is a Hummingbot connector.
@@ -39,7 +44,11 @@ order book, it is a Hummingbot connector.
 2. **LP / CLMM questions** (Gateway) → read the `create_lp_executor` tool description — its `lp_provider` parameter lists the supported DEXs
 3. **AMM swap / pool-creation questions** (Gateway) → `manage_amm()` (no action) — read the connector list
 4. **Pool discovery questions** (Gateway) → `explore_dex_pools` tool description lists supported connectors
-5. **Market data / candle questions** → see the **Candles** section below
+5. **Market data / candle questions** → `get_market_data(action="connectors")`, which
+   answers *which connectors have a feed* directly. Prefer it over a `run_code`
+   snippet: it is a parameterised read, it is mounted on every seat including the
+   unattended tick, and a dry run can call it — `run_code` cannot (SS-4). See the
+   **Candles** section below for what to do when the answer is "no feed"
 
 Answer from what the guide actually says — not from what you remember.
 
@@ -47,7 +56,15 @@ Answer from what the guide actually says — not from what you remember.
 
 ## Candles — When the Connector Has No Feed
 
-`client.market_data.get_candles*(...)` — inside `run_code`, the only way candles are read — first asks the API which connectors have a candle feed, and **raises** if yours is not one of them:
+`get_market_data(action="candles", ...)` is the ordinary way to read candles, and
+`action="connectors"` is how you ask which connectors have a feed at all.
+
+A `run_code` snippet over `client.market_data.get_candles*(...)` reaches the same
+data and is the right tool when you need to *compute* over it, but it is NOT the
+only way and must not be presented as one (SS-4): `run_code` holds the
+unrestricted API client, so a dry run refuses it and a constrained seat may not
+mount it, and a playbook that names it as the only road sends those seats into a
+refusal. Either way the API raises if the connector has no feed:
 
 ```
 ValueError: Connector 'xrpl' does not support candle data.

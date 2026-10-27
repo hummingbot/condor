@@ -3864,13 +3864,18 @@ async def start_strategy(
 
 async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> dict:
     """Spawn a TickEngine session for ``strategy`` under ``agent``."""
-    from condor.agents.config import load_full_config
+    from condor.agents.config import apply_overrides, load_full_config
     from condor.agents.engine import TickEngine
     from config_manager import get_config_manager
 
     config_dict = load_full_config(strategy.home, strategy.default_config)
     if req.config:
-        config_dict.update(req.config)
+        # A patch, not a replacement (SH-2). The Start dialog sends three
+        # generic risk limits and inherits everything else; ``update`` replaced
+        # the whole ``risk_limits`` block with those three, so a loop that
+        # configured any other limit started without it and said nothing. See
+        # ``apply_overrides`` for why the editor's route keeps ``update``.
+        config_dict = apply_overrides(config_dict, req.config)
 
     # The engine notifies ``chat_id`` on every tick, so the same ownership rule
     # as /notify applies to it (SEC-198).

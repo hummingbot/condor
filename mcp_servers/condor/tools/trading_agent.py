@@ -786,9 +786,18 @@ async def _agent_lifecycle(
                 "shutdown_agent": "shutdown",
             }[action]
             aslug, sslug = agent_strategy_from_agent_id(agent_id)
+            # A shutdown is not a question, it is a winddown waited on: the
+            # route runs the whole thing before answering, so the default
+            # 15-second budget expired every time and the tool reported the
+            # main process unreachable while the kill switch was still firing
+            # behind it (MM-3).
+            from condor.runtime.timeouts import TIMEOUTS
+
+            timeout = TIMEOUTS.mcp_shutdown if verb == "shutdown" else None
             return await call_main_api(
                 "POST",
                 f"/agents/{aslug}/strategies/{sslug}/{verb}?agent_id={agent_id}",
+                timeout=timeout,
             )
 
         return {"error": f"Unknown lifecycle action: {action}"}
