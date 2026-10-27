@@ -49,8 +49,8 @@ function hubSource(slug: string, version: string): BundleSource {
         ? { verb: "update", plan: res.plan as AgentUpdatePlan }
         : { verb: "install", plan: res.plan as AgentImportPlan };
     },
-    install: async (asSlug) =>
-      (await api.installFromHub(slug, asSlug, version)).plan as AgentImportPlan,
+    install: async (asSlug, agentKey) =>
+      (await api.installFromHub(slug, asSlug, version, agentKey)).plan as AgentImportPlan,
     previewUpdate: async () =>
       (await api.previewHubInstall(slug, "", version)).plan as AgentUpdatePlan,
     applyUpdate: async () =>

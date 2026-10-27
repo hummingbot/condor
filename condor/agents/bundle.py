@@ -399,6 +399,10 @@ class ImportPlan(BaseModel):
     mutes: dict[str, list[str]] = Field(default_factory=dict)
     agent_key: str = ""
     agent_key_inherited: bool = False
+    #: The agent's own model, when this install cannot start it — and why not
+    #: (``agent_key_gap``), so the dialog can say so and offer another.
+    agent_key_wanted: str = ""
+    agent_key_gap: str = ""
     #: The taken slug, when this bundle cannot land under the name it asked for.
     collision: str = ""
     #: The first free ``<slug>_2``, ``<slug>_3`` … when there is a collision.
@@ -885,6 +889,7 @@ def plan(
     user_id: int = 0,
     available_connectors: Sequence[str] | None = None,
     available_tools: Sequence[str] | None = None,
+    agent_key: str = "",
 ) -> ImportPlan:
     """Everything a human needs to decide, computed without writing anything.
 
@@ -897,6 +902,9 @@ def plan(
     supply, passed in rather than fetched so the module stays headless — the
     connector list needs an async Hummingbot client. Leaving either ``None``
     means "not asked", and nothing of that kind is then reported unmet.
+
+    ``agent_key`` is the model the operator picked to run it on, when the
+    agent's own cannot run here; empty means the default.
 
     Every refusal is collected rather than raised, so a reviewer sees all of
     them at once; :func:`apply` is the one that turns them into an error. An
@@ -942,7 +950,11 @@ def plan(
     agent_uid = bundle.agent.agent_uid or _minted_uid(bundle)
     collision_uid = _installed_agent_uid(collision) if collision else ""
 
-    agent_key, inherited = _resolve_agent_key(bundle, user_id)
+    chosen = agent_key
+    agent_key, inherited, gap = _resolve_agent_key(bundle, user_id, chosen)
+    chosen_gap = _agent_key_gap(chosen, user_id) if chosen else ""
+    if chosen_gap:
+        refusals.append(f"{chosen} cannot run here: {chosen_gap}")
 
     requires = requires_of(bundle.files)
     unmet = unmet_of(
@@ -976,6 +988,8 @@ def plan(
         mutes=_mutes_for(sorted(seen)),
         agent_key=agent_key,
         agent_key_inherited=inherited,
+        agent_key_wanted=requires.agent_key if gap else "",
+        agent_key_gap=gap,
         collision=collision,
         suggested_slug=suggested,
         collision_agent_uid=collision_uid,
@@ -1211,13 +1225,17 @@ def _mute_imported(slug: str, mutes: dict[str, list[str]]) -> None:
             set_muted(slug, kind, name, True)
 
 
-def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool]:
-    """``(agent_key, inherited)`` for the imported agent.
+def _resolve_agent_key(
+    bundle: Bundle, user_id: int, chosen: str = ""
+) -> tuple[str, bool, str]:
+    """``(agent_key, inherited, gap)`` for the imported agent.
 
     The key travels — an agent authored against a local Ollama model says
-    something real about how it was tuned. It is kept when this install knows
-    how to start it, and otherwise falls back to the importer's own active
-    model, which is exactly what ``create`` already does for an unspecified one.
+    something real about how it was tuned. It is kept when this install can
+    start it; otherwise ``gap`` says why not, and the agent runs on ``chosen``
+    (the model the operator picked in the dialog) or else the importer's own
+    active model, which is exactly what ``create`` already does for an
+    unspecified one.
     """
     carried = ""
     for entry in bundle.files:
@@ -1225,16 +1243,19 @@ def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool]:
             meta, _ = parse_frontmatter(entry.text)
             carried = str((meta or {}).get("agent_key") or "")
             break
-    if carried and _agent_key_known(carried, user_id):
-        return carried, False
+    gap = _agent_key_gap(carried, user_id) if carried else ""
+    if chosen:
+        return chosen, chosen != carried, gap
+    if carried and not gap:
+        return carried, False, ""
     fallback = _active_agent_key(user_id)
     if fallback:
-        return fallback, True
-    return carried, False
+        return fallback, True, gap
+    return carried, False, gap
 
 
-def _agent_key_known(agent_key: str, user_id: int) -> bool:
-    """True when this install knows how to start ``agent_key``.
+def _agent_key_gap(agent_key: str, user_id: int) -> str:
+    """Why this install cannot start ``agent_key``, or ``""`` when it can.
 
     Catalog membership, then whether that provider is set up here at all (its
     cloud key set, its bridge installed) — not a live probe: resolving a model
@@ -1245,7 +1266,7 @@ def _agent_key_known(agent_key: str, user_id: int) -> bool:
     actually has that endpoint saved.
     """
     from condor.llm.options import AGENT_OPTIONS, selectable_agent_options
-    from condor.llm.readiness import base_of, provider_present
+    from condor.llm.readiness import base_of, provider_gap
 
     base = base_of(agent_key)
     if agent_key not in selectable_agent_options():
@@ -1255,13 +1276,13 @@ def _agent_key_known(agent_key: str, user_id: int) -> bool:
             base_url, _ = resolve_custom_endpoint(
                 agent_key, user_id=user_id, env_fallback=False
             )
-            return bool(base_url)
+            return "" if base_url else "no saved endpoint by that name"
         if f"{base}:" not in AGENT_OPTIONS:
-            return False
+            return "not a model this install offers"
     # An author's openrouter:* model on an install without OPENROUTER_API_KEY,
     # or their copilot on one without the bridge, would only fail at the first
-    # chat — the importer's own model runs.
-    return provider_present(base)
+    # chat.
+    return provider_gap(base)
 
 
 def _active_agent_key(user_id: int) -> str:

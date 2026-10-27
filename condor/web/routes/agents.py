@@ -961,6 +961,8 @@ class HubInstallRequest(BaseModel):
 
     as_slug: str = ""
     version: str = "latest"
+    #: The model to run it on when its own cannot run here; empty = the default.
+    agent_key: str = ""
 
 
 class PublishAgentRequest(BaseModel):
@@ -3096,6 +3098,7 @@ async def preview_agent_import(
 async def import_agent(
     file: UploadFile = File(...),
     as_slug: str = Form(""),
+    agent_key: str = Form(""),
     user: WebUser = Depends(get_current_user),
 ):
     """Register the agent in this bundle, with its code switched off.
@@ -3114,6 +3117,7 @@ async def import_agent(
         user_id=user.id,
         available_connectors=connectors,
         available_tools=tools,
+        agent_key=agent_key,
     )
     try:
         return agent_bundle.apply(plan, user_id=user.id)
@@ -5199,7 +5203,9 @@ async def _hub_bundle(slug: str, version: str, user: WebUser):
     return listing, fetched, bundle
 
 
-async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
+async def _hub_plan(
+    slug: str, version: str, as_slug: str, user: WebUser, agent_key: str = ""
+):
     """Which verb this agent version is, and the plan for it. Writes nothing.
 
     The choice is FEAT-133's ``is_update``, not a comparison this layer makes:
@@ -5219,6 +5225,7 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
         user_id=user.id,
         available_connectors=connectors,
         available_tools=tools,
+        agent_key=agent_key,
     )
     if plan.is_update:
         return (
@@ -5342,6 +5349,7 @@ async def install_from_hub(
         (req.version if req else "") or "latest",
         (req.as_slug if req else ""),
         user,
+        (req.agent_key if req else ""),
     )
     try:
         if verb == "update":

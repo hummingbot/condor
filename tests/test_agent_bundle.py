@@ -993,6 +993,8 @@ def test_an_author_model_this_install_has_no_key_for_falls_back_to_yours(
 
     assert import_plan.agent_key == "claude-acp:sonnet"
     assert import_plan.agent_key_inherited is True
+    assert import_plan.agent_key_wanted == "openrouter:deepseek/deepseek-v4.1-flash"
+    assert import_plan.agent_key_gap == "needs OPENROUTER_API_KEY in .env"
 
 
 def test_an_author_model_this_install_can_run_is_kept(traveller, monkeypatch):
@@ -1006,6 +1008,7 @@ def test_an_author_model_this_install_can_run_is_kept(traveller, monkeypatch):
 
     assert import_plan.agent_key == "openrouter:deepseek/deepseek-v4.1-flash"
     assert import_plan.agent_key_inherited is False
+    assert import_plan.agent_key_wanted == ""
 
 
 def test_an_author_bridge_that_is_not_installed_falls_back_to_yours(
@@ -1024,3 +1027,36 @@ def test_an_author_bridge_that_is_not_installed_falls_back_to_yours(
 
     assert import_plan.agent_key == "claude-acp:sonnet"
     assert import_plan.agent_key_inherited is True
+
+
+def test_the_model_the_operator_picks_is_the_one_it_lands_with(traveller, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "condor.preferences.get_active_agent_key", lambda uid: "claude-acp:sonnet"
+    )
+    monkeypatch.setattr(
+        "condor.llm.readiness.npx_packages_installed",
+        lambda: {"@agentclientprotocol/codex-acp"},
+    )
+
+    bundle = _bundle_asking_for(traveller, "openrouter:deepseek/deepseek-v4.1-flash")
+    import_plan = ab.plan(bundle, as_slug="arrival", user_id=7, agent_key="codex")
+    assert import_plan.agent_key == "codex"
+    assert import_plan.refusals == []
+
+    ab.apply(import_plan, user_id=7)
+    meta, _ = parse_frontmatter((agent_home("arrival") / "AGENT.md").read_text("utf-8"))
+    assert meta["agent_key"] == "codex"
+
+
+def test_a_picked_model_that_cannot_run_here_is_refused(traveller, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    import_plan = ab.plan(
+        _bundle_for(traveller),
+        as_slug="arrival",
+        user_id=7,
+        agent_key="openrouter:deepseek/deepseek-v4.1-flash",
+    )
+
+    assert any("OPENROUTER_API_KEY" in r for r in import_plan.refusals)

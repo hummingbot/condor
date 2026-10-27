@@ -46,6 +46,8 @@ const PLAN: AgentImportPlan = {
   mutes: { routines: ["r"], skills: ["s"] },
   agent_key: "claude-code",
   agent_key_inherited: false,
+  agent_key_wanted: "",
+  agent_key_gap: "",
   collision: "",
   suggested_slug: "",
   collision_agent_uid: "",
@@ -156,21 +158,44 @@ const UPDATE: AgentUpdatePlan = {
   warnings: [],
 };
 
+/** The models this install can start, as the chat's model picker lists them. */
+const SESSION_OPTIONS = {
+  agents: [
+    { key: "claude-code", label: "Claude Code", ready: true },
+    { key: "codex", label: "Codex", ready: true },
+    { key: "copilot", label: "GitHub Copilot", ready: false },
+    { key: "openrouter:", label: "OpenRouter…", picker: true },
+  ],
+  custom_providers: [],
+  default_agent: "claude-code",
+  servers: [],
+  agent_bindings: [],
+};
+
 let container: HTMLDivElement;
 let root: Root;
 let posts: { url: string; asSlug: string }[] = [];
+/** The `agent_key` each import post carried, when it carried one. */
+let agentKeys: string[] = [];
 let reply: AgentImportPlan = PLAN;
 let updateReply: AgentUpdatePlan = UPDATE;
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   posts = [];
+  agentKeys = [];
   reply = PLAN;
   updateReply = UPDATE;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/sessions/options")) {
+        return new Response(JSON.stringify(SESSION_OPTIONS), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       const body = init?.body as FormData;
+      if (body.get("agent_key")) agentKeys.push(String(body.get("agent_key")));
       posts.push({ url, asSlug: String(body.get("as_slug") ?? "") });
       // The update pair answers a different shape, and the dialog must not be
       // able to render one as the other.
@@ -617,4 +642,45 @@ it("shows a different build of the same version as a warning, with the diff", as
   ).toContain("same as the one installed");
   expect(container.querySelectorAll("[data-update-file]").length).toBe(5);
   expect(button("Update traveller").disabled).toBe(false);
+});
+
+it("says when the agent's own model can't run here, and installs on the one picked", async () => {
+  reply = {
+    ...PLAN,
+    agent_key: "claude-code",
+    agent_key_inherited: true,
+    agent_key_wanted: "openrouter:deepseek/deepseek-v4.1-flash",
+    agent_key_gap: "needs OPENROUTER_API_KEY in .env",
+  };
+  await render();
+  await choose();
+
+  const choice = container.querySelector("[data-model-choice]");
+  expect(choice?.textContent).toContain("openrouter:deepseek/deepseek-v4.1-flash");
+  expect(choice?.textContent).toContain("needs OPENROUTER_API_KEY in .env");
+  const select = container.querySelector("select[aria-label=Model]") as HTMLSelectElement;
+  // Only what this install can start: no unready bridge, no picker sentinel.
+  expect([...select.options].map((o) => o.value)).toEqual(["claude-code", "codex"]);
+  expect(select.value).toBe("claude-code");
+
+  await act(async () => {
+    select.value = "codex";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => {
+    button("Import traveller").click();
+  });
+
+  expect(agentKeys).toEqual(["codex"]);
+});
+
+it("sends no model when the agent's own runs here", async () => {
+  await render();
+  await choose();
+  expect(container.querySelector("[data-model-choice]")).toBeNull();
+
+  await act(async () => {
+    button("Import traveller").click();
+  });
+  expect(agentKeys).toEqual([]);
 });

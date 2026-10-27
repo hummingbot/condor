@@ -40,7 +40,8 @@ export interface BundleSource {
   /** Identity of this source. A change re-previews from scratch. */
   key: string;
   preview(asSlug: string): Promise<BundlePreview>;
-  install(asSlug: string): Promise<AgentImportPlan>;
+  /** `agentKey`: the model to run it on when its own can't run here. */
+  install(asSlug: string, agentKey?: string): Promise<AgentImportPlan>;
   previewUpdate(slug: string): Promise<AgentUpdatePlan>;
   applyUpdate(slug: string): Promise<AgentUpdatePlan>;
 }
@@ -53,7 +54,7 @@ export function fileSource(file: File): BundleSource {
       verb: "install",
       plan: await api.previewAgentImport(file, asSlug),
     }),
-    install: (asSlug) => api.importAgent(file, asSlug),
+    install: (asSlug, agentKey) => api.importAgent(file, asSlug, agentKey),
     previewUpdate: (slug) => api.previewAgentUpdate(slug, file),
     applyUpdate: (slug) => api.updateAgentFromBundle(slug, file),
   };
