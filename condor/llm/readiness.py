@@ -264,6 +264,31 @@ def outdated_bridge(cmd: str) -> dict | None:
     return {"installed": f"{name} {version}".strip(), "fix": " && ".join(steps)}
 
 
+def _bridge_installed(cmd: str, npx_packages: set[str]) -> bool:
+    """A bridge launched as ``npx <package> …`` needs the package installed; a
+    bare command needs to be on PATH."""
+    parts = cmd.split()
+    if not parts:
+        return False
+    if parts[0] == "npx":
+        return len(parts) > 1 and parts[1] in npx_packages
+    return shutil.which(parts[0]) is not None
+
+
+def provider_present(base: str) -> bool:
+    """Is this provider set up here at all: a cloud key in the environment, a
+    bridge installed? Cheap and offline — no login probe, no server ping — so an
+    import can ask it. An unproven login or a stopped local server still counts
+    as present, by the same rule that never lets those refuse a pick."""
+    if base in CLOUD_KEY_ENVS:
+        return bool(os.environ.get(CLOUD_KEY_ENVS[base]))
+    cmd = ACP_COMMANDS.get(base)
+    if cmd is not None:
+        packages = npx_packages_installed() if cmd.startswith("npx ") else set()
+        return _bridge_installed(cmd, packages)
+    return True
+
+
 def acp_bridges() -> list[dict]:
     """ACP CLI bridges: whether each is installed, and whether it is logged in.
 
@@ -275,13 +300,7 @@ def acp_bridges() -> list[dict]:
     npx_packages = npx_packages_installed()
     out: list[dict] = []
     for base, cmd in ACP_COMMANDS.items():
-        parts = cmd.split()
-        if not parts:
-            available = False
-        elif parts[0] == "npx":
-            available = parts[1] in npx_packages if len(parts) > 1 else False
-        else:
-            available = shutil.which(parts[0]) is not None
+        available = _bridge_installed(cmd, npx_packages)
         out.append(
             {
                 "agent_key": base,

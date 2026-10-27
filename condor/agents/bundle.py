@@ -1236,27 +1236,32 @@ def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool]:
 def _agent_key_known(agent_key: str, user_id: int) -> bool:
     """True when this install knows how to start ``agent_key``.
 
-    Catalog membership, not a live probe: resolving a model here would shell out
-    to every bridge on an import, and a bridge that happens to be logged out is
-    not a reason to rewrite the agent's model. A family key
+    Catalog membership, then whether that provider is set up here at all (its
+    cloud key set, its bridge installed) — not a live probe: resolving a model
+    would shell out to every bridge on an import, and a bridge that happens to
+    be logged out is not a reason to rewrite the agent's model. A family key
     (``ollama:<model>``, ``openrouter:<model>``) counts when the family is in
     the catalog; a ``custom@<endpoint>:<model>`` counts when the importer
     actually has that endpoint saved.
     """
     from condor.llm.options import AGENT_OPTIONS, selectable_agent_options
-    from condor.llm.readiness import base_of
+    from condor.llm.readiness import base_of, provider_present
 
-    if agent_key in selectable_agent_options():
-        return True
     base = base_of(agent_key)
-    if base == "custom":
-        from condor.preferences import resolve_custom_endpoint
+    if agent_key not in selectable_agent_options():
+        if base == "custom":
+            from condor.preferences import resolve_custom_endpoint
 
-        base_url, _ = resolve_custom_endpoint(
-            agent_key, user_id=user_id, env_fallback=False
-        )
-        return bool(base_url)
-    return f"{base}:" in AGENT_OPTIONS
+            base_url, _ = resolve_custom_endpoint(
+                agent_key, user_id=user_id, env_fallback=False
+            )
+            return bool(base_url)
+        if f"{base}:" not in AGENT_OPTIONS:
+            return False
+    # An author's openrouter:* model on an install without OPENROUTER_API_KEY,
+    # or their copilot on one without the bridge, would only fail at the first
+    # chat — the importer's own model runs.
+    return provider_present(base)
 
 
 def _active_agent_key(user_id: int) -> str:
