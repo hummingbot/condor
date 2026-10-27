@@ -660,13 +660,16 @@ it("says when the agent's own model can't run here, and installs on the one pick
   expect(choice?.textContent).toContain("needs OPENROUTER_API_KEY in .env");
   const select = container.querySelector("select[aria-label=Model]") as HTMLSelectElement;
   // Only what this install can start: no unready bridge, no picker sentinel.
-  expect([...select.options].map((o) => o.value)).toEqual(["claude-code", "codex"]);
-  expect(select.value).toBe("claude-code");
+  expect([...select.options].map((o) => o.value)).toEqual(["", "claude-code", "codex"]);
+  // Nothing is picked for them, and Import waits until something is.
+  expect(select.value).toBe("");
+  expect(button("Import traveller").disabled).toBe(true);
 
   await act(async () => {
     select.value = "codex";
     select.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  expect(button("Import traveller").disabled).toBe(false);
   await act(async () => {
     button("Import traveller").click();
   });

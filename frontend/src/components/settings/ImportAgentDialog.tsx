@@ -161,15 +161,15 @@ export function ImportAgentDialog({
    */
   const latest = useRef(0);
   /**
-   * The model it will run on, when its own can't run here: the plan's
-   * fallback (the operator's model) until they pick another of the ones this
-   * install can start — the same list as the chat's model picker.
+   * The model it will run on, when its own can't run here. Nothing until the
+   * operator picks one of the models this install can start — the same list
+   * as the chat's model picker — and Import waits for that pick.
    */
   const [model, setModel] = useState("");
   const [models, setModels] = useState<ChatAgentOption[]>([]);
   const wanted = plan?.agent_key_wanted ?? "";
   useEffect(() => {
-    setModel(plan?.agent_key ?? "");
+    setModel(plan?.agent_key_wanted ? "" : (plan?.agent_key ?? ""));
   }, [plan]);
   useEffect(() => {
     if (!wanted) return;
@@ -178,10 +178,7 @@ export function ImportAgentDialog({
       .then((options) => setModels(options.agents.filter((o) => !o.picker && o.ready !== false)))
       .catch(() => setModels([]));
   }, [wanted]);
-  const modelChoices =
-    model && !models.some((o) => o.key === model)
-      ? [{ key: model, label: model }, ...models]
-      : models;
+  const modelChoices = models;
 
   function reset() {
     setPlan(null);
@@ -296,7 +293,9 @@ export function ImportAgentDialog({
     }
   }
 
-  const blocked = plan ? plan.refusals.length > 0 || plan.collision !== "" : false;
+  const blocked = plan
+    ? plan.refusals.length > 0 || plan.collision !== "" || (wanted !== "" && !model)
+    : false;
 
   return (
     <div className="space-y-4">
@@ -558,6 +557,9 @@ export function ImportAgentDialog({
                     onChange={(e) => setModel(e.target.value)}
                     className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
                   >
+                    <option value="" disabled>
+                      Choose a model…
+                    </option>
                     {modelChoices.map((o) => (
                       <option key={o.key} value={o.key}>
                         {o.label}
