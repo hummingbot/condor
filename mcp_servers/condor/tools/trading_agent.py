@@ -394,6 +394,35 @@ def _upgrade_agent(agent_slug: str, path: str) -> dict:
         return {"error": str(exc), "preview": plan.summary()}
 
 
+def _hub_browse(query: str, page: int) -> dict:
+    """One page of Botcamp's published agents, newest first (BUG-7).
+
+    The PR #111 catalogue endpoint this calls through (``condor.hub.browse``)
+    came after ``_hub_get``'s docstring was written, which is why that one
+    still says "there is no browse or search" — this is the missing other
+    half, the same ``GET /hub/catalogue`` the web dashboard's Hub tab reads.
+    Pulling one of the results is still ``hub_get``/``hub_install`` by slug;
+    this only says which slugs exist.
+    """
+    from condor import hub
+
+    try:
+        # The admin's token only for the admin (SEC review C4): it carries
+        # whatever their Botcamp account bought or joined.
+        entries = hub.browse(query, page, hub.token() if _caller_is_admin() else "")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {
+        "listings": [e.model_dump() for e in entries],
+        "page": page,
+        "trust": (
+            "Only an approved version is ever listed here, but that is a gate "
+            "on the catalogue, not a security boundary. Whatever you install "
+            "arrives muted and unstarted, and the review on install is the gate."
+        ),
+    }
+
+
 def _hub_get(slug: str) -> dict:
     """One Botcamp agent's catalogue entry, as rows to read out (FEAT-146).
 
@@ -610,6 +639,8 @@ def _manage_agent(
     notes: str | None = None,
     author_name: str | None = None,
     acknowledge: list[str] | None = None,
+    query: str | None = None,
+    page: int | None = None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -727,12 +758,12 @@ def _manage_agent(
             return {"error": "path (the newer bundle file) is required"}
         return _upgrade_agent(agent_slug, path)
 
+    if action == "hub_browse":
+        return _hub_browse(query or "", page or 1)
+
     if action == "hub_get":
         if not path:
             return {"error": "path (the Botcamp agent slug to look up) is required"}
-        # ``path`` carries the slug: there is no browse/search endpoint on
-        # Botcamp (PR #111), only a lookup by a slug the caller must already
-        # know.
         return _hub_get(path)
 
     if action == "hub_install":
@@ -1126,6 +1157,10 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="upgrade", agent_slug=..., path=...)',
     ),
+    "hub_browse": (
+        "manage_agents",
+        'manage_agents(action="hub_browse", query=..., page=...)',
+    ),
     "hub_get": (
         "manage_agents",
         'manage_agents(action="hub_get", path=<agent slug>)',
@@ -1186,10 +1221,12 @@ _AGENT_ACTIONS = {
     "export": "export_agent",
     "import": "import_agent",
     "upgrade": "upgrade_agent",
-    # The hub's three (FEAT-146). Spelled with their prefix even in the short
-    # table: "get" and "install" on their own would read as local verbs, and
-    # ``publish`` is already taken by the publish-to-stock action — which is a
-    # different act entirely, writing into this repo's tracked library.
+    # The hub's four (FEAT-146, BUG-7). Spelled with their prefix even in the
+    # short table: "get"/"install"/"browse" on their own would read as local
+    # verbs, and ``publish`` is already taken by the publish-to-stock action
+    # — which is a different act entirely, writing into this repo's tracked
+    # library.
+    "hub_browse": "hub_browse",
     "hub_get": "hub_get",
     "hub_install": "hub_install",
     "publish_hub": "publish_hub",
@@ -1249,6 +1286,8 @@ def manage_agents(
     notes: str | None = None,
     author_name: str | None = None,
     acknowledge: list[str] | None = None,
+    query: str | None = None,
+    page: int | None = None,
 ) -> dict:
     resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
     if err:
@@ -1270,6 +1309,8 @@ def manage_agents(
         notes,
         author_name,
         acknowledge,
+        query,
+        page,
     )
 
 

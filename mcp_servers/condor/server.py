@@ -809,6 +809,7 @@ async def manage_agents(
         "export",
         "import",
         "upgrade",
+        "hub_browse",
         "hub_get",
         "hub_install",
         "publish_hub",
@@ -836,6 +837,8 @@ async def manage_agents(
     notes: str | None = None,
     author_name: str | None = None,
     acknowledge: list[str] | None = None,
+    query: str | None = None,
+    page: int | None = None,
 ) -> dict:
     """Create and edit agent identities (.condor/agents/{slug}/AGENT.md).
 
@@ -898,9 +901,11 @@ async def manage_agents(
       agent's upstream, when the bundle is older, for an agent the repo ships,
       and while a loop is running: read `blockers` back verbatim. On success
       read `files` back — a conflict is content nobody else can reproduce.
+    - "hub_browse": One page of Botcamp's published agents, newest first
+      (`query` narrows it, `page` pages through — both optional). This only
+      says which slugs exist; pull one with "hub_get"/"hub_install" by slug.
     - "hub_get": Look up one Botcamp agent by slug (requires `path` = the
-      agent's slug on Botcamp — there is no browse or search; the caller must
-      already know the slug). No account needed for a free agent; a linked
+      agent's slug on Botcamp). No account needed for a free agent; a linked
       Botcamp profile's token is what resolves one gated behind a membership
       or purchase. Only an APPROVED version is ever listed — that is a gate on
       the catalogue, not a security boundary; it is not a signature, Condor
@@ -970,6 +975,9 @@ async def manage_agents(
         acknowledge: For "export" and "publish_hub" — fingerprints from a
             previous call's `possible_keys` that the USER confirmed are not
             keys. Only ever the ones they named.
+        query: For "hub_browse" — search text. Empty lists every published
+            agent.
+        page: For "hub_browse" — 1-based page number. Default 1.
 
     Returns:
         Action-specific result dict.
@@ -989,6 +997,8 @@ async def manage_agents(
         notes=notes,
         author_name=author_name,
         acknowledge=acknowledge,
+        query=query,
+        page=page,
     )
 
 

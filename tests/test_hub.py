@@ -2761,6 +2761,23 @@ def test_the_publish_route_refuses_an_agent_that_does_not_exist(fake_hub):
 # ── The chat/MCP door ────────────────────────────────────────────────────
 
 
+def test_manage_agents_browses_the_hub_catalogue(fake_hub):
+    """BUG-7: the chat door had no catalogue browse at all — only a lookup
+    by a slug the caller had to already know — even though PR #111's
+    catalogue endpoint (``condor.hub.browse``) existed and the web dashboard
+    already read it.
+    """
+    from mcp_servers.condor.tools import trading_agent
+
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(_entry("grid-bot"))
+
+    result = trading_agent.manage_agents(action="hub_browse")
+
+    assert result["listings"][0]["slug"] == "grid-bot"
+    assert result["page"] == 1
+    assert "not a security boundary" in result["trust"]
+
+
 def test_manage_agents_gets_one_hub_agent(fake_hub):
     from mcp_servers.condor.tools import trading_agent
 
