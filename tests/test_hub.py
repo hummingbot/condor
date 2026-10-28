@@ -303,8 +303,8 @@ class FakeHub:
                 {
                     "device_code": "dev_test",
                     "user_code": "WXYZ-4821",
-                    "verification_uri": "https://dev.botcamp.xyz/connect",
-                    "verification_uri_complete": "https://dev.botcamp.xyz/connect?code=WXYZ-4821",
+                    "verification_uri": "https://www.botcamp.xyz/connect",
+                    "verification_uri_complete": "https://www.botcamp.xyz/connect?code=WXYZ-4821",
                     "expires_in": 600,
                     "interval": 5,
                 }
@@ -347,7 +347,7 @@ def _missing() -> hub.Reply:
 #: `CONDOR_HUB_DEV_MODE`/`CONDOR_HUB_DEV_URL` override (pointing this install
 #: at a LAN hub), and a suite whose expected URLs move with it would pass or
 #: fail on local config rather than on the code.
-HUB_BASE = "https://dev.botcamp.xyz/api"
+HUB_BASE = "https://www.botcamp.xyz/api"
 
 
 @pytest.fixture
@@ -436,7 +436,7 @@ def test_no_environment_variable_redirects_the_hub():
         check=True,
         env={**_base_env(), **env},
     )
-    assert done.stdout.strip() == "https://dev.botcamp.xyz/api"
+    assert done.stdout.strip() == "https://www.botcamp.xyz/api"
     assert "127.0.0.1" not in done.stdout
 
 
@@ -507,7 +507,7 @@ def test_dev_mode_flag_without_a_url_changes_nothing():
         check=True,
         env={**_base_env(), "CONDOR_HUB_DEV_MODE": "1"},
     )
-    assert done.stdout.strip() == "https://dev.botcamp.xyz/api"
+    assert done.stdout.strip() == "https://www.botcamp.xyz/api"
 
 
 def _base_env() -> dict:
@@ -1309,7 +1309,7 @@ def test_the_token_survives_a_save_and_a_fresh_load(cm):
     reloaded = cm_module.ConfigManager(config_path=str(cm.config_path))
     assert reloaded.get_hub() == {
         "token": "botcamp-tok",
-        "token_origin": "https://dev.botcamp.xyz",
+        "token_origin": "https://www.botcamp.xyz",
     }
 
 
@@ -1477,7 +1477,7 @@ def test_device_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
     assert fake_hub.calls[-1].token == ""
     assert fake_hub.calls[-1].body == {}
     assert code.user_code == "WXYZ-4821"
-    assert code.approval_url == "https://dev.botcamp.xyz/connect"
+    assert code.approval_url == "https://www.botcamp.xyz/connect"
     assert hub._pending_device["device_code"] == "dev_test"
 
 
@@ -1507,7 +1507,7 @@ def _hostile_code(**over) -> object:
     [
         pytest.param({}, id="both-hostile"),
         pytest.param(
-            {"verification_uri": "https://dev.botcamp.xyz/connect"},
+            {"verification_uri": "https://www.botcamp.xyz/connect"},
             id="only-complete-hostile",
         ),
         pytest.param(
@@ -1527,7 +1527,7 @@ def test_a_hostile_device_code_reply_never_reaches_the_browser(
     with caplog.at_level(logging.WARNING, logger="condor.hub"):
         started = hub.device_start()
 
-    safe = "https://dev.botcamp.xyz/connect"
+    safe = "https://www.botcamp.xyz/connect"
     assert started.approval_url == safe
     assert "evil.example" not in started.model_dump_json()
 
@@ -1549,14 +1549,14 @@ def test_an_ordinary_same_origin_reply_logs_no_mismatch(fake_hub, caplog):
     with caplog.at_level(logging.WARNING, logger="condor.hub"):
         started = hub.device_start()
 
-    assert started.approval_url == "https://dev.botcamp.xyz/connect"
+    assert started.approval_url == "https://www.botcamp.xyz/connect"
     assert not [r for r in caplog.records if "not this install's hub" in r.message]
 
 
 @pytest.mark.parametrize(
     "hub_url, expected",
     [
-        ("https://dev.botcamp.xyz/api", "https://dev.botcamp.xyz/connect"),
+        ("https://www.botcamp.xyz/api", "https://www.botcamp.xyz/connect"),
         # A dev hub: scheme, host *and port* survive; `/api` does not.
         ("http://masiva.local:3000/api", "http://masiva.local:3000/connect"),
     ],
@@ -1612,7 +1612,7 @@ def test_device_state_reports_pending_with_the_user_code_and_link(fake_hub):
 
     assert state.status == "pending"
     assert state.user_code == "WXYZ-4821"
-    assert state.approval_url == "https://dev.botcamp.xyz/connect"
+    assert state.approval_url == "https://www.botcamp.xyz/connect"
 
 
 def test_device_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
@@ -1741,7 +1741,7 @@ def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, 
     reloaded = cm_module.ConfigManager(config_path=str(cm.config_path))
     assert reloaded.get_hub() == {
         "token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
-        "token_origin": "https://dev.botcamp.xyz",
+        "token_origin": "https://www.botcamp.xyz",
         "profile_handle": "cardosofede",
         "scope": ["agents:read", "agents:publish"],
         "user": {"id": "u_1", "name": "cardosofede"},
@@ -1845,8 +1845,8 @@ def test_restarting_a_device_login_forgets_the_previous_attempt(fake_hub):
         {
             "device_code": "dev_second",
             "user_code": "ABCD-1234",
-            "verification_uri": "https://dev.botcamp.xyz/connect",
-            "verification_uri_complete": "https://dev.botcamp.xyz/connect?code=ABCD-1234",
+            "verification_uri": "https://www.botcamp.xyz/connect",
+            "verification_uri_complete": "https://www.botcamp.xyz/connect?code=ABCD-1234",
             "expires_in": 600,
             "interval": 5,
         }
@@ -1858,7 +1858,7 @@ def test_restarting_a_device_login_forgets_the_previous_attempt(fake_hub):
     # `device_code` at all — the polling secret stays inside this module
     # (SEC-819), so the swap is read off the tracked attempt.
     assert second.user_code == "ABCD-1234"
-    assert second.approval_url == "https://dev.botcamp.xyz/connect"
+    assert second.approval_url == "https://www.botcamp.xyz/connect"
     assert hub._pending_device["device_code"] == "dev_second" != first_device_code
 
 
@@ -2077,7 +2077,7 @@ def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
     assert started.status_code == 200
     body = started.json()
     assert body["user_code"] == "WXYZ-4821"
-    assert body["approval_url"] == "https://dev.botcamp.xyz/connect"
+    assert body["approval_url"] == "https://www.botcamp.xyz/connect"
     assert "access_token" not in body
 
     pending = client.get("/settings/hub-device")
@@ -2117,7 +2117,7 @@ def test_the_dashboard_routes_never_hand_back_a_hostile_approval_url(
     assert started.status_code == 200
     assert started.json() == {
         "user_code": "WXYZ-4821",
-        "approval_url": "https://dev.botcamp.xyz/connect",
+        "approval_url": "https://www.botcamp.xyz/connect",
         "expires_in": 600,
         "interval": 5,
     }
@@ -2125,7 +2125,7 @@ def test_the_dashboard_routes_never_hand_back_a_hostile_approval_url(
 
     pending = client.get("/settings/hub-device")
     assert pending.json()["status"] == "pending"
-    assert pending.json()["approval_url"] == ("https://dev.botcamp.xyz/connect")
+    assert pending.json()["approval_url"] == ("https://www.botcamp.xyz/connect")
     assert "evil.example" not in pending.text
 
     assert (

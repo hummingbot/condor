@@ -103,17 +103,16 @@ log = logging.getLogger(__name__)
 #: FEAT-144's review as a Python dependency or a reimplementation — is
 #: TASK-004. Changing it is a code change by design.
 #:
-#: Pointed at the **dev** deployment while the hub is being exercised end to
-#: end: ``dev.botcamp.xyz`` is the instance that currently answers these
-#: routes. Bare ``botcamp.xyz`` is not a drop-in replacement — it answers
-#: ``307`` to ``www.botcamp.xyz``, and :class:`_NoRedirect` refuses that, so
-#: moving this to production is a deliberate change made against whichever
-#: host serves the API without a redirect, not a one-token edit. The path
-#: prefix is the same on both: ``/api``, verified on dev for
+#: Pointed at the **production** deployment: ``www.botcamp.xyz`` is the
+#: instance that answers these routes now that ``hummingbot/botcamp-site``'s
+#: ``dev`` branch has merged to ``main``. Bare ``botcamp.xyz`` is not used
+#: here — it answers ``307`` to ``www.botcamp.xyz``, and :class:`_NoRedirect`
+#: refuses that, so this targets the ``www`` host directly rather than the
+#: bare one. The path prefix is unchanged: ``/api``, verified on prod for
 #: ``GET /api/agents``, ``GET /api/agents/{slug}``,
 #: ``GET /api/agents/{slug}/versions/{version}``, ``GET /api/submissions/{id}``
 #: and ``POST /api/condor/device/code``.
-HUB_URL = "https://dev.botcamp.xyz/api"
+HUB_URL = "https://www.botcamp.xyz/api"
 
 #: The compiled-in address, kept apart from :data:`HUB_URL` (which the dev
 #: override below may retarget): a stored token that predates
@@ -618,8 +617,8 @@ def approval_url() -> str:
     (SEC-819, contract §4.1 step 3).
 
     Built from :data:`HUB_URL`'s **origin** — scheme, host and port — because
-    ``HUB_URL`` addresses the API (``https://dev.botcamp.xyz/api``) while the
-    approval page is a page on the site (``https://dev.botcamp.xyz/connect``).
+    ``HUB_URL`` addresses the API (``https://www.botcamp.xyz/api``) while the
+    approval page is a page on the site (``https://www.botcamp.xyz/connect``).
     The dev override is picked up for free, so pointing this install at a LAN
     hub retargets the approval link with it.
 
@@ -747,9 +746,9 @@ def _model(payload: dict, model, what: str):
 # segment, nothing this module invented: ``GET /api/agents?query=&page=``
 # lists the catalogue (:func:`browse`), ``GET /api/agents/{slug}`` is one
 # agent (:func:`get`), ``GET /api/agents/{slug}/versions/{version}`` is a
-# download (:func:`fetch`). The catalogue arrived after the rest, on
-# botcamp-site's ``dev`` branch; until that merges to ``main`` it answers
-# only on the dev deploy, which is what :data:`HUB_URL` addresses.
+# download (:func:`fetch`). The catalogue arrived on botcamp-site's ``dev``
+# branch, which has since merged to ``main`` and answers on the production
+# deploy that :data:`HUB_URL` addresses.
 
 
 def _detail(reply: Reply) -> str:
