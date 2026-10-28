@@ -102,7 +102,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from condor.agents import bundle_review, code_trust
 from condor.frontmatter import parse_frontmatter, render_frontmatter
@@ -295,6 +295,17 @@ class Bundle(BaseModel):
     requires: BundleRequires = Field(default_factory=BundleRequires)
     agent: BundleAgent
     files: list[BundleFile] = Field(default_factory=list)
+
+    #: The review :func:`build` already ran over these same files, cached on
+    #: its way out (BUG-10) so a caller that already holds this exact bundle
+    #: — :func:`condor.hub.publish`, right after — does not run
+    #: ``bundle_review.review`` a second time. Private: never touches the
+    #: wire, since ``render``/``model_dump`` skip pydantic private attributes
+    #: entirely, so nothing about the schema changes. ``None`` for any
+    #: ``Bundle`` not built through :func:`build` (a parsed import, a test
+    #: fixture) — :func:`condor.agents.bundle_review.review` is still the
+    #: single source of truth; this only remembers one already-paid call.
+    _review_findings: list[bundle_review.Finding] | None = PrivateAttr(default=None)
 
 
 class PlannedFile(BaseModel):
@@ -700,6 +711,9 @@ def build(
     if pending:
         raise PossibleKeysError(pending)
     _stamp_bookkeeping(slug, agent_uid, version, digest)
+    # Cached for a caller that already holds this exact bundle (BUG-10) —
+    # see the field's own docstring on ``Bundle``.
+    bundle._review_findings = findings
     return bundle
 
 

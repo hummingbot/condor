@@ -976,6 +976,25 @@ def test_publish_refuses_a_certain_secret_and_sends_nothing(traveller, fake_hub)
     assert fake_hub.calls == []
 
 
+def test_publish_reviews_the_bundle_only_once(traveller, fake_hub, monkeypatch):
+    """BUG-10: build() already runs bundle_review.review over these files;
+    publish() used to run it again just to recompute acknowledged_secrets."""
+    from condor.agents import bundle_review
+
+    calls = []
+    original = bundle_review.review
+
+    def _counting(bundle):
+        calls.append(1)
+        return original(bundle)
+
+    monkeypatch.setattr(bundle_review, "review", _counting)
+
+    hub.publish("traveller", "tok")
+
+    assert len(calls) == 1
+
+
 def test_publish_without_a_token_sends_nothing_and_says_what_to_do(traveller, fake_hub):
     with pytest.raises(hub.HubError) as exc:
         hub.publish("traveller", "   ")

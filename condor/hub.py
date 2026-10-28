@@ -1138,12 +1138,18 @@ def publish(
     bundle = agent_bundle.build(
         slug, notes=notes, author_name=author_name, acknowledged=acknowledged
     )
+    # build() already ran the review over these same files (BUG-10); reuse
+    # it rather than running bundle_review.review a second time. Fall back
+    # to a fresh review for any Bundle that reaches here without one — never
+    # the case for build()'s own return, but the field is None by default.
+    findings = bundle._review_findings
+    if findings is None:
+        findings = bundle_review.review(bundle)
     carried = sorted(
         {
             key.fingerprint
             for key in bundle_review.possible_keys(
-                ((f.path, f.text) for f in bundle.files),
-                bundle_review.review(bundle),
+                ((f.path, f.text) for f in bundle.files), findings
             )
         }
     )
