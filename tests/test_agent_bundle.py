@@ -347,6 +347,22 @@ def test_the_reserved_default_slug_is_refused(traveller):
     assert import_plan.collision == "condor"
 
 
+def test_a_deleted_slug_with_leftover_skills_is_not_a_collision(traveller):
+    bundle = _bundle_for(traveller)
+    assert AgentStore().delete("traveller")
+    # AGENT.md is gone but skills/routines/controllers/loops survive the
+    # delete, so the slug directory itself still exists — the reimport
+    # must judge by AgentStore.get, not by that leftover directory.
+    assert agent_home("traveller").exists()
+    assert AgentStore().get("traveller") is None
+
+    import_plan = ab.plan(bundle, user_id=7)
+    assert import_plan.collision == ""
+    result = ab.apply(import_plan, user_id=7)
+    assert result["imported"] is True
+    assert AgentStore().get("traveller") is not None
+
+
 # ── Apply: what lands, and in what state ──
 
 

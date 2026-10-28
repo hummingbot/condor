@@ -1134,7 +1134,13 @@ def _collision(slug: str) -> tuple[str, str]:
     if slug == CHAT_SLUG:
         return slug, _first_free(slug)
     store = AgentStore()
-    if store.get(slug) is not None or agent_home(slug).exists():
+    # Not a bare ``agent_home(slug).exists()`` check: AgentStore.delete()
+    # intentionally leaves the directory behind when strategies/store survive
+    # it, so a deleted agent's old home would otherwise collide forever with
+    # its own reimport. ``store.get`` is the actual "is something installed
+    # here" answer, through both layers, and a failed import already cleans
+    # its own directory up on the way out.
+    if store.get(slug) is not None:
         return slug, _first_free(slug)
     return "", ""
 
