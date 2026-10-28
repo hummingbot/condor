@@ -1022,10 +1022,11 @@ reviewer accounts (out of scope for this contract; the only requirement is
 that it is never the same bearer value as an author's publish credential,
 and that it cannot be obtained through the device-login flow in §4, which
 only ever grants `agents:read`/`agents:publish` scope — see §4.3's `scope`
-field). The review worker itself — whether
-run by a human directly or orchestrated by MetaBrain on a human's behalf — is
-explicitly out of this Condor-only filing's scope; this section defines only
-the API surface such a worker calls.
+field). The review worker itself — whether run by a human directly or by
+automation acting on a human's behalf — is explicitly out of this
+Condor-only filing's scope (the hub is a separate codebase the Condor team
+may not deploy into, §10); this section defines only the API surface such a
+worker calls.
 
 ### 7.2 `GET /v1/review/queue?page=`
 
@@ -1241,10 +1242,10 @@ someone reads this contract wondering why it looks the way it does.
   verdict. Rejected because an AI judgment is not reproducible the way §6's
   two checks are, and because the one thing a `"validated"` badge needs to
   mean is "a human looked at this," not "a model scored this below a
-  threshold." The AI pass (however it is built, including a MetaBrain-driven
-  one) feeds the same findings a human reviewer already sees from §6 and
-  from Condor's own `bundle_review`; it does not get its own verdict
-  endpoint, and §7.4 accepts only a human-attributable `decision`.
+  threshold." The AI pass (however the hub builds it) feeds the same findings
+  a human reviewer already sees from §6 and from Condor's own
+  `bundle_review`; it does not get its own verdict endpoint, and §7.4
+  accepts only a human-attributable `decision`.
 
 ---
 
