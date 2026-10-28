@@ -28,6 +28,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1510,6 +1511,28 @@ def test_device_state_is_none_with_nothing_pending_or_linked(cm):
     assert hub.device_state() == hub.DeviceLinkState(status="none")
 
 
+def test_is_linked_never_polls_and_agrees_with_device_state(fake_hub, cm):
+    """``is_linked()`` is the config-only read `/settings/hub-device/linked`
+    uses so a non-admin seat can never drive the pending poll (BUG-3 case
+    A). It must track whatever ``device_state`` would call "linked", off
+    local config alone.
+    """
+    assert hub.is_linked() is False
+
+    hub.device_start()
+    calls_before = len(fake_hub.calls)
+    assert hub.is_linked() is False
+    assert len(fake_hub.calls) == calls_before  # no poll spent
+
+    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+        {"access_token": "bc_live_x", "user": {"name": "cardosofede"}}
+    )
+    _force_poll()
+    hub.device_state()
+
+    assert hub.is_linked() is True
+
+
 def test_device_state_reports_pending_with_the_user_code_and_link(fake_hub):
     hub.device_start()
 
@@ -1591,6 +1614,35 @@ def test_a_successful_poll_stores_the_credential_scope_and_user(fake_hub, cm):
     assert len(fake_hub.calls) == calls_before
 
 
+def test_a_sign_in_with_no_user_identity_still_reads_as_linked(fake_hub, cm):
+    """BUG-6: a reply whose ``user`` carries neither ``name`` nor ``id`` still
+    stores a real, usable token — judging "linked" on a non-empty
+    ``profile_handle`` read that install back as signed out forever even
+    though every later call still sent the stored token.
+    """
+    hub.device_start()
+    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+        {
+            "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
+            "scope": "agents:read agents:publish",
+            "user": {},
+        }
+    )
+    _force_poll()
+
+    state = hub.device_state()
+
+    assert state.status == "linked"
+    assert state.profile_handle == ""
+    assert hub.token() == "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60"
+    assert hub.is_linked() is True
+    # A later read, straight off config, must agree — not fall back to
+    # "none" because the stored handle is empty.
+    calls_before = len(fake_hub.calls)
+    assert hub.device_state().status == "linked"
+    assert len(fake_hub.calls) == calls_before
+
+
 def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, cm):
     """ARCH-738's own criterion, now for the keys the device-login flow adds.
 
@@ -1658,6 +1710,45 @@ def test_invalid_grant_is_reported_as_its_own_distinct_status(fake_hub):
 
     assert hub.device_state().status == "invalid"
     assert hub.device_state().status == "none"
+
+
+def test_overlapping_polls_claim_the_slot_before_dialling_out(fake_hub, monkeypatch):
+    """BUG-3 case B: two ``device_state()`` calls landing close together must
+    never both reach the hub with the same one-time ``device_code`` — the
+    loser would see ``invalid_grant`` and misreport a working sign-in as
+    failed. The second call here starts while the first is still inside its
+    (slowed-down) exchange, and must answer "pending" from the cache rather
+    than dialling out a second time.
+    """
+    hub.device_start()
+    _force_poll()
+
+    entered = []
+    original_send = hub._send
+
+    def _slow_send(method, url, **kwargs):
+        if method == "POST" and url.endswith("/condor/device/token"):
+            entered.append(1)
+            time.sleep(0.1)
+        return original_send(method, url, **kwargs)
+
+    monkeypatch.setattr(hub, "_send", _slow_send)
+
+    results: list[hub.DeviceLinkState] = []
+
+    def _poll():
+        results.append(hub.device_state())
+
+    first = threading.Thread(target=_poll)
+    first.start()
+    time.sleep(0.02)  # let the first call claim the slot and start dialling
+    second = threading.Thread(target=_poll)
+    second.start()
+    first.join()
+    second.join()
+
+    assert len(entered) == 1
+    assert [r.status for r in results] == ["pending", "pending"]
 
 
 def test_the_600s_deadline_expires_locally_without_a_further_hub_call(fake_hub):

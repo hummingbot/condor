@@ -349,7 +349,12 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
           >
             <Check className="h-3.5 w-3.5 text-[var(--color-primary)]" />
             Connected to Botcamp as{" "}
-            <span className="font-mono">{data?.profile_handle}</span>
+            {/* A linked reply with no name or id in its `user` object still
+                holds a real token (BUG-6) — "as <nothing>" would read as
+                broken rather than merely anonymous. */}
+            <span className="font-mono">
+              {data?.profile_handle || "Botcamp account"}
+            </span>
           </p>
           <button
             onClick={() => disconnect.mutate()}

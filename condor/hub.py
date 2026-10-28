@@ -1389,6 +1389,24 @@ def device_start() -> DeviceStart:
     )
 
 
+def is_linked() -> bool:
+    """Whether this install holds a Botcamp token right now. Never polls.
+
+    Local ``config.yml`` only — safe for every signed-in seat to call, not
+    just the admin driving a device-login poll. :func:`device_state` answers
+    the same question but, when nothing is linked yet, also drives the
+    pending poll forward; a non-admin seat calling it for this one bit was
+    BUG-3's case A, stealing the admin's one-time code exchange and reporting
+    the admin's own next poll as ``invalid``.
+
+    ``token()`` alone, never gated on ``profile_handle`` (BUG-6): a reply
+    whose ``user`` carries neither ``name`` nor ``id`` still linked a real
+    token, and judging "linked" by the handle read that install back as
+    signed out forever while every call still carried the stored token.
+    """
+    return bool(token())
+
+
 def device_state() -> DeviceLinkState:
     """This install's current device-login/link state. **Never the credential.**
 
@@ -1411,50 +1429,70 @@ def device_state() -> DeviceLinkState:
     A transition to ``denied``/``expired``/``invalid``/linked is reported for
     exactly the one poll that observed it and then forgotten (the pending
     attempt is cleared).
+
+    The read-check-claim for case 2 all happens under :data:`_device_lock` in
+    one critical section, with an ``in_flight`` flag held until the exchange
+    comes back: two ``device_state()`` calls that land close together — the
+    admin's own cadence, or an overlapping call from another seat before
+    PR #111's read endpoints existed — must never both reach the hub with the
+    same ``device_code``, because that code is single-use and the loser would
+    see ``invalid_grant`` and misreport a working sign-in as failed (BUG-3
+    case B). Rate-limiting on ``last_polled`` alone cannot provide that: two
+    callers can both read it as stale before either writes it back, which is
+    exactly the race this closes.
     """
     section = _section()
-    linked_handle = str(section.get("profile_handle") or "")
-    if linked_handle and token():
+    if token():
+        # token() alone, never gated on profile_handle (BUG-6): see
+        # is_linked's docstring for why a non-empty handle is not required.
         return DeviceLinkState(
             status="linked",
-            profile_handle=linked_handle,
+            profile_handle=str(section.get("profile_handle") or ""),
             scope=list(section.get("scope") or []),
         )
 
+    global _pending_device
     with _device_lock:
-        pending = dict(_pending_device) if _pending_device else None
-    if pending is None:
-        return DeviceLinkState(status="none")
+        pending = _pending_device
+        if pending is None:
+            return DeviceLinkState(status="none")
 
-    now = time.monotonic()
-    if now >= pending["deadline"]:
-        # The 600s device-code deadline: stop polling rather than forever,
-        # and without spending a request on an attempt the hub has already
-        # retired on its own side.
-        _clear_pending_device()
-        return DeviceLinkState(status="expired")
+        now = time.monotonic()
+        if now >= pending["deadline"]:
+            # The 600s device-code deadline: stop polling rather than forever,
+            # and without spending a request on an attempt the hub has already
+            # retired on its own side.
+            _pending_device = None
+            return DeviceLinkState(status="expired")
 
-    def _pending_reply() -> DeviceLinkState:
-        return DeviceLinkState(
-            status="pending",
-            user_code=pending["user_code"],
-            approval_url=pending["approval_url"],
-            expires_at=pending["wall_expires_at"],
+        if pending.get("in_flight") or now - pending["last_polled"] < pending["interval"]:
+            return DeviceLinkState(
+                status="pending",
+                user_code=pending["user_code"],
+                approval_url=pending["approval_url"],
+                expires_at=pending["wall_expires_at"],
+            )
+
+        # Claim this poll slot before releasing the lock and dialling out:
+        # an overlapping caller that arrives before this exchange comes back
+        # must see the claim and answer from the cache, never also spend the
+        # device_code's one-time exchange.
+        pending["last_polled"] = now
+        pending["in_flight"] = True
+        snapshot = dict(pending)
+
+    try:
+        reply = _send(
+            "POST",
+            f"{HUB_URL}/condor/device/token",
+            payload=json.dumps(
+                {"device_code": snapshot["device_code"]}, separators=(",", ":")
+            ).encode("utf-8"),
         )
-
-    if now - pending["last_polled"] < pending["interval"]:
-        return _pending_reply()
-
-    reply = _send(
-        "POST",
-        f"{HUB_URL}/condor/device/token",
-        payload=json.dumps(
-            {"device_code": pending["device_code"]}, separators=(",", ":")
-        ).encode("utf-8"),
-    )
-    with _device_lock:
-        if _pending_device is not None:
-            _pending_device["last_polled"] = now
+    finally:
+        with _device_lock:
+            if _pending_device is not None:
+                _pending_device["in_flight"] = False
 
     if reply.status == 200:
         payload = _decode(reply, "the device token")
@@ -1495,12 +1533,22 @@ def device_state() -> DeviceLinkState:
         payload = _decode(reply, "the device token")
         error = str(payload.get("error") or "")
         if error == "authorization_pending":
-            return _pending_reply()
+            return DeviceLinkState(
+                status="pending",
+                user_code=snapshot["user_code"],
+                approval_url=snapshot["approval_url"],
+                expires_at=snapshot["wall_expires_at"],
+            )
         if error == "slow_down":
             with _device_lock:
                 if _pending_device is not None:
                     _pending_device["interval"] += 5
-            return _pending_reply()
+            return DeviceLinkState(
+                status="pending",
+                user_code=snapshot["user_code"],
+                approval_url=snapshot["approval_url"],
+                expires_at=snapshot["wall_expires_at"],
+            )
         if error == "access_denied":
             _clear_pending_device()
             return DeviceLinkState(status="denied")

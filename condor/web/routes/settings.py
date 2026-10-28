@@ -1389,15 +1389,16 @@ async def get_hub_device_linked(user: WebUser = Depends(get_current_user)):
     purpose (profile handle, a pending user code); this route answers with
     neither, so a non-admin learns only the one bit that unlocks their own
     Pull section.
+
+    Reads local config only, through :func:`condor.hub.is_linked` — never
+    ``device_state``, which also drives a pending poll forward. A non-admin
+    seat calling this while the admin's own device login was mid-flight used
+    to steal the one-time code exchange and report the admin's next poll as
+    ``invalid`` (BUG-3).
     """
     from condor import hub
-    from condor.hub import HubError
 
-    try:
-        state = await asyncio.to_thread(hub.device_state)
-    except HubError as exc:
-        raise _hub_device_refusal(exc) from exc
-    return {"linked": state.status == "linked"}
+    return {"linked": hub.is_linked()}
 
 
 @router.delete("/hub-device")
