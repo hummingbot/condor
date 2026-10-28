@@ -516,6 +516,12 @@ def _make_event_sink(dt: DelegateTask):
 async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
     from condor.agents.agent_run import run_agent_to_completion
+    from condor.runtime.context import delegation_attribution
+
+    # The same owner (and so the same tag) the deed record below is filed
+    # under -- computed before the run starts, not after, because that is the
+    # only string the delegated worker ever has a chance to use (CORR-861).
+    tag = deeds.attribution_tag(deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug))
 
     try:
         dt.result = await asyncio.wait_for(
@@ -525,7 +531,7 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
                 chat_id=dt.chat_id,
                 server_name=dt.server_name,
                 task=dt.task,
-                context="",
+                context=delegation_attribution(tag),
                 event_sink=_make_event_sink(dt),
                 delegate_worker=True,  # background seat: worker framing, no recursion
             ),
