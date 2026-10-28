@@ -11,20 +11,24 @@ here — say, refusing a mute that would empty a profile — lands on both seats
 once instead of drifting between two copies.
 
 A leaf module on purpose. It must import neither ``server.py`` (importing one
-parses argv and builds a ``FastMCP`` singleton as a side effect) nor anything
+parses argv and builds a ``MCPServer`` singleton as a side effect) nor anything
 that builds one — ``mcp_servers/hummingbot_api/__init__.py`` lazy-loads ``main``
 precisely so that the tables stay reachable without waking a server. Hence the
-``FastMCP`` annotation below is a type-checking import only.
+``MCPServer`` annotation below is a type-checking import only, and the one SDK
+import this module needs at runtime is deferred to registration, by which point
+the caller is a server.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, never imported at runtime
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
 
 def parse_profile_flags(default_profile: str) -> tuple[str, tuple[str, ...]]:
@@ -101,8 +105,29 @@ def resolve_profiles(
     }
 
 
+def _surface_errors(fn):
+    """Keep a tool's exception message in the result the model reads.
+
+    MCP SDK >= 2.1 reports any non-SDK exception as a bare
+    ``Error executing tool <name>``. Agents act on the message, so re-raise
+    as the SDK's ToolError, which is passed through verbatim.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
+
+
 def register_tools(
-    server: FastMCP,
+    server: MCPServer,
     tool_profiles: Mapping[str, tuple],
     profile: str,
     muted: Iterable[str] = (),
@@ -119,6 +144,11 @@ def register_tools(
     and a name this profile never mounts is ignored rather than refused: seats
     mount different rings, so "off here, never mounted there" is an ordinary
     difference between seats and not a mistake to report.
+
+    Every tool must be a coroutine function. The SDK runs a sync ``def`` on a
+    worker thread with no running loop, and ``_surface_errors`` awaits what it
+    wraps — so a sync tool is refused here, at startup, rather than discovered
+    on its first call.
     """
     try:
         tools = tool_profiles[profile]
@@ -129,6 +159,8 @@ def register_tools(
         ) from None
     switched_off = set(muted)
     for fn in tools:
+        if not inspect.iscoroutinefunction(fn):
+            raise TypeError(f"MCP tool {fn.__name__!r} must be an async function")
         if fn.__name__ in switched_off:
             continue
-        server.tool()(fn)
+        server.tool()(_surface_errors(fn))

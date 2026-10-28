@@ -6,7 +6,7 @@ export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 # "Entering/Leaving directory" line around every sub-invocation.
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor refresh-codex
+.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor live-backend refresh-codex
 
 # tmux session Condor runs in
 SESSION := condor
@@ -36,6 +36,7 @@ help:
 	@echo "  make status         - Is Condor running?"
 	@echo "  make doctor         - Verify dependencies, config, and Hummingbot API access"
 	@echo "  make doctor AGENT=x - ...and whether agent x's loops can actually trade"
+	@echo "  make live-backend   - Send a real prompt to the loaded local model (opt-in)"
 	@echo "  make test           - Run tests"
 	@echo "  make lint           - Run black + isort"
 
@@ -86,6 +87,19 @@ doctor:
 		[ -s "$$NVM_DIR/nvm.sh" ] && . "$$NVM_DIR/nvm.sh"; \
 		uv run python -m condor.doctor $(if $(AGENT),--agent $(AGENT),) \
 	'
+
+# The only tests that send a real prompt to a local model (tests/test_live_local_backend.py).
+# Deliberately not wired into `doctor`, `test` or `install`: doctor is a
+# reachability report and only GETs /models, which cannot tell a loaded model
+# that still answers from one an SDK bump broke, and a generation costing tens
+# of seconds has no place in an install. Run this after an SDK bump, with a
+# tool-capable model loaded. CONDOR_LIVE_BACKEND_MODEL=ollama:qwen3 picks the
+# agent key (default `ollama:`, the backend's first model), from the environment
+# or as a make variable; both tests skip when nothing answers.
+live-backend:
+	CONDOR_LIVE_BACKEND_CHECK=1 \
+		$(if $(CONDOR_LIVE_BACKEND_MODEL),CONDOR_LIVE_BACKEND_MODEL=$(CONDOR_LIVE_BACKEND_MODEL),) \
+		uv run pytest tests/test_live_local_backend.py
 
 # Builds into dist.new and swaps, exactly as the in-process updater does
 # (utils/updater.build_frontend). vite's `emptyOutDir` would otherwise empty the

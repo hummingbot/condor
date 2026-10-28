@@ -558,6 +558,108 @@ def test_cancel_during_confirmation_preserves_semaphore_permits():
     asyncio.run(_run())
 
 
+# ── a consumer that walks away mid-turn (CORR-714) ──
+
+
+def _answering_client(sem):
+    """A real pydantic-ai run behind a local backend's one-request slot."""
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    client = PydanticAIClient(model="ollama:x")
+    client._agent = Agent(FunctionModel(lambda m, i: ModelResponse([TextPart("hi")])))
+    client._request_semaphore = sem
+    return client
+
+
+def _other_tasks():
+    return asyncio.all_tasks() - {asyncio.current_task()}
+
+
+def test_closing_the_stream_mid_turn_returns_the_slot_at_once():
+    # CORR-714: a WS drop or a page reload stops reading mid-answer. The slot is
+    # process-global per backend, so it must come back when the stream is
+    # closed — not whenever the half-read generator happens to be collected.
+    from condor.acp.client import TextChunk
+
+    async def _run():
+        sem = asyncio.Semaphore(1)
+        client = _answering_client(sem)
+
+        stream = client.prompt_stream("go")
+        async for event in stream:
+            if isinstance(event, TextChunk):
+                assert client._slot_held
+                break
+        await stream.aclose()
+
+        assert not client._slot_held
+        assert not sem.locked()
+        assert not _other_tasks(), "the turn kept running with nobody reading it"
+
+    asyncio.run(_run())
+
+
+def test_dropping_the_stream_mid_turn_returns_the_slot():
+    # No caller closes the stream by hand: a bare ``async for`` that breaks only
+    # drops its reference. That alone must end the turn, cleanly.
+    from condor.acp.client import TextChunk
+
+    async def _run():
+        sem = asyncio.Semaphore(1)
+        client = _answering_client(sem)
+
+        async for event in client.prompt_stream("go"):
+            if isinstance(event, TextChunk):
+                break
+        for _ in range(10):
+            if not _other_tasks():
+                break
+            await asyncio.sleep(0)
+
+        assert not client._slot_held
+        assert not sem.locked()
+        assert not _other_tasks(), "the turn kept running with nobody reading it"
+
+    asyncio.run(_run())
+
+
+def test_cancelling_the_reader_mid_turn_returns_the_slot():
+    # Web Stop cancels the task that is reading the stream, which is waiting on
+    # the model at that moment.
+    from pydantic_ai import Agent
+    from pydantic_ai.models.function import FunctionModel
+
+    async def _run():
+        sem = asyncio.Semaphore(1)
+        client = _answering_client(sem)
+        generating = asyncio.Event()
+
+        async def _slow_model(messages, info):
+            generating.set()
+            await asyncio.sleep(3600)
+
+        client._agent = Agent(FunctionModel(_slow_model))
+
+        async def _read():
+            async for _event in client.prompt_stream("go"):
+                pass
+
+        task = asyncio.create_task(_read())
+        await generating.wait()
+        assert client._slot_held
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=0.5)
+        assert done and task.cancelled()
+
+        assert not client._slot_held
+        assert not sem.locked()
+        assert not _other_tasks(), "the turn kept running with nobody reading it"
+
+    asyncio.run(_run())
+
+
 def test_hold_request_slot_noop_for_cloud_providers():
     # CORR-330: the outer guard is explicit acquire/release now; cloud providers
     # (semaphore None) must still pass straight through it.

@@ -1125,8 +1125,9 @@ export function useChatSocket() {
     closeSocket();
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
-    const url = `${protocol}//${host}/api/v1/ws/chat`;
+    // The page's own origin in dev too: Vite proxies `/api` sockets to
+    // whichever backend it was started against (vite.config.ts).
+    const url = `${protocol}//${window.location.host}/api/v1/ws/chat`;
 
     // Pass the JWT via the Sec-WebSocket-Protocol subprotocol header instead of
     // the URL query string, so it never leaks via proxy logs or history.

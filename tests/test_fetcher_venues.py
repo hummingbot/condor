@@ -29,12 +29,17 @@ Condor cannot chart, or the user picks one and gets an empty chart.
 """
 
 import asyncio
-import time
 
 import pytest
 
 from condor.fetchers.connectors import fetch_venues
 from condor.pool_data import network_has_clmm
+
+#: How long one venue source waits for its sibling before deciding it is not
+#: coming. Only ever reached by a *serial* fetch, so it bounds the failure rather
+#: than the success -- a gathered one releases as soon as the second source
+#: arrives, however loaded the machine is.
+RENDEZVOUS_TIMEOUT = 0.5
 
 
 class FakeClient:
@@ -51,9 +56,17 @@ class FakeClient:
         candles_error=None,
         gateway_delay=0.0,
         candle_delay=0.0,
+        rendezvous=0,
     ):
         self.gateway_calls = 0
         self.candle_calls = 0
+        # ``rendezvous`` makes the gather provable instead of merely likely: each
+        # source blocks until that many are in flight at once, which a serial
+        # fetcher can never satisfy. Off by default, so every other test keeps the
+        # plain delay path.
+        self._barrier = asyncio.Barrier(rendezvous) if rendezvous else None
+        self.in_flight = 0
+        self.max_in_flight = 0
         self.gateway = self._Gateway(self)
         self.accounts = self._Accounts(self)
         self.connectors = self._Connectors(self)
@@ -75,14 +88,30 @@ class FakeClient:
         self._gateway_delay = gateway_delay
         self._candle_delay = candle_delay
 
+    async def _wait(self, delay):
+        """Count this source as in flight, then wait for its sibling or the clock.
+
+        The barrier releases only once both sources have been counted, so the
+        high-water mark a test reads is an observation of overlap and not of
+        duration.
+        """
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self._barrier is not None:
+                await asyncio.wait_for(self._barrier.wait(), RENDEZVOUS_TIMEOUT)
+            elif delay:
+                await asyncio.sleep(delay)
+        finally:
+            self.in_flight -= 1
+
     class _Gateway:
         def __init__(self, outer):
             self._outer = outer
 
         async def list_networks(self):
             self._outer.gateway_calls += 1
-            if self._outer._gateway_delay:
-                await asyncio.sleep(self._outer._gateway_delay)
+            await self._outer._wait(self._outer._gateway_delay)
             if self._outer._networks_error is not None:
                 raise self._outer._networks_error
             return self._outer._networks
@@ -111,8 +140,7 @@ class FakeClient:
 
         async def get_available_candle_connectors(self):
             self._outer.candle_calls += 1
-            if self._outer._candle_delay:
-                await asyncio.sleep(self._outer._candle_delay)
+            await self._outer._wait(self._outer._candle_delay)
             if self._outer._candles_error is not None:
                 raise self._outer._candles_error
             if self._outer._candles is None:
@@ -485,22 +513,54 @@ def test_rejects_an_unsafe_account_name():
 
 
 def test_the_gateway_and_candle_sources_are_awaited_concurrently():
-    delay = 0.2
+    """Asserted by rendezvous rather than by the clock.
+
+    The wall-clock form (``elapsed < delay * 1.5``) measured the machine as much
+    as the gather, and is the expression
+    ``test_three_slow_servers_are_all_in_flight_at_once`` already dropped for
+    passing alone and failing under a loaded full suite. Here each source blocks
+    until the other has arrived, so a serial fetch cannot reach the assertion at
+    all and a slow one still can.
+    """
     client = FakeClient(
         credentials=["binance"],
         available=["binance"],
         networks={"networks": ["solana-mainnet-beta"]},
         candles=["binance"],
-        gateway_delay=delay,
-        candle_delay=delay,
+        rendezvous=2,
     )
-    started = time.monotonic()
     venues = _by_name(asyncio.run(fetch_venues(client)))
-    elapsed = time.monotonic() - started
 
     assert sorted(venues) == ["binance", "solana-mainnet-beta"]
-    # Serially this is 2*delay; concurrently it is one delay plus scheduling.
-    assert elapsed < delay * 1.5
+    assert client.max_in_flight == 2, (
+        "the two sources never overlapped -- they were awaited one after the "
+        "other, so the fetch pays the sum of the two round-trips"
+    )
+
+
+def test_a_serial_await_of_the_two_sources_never_rendezvouses():
+    """The negative of the test above: the barrier is what does the asserting.
+
+    Awaiting the two methods one after the other leaves the first waiting on a
+    sibling that cannot arrive until it has returned, so it fails on the
+    rendezvous bound rather than on a duration being too large. No amount of load
+    can turn this one green, and no amount can turn the gathered one red.
+    """
+    client = FakeClient(
+        networks={"networks": ["solana-mainnet-beta"]},
+        candles=["binance"],
+        rendezvous=2,
+    )
+
+    async def serially():
+        await client.gateway.list_networks()
+        await client.market_data.get_available_candle_connectors()
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(serially())
+
+    assert client.max_in_flight == 1
+    assert client.candle_calls == 0
 
 
 def test_a_gateway_failure_does_not_cancel_the_candle_source():

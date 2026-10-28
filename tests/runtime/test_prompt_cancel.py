@@ -14,6 +14,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
+from condor.acp import client as acp_client_module
 from condor.acp.client import ACPClient, PromptDone, TextChunk
 from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.runtime import SessionKey
@@ -158,11 +159,33 @@ def test_abort_releases_the_session_lock():
 # ── ACP: the agent ignores session/cancel ──
 
 
+class _AsyncioSpy:
+    """Stands in for ``asyncio`` inside ``condor.acp.client``.
+
+    Records the ``timeout`` of every ``wait_for`` that module makes and
+    delegates everything, ``wait_for`` included, to the real asyncio — so the
+    waits behave exactly as they do unpatched. Scoped to the module's own
+    namespace, so no other caller's ``wait_for`` is recorded.
+    """
+
+    def __init__(self):
+        self.wait_for_timeouts: list[float | None] = []
+
+    def wait_for(self, awaitable, timeout=None):
+        self.wait_for_timeouts.append(timeout)
+        return asyncio.wait_for(awaitable, timeout=timeout)
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+
 def test_unanswered_cancel_falls_back_within_the_timeout(monkeypatch):
     """An agent that never answers must not hang Stop — or hold the lock."""
     monkeypatch.setattr(
         timeouts, "TIMEOUTS", replace(timeouts.TIMEOUTS, prompt_cancel=0.2)
     )
+    spy = _AsyncioSpy()
+    monkeypatch.setattr(acp_client_module, "asyncio", spy)
     client = _client(answers_cancel=False)
     session = _session(client, "slot-b")
 
@@ -176,19 +199,18 @@ def test_unanswered_cancel_falls_back_within_the_timeout(monkeypatch):
         task = asyncio.create_task(consume())
         await asyncio.sleep(0.05)
 
-        loop = asyncio.get_event_loop()
-        started = loop.time()
         await session.abort()
-        elapsed = loop.time() - started
 
         await asyncio.wait_for(task, timeout=5)
-        return events, elapsed
+        return events
 
-    events, elapsed = asyncio.run(scenario())
+    events = asyncio.run(scenario())
 
     assert "session/cancel" in client._process.stdin.methods()
-    # Bounded by prompt_cancel, not by the 30s heartbeat.
-    assert elapsed < 2
+    # Bounded by prompt_cancel, not by the 30s heartbeat: the fallback waited
+    # on the patched constant, whatever the machine took to get there. The
+    # stream's own queue poll passes 30 and is not this wait.
+    assert 0.2 in spy.wait_for_timeouts
     assert isinstance(events[-1], PromptDone)
     assert events[-1].stop_reason == "cancelled"
     assert session.is_busy is False
