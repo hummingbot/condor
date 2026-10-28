@@ -1428,6 +1428,13 @@ class BundleStamp(BaseModel):
     hub_digest: str = ""
     hub_status: str = ""
     hub_checked_at: str = ""
+    #: Whether a cloned agent's sidebar "New" badge has already been retired.
+    #: Defaults ``True`` so a stamp written before this field existed — every
+    #: hub install on record at the time this shipped — parses as already
+    #: seen rather than suddenly badging an agent the user has had for
+    #: months. :func:`record_hub_install` is the only writer that ever sets
+    #: this ``False``, and only for a fresh clone, never an update.
+    hub_seen: bool = True
 
     def knows(self, path: str) -> bool:
         return path in self.digests
@@ -1585,7 +1592,7 @@ def write_stamp(home: Path, stamp: BundleStamp) -> None:
 
 
 def record_hub_install(
-    slug: str, *, hub_slug: str, hub_version: int, digest: str
+    slug: str, *, hub_slug: str, hub_version: int, digest: str, is_clone: bool = False
 ) -> None:
     """Note that ``slug`` was just installed or updated from a Botcamp agent.
 
@@ -1601,23 +1608,25 @@ def record_hub_install(
     already verified the ``X-Agent-Sha256`` the caller passes through
     :func:`condor.hub.fetch`, so this only names the answer that verification
     already gave.
+
+    ``is_clone`` is the route's own ``verb == "install"`` — true for a fresh
+    clone, false for an update of an agent already on this install. Only a
+    fresh clone resets :data:`BundleStamp.hub_seen`, which is what lights the
+    sidebar's "New" badge; an update must not re-surprise an agent the user
+    has already been using.
     """
     home = agent_home(slug)
     stamp = read_stamp(home) or BundleStamp()
-    write_stamp(
-        home,
-        stamp.model_copy(
-            update={
-                "hub_slug": hub_slug,
-                "hub_version": hub_version,
-                "hub_digest": digest,
-                "hub_status": "ok",
-                "hub_checked_at": datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-            }
-        ),
-    )
+    update: dict[str, object] = {
+        "hub_slug": hub_slug,
+        "hub_version": hub_version,
+        "hub_digest": digest,
+        "hub_status": "ok",
+        "hub_checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if is_clone:
+        update["hub_seen"] = False
+    write_stamp(home, stamp.model_copy(update=update))
 
 
 def _comparable(path: str, text: str) -> str:

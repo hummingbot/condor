@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Bot,
@@ -219,6 +219,22 @@ export function AgentChatTab() {
   const { data: agents = [], isLoading: agentsLoading } = useQuery(
     agentsQuery(),
   );
+  const queryClient = useQueryClient();
+  // Retires a cloned agent's sidebar "New" badge the instant a chat with it
+  // actually starts — wherever that start came from (the rail row, the
+  // hero's composer, an agent page's "Chat" button, `?agent=` on load), since
+  // all of them fund into `talkTo`'s `startSession` branch below. Applied to
+  // the cache directly rather than invalidated: a refetch would still show
+  // the badge for however long the round trip takes, and the whole point is
+  // that starting the chat is what makes it go away.
+  const markAgentSeen = useMutation({
+    mutationFn: (slug: string) => api.markAgentSeen(slug),
+    onMutate: (slug: string) => {
+      queryClient.setQueryData<AgentSummary[]>(agentsQuery().queryKey, (prev) =>
+        prev?.map((a) => (a.slug === slug ? { ...a, is_new: false } : a)),
+      );
+    },
+  });
   const { data: delegationData } = useQuery({
     queryKey: ["delegations"],
     queryFn: api.getDelegations,
@@ -291,6 +307,10 @@ export function AgentChatTab() {
           return;
         }
       }
+      // A conversation is genuinely starting — the one moment that counts as
+      // "opened it" for a cloned agent's "New" badge, wherever this call came
+      // from.
+      if (agents.find((a) => a.slug === slug)?.is_new) markAgentSeen.mutate(slug);
       const slotId = chat.startSession(
         // `""` asks whoever is bound for their own model; only an unbound chat
         // needs a model named. Volunteering `defaultAgent` here is what used to
@@ -308,10 +328,12 @@ export function AgentChatTab() {
         chat.sendMessage(slotId, opts.text ?? "", opts.files);
     },
     [
+      agents,
       chat.sendMessage,
       chat.setActiveSlotId,
       chat.startSession,
       defaultAgent,
+      markAgentSeen,
       pendingPick,
       server,
     ],

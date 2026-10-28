@@ -269,6 +269,10 @@ class AgentSummary(BaseModel):
     #: (ARCH-324). A strategy's own ``server_name`` overrides it.
     server_name: str = ""
     instances: list[RunningInstance] = []
+    #: True for an agent cloned from Botcamp whose "New" badge has not yet
+    #: been retired by a first visit (``BundleStamp.hub_seen``). Always
+    #: ``False`` for an agent never installed from the hub.
+    is_new: bool = False
 
 
 class AgentPerformanceModel(BaseModel):
@@ -1781,6 +1785,19 @@ async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
 # ── Agent routes ──
 
 
+def _agent_is_new(slug: str) -> bool:
+    """Whether ``slug``'s sidebar "New" badge should still be on.
+
+    True only for a fresh Botcamp clone (``hub_slug`` set) not yet opened
+    once (``hub_seen`` false) — see :func:`condor.agents.bundle.record_hub_install`
+    and ``POST /agents/{slug}/hub-seen`` below, its only two writers.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    stamp = agent_bundle.read_stamp(agent_bundle.agent_home(slug))
+    return bool(stamp and stamp.hub_slug and not stamp.hub_seen)
+
+
 @router.get("", response_model=list[AgentSummary])
 async def list_agents(user: WebUser = Depends(get_current_user)):
     """List all Agents, each with its strategies and their status."""
@@ -1817,6 +1834,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 server_name=agent.server_name,
                 strategy_count=len(strat_summaries),
                 strategies=strat_summaries,
+                is_new=_agent_is_new(agent.slug),
                 **_aggregate_strategy_perf(strat_summaries),
             )
         )
@@ -2762,6 +2780,24 @@ async def delete_agent_memory(
     if not _memory_store_for(agent.slug, user.id).delete(name, source="web"):
         raise HTTPException(status_code=404, detail=f"Memory '{name}' not found")
     return {"deleted": True}
+
+
+@router.post("/{slug}/hub-seen")
+async def mark_hub_agent_seen(slug: str, user: WebUser = Depends(get_current_user)):
+    """Retire a cloned agent's sidebar "New" badge — the rail calls this the
+    first time its row is opened.
+
+    A no-op for an agent never installed from the hub, or already seen: the
+    badge only ever goes from on to off, never back.
+    """
+    from condor.agents import bundle as agent_bundle
+
+    agent = _get_agent(slug)
+    home = agent_bundle.agent_home(agent.slug)
+    stamp = agent_bundle.read_stamp(home)
+    if stamp and stamp.hub_slug and not stamp.hub_seen:
+        agent_bundle.write_stamp(home, stamp.model_copy(update={"hub_seen": True}))
+    return {"ok": True}
 
 
 def _create_refusal(exc: ValueError) -> HTTPException:
@@ -5426,6 +5462,7 @@ async def install_from_hub(
         hub_slug=slug,
         hub_version=fetched.version,
         digest=fetched.sha256,
+        is_clone=verb == "install",
     )
     return {"verb": verb, "listing": listing.model_dump(), "plan": result}
 

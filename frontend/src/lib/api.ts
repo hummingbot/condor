@@ -1513,6 +1513,8 @@ export interface AgentSummary {
    */
   server_name?: string;
   instances: RunningInstance[];
+  /** True for a Botcamp clone not yet opened once — the rail's "New" badge. */
+  is_new?: boolean;
 }
 
 export interface AgentExecutorRow {
@@ -4019,6 +4021,13 @@ export const api = {
       {
         method: "DELETE",
       },
+    ),
+
+  /** Retires a cloned agent's "New" badge — call once its row is opened. */
+  markAgentSeen: (slug: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/hub-seen`,
+      { method: "POST" },
     ),
 
   // ── An agent as one file (FEAT-133) ──

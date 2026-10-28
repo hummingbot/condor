@@ -238,6 +238,7 @@ export const ChatRail = memo(function ChatRail({
                 <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
               }
               live={live}
+              isNew={agent.is_new}
               active={!hubActive && activeSlug === agent.slug}
               title={agent.description || agent.name}
               onClick={() => onTalk(agent.slug, agent)}
@@ -477,6 +478,7 @@ function RailRow({
   label,
   icon,
   live,
+  isNew,
   active,
   title,
   onClick,
@@ -489,6 +491,8 @@ function RailRow({
   label: string;
   icon: React.ReactNode;
   live?: boolean;
+  /** Cloned from Botcamp and not opened once yet — see `ChatRail`'s `markSeen`. */
+  isNew?: boolean;
   active?: boolean;
   title?: string;
   onClick: () => void;
@@ -513,6 +517,19 @@ function RailRow({
     >
       {icon}
       <span className="min-w-0 flex-1 truncate">{label}</span>
+      {isNew && (
+        // A one-shot badge, never a second "live"-style dot: a dot would
+        // read as "running" next to the real one, and this is the opposite
+        // fact — nobody has opened it yet. Gone the instant the row is
+        // clicked (`ChatRail`'s `markSeen`), so it never lingers past the
+        // first chat.
+        <span
+          className="shrink-0 rounded-full bg-amber-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-400"
+          title="Cloned from Botcamp — not opened yet"
+        >
+          New
+        </span>
+      )}
       {live && (
         <span
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
