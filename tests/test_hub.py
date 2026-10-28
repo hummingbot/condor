@@ -872,6 +872,42 @@ def test_fetch_returns_matching_bytes_verified_against_their_own_header(
     assert bundle.agent.slug == "traveller"
 
 
+def test_a_zip_revision_with_no_stamped_uid_keeps_its_identity_across_content_changes(
+    traveller,
+):
+    """A Botcamp zip that carries no ``agent_uid`` of its own must still
+    resolve to the *same* agent on its next revision, even though that
+    revision's files differ — the whole point of the field. Hashing the
+    zip's own content (the way a local export without a prior stamp mints
+    one) would instead mint a new identity every time anything in the
+    archive changed, so a pull of the next revision would read as a
+    different agent colliding on the installed slug rather than an update
+    of it (Greptile's review of PR #111's integration)."""
+    import io
+    import zipfile
+
+    from condor.layering import publishable_files
+
+    def _zip_without_uid_stamp(home: Path) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for rel in publishable_files(home):
+                zf.writestr(rel.as_posix(), (home / rel).read_bytes())
+        return buf.getvalue()
+
+    v1 = botcamp_import.from_zip(
+        _zip_without_uid_stamp(traveller), agent_slug="traveller"
+    )
+    assert v1.agent.agent_uid
+
+    _write(traveller / "skills" / "s" / "SKILL.md", SKILL_MD + "\nMore.\n")
+    v2 = botcamp_import.from_zip(
+        _zip_without_uid_stamp(traveller), agent_slug="traveller"
+    )
+
+    assert v2.agent.agent_uid == v1.agent.agent_uid
+
+
 def test_fetch_refuses_bytes_that_do_not_match_their_own_sha256_header(
     traveller, fake_hub
 ):
@@ -1287,6 +1323,36 @@ def test_unpublish_reports_the_hubs_refusal(fake_hub):
         hub.unpublish("listed", "tok")
 
     assert "not yours" in str(exc.value)
+
+
+def test_unpublish_clears_the_stored_submission_so_it_stops_reading_published(
+    traveller, fake_hub, cm
+):
+    """``GET /{slug}/submission`` only re-polls the hub while a record reads
+    ``pending`` (§5.4's own cost-saving) — a ``published`` record never
+    changes on the hub's side on its own. Without clearing this install's own
+    copy, a successful withdrawal would leave the dashboard reading
+    "Published" and offering another withdrawal forever (Greptile's review of
+    PR #111's integration)."""
+    hub.publish("traveller", "tok")
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "submission_id": "sub_test",
+                "status": "published",
+                "submitted_at": "2026-10-21T12:03:00Z",
+                "decided_at": "2026-10-21T14:40:00Z",
+                "listing_id": "traveller",
+            }
+        ).encode("utf-8"),
+    )
+    hub.submission_status("traveller", "tok")
+    assert hub.local_submission("traveller").status == "published"
+
+    hub.unpublish("traveller", "tok")
+
+    assert hub.local_submission("traveller") is None
 
 
 # ── The token: stored, never read back, never logged ─────────────────────
@@ -1873,6 +1939,53 @@ def test_cancelling_a_pending_device_login_forgets_it_with_no_hub_call(fake_hub)
     assert len(fake_hub.calls) == calls_before
     assert hub._pending_device is None
     assert hub.device_state().status == "none"
+
+
+def test_a_cancel_during_the_exchange_revokes_rather_than_links(
+    fake_hub, cm, monkeypatch
+):
+    """A device login cancelled while its token exchange is already in
+    flight must not end up linked: the exchange runs outside `_device_lock`
+    (a network call has no business holding it), so `device_cancel()` can
+    land before the 200 comes back. `device_state()` must notice its tracked
+    attempt is gone by the time the exchange answers, and revoke the token
+    it was just handed rather than storing it (Greptile's review of PR
+    #111's integration)."""
+    hub.device_start()
+    _force_poll()
+    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+        {
+            "access_token": "bc_live_cancelled",
+            "scope": "agents:read agents:publish",
+            "user": {"id": "u_1", "name": "cardosofede"},
+        }
+    )
+
+    original_send = hub._send
+    released = threading.Event()
+
+    def _slow_send(method, url, **kwargs):
+        if method == "POST" and url.endswith("/condor/device/token"):
+            released.wait(timeout=2)
+        return original_send(method, url, **kwargs)
+
+    monkeypatch.setattr(hub, "_send", _slow_send)
+
+    results: list[hub.DeviceLinkState] = []
+    poller = threading.Thread(target=lambda: results.append(hub.device_state()))
+    poller.start()
+    time.sleep(0.02)  # let the poll claim its slot and start dialling out
+
+    hub.device_cancel()
+    released.set()
+    poller.join()
+
+    assert hub.token() == "", "a token for a cancelled attempt must not link"
+    assert cm.get_hub().get("profile_handle", "") == ""
+    assert ("DELETE", f"{hub.HUB_URL}/condor/me", "bc_live_cancelled", b"") in [
+        (c.method, c.url, c.token, c.payload) for c in fake_hub.calls
+    ]
+    assert results[0].status == "none"
 
 
 def test_disconnecting_a_linked_profile_revokes_the_token_then_clears_it_locally(

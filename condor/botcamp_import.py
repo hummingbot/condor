@@ -31,6 +31,7 @@ one that arrived in this process, not the one that left Botcamp's.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import stat
 import zipfile
@@ -63,6 +64,30 @@ MAX_FILE_BYTES = 1_048_576
 #: layout a race entry used; Condor's own loader only looks under
 #: ``controllers/<name>/<name>.py``.
 _HB_CONTROLLER_TYPES = frozenset({"generic", "market_making", "directional_trading"})
+
+
+def _hub_agent_uid(agent_slug: str) -> str:
+    """A stable ``agent_uid`` for a Botcamp agent that stamps none of its own.
+
+    A pre-FEAT-143 zip, or one from a hub revision that never carried
+    ``agent_uid`` in ``AGENT.md``, must still resolve to the *same* agent on
+    every revision pulled — that is the whole point of the field
+    (:func:`condor.agents.bundle._minted_uid`'s own docstring). Content hashing
+    cannot give that here the way it can for a local export: Botcamp serves a
+    new revision specifically *because* files changed, so hashing the zip's
+    own content would mint a new identity every time anything in it changed,
+    and a pull of the next revision would read as a different agent occupying
+    the installed slug rather than an update of it.
+
+    Keyed on :data:`condor.hub.HUB_URL` and the hub's own catalogue slug
+    instead — both stable across revisions, and together they are exactly
+    what "the same Botcamp agent" means to this install.
+    """
+    from condor.hub import HUB_URL
+
+    return hashlib.sha256(
+        f"condor-botcamp-agent-uid\0{HUB_URL}\0{agent_slug}".encode("utf-8")
+    ).hexdigest()[:32]
 
 
 def _condor_controller_path(path: str) -> str:
@@ -115,6 +140,12 @@ def from_zip(data: bytes, *, agent_slug: str = "") -> Bundle:
     a zip of files has no equivalent of). :func:`condor.agents.bundle.plan`
     already prefers its own ``as_slug`` argument over this field, so a caller
     that wants a different name still gets it.
+
+    When the zip's own ``AGENT.md`` carries no ``agent_uid`` (a revision from
+    before the hub started stamping one), the identity is :func:`_hub_agent_uid`
+    rather than left for :func:`condor.agents.bundle._minted_uid` to derive
+    from content — see that function's docstring for why a content hash would
+    make the next revision of the same agent look like a different one.
     """
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -162,6 +193,12 @@ def from_zip(data: bytes, *, agent_slug: str = "") -> Bundle:
         raise BundleError(f"A bundle without {AGENT_MD} is not an agent")
 
     meta = _frontmatter(next(entry.text for entry in files if entry.path == AGENT_MD))
+    agent_uid = str(meta.get(AGENT_UID_KEY) or "")
+    if not agent_uid and agent_slug:
+        # No stamp in this revision's AGENT.md: mint off the hub + slug, not
+        # the content (BUG from Greptile's review — see _hub_agent_uid), so
+        # the next revision of this same agent is still recognised as one.
+        agent_uid = _hub_agent_uid(agent_slug)
     return Bundle(
         schema=SCHEMA,
         kind=KIND,
@@ -171,7 +208,7 @@ def from_zip(data: bytes, *, agent_slug: str = "") -> Bundle:
             name=str(meta.get("name") or ""),
             description=str(meta.get("description") or ""),
             when_to_consult=str(meta.get("when_to_consult") or ""),
-            agent_uid=str(meta.get(AGENT_UID_KEY) or ""),
+            agent_uid=agent_uid,
         ),
         requires=requires_of(files),
         files=files,

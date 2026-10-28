@@ -1222,6 +1222,13 @@ def unpublish(listing_id: str, token: str) -> None:
 
     It removes the listing. It does not recall a download, and the surface that
     offers it says so.
+
+    Also clears this install's own stored submission record for the listing
+    (BUG from Greptile's review): ``GET /{slug}/submission`` only re-polls the
+    hub while a record reads ``pending`` (§5.4's own cost-saving, since a
+    terminal record never changes on the hub's side) — without this, a
+    withdrawn listing would keep reading back as ``published`` forever, and
+    the dashboard would go on offering to withdraw a listing already gone.
     """
     listing_id = _listing_id(listing_id)
     if not (token or "").strip():
@@ -1235,7 +1242,31 @@ def unpublish(listing_id: str, token: str) -> None:
         raise HubError(
             _refusal(reply, f"withdrawing '{listing_id}'"), status=reply.status
         )
+    _clear_submission_by_listing(listing_id)
     log.info("hub: withdrew listing '%s'", listing_id)
+
+
+def _clear_submission_by_listing(listing_id: str) -> None:
+    """Drop this install's stored submission record for ``listing_id``.
+
+    Searched by ``listing_id`` rather than by slug, because the caller (the
+    web route behind ``DELETE /agents/{listing_id}``) only ever receives the
+    listing id and submissions are stored keyed by the agent's own slug —
+    which happens to equal the listing id for every publish this install has
+    made, but this does not assume that.
+    """
+    from config_manager import get_config_manager
+
+    submissions = _section().get("submissions")
+    if not isinstance(submissions, dict):
+        return
+    remaining = {
+        slug: row
+        for slug, row in submissions.items()
+        if not (isinstance(row, dict) and row.get("listing_id") == listing_id)
+    }
+    if remaining != submissions:
+        get_config_manager().update_hub(submissions=remaining)
 
 
 def local_submission(slug: str) -> Receipt | None:
@@ -1459,6 +1490,13 @@ def device_state() -> DeviceLinkState:
     case B). Rate-limiting on ``last_polled`` alone cannot provide that: two
     callers can both read it as stale before either writes it back, which is
     exactly the race this closes.
+
+    The exchange call itself still runs *outside* the lock (a network call
+    has no business holding it), so a ``device_cancel()`` — or a fresh
+    ``device_start()`` replacing this attempt — can land while it is in
+    flight. A 200 is therefore not stored on sight: this re-checks under the
+    lock that ``_pending_device`` is still the same ``device_code`` it sent,
+    and revokes the token instead of saving it when it is not.
     """
     section = _section()
     if token():
@@ -1513,7 +1551,10 @@ def device_state() -> DeviceLinkState:
         )
     finally:
         with _device_lock:
-            if _pending_device is not None:
+            if (
+                _pending_device is not None
+                and _pending_device.get("device_code") == snapshot["device_code"]
+            ):
                 _pending_device["in_flight"] = False
 
     if reply.status == 200:
@@ -1528,6 +1569,38 @@ def device_state() -> DeviceLinkState:
             scope_list = []
         user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
         profile_handle = str(user.get("name") or user.get("id") or "")
+
+        # The attempt this exchange was for may have been cancelled, or
+        # replaced by a fresh `device_start()`, while the request was in
+        # flight. Re-check identity under the lock before storing anything:
+        # a token issued for an attempt that is no longer the one this
+        # install is tracking must be revoked, not linked (BUG from
+        # Greptile's review of PR #111's integration).
+        with _device_lock:
+            current = _pending_device
+            still_current = (
+                current is not None
+                and current.get("device_code") == snapshot["device_code"]
+            )
+            if still_current:
+                _pending_device = None
+
+        if not still_current:
+            if access_token:
+                try:
+                    _send("DELETE", f"{HUB_URL}/condor/me", token=access_token)
+                except HubError:
+                    log.warning(
+                        "hub: could not revoke a token issued for a cancelled "
+                        "or replaced device login",
+                        exc_info=True,
+                    )
+                log.info(
+                    "hub: discarded a device-login token for a cancelled or "
+                    "replaced attempt"
+                )
+            return device_state()
+
         if access_token:
             # The one write of the credential, as soon as it exists — never
             # handed back past this function. The token is issued once per
@@ -1543,7 +1616,6 @@ def device_state() -> DeviceLinkState:
                 user=user,
             )
             log.info("hub: linked to Botcamp profile '%s'", profile_handle)
-        _clear_pending_device()
         return DeviceLinkState(
             status="linked",
             profile_handle=profile_handle
