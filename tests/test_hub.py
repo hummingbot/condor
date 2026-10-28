@@ -2748,6 +2748,40 @@ def test_manage_agents_installs_from_the_hub(offered, monkeypatch):
     assert load_mutes("traveller")["routines"] == {"r"}
 
 
+def test_manage_agents_hub_install_records_provenance(offered, fake_hub, monkeypatch):
+    """BUG-4: the chat door's install must stamp the same provenance the web
+    route does, or ``installed_agent_status`` never learns to watch this
+    agent for delisting."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
+
+    trading_agent.manage_agents(action="hub_install", path="traveller")
+
+    stamp = ab.read_stamp(agent_home("traveller"))
+    assert stamp.hub_slug == "traveller"
+    assert stamp.hub_version == 1
+    assert stamp.hub_status == "ok"
+
+
+def test_manage_agents_hub_update_records_provenance(traveller, fake_hub, monkeypatch):
+    """Same stamp, taken on the update verb (the agent already installed)."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    ab.build("traveller")  # mints and stamps this agent's agent_uid on disk
+    fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
+
+    result = trading_agent.manage_agents(action="hub_install", path="traveller")
+
+    assert result["verb"] == "update"
+    stamp = ab.read_stamp(agent_home("traveller"))
+    assert stamp.hub_slug == "traveller"
+    assert stamp.hub_version == 2
+
+
 def test_manage_agents_hub_install_needs_a_slug(fake_hub):
     from mcp_servers.condor.tools import trading_agent
 

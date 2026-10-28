@@ -481,11 +481,21 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
             result = agent_bundle.apply_update(update, user_id=settings.user_id)
         except ValueError as exc:
             return {"error": str(exc), "verb": "update", "preview": update.summary()}
+        # So a later visit can learn Botcamp stopped serving this version
+        # (CORR-812) — the same stamp the web install path writes
+        # (``condor/web/routes/agents.py``'s ``install_from_hub``), which this
+        # tool path skipped entirely until now.
+        agent_bundle.record_hub_install(
+            update.slug, hub_slug=slug, hub_version=fetched.version, digest=fetched.sha256
+        )
         return {"verb": "update", "listing": listing_row, **result}
     try:
         result = agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:
         return {"error": str(exc), "verb": "install", "preview": plan.summary()}
+    agent_bundle.record_hub_install(
+        plan.slug, hub_slug=slug, hub_version=fetched.version, digest=fetched.sha256
+    )
     return {"verb": "install", "listing": listing_row, **result}
 
 
