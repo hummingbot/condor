@@ -23,19 +23,6 @@ services:
     # Rebuilds frontend/dist from the worktree's own source (npm ci only when
     # package-lock.json moved), then runs Condor as a dashboard alone.
     command: bash -c 'make build-frontend && exec uv run python main.py'
-    # The Live chat's preview: Condor's API on {port}+100 (8190-8199, nothing
-    # listens there) and Vite's dev server on {port}, proxying `/api` and its
-    # sockets to it, so a saved .tsx repaints the open page. A worktree whose
-    # vite.config.ts predates CONDOR_API_URL would proxy to the live Condor on
-    # :8088, so it is refused until the workstream syncs main.
-    dev_command: >-
-      bash -ec 'api=$(( {port} + 100 ));
-      grep -q CONDOR_API_URL frontend/vite.config.ts || { echo "frontend/vite.config.ts has no CONDOR_API_URL: sync the workstream with main first" >&2; exit 1; };
-      WEB_PORT=$api WEB_URL=http://localhost:$api uv run python main.py & backend=$!;
-      trap "kill $backend 2>/dev/null" EXIT;
-      cd frontend;
-      if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then npm ci --no-audit --no-fund; fi;
-      CONDOR_API_URL=http://localhost:$api npm run dev -- --port {port} --strictPort'
     # Main's instance, if started from /services. It is refused while the
     # live Condor holds 8088, which is the normal case.
     port: 8088
