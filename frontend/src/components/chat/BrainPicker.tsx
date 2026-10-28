@@ -75,7 +75,11 @@ export function BrainMenuBody({
 
   // Direct picks are everything the backend didn't flag as a picker.
   const directAgents = agents.filter((a) => !a.picker);
-  const hasOpenRouter = agents.some((a) => a.key === "openrouter:" && a.picker);
+  const openRouterRow = agents.find((a) => a.key === "openrouter:" && a.picker);
+  // Same readiness field as every direct row, so a key-less install reads the
+  // same way here as it does for "not installed" or "not reachable" — rather
+  // than opening a model list whose every pick dies with the same error.
+  const openRouterBlocked = openRouterRow?.ready === false;
   const { boundAgent, effectiveKey } = useBrainLabel({
     agents,
     agentBindings,
@@ -177,20 +181,38 @@ export function BrainMenuBody({
             </button>
           );
         })}
-        {hasOpenRouter && (
+        {openRouterRow && (
           <button
             onClick={() => {
+              if (openRouterBlocked) return;
               setSubmenu({ kind: "openrouter" });
               loadModels();
             }}
-            className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-              effectiveKey.startsWith("openrouter:")
-                ? "font-medium text-[var(--color-primary)]"
-                : "text-[var(--color-text)]"
-            }`}
+            disabled={openRouterBlocked}
+            title={openRouterBlocked ? openRouterRow.detail : undefined}
+            className={
+              openRouterBlocked
+                ? "flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-xs text-[var(--color-text-muted)] opacity-60"
+                : `flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                    effectiveKey.startsWith("openrouter:")
+                      ? "font-medium text-[var(--color-primary)]"
+                      : "text-[var(--color-text)]"
+                  }`
+            }
           >
-            <span>OpenRouter — Pick Model</span>
-            <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+            <span className="flex w-full items-center justify-between gap-1.5">
+              <span>OpenRouter — Pick Model</span>
+              {!openRouterBlocked && (
+                <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+              )}
+            </span>
+            {/* The fix, on the row it belongs to — same treatment as a blocked
+                direct row above. */}
+            {openRouterBlocked && openRouterRow.detail && (
+              <span className="w-full truncate text-[10px]" title={openRouterRow.detail}>
+                {openRouterRow.detail}
+              </span>
+            )}
           </button>
         )}
         {customProviders.length > 0 && sectionHeader("Custom endpoints")}

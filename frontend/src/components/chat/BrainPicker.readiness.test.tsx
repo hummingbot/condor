@@ -34,6 +34,13 @@ const AGENTS: ChatAgentOption[] = [
   // No readiness at all: the backend could not probe, so it must still be
   // offered rather than silently withheld.
   { key: "codex", label: "ChatGPT Codex" },
+  {
+    key: "openrouter:",
+    label: "OpenRouter — Pick Model",
+    picker: true,
+    ready: false,
+    detail: "needs an API key (you can enter one here)",
+  },
 ];
 
 let container: HTMLDivElement;
@@ -102,5 +109,18 @@ describe("BrainPicker readiness", () => {
     expect((rowFor("ChatGPT Codex") as HTMLButtonElement).disabled).toBe(false);
     await click(rowFor("ChatGPT Codex")!);
     expect(picked).toEqual(["codex"]);
+  });
+
+  it("disables the OpenRouter submenu itself when there is no key, instead of opening a list that only dead-ends", async () => {
+    await openMenu();
+
+    const row = rowFor("OpenRouter — Pick Model");
+    expect(row).toBeTruthy();
+    expect((row as HTMLButtonElement).disabled).toBe(true);
+    expect(row!.textContent).toContain("needs an API key");
+
+    await click(row!);
+    // No submenu opened: the model list ("Search models...") never appears.
+    expect(document.body.textContent).not.toContain("Search models");
   });
 });
