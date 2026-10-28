@@ -1232,7 +1232,9 @@ def _get_engines_for(agent_slug: str, sslug: str) -> list:
 # code that owns the layout. This module keeps only HTTP concerns.
 
 
-def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
+def _strategy_server(
+    strategy_dir: Path, default_config: dict | None, session_dir: Path | None = None
+) -> str:
     """Which server this strategy's records live on, or ``""`` when it has none.
 
     The one answer to that question, so the client this module fetches
@@ -1244,11 +1246,36 @@ def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
     Empty is a real state, not a missing one: ``AgentConfig`` defaults to ``""``
     (CORR-729), so an empty string is a strategy that names no server — and the
     caller is expected to say so rather than substitute one.
+
+    A start request's server choice — Auto's resolved default included — only
+    ever lands in the *session's own* ``config.yml``, never the strategy's
+    (#296): none of the shipped loops pin a server at the strategy level, so
+    this fell back to ``""`` for every one of them while they traded.
+    ``session_dir`` names the session to read that pin from; omitted, the
+    latest session stands in, so a strategy-wide rollup still sees the fleet's
+    current server.
     """
-    from condor.agents.config import load_full_config
+    from condor.agents.config import load_full_config, load_session_pins
+    from condor.agents.journal import iter_session_dirs
 
     try:
-        return load_full_config(strategy_dir, default_config).get("server_name") or ""
+        server_name = load_full_config(strategy_dir, default_config).get(
+            "server_name"
+        ) or ""
+    except Exception:
+        server_name = ""
+    if server_name:
+        return server_name
+    if session_dir is None:
+        try:
+            sessions = iter_session_dirs(strategy_dir)
+        except Exception:
+            sessions = []
+        session_dir = sessions[-1][1] if sessions else None
+    if session_dir is None:
+        return ""
+    try:
+        return load_session_pins(session_dir).get("server_name") or ""
     except Exception:
         return ""
 
@@ -1331,7 +1358,10 @@ class StrategyClient(NamedTuple):
 
 
 async def _get_client_for_strategy(
-    strategy_dir: Path, default_config: dict | None, principal: int
+    strategy_dir: Path,
+    default_config: dict | None,
+    principal: int,
+    session_dir: Path | None = None,
 ) -> StrategyClient:
     """Resolve a Hummingbot API client for a strategy, based on its config.yml.
 
@@ -1342,10 +1372,14 @@ async def _get_client_for_strategy(
     other two ways of having no client: ``unavailable`` says which of them it
     was (CORR-706), so an empty session and a withheld one are told apart. The
     reason carries nothing about the strategy's owner or its figures.
+
+    ``session_dir``, when the caller already knows which session it is
+    resolving a client for, pins ``_strategy_server``'s fallback to that
+    session rather than the latest one (#296).
     """
     from config_manager import get_config_manager
 
-    server_name = _strategy_server(strategy_dir, default_config)
+    server_name = _strategy_server(strategy_dir, default_config, session_dir)
     if not server_name:
         return StrategyClient(None, "", "no_server")
     if not _may_use_strategy_server(server_name, principal):
@@ -3788,8 +3822,12 @@ async def get_session_executors(
 
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
+    session_dir = find_session_dir(strategy.home, session_num)
     client, _server, unavailable = await _get_client_for_strategy(
-        strategy.home, strategy.default_config, _strategy_principal(strategy, user)
+        strategy.home,
+        strategy.default_config,
+        _strategy_principal(strategy, user),
+        session_dir,
     )
     if client is None:
         # Still no money on any branch; ``unavailable`` only says which of the
@@ -3855,7 +3893,6 @@ async def get_session_executors(
     # gets no tick numbers.
     from condor.agents.actions import read_actions
 
-    session_dir = find_session_dir(strategy.home, session_num)
     deployments = build_deployments(
         owned,
         bot_names,

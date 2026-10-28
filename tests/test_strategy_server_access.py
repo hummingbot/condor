@@ -371,6 +371,22 @@ def test_session_executors_normal_payload_has_an_empty_reason(cm, strategy, pric
     assert out["performance"]["total_pnl"] == pytest.approx(PNL)
 
 
+def test_session_executors_falls_back_to_the_sessions_own_pin(
+    cm, strategy, priced
+):
+    """#296: a start request's server choice is only ever saved on the
+    session's own config.yml, never the strategy's — true of every shipped
+    loop. The Fleet tab must still find the server from there."""
+    (strategy.home / "config.yml").write_text("server_name: ''\n")
+    (strategy.home / "sessions" / "session_1" / "config.yml").write_text(
+        f"server_name: {SERVER}\n"
+    )
+    out = _executors(OWNER)
+    assert out["unavailable"] == ""
+    assert out["performance"]["total_pnl"] == pytest.approx(PNL)
+    assert cm.client_calls == [SERVER]
+
+
 def test_summary_and_detail_carry_the_reason(cm, strategy, priced):
     summary = asyncio.run(agents_routes._build_strategy_summary(strategy, _user(OWNER)))
     assert (summary.unavailable, _detail(strategy, OWNER).unavailable) == ("", "")
