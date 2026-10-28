@@ -38,8 +38,9 @@ import {
  * Hub joined it in FEAT-153 and left it again. `/hub` mounts the Agents
  * workspace with its transcript column swapped for the catalogue, so a tab of
  * its own sat beside Agents saying the same thing twice. Its door is the card
- * at the top of the Agents rail, above the agents it installs — which is where
- * you are when you want it. It is the one full-bleed route with no nav entry.
+ * at the foot of the Agents rail, below the agents it installs — which is
+ * where you are when you want it. It is the one full-bleed route with no nav
+ * entry.
  */
 export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
