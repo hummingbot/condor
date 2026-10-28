@@ -321,6 +321,9 @@ class UnmetRequirement(BaseModel):
     name: str
     have: list[str] = Field(default_factory=list)
     blocking: bool = False
+    #: Why this install cannot supply it, when that is known — for a model, the
+    #: key missing from ``.env`` or the bridge not installed.
+    why: str = ""
 
 
 class BundleFinding(BaseModel):
@@ -399,10 +402,6 @@ class ImportPlan(BaseModel):
     mutes: dict[str, list[str]] = Field(default_factory=dict)
     agent_key: str = ""
     agent_key_inherited: bool = False
-    #: The agent's own model, when this install cannot start it — and why not
-    #: (``agent_key_gap``), so the dialog can say so and offer another.
-    agent_key_wanted: str = ""
-    agent_key_gap: str = ""
     #: The taken slug, when this bundle cannot land under the name it asked for.
     collision: str = ""
     #: The first free ``<slug>_2``, ``<slug>_3`` … when there is a collision.
@@ -526,6 +525,7 @@ def unmet_of(
     available_tools: Sequence[str] | None = None,
     available_skills: Sequence[str] | None = None,
     substituted_model: str = "",
+    model_gap: str = "",
 ) -> list[UnmetRequirement]:
     """Which requirements this install cannot meet, given what it has.
 
@@ -556,13 +556,14 @@ def unmet_of(
         for name in requires.skills.inherited:
             if name not in have:
                 unmet.append(UnmetRequirement(kind="skill", name=name, blocking=True))
-    if substituted_model:
+    if model_gap:
         unmet.append(
             UnmetRequirement(
                 kind="model",
                 name=requires.agent_key,
-                have=[substituted_model],
+                have=[substituted_model] if substituted_model else [],
                 blocking=False,
+                why=model_gap,
             )
         )
     return unmet
@@ -883,13 +884,45 @@ def parse(data: bytes | str) -> Bundle:
         raise BundleError(f"Malformed bundle: {exc}") from exc
 
 
+def with_agent_key(bundle: Bundle, agent_key: str, user_id: int = 0) -> Bundle:
+    """``bundle`` with its ``AGENT.md`` asking for ``agent_key`` instead.
+
+    How an import runs on a model the operator picked when the agent's own
+    cannot start here: the pick replaces the key the bundle carries, so the
+    plan and the write see one model and nothing beside it. The file's
+    ``sha256`` is recomputed, and ``agent_uid`` is settled *before* the edit,
+    because a bundle that carries none mints it from its content and the pick
+    must not make it a different agent.
+
+    Refused when ``agent_key`` cannot run here either.
+    """
+    gap = _agent_key_gap(agent_key, user_id)
+    if gap:
+        raise BundleError(f"{agent_key} cannot run here: {gap}")
+    agent = bundle.agent.model_copy(
+        update={"agent_uid": bundle.agent.agent_uid or _minted_uid(bundle)}
+    )
+    files = []
+    for entry in bundle.files:
+        if entry.path == AGENT_MD:
+            meta, body = parse_frontmatter(entry.text)
+            meta = meta if isinstance(meta, dict) else {}
+            meta["agent_key"] = agent_key
+            text = render_frontmatter(meta, body)
+            entry = BundleFile(path=entry.path, sha256=_digest(text), text=text)
+        files.append(entry)
+    requires = bundle.requires.model_copy(update={"agent_key": agent_key})
+    return bundle.model_copy(
+        update={"agent": agent, "files": files, "requires": requires}
+    )
+
+
 def plan(
     bundle: Bundle,
     as_slug: str = "",
     user_id: int = 0,
     available_connectors: Sequence[str] | None = None,
     available_tools: Sequence[str] | None = None,
-    agent_key: str = "",
 ) -> ImportPlan:
     """Everything a human needs to decide, computed without writing anything.
 
@@ -902,9 +935,6 @@ def plan(
     supply, passed in rather than fetched so the module stays headless — the
     connector list needs an async Hummingbot client. Leaving either ``None``
     means "not asked", and nothing of that kind is then reported unmet.
-
-    ``agent_key`` is the model the operator picked to run it on, when the
-    agent's own cannot run here; empty means the default.
 
     Every refusal is collected rather than raised, so a reviewer sees all of
     them at once; :func:`apply` is the one that turns them into an error. An
@@ -950,11 +980,7 @@ def plan(
     agent_uid = bundle.agent.agent_uid or _minted_uid(bundle)
     collision_uid = _installed_agent_uid(collision) if collision else ""
 
-    chosen = agent_key
-    agent_key, inherited, gap = _resolve_agent_key(bundle, user_id, chosen)
-    chosen_gap = _agent_key_gap(chosen, user_id) if chosen else ""
-    if chosen_gap:
-        refusals.append(f"{chosen} cannot run here: {chosen_gap}")
+    agent_key, inherited, gap = _resolve_agent_key(bundle, user_id)
 
     requires = requires_of(bundle.files)
     unmet = unmet_of(
@@ -962,7 +988,8 @@ def plan(
         available_connectors=available_connectors,
         available_tools=available_tools,
         available_skills=_shared_skill_slugs(),
-        substituted_model=agent_key if inherited and requires.agent_key else "",
+        substituted_model=agent_key if inherited else "",
+        model_gap=gap,
     )
 
     return ImportPlan(
@@ -988,8 +1015,6 @@ def plan(
         mutes=_mutes_for(sorted(seen)),
         agent_key=agent_key,
         agent_key_inherited=inherited,
-        agent_key_wanted=requires.agent_key if gap else "",
-        agent_key_gap=gap,
         collision=collision,
         suggested_slug=suggested,
         collision_agent_uid=collision_uid,
@@ -1225,17 +1250,16 @@ def _mute_imported(slug: str, mutes: dict[str, list[str]]) -> None:
             set_muted(slug, kind, name, True)
 
 
-def _resolve_agent_key(
-    bundle: Bundle, user_id: int, chosen: str = ""
-) -> tuple[str, bool, str]:
+def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool, str]:
     """``(agent_key, inherited, gap)`` for the imported agent.
 
     The key travels — an agent authored against a local Ollama model says
     something real about how it was tuned. It is kept when this install can
-    start it; otherwise ``gap`` says why not, and the agent runs on ``chosen``
-    (the model the operator picked in the dialog) or else the importer's own
-    active model, which is exactly what ``create`` already does for an
-    unspecified one.
+    start it; otherwise ``gap`` says why not, and the agent falls back to the
+    importer's own active model, which is exactly what ``create`` already does
+    for an unspecified one. A model the operator picks instead is not an input
+    here: :func:`with_agent_key` writes it into the bundle first, so it is
+    simply the key the bundle carries.
     """
     carried = ""
     for entry in bundle.files:
@@ -1244,8 +1268,6 @@ def _resolve_agent_key(
             carried = str((meta or {}).get("agent_key") or "")
             break
     gap = _agent_key_gap(carried, user_id) if carried else ""
-    if chosen:
-        return chosen, chosen != carried, gap
     if carried and not gap:
         return carried, False, ""
     fallback = _active_agent_key(user_id)

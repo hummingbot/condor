@@ -87,8 +87,6 @@ const PLAN: AgentImportPlan = {
   mutes: { routines: ["r"], skills: ["s"] },
   agent_key: "claude-code",
   agent_key_inherited: false,
-  agent_key_wanted: "",
-  agent_key_gap: "",
   collision: "",
   suggested_slug: "",
   collision_agent_uid: "",

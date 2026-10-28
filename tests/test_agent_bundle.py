@@ -993,8 +993,9 @@ def test_an_author_model_this_install_has_no_key_for_falls_back_to_yours(
 
     assert import_plan.agent_key == "claude-acp:sonnet"
     assert import_plan.agent_key_inherited is True
-    assert import_plan.agent_key_wanted == "openrouter:deepseek/deepseek-v4.1-flash"
-    assert import_plan.agent_key_gap == "needs OPENROUTER_API_KEY in .env"
+    [model] = [u for u in import_plan.unmet if u.kind == "model"]
+    assert model.name == "openrouter:deepseek/deepseek-v4.1-flash"
+    assert model.why == "needs OPENROUTER_API_KEY in .env"
 
 
 def test_an_author_model_this_install_can_run_is_kept(traveller, monkeypatch):
@@ -1008,7 +1009,7 @@ def test_an_author_model_this_install_can_run_is_kept(traveller, monkeypatch):
 
     assert import_plan.agent_key == "openrouter:deepseek/deepseek-v4.1-flash"
     assert import_plan.agent_key_inherited is False
-    assert import_plan.agent_key_wanted == ""
+    assert not [u for u in import_plan.unmet if u.kind == "model"]
 
 
 def test_an_author_bridge_that_is_not_installed_falls_back_to_yours(
@@ -1040,9 +1041,14 @@ def test_the_model_the_operator_picks_is_the_one_it_lands_with(traveller, monkey
     )
 
     bundle = _bundle_asking_for(traveller, "openrouter:deepseek/deepseek-v4.1-flash")
-    import_plan = ab.plan(bundle, as_slug="arrival", user_id=7, agent_key="codex")
+    picked = ab.with_agent_key(bundle, "codex", user_id=7)
+    import_plan = ab.plan(picked, as_slug="arrival", user_id=7)
     assert import_plan.agent_key == "codex"
+    assert import_plan.agent_key_inherited is False
+    assert not [u for u in import_plan.unmet if u.kind == "model"]
     assert import_plan.refusals == []
+    # The pick replaces the carried key; it does not make it another agent.
+    assert import_plan.agent_uid == ab.plan(bundle, as_slug="arrival").agent_uid
 
     ab.apply(import_plan, user_id=7)
     meta, _ = parse_frontmatter((agent_home("arrival") / "AGENT.md").read_text("utf-8"))
@@ -1052,14 +1058,10 @@ def test_the_model_the_operator_picks_is_the_one_it_lands_with(traveller, monkey
 def test_a_picked_model_that_cannot_run_here_is_refused(traveller, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
-    import_plan = ab.plan(
-        _bundle_for(traveller),
-        as_slug="arrival",
-        user_id=7,
-        agent_key="openrouter:deepseek/deepseek-v4.1-flash",
-    )
-
-    assert any("OPENROUTER_API_KEY" in r for r in import_plan.refusals)
+    with pytest.raises(ab.BundleError, match="OPENROUTER_API_KEY"):
+        ab.with_agent_key(
+            _bundle_for(traveller), "openrouter:deepseek/deepseek-v4.1-flash", user_id=7
+        )
 
 
 def test_manage_agents_import_stops_to_ask_for_a_model_its_own_cannot_run(
@@ -1095,3 +1097,26 @@ def test_manage_agents_import_stops_to_ask_for_a_model_its_own_cannot_run(
     assert landed["imported"] is True
     meta, _ = parse_frontmatter((agent_home("arrival") / "AGENT.md").read_text("utf-8"))
     assert meta["agent_key"] == "codex"
+
+
+def test_a_picked_model_keeps_the_identity_of_a_bundle_that_carries_none(
+    traveller, monkeypatch
+):
+    """A bundle with no ``agent_uid`` mints one from its content, so rewriting
+    ``agent_key`` must not mint a different one: the preview (made before the
+    pick) and the write (made after it) have to name the same agent."""
+    monkeypatch.setattr(
+        "condor.llm.readiness.npx_packages_installed",
+        lambda: {"@agentclientprotocol/codex-acp"},
+    )
+    payload = _bundle_for(traveller, as_dict=True)
+    payload["agent"]["agent_uid"] = ""
+    bundle = ab.parse(json.dumps(payload))
+
+    previewed = ab.plan(bundle, as_slug="arrival", user_id=7)
+    written = ab.plan(
+        ab.with_agent_key(bundle, "codex", 7), as_slug="arrival", user_id=7
+    )
+
+    assert written.agent_key == "codex"
+    assert written.agent_uid == previewed.agent_uid

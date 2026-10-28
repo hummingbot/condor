@@ -167,10 +167,11 @@ export function ImportAgentDialog({
    */
   const [model, setModel] = useState("");
   const [models, setModels] = useState<ChatAgentOption[]>([]);
-  const wanted = plan?.agent_key_wanted ?? "";
+  const modelGap = plan?.unmet.find((u) => u.kind === "model");
+  const wanted = modelGap?.name ?? "";
   useEffect(() => {
-    setModel(plan?.agent_key_wanted ? "" : (plan?.agent_key ?? ""));
-  }, [plan]);
+    setModel(wanted ? "" : (plan?.agent_key ?? ""));
+  }, [plan, wanted]);
   useEffect(() => {
     if (!wanted) return;
     api
@@ -545,7 +546,7 @@ export function ImportAgentDialog({
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
                 <span>
                   It was built to run on <span className="font-mono">{wanted}</span>, which
-                  you don&apos;t have here: {plan.agent_key_gap}.
+                  you don&apos;t have here: {modelGap?.why}.
                 </span>
               </p>
               {modelChoices.length > 0 ? (

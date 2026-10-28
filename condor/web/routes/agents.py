@@ -3110,6 +3110,11 @@ async def import_agent(
     from condor.agents import bundle as agent_bundle
 
     bundle = await _uploaded_bundle(file)
+    if agent_key:
+        try:
+            bundle = agent_bundle.with_agent_key(bundle, agent_key, user.id)
+        except ValueError as exc:
+            raise _bundle_refusal(exc) from exc
     connectors, tools = await _install_capabilities(user)
     plan = agent_bundle.plan(
         bundle,
@@ -3117,7 +3122,6 @@ async def import_agent(
         user_id=user.id,
         available_connectors=connectors,
         available_tools=tools,
-        agent_key=agent_key,
     )
     try:
         return agent_bundle.apply(plan, user_id=user.id)
@@ -5218,6 +5222,11 @@ async def _hub_plan(
     from condor.agents import bundle as agent_bundle
 
     listing, fetched, bundle = await _hub_bundle(slug, version, user)
+    if agent_key:
+        try:
+            bundle = agent_bundle.with_agent_key(bundle, agent_key, user.id)
+        except ValueError as exc:
+            raise _bundle_refusal(exc) from exc
     connectors, tools = await _install_capabilities(user)
     plan = agent_bundle.plan(
         bundle,
@@ -5225,7 +5234,6 @@ async def _hub_plan(
         user_id=user.id,
         available_connectors=connectors,
         available_tools=tools,
-        agent_key=agent_key,
     )
     if plan.is_update:
         return (

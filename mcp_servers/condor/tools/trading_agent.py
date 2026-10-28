@@ -299,7 +299,13 @@ def _export_agent(
     }
 
 
-def _needs_model(plan) -> dict:
+def _model_unmet(plan):
+    """The plan's unmet ``model`` row — the agent's own model can't run here —
+    or ``None``."""
+    return next((u for u in plan.unmet if u.kind == "model"), None)
+
+
+def _needs_model(plan, unmet) -> dict:
     """The answer when the agent's own model can't run here and nobody picked
     another: nothing is written, and the user chooses — the same stop the
     import dialog makes with its Run it on select."""
@@ -308,12 +314,12 @@ def _needs_model(plan) -> dict:
     return {
         "needs_model": True,
         "error": (
-            f"This agent was built to run on {plan.agent_key_wanted}, which this "
-            f"install can't start ({plan.agent_key_gap}). Ask the user which of "
+            f"This agent was built to run on {unmet.name}, which this "
+            f"install can't start ({unmet.why}). Ask the user which of "
             "`models` to run it on, then call again with agent_key set to it."
         ),
-        "wanted": plan.agent_key_wanted,
-        "why": plan.agent_key_gap,
+        "wanted": unmet.name,
+        "why": unmet.why,
         "models": agent_bundle.runnable_agent_keys(settings.user_id),
         "preview": plan.summary(),
     }
@@ -353,6 +359,8 @@ def _import_agent(path: str, as_slug: str, agent_key: str = "") -> dict:
 
     try:
         bundle = agent_bundle.parse(data)
+        if agent_key:
+            bundle = agent_bundle.with_agent_key(bundle, agent_key, settings.user_id)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -361,10 +369,10 @@ def _import_agent(path: str, as_slug: str, agent_key: str = "") -> dict:
         as_slug=as_slug,
         user_id=settings.user_id,
         available_tools=sorted(every_tool_name()),
-        agent_key=agent_key,
     )
-    if plan.agent_key_wanted and not agent_key:
-        return _needs_model(plan)
+    unmet = _model_unmet(plan)
+    if unmet:
+        return _needs_model(plan, unmet)
     try:
         return agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:
@@ -489,6 +497,8 @@ def _hub_install(
 
     try:
         bundle = botcamp_import.from_zip(fetched.data, agent_slug=slug)
+        if agent_key:
+            bundle = agent_bundle.with_agent_key(bundle, agent_key, settings.user_id)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -498,7 +508,6 @@ def _hub_install(
         as_slug=as_slug or "",
         user_id=settings.user_id,
         available_tools=tools,
-        agent_key=agent_key,
     )
     listing_row = listing.model_dump()
     if plan.is_update:
@@ -508,8 +517,9 @@ def _hub_install(
         except ValueError as exc:
             return {"error": str(exc), "verb": "update", "preview": update.summary()}
         return {"verb": "update", "listing": listing_row, **result}
-    if plan.agent_key_wanted and not agent_key:
-        return {"verb": "install", "listing": listing_row, **_needs_model(plan)}
+    unmet = _model_unmet(plan)
+    if unmet:
+        return {"verb": "install", "listing": listing_row, **_needs_model(plan, unmet)}
     try:
         result = agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:

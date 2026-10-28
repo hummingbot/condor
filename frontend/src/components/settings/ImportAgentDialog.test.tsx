@@ -46,8 +46,6 @@ const PLAN: AgentImportPlan = {
   mutes: { routines: ["r"], skills: ["s"] },
   agent_key: "claude-code",
   agent_key_inherited: false,
-  agent_key_wanted: "",
-  agent_key_gap: "",
   collision: "",
   suggested_slug: "",
   collision_agent_uid: "",
@@ -649,8 +647,15 @@ it("says when the agent's own model can't run here, and installs on the one pick
     ...PLAN,
     agent_key: "claude-code",
     agent_key_inherited: true,
-    agent_key_wanted: "openrouter:deepseek/deepseek-v4.1-flash",
-    agent_key_gap: "needs OPENROUTER_API_KEY in .env",
+    unmet: [
+      {
+        kind: "model",
+        name: "openrouter:deepseek/deepseek-v4.1-flash",
+        have: ["claude-code"],
+        blocking: false,
+        why: "needs OPENROUTER_API_KEY in .env",
+      },
+    ],
   };
   await render();
   await choose();

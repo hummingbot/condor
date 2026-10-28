@@ -99,6 +99,8 @@ export interface AgentUnmetRequirement {
   have: string[];
   /** Whether the agent cannot do its job at all without it. */
   blocking: boolean;
+  /** Why this install cannot supply it, when known — for a model, the key or bridge it lacks. */
+  why?: string;
 }
 
 /**
@@ -154,9 +156,6 @@ export interface AgentImportPlan {
   mutes: { routines: string[]; skills: string[] };
   agent_key: string;
   agent_key_inherited: boolean;
-  /** The agent's own model when this install can't start it, and why not. */
-  agent_key_wanted: string;
-  agent_key_gap: string;
   /** The taken slug, when the bundle cannot land under the name it asked for. */
   collision: string;
   suggested_slug: string;
