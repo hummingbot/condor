@@ -5513,8 +5513,15 @@ async def get_agent_hub_status(slug: str, user: WebUser = Depends(get_current_us
     route, a hub this install cannot reach right now is not this request's
     failure, since the whole point is telling that case apart from a real
     delisting.
+
+    The admin's own token only for the admin (SEC review C4, BUG-5), the
+    same :func:`_hub_read_token` every other hub read here uses — a
+    non-admin's check must never carry the admin's paid or members-only
+    access to Botcamp.
     """
     from condor import hub
 
     _get_agent(slug)
-    return await asyncio.to_thread(hub.installed_agent_status, slug)
+    return await asyncio.to_thread(
+        hub.installed_agent_status, slug, token=_hub_read_token(user)
+    )

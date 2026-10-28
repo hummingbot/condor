@@ -2489,6 +2489,45 @@ def test_the_hub_status_route_is_open_to_any_authenticated_user(offered, fake_hu
     assert res.json()["tracked"] is True
 
 
+def test_the_hub_status_route_never_sends_a_non_admins_check_with_the_admins_token(
+    offered, fake_hub, cm
+):
+    """BUG-5: ``installed_agent_status`` always called ``token()``
+    unconditionally, bypassing SEC review C4's rule that only the admin's
+    own reads carry the admin's Botcamp account."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+    from condor.web.models import WebUser
+    from condor.web.routes import agents as routes
+
+    _client().post("/hub/agents/traveller/install")
+    hub.set_token("botcamp-tok")
+
+    # Force a live re-check rather than the cached confirmed answer.
+    home = agent_home("traveller")
+    stamp = ab.read_stamp(home)
+    ab.write_stamp(
+        home, stamp.model_copy(update={"hub_checked_at": "2000-01-01T00:00:00Z"})
+    )
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.include_router(routes.hub_router)
+    app.dependency_overrides[get_current_user] = lambda: WebUser(
+        id=SEAT_ID, username="u", first_name="U", role="user"
+    )
+    before = len(fake_hub.calls)
+
+    res = TestClient(app).get("/agents/traveller/hub-status")
+
+    assert res.status_code == 200
+    sent = fake_hub.calls[before:]
+    assert sent, "the route reached the hub"
+    assert {call.token for call in sent} == {""}
+
+
 def test_the_hub_status_route_answers_404_for_an_agent_that_does_not_exist():
     res = _client().get("/agents/nobody/hub-status")
 

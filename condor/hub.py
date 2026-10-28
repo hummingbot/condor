@@ -1047,7 +1047,7 @@ def _status_payload(stamp) -> dict:
     }
 
 
-def installed_agent_status(slug: str, force: bool = False) -> dict:
+def installed_agent_status(slug: str, force: bool = False, *, token: str = "") -> dict:
     """What this install knows right now about ``slug``'s Botcamp provenance.
 
     ``{"tracked": False}`` when ``slug`` was never installed or updated from
@@ -1061,6 +1061,13 @@ def installed_agent_status(slug: str, force: bool = False) -> dict:
     keeps naming the last time the hub gave a definite answer rather than
     the last time it was asked — which is what lets a dashboard say "last
     confirmed Tuesday" through an outage instead of silently forgetting it.
+
+    ``token`` is the caller's to supply (SEC review C4, BUG-5): this read
+    has no caller identity of its own, so without it every check used
+    :func:`token` unconditionally and sent the admin's account to Botcamp
+    for a seat that has none. Empty is the anonymous read a free agent's
+    status answers fine; a membership/purchase-gated agent's status needs
+    the admin's own token passed in, same as every other hub read.
     """
     from condor.agents.bundle import agent_home, read_stamp, write_stamp
 
@@ -1072,7 +1079,7 @@ def installed_agent_status(slug: str, force: bool = False) -> dict:
     if not force and not _stale(stamp.hub_checked_at):
         return _status_payload(stamp)
 
-    result = listing_status(stamp.hub_slug, stamp.hub_version, token=token())
+    result = listing_status(stamp.hub_slug, stamp.hub_version, token=token)
     if result.state == "unknown":
         payload = _status_payload(stamp)
         payload["live_check_failed"] = True
