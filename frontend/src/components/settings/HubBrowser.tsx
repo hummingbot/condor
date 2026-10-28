@@ -8,7 +8,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import {
   api,
@@ -45,6 +45,13 @@ import { ImportAgentDialog } from "./ImportAgentDialog";
  * got back, and every install/update call that follows sends those back
  * instead of re-resolving `"latest"` — the server refuses rather than
  * silently applying whatever is newest by the time install runs.
+ *
+ * `pinned` lives in this closure, so the *same* `hubSource()` call must stay
+ * in use for the whole review — a second call starts over with an empty
+ * digest. Callers must memoize this per chosen agent rather than calling it
+ * on every render (a background rerender while the dialog is open would
+ * otherwise hand the dialog a fresh, unpinned source without changing its
+ * displayed plan, since that only re-previews on `source.key`).
  */
 function hubSource(slug: string, version: string): BundleSource {
   let pinned = { version, sha256: "" };
@@ -123,6 +130,15 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
   const lookup = useMutation({
     mutationFn: (value: string) => api.getHubListing(value),
   });
+
+  // One `hubSource()` per chosen agent, not one per render: it carries the
+  // preview's pinned version/digest in its own closure, and a background
+  // rerender creating a fresh one would silently drop that pin (BUG-2 cont.).
+  const chosenSlug = chosen?.slug ?? "";
+  const source = useMemo(
+    () => (chosenSlug ? hubSource(chosenSlug, "latest") : null),
+    [chosenSlug],
+  );
 
   return (
     <div className="space-y-5">
@@ -251,11 +267,11 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
       {/* The review opens over the page rather than below it: from a card
           high up in the grid, a dialog rendered under the slug lookup was
           off-screen, and pressing Review looked like it did nothing. */}
-      {chosen && (
+      {chosen && source && (
         <ReviewModal chosen={chosen} onClose={() => setChosen(null)}>
           <ImportAgentDialog
             key={chosen.slug}
-            source={hubSource(chosen.slug, "latest")}
+            source={source}
             onImported={onInstalled}
             stickyAction
             provenance={
