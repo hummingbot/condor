@@ -272,7 +272,11 @@ function UploadYours() {
             </span>
             <span className="truncate font-mono text-xs">{slug}</span>
           </span>
-          <span className="flex flex-wrap items-center gap-2">
+          {/* Keyed on `slug`: `PublishAgentButton` carries its own export
+              preview in state, and without a key React would keep that
+              instance mounted across a dropdown change, showing one agent's
+              preview while Publish uploads another. */}
+          <span key={slug} className="flex flex-wrap items-center gap-2">
             <PublishAgentButton slug={slug} />
             <WithdrawListingButton slug={slug} />
           </span>
