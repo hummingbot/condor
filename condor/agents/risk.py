@@ -468,12 +468,14 @@ class RiskEngine:
         """Check a manage_bots call against risk limits.
 
         A bot's capital lives in saved controller configs on the API server,
-        so exposure can't be computed from the tool inputs alone. Instead,
-        bound the loss: a deploy must declare ``max_global_drawdown_quote``
-        (the platform-enforced kill switch) no larger than the strategy's
-        position limit. Stops are risk-reducing and always allowed; an
-        ``update_config`` is only gated when it declares a
-        ``total_amount_quote`` above the position limit.
+        so exposure can't be computed from the tool inputs alone. Instead, a
+        deploy that declares ``max_global_drawdown_quote`` (the
+        platform-enforced kill switch) has it bounded by the strategy's
+        position limit; omitting it deploys with no platform-side loss cap,
+        matching the hummingbot-api client's own default (owner's call,
+        GitHub condor#303 — risk caps are opt-in, not required). Stops are
+        risk-reducing and always allowed; an ``update_config`` is only gated
+        when it declares a ``total_amount_quote`` above the position limit.
 
         ``current_state`` carries the venue check's verdict ([[FEAT-113]]);
         without one (older callers, tests) the drift guard simply does not fire.
@@ -491,27 +493,33 @@ class RiskEngine:
                 return refusal
 
         if action == "deploy":
-            # Parsed like every other figure the gate values (SEC-632): a NaN
-            # cap is truthy but never fires on the backend, and a zero cap is
-            # never installed, so both are refused rather than approved.
-            try:
-                cap = _quote_amount(
-                    input_data.get("max_global_drawdown_quote"),
-                    "max_global_drawdown_quote",
-                )
-            except ValueError as exc:
-                return False, f"manage_bots {action}: {exc}"
-            if cap <= 0:
-                return False, (
-                    "Bot deploy must declare max_global_drawdown_quote "
-                    f"(≤ ${self.limits.max_position_size_quote:.2f}) so the "
-                    "platform kill switch bounds the loss"
-                )
-            if cap > self.limits.max_position_size_quote:
-                return False, (
-                    f"max_global_drawdown_quote ${cap:.2f} exceeds "
-                    f"position limit ${self.limits.max_position_size_quote:.2f}"
-                )
+            raw_cap = input_data.get("max_global_drawdown_quote")
+            # Unset (None/"") means no loss cap, same as the hummingbot-api
+            # client itself: it omits the field from the deploy payload
+            # rather than sending a sentinel (verified in
+            # hummingbot_api_client.routers.bot_orchestration.deploy_v2_controllers).
+            # A value that WAS declared is still parsed and bounded below —
+            # this makes the cap optional, not meaningless.
+            if raw_cap is not None and raw_cap != "":
+                # Parsed like every other figure the gate values (SEC-632): a
+                # NaN cap is truthy but never fires on the backend, and a zero
+                # or negative cap is never installed, so neither may clear a
+                # cap the caller bothered to declare.
+                try:
+                    cap = _quote_amount(raw_cap, "max_global_drawdown_quote")
+                except ValueError as exc:
+                    return False, f"manage_bots {action}: {exc}"
+                if cap <= 0:
+                    return False, (
+                        "manage_bots deploy: max_global_drawdown_quote must "
+                        f"be a positive amount, got {raw_cap!r} — omit the "
+                        "field entirely for no loss cap"
+                    )
+                if cap > self.limits.max_position_size_quote:
+                    return False, (
+                        f"max_global_drawdown_quote ${cap:.2f} exceeds "
+                        f"position limit ${self.limits.max_position_size_quote:.2f}"
+                    )
         elif action == "update_config":
             # A stringified config_data is a common model slip; its amount can't
             # be read, so it is refused rather than raised out of the permission
