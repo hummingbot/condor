@@ -299,6 +299,17 @@ class TickEngine:
             self.config, self.agent.slug, self.strategy.slug
         )
 
+        # Auto's resolved default, same as bot_name above: a start request that
+        # asked for no particular server (or one that no longer resolves) picks
+        # one through ``_resolve_server``'s chain, and that pick must land in
+        # ``self.config["server_name"]`` BEFORE the session config is
+        # persisted below — otherwise the session's own config.yml keeps the
+        # sentinel, ``_strategy_server``'s pin read (#296) finds nothing, and
+        # the Fleet tab can never locate this run's bot.
+        resolved_server_name, _ = self._resolve_server()
+        if resolved_server_name:
+            self.config["server_name"] = resolved_server_name
+
         if self.is_experiment:
             self.session_num = next_experiment_number(strategy_dir)
             self.agent_id = f"{run_key}_e{self.session_num}"

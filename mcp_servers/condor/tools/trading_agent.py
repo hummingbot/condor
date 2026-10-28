@@ -515,7 +515,10 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
         # (``condor/web/routes/agents.py``'s ``install_from_hub``), which this
         # tool path skipped entirely until now.
         agent_bundle.record_hub_install(
-            update.slug, hub_slug=slug, hub_version=fetched.version, digest=fetched.sha256
+            update.slug,
+            hub_slug=slug,
+            hub_version=fetched.version,
+            digest=fetched.sha256,
         )
         return {"verb": "update", "listing": listing_row, **result}
     try:

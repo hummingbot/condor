@@ -371,9 +371,7 @@ def test_session_executors_normal_payload_has_an_empty_reason(cm, strategy, pric
     assert out["performance"]["total_pnl"] == pytest.approx(PNL)
 
 
-def test_session_executors_falls_back_to_the_sessions_own_pin(
-    cm, strategy, priced
-):
+def test_session_executors_falls_back_to_the_sessions_own_pin(cm, strategy, priced):
     """#296: a start request's server choice is only ever saved on the
     session's own config.yml, never the strategy's — true of every shipped
     loop. The Fleet tab must still find the server from there."""

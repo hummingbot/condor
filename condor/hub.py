@@ -1267,7 +1267,9 @@ def _store_submission(slug: str, receipt: Receipt) -> None:
     get_config_manager().update_hub(submissions=submissions)
 
 
-def _published_listing_provenance(listing_id: str, *, token: str = "") -> tuple[str, str]:
+def _published_listing_provenance(
+    listing_id: str, *, token: str = ""
+) -> tuple[str, str]:
     """``(badge, published_at)`` for a submission's own listing, best-effort.
 
     :func:`get` is the pull-side reader of PR #111's ``GET /agents/{slug}``,
@@ -1482,7 +1484,10 @@ def device_state() -> DeviceLinkState:
             _pending_device = None
             return DeviceLinkState(status="expired")
 
-        if pending.get("in_flight") or now - pending["last_polled"] < pending["interval"]:
+        if (
+            pending.get("in_flight")
+            or now - pending["last_polled"] < pending["interval"]
+        ):
             return DeviceLinkState(
                 status="pending",
                 user_code=pending["user_code"],

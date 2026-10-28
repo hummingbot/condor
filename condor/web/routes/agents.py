@@ -1263,9 +1263,9 @@ def _strategy_server(
     from condor.agents.journal import iter_session_dirs
 
     try:
-        server_name = load_full_config(strategy_dir, default_config).get(
-            "server_name"
-        ) or ""
+        server_name = (
+            load_full_config(strategy_dir, default_config).get("server_name") or ""
+        )
     except Exception:
         server_name = ""
     if server_name:
