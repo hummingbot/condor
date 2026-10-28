@@ -318,11 +318,21 @@ export const ChatRail = memo(function ChatRail({
         title="Delete Agent"
         isPending={deleteAgent.isPending}
         isError={deleteAgent.isError}
-        errorText="Failed to delete agent. It may have running loops."
+        errorText={
+          (deleteAgent.error as Error | null)?.message ??
+          "Failed to delete agent. It may have running loops."
+        }
         onConfirm={() =>
           pendingDelete && deleteAgent.mutate(pendingDelete.slug)
         }
-        onClose={() => setPendingDelete(null)}
+        onClose={() => {
+          // A mutation shared across every row in the rail (BUG-9):
+          // without this, the error from a row whose delete was refused
+          // stayed on screen as the *next* row's dialog opened, blaming a
+          // delete that was never attempted.
+          deleteAgent.reset();
+          setPendingDelete(null);
+        }}
       >
         Delete{" "}
         <strong className="text-[var(--color-text)]">
