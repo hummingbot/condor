@@ -164,6 +164,14 @@ function BotcampAccountCard() {
           </Link>{" "}
           to publish agents.
         </p>
+        {/* Disconnecting clears the local token immediately, which is what
+            flips `linked` to false and lands here — a failed revoke still
+            needs to be seen, not lost the moment this branch takes over. */}
+        {revokeNotice && (
+          <p role="alert" className="mt-2 text-[11px] text-[var(--color-red)]">
+            {revokeNotice}
+          </p>
+        )}
       </section>
     );
   }
@@ -307,12 +315,27 @@ function useHubDevice() {
     },
   });
 
-  const [revokeNotice, setRevokeNotice] = useState<string | null>(null);
+  // Not local `useState`: `AgentHub` unmounts whichever of `HubDeviceField`
+  // (linked) or `HubDeviceSignIn` (not linked) is on screen the moment this
+  // disconnect flips `linked` false, which would otherwise destroy this
+  // component's own state before `HubDeviceSignInPanel`'s notice paragraph
+  // below ever rendered it (Greptile's review of PR #111's integration). The
+  // query cache survives that unmount; the fresh `HubDeviceSignIn` mount
+  // that replaces this one reads the same key and shows it anyway.
+  const revokeNotice = useQuery({
+    queryKey: ["hub-revoke-notice"],
+    queryFn: () => null as string | null,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  }).data;
   const disconnect = useMutation({
     mutationFn: api.disconnectHubDevice,
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["hub-device"] });
-      setRevokeNotice(result.revoked === false ? COULD_NOT_REVOKE : null);
+      queryClient.setQueryData(
+        ["hub-revoke-notice"],
+        result.revoked === false ? COULD_NOT_REVOKE : null,
+      );
     },
   });
 
@@ -322,7 +345,7 @@ function useHubDevice() {
     start,
     disconnect,
     busy: start.isPending || disconnect.isPending,
-    revokeNotice,
+    revokeNotice: revokeNotice ?? null,
   };
 }
 
