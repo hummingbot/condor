@@ -99,6 +99,8 @@ export interface AgentUnmetRequirement {
   have: string[];
   /** Whether the agent cannot do its job at all without it. */
   blocking: boolean;
+  /** Why this install cannot supply it, when known — for a model, the key or bridge it lacks. */
+  why?: string;
 }
 
 /**
@@ -425,10 +427,12 @@ async function postAgentBundle(
   path: string,
   file: File,
   asSlug: string,
+  agentKey = "",
 ): Promise<AgentImportPlan> {
   const body = new FormData();
   body.append("file", file);
   body.append("as_slug", asSlug);
+  if (agentKey) body.append("agent_key", agentKey);
   const res = await authFetch(path, { method: "POST", body });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
@@ -4048,8 +4052,8 @@ export const api = {
     postAgentBundle("/api/v1/agents/import/preview", file, asSlug),
 
   /** Register the agent in this bundle, with its routines and skills muted. */
-  importAgent: (file: File, asSlug = "") =>
-    postAgentBundle("/api/v1/agents/import", file, asSlug),
+  importAgent: (file: File, asSlug = "", agentKey = "") =>
+    postAgentBundle("/api/v1/agents/import", file, asSlug, agentKey),
 
   // ── Updating one from a newer bundle (FEAT-145) ──
 
@@ -4093,10 +4097,13 @@ export const api = {
     ),
 
   /** Install it, through exactly the gate the file path uses. */
-  installFromHub: (slug: string, asSlug = "", version = "latest") =>
+  installFromHub: (slug: string, asSlug = "", version = "latest", agentKey = "") =>
     apiFetch<HubInstallResponse>(
       `/api/v1/hub/agents/${encodeURIComponent(slug)}/install`,
-      { method: "POST", body: JSON.stringify({ as_slug: asSlug, version }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ as_slug: asSlug, version, agent_key: agentKey }),
+      },
     ),
 
   /** Upload one of this install's agents. Admin-only, and irreversible in

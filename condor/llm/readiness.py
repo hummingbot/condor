@@ -275,18 +275,21 @@ def _bridge_installed(cmd: str, npx_packages: set[str]) -> bool:
     return shutil.which(parts[0]) is not None
 
 
-def provider_present(base: str) -> bool:
-    """Is this provider set up here at all: a cloud key in the environment, a
-    bridge installed? Cheap and offline — no login probe, no server ping — so an
-    import can ask it. An unproven login or a stopped local server still counts
-    as present, by the same rule that never lets those refuse a pick."""
+def provider_gap(base: str) -> str:
+    """Why this provider is not set up here, or ``""`` when it is: a cloud key
+    missing from the environment, a bridge not installed. Cheap and offline — no
+    login probe, no server ping — so an import can ask it. An unproven login or
+    a stopped local server is not a gap, by the same rule that never lets those
+    refuse a pick."""
     if base in CLOUD_KEY_ENVS:
-        return bool(os.environ.get(CLOUD_KEY_ENVS[base]))
+        var = CLOUD_KEY_ENVS[base]
+        return "" if os.environ.get(var) else f"needs {var} in .env"
     cmd = ACP_COMMANDS.get(base)
     if cmd is not None:
         packages = npx_packages_installed() if cmd.startswith("npx ") else set()
-        return _bridge_installed(cmd, packages)
-    return True
+        if not _bridge_installed(cmd, packages):
+            return f"not installed — {install_command(cmd)}"
+    return ""
 
 
 def acp_bridges() -> list[dict]:

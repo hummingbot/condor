@@ -321,6 +321,9 @@ class UnmetRequirement(BaseModel):
     name: str
     have: list[str] = Field(default_factory=list)
     blocking: bool = False
+    #: Why this install cannot supply it, when that is known — for a model, the
+    #: key missing from ``.env`` or the bridge not installed.
+    why: str = ""
 
 
 class BundleFinding(BaseModel):
@@ -522,6 +525,7 @@ def unmet_of(
     available_tools: Sequence[str] | None = None,
     available_skills: Sequence[str] | None = None,
     substituted_model: str = "",
+    model_gap: str = "",
 ) -> list[UnmetRequirement]:
     """Which requirements this install cannot meet, given what it has.
 
@@ -552,13 +556,14 @@ def unmet_of(
         for name in requires.skills.inherited:
             if name not in have:
                 unmet.append(UnmetRequirement(kind="skill", name=name, blocking=True))
-    if substituted_model:
+    if model_gap:
         unmet.append(
             UnmetRequirement(
                 kind="model",
                 name=requires.agent_key,
-                have=[substituted_model],
+                have=[substituted_model] if substituted_model else [],
                 blocking=False,
+                why=model_gap,
             )
         )
     return unmet
@@ -879,6 +884,39 @@ def parse(data: bytes | str) -> Bundle:
         raise BundleError(f"Malformed bundle: {exc}") from exc
 
 
+def with_agent_key(bundle: Bundle, agent_key: str, user_id: int = 0) -> Bundle:
+    """``bundle`` with its ``AGENT.md`` asking for ``agent_key`` instead.
+
+    How an import runs on a model the operator picked when the agent's own
+    cannot start here: the pick replaces the key the bundle carries, so the
+    plan and the write see one model and nothing beside it. The file's
+    ``sha256`` is recomputed, and ``agent_uid`` is settled *before* the edit,
+    because a bundle that carries none mints it from its content and the pick
+    must not make it a different agent.
+
+    Refused when ``agent_key`` cannot run here either.
+    """
+    gap = _agent_key_gap(agent_key, user_id)
+    if gap:
+        raise BundleError(f"{agent_key} cannot run here: {gap}")
+    agent = bundle.agent.model_copy(
+        update={"agent_uid": bundle.agent.agent_uid or _minted_uid(bundle)}
+    )
+    files = []
+    for entry in bundle.files:
+        if entry.path == AGENT_MD:
+            meta, body = parse_frontmatter(entry.text)
+            meta = meta if isinstance(meta, dict) else {}
+            meta["agent_key"] = agent_key
+            text = render_frontmatter(meta, body)
+            entry = BundleFile(path=entry.path, sha256=_digest(text), text=text)
+        files.append(entry)
+    requires = bundle.requires.model_copy(update={"agent_key": agent_key})
+    return bundle.model_copy(
+        update={"agent": agent, "files": files, "requires": requires}
+    )
+
+
 def plan(
     bundle: Bundle,
     as_slug: str = "",
@@ -942,7 +980,7 @@ def plan(
     agent_uid = bundle.agent.agent_uid or _minted_uid(bundle)
     collision_uid = _installed_agent_uid(collision) if collision else ""
 
-    agent_key, inherited = _resolve_agent_key(bundle, user_id)
+    agent_key, inherited, gap = _resolve_agent_key(bundle, user_id)
 
     requires = requires_of(bundle.files)
     unmet = unmet_of(
@@ -950,7 +988,8 @@ def plan(
         available_connectors=available_connectors,
         available_tools=available_tools,
         available_skills=_shared_skill_slugs(),
-        substituted_model=agent_key if inherited and requires.agent_key else "",
+        substituted_model=agent_key if inherited else "",
+        model_gap=gap,
     )
 
     return ImportPlan(
@@ -1211,13 +1250,16 @@ def _mute_imported(slug: str, mutes: dict[str, list[str]]) -> None:
             set_muted(slug, kind, name, True)
 
 
-def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool]:
-    """``(agent_key, inherited)`` for the imported agent.
+def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool, str]:
+    """``(agent_key, inherited, gap)`` for the imported agent.
 
     The key travels — an agent authored against a local Ollama model says
-    something real about how it was tuned. It is kept when this install knows
-    how to start it, and otherwise falls back to the importer's own active
-    model, which is exactly what ``create`` already does for an unspecified one.
+    something real about how it was tuned. It is kept when this install can
+    start it; otherwise ``gap`` says why not, and the agent falls back to the
+    importer's own active model, which is exactly what ``create`` already does
+    for an unspecified one. A model the operator picks instead is not an input
+    here: :func:`with_agent_key` writes it into the bundle first, so it is
+    simply the key the bundle carries.
     """
     carried = ""
     for entry in bundle.files:
@@ -1225,16 +1267,31 @@ def _resolve_agent_key(bundle: Bundle, user_id: int) -> tuple[str, bool]:
             meta, _ = parse_frontmatter(entry.text)
             carried = str((meta or {}).get("agent_key") or "")
             break
-    if carried and _agent_key_known(carried, user_id):
-        return carried, False
+    gap = _agent_key_gap(carried, user_id) if carried else ""
+    if carried and not gap:
+        return carried, False, ""
     fallback = _active_agent_key(user_id)
     if fallback:
-        return fallback, True
-    return carried, False
+        return fallback, True, gap
+    return carried, False, gap
 
 
-def _agent_key_known(agent_key: str, user_id: int) -> bool:
-    """True when this install knows how to start ``agent_key``.
+def runnable_agent_keys(user_id: int) -> list[str]:
+    """The models this install can start, for a surface that has to ask which
+    one an imported agent should run on: the catalogue's startable keys with no
+    gap, and the importer's own model when it is one the catalogue only names
+    as a family (``openrouter:<model>``)."""
+    from condor.llm.options import selectable_agent_options
+
+    keys = [k for k in selectable_agent_options() if not _agent_key_gap(k, user_id)]
+    active = _active_agent_key(user_id)
+    if active and active not in keys and not _agent_key_gap(active, user_id):
+        keys.insert(0, active)
+    return keys
+
+
+def _agent_key_gap(agent_key: str, user_id: int) -> str:
+    """Why this install cannot start ``agent_key``, or ``""`` when it can.
 
     Catalog membership, then whether that provider is set up here at all (its
     cloud key set, its bridge installed) — not a live probe: resolving a model
@@ -1245,7 +1302,7 @@ def _agent_key_known(agent_key: str, user_id: int) -> bool:
     actually has that endpoint saved.
     """
     from condor.llm.options import AGENT_OPTIONS, selectable_agent_options
-    from condor.llm.readiness import base_of, provider_present
+    from condor.llm.readiness import base_of, provider_gap
 
     base = base_of(agent_key)
     if agent_key not in selectable_agent_options():
@@ -1255,13 +1312,13 @@ def _agent_key_known(agent_key: str, user_id: int) -> bool:
             base_url, _ = resolve_custom_endpoint(
                 agent_key, user_id=user_id, env_fallback=False
             )
-            return bool(base_url)
+            return "" if base_url else "no saved endpoint by that name"
         if f"{base}:" not in AGENT_OPTIONS:
-            return False
+            return "not a model this install offers"
     # An author's openrouter:* model on an install without OPENROUTER_API_KEY,
     # or their copilot on one without the bridge, would only fail at the first
-    # chat — the importer's own model runs.
-    return provider_present(base)
+    # chat.
+    return provider_gap(base)
 
 
 def _active_agent_key(user_id: int) -> str:

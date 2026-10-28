@@ -299,7 +299,33 @@ def _export_agent(
     }
 
 
-def _import_agent(path: str, as_slug: str) -> dict:
+def _model_unmet(plan):
+    """The plan's unmet ``model`` row — the agent's own model can't run here —
+    or ``None``."""
+    return next((u for u in plan.unmet if u.kind == "model"), None)
+
+
+def _needs_model(plan, unmet) -> dict:
+    """The answer when the agent's own model can't run here and nobody picked
+    another: nothing is written, and the user chooses — the same stop the
+    import dialog makes with its Run it on select."""
+    from condor.agents import bundle as agent_bundle
+
+    return {
+        "needs_model": True,
+        "error": (
+            f"This agent was built to run on {unmet.name}, which this "
+            f"install can't start ({unmet.why}). Ask the user which of "
+            "`models` to run it on, then call again with agent_key set to it."
+        ),
+        "wanted": unmet.name,
+        "why": unmet.why,
+        "models": agent_bundle.runnable_agent_keys(settings.user_id),
+        "preview": plan.summary(),
+    }
+
+
+def _import_agent(path: str, as_slug: str, agent_key: str = "") -> dict:
     """Register the agent in a bundle file, with its code switched off.
 
     ``as_slug`` (passed as ``agent_slug``) renames it on the way in, which is
@@ -333,6 +359,8 @@ def _import_agent(path: str, as_slug: str) -> dict:
 
     try:
         bundle = agent_bundle.parse(data)
+        if agent_key:
+            bundle = agent_bundle.with_agent_key(bundle, agent_key, settings.user_id)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -342,6 +370,9 @@ def _import_agent(path: str, as_slug: str) -> dict:
         user_id=settings.user_id,
         available_tools=sorted(every_tool_name()),
     )
+    unmet = _model_unmet(plan)
+    if unmet:
+        return _needs_model(plan, unmet)
     try:
         return agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:
@@ -427,7 +458,9 @@ def _hub_get(slug: str) -> dict:
     }
 
 
-def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
+def _hub_install(
+    slug: str, as_slug: str = "", version: str = "latest", agent_key: str = ""
+) -> dict:
     """Install a Botcamp agent version, through exactly the gate the file
     path uses.
 
@@ -464,6 +497,8 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
 
     try:
         bundle = botcamp_import.from_zip(fetched.data, agent_slug=slug)
+        if agent_key:
+            bundle = agent_bundle.with_agent_key(bundle, agent_key, settings.user_id)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -482,6 +517,9 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
         except ValueError as exc:
             return {"error": str(exc), "verb": "update", "preview": update.summary()}
         return {"verb": "update", "listing": listing_row, **result}
+    unmet = _model_unmet(plan)
+    if unmet:
+        return {"verb": "install", "listing": listing_row, **_needs_model(plan, unmet)}
     try:
         result = agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:
@@ -708,7 +746,7 @@ def _manage_agent(
         # ``agent_slug`` is the name to land under, not one to look up: the
         # bundle already carries its own, and this is how a collision is
         # answered.
-        return _import_agent(path, agent_slug or "")
+        return _import_agent(path, agent_slug or "", agent_key or "")
 
     if action == "upgrade_agent":
         if not agent_slug:
@@ -737,7 +775,7 @@ def _manage_agent(
         # name to land under, which is the same split ``import`` already
         # uses: the bundle names itself, and ``agent_slug`` is how a
         # collision is answered.
-        return _hub_install(path, agent_slug or "")
+        return _hub_install(path, agent_slug or "", agent_key=agent_key or "")
 
     if action == "publish_hub":
         if not agent_slug:

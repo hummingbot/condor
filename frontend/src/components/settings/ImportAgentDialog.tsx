@@ -10,9 +10,11 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
+  api,
   type AgentBundleFinding,
   type AgentImportPlan,
   type AgentUpdatePlan,
+  type ChatAgentOption,
 } from "@/lib/api";
 
 import { fileSource, type BundleSource } from "./bundleSource";
@@ -158,6 +160,26 @@ export function ImportAgentDialog({
    * render, so what is shown is always what the pending import would do.
    */
   const latest = useRef(0);
+  /**
+   * The model it will run on, when its own can't run here. Nothing until the
+   * operator picks one of the models this install can start — the same list
+   * as the chat's model picker — and Import waits for that pick.
+   */
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<ChatAgentOption[]>([]);
+  const modelGap = plan?.unmet.find((u) => u.kind === "model");
+  const wanted = modelGap?.name ?? "";
+  useEffect(() => {
+    setModel(wanted ? "" : (plan?.agent_key ?? ""));
+  }, [plan, wanted]);
+  useEffect(() => {
+    if (!wanted) return;
+    api
+      .getSessionOptions()
+      .then((options) => setModels(options.agents.filter((o) => !o.picker && o.ready !== false)))
+      .catch(() => setModels([]));
+  }, [wanted]);
+  const modelChoices = models;
 
   function reset() {
     setPlan(null);
@@ -260,7 +282,7 @@ export function ImportAgentDialog({
       // the colliding name again and answered 409 while this button read
       // "Import <the free name>". The plan is what was reviewed, so the plan's
       // name is what lands.
-      const result = await active.install(plan.slug);
+      const result = await active.install(plan.slug, wanted ? model : undefined);
       setLanded(result);
       setPicked(null);
       setPlan(null);
@@ -272,7 +294,9 @@ export function ImportAgentDialog({
     }
   }
 
-  const blocked = plan ? plan.refusals.length > 0 || plan.collision !== "" : false;
+  const blocked = plan
+    ? plan.refusals.length > 0 || plan.collision !== "" || (wanted !== "" && !model)
+    : false;
 
   return (
     <div className="space-y-4">
@@ -509,8 +533,51 @@ export function ImportAgentDialog({
             server pin. Muted on arrival:{" "}
             {[...plan.mutes.routines, ...plan.mutes.skills].join(", ") || "nothing"}.
             {plan.agent_key_inherited &&
+              !wanted &&
               ` Its model is not configured here, so it will use yours (${plan.agent_key}).`}
           </p>
+
+          {wanted && (
+            <div
+              data-model-choice
+              className="space-y-1.5 rounded-md border border-amber-400/40 bg-amber-400/5 p-2.5"
+            >
+              <p className="flex items-start gap-1.5 text-xs text-[var(--color-text)]">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                <span>
+                  It was built to run on <span className="font-mono">{wanted}</span>, which
+                  you don&apos;t have here: {modelGap?.why}.
+                </span>
+              </p>
+              {modelChoices.length > 0 ? (
+                <label className="flex items-center gap-2 text-[11px] text-[var(--color-text-muted)]">
+                  Run it on
+                  <select
+                    aria-label="Model"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+                  >
+                    <option value="" disabled>
+                      Choose a model…
+                    </option>
+                    {modelChoices.map((o) => (
+                      <option key={o.key} value={o.key}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <p className="text-[11px] text-[var(--color-text-muted)]">
+                  No model is set up here yet. Pick one in Settings first.
+                </p>
+              )}
+              <p className="text-[11px] text-[var(--color-text-muted)]">
+                Or set {wanted} up and import it again.
+              </p>
+            </div>
+          )}
 
           {plan.refusals.map((r) => (
             <p key={r} role="alert" data-refusal className="text-xs text-[var(--color-red)]">
