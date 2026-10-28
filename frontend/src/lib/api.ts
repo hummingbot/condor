@@ -395,6 +395,9 @@ export interface HubInstallResponse {
   verb: "install" | "update";
   listing: HubListing;
   plan: AgentImportPlan | AgentUpdatePlan;
+  /** The version and digest the server actually reviewed (BUG-2) — pin
+   *  install to this rather than re-resolving "latest" a second time. */
+  fetched: { version: number; sha256: string };
 }
 
 /**
@@ -4092,11 +4095,27 @@ export const api = {
       { method: "POST", body: JSON.stringify({ as_slug: asSlug, version }) },
     ),
 
-  /** Install it, through exactly the gate the file path uses. */
-  installFromHub: (slug: string, asSlug = "", version = "latest") =>
+  /** Install it, through exactly the gate the file path uses. `version`
+   *  and `expectedSha256` should be the preview's own `fetched` fields
+   *  (BUG-2) — pinning install to what was actually reviewed, rather than
+   *  re-resolving `"latest"` and risking a newer approval landing between
+   *  the two calls. The server refuses when the digest no longer matches. */
+  installFromHub: (
+    slug: string,
+    asSlug = "",
+    version = "latest",
+    expectedSha256 = "",
+  ) =>
     apiFetch<HubInstallResponse>(
       `/api/v1/hub/agents/${encodeURIComponent(slug)}/install`,
-      { method: "POST", body: JSON.stringify({ as_slug: asSlug, version }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          as_slug: asSlug,
+          version,
+          expected_sha256: expectedSha256,
+        }),
+      },
     ),
 
   /** Upload one of this install's agents. Admin-only, and irreversible in

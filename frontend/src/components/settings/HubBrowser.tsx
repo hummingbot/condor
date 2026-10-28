@@ -37,24 +37,37 @@ import { ImportAgentDialog } from "./ImportAgentDialog";
  * Both `install` and `applyUpdate` post to the same endpoint, because the
  * server decides which verb it is from the bundle's identity and not from
  * which button was pressed. Each re-fetches rather than reusing the preview's
- * bytes; what makes that safe is the integrity check on the server, which
- * holds both fetches to the download's own header.
+ * bytes; what makes that safe is the integrity check on the server — but
+ * only once install is pinned to what the preview actually showed (BUG-2):
+ * `version` here is usually `"latest"`, and asking Botcamp for "latest"
+ * twice can resolve to two different approved versions if one landed in
+ * between. So every preview call records the exact version and digest it
+ * got back, and every install/update call that follows sends those back
+ * instead of re-resolving `"latest"` — the server refuses rather than
+ * silently applying whatever is newest by the time install runs.
  */
 function hubSource(slug: string, version: string): BundleSource {
+  let pinned = { version, sha256: "" };
   return {
     key: `hub:${slug}:${version}`,
     preview: async (asSlug) => {
       const res = await api.previewHubInstall(slug, asSlug, version);
+      pinned = { version: String(res.fetched.version), sha256: res.fetched.sha256 };
       return res.verb === "update"
         ? { verb: "update", plan: res.plan as AgentUpdatePlan }
         : { verb: "install", plan: res.plan as AgentImportPlan };
     },
     install: async (asSlug) =>
-      (await api.installFromHub(slug, asSlug, version)).plan as AgentImportPlan,
-    previewUpdate: async () =>
-      (await api.previewHubInstall(slug, "", version)).plan as AgentUpdatePlan,
+      (await api.installFromHub(slug, asSlug, pinned.version, pinned.sha256))
+        .plan as AgentImportPlan,
+    previewUpdate: async () => {
+      const res = await api.previewHubInstall(slug, "", version);
+      pinned = { version: String(res.fetched.version), sha256: res.fetched.sha256 };
+      return res.plan as AgentUpdatePlan;
+    },
     applyUpdate: async () =>
-      (await api.installFromHub(slug, "", version)).plan as AgentUpdatePlan,
+      (await api.installFromHub(slug, "", pinned.version, pinned.sha256))
+        .plan as AgentUpdatePlan,
   };
 }
 

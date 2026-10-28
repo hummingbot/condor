@@ -2064,6 +2064,63 @@ def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
     )
 
 
+def test_the_preview_returns_what_version_and_digest_it_reviewed(offered, fake_hub):
+    body = _client().post("/hub/agents/traveller/install/preview").json()
+
+    row = fake_hub.listings["traveller"]["versions"][0]
+    assert body["fetched"] == {"version": 1, "sha256": row["sha256"]}
+
+
+def test_install_refuses_when_botcamp_approved_a_newer_version_since_preview(
+    offered, fake_hub
+):
+    """BUG-2: a frontend that always asks for "latest" can have Botcamp
+    approve v2 between the preview and the install call. Pinning install to
+    the preview's own digest turns that race into a refusal, not a silent
+    upgrade to code nobody reviewed.
+    """
+    client = _client()
+    preview = client.post("/hub/agents/traveller/install/preview").json()
+    reviewed_sha256 = preview["fetched"]["sha256"]
+
+    # ``offered`` already removed the agent's library from disk (so the
+    # install is a *create*), so a v2 bundle has to be built from scratch —
+    # the same files plus the one a reviewer never saw.
+    home = agent_home("traveller")
+    _write(home / "AGENT.md", AGENT_MD)
+    _write(home / "skills" / "s" / "SKILL.md", SKILL_MD)
+    _write(home / "routines" / "r.py", ROUTINE_PY)
+    _write(home / "routines" / "added_in_v2.py", ROUTINE_PY)
+    fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+    import shutil
+
+    shutil.rmtree(home)
+
+    res = client.post(
+        "/hub/agents/traveller/install",
+        json={"version": "latest", "expected_sha256": reviewed_sha256},
+    )
+
+    assert res.status_code == 409
+    assert "changed since it was reviewed" in res.json()["detail"]
+    assert not agent_home("traveller").exists()
+
+
+def test_install_succeeds_when_the_pinned_digest_still_matches(offered, fake_hub):
+    client = _client()
+    preview = client.post("/hub/agents/traveller/install/preview").json()
+    reviewed_version = preview["fetched"]["version"]
+    reviewed_sha256 = preview["fetched"]["sha256"]
+
+    res = client.post(
+        "/hub/agents/traveller/install",
+        json={"version": str(reviewed_version), "expected_sha256": reviewed_sha256},
+    )
+
+    assert res.status_code == 200
+    assert res.json()["plan"]["imported"] is True
+
+
 def test_an_installed_hub_agent_arrives_muted_with_nothing_running(offered):
     from condor.agents.engine import get_all_engines
 

@@ -957,10 +957,18 @@ class HubInstallRequest(BaseModel):
     newer is an update, not a second copy, and that branch is chosen by the
     plan rather than by the caller (FEAT-145). ``version`` defaults to
     ``"latest"``, which Botcamp itself resolves.
+
+    ``expected_sha256`` is what install pins against (BUG-2): the preview
+    response names the digest of the bytes it actually reviewed, and the
+    frontend sends it back here. Botcamp approving a newer version between
+    the preview and the install is then a refusal, not a silent upgrade —
+    ``fetch``'s own digest check only proves install's bytes match install's
+    header, never that they match what preview showed.
     """
 
     as_slug: str = ""
     version: str = "latest"
+    expected_sha256: str = ""
 
 
 class PublishAgentRequest(BaseModel):
@@ -5308,13 +5316,21 @@ async def preview_hub_install(
     to sniff the shape: ``install`` carries FEAT-133's ``ImportPlan`` and
     ``update`` FEAT-145's ``UpdatePlan``.
     """
-    listing, _fetched, verb, plan = await _hub_plan(
+    listing, fetched, verb, plan = await _hub_plan(
         slug,
         (req.version if req else "") or "latest",
         (req.as_slug if req else ""),
         user,
     )
-    return {"verb": verb, "listing": listing.model_dump(), "plan": plan.summary()}
+    return {
+        "verb": verb,
+        "listing": listing.model_dump(),
+        "plan": plan.summary(),
+        # What was actually reviewed, so the dialog can pin install to this
+        # exact version and digest rather than re-asking for "latest" and
+        # risking Botcamp having approved a newer one in between (BUG-2).
+        "fetched": {"version": fetched.version, "sha256": fetched.sha256},
+    }
 
 
 @hub_router.post("/agents/{slug}/install")
@@ -5343,6 +5359,15 @@ async def install_from_hub(
         (req.as_slug if req else ""),
         user,
     )
+    expected_sha256 = (req.expected_sha256 if req else "").strip().lower()
+    if expected_sha256 and expected_sha256 != fetched.sha256:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This agent changed since it was reviewed — preview it "
+                "again before installing."
+            ),
+        )
     try:
         if verb == "update":
             result = agent_bundle.apply_update(plan, user_id=user.id)
