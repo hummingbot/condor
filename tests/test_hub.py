@@ -1074,10 +1074,12 @@ def test_submission_status_merges_the_poll_over_what_publish_stored(
     those have to survive the poll from the record ``publish`` already made.
     """
     hub.publish("traveller", "tok", notes="widened the grid")
-    # The old, forward-looking ``listing_id``-keyed shape ``submission_status``
-    # still reads for badge provenance (_published_listing_provenance) — not
-    # the pull side's ``AgentListing``, which has no badge at all.
-    fake_hub.listings["lst_8f3a9c2e1b"] = {"badge": hub.VALIDATED}
+    # BUG-8: badge provenance (_published_listing_provenance) reads the
+    # catalogue (GET /agents?query=&page=), the only PR #111 shape that
+    # actually carries a badge — the pull side's AgentListing has none.
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("lst_8f3a9c2e1b", badge=hub.VALIDATED)
+    )
     fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
         200,
         json.dumps(
@@ -1098,6 +1100,57 @@ def test_submission_status_merges_the_poll_over_what_publish_stored(
     assert receipt.slug == "traveller"  # carried over, not repeated by the poll
     assert receipt.badge == hub.VALIDATED  # fetched via the listing (§3.1)
     assert hub.local_submission("traveller") == receipt
+
+
+def test_submission_status_also_picks_up_the_published_date(traveller, fake_hub, cm):
+    """BUG-8: the Publish panel wants ``published_at`` too, not just the
+    badge — both live only on the catalogue entry."""
+    hub.publish("traveller", "tok")
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("lst_1", badge=hub.VALIDATED, published_at="2026-10-20T00:00:00Z")
+    )
+    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(
+        200,
+        json.dumps(
+            {
+                "submission_id": "sub_test",
+                "status": "published",
+                "listing_id": "lst_1",
+            }
+        ).encode("utf-8"),
+    )
+
+    receipt = hub.submission_status("traveller", "tok")
+
+    assert receipt.published_at == "2026-10-20T00:00:00Z"
+
+
+def test_published_listing_provenance_sends_the_token_and_matches_the_exact_slug(
+    fake_hub,
+):
+    """A members/purchase-gated listing needs the caller's token to resolve
+    at all (SEC review C4), and a fuzzy catalogue search can plausibly
+    return more than the one row — the match has to be on the slug, not on
+    being first in the list."""
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(
+        _entry("other-bot", badge=hub.VALIDATED, published_at="2026-01-01T00:00:00Z"),
+        _entry("traveller", badge="", published_at="2026-10-20T00:00:00Z"),
+    )
+
+    badge, published_at = hub._published_listing_provenance(
+        "traveller", token="a-token"
+    )
+
+    assert (badge, published_at) == ("", "2026-10-20T00:00:00Z")
+    assert fake_hub.calls[-1].token == "a-token"
+
+
+def test_published_listing_provenance_degrades_to_no_badge_when_absent(fake_hub):
+    """Not (yet) indexed, or gated behind a membership the token does not
+    carry — this must not raise, only answer with nothing."""
+    fake_hub.overrides[("GET", "/agents")] = _catalogue()
+
+    assert hub._published_listing_provenance("traveller") == ("", "")
 
 
 def test_submission_status_reports_a_rejection_with_reasons(traveller, fake_hub, cm):

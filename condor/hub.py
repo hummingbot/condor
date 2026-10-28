@@ -1262,28 +1262,31 @@ def _store_submission(slug: str, receipt: Receipt) -> None:
     get_config_manager().update_hub(submissions=submissions)
 
 
-def _published_listing_provenance(listing_id: str) -> tuple[str, str]:
+def _published_listing_provenance(listing_id: str, *, token: str = "") -> tuple[str, str]:
     """``(badge, published_at)`` for a submission's own listing, best-effort.
 
-    ``get()`` is :func:`get`'s pull-side reader of PR #111's
-    ``GET /agents/{slug}``, keyed on a catalogue slug and shaped as
-    :class:`AgentListing` — neither of which this is. Botcamp ships no
-    route a publish actually reaches (bullet 6 of FEAT-146's retarget:
-    publishing exists today only as a session-authenticated website upload,
-    with nothing for Condor to call), so this keeps :func:`submission_status`
-    reading the *old*, forward-looking ``listing_id``-keyed shape it always
-    read, independent of whatever the pull side's own model becomes. A hub
-    that never answers this at all — true today — degrades to no badge,
-    never a crash; :func:`submission_status` already catches
-    :class:`HubError` around its one call here for exactly that.
+    :func:`get` is the pull-side reader of PR #111's ``GET /agents/{slug}``,
+    and its real reply (``{"data": {slug, title, summary, latest,
+    versions}}``) carries neither field — only the catalogue
+    (:func:`browse`'s ``GET /agents?query=&page=``) does, as
+    :class:`CatalogueEntry`'s own ``badge``/``published_at`` (BUG-8). This
+    searches the catalogue by the listing's own slug and keys off the entry
+    whose ``slug`` matches it exactly, never positional order — a search
+    this fuzzy can plausibly return more than the one row.
+
+    ``token`` rides along for the same reason every other hub read here
+    passes one through: a membership/purchase-gated listing otherwise
+    answers as if it does not exist. Finding no matching entry — not (yet)
+    indexed, or still gated behind a membership this token does not carry
+    — degrades to no badge, same as a hub that cannot be reached at all;
+    :func:`submission_status` already catches :class:`HubError` around its
+    one call here for that case.
     """
     listing_id = _listing_id(listing_id)
-    what = f"listing '{listing_id}'"
-    reply = _send("GET", f"{HUB_URL}/agents/{listing_id}")
-    if reply.status < 200 or reply.status >= 300:
-        raise HubError(_refusal(reply, what), status=reply.status)
-    payload = _decode(reply, what)
-    return str(payload.get("badge") or ""), str(payload.get("published_at") or "")
+    for entry in browse(listing_id, token=token):
+        if entry.slug == listing_id:
+            return entry.badge, entry.published_at
+    return "", ""
 
 
 def submission_status(slug: str, token: str) -> Receipt:
@@ -1329,7 +1332,9 @@ def submission_status(slug: str, token: str) -> Receipt:
         # genuinely published submission back into an error — the status
         # itself is already settled.
         try:
-            badge, published_at = _published_listing_provenance(merged.listing_id)
+            badge, published_at = _published_listing_provenance(
+                merged.listing_id, token=token
+            )
             merged = merged.model_copy(
                 update={
                     "badge": badge,
