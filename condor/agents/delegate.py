@@ -521,7 +521,9 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
     # The same owner (and so the same tag) the deed record below is filed
     # under -- computed before the run starts, not after, because that is the
     # only string the delegated worker ever has a chance to use (CORR-861).
-    tag = deeds.attribution_tag(deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug))
+    tag = deeds.attribution_tag(
+        deeds.for_delegation(dt.user_id, dt.task_id, dt.agent_slug)
+    )
 
     try:
         dt.result = await asyncio.wait_for(
