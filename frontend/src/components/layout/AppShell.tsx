@@ -71,7 +71,8 @@ function AppShellBody() {
   // loops and journals, none of which is an exchange — so blocking it would
   // teach nobody anything. Matched exactly rather than by prefix, because `/`
   // prefixes every route in the app.
-  const exemptRoutes = ["/routines", "/settings"];
+  // `/hub` reads Botcamp, never an exchange, so it needs no keys either.
+  const exemptRoutes = ["/routines", "/settings", "/hub"];
   const showKeysOverlay =
     server && !keysLoading && !hasKeys && pathname !== "/" &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
@@ -121,6 +122,8 @@ function AppShellBody() {
                 end={to === "/"}
                 className={({ isActive }) =>
                   `flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                    // `end` on `/` is the whole rule: `/hub` has no tab, so
+                    // nothing here lights while the catalogue is open.
                     isActive
                       ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

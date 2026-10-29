@@ -33,6 +33,17 @@ describe("the nav", () => {
     expect(paths).toContain("/bots");
   });
 
+  it("has no Hub entry: its door is the card atop the Agents rail", () => {
+    // FEAT-153 gave `/hub` a tab and it read as a second Agents. The route is
+    // the Agents workspace with the catalogue in place of the transcript, so
+    // the way in belongs where the agents are — the card the rail draws above
+    // them. Every other full-bleed route is still a nav entry.
+    const paths: string[] = NAV_ITEMS.map((item) => item.to);
+    expect(paths).not.toContain("/hub");
+    for (const route of FULL_BLEED_ROUTES)
+      if (route !== "/hub") expect(paths).toContain(route);
+  });
+
   it("gives every nav entry a distinct address and label", () => {
     expect(new Set(NAV_ITEMS.map((i) => i.to)).size).toBe(NAV_ITEMS.length);
     expect(new Set(NAV_ITEMS.map((i) => i.label)).size).toBe(NAV_ITEMS.length);

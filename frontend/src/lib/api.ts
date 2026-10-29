@@ -25,6 +25,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // every existing caller reads exactly what it read before.
     throw Object.assign(new Error(err.detail || `Request failed: ${res.status}`), {
       status: res.status,
+      // The whole JSON body, for the few answers that carry more than a
+      // sentence — a 409 on export/publish lists `possible_keys` (SEC review C2).
+      body: err,
     });
   }
   return res.json();
@@ -230,41 +233,155 @@ export interface AgentUpdatePlan {
 }
 
 /**
- * One agent the hub offers (FEAT-146).
+ * One approved version of a Botcamp agent (PR #111's own shape,
+ * `GET /api/agents/{slug}`'s `versions[]`).
  *
- * Every field is the hub's claim except `digest`, which the *server* verifies
- * the downloaded bytes against before anything parses them — the browser never
- * sees the bundle, so it cannot check it and does not pretend to. `badge` is
- * provenance and nothing more: no code here or on the server reads it to
- * decide whether to write.
+ * `sha256` is shown for the version picker; it is **not** what the download
+ * is verified against — that is the `X-Agent-Sha256` header the download's
+ * own response carries, checked server-side before anything parses it.
+ */
+export interface HubAgentVersion {
+  version: number;
+  sha256: string;
+  size: number;
+  file_count: number;
+  source_ref: string;
+  created_at: string;
+  manifest: Record<string, unknown>;
+}
+
+/**
+ * One Botcamp agent, as `GET /api/agents/{slug}` describes it (FEAT-146).
+ *
+ * PR #111 carries no listing id, no badge and no author claim on this read
+ * path — there is no browse/search either, only this lookup by a slug the
+ * operator must already have. `versions` lists only `APPROVED` revisions,
+ * newest first; `latest` is Botcamp's own pick among them.
  */
 export interface HubListing {
+  slug: string;
+  name: string;
+  description: string;
+  latest: number;
+  versions: HubAgentVersion[];
+}
+
+/** The one sentence `HUB_TRUST` states server-side about what this is. */
+export interface HubCatalogue {
+  listing: HubListing;
+  trust: string;
+}
+
+/** One published agent in Botcamp's catalogue, in Botcamp's own words.
+ *  `free: false` means a membership or unlock is needed to pull it (402). */
+export interface HubCatalogueEntry {
   listing_id: string;
-  /** Decides whether installing this is a create or an update. Advisory. */
-  agent_uid: string;
   slug: string;
   name: string;
   description: string;
   version: number;
-  notes: string;
-  /** Attested by the hub at upload — an account claim, not a signature. */
-  author: AgentBundleAuthor;
-  /** `"validated"` | `"community"`. Rendered, never acted on. */
+  author: { name: string; handle: string };
   badge: string;
   digest: string;
   bytes: number;
   published_at: string;
-  requires: AgentBundleRequires;
-  /** FEAT-144's review **as the hub computed it on submission**. */
-  findings: AgentBundleFinding[];
-  /** Which review produced `findings`, so drift with this install is visible. */
-  review_version: string;
+  free: boolean;
+  /** The agent's page on Botcamp — built by Condor from its configured hub,
+   *  never taken from the catalogue's reply, so it is safe to open. */
+  page_url: string;
 }
 
-/** The hub's badge is provenance: `HUB_TRUST`, stated server-side, once. */
-export interface HubCatalogue {
-  listings: HubListing[];
+/** One page of the catalogue, newest first; a short or empty page is the last. */
+export interface HubCataloguePage {
+  listings: HubCatalogueEntry[];
+  page: number;
   trust: string;
+  /** Botcamp's own list of agents, built the same way as `page_url`. */
+  botcamp_url: string;
+}
+
+/** Botcamp pages its catalogue this many at a time. */
+export const HUB_CATALOGUE_PAGE_SIZE = 20;
+
+/**
+ * This install's Botcamp device-login/link state, as `condor.hub.device_state`
+ * reports it — never the credential, which no route ever answers with
+ * (PR #111's device flow, replacing FEAT-148's pairing code).
+ *
+ * `"pending"` carries `user_code`/`approval_url`/`expires_at` to show again;
+ * `"denied"`/`"expired"`/`"invalid"` are reported for the one poll that
+ * observed them; `"linked"` carries `profile_handle` and `scope`.
+ *
+ * `approval_url` is built by the backend from this install's configured hub
+ * base, never echoed from the hub's own reply — so it is safe to navigate to
+ * (SEC-819). The hub's `verification_uri`/`verification_uri_complete` are
+ * deliberately not part of this type: they never leave `condor.hub`.
+ */
+export interface HubDeviceState {
+  status: "none" | "pending" | "denied" | "expired" | "invalid" | "linked";
+  user_code: string;
+  approval_url: string;
+  expires_at: number;
+  profile_handle: string;
+  scope: string[];
+}
+
+/**
+ * Who this install's Botcamp token identifies, as `GET /api/condor/me`
+ * (PR #111) answers it live — the account surface for Settings, distinct
+ * from `HubDeviceState.profile_handle`/`.scope`, which are a snapshot taken
+ * once at link time and never re-checked against the hub on their own.
+ */
+export interface HubMe {
+  user: { id: string; name: string; slug: string };
+  scopes: string[];
+}
+
+/** Why a submission is `"rejected"` — never a secret value (FEAT-150). */
+export interface HubSubmissionReason {
+  rule: string;
+  detail: string;
+}
+
+/**
+ * What the hub said about one publish attempt (FEAT-150, contract §5).
+ *
+ * A submission is not a listing: `status` is `"pending"`, `"rejected"` or
+ * `"published"`, and nothing may read a successful upload as a claim of
+ * `"published"` on its own — that claim is this field. `listing_id` and
+ * `badge` exist only once a human verdict publishes it; `reasons` only on
+ * `"rejected"`.
+ */
+/** A value that may be a private key (64 hex, long base58), stopping an
+ *  export or publish until a person confirms it is not (SEC review C2).
+ *  Located and fingerprinted — never the value itself. */
+export interface PossibleKey {
+  path: string;
+  line: number;
+  label: string;
+  fingerprint: string;
+}
+
+/** The possible keys an export/publish error carries, or `[]`. */
+export function possibleKeysOf(error: unknown): PossibleKey[] {
+  const e = error as { possibleKeys?: PossibleKey[]; body?: { possible_keys?: PossibleKey[] } };
+  return e?.possibleKeys ?? e?.body?.possible_keys ?? [];
+}
+
+export interface HubReceipt {
+  submission_id: string;
+  status: "pending" | "rejected" | "published";
+  agent_uid: string;
+  slug: string;
+  version: number;
+  digest: string;
+  bytes: number;
+  submitted_at: string;
+  decided_at: string;
+  reasons: HubSubmissionReason[];
+  listing_id: string;
+  badge: string;
+  published_at: string;
 }
 
 /**
@@ -278,7 +395,33 @@ export interface HubInstallResponse {
   verb: "install" | "update";
   listing: HubListing;
   plan: AgentImportPlan | AgentUpdatePlan;
+  /** The version and digest the server actually reviewed (BUG-2) — pin
+   *  install to this rather than re-resolving "latest" a second time. */
+  fetched: { version: number; sha256: string };
 }
+
+/**
+ * What this install knows right now about an installed agent's Botcamp
+ * provenance (CORR-812) — whether the hub stopped serving that version.
+ *
+ * `tracked: false` means the agent was never installed or updated from a
+ * Botcamp agent, so there is nothing here to warn about. `status` is `"ok"`
+ * or `"delisted"` — the server's own last *confirmed* answer, never invented
+ * from a failed check; there is no `"badge_changed"`, since PR #111 carries
+ * no badge on this read path at all. `live_check_failed` means this one read
+ * could not reach the hub; `checked_at` still names the last time it could,
+ * which is the time to show, not the time of this request.
+ */
+export type HubAgentStatus =
+  | { tracked: false }
+  | {
+      tracked: true;
+      slug: string;
+      version: number;
+      status: "ok" | "delisted";
+      checked_at: string;
+      live_check_failed: boolean;
+    };
 
 /** `authFetch` because the body is `FormData` — see `uploadAttachment`. */
 async function postAgentBundle(
@@ -1370,6 +1513,8 @@ export interface AgentSummary {
    */
   server_name?: string;
   instances: RunningInstance[];
+  /** True for a Botcamp clone not yet opened once — the rail's "New" badge. */
+  is_new?: boolean;
 }
 
 export interface AgentExecutorRow {
@@ -3878,6 +4023,13 @@ export const api = {
       },
     ),
 
+  /** Retires a cloned agent's "New" badge — call once its row is opened. */
+  markAgentSeen: (slug: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/hub-seen`,
+      { method: "POST" },
+    ),
+
   // ── An agent as one file (FEAT-133) ──
 
   /**
@@ -3887,13 +4039,18 @@ export const api = {
    * everything else here, and a link has no way to carry the header — the same
    * reason `useAuthedImage` exists. The caller makes an object URL from this.
    */
-  exportAgentBundle: async (slug: string): Promise<string> => {
+  exportAgentBundle: async (slug: string, acknowledge: string[] = []): Promise<string> => {
+    const query = new URLSearchParams();
+    for (const fingerprint of acknowledge) query.append("acknowledge", fingerprint);
     const res = await authFetch(
-      `/api/v1/agents/${encodeURIComponent(slug)}/bundle`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/bundle${acknowledge.length ? `?${query}` : ""}`,
     );
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
-      throw new Error(detail.detail || `Export failed: ${res.status}`);
+      throw Object.assign(new Error(detail.detail || `Export failed: ${res.status}`), {
+        status: res.status,
+        possibleKeys: (detail.possible_keys ?? []) as PossibleKey[],
+      });
     }
     return res.text();
   },
@@ -3926,41 +4083,69 @@ export const api = {
   // previewed and the bytes installed come out of one client rather than two,
   // which is FEAT-133's one-builder rule.
 
-  /** What the hub offers, plus the one sentence about what a badge means.
-   *
-   *  The search term is a query *parameter* all the way down — never a path
-   *  segment — so it needs no identifier check and cannot change which
-   *  endpoint is addressed. (Named `search` here only because `query` is this
-   *  module's query-string builder.) */
-  browseHub: (search = "", page = 1) =>
-    apiFetch<HubCatalogue>(`/api/v1/hub/agents${query({ query: search, page })}`),
-
-  /** One listing, with the digest its bundle will be held to. */
-  getHubListing: (listingId: string) =>
-    apiFetch<{ listing: HubListing; trust: string }>(
-      `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
+  /** One page of Botcamp's published agents. Pulling one is the same
+   *  `getHubListing`/install flow as a slug typed by hand. */
+  browseHub: (query = "", page = 1) =>
+    apiFetch<HubCataloguePage>(
+      `/api/v1/hub/catalogue?${new URLSearchParams({ query, page: String(page) })}`,
     ),
 
-  /** What installing this listing would do. Writes nothing on the server. */
-  previewHubInstall: (listingId: string, asSlug = "") =>
+  /** One agent's catalogue entry, with its approved versions, plus the one
+   *  sentence about what that approval is not. The lookup by a slug someone
+   *  shared — a private agent is not in `browseHub`'s catalogue. */
+  getHubListing: (slug: string) =>
+    apiFetch<HubCatalogue>(`/api/v1/hub/agents/${encodeURIComponent(slug)}`),
+
+  /** What installing this agent version would do. Writes nothing on the
+   *  server. `version` defaults to `"latest"`, which Botcamp resolves. */
+  previewHubInstall: (slug: string, asSlug = "", version = "latest") =>
     apiFetch<HubInstallResponse>(
-      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install/preview`,
-      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+      `/api/v1/hub/agents/${encodeURIComponent(slug)}/install/preview`,
+      { method: "POST", body: JSON.stringify({ as_slug: asSlug, version }) },
     ),
 
-  /** Install it, through exactly the gate the file path uses. */
-  installFromHub: (listingId: string, asSlug = "") =>
+  /** Install it, through exactly the gate the file path uses. `version`
+   *  and `expectedSha256` should be the preview's own `fetched` fields
+   *  (BUG-2) — pinning install to what was actually reviewed, rather than
+   *  re-resolving `"latest"` and risking a newer approval landing between
+   *  the two calls. The server refuses when the digest no longer matches. */
+  installFromHub: (
+    slug: string,
+    asSlug = "",
+    version = "latest",
+    expectedSha256 = "",
+  ) =>
     apiFetch<HubInstallResponse>(
-      `/api/v1/hub/agents/${encodeURIComponent(listingId)}/install`,
-      { method: "POST", body: JSON.stringify({ as_slug: asSlug }) },
+      `/api/v1/hub/agents/${encodeURIComponent(slug)}/install`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          as_slug: asSlug,
+          version,
+          expected_sha256: expectedSha256,
+        }),
+      },
     ),
 
   /** Upload one of this install's agents. Admin-only, and irreversible in
-   *  practice — unpublishing removes the listing, not anybody's download. */
-  publishAgentToHub: (slug: string, notes = "", authorName = "") =>
-    apiFetch<{ published: boolean; receipt: Record<string, unknown> }>(
+   *  practice — unpublishing removes the listing, not anybody's download.
+   *  `published` is true only once the hub's own verdict says so — a 2xx
+   *  here means the submission was accepted for review, not that it is live. */
+  publishAgentToHub: (slug: string, notes = "", authorName = "", acknowledge: string[] = []) =>
+    apiFetch<{ published: boolean; receipt: HubReceipt }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/publish`,
-      { method: "POST", body: JSON.stringify({ notes, author_name: authorName }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ notes, author_name: authorName, acknowledge }),
+      },
+    ),
+
+  /** Where this agent's most recent hub submission stands right now, or
+   *  `null` if it was never published from this install (FEAT-150). Polls
+   *  the hub itself while the stored record is still pending. */
+  getHubSubmission: (slug: string) =>
+    apiFetch<{ receipt: HubReceipt | null }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/submission`,
     ),
 
   /** Withdraw a listing. Admin-only. */
@@ -3968,6 +4153,13 @@ export const api = {
     apiFetch<{ unpublished: boolean }>(
       `/api/v1/hub/agents/${encodeURIComponent(listingId)}`,
       { method: "DELETE" },
+    ),
+
+  /** Whether the hub later delisted or re-badged an installed agent
+   *  (CORR-812). Any authenticated user — this reads no credential. */
+  getAgentHubStatus: (slug: string) =>
+    apiFetch<HubAgentStatus>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/hub-status`,
     ),
 
   /** Whether a publish token is set. **Never its value** — there is no route
@@ -3981,6 +4173,49 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ token }),
     }),
+
+  /** Begin a device login: the user code to show, and the link to open so
+   *  the admin can approve it on Botcamp (PR #111's device flow).
+   *  `approval_url` is derived server-side from the configured hub base —
+   *  see `HubDeviceState`. */
+  startHubDevice: () =>
+    apiFetch<{
+      user_code: string;
+      approval_url: string;
+      expires_in: number;
+      interval: number;
+    }>("/api/v1/settings/hub-device/start", { method: "POST" }),
+
+  /** Where the device login/link stands right now. Polled while `"pending"`.
+   *  Admin-only — see `getHubDeviceLinked` for the non-admin-safe version. */
+  getHubDevice: () => apiFetch<HubDeviceState>("/api/v1/settings/hub-device"),
+
+  /** Whether this install is linked to Botcamp. Nothing else — every
+   *  signed-in seat can call this to know if Pull agents (FEAT-153) is
+   *  unlocked, unlike `getHubDevice`'s full state. */
+  getHubDeviceLinked: () =>
+    apiFetch<{ linked: boolean }>("/api/v1/settings/hub-device/linked"),
+
+  /** Cancel a device login in flight, or disconnect a linked profile.
+   *
+   *  `revoked` is `true` only once Botcamp itself confirmed the token was
+   *  revoked (`DELETE /api/condor/me`, PR #111), `false` with `error` set
+   *  when the hub could not be reached or refused, and `null` when there was
+   *  no token to revoke. The local credential is cleared regardless — this
+   *  only says whether Botcamp's own copy was actually told. */
+  disconnectHubDevice: () =>
+    apiFetch<{ status: string; revoked: boolean | null; error: string }>(
+      "/api/v1/settings/hub-device",
+      { method: "DELETE" },
+    ),
+
+  /** Who the linked Botcamp token identifies right now, read live from the
+   *  hub (PR #111's `GET /api/condor/me`) rather than the `profile_handle`
+   *  `HubDeviceState` cached once at link time. A 401 means the hub revoked
+   *  this install's token elsewhere — Condor has already cleared its own
+   *  copy by the time this rejects, so the next `getHubDevice` reads
+   *  `"none"`. */
+  getHubMe: () => apiFetch<HubMe>("/api/v1/settings/hub-me"),
 
   // ── Delegations (fire-and-forget background agent tasks) ──
 

@@ -1,23 +1,35 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRight,
   Bot,
   ChevronDown,
+  ChevronRight,
+  Globe,
   MessageSquare,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Trash2,
   Zap,
 } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { EXECUTION_PATH } from "@/components/chat/accountPanels";
-import { CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
+import {
+  api,
+  CHAT_SLUG,
+  type AgentSummary,
+  type ConversationMeta,
+} from "@/lib/api";
+import { agentsQuery } from "@/lib/queryClient";
 import { CHAT_RAIL_OPEN_KEY } from "@/lib/sessionState";
 
 function readOpen(): boolean {
@@ -50,6 +62,7 @@ export const ChatRail = memo(function ChatRail({
   hasSession,
   liveIds,
   activeId,
+  hubActive = false,
   open,
   onClose,
   onTalk,
@@ -66,6 +79,8 @@ export const ChatRail = memo(function ChatRail({
   liveIds: Set<string>;
   /** Conversation on screen — `null` before a session exists. */
   activeId: string | null;
+  /** The Hub is in the workspace's column, so its row is the one lit. */
+  hubActive?: boolean;
   /** Shown below `md`, where the rail is an overlay rather than a column. */
   open: boolean;
   onClose: () => void;
@@ -76,6 +91,19 @@ export const ChatRail = memo(function ChatRail({
   onOpenConversation: (meta: ConversationMeta) => void;
 }) {
   const [expanded, setExpanded] = useState(readOpen);
+
+  // The agent a row's menu asked to delete, held here rather than in the row:
+  // the row unmounts the moment the deletion lands, and a dialog owned by it
+  // would go with it mid-confirm.
+  const [pendingDelete, setPendingDelete] = useState<AgentSummary | null>(null);
+  const queryClient = useQueryClient();
+  const deleteAgent = useMutation({
+    mutationFn: (slug: string) => api.deleteAgent(slug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: agentsQuery().queryKey });
+      setPendingDelete(null);
+    },
+  });
 
   // A pane that opened borrows the column; the value it borrowed is what it
   // gives back, so a rail the reader had already collapsed stays collapsed.
@@ -136,6 +164,21 @@ export const ChatRail = memo(function ChatRail({
         >
           <Plus className="h-4 w-4" />
         </button>
+        {/* The nav's Hub tab is gone, so the collapsed strip carries the
+            glyph again: the rail collapses on its own when a pane opens, and
+            that must not cost the only way in. */}
+        <Link
+          to="/hub"
+          title="Botcamp Hub — install published agents, or publish your own"
+          aria-current={hubActive ? "page" : undefined}
+          className={`rounded p-1 transition-colors hover:bg-[var(--color-surface-hover)] ${
+            hubActive
+              ? "text-[var(--color-primary)]"
+              : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          <Globe className="h-4 w-4" />
+        </Link>
         {liveAgents.length > 0 && (
           <button
             onClick={() => toggle(true)}
@@ -179,27 +222,37 @@ export const ChatRail = memo(function ChatRail({
         <RailRow
           label={condor?.name || "Condor"}
           icon={<MessageSquare className="h-3 w-3 shrink-0" />}
-          active={hasSession && !activeSlug}
+          active={!hubActive && hasSession && !activeSlug}
           title={condor?.description || "General trading assistant"}
           onClick={() => onTalk("", null)}
           newTitle={`New chat with ${condor?.name || "Condor"}`}
           onNew={() => onTalk("", null, true)}
         />
-        {specialists.map((agent) => (
-          <RailRow
-            key={agent.slug}
-            label={agent.name}
-            icon={
-              <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-            }
-            live={deriveAgentStatus(agent) === "running"}
-            active={activeSlug === agent.slug}
-            title={agent.description || agent.name}
-            onClick={() => onTalk(agent.slug, agent)}
-            newTitle={`New chat with ${agent.name}`}
-            onNew={() => onTalk(agent.slug, agent, true)}
-          />
-        ))}
+        {specialists.map((agent) => {
+          const live = deriveAgentStatus(agent) === "running";
+          return (
+            <RailRow
+              key={agent.slug}
+              label={agent.name}
+              icon={
+                <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
+              }
+              live={live}
+              isNew={agent.is_new}
+              active={!hubActive && activeSlug === agent.slug}
+              title={agent.description || agent.name}
+              onClick={() => onTalk(agent.slug, agent)}
+              newTitle={`New chat with ${agent.name}`}
+              onNew={() => onTalk(agent.slug, agent, true)}
+              slug={agent.slug}
+              // A looping agent cannot be deleted — the server refuses it —
+              // so the menu says so where the click is, rather than letting
+              // the refusal come back as a failed dialog.
+              running={live}
+              onDelete={() => setPendingDelete(agent)}
+            />
+          );
+        })}
       </div>
 
       {/* What you already said — the rail's own list, in flow */}
@@ -214,6 +267,80 @@ export const ChatRail = memo(function ChatRail({
           onOpenConversation(meta);
         }}
       />
+
+      {/* The one door into Botcamp Hub: installing and publishing agents.
+          It sat below the agents and had a nav tab beside Agents too; the tab
+          is gone and the card is the foot of the rail, under the
+          conversations and pinned there however short the list is: a place you
+          go, not something you read past. Still outside the agent list, as a
+          card and not a row — when the two shared a shape the Hub read as a
+          seventh agent whose chat was broken. */}
+      <div className="mt-auto border-t border-[var(--color-border)] p-2">
+        <Link
+          to="/hub"
+          title="Botcamp Hub — install published agents, or publish your own"
+          aria-current={hubActive ? "page" : undefined}
+          onClick={onClose}
+          className={`group flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-left transition-colors ${
+            hubActive
+              ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10"
+              : "border-[var(--color-border)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)]"
+          }`}
+        >
+          <span
+            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors ${
+              hubActive
+                ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
+                : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] group-hover:text-[var(--color-primary)]"
+            }`}
+          >
+            <Globe className="h-3.5 w-3.5" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span
+              className={`block truncate text-xs font-medium ${
+                hubActive
+                  ? "text-[var(--color-primary)]"
+                  : "text-[var(--color-text)]"
+              }`}
+            >
+              Agent Hub
+            </span>
+            <span className="block truncate text-[10px] text-[var(--color-text-muted)]">
+              Browse and publish agents
+            </span>
+          </span>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] transition-transform group-hover:translate-x-0.5" />
+        </Link>
+      </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete Agent"
+        isPending={deleteAgent.isPending}
+        isError={deleteAgent.isError}
+        errorText={
+          (deleteAgent.error as Error | null)?.message ??
+          "Failed to delete agent. It may have running loops."
+        }
+        onConfirm={() =>
+          pendingDelete && deleteAgent.mutate(pendingDelete.slug)
+        }
+        onClose={() => {
+          // A mutation shared across every row in the rail (BUG-9):
+          // without this, the error from a row whose delete was refused
+          // stayed on screen as the *next* row's dialog opened, blaming a
+          // delete that was never attempted.
+          deleteAgent.reset();
+          setPendingDelete(null);
+        }}
+      >
+        Delete{" "}
+        <strong className="text-[var(--color-text)]">
+          {pendingDelete?.name}
+        </strong>{" "}
+        and all its loops? This cannot be undone.
+      </ConfirmDialog>
     </aside>
   );
 });
@@ -351,21 +478,32 @@ function RailRow({
   label,
   icon,
   live,
+  isNew,
   active,
   title,
   onClick,
   onNew,
   newTitle,
+  slug,
+  running,
+  onDelete,
 }: {
   label: string;
   icon: React.ReactNode;
   live?: boolean;
+  /** Cloned from Botcamp and not opened once yet — see `ChatRail`'s `markSeen`. */
+  isNew?: boolean;
   active?: boolean;
   title?: string;
   onClick: () => void;
   /** Start a *second* conversation with this row, rather than focusing one. */
   onNew?: () => void;
   newTitle?: string;
+  /** Whose row this is. With `onDelete`, what gives the row its `⋯` menu. */
+  slug?: string;
+  /** Looping, so deleting is refused by the server and said so here. */
+  running?: boolean;
+  onDelete?: () => void;
 }) {
   return (
     <button
@@ -379,6 +517,19 @@ function RailRow({
     >
       {icon}
       <span className="min-w-0 flex-1 truncate">{label}</span>
+      {isNew && (
+        // A one-shot badge, never a second "live"-style dot: a dot would
+        // read as "running" next to the real one, and this is the opposite
+        // fact — nobody has opened it yet. Gone the instant the row is
+        // clicked (`ChatRail`'s `markSeen`), so it never lingers past the
+        // first chat.
+        <span
+          className="shrink-0 rounded-full bg-amber-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-400"
+          title="Cloned from Botcamp — not opened yet"
+        >
+          New
+        </span>
+      )}
       {live && (
         <span
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
@@ -421,6 +572,121 @@ function RailRow({
           </span>
         </span>
       )}
+      {slug && onDelete && (
+        <RowMenu
+          slug={slug}
+          label={label}
+          running={running}
+          onDelete={onDelete}
+        />
+      )}
     </button>
+  );
+}
+
+/**
+ * Everything you can do to an agent that is not talking to it.
+ *
+ * A row click means "talk", and it always has — which left the agent's own
+ * workspace with no door from the only list that names every agent, and
+ * deleting one four clicks deep behind a chat you did not want. This is that
+ * door, in the slot beside the `+` that already taught the row has actions on
+ * it.
+ *
+ * `role="button"` on a span rather than a real `<button>`: the row itself is a
+ * button and nesting one inside it is invalid HTML. Same reason the `+` beside
+ * it is a span, and the same stopPropagation so the click does not also open a
+ * chat underneath the menu.
+ */
+function RowMenu({
+  slug,
+  label,
+  running,
+  onDelete,
+}: {
+  slug: string;
+  label: string;
+  running?: boolean;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+
+  return (
+    <>
+      <span
+        ref={setAnchor}
+        role="button"
+        tabIndex={0}
+        aria-label={`More for ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`More for ${label}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }
+        }}
+        className={`flex shrink-0 items-center rounded-full p-0.5 text-[var(--color-text-muted)] transition-all duration-200 hover:bg-[var(--color-primary)]/15! hover:text-[var(--color-primary)]! focus-visible:opacity-100 ${
+          // Unlike the `+`, this is hidden until the row is pointed at: it is
+          // the rare errand, and six always-on `⋯` would make the list busier
+          // than the agents in it.
+          open
+            ? "opacity-100"
+            : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+        }`}
+      >
+        <MoreHorizontal className="h-3 w-3 shrink-0" />
+      </span>
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={() => setOpen(false)}
+        align="left"
+        role="menu"
+        className="flex w-[200px] flex-col py-0.5"
+      >
+        {/* The panel is portalled into `body`, so it is not nested in the row
+            in the DOM — but it still is in React's tree, and that is what
+            bubbling follows. Without this every click in the menu would also
+            open a chat with the row behind it. */}
+        <div
+          className="flex w-full flex-col"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <Link
+            to={`/agents/${encodeURIComponent(slug)}`}
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+          >
+            <span className="min-w-0 flex-1 truncate">Open workspace</span>
+            <ArrowUpRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+          </Link>
+          <button
+            role="menuitem"
+            disabled={running}
+            title={running ? "Stop its loops before deleting" : undefined}
+            onClick={() => {
+              setOpen(false);
+              onDelete();
+            }}
+            className="mt-0.5 flex items-center gap-2 border-t border-[var(--color-border)] px-2.5 py-1.5 text-left text-xs text-[var(--color-red)] transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:text-[var(--color-text-muted)] disabled:hover:bg-transparent"
+          >
+            <Trash2 className="h-3 w-3 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              {running ? "Delete — stop its loops first" : "Delete…"}
+            </span>
+          </button>
+        </div>
+      </AnchoredMenu>
+    </>
   );
 }

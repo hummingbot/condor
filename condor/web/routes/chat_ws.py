@@ -763,6 +763,12 @@ async def _spawn(
                 # rather than leaving one that will never have a session.
                 "client_ref": client_ref,
                 "slot_id": slot_id,
+                # Tells the client this killed the *spawn* — no subprocess ever
+                # came up — rather than a prompt failing mid-conversation. That
+                # is what licenses the client to offer "try another model"
+                # inline: the fix is a respawn (switch_session already handles
+                # one with no live session behind it), not just a retry.
+                "phase": "start",
             },
         )
         return False

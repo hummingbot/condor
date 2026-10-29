@@ -347,6 +347,51 @@ def test_the_reserved_default_slug_is_refused(traveller):
     assert import_plan.collision == "condor"
 
 
+def test_a_deleted_slug_with_leftover_skills_is_not_a_collision(traveller):
+    bundle = _bundle_for(traveller)
+    assert AgentStore().delete("traveller")
+    # AGENT.md is gone but skills/routines/controllers/loops survive the
+    # delete, so the slug directory itself still exists — the reimport
+    # must judge by AgentStore.get, not by that leftover directory.
+    assert agent_home("traveller").exists()
+    assert AgentStore().get("traveller") is None
+
+    import_plan = ab.plan(bundle, user_id=7)
+    assert import_plan.collision == ""
+    result = ab.apply(import_plan, user_id=7)
+    assert result["imported"] is True
+    assert AgentStore().get("traveller") is not None
+
+
+def test_a_failed_reimport_into_a_leftover_home_keeps_the_retained_files(
+    traveller, monkeypatch
+):
+    """``apply``'s own failure cleanup must not undo what ``_collision``
+    allows: writing into a deleted agent's leftover home (skills/routines/
+    controllers/loops kept on purpose by ``AgentStore.delete``). A failure
+    partway through a reimport there may only remove what *this* import
+    wrote, never the retained content — a bare `shutil.rmtree(home)` would
+    erase it instead."""
+    bundle = _bundle_for(traveller)
+    assert AgentStore().delete("traveller")
+    retained = (agent_home("traveller") / "skills" / "s" / "SKILL.md").read_text(
+        "utf-8"
+    )
+
+    import_plan = ab.plan(bundle, user_id=7)
+    monkeypatch.setattr(
+        ab.code_trust, "arm", lambda slug: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    with pytest.raises(RuntimeError):
+        ab.apply(import_plan, user_id=7)
+
+    home = agent_home("traveller")
+    assert (home / "skills" / "s" / "SKILL.md").read_text("utf-8") == retained
+    # What the failed import itself wrote is rolled back.
+    assert not (home / "AGENT.md").exists()
+    assert AgentStore().get("traveller") is None
+
+
 # ── Apply: what lands, and in what state ──
 
 

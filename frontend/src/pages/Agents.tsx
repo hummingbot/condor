@@ -15,12 +15,10 @@ import { AgentChatTab } from "@/pages/tabs/AgentChatTab";
  * lands on the home with the fleet open.
  *
  * Owns the full viewport and scrolls its own transcript, so the shell drops
- * `main`'s padding for this route (see `AppShell`).
+ * `main`'s padding for this route (see `AppShell`). The one visible door to
+ * Botcamp Hub (FEAT-153) lives in `ChatRail`, below the agent list, rather than
+ * in a bar of its own above the conversation.
  */
 export function Agents() {
-  return (
-    <div className="h-full min-h-0">
-      <AgentChatTab />
-    </div>
-  );
+  return <AgentChatTab />;
 }
