@@ -74,6 +74,28 @@ class TimeoutPolicy:
     session_idle: int = 3600
 
     @property
+    def mcp_shutdown(self) -> float:
+        """Budget for the shutdown tool call, which waits on a whole winddown.
+
+        ``mcp_call``'s 15 seconds is the budget for a tool call that asks the
+        main process a question. An emergency shutdown is not that: the route
+        awaits ``run_shutdown`` inline — the deterministic executor pass, the
+        order sweep, an LLM cleanup turn under ``tick_default``, then a verify
+        and one retry — and only then answers.
+
+        So the call always outran its budget and the tool reported ``Failed to
+        reach main process API`` while the winddown carried on behind it. The
+        operator read that as "the kill switch did not fire", when what had
+        actually happened was that nobody waited for it (MM-3).
+
+        Derived from ``tick_default`` rather than written as a number, so the
+        two cannot drift: the cleanup turn is the long pole, and raising its
+        ceiling without raising this one would reproduce the same lie. The
+        headroom covers the deterministic passes either side of it.
+        """
+        return float(self.tick_default + 120)
+
+    @property
     def prompt_hard_stop(self) -> int:
         """The ACP stream's own ceiling: one minute above the turn budget.
 

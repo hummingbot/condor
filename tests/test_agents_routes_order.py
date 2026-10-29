@@ -73,3 +73,47 @@ def test_update_hangs_off_a_real_slug_and_its_preview_is_not_shadowed():
         _first_full_match("POST", "/agents/my-agent/update/preview")
         == "preview_agent_update"
     )
+
+
+def _app_match(method: str, path: str) -> str | None:
+    """The same dispatch question, asked of the whole app rather than one router.
+
+    ``_first_full_match`` above sees the router before it is mounted, so it
+    cannot tell whether the dashboard's URL — ``/api/v1/hub/catalogue`` — is
+    served at all. That gap is not hypothetical: every backend hub test mounts
+    ``hub_router`` bare and calls ``/hub/catalogue``, while the frontend's tests
+    mock ``/api/v1/hub/catalogue``, so a wrong prefix on either side passes both
+    suites and only shows up in a browser as the SPA fallback's
+    ``No such API route``.
+    """
+    from starlette.routing import Match
+
+    from condor.web.app import create_app
+
+    scope = {"type": "http", "method": method, "path": path, "path_params": {}}
+    for route in create_app().routes:
+        match, _ = route.matches(scope)
+        if match == Match.FULL and getattr(route, "endpoint", None) is not None:
+            return route.endpoint.__name__
+    return None
+
+
+def test_hub_routes_answer_at_the_paths_the_dashboard_requests():
+    """Every hub URL ``frontend/src/lib/api.ts`` builds must be registered.
+
+    The literals below are the ones that file requests, prefix included. Change
+    one side without the other and this fails instead of the Hub view 404ing.
+    """
+    assert (
+        _app_match("GET", "/api/v1/hub/catalogue") == "browse_hub_catalogue"
+    ), "the Hub view's catalogue browser (api.ts browseHub)"
+    assert _app_match("GET", "/api/v1/hub/agents/river_scalper") == "get_hub_listing"
+    assert (
+        _app_match("POST", "/api/v1/hub/agents/river_scalper/install/preview")
+        == "preview_hub_install"
+    )
+    assert (
+        _app_match("POST", "/api/v1/hub/agents/river_scalper/install")
+        == "install_from_hub"
+    )
+    assert _app_match("DELETE", "/api/v1/hub/agents/listing-1") == "unpublish_from_hub"

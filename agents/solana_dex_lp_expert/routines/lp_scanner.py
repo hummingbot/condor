@@ -23,6 +23,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 from telegram.ext import ContextTypes
 
+from condor.pool_data import lp_provider_for_dex
 from config_manager import get_client
 from handlers.dex.geckoterminal import _extract_pool_data
 
@@ -46,7 +47,13 @@ class Config(BaseModel):
         default="SOL", description="Quote token to require (SOL or USDC)"
     )
     venues: list[str] = Field(
-        default=["meteora", "orca", "raydium"], description="CLMM venues to allow"
+        default=["meteora", "orca", "raydium-clmm"],
+        description=(
+            "GeckoTerminal dex ids to allow. NOT connector names: plain "
+            "'raydium' is the constant-product AMM v4 and has no CLMM "
+            "positions, so scanning it returned pools no lp_executor could "
+            "ever open (LP-4). The concentrated venue is 'raydium-clmm'."
+        ),
     )
     ranking_window: str = Field(
         default="24h", description="Volume window for fees/TVL: 1h, 6h, or 24h"
@@ -188,13 +195,30 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # 3. Enrich top candidates with CLMM pool-info (fee %, bin/tick, price, mints).
     async def _enrich(c: dict) -> dict | None:
+        # Resolve the connector BEFORE asking Gateway anything. A GeckoTerminal
+        # dex id is not a connector name -- "raydium-clmm" is served by
+        # "raydium/clmm", so passing the dex id straight through made pool-info
+        # fail and dropped every Raydium candidate before the mapping below ran.
+        # A venue Gateway cannot drive at all is dropped here rather than after
+        # paying for a request that cannot succeed.
+        provider = lp_provider_for_dex(c["dex"], GECKO_NETWORK)
+        if not provider:
+            logger.info(
+                "lp_scanner: dropping %s — dex '%s' has no CLMM lp_provider",
+                c.get("pool_address", "?"),
+                c["dex"],
+            )
+            return None
+        connector = provider.split("/", 1)[0]
         try:
             info = await client.gateway_clmm.get_pool_info(
-                connector=c["dex"], network=CLMM_NETWORK, pool_address=c["pool_address"]
+                connector=connector,
+                network=CLMM_NETWORK,
+                pool_address=c["pool_address"],
             )
         except Exception as e:
             logger.info(
-                f"lp_scanner: pool-info failed for {c['dex']} {c['pool_address']}: {e}"
+                f"lp_scanner: pool-info failed for {connector} {c['pool_address']}: {e}"
             )
             return None
         fee_pct = _num(info.get("fee_pct") or info.get("base_fee_percentage"))
@@ -224,7 +248,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             f"{memecoin_mint}-{quote}" if memecoin_mint else c["trading_pair"]
         )
         c["fee_yield"] = (c["vol_window"] * (fee_pct / 100.0)) / max(c["tvl_usd"], 1.0)
-        c["lp_provider"] = f"{c['dex']}/clmm"
+        c["lp_provider"] = provider
         return c
 
     enriched = [r for r in await asyncio.gather(*[_enrich(c) for c in shortlist]) if r]

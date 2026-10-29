@@ -156,9 +156,9 @@ def create_app() -> FastAPI:
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     # The hub's own router, declared beside the agent routes it installs
-    # through but kept off the ``/agents`` prefix: a listing is addressed by a
-    # ``listing_id``, not a slug, and ``/agents/hub/...`` would sit one rename
-    # away from shadowing ``/agents/{slug}`` (FEAT-146, CORR-061).
+    # through but kept off the ``/agents`` prefix: ``/agents/hub/...`` would
+    # read as an agent called "hub" and sit one rename away from shadowing
+    # ``/agents/{slug}`` (FEAT-146, CORR-061).
     app.include_router(agents.hub_router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
     app.include_router(code.router, prefix="/api/v1")

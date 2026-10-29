@@ -365,7 +365,7 @@ def test_a_block_is_announced_once_not_every_tick(tmp_path, monkeypatch, supervi
     monkeypatch.setattr(
         engine.risk,
         "get_state",
-        lambda tracker: RiskState(is_blocked=True, block_reason="max drawdown"),
+        lambda tracker, **kw: RiskState(is_blocked=True, block_reason="max drawdown"),
     )
 
     for _ in range(3):

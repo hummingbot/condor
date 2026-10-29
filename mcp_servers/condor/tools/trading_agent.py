@@ -190,6 +190,16 @@ def _creator_agent_key() -> str:
         return ""
 
 
+def _caller_is_admin() -> bool:
+    """Whether this seat's user is an admin; no config is not a licence."""
+    try:
+        from config_manager import get_config_manager
+
+        return bool(get_config_manager().is_admin(settings.user_id))
+    except Exception:  # noqa: BLE001 - no config is not a licence to publish
+        return False
+
+
 def _publish_agent(agent_slug: str, path: str) -> dict:
     """Copy a local agent into the shipped library. Admin only.
 
@@ -204,13 +214,7 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     """
     from condor.layering import publish_to_stock
 
-    try:
-        from config_manager import get_config_manager
-
-        is_admin = get_config_manager().is_admin(settings.user_id)
-    except Exception:  # noqa: BLE001 - no config is not a licence to publish
-        is_admin = False
-    if not is_admin:
+    if not _caller_is_admin():
         return {
             "error": (
                 "Publishing writes into the tracked library the repo ships, so "
@@ -222,7 +226,22 @@ def _publish_agent(agent_slug: str, path: str) -> dict:
     return publish_to_stock(agent_slug, path)
 
 
-def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+def _possible_keys_answer(exc) -> dict:
+    """A stop on possible keys, as the tool says it (SEC review C2)."""
+    return {
+        "error": str(exc),
+        "possible_keys": [key._asdict() for key in exc.pending],
+        "next": (
+            "Show the user each possible key's file and line and ask which are "
+            "not keys. Call again with `acknowledge` set to only the "
+            "fingerprints they confirm; never acknowledge one yourself."
+        ),
+    }
+
+
+def _export_agent(
+    agent_slug: str, notes: str = "", author_name: str = "", acknowledge: list[str] = ()
+) -> dict:
     """Write this agent out as one portable file, and say where it landed.
 
     Into ``data/exports/``, which is gitignored and is already this install's
@@ -249,7 +268,11 @@ def _export_agent(agent_slug: str, notes: str = "", author_name: str = "") -> di
     from condor.paths import data_dir
 
     try:
-        bundle = agent_bundle.build(agent_slug, notes=notes, author_name=author_name)
+        bundle = agent_bundle.build(
+            agent_slug, notes=notes, author_name=author_name, acknowledged=acknowledge
+        )
+    except agent_bundle.PossibleKeysError as exc:
+        return _possible_keys_answer(exc)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -371,44 +394,80 @@ def _upgrade_agent(agent_slug: str, path: str) -> dict:
         return {"error": str(exc), "preview": plan.summary()}
 
 
-def _hub_browse(query: str = "") -> dict:
-    """What the agent hub offers, as rows to read out (FEAT-146).
+def _hub_browse(query: str, page: int) -> dict:
+    """One page of Botcamp's published agents, newest first (BUG-7).
 
-    Anonymous — browsing needs no token, because the listing is public content
-    and gating it would make the feature useless for an operator who has no
-    Botcamp account, which is most of them on day one.
-
-    ``badge`` is **provenance and nothing else**. A ``validated`` badge means a
-    human reviewed one submitted revision once; it is not a signature, Condor
-    verifies no bundle against it, and it must never be read back to the user
-    as a reason something is safe to run. Say what it is, and say that the
-    review on install is the gate.
+    The PR #111 catalogue endpoint this calls through (``condor.hub.browse``)
+    came after ``_hub_get``'s docstring was written, which is why that one
+    still says "there is no browse or search" — this is the missing other
+    half, the same ``GET /hub/catalogue`` the web dashboard's Hub tab reads.
+    Pulling one of the results is still ``hub_get``/``hub_install`` by slug;
+    this only says which slugs exist.
     """
     from condor import hub
 
     try:
-        listings = hub.browse(query or "")
+        # The admin's token only for the admin (SEC review C4): it carries
+        # whatever their Botcamp account bought or joined.
+        entries = hub.browse(query, page, hub.token() if _caller_is_admin() else "")
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
     return {
-        "listings": [listing.model_dump() for listing in listings],
+        "listings": [e.model_dump() for e in entries],
+        "page": page,
         "trust": (
-            "A badge is provenance, not a verdict: the hub is a discovery "
-            "service and not a security boundary. Whatever you install arrives "
-            "muted and unstarted, and the review on install is the gate."
+            "Only an approved version is ever listed here, but that is a gate "
+            "on the catalogue, not a security boundary. Whatever you install "
+            "arrives muted and unstarted, and the review on install is the gate."
         ),
     }
 
 
-def _hub_install(listing_id: str, as_slug: str = "") -> dict:
-    """Install a hub listing, through exactly the gate the file path uses.
+def _hub_get(slug: str) -> dict:
+    """One Botcamp agent's catalogue entry, as rows to read out (FEAT-146).
 
-    The bytes are digest-verified against the listing before anything parses
-    them (``hub.fetch``), and then this is FEAT-133's ``plan``/``apply`` — or
-    FEAT-145's ``plan_update``/``apply_update`` when the listing's agent is
-    already installed here, which the plan decides, not this function and not
-    the caller. ``as_slug`` is only ever a rename for a collision that is a
-    *different* agent.
+    PR #111 ships no browse — only a lookup by a slug the caller must
+    already know, so this is a lookup and not a search. This install's own
+    Botcamp token rides along if one is linked (optional on this endpoint),
+    which is what lets a membership/purchase-gated agent an account actually
+    has access to resolve at all; omitted, this is the anonymous read a free
+    agent answers.
+
+    Only an ``APPROVED`` version is ever listed. That is a gate on what
+    reaches the catalogue, never a verdict this tool should repeat back to
+    the user as a reason something is safe to run — the review on install is
+    the gate.
+    """
+    from condor import hub
+
+    try:
+        # The admin's token only for the admin (SEC review C4): it carries
+        # whatever their Botcamp account bought or joined.
+        listing = hub.get(slug, hub.token() if _caller_is_admin() else "")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    return {
+        "listing": listing.model_dump(),
+        "trust": (
+            "Only an approved version is ever listed here, but that is a gate "
+            "on the catalogue, not a security boundary. Whatever you install "
+            "arrives muted and unstarted, and the review on install is the gate."
+        ),
+    }
+
+
+def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
+    """Install a Botcamp agent version, through exactly the gate the file
+    path uses.
+
+    The bytes are verified against the response's own ``X-Agent-Sha256``
+    header before anything parses them (``hub.fetch``), then converted from
+    Botcamp's zip layout into a bundle
+    (``condor.botcamp_import.from_zip``), and then this is FEAT-133's
+    ``plan``/``apply`` — or FEAT-145's ``plan_update``/``apply_update`` when
+    this agent is already installed here, which the plan decides, not this
+    function and not the caller. ``as_slug`` is only ever a rename for a
+    collision that is a *different* agent.
 
     Everything the import door promises holds unchanged: every executable file
     is named in the result, routines and skills arrive muted, no imported
@@ -419,18 +478,21 @@ def _hub_install(listing_id: str, as_slug: str = "") -> dict:
     them: resolving them needs an async Hummingbot client and this is a
     synchronous tool.
     """
-    from condor import hub
+    from condor import botcamp_import, hub
     from condor.agents import bundle as agent_bundle
     from condor.runtime.toolsets import every_tool_name
 
+    # The admin's token only for the admin (SEC review C4): it carries
+    # whatever their Botcamp account bought or joined.
+    hub_token = hub.token() if _caller_is_admin() else ""
     try:
-        listing = hub.get(listing_id)
-        data = hub.fetch(listing_id, listing)
+        listing = hub.get(slug, hub_token)
+        fetched = hub.fetch(slug, version or "latest", token=hub_token)
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
 
     try:
-        bundle = agent_bundle.parse(data)
+        bundle = botcamp_import.from_zip(fetched.data, agent_slug=slug)
     except ValueError as exc:
         return {"error": str(exc)}
 
@@ -448,15 +510,30 @@ def _hub_install(listing_id: str, as_slug: str = "") -> dict:
             result = agent_bundle.apply_update(update, user_id=settings.user_id)
         except ValueError as exc:
             return {"error": str(exc), "verb": "update", "preview": update.summary()}
+        # So a later visit can learn Botcamp stopped serving this version
+        # (CORR-812) — the same stamp the web install path writes
+        # (``condor/web/routes/agents.py``'s ``install_from_hub``), which this
+        # tool path skipped entirely until now.
+        agent_bundle.record_hub_install(
+            update.slug,
+            hub_slug=slug,
+            hub_version=fetched.version,
+            digest=fetched.sha256,
+        )
         return {"verb": "update", "listing": listing_row, **result}
     try:
         result = agent_bundle.apply(plan, user_id=settings.user_id)
     except ValueError as exc:
         return {"error": str(exc), "verb": "install", "preview": plan.summary()}
+    agent_bundle.record_hub_install(
+        plan.slug, hub_slug=slug, hub_version=fetched.version, digest=fetched.sha256
+    )
     return {"verb": "install", "listing": listing_row, **result}
 
 
-def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dict:
+def _publish_hub(
+    agent_slug: str, notes: str = "", author_name: str = "", acknowledge: list[str] = ()
+) -> dict:
     """Upload this agent to the hub, as the file an export would hand over.
 
     The bytes are built by FEAT-133's ``build`` and rendered by its ``render``,
@@ -467,21 +544,44 @@ def _publish_hub(agent_slug: str, notes: str = "", author_name: str = "") -> dic
     out of somebody's download.
 
     It needs the install's Botcamp token, which lives in ``config.yml`` and is
-    set in Settings → Agents. There is no way to pass one in here and there
+    set in the Agent Hub (Agents → Hub). There is no way to pass one in here and there
     should not be: a token in a tool argument is a token in a transcript.
 
     Publishing sends content off this box and is irreversible in practice —
     ``unpublish`` removes the listing, it does not recall a download. Confirm
     with the user before calling it, and read the receipt back rather than
     summarising it.
+
+    Admin only, like ``publish_agent`` and the web route: it publishes under
+    the install's one Botcamp account, and the "ADMIN ONLY" in the tool's
+    description is read only by the model. A human confirms it on top of that
+    (``condor.runtime.danger.DANGEROUS_AGENT_ACTIONS``), and an unattended
+    loop is refused it outright (``condor.agents.risk``).
     """
     from condor import hub
+    from condor.agents import bundle as agent_bundle
+
+    if not _caller_is_admin():
+        return {
+            "error": (
+                "Publishing to the Botcamp hub sends this agent out under the "
+                "install's Botcamp account, so it is admin-only."
+            )
+        }
 
     try:
-        receipt = hub.publish(agent_slug, hub.token(), notes or "", author_name or "")
+        receipt = hub.publish(
+            agent_slug, hub.token(), notes or "", author_name or "", acknowledge
+        )
+    except agent_bundle.PossibleKeysError as exc:
+        return _possible_keys_answer(exc)
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
-    return {"published": True, **receipt.model_dump()}
+    # A submission is not a listing (FEAT-150): the hub answering the upload
+    # does not by itself mean this is published, only that it is on file as
+    # pending, rejected or published — ``receipt.status`` is the hub's own
+    # word on which.
+    return {"published": receipt.status == "published", **receipt.model_dump()}
 
 
 def _refuse_unreachable_pin(new: str | None, stored: str) -> dict | None:
@@ -541,6 +641,9 @@ def _manage_agent(
     path: str | None = None,
     notes: str | None = None,
     author_name: str | None = None,
+    acknowledge: list[str] | None = None,
+    query: str | None = None,
+    page: int | None = None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -639,7 +742,9 @@ def _manage_agent(
     if action == "export_agent":
         if not agent_slug:
             return {"error": "agent_slug is required"}
-        return _export_agent(agent_slug, notes or "", author_name or "")
+        return _export_agent(
+            agent_slug, notes or "", author_name or "", acknowledge or []
+        )
 
     if action == "import_agent":
         if not path:
@@ -657,28 +762,33 @@ def _manage_agent(
         return _upgrade_agent(agent_slug, path)
 
     if action == "hub_browse":
-        # ``agent_slug`` doubles as the search here: there is no listing to
-        # look up yet, and a second string parameter for one optional filter
-        # would be a field every other action has to ignore.
-        return _hub_browse(agent_slug or "")
+        return _hub_browse(query or "", page or 1)
+
+    if action == "hub_get":
+        if not path:
+            return {"error": "path (the Botcamp agent slug to look up) is required"}
+        return _hub_get(path)
 
     if action == "hub_install":
         if not path:
             return {
                 "error": (
-                    "path (the hub listing_id to install) is required — "
-                    'find one with manage_agents(action="hub_browse")'
+                    "path (the Botcamp agent slug to install) is required — "
+                    'look one up first with manage_agents(action="hub_get")'
                 )
             }
-        # ``path`` carries the listing id and ``agent_slug`` the name to land
-        # under, which is the same split ``import`` already uses: the bundle
-        # names itself, and ``agent_slug`` is how a collision is answered.
+        # ``path`` carries the agent's Botcamp slug and ``agent_slug`` the
+        # name to land under, which is the same split ``import`` already
+        # uses: the bundle names itself, and ``agent_slug`` is how a
+        # collision is answered.
         return _hub_install(path, agent_slug or "")
 
     if action == "publish_hub":
         if not agent_slug:
             return {"error": "agent_slug is required"}
-        return _publish_hub(agent_slug, notes or "", author_name or "")
+        return _publish_hub(
+            agent_slug, notes or "", author_name or "", acknowledge or []
+        )
 
     if action == "delete_agent":
         if not agent_slug:
@@ -786,9 +896,18 @@ async def _agent_lifecycle(
                 "shutdown_agent": "shutdown",
             }[action]
             aslug, sslug = agent_strategy_from_agent_id(agent_id)
+            # A shutdown is not a question, it is a winddown waited on: the
+            # route runs the whole thing before answering, so the default
+            # 15-second budget expired every time and the tool reported the
+            # main process unreachable while the kill switch was still firing
+            # behind it (MM-3).
+            from condor.runtime.timeouts import TIMEOUTS
+
+            timeout = TIMEOUTS.mcp_shutdown if verb == "shutdown" else None
             return await call_main_api(
                 "POST",
                 f"/agents/{aslug}/strategies/{sslug}/{verb}?agent_id={agent_id}",
+                timeout=timeout,
             )
 
         return {"error": f"Unknown lifecycle action: {action}"}
@@ -1050,10 +1169,17 @@ _ACTION_OWNER: dict[str, tuple[str, str]] = {
         "manage_agents",
         'manage_agents(action="upgrade", agent_slug=..., path=...)',
     ),
-    "hub_browse": ("manage_agents", 'manage_agents(action="hub_browse")'),
+    "hub_browse": (
+        "manage_agents",
+        'manage_agents(action="hub_browse", query=..., page=...)',
+    ),
+    "hub_get": (
+        "manage_agents",
+        'manage_agents(action="hub_get", path=<agent slug>)',
+    ),
     "hub_install": (
         "manage_agents",
-        'manage_agents(action="hub_install", path=<listing_id>)',
+        'manage_agents(action="hub_install", path=<agent slug>)',
     ),
     "publish_hub": (
         "manage_agents",
@@ -1107,11 +1233,13 @@ _AGENT_ACTIONS = {
     "export": "export_agent",
     "import": "import_agent",
     "upgrade": "upgrade_agent",
-    # The hub's three (FEAT-146). Spelled with their prefix even in the short
-    # table: "browse" and "install" on their own would read as local verbs, and
-    # ``publish`` is already taken by the publish-to-stock action — which is a
-    # different act entirely, writing into this repo's tracked library.
+    # The hub's four (FEAT-146, BUG-7). Spelled with their prefix even in the
+    # short table: "get"/"install"/"browse" on their own would read as local
+    # verbs, and ``publish`` is already taken by the publish-to-stock action
+    # — which is a different act entirely, writing into this repo's tracked
+    # library.
     "hub_browse": "hub_browse",
+    "hub_get": "hub_get",
     "hub_install": "hub_install",
     "publish_hub": "publish_hub",
 }
@@ -1169,6 +1297,9 @@ def manage_agents(
     path: str | None = None,
     notes: str | None = None,
     author_name: str | None = None,
+    acknowledge: list[str] | None = None,
+    query: str | None = None,
+    page: int | None = None,
 ) -> dict:
     resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
     if err:
@@ -1189,6 +1320,9 @@ def manage_agents(
         path,
         notes,
         author_name,
+        acknowledge,
+        query,
+        page,
     )
 
 

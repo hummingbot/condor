@@ -412,6 +412,13 @@ class AgentStore:
         if not path.exists():
             return False
         path.unlink()
+        # The bundle stamp is install bookkeeping about the AGENT.md just
+        # removed, not brain content — left behind, it keeps agent_home()
+        # existing forever and makes a later re-pull of this slug read as an
+        # update of nothing rather than a fresh install.
+        from condor.agents.bundle import stamp_path
+
+        stamp_path(agent_dir).unlink(missing_ok=True)
         # Remove the whole dir only when nothing else lives there (no strategies,
         # store or skills) — the brain/strategies must not be silently dropped.
         try:

@@ -45,7 +45,16 @@ FRAMEWORK = {
 }
 
 #: Tool names an agent's own files mention without calling them.
-NOT_CALLS: dict[str, set[str]] = {}
+#: Tools an agent's own files NAME without calling — a mention this scan would
+#: otherwise read as a missing allowlist entry. Kept narrow and per agent: the
+#: common case is a playbook naming a tool to say the seat does NOT have it,
+#: which is the opposite of needing it allowlisted.
+NOT_CALLS: dict[str, set[str]] = {
+    # shutdown.md names execute_swap to rule it out: the winddown cannot swap
+    # leftover tokens back, and saying so by name is what stops the agent
+    # spending its cleanup pass discovering that (LP-5).
+    "solana_dex_lp_expert": {"execute_swap"},
+}
 
 
 def _frontmatter(path: Path) -> dict:

@@ -46,6 +46,44 @@ def pin_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def apply_overrides(
+    config: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    """``config`` with ``overrides`` applied as a **patch**, not a replacement.
+
+    A start request names the few settings its dialog offers and inherits the
+    rest, so a key it does not mention must survive — including a key *inside*
+    a block it does mention. ``dict.update`` cannot express that: it replaces a
+    whole value, so a dialog sending three of a loop's risk limits deleted
+    every other limit that loop had configured (SH-2). The LP operator lost
+    ``min_wallet_sol_reserve`` and ``max_open_slots`` on every start this way,
+    with the UI reporting the start as successful — the limits looked saved and
+    were not there.
+
+    Nested mappings are merged one level at a time; anything else replaces. The
+    rule is general rather than a list naming ``risk_limits``, because the
+    property wanted is "a patch does not delete what it does not mention", and
+    a rule that has to be extended for each new nested block is a rule that
+    will be forgotten for one. A scalar, a list and a mapping arriving over a
+    non-mapping all replace outright: those are statements of what the value
+    *is*, and only two mappings describe the same shape well enough to merge.
+
+    Deliberately NOT used by the config editor's route, which sends the whole
+    document and whose deletions must therefore stand as deletions — merging
+    there would make a removed key un-removable (see ``update_strategy_config``
+    and ``StrategyConfigEditor``'s own dropped-key warning). Patch semantics
+    belong to the partial payload, not to every write.
+    """
+    merged = dict(config)
+    for key, value in overrides.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = apply_overrides(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 #: What an effective-vs-file diff compares: the fields a session pins, plus the
 #: risk limits it is enforcing. Deliberately not every key — a cosmetic edit to
 #: ``trading_context`` must not badge a running session as drifted — and

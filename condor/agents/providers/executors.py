@@ -109,16 +109,28 @@ class ExecutorsProvider(BaseProvider):
         for o in orphaned:
             pos = (o.get("custom_info") or {}).get("position_address")
             reason = (o.get("custom_info") or {}).get("hold_reason") or "close failed"
+            # ESCALATE, do not self-recover (LP-6). This block is built for the
+            # two tick-seat callers — the loop and the winddown — and that seat
+            # mounts no liquidity tools: ``manage_clmm`` is in LIQUIDITY_TOOLS,
+            # which ``profiles.py`` deliberately withholds from ``tick`` on the
+            # grounds that "its orphan hint tells it to report, not to
+            # self-recover". The hint said the opposite for every tick, so a
+            # loop that followed it spent the tick discovering the tool it was
+            # told to use does not exist, and the position stayed open.
             lines.append(
                 f"  🚨 ORPHANED POSITION: executor {o['id']} ({o['pair']}) terminated "
-                f"({reason}) with position {pos} still open on-chain. Stopping the executor "
-                "will NOT close it — it has already terminated. Close it with "
-                'manage_clmm(action="close", position_address=..., pool_address=...); '
-                "list_orphaned_positions() reports the dex, pool and network for "
-                "the call, and pool_address is required. A new create_lp_executor CANNOT adopt "
-                "the position and would mint a second one. Then mark it recovered with "
-                f"resolve_orphaned_position(executor_id=\"{o['id']}\"). "
-                "Do not open new positions on these funds first."
+                f"({reason}) with position {pos} still open on-chain. Stopping the "
+                "executor will NOT close it — it has already terminated, and a new "
+                "create_lp_executor CANNOT adopt it (it would mint a second one). "
+                "You cannot close it yourself: closing liquidity directly needs "
+                "manage_clmm, which this seat does not mount. So ESCALATE — call "
+                "list_orphaned_positions() for the dex, pool and network, then "
+                "send_notification with those details and the position address so "
+                "an operator or an attended agent can close it. Journal it. Do NOT "
+                f"call resolve_orphaned_position(executor_id=\"{o['id']}\") yet: that "
+                "marks it recovered and drops it from this warning, so calling it on "
+                "a position still open on-chain hides live exposure. Do not open new "
+                "positions on these funds."
             )
         if perf.bot_names:
             lines.append(f"  Bots operated: {', '.join(perf.bot_names)}")

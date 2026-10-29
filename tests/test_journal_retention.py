@@ -187,7 +187,7 @@ def test_a_risk_blocked_tick_rewrites_the_journal_once(tmp_path, monkeypatch, wr
     monkeypatch.setattr(
         engine.risk,
         "get_state",
-        lambda tracker: RiskState(is_blocked=True, block_reason="max drawdown"),
+        lambda tracker, **kw: RiskState(is_blocked=True, block_reason="max drawdown"),
     )
     writes.clear()
 

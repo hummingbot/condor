@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Bot,
@@ -9,7 +9,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
 import type { KnowledgeTabId } from "@/components/agent/knowledgeTabs";
 import { AccountDock } from "@/components/chat/AccountDock";
@@ -58,6 +58,7 @@ import { webSessionKey } from "@/hooks/useChatSocket";
 import { loopsOnServer, useLiveLoops } from "@/hooks/useLiveLoops";
 import { useServer } from "@/hooks/useServer";
 import { useAuth } from "@/lib/auth";
+import { AgentHub } from "@/pages/AgentHub";
 import { useStarters } from "@/hooks/useStarters";
 import { normalizeAgentSlug, slotFor } from "@/lib/agentSlug";
 import {
@@ -131,6 +132,14 @@ export function AgentChatTab() {
   // Its id is half the session key a run from the dock's library carries.
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  // `/hub` is this same workspace with the Hub in the conversation's column
+  // (FEAT-153), so picking anything that means "a conversation" leaves it.
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const onHub = pathname === "/hub";
+  const leaveHub = useCallback(() => {
+    if (onHub) navigate("/");
+  }, [onHub, navigate]);
   const {
     agents: modelOptions,
     customProviders,
@@ -210,6 +219,22 @@ export function AgentChatTab() {
   const { data: agents = [], isLoading: agentsLoading } = useQuery(
     agentsQuery(),
   );
+  const queryClient = useQueryClient();
+  // Retires a cloned agent's sidebar "New" badge the instant a chat with it
+  // actually starts — wherever that start came from (the rail row, the
+  // hero's composer, an agent page's "Chat" button, `?agent=` on load), since
+  // all of them fund into `talkTo`'s `startSession` branch below. Applied to
+  // the cache directly rather than invalidated: a refetch would still show
+  // the badge for however long the round trip takes, and the whole point is
+  // that starting the chat is what makes it go away.
+  const markAgentSeen = useMutation({
+    mutationFn: (slug: string) => api.markAgentSeen(slug),
+    onMutate: (slug: string) => {
+      queryClient.setQueryData<AgentSummary[]>(agentsQuery().queryKey, (prev) =>
+        prev?.map((a) => (a.slug === slug ? { ...a, is_new: false } : a)),
+      );
+    },
+  });
   const { data: delegationData } = useQuery({
     queryKey: ["delegations"],
     queryFn: api.getDelegations,
@@ -282,6 +307,10 @@ export function AgentChatTab() {
           return;
         }
       }
+      // A conversation is genuinely starting — the one moment that counts as
+      // "opened it" for a cloned agent's "New" badge, wherever this call came
+      // from.
+      if (agents.find((a) => a.slug === slug)?.is_new) markAgentSeen.mutate(slug);
       const slotId = chat.startSession(
         // `""` asks whoever is bound for their own model; only an unbound chat
         // needs a model named. Volunteering `defaultAgent` here is what used to
@@ -299,10 +328,12 @@ export function AgentChatTab() {
         chat.sendMessage(slotId, opts.text ?? "", opts.files);
     },
     [
+      agents,
       chat.sendMessage,
       chat.setActiveSlotId,
       chat.startSession,
       defaultAgent,
+      markAgentSeen,
       pendingPick,
       server,
     ],
@@ -354,28 +385,30 @@ export function AgentChatTab() {
   // Stable identities, so the rail's `memo` holds while an answer streams.
   // `selectedSlug` is a string and the rest are `useCallback`s on genuinely
   // stable deps, so these only change when the rail's answer actually changes.
-  const openFresh = useCallback(
-    () => talkTo(selectedSlug, { intent: "fresh" }),
-    [talkTo, selectedSlug],
-  );
+  const openFresh = useCallback(() => {
+    leaveHub();
+    talkTo(selectedSlug, { intent: "fresh" });
+  }, [leaveHub, talkTo, selectedSlug]);
   const openConversation = useCallback(
     (meta: ConversationMeta) => {
+      leaveHub();
       chat.resumeConversation(meta.id, {
         agent_key: meta.agent_key,
         server_name: meta.server_name || undefined,
         agent_slug: meta.agent_slug,
       });
     },
-    [chat.resumeConversation],
+    [leaveHub, chat.resumeConversation],
   );
   // The rail says who was picked and the tab remembers it, because the hero it
   // colours is the tab's, not the rail's.
   const onTalk = useCallback(
     (slug: string, agent: AgentSummary | null, fresh?: boolean) => {
+      leaveHub();
       setPendingAgent(agent);
       talkTo(slug, fresh ? { intent: "fresh" } : undefined);
     },
-    [talkTo],
+    [leaveHub, talkTo],
   );
   // The tab strip's `+`: always a *second* conversation, never a jump to one
   // that already exists — "new chat" is the whole of what the button says, and
@@ -561,7 +594,10 @@ export function AgentChatTab() {
           activeSlug={activeSlot?.info.agent_slug || ""}
           hasSession={!!activeSlot}
           liveIds={liveIds}
-          activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
+          activeId={
+            onHub ? null : activeSlot?.info.conversation_id || chat.activeSlotId
+          }
+          hubActive={onHub}
           open={railOpen}
           onClose={closeRail}
           onTalk={onTalk}
@@ -611,10 +647,14 @@ export function AgentChatTab() {
                   background — switching, and the only way to stop one. */}
               <SessionTabs
                 slots={chat.slots}
-                activeSlotId={chat.activeSlotId}
+                // No tab is the one on screen while the Hub has the column.
+                activeSlotId={onHub ? null : chat.activeSlotId}
                 isSlotStreaming={chat.isSlotStreaming}
                 permissionRequests={chat.permissionRequests}
-                onSelect={(slotId) => chat.setActiveSlotId(slotId)}
+                onSelect={(slotId) => {
+                  leaveHub();
+                  chat.setActiveSlotId(slotId);
+                }}
                 // The session ends; the transcript stays on the server, so the
                 // conversation is still in the rail and clicking it respawns it.
                 onClose={(slotId) => chat.destroySession(slotId)}
@@ -627,6 +667,11 @@ export function AgentChatTab() {
               />
             </div>
 
+            {onHub ? (
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <AgentHub />
+              </div>
+            ) : (
             <ChatThread
               slot={activeSlot}
               agents={modelOptions}
@@ -636,6 +681,9 @@ export function AgentChatTab() {
               onResolvePermission={chat.resolvePermission}
               switchError={switchError}
               onDismissSwitchError={dismissSwitchError}
+              onRetryModel={(agentKey) => switchBrain({ agentKey })}
+              defaultAgentKey={defaultAgent}
+              agentBindings={agentBindings}
               onSend={(text, files) =>
                 activeSlot &&
                 chat.sendMessage(activeSlot.info.slot_id, text, files)
@@ -697,6 +745,7 @@ export function AgentChatTab() {
                 />
               }
             />
+            )}
           </div>
 
           {/* Whatever has claimed the pane — the agent panel, a strategy

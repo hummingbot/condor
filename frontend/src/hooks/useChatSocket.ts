@@ -103,8 +103,8 @@ export interface ChatMessage {
    * always drew — the reasoning, then the calls.
    */
   events?: RunStep[];
-  /** System: "switch" | "error" | "delegation" | "resume" | "notification" |
-   * "routine" | "secret_notice". */
+  /** System: "switch" | "error" | "start_error" | "delegation" | "resume" |
+   * "notification" | "routine" | "secret_notice". */
   kind?: string;
   /**
    * The user redirected the agent while this answer was being written. The
@@ -1125,9 +1125,8 @@ export function useChatSocket() {
     closeSocket();
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    // The page's own origin in dev too: Vite proxies `/api` sockets to
-    // whichever backend it was started against (vite.config.ts).
-    const url = `${protocol}//${window.location.host}/api/v1/ws/chat`;
+    const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
+    const url = `${protocol}//${host}/api/v1/ws/chat`;
 
     // Pass the JWT via the Sec-WebSocket-Protocol subprotocol header instead of
     // the URL query string, so it never leaks via proxy logs or history.
@@ -1854,20 +1853,51 @@ export function useChatSocket() {
           // kind now, so the glyph and the label come from the renderer and
           // the text is the backend's own message, unadorned.
           const errMsg = (data.message as string) || "Unknown error";
+          // A spawn failure (`_start`'s except in chat_ws.py) stands up no
+          // subprocess at all — commonly a missing provider key for the model
+          // the slot was about to use. `switchBrain` already respawns a slot
+          // with no live session behind it (the same path a detached-after-
+          // restart tab uses), so this is the one failure the transcript can
+          // offer a model picker on instead of a dead end.
+          const noteKind = data.phase === "start" ? "start_error" : "error";
+          // `_handle_start_session` mints the conversation *before* trying to
+          // spawn it, so a start failure still names a real id the backend
+          // can find — `data.slot_id`, same field `session_started` renames
+          // the optimistic tab to on success. Without adopting it here the
+          // tab stays "new_N" forever, and `onRetryModel`'s "Use Sonnet"
+          // asks the backend to switch a conversation that id does not name,
+          // which 404s with "No session web:<user>:new_N".
+          const realSlotId =
+            noteKind === "start_error" ? (data.slot_id as string) || null : null;
           if (errSlotId) {
             // Nothing is coming for a tab whose spawn failed — dropping
             // `pending` stops the input pretending the queue will drain.
             delete outbox.current[errSlotId];
+            if (realSlotId && realSlotId !== errSlotId) {
+              refAliases.current[errSlotId] = realSlotId;
+            }
             setSlots((prev) =>
               prev.map((s) => {
                 if (s.info.slot_id !== errSlotId) return s;
                 return {
                   ...s,
+                  ...(realSlotId && realSlotId !== errSlotId
+                    ? {
+                        info: {
+                          ...s.info,
+                          slot_id: realSlotId,
+                          conversation_id: realSlotId,
+                        },
+                      }
+                    : {}),
                   pending: false,
-                  messages: [...s.messages, systemNote(errMsg, "error")],
+                  messages: [...s.messages, systemNote(errMsg, noteKind)],
                 };
               }),
             );
+            if (realSlotId && realSlotId !== errSlotId) {
+              setActiveSlotId((cur) => (cur === errSlotId ? realSlotId : cur));
+            }
             stopStreaming(errSlotId);
           }
           break;

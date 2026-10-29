@@ -34,6 +34,13 @@ import {
  * own root, split by the level below it — so the floor is the fleet scope of
  * that browser rather than a second door onto the same records. `/floor`
  * redirects to `/bots`.
+ *
+ * Hub joined it in FEAT-153 and left it again. `/hub` mounts the Agents
+ * workspace with its transcript column swapped for the catalogue, so a tab of
+ * its own sat beside Agents saying the same thing twice. Its door is the card
+ * at the foot of the Agents rail, below the agents it installs — which is
+ * where you are when you want it. It is the one full-bleed route with no nav
+ * entry.
  */
 export const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
@@ -64,4 +71,4 @@ export const NAV_ITEMS = [
  * route with a body any more (FEAT-116): a layout rule for it would be a rule
  * about a redirect. What it used to draw is `/bots`, which is on this list.
  */
-export const FULL_BLEED_ROUTES = ["/", "/bots", "/routines"];
+export const FULL_BLEED_ROUTES = ["/", "/hub", "/bots", "/routines"];

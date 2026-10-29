@@ -144,6 +144,9 @@ export default function App() {
                   path="/agents/:slug/strategies/:sslug"
                   element={<AgentStrategyRedirect />}
                 />
+                {/* The Hub opens inside the Agents workspace, in the conversation's
+                    column, so the rail and the dock stay where they were. */}
+                <Route path="/hub" element={<Agents />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/market" element={<Navigate to="/trade" replace />} />
               </Route>

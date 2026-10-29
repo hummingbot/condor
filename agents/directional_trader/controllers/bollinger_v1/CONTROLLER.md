@@ -140,7 +140,7 @@ controller without redeploying. Controller-specific fields are not updatable.
 | `time_limit` | int (s) | 2700 | Max holding time | Updatable; scale with `interval` |
 | `take_profit_order_type` | enum | `LIMIT` | TP order type | Updatable; `LIMIT`, `LIMIT_MAKER` or `MARKET` |
 | `trailing_stop` | obj | null | `{activation_price, trailing_delta}` as PnL fractions | Updatable |
-| `manual_kill_switch` | bool | false | Stops new executors | Updatable; this is the real on/off state |
+| `manual_kill_switch` | bool | false | true stops the controller AND sends a stop to every executor it owns, closing position executors by default; false restarts it | Updatable; this is the real on/off state |
 | `initial_positions` | list | [] | Pre-existing positions to adopt | Rarely used |
 
 ## Config gotchas

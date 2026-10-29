@@ -161,6 +161,40 @@ export function formatCurrency(val: number, symbol = "$") {
 }
 
 /**
+ * Quote assets a `$` renders correctly, mirroring `DOLLAR_QUOTES` in
+ * `condor/agents/quote_render.py`. The two have to agree: an operator reads the
+ * dashboard's limits and the agent's own journal about the same ceiling.
+ */
+const DOLLAR_QUOTES = new Set(["USD", "USDT", "USDC", "DAI", "BUSD", "FDUSD"]);
+
+/**
+ * A quote-denominated figure in the token it is actually measured in (LP-2).
+ *
+ * A strategy's limits are denominated in "quote", and quote is whatever it
+ * trades against — USDT for the CEX market makers, SOL for the Solana LP
+ * operator. Rendering them all with `formatCurrency` showed the LP operator's
+ * 0.5 SOL position ceiling as `$0.50`, which is both the wrong unit and, read
+ * as dollars, three orders of magnitude out.
+ *
+ * An unset or dollar-stablecoin quote keeps `formatCurrency` exactly, so every
+ * CEX strategy renders as it always did. Four decimals for a token for the same
+ * reason the Python side uses four: an LP slot is a fraction of one SOL, and two
+ * places render 0.0275 as `0.03`.
+ */
+export function formatQuoteAmount(val: number, quoteAsset?: string | null): string {
+  const unit = (quoteAsset ?? "").trim().toUpperCase();
+  if (!unit || DOLLAR_QUOTES.has(unit)) return formatCurrency(val);
+  return (
+    withSign(val, (abs) =>
+      abs.toLocaleString("en-US", {
+        minimumFractionDigits: 4,
+        maximumFractionDigits: 4,
+      }),
+    ) + ` ${unit}`
+  );
+}
+
+/**
  * Compact USD for chart tooltips / stat strips: `>=1M → "$N.NNM"`, `>=10K → "$N.NK"`,
  * else plain `"$" + toFixed(2)` (no locale grouping). Kept distinct from `formatCurrency`,
  * which uses `Intl` grouping below 10K — switching would change rendered values.

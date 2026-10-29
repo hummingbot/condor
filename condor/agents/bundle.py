@@ -102,7 +102,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from condor.agents import bundle_review, code_trust
 from condor.frontmatter import parse_frontmatter, render_frontmatter
@@ -171,6 +171,19 @@ BOOKKEEPING_KEYS = (BUNDLE_VERSION_KEY, BUNDLE_DIGEST_KEY)
 
 class BundleError(ValueError):
     """A bundle this install refuses, with the sentence explaining why."""
+
+
+class PossibleKeysError(BundleError):
+    """An export stopped on values that may be private keys (SEC review C2).
+
+    ``pending`` lists each by file, line, kind and fingerprint — never the
+    value — so a surface can ask a person about each one and export again
+    with the ones they confirmed are not keys.
+    """
+
+    def __init__(self, pending):
+        super().__init__(bundle_review.possible_keys_refusal(pending))
+        self.pending = list(pending)
 
 
 class NotJsonError(BundleError):
@@ -282,6 +295,17 @@ class Bundle(BaseModel):
     requires: BundleRequires = Field(default_factory=BundleRequires)
     agent: BundleAgent
     files: list[BundleFile] = Field(default_factory=list)
+
+    #: The review :func:`build` already ran over these same files, cached on
+    #: its way out (BUG-10) so a caller that already holds this exact bundle
+    #: — :func:`condor.hub.publish`, right after — does not run
+    #: ``bundle_review.review`` a second time. Private: never touches the
+    #: wire, since ``render``/``model_dump`` skip pydantic private attributes
+    #: entirely, so nothing about the schema changes. ``None`` for any
+    #: ``Bundle`` not built through :func:`build` (a parsed import, a test
+    #: fixture) — :func:`condor.agents.bundle_review.review` is still the
+    #: single source of truth; this only remembers one already-paid call.
+    _review_findings: list[bundle_review.Finding] | None = PrivateAttr(default=None)
 
 
 class PlannedFile(BaseModel):
@@ -573,7 +597,12 @@ def _shared_skill_slugs() -> list[str]:
 # ── Export ──
 
 
-def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
+def build(
+    slug: str,
+    notes: str = "",
+    author_name: str = "",
+    acknowledged: Sequence[str] = (),
+) -> Bundle:
     """The bundle for ``slug``, read from disk and scrubbed.
 
     Reads **both** layers, local shadowing stock per file, so a shipped agent
@@ -590,7 +619,8 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     leaves no trace.
 
     ``notes`` and ``author_name`` are the exporting caller's; neither is read
-    by anything that decides what gets written.
+    by anything that decides what gets written. ``acknowledged`` is the
+    fingerprints of possible keys a person confirmed are not keys.
 
     Raises :class:`BundleError` for an agent that does not exist, a file whose
     bytes are not UTF-8 (named, so the operator can remove it), a bundle over
@@ -668,10 +698,22 @@ def build(slug: str, notes: str = "", author_name: str = "") -> Bundle:
     # ``bundle_review.review(bundle)``; only a value that can be nothing but a
     # secret stops the export, which is the same loud posture the non-UTF-8
     # refusal above already takes rather than a new one.
-    refusal = bundle_review.refusal(bundle_review.review(bundle))
+    findings = bundle_review.review(bundle)
+    refusal = bundle_review.refusal(findings)
     if refusal:
         raise BundleError(refusal)
+    # A value that *may* be a key (64 hex, long base58) is a tx hash as often
+    # as not, so it is not refused outright — but it does not leave unseen
+    # either (SEC review C2): each one waits for a person's acknowledgement.
+    pending = bundle_review.possible_keys(
+        ((f.path, f.text) for f in files), findings, acknowledged
+    )
+    if pending:
+        raise PossibleKeysError(pending)
     _stamp_bookkeeping(slug, agent_uid, version, digest)
+    # Cached for a caller that already holds this exact bundle (BUG-10) —
+    # see the field's own docstring on ``Bundle``.
+    bundle._review_findings = findings
     return bundle
 
 
@@ -973,6 +1015,17 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
 
     slug = import_plan.slug
     home = agent_home(slug)
+    # ``home`` can predate this import: a deleted agent's memory, loops,
+    # skills or store survive ``AgentStore.delete()`` on purpose, and
+    # ``_collision`` deliberately lets a reimport write into that leftover
+    # directory (it judges the collision by the store, not by the directory's
+    # existence). Snapshotting what was already there means a failure below
+    # rolls back only this import's own writes, never the retained content.
+    pre_existing = (
+        {p.relative_to(home) for p in home.rglob("*") if p.is_file()}
+        if home.exists()
+        else None
+    )
     try:
         for entry in import_plan.bundle.files:
             target = home.joinpath(*entry.path.split("/"))
@@ -998,7 +1051,10 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
             ),
         )
     except Exception:
-        shutil.rmtree(home, ignore_errors=True)
+        if pre_existing is None:
+            shutil.rmtree(home, ignore_errors=True)
+        else:
+            _undo_partial_import(home, pre_existing)
         raise
 
     log.info(
@@ -1023,6 +1079,30 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
         )
     )
     return result
+
+
+def _undo_partial_import(home: Path, pre_existing: set[Path]) -> None:
+    """Remove only what a failed import wrote into an already-occupied ``home``.
+
+    ``pre_existing`` is the file set ``apply`` snapshotted before writing
+    anything, so this rolls back exactly the files this import added — never
+    a deleted agent's retained memory, loops, skills or store, which were
+    already there and are never this import's to remove. Best-effort: a file
+    that will not unlink or a directory that still has something in it is
+    left alone rather than raising a second exception on top of the one that
+    triggered this cleanup.
+    """
+    paths = sorted(home.rglob("*"), key=lambda p: len(p.parts), reverse=True)
+    for path in paths:
+        if path.relative_to(home) in pre_existing:
+            continue
+        try:
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+        except OSError:
+            pass
 
 
 def _minted_uid(bundle: Bundle) -> str:
@@ -1106,7 +1186,15 @@ def _collision(slug: str) -> tuple[str, str]:
     if slug == CHAT_SLUG:
         return slug, _first_free(slug)
     store = AgentStore()
-    if store.get(slug) is not None or agent_home(slug).exists():
+    # Not a bare ``agent_home(slug).exists()`` check: AgentStore.delete()
+    # intentionally leaves the directory behind when strategies/store survive
+    # it, so a deleted agent's old home would otherwise collide forever with
+    # its own reimport. ``store.get`` is the actual "is something installed
+    # here" answer, through both layers; ``apply``'s own failure cleanup
+    # (``_undo_partial_import``) is what makes writing into that leftover
+    # directory safe — it rolls back only the files this import added, never
+    # the retained content a failed import must not touch.
+    if store.get(slug) is not None:
         return slug, _first_free(slug)
     return "", ""
 
@@ -1355,12 +1443,38 @@ class BundleStamp(BaseModel):
     question: which upstream bytes has this install already taken for this
     file. A path whose local copy was kept in a conflict is deliberately **not**
     updated, which is what keeps the divergence visible to the next update.
+
+    The ``hub_*`` fields are CORR-812's addition: this install's own record of
+    which Botcamp agent (slug and version — PR #111 carries no listing id)
+    this agent came from, so a later check can warn when the hub no longer
+    serves that version. They live here rather than in a field of their own
+    for the same reason the rest of this file does — a dotfile
+    ``publishable_files`` never yields, so neither this nor any other stamp
+    field can travel in a re-export of the agent (a hub-installed agent's
+    *next* export is this install's own new submission, not a relabelled copy
+    of somebody else's listing). ``hub_status`` is ``"ok"`` or ``"delisted"``
+    — never ``"unknown"``: a check that could not get a confirmed answer
+    leaves the stamp exactly as it was, so ``hub_checked_at`` always names the
+    last time the hub gave a definite answer, not the last time it was asked
+    (:func:`condor.hub.installed_agent_status`).
     """
 
     agent_uid: str = ""
     version: int = 0
     exported_at: str = ""
     digests: dict[str, str] = Field(default_factory=dict)
+    hub_slug: str = ""
+    hub_version: int = 0
+    hub_digest: str = ""
+    hub_status: str = ""
+    hub_checked_at: str = ""
+    #: Whether a cloned agent's sidebar "New" badge has already been retired.
+    #: Defaults ``True`` so a stamp written before this field existed — every
+    #: hub install on record at the time this shipped — parses as already
+    #: seen rather than suddenly badging an agent the user has had for
+    #: months. :func:`record_hub_install` is the only writer that ever sets
+    #: this ``False``, and only for a fresh clone, never an update.
+    hub_seen: bool = True
 
     def knows(self, path: str) -> bool:
         return path in self.digests
@@ -1515,6 +1629,44 @@ def write_stamp(home: Path, stamp: BundleStamp) -> None:
         stamp_path(home),
         json.dumps(stamp.model_dump(), indent=2, ensure_ascii=False, sort_keys=True),
     )
+
+
+def record_hub_install(
+    slug: str, *, hub_slug: str, hub_version: int, digest: str, is_clone: bool = False
+) -> None:
+    """Note that ``slug`` was just installed or updated from a Botcamp agent.
+
+    Called once, right after :func:`apply` or :func:`apply_update` returns, by
+    the route that holds the :class:`~condor.hub.AgentListing` this came from.
+    Folded into the stamp :func:`write_stamp` just finished writing rather than
+    threaded through ``ImportPlan``/``UpdatePlan`` themselves — both are shared
+    with the plain file-import and file-update paths, which have no hub agent
+    to carry, and reading the stamp back here keeps those two generic models
+    untouched.
+
+    Recording ``"ok"`` is not a second check: the install that just finished
+    already verified the ``X-Agent-Sha256`` the caller passes through
+    :func:`condor.hub.fetch`, so this only names the answer that verification
+    already gave.
+
+    ``is_clone`` is the route's own ``verb == "install"`` — true for a fresh
+    clone, false for an update of an agent already on this install. Only a
+    fresh clone resets :data:`BundleStamp.hub_seen`, which is what lights the
+    sidebar's "New" badge; an update must not re-surprise an agent the user
+    has already been using.
+    """
+    home = agent_home(slug)
+    stamp = read_stamp(home) or BundleStamp()
+    update: dict[str, object] = {
+        "hub_slug": hub_slug,
+        "hub_version": hub_version,
+        "hub_digest": digest,
+        "hub_status": "ok",
+        "hub_checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if is_clone:
+        update["hub_seen"] = False
+    write_stamp(home, stamp.model_copy(update=update))
 
 
 def _comparable(path: str, text: str) -> str:

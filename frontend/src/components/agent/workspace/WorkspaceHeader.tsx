@@ -17,6 +17,7 @@ import { effectiveTradingContext } from "@/components/agent/lab/runs";
 import { BrainPicker } from "@/components/chat/BrainPicker";
 import {
   ExportAgentButton,
+  HubInstallStatus,
   PublishAgentButton,
 } from "@/components/settings/AgentsSettings";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
@@ -305,6 +306,10 @@ export function WorkspaceHeader({
             download stays on this box and a publish does not. Which is why
             this one confirms and Export does not. */}
         <PublishAgentButton slug={agent.slug} />
+        {/* Only an agent installed from the hub has anything to say here —
+            everyone else's `getAgentHubStatus` answers `tracked: false` and
+            this renders nothing (CORR-812). */}
+        <HubInstallStatus slug={agent.slug} />
         {/* Condor is the default agent: deleting its AGENT.md would leave every
             unbound session without instructions or a model, so the store
             refuses it. The button is not offered rather than offered and

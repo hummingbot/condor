@@ -393,6 +393,15 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     A message queued behind the aborted turn still runs — stopping the answer
     you are watching is not the same as discarding what you asked next.
+
+    And deliberately not what a *loop* does either, which is the thing operators
+    read into it (SH-4): ``/stop`` never touched a ``TickEngine``, and Telegram
+    has no control that does — the loop lifecycle lives on the dashboard and in
+    ``control_agent``. Quietly repurposing this command would be worse than the
+    gap it closes, since someone cutting a long answer short would be stopping
+    live trading instead. So every reply here names any loop still running, and
+    says where to stop it. An honest answer is the fix; the control is a
+    separate piece of product.
     """
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
@@ -401,20 +410,55 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     chat_id = update.effective_chat.id
     session = await get_session(chat_id)
+    running = _running_loops_note(update.effective_user.id, chat_id)
 
     if not session or not session.alive:
-        await update.message.reply_text("No active session.")
+        await update.message.reply_text("No active session." + running)
         return
 
     if not session.is_busy:
-        await update.message.reply_text("Nothing to stop — the agent is idle.")
+        await update.message.reply_text(
+            "Nothing to stop — the agent is idle." + running
+        )
         return
 
     # Awaits the agent's own cancel (bounded by TIMEOUTS.prompt_cancel), so by
     # the time this replies the generation has actually stopped. The streamed
     # message finalizes itself on the DONE/cancelled event.
     await runtime.abort(_tg_key(chat_id))
-    await update.message.reply_text("⏹ Stopped. The session and its context are kept.")
+    await update.message.reply_text(
+        "⏹ Stopped the reply. The session and its context are kept." + running
+    )
+
+
+def _running_loops_note(user_id: int, chat_id: int) -> str:
+    """What this command did NOT stop, or ``""`` when nothing is running.
+
+    Best-effort: a chat reply must not fail because the registry could not be
+    read, and "no note" degrades to the message this command always sent.
+    """
+    try:
+        from condor.runtime.loops import get_supervisor
+
+        engines = get_supervisor().for_owner(user_id, chat_id)
+    except Exception:
+        log.warning("Could not read running loops for /stop", exc_info=True)
+        return ""
+    if not engines:
+        return ""
+
+    # Plain text on purpose: every reply this command sends goes out with no
+    # parse_mode, and a note full of backticks would either render literally or
+    # force MarkdownV2 escaping onto a string carrying quotes, dots and
+    # parentheses — a rendering bug in the one message that has to be read.
+    names = "\n".join(f"• {e.agent_id}" for e in engines)
+    return (
+        f"\n\n⚠️ This did NOT stop your running "
+        f"{'loop' if len(engines) == 1 else 'loops'}:\n{names}\n"
+        "A loop keeps trading until you stop it on the dashboard, or with "
+        'control_agent(action="stop", agent_id=...) — use action="shutdown" '
+        "to wind its positions down as well."
+    )
 
 
 @restricted

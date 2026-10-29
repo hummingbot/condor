@@ -117,7 +117,11 @@ def declared_names(config: dict[str, Any], namespace: str) -> list[str]:
 @dataclass
 class OwnedBot:
     base: str  # the name as the agent asked for it (no deploy timestamp)
-    origin: str  # "deployed" | "adopted" | "legacy"
+    # "claimed" | "deployed" | "adopted" | "legacy". ``claimed`` is a deploy the
+    # permission gate approved on the way *in*, before the call ran, so the bot
+    # may not exist: see :meth:`BotLedger.note_claim`. The other three are bots
+    # something actually observed.
+    origin: str
     since: float  # epoch this session took ownership
     last_seen: float
     # Epoch this session gave the bot up, or 0.0 while it still holds it. A
@@ -270,16 +274,59 @@ class BotLedger:
         return self.session_dir / LEDGER_FILENAME if self.session_dir else None
 
     def owns(self, name: str) -> bool:
-        """In-namespace, or under one of the explicitly declared legacy names."""
+        """In-namespace, declared legacy, **or already recorded in this ledger**.
+
+        The first two answer "may this session touch a bot it has never seen".
+        The third answers "may it touch one it already holds", and without it a
+        session could adopt a bot and then be refused every action on it —
+        including the stop that would wind it down.
+
+        That is not hypothetical: a strategy switching to ``bot_mode: bot``
+        adopts its predecessor's bots by lineage (``_adopt_running_bots``), and
+        those carry the old naming, so a namespace test says no to every one of
+        them. The session then reports owning a book it cannot stop, update or
+        restart — strictly worse than not adopting it at all.
+
+        A recorded bot is the *stronger* fact, not a weaker one. It reached
+        ``self.bots`` either because this session deployed it and this very gate
+        approved that deploy, or because the adoption pass matched the
+        namespace, this strategy's own session lineage, or this session's action
+        log — each bounded by the live listing and overridden by ``disowned``.
+        Nothing enters the ledger on a name pattern alone.
+        """
         name = (name or "").strip()
         if not name:
             return False
         if in_namespace(name, self.namespace):
             return True
-        return any(in_namespace(name, d) for d in self.declared)
+        if any(in_namespace(name, d) for d in self.declared):
+            return True
+        return strip_deploy_suffix(name) in self.bots
 
     def bases(self) -> list[str]:
         return sorted(self.bots)
+
+    def confirmed_bases(self) -> list[str]:
+        """``bases()`` minus the ones only *claimed*, never observed.
+
+        A deploy is recorded twice: the permission gate claims it on the way in,
+        before the call runs (so ownership survives a completion the engine
+        cannot parse), and the engine confirms it on the way out, from the call
+        that actually returned. A deploy that *failed* leaves only the first —
+        a name with no bot behind it.
+
+        Ownership does not care about the difference: a claimed bot may well be
+        running, so ``owns`` and ``bases`` must include it or the session could
+        not stop what it started. Anything reasoning about *exposure* does care,
+        because a name is not a position ([[CORR-750]]).
+
+        A claim is not a permanent state. ``_record`` clears it on the first
+        thing that observes the bot, and the engine keeps its adoption pass
+        running while any base is still only claimed, so a deploy that landed
+        while its result went unread is confirmed off the live listing rather
+        than staying exempt forever.
+        """
+        return sorted(b for b, o in self.bots.items() if o.origin != "claimed")
 
     def owned(self) -> list[OwnedBot]:
         """Owned bots, oldest takeover first."""
@@ -289,7 +336,30 @@ class BotLedger:
     # Mutations
     # ------------------------------------------------------------------
 
+    def note_claim(self, name: str, now: float | None = None) -> None:
+        """Record a deploy the gate approved but nobody has seen land yet.
+
+        The gate decides a call *before* it runs, so this is the strongest
+        statement available at that moment: the session is about to deploy this
+        name. Ownership has to be taken on it — a deploy whose result the engine
+        cannot parse must still be stoppable — but exposure must not, because a
+        failed deploy leaves the name and no bot.
+
+        Without the distinction a bot-mode session whose first deploy failed was
+        held forever: the recorded name made the drawdown guard treat the
+        session as holding a position, the bot that was never created could
+        never supply a reading, and every later tick stopped before the model
+        ran — so the retry that would have fixed it could not happen
+        ([[CORR-750]]).
+        """
+        self._record(name, "claimed", now)
+
     def note_deploy(self, name: str, now: float | None = None) -> None:
+        """Record a deploy that actually completed.
+
+        Clears a prior :meth:`note_claim` for the same base — see ``_record``,
+        where every observation does.
+        """
         self._record(name, "deployed", now)
 
     def adopt(self, name: str, now: float | None = None) -> None:
@@ -379,6 +449,19 @@ class BotLedger:
         else:
             # First claim wins: a bot this session deployed stays "deployed" even
             # if a later adoption pass sees it running.
+            #
+            # A ``claimed`` entry is the exception, because it is not an
+            # observation at all — only the gate's statement that a deploy was
+            # approved — so the first thing that actually sees the bot replaces
+            # it, keeping whichever origin did the seeing. Without this a deploy
+            # that succeeded while its result went unread stayed ``claimed`` for
+            # the life of the session: ``confirmed_bases()`` reported nothing,
+            # and the drawdown exemption built on it went on letting ticks run
+            # unmeasured while the bot traded ([[CORR-750]]). That is the
+            # dangerous inverse of the failed-deploy case the claim exists for,
+            # and the live listing is what tells the two apart.
+            if existing.origin == "claimed" and origin != "claimed":
+                existing.origin = origin
             existing.last_seen = ts
             # Operating it again re-opens a window closed by an earlier release,
             # so a stop followed by another tick cannot strand the attribution.

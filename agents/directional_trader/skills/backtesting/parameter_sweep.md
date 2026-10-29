@@ -43,7 +43,7 @@ manage_routines(
     config={
         "config_name": "{strategy_slug}_sweep_{param}_{value}",
         "start_date": start_date, "end_date": end_date,
-        "resolution": "1m", "trade_cost": 0.0006,
+        "resolution": "<the controller's interval>", "trade_cost": 0.0006,
         "chart": False,          # a sweep must not push an image per variant
     },
 )

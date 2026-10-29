@@ -40,22 +40,39 @@ Your job is to produce structured, data-driven assessments of whether an asset i
 
 **DeFi / on-chain protocols** — use `run_code` with `httpx` to call DefiLlama API (no key needed):
 
+> **`await` every request — never `httpx.get` (FA-4).** A snippet runs inside the
+> bot's own event loop, so a synchronous request blocks EVERYTHING while it waits:
+> one bounded 2-second call delayed a concurrent dashboard request by 1.82s, and a
+> sweep of a dozen protocols stalls every tick, every chat and every web request
+> for its whole duration. `AsyncClient` also fetches them concurrently, which is
+> both faster and the only shape that scales to a peer comparison.
+
 ```python
-import httpx, asyncio
+import asyncio
 
-# Protocol list (to find the slug)
-r = httpx.get("https://api.llama.fi/protocols")
-protocols = r.json()
+import httpx
 
-# TVL
-r = httpx.get("https://api.llama.fi/tvl/{protocol_slug}")
+async with httpx.AsyncClient(timeout=30) as client:
+    # Protocol list (to find the slug)
+    r = await client.get("https://api.llama.fi/protocols")
+    protocols = r.json()
 
-# Fees and revenue
-r = httpx.get("https://api.llama.fi/summary/fees/{protocol_slug}?dataType=dailyFees")
-r = httpx.get("https://api.llama.fi/summary/fees/{protocol_slug}?dataType=dailyRevenue")
+    # TVL
+    r = await client.get(f"https://api.llama.fi/tvl/{protocol_slug}")
 
-# Overview (chains, tokens, mcap, fdv, treasury)
-r = httpx.get("https://api.llama.fi/protocol/{protocol_slug}")
+    # Fees and revenue, fetched together rather than one after another
+    fees, revenue, overview = await asyncio.gather(
+        client.get(
+            f"https://api.llama.fi/summary/fees/{protocol_slug}",
+            params={"dataType": "dailyFees"},
+        ),
+        client.get(
+            f"https://api.llama.fi/summary/fees/{protocol_slug}",
+            params={"dataType": "dailyRevenue"},
+        ),
+        # Overview (chains, tokens, mcap, fdv, treasury)
+        client.get(f"https://api.llama.fi/protocol/{protocol_slug}"),
+    )
 ```
 
 For market cap / FDV / circulating supply use GeckoTerminal or CoinGecko public endpoints, or `run_code` to hit DefiLlama's `/coins` endpoint.

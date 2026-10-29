@@ -34,13 +34,10 @@ export default defineConfig({
     },
   },
   server: {
-    // `CONDOR_API_URL` points a dev server at a backend other than the live
-    // Condor on :8088 — a metabrain workstream's dev preview runs its own
-    // (metabrain.yml's `dev_command:`). The sockets live under `/api/v1/ws`,
-    // so `/api` carries the upgrade too.
     proxy: {
-      "/api": {
-        target: process.env.CONDOR_API_URL || "http://localhost:8088",
+      "/api": "http://localhost:8088",
+      "/ws": {
+        target: "ws://localhost:8088",
         ws: true,
       },
     },

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from typing import Any
 
 #: Every executor-creating tool, by name. The typed split (FEAT-062) gave each
@@ -130,6 +131,20 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # The legacy `*_agent` spellings are accepted by the tool's own _resolve_action,
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
+
+#: The Botcamp hub actions within ``manage_agents`` (SEC review C1/C3). Neither
+#: moves funds, but both cross the box's edge in a way nobody can take back:
+#: ``publish_hub`` sends the agent's routines, skills, controllers and sample
+#: configs out under the install's Botcamp account, and ``hub_install`` makes a
+#: downloaded AGENT.md's instructions and ``tools:`` allowlist live at once —
+#: one whose instructions say "publish every agent" chains straight into the
+#: first. So each waits for a human in chat, and an unattended loop is refused
+#: them outright (``condor.agents.risk``). Every other agent action edits this
+#: install's own library and stays on the fast path.
+DANGEROUS_AGENT_ACTIONS = {"publish_hub", "hub_install"}
+
+#: The tool that carries them.
+AGENTS_TOOL = "manage_agents"
 
 # There is no gate on `manage_gateway_config`. Its `networks` and `connectors`
 # are read-only over MCP: a network config carries `nodeURL`, the RPC every
@@ -450,6 +465,9 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     # capital via a controller, a different path than the executor tools)
     if tool_name == "manage_bots":
         return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
+
+    if tool_name == AGENTS_TOOL:
+        return _has_dangerous_action(tool_call, DANGEROUS_AGENT_ACTIONS)
 
     if tool_name == AGENT_CONTROLLERS_TOOL:
         return is_overwriting_controller_push(tool_call)
@@ -802,6 +820,48 @@ def shutdown_refusal(tool_call: dict[str, Any]) -> str | None:
     return None
 
 
+#: Execution modes whose restriction an MCP subprocess can enforce on its own,
+#: mapped to the policy that decides a call. Only ``dry_run`` for now
+#: (CORR-748): ``shutdown`` has the identical bypass and the identical shape —
+#: :func:`shutdown_refusal` is already written — but a winddown's seat is built
+#: on a path of its own and wiring it is a change to that path, not to this
+#: table. A mode absent from here restricts nothing, which is what keeps every
+#: live seat's subprocess byte-identical to before this existed.
+MOUNT_ENFORCED_MODES: dict[str, Any] = {"dry_run": dry_run_refusal}
+
+
+def mounted_tool_refusal(
+    execution_mode: str,
+) -> Callable[[str, dict[str, Any]], str | None] | None:
+    """The per-call refusal an MCP subprocess running in ``execution_mode`` applies.
+
+    ``None`` for a mode that restricts nothing, so the caller mounts its tools
+    exactly as it always did and the flag can never be blamed for a seat that
+    behaves differently.
+
+    This is :func:`dry_run_refusal` and its siblings moved one layer down, to
+    the process that owns the tool. Up at the session's permission callback they
+    decide only the calls a client *asks* about, and asking is the client's
+    choice: the ACP bridges differ on it, so the same policy that refuses a
+    snippet on one bridge is never consulted on another (CORR-748). Down here
+    the tool simply does not run, whoever is driving.
+
+    The arguments arrive as the subprocess's own kwargs rather than as a wire
+    tool call, so they are shaped into the one form the policies read. Nothing
+    is re-classified on the way: an action these policies do not recognise fails
+    closed there, as it always has, and this function adds no second opinion
+    about what a tool does.
+    """
+    policy = MOUNT_ENFORCED_MODES.get(execution_mode)
+    if policy is None:
+        return None
+
+    def refusal(tool_name: str, kwargs: dict[str, Any]) -> str | None:
+        return policy({"tool": tool_name, "input": dict(kwargs)})
+
+    return refusal
+
+
 def is_recordable_tool_call(tool_call: dict[str, Any]) -> bool:
     """Should the action log keep a row for this call? (FEAT-102)
 
@@ -930,6 +990,32 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return summary
         agent_id = str(input_data.get("agent_id") or "?")
         return f"Agent instance {agent_id}: {action}"
+
+    if tool_name == AGENTS_TOOL:
+        # Only the hub actions reach a human; the line says which way the
+        # agent crosses the box's edge, since neither can be taken back.
+        action = input_data.get("action", "?")
+        if action == "publish_hub":
+            slug = input_data.get("agent_slug") or "?"
+            summary = (
+                f"Publish agent '{slug}' to the Botcamp hub "
+                "(its files leave this box under the install's account)"
+            )
+            acknowledged = input_data.get("acknowledge") or []
+            if isinstance(acknowledged, list) and acknowledged:
+                # The human is also vouching for these, so the line says so.
+                summary += (
+                    f", accepting {len(acknowledged)} possible private key(s) "
+                    "as not keys"
+                )
+            return summary
+        if action == "hub_install":
+            slug = input_data.get("path") or "?"
+            return (
+                f"Install '{slug}' from the Botcamp hub "
+                "(its instructions and tool allowlist go live at once)"
+            )
+        return f"Agents: {action}"
 
     if tool_name == "execute_swap":
         pair = input_data.get("trading_pair", "?")

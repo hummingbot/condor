@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
 import type { ChatSlot, PermissionRequest } from "@/hooks/useChatSocket";
-import { CHAT_SLUG, type AgentSummary, type ChatAgentOption } from "@/lib/api";
+import {
+  CHAT_SLUG,
+  type AgentBindingOption,
+  type AgentSummary,
+  type ChatAgentOption,
+} from "@/lib/api";
 import { speakerNames } from "@/lib/agentColor";
 import { ApprovalPrompt } from "./ApprovalPrompt";
 import { ChatInput } from "./ChatInput";
@@ -52,6 +57,9 @@ export function ChatThread({
   columnClassName = "",
   autoFocus = false,
   composerLeading,
+  onRetryModel,
+  defaultAgentKey,
+  agentBindings,
 }: {
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
@@ -104,6 +112,21 @@ export function ChatThread({
    * that is unmistakably about the chat on screen.
    */
   composerLeading?: React.ReactNode;
+  /**
+   * A spawn that died before any model answered (`start_error`) can be
+   * retried with a different one right from the note that reported it —
+   * this is what the picker there calls. Absent on a surface that cannot
+   * respawn the slot (none today; kept optional so a future read-only
+   * transcript view is not forced to wire it).
+   */
+  onRetryModel?: (agentKey: string) => void;
+  /** Condor's own default model, for `start_error`'s one-click fallback —
+   *  the same field `useSessionOptions` already exposes. */
+  defaultAgentKey?: string;
+  /** The domain-Agent roster, so `start_error`'s picker can resolve a bound
+   *  Agent's own default model — the slot's `agent_key` is `""` for every
+   *  bound Agent, so without this the picker has nothing to show as current. */
+  agentBindings?: AgentBindingOption[];
 }) {
   /**
    * A stamped slug's display name.
@@ -290,6 +313,12 @@ export function ChatThread({
                 message={msg}
                 live={isStreaming && !!msg.open}
                 agentName={speakers[i]}
+                brainOptions={agents}
+                agentBindings={agentBindings}
+                attemptedAgentKey={slot?.info.agent_key}
+                attemptedAgentSlug={slot?.info.agent_slug}
+                defaultAgentKey={defaultAgentKey}
+                onRetryModel={onRetryModel}
               />
             ))
           )}

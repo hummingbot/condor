@@ -268,6 +268,24 @@ def _bot_call(action: str, **extra) -> dict:
     }
 
 
+class _CapitalClient:
+    """An API that answers what a named controller config would trade (DT-2).
+
+    A deploy's capital is not in the call — it names saved configs and the money
+    is in those — so since DT-2 the gate reads it before approving one. A test
+    about the *declared cap* still has to get past that read, which is what this
+    supplies: a $100 config, small enough that no position limit used here is
+    the thing under test. ``tests/test_bot_deploy_capital.py`` owns the capital
+    rules themselves.
+    """
+
+    class _Controllers:
+        async def get_controller_config(self, config_id: str) -> dict:
+            return {"total_amount_quote": 100.0}
+
+    controllers = _Controllers()
+
+
 def test_dry_run_blocks_manage_bots_deploy():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
@@ -312,7 +330,9 @@ def test_loop_mode_approves_bot_deploy_without_loss_cap():
     """A deploy with no declared max_global_drawdown_quote is no longer blocked."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = auto_approve_with_risk_check(
+        engine, state, execution_mode="loop", price_client=_CapitalClient()
+    )
 
     result = asyncio.run(
         callback(
@@ -326,7 +346,9 @@ def test_loop_mode_approves_bot_deploy_with_null_loss_cap():
     """An explicit null is the same as omitting the field entirely."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = auto_approve_with_risk_check(
+        engine, state, execution_mode="loop", price_client=_CapitalClient()
+    )
 
     result = asyncio.run(
         callback(
@@ -345,7 +367,9 @@ def test_loop_mode_approves_bot_deploy_with_null_loss_cap():
 def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = auto_approve_with_risk_check(
+        engine, state, execution_mode="loop", price_client=_CapitalClient()
+    )
 
     result = asyncio.run(
         callback(
@@ -353,7 +377,7 @@ def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
                 "deploy",
                 bot_name="x",
                 controllers_config=["cfg"],
-                max_global_drawdown_quote=400.0,
+                max_global_drawdown_quote=40.0,
             ),
             _OPTIONS,
         )
@@ -458,6 +482,7 @@ def test_bot_deploy_accepts_a_dollar_prefixed_loss_cap():
         RiskEngine(RiskLimits(max_position_size_quote=500.0)),
         RiskState(),
         execution_mode="loop",
+        price_client=_CapitalClient(),
     )
 
     result = asyncio.run(
@@ -466,7 +491,7 @@ def test_bot_deploy_accepts_a_dollar_prefixed_loss_cap():
                 "deploy",
                 bot_name="x",
                 controllers_config=["cfg"],
-                max_global_drawdown_quote="$100",
+                max_global_drawdown_quote="$40",
             ),
             _OPTIONS,
         )

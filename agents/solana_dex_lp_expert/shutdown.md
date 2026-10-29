@@ -18,8 +18,9 @@ top of that guaranteed floor.
 > every `lp_executor` reported a clean `EARLY_STOP`. **A clean executor status is NOT
 > evidence the tokens were converted.** Removing liquidity and converting it are two
 > separate legs; only the first is reliable.
-> **You are not done until the on-chain base-token balance is ~0.** Re-read the
-> wallet after the sells and retry anything still held.
+> **Read the wallet and report what is still held** — you cannot convert it from
+> this seat (see below), so the deliverable is an accurate list, not a zero
+> balance. A clean executor status is not evidence of anything about the tokens.
 
 Now:
 
@@ -27,26 +28,22 @@ Now:
   If any CLMM position for this session is still on-chain, close it — stop its
   executor with `keep_position=false`, and if it has no executor, remove the
   liquidity via the Gateway `/clmm/close` path.
-- **Swap the base tokens back — this is mandatory, not a dust sweep.** After the
-  liquidity is out, read the **actual on-chain wallet balance** of every base mint
-  this session touched (do NOT trust the executor's reported amounts) and sell each
-  back to the quote asset with an `order_executor` MARKET **sell** (use the token
-  **mint** in the trading pair — Gateway can't resolve memecoins by symbol). Sell
-  the *whole* balance, not a dust-sized slice. Only skip a leftover genuinely worth
-  under ~$5. **Then re-read the balances and retry any that are still non-zero.**
+- **Report the leftover base tokens — you cannot sell them from this seat.** After the
+  liquidity is out, read the **actual on-chain wallet balance** of every base mint this
+  session touched (do NOT trust the executor's reported amounts) and write down what is
+  still held, with its mint and approximate value.
 
-- **PACE THE SELLS — Jupiter rate-limits, and it lies about why.** When throttled,
-  Gateway surfaces the failure as `NO_ROUTE_FOUND` with the giveaway text
-  `Unexpected token 'R', "Rate limit"... is not valid JSON`. That is a **rate limit,
-  not a missing route** — do NOT conclude the token is unsellable or blacklist it.
-  Spacing depends on whether a Jupiter API key is configured (`jupiter.apiKey`):
-  - **With a Pro/portal key** (routes via `api.jup.ag`, ~60 req/min): sequential
-    sells are fine; leave **~2 s** between them. Observed 0–1 retries per sell.
-  - **Without a key** (falls back to `lite-api.jup.ag`, much tighter): leave
-    **≥15–20 s** between sells and expect intermittent failures. Observed the same
-    sells failing after **10+ retries** purely from throttling.
-  If a sell fails this way, wait and retry rather than escalating — it succeeds once
-  the window clears.
+  **Do not try to swap it back.** The swap-back needs a MARKET `create_order_executor`
+  sell, and a winddown refuses every create: only stops and liquidity removals pass the
+  risk gate once a kill switch has fired, and this seat has no `execute_swap` either.
+  Attempting it spends the pass discovering the refusal and changes nothing (LP-5). The
+  safety-critical half — removing the liquidity — is already done by the deterministic
+  pass above; converting the proceeds is an attended job.
+
+  So: include every non-zero base balance in the `send_notification` below, named by
+  mint, and say plainly that it is still held as spot and needs converting by an operator
+  or an attended agent. A leftover genuinely worth under ~$5 can be called dust and
+  skipped. Journal the list either way, so the next session does not re-discover it.
 - Confirm the position **rent** was refunded (each Meteora slot locks ~0.057 SOL).
 - Notify the owner via `send_notification` with final realized PnL and a one-line
   summary of the slots wound down.

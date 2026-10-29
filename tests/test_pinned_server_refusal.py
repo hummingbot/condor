@@ -552,3 +552,79 @@ def test_both_legs_agree_when_the_chat_is_not_the_subject(two_fleets, monkeypatc
     # that group legitimately follows the group's own default. What changed is
     # that an unattended loop is not a chat session.
     assert _seat_server_name(via_chat_session) == THE_GROUPS
+
+
+# ── Criterion 6: the resolved pick is what the session's own config.yml keeps ──
+#
+# PR #290 review: a loop started with the server set to Auto deployed and
+# traded, but the Fleet tab stayed empty. ``_strategy_server``'s #296 fix reads
+# the server off the session's own ``config.yml`` (``load_session_pins``), and
+# nothing wrote the *resolved* name there — ``__post_init__`` persisted
+# whatever ``config["server_name"]`` held at construction, which for Auto is
+# the unset ``""`` AgentConfig default, never the fleet ``_resolve_server``
+# chose. These build the real ``TickEngine`` (not the lightweight ``_Engine``
+# stand-in above, which skips ``__post_init__`` on purpose) to pin the write
+# side, where the ones above pin the read side only.
+
+
+def _real_engine(tmp_path, monkeypatch, cm_install, config, **kwargs):
+    from condor.agents.agent import Agent
+    from condor.agents.engine import TickEngine
+    from condor.agents.strategy import Strategy
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    cm_install({OWNER: [MINE]})
+    strategy = Strategy(agent_slug="brigado", name="Scalp")
+    strategy.home.mkdir(parents=True, exist_ok=True)
+    agent = Agent(slug="brigado", name="Brigado")
+    return TickEngine(
+        agent=agent,
+        strategy=strategy,
+        config=dict(config),
+        chat_id=kwargs.pop("chat_id", OWNER),
+        user_id=kwargs.pop("user_id", OWNER),
+        **kwargs,
+    )
+
+
+def test_auto_pick_is_persisted_to_the_sessions_own_config(tmp_path, monkeypatch, cm):
+    """Auto's resolved default lands in ``config["server_name"]`` before the
+    session's config.yml is written, so a restart and the Fleet tab's #296
+    pin read both see the fleet this run actually traded on."""
+    from condor.agents.config import load_full_config
+
+    engine = _real_engine(tmp_path, monkeypatch, cm, {"server_name": ""})
+
+    assert engine.config["server_name"] == MINE
+    assert load_full_config(engine.session_dir, None).get("server_name") == MINE
+
+
+def test_a_pinned_name_that_already_resolves_is_left_as_is(tmp_path, monkeypatch, cm):
+    """The common case — a start request that named a reachable server — is a
+    no-op for this write: it persists exactly what was asked for."""
+    from condor.agents.config import load_full_config
+
+    engine = _real_engine(
+        tmp_path, monkeypatch, cm, {"server_name": MINE}, server_pinned=True
+    )
+
+    assert engine.config["server_name"] == MINE
+    assert load_full_config(engine.session_dir, None).get("server_name") == MINE
+
+
+def test_a_serverless_run_is_not_forced_into_one(tmp_path, monkeypatch, cm):
+    """Nothing accessible: the write is skipped, not a fabricated name — a
+    chat with no grants yet stays a valid, serverless outcome."""
+    from condor.agents.config import load_full_config
+
+    engine = _real_engine(
+        tmp_path,
+        monkeypatch,
+        cm,
+        {"server_name": ""},
+        user_id=STRANGER,
+        chat_id=STRANGER,
+    )
+
+    assert engine.config.get("server_name") == ""
+    assert load_full_config(engine.session_dir, None).get("server_name") == ""

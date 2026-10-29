@@ -54,7 +54,17 @@ def _row(**overrides):
     return row
 
 
-def test_address_bearing_orphan_still_emits_the_close_call():
+def test_address_bearing_orphan_is_surfaced_with_a_route_it_can_take():
+    """Surfaced, and told what it can actually DO about it (LP-6).
+
+    This asserted the hint emitted ``manage_clmm(action="close")`` — which is
+    the same dishonesty this module is named for, one layer along: the only two
+    callers of this provider are the tick and the winddown, and that seat does
+    not mount ``manage_clmm``. A loop following the hint spent its tick
+    discovering the tool does not exist while the position stayed open. The
+    surfacing is the part that mattered and is unchanged; the route is now one
+    the reader has.
+    """
     result = _run_provider(
         [
             _row(
@@ -67,7 +77,10 @@ def test_address_bearing_orphan_still_emits_the_close_call():
         ]
     )
     assert "🚨 ORPHANED POSITION" in result.summary
-    assert 'manage_clmm(action="close"' in result.summary
+    assert "H4vD69Ds" in result.summary
+    assert 'manage_clmm(action="close"' not in result.summary
+    assert "ESCALATE" in result.summary
+    assert "send_notification" in result.summary
 
 
 def test_position_info_formats_the_apis_snake_case_fields():

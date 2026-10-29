@@ -33,6 +33,7 @@ from condor.runtime.context import (  # noqa: F401
 from condor.runtime.danger import (  # noqa: F401
     BLOCKED_TOOLS,
     CREATE_EXECUTOR_TOOLS,
+    DANGEROUS_AGENT_ACTIONS,
     DANGEROUS_AMM_ACTIONS,
     DANGEROUS_BOT_ACTIONS,
     DANGEROUS_CLMM_ACTIONS,
