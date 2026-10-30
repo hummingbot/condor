@@ -319,24 +319,49 @@ def test_dry_run_allows_manage_bots_status():
 
 
 # ---------------------------------------------------------------------------
-# loop mode: manage_bots(deploy) is risk-gated on a declared loss cap — the
-# capital lives in saved controller configs on the API server, so the deploy
-# must carry a max_global_drawdown_quote bounded by the position limit.
+# loop mode: manage_bots(deploy) is risk-gated on an OPTIONAL loss cap — the
+# capital lives in saved controller configs on the API server, so a declared
+# max_global_drawdown_quote is bounded by the position limit, but omitting it
+# deploys with no platform-side cap at all (condor#303).
 # ---------------------------------------------------------------------------
 
 
-def test_loop_mode_blocks_bot_deploy_without_loss_cap():
-    """A deploy with no declared max_global_drawdown_quote is blocked."""
+def test_loop_mode_approves_bot_deploy_without_loss_cap():
+    """A deploy with no declared max_global_drawdown_quote is no longer blocked."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = auto_approve_with_risk_check(
+        engine, state, execution_mode="loop", price_client=_CapitalClient()
+    )
 
     result = asyncio.run(
         callback(
             _bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS
         )
     )
-    assert result["outcome"]["outcome"] == "cancelled"
+    assert result["outcome"]["outcome"] == "selected"
+
+
+def test_loop_mode_approves_bot_deploy_with_null_loss_cap():
+    """An explicit null is the same as omitting the field entirely."""
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        engine, state, execution_mode="loop", price_client=_CapitalClient()
+    )
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote=None,
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "selected"
 
 
 def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():

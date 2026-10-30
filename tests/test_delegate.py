@@ -111,6 +111,53 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     assert any("done" in m for m in bot.messages)
 
 
+# ── The agent is handed its own controller_id (condor#302) ──
+
+
+def test_delegation_hands_the_worker_its_own_attribution_tag(tmp_path, monkeypatch):
+    """The worker that opens a position is told what to tag it with.
+
+    Before this fix the background run was always built with ``context=""``:
+    a delegated agent had no tool or data source that could tell it any
+    controller_id scoped to its own run, so it either stalled or borrowed the
+    parent conversation's. The fix hands it the exact tag the completed run's
+    own deed record (``deeds.for_delegation``) is filed under.
+    """
+    from condor.agents import deeds
+
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    _write_agent(tmp_path, "solana_dex_lp_expert")
+
+    seen = {}
+
+    async def fake_run(**kw):
+        seen.update(kw)
+        return "done"
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="solana_dex_lp_expert",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="open one LP slot",
+            bot=_FakeBot(),
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    expected_tag = deeds.attribution_tag(
+        deeds.for_delegation(1, dt.task_id, "solana_dex_lp_expert")
+    )
+    assert expected_tag  # the formula this test pins actually produced a tag
+    assert f'controller_id="{expected_tag}"' in seen["context"]
+    assert "[THIS DELEGATION]" in seen["context"]
+
+
 def test_delegation_captures_error(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     _write_agent(tmp_path, "scout")

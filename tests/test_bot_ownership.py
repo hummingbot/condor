@@ -311,11 +311,15 @@ def test_read_only_actions_see_the_whole_fleet(tmp_path):
 
 
 def test_risk_rejected_deploy_is_not_recorded_as_owned(tmp_path):
-    """A deploy without a loss cap is blocked by risk — it never entered the ledger."""
+    """A deploy with a loss cap above the position limit is blocked by risk — it never entered the ledger."""
     ledger = BotLedger(NS, tmp_path)
     call = {
         "tool": "manage_bots",
-        "input": {"action": "deploy", "bot_name": f"{NS}-btc"},
+        "input": {
+            "action": "deploy",
+            "bot_name": f"{NS}-btc",
+            "max_global_drawdown_quote": 5000.0,
+        },
     }
 
     assert _drive(_callback(ledger), call) == "cancelled"

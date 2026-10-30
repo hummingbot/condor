@@ -195,7 +195,7 @@ Derive `config_name` and `bot_name` from `trading_pair` at runtime (see Naming c
 
 ### First deployment (no controller config exists):
 1. Create config: `manage_controllers(action="upsert", target="config", config_name="{config_name}", config_data={...})`
-2. Deploy bot: `manage_bots(action="deploy", bot_name="{bot_name}", controllers_config=["{config_name}"], max_global_drawdown_quote=<max_global_drawdown_quote from [CURRENT CONFIG]>)` — the loss cap is required and must be **below** the `total_amount_quote` the controllers trade; a cap at or above the capital is a kill switch that can only fire once the position is gone, and the risk engine refuses both it and a missing one
+2. Deploy bot: `manage_bots(action="deploy", bot_name="{bot_name}", controllers_config=["{config_name}"], max_global_drawdown_quote=<max_global_drawdown_quote from [CURRENT CONFIG]>)` — the loss cap is optional (omitting it deploys with no platform-side cap), but this loop always sets one; when set it must be **below** the `total_amount_quote` the controllers trade — a cap at or above the capital is a kill switch that can only fire once the position is gone
 
 ### Update running controller:
 `manage_bots(action="update_config", bot_name="{bot_name}", config_name="{config_name}", config_data={...full config...}, confirm_override=true)`

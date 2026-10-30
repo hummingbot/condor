@@ -587,8 +587,12 @@ class RiskEngine:
 
         Two things are bounded on a deploy, and the difference is the whole of
         DT-2. The *declared loss cap* (``max_global_drawdown_quote``, the
-        platform kill switch) must be present and no larger than the position
-        limit — that check never needed to leave the call. The *capital* the
+        platform kill switch) is optional — omitting it deploys with no
+        platform-side cap, matching the hummingbot-api client's own default
+        (owner's call, GitHub condor#303: risk restrictions like this one are
+        not required of a delegated agent and default to none). A cap that
+        *is* declared is still bounded, no larger than the position limit —
+        that check never needed to leave the call. The *capital* the
         bot will actually trade lives in saved controller configs on the API
         server, so it arrives here as ``capital_quote``, resolved by
         :func:`_deployed_capital_quote` the way ``check_executor_action`` is
@@ -596,12 +600,14 @@ class RiskEngine:
         loss and nothing about the position: a $60 controller deployed cleanly
         under a $10 position limit.
 
-        ``capital_quote`` also settles MM-4, which no single figure could. A
-        cap at or above the capital it guards is a kill switch that fires after
-        everything is gone: ``pmm_mister_operator`` shipped
-        ``total_amount_quote: 500`` under ``max_position_size_quote: 600`` and
-        passed the cap-versus-limit check, because 600 was within the limit —
-        it was only wrong relative to the 500 it was supposed to protect.
+        ``capital_quote`` also settles MM-4, which no single figure could — but
+        only when a cap was declared; an omitted cap has nothing to compare
+        against the capital and is not MM-4's concern. A cap at or above the
+        capital it guards is a kill switch that fires after everything is
+        gone: ``pmm_mister_operator`` shipped ``total_amount_quote: 500``
+        under ``max_position_size_quote: 600`` and passed the
+        cap-versus-limit check, because 600 was within the limit — it was
+        only wrong relative to the 500 it was supposed to protect.
 
         ``None`` (older callers, tests, every non-deploy action) keeps the
         call-only behaviour exactly. Stops are risk-reducing and always
@@ -624,27 +630,34 @@ class RiskEngine:
                 return refusal
 
         if action == "deploy":
-            # Parsed like every other figure the gate values (SEC-632): a NaN
-            # cap is truthy but never fires on the backend, and a zero cap is
-            # never installed, so both are refused rather than approved.
-            try:
-                cap = _quote_amount(
-                    input_data.get("max_global_drawdown_quote"),
-                    "max_global_drawdown_quote",
-                )
-            except ValueError as exc:
-                return False, f"manage_bots {action}: {exc}"
-            if cap <= 0:
-                return False, (
-                    "Bot deploy must declare max_global_drawdown_quote "
-                    f"(≤ {self._amount(self.limits.max_position_size_quote)}) so the "
-                    "platform kill switch bounds the loss"
-                )
-            if cap > self.limits.max_position_size_quote:
-                return False, (
-                    f"max_global_drawdown_quote {self._amount(cap)} exceeds "
-                    f"position limit {self._amount(self.limits.max_position_size_quote)}"
-                )
+            raw_cap = input_data.get("max_global_drawdown_quote")
+            cap: float | None = None
+            # Unset (None or "") means no platform-side loss cap at all,
+            # matching the hummingbot-api client's own default: it omits the
+            # field from the deploy payload rather than sending a sentinel
+            # (owner's call, GitHub condor#303 — risk caps are opt-in, not
+            # required). A cap that IS declared is still parsed and bounded
+            # below; this makes the cap optional, not meaningless.
+            if raw_cap is not None and raw_cap != "":
+                # Parsed like every other figure the gate values (SEC-632): a
+                # NaN cap is truthy but never fires on the backend, and a
+                # zero or negative cap is never installed, so neither may
+                # clear a cap the caller bothered to declare.
+                try:
+                    cap = _quote_amount(raw_cap, "max_global_drawdown_quote")
+                except ValueError as exc:
+                    return False, f"manage_bots {action}: {exc}"
+                if cap <= 0:
+                    return False, (
+                        "manage_bots deploy: max_global_drawdown_quote must "
+                        f"be a positive amount, got {raw_cap!r} — omit the "
+                        "field entirely for no loss cap"
+                    )
+                if cap > self.limits.max_position_size_quote:
+                    return False, (
+                        f"max_global_drawdown_quote {self._amount(cap)} exceeds "
+                        f"position limit {self._amount(self.limits.max_position_size_quote)}"
+                    )
             if capital_quote is not None:
                 # DT-2: the money the bot will trade, not the loss it declares,
                 # and against what is LEFT of the allowance rather than all of
@@ -668,8 +681,8 @@ class RiskEngine:
                 # only once that capital is gone. "Never above" is the hard
                 # rule; equality is the same degenerate case and is named as
                 # such rather than waved through for being arithmetically
-                # tidy.
-                if cap >= capital_quote:
+                # tidy. Only meaningful when a cap was actually declared.
+                if cap is not None and cap >= capital_quote:
                     return False, (
                         f"max_global_drawdown_quote {self._amount(cap)} is not "
                         f"below the {self._amount(capital_quote)} the "

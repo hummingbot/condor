@@ -57,12 +57,13 @@ def _outcome(result: dict) -> str:
 # ── MM-1: the deploy that started this ───────────────────────────────────────
 
 
-def test_a_delegated_deploy_with_no_loss_cap_is_refused():
-    """The regression, in the shape QA actually deployed."""
+def test_a_delegated_deploy_with_no_loss_cap_goes_through():
+    """The shape QA actually deployed: no cap is a choice, not an omission to
+    refuse (condor#303) — the gate used to require one, which is the second
+    regression this seat hit, on top of MM-1's ungated door."""
     result = _call(_gate(), "manage_bots", action="deploy", bot_name="jto-mm")
 
-    assert _outcome(result) == "cancelled"
-    assert "max_global_drawdown_quote" in result["reason"]
+    assert _outcome(result) == "selected"
 
 
 def test_a_loss_cap_above_the_envelope_is_refused():
@@ -200,13 +201,19 @@ def test_a_refusal_reaches_the_caller():
     return value has to."""
     refusals = RefusalLog()
     gate = _gate(refusals)
-    _call(gate, "manage_bots", action="deploy", bot_name="jto-mm")
+    _call(
+        gate,
+        "manage_bots",
+        action="deploy",
+        bot_name="jto-mm",
+        max_global_drawdown_quote=600,
+    )
 
     note = _refusal_note(refusals)
 
     assert "risk gate refused 1 call" in note
     assert "manage_bots" in note
-    assert "max_global_drawdown_quote" in note
+    assert "exceeds position limit" in note
 
 
 def test_a_clean_run_appends_nothing():
@@ -220,7 +227,13 @@ def test_a_clean_run_appends_nothing():
 def test_several_refusals_are_all_reported():
     refusals = RefusalLog()
     gate = _gate(refusals)
-    _call(gate, "manage_bots", action="deploy", bot_name="a")
+    _call(
+        gate,
+        "manage_bots",
+        action="deploy",
+        bot_name="a",
+        max_global_drawdown_quote=600,
+    )
     _call(gate, "place_order", amount=1)
 
     note = _refusal_note(refusals)

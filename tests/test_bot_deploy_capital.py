@@ -148,12 +148,20 @@ def test_the_declared_cap_check_still_runs_first():
     assert "position limit" in result["reason"]
 
 
-def test_a_deploy_with_no_cap_at_all_is_still_refused():
-    """MM-1's check, unchanged by any of this."""
+def test_a_deploy_with_no_cap_at_all_is_bounded_by_capital_alone():
+    """The cap is optional (condor#303); the capital check below still runs."""
     result = _deploy(500, {"cfg": 100}, controllers_config=["cfg"])
 
+    assert _outcome(result) == "selected"
+
+
+def test_a_deploy_with_no_cap_still_bounded_by_capital():
+    """Omitting the cap does not also waive DT-2's capital-vs-limit check."""
+    result = _deploy(10, {"cfg": 60}, controllers_config=["cfg"])
+
     assert _outcome(result) == "cancelled"
-    assert "max_global_drawdown_quote" in result["reason"]
+    assert "$60.00" in result["reason"]
+    assert "$10.00" in result["reason"]
 
 
 # ── what happens when the capital cannot be read ─────────────────────────────

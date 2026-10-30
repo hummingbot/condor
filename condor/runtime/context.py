@@ -230,6 +230,46 @@ def conversation_attribution(tag: str) -> str:
     )
 
 
+def delegation_attribution(tag: str) -> str:
+    """Tell a delegated worker the ``controller_id`` its positions must carry (CORR-861).
+
+    :func:`conversation_attribution`'s sibling for the other door onto an
+    unattended run. A delegation is always auto-approved (FEAT-032's background
+    seat builds no permission callback at all), so nothing downstream can catch
+    an untagged create the way a chat's human-in-the-loop callback or a loop's
+    risk gate can — the tag the model is handed here is the *only* thing that
+    can make the position it opens attributable to this run.
+
+    Unlike the conversation sibling, a tagless run is never answered with
+    silence: a delegation that cannot be attributed is the bug this was written
+    for (CORR-861), not a state worth staying quiet about. Saying so explicitly
+    is also what stops a model from inventing a plausible-looking id of its own
+    — the parent conversation's, usually — when it goes looking for one and
+    finds none (the failure this item reports).
+
+    The tag comes from :func:`~condor.agents.deeds.attribution_tag`, so it is
+    byte-for-byte the id the delegation's own deed record
+    (:func:`~condor.agents.deeds.for_delegation`) and the fleet map key off —
+    one rule stated once, as in the conversation case.
+    """
+    if not tag:
+        return (
+            "[THIS DELEGATION]\n"
+            "No controller_id has been assigned to this delegation. Do not "
+            "invent one and do not reuse any id you see elsewhere (a parent "
+            "conversation's, another session's) — pass none, and name this "
+            "when you report back."
+        )
+    return (
+        "[THIS DELEGATION]\n"
+        f"Attribution tag: {tag}\n"
+        f'Pass controller_id="{tag}" to every create_*_executor call — it is what '
+        "attributes the position to this delegation. Without it nothing can tell "
+        "that this run opened it, and it will not appear in what this delegation "
+        "reports having deployed. Do not invent a different one."
+    )
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
     """Condor's own AGENT.md plus the platform's formatting rules."""
     agent = _chat_agent()

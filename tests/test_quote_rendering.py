@@ -179,13 +179,12 @@ def test_a_cap_over_the_position_limit_is_in_the_strategys_unit():
     assert "$" not in reason, reason
 
 
-def test_a_missing_cap_names_the_ceiling_in_the_strategys_unit():
+def test_a_missing_cap_is_no_longer_refused_regardless_of_unit():
+    """condor#303: the cap is optional, so a deploy within the position limit
+    goes through with no cap declared, whatever the strategy's quote asset."""
     result = _deploy(0.5, "SOL", {"cfg": 0.1}, controllers_config=["cfg"])
 
-    assert result["outcome"]["outcome"] == "cancelled"
-    reason = result["reason"]
-    assert "0.5000 SOL" in reason, reason
-    assert "$" not in reason, reason
+    assert result["outcome"]["outcome"] == "selected"
 
 
 def test_an_executor_create_over_the_limit_is_in_the_strategys_unit():
