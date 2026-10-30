@@ -930,6 +930,131 @@ def test_fetch_instance_history_sums_controllers_and_filters_trades():
     assert fees == 0.0
 
 
+# ── A dead strategy's 0/0 readings (quad_threat_orchestrator, 2026-10-08) ──
+#
+# A bot whose strategy died stays listed and keeps reporting 0/0. Read as a
+# cumulative, that is a fall back to zero, and session figures are differences
+# of cumulatives — so a bot adopted mid-life read as -$78k volume and invented
+# PnL, and a bot born and killed in one session vanished.
+
+
+def _dead_bot_client(rows_by_ts: list[tuple[str, list[tuple[float, float]]]]):
+    """Per timestamp, one (realized, volume) per controller, as history rows.
+
+    Built on :func:`_history_client` / :func:`_hist_row` further down.
+    """
+    return _history_client(
+        [
+            _hist_row(ts, f"c{i}", realized, volume)
+            for ts, controllers in rows_by_ts
+            for i, (realized, volume) in enumerate(controllers)
+        ]
+    )
+
+
+def _epoch(ts: str) -> float:
+    from condor.fetchers.bot_performance import _iso_to_epoch
+
+    return _iso_to_epoch(ts)
+
+
+_T0 = "2026-10-08T01:00:00+00:00"
+_T1 = "2026-10-08T02:00:00+00:00"
+_T2 = "2026-10-08T03:00:00+00:00"  # strategy dies after this reading
+_T3 = "2026-10-08T04:00:00+00:00"
+_T4 = "2026-10-08T05:00:00+00:00"
+
+
+def test_a_dead_strategys_zero_readings_carry_its_last_real_cumulative():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _dead_bot_client(
+        [
+            (_T0, [(1.0, 100.0)]),
+            (_T2, [(5.0, 900.0)]),
+            (_T3, [(0.0, 0.0)]),
+            (_T4, [(0.0, 0.0)]),
+        ]
+    )
+
+    hist = asyncio.run(fetch_instance_history(client, "quad-e4"))
+
+    assert [(r[1], r[2]) for r in hist] == [(1.0, 100.0), (5.0, 900.0)]
+
+
+def test_a_bot_adopted_mid_life_that_dies_keeps_what_it_did_in_session():
+    """The quad symptom: negative volume and invented PnL for the session."""
+    from condor.fetchers.bot_performance import fetch_instance_history, slice_history
+
+    client = _dead_bot_client(
+        [
+            (_T0, [(1.0, 100.0)]),
+            (_T1, [(3.0, 500.0)]),  # adopted here
+            (_T2, [(5.0, 900.0)]),
+            (_T3, [(0.0, 0.0)]),
+        ]
+    )
+    hist = asyncio.run(fetch_instance_history(client, "quad-e4"))
+
+    realized, volume, _, _ = slice_history([hist], _epoch(_T1), _epoch(_T4))
+
+    assert (realized, volume) == (2.0, 400.0)  # was (-3.0, -500.0)
+
+
+def test_a_bot_born_and_killed_in_one_session_does_not_vanish():
+    from condor.fetchers.bot_performance import fetch_instance_history, slice_history
+
+    client = _dead_bot_client([(_T1, [(4.0, 700.0)]), (_T3, [(0.0, 0.0)])])
+    hist = asyncio.run(fetch_instance_history(client, "quad-e4"))
+
+    realized, volume, _, _ = slice_history([hist], _epoch(_T0), _epoch(_T4))
+
+    assert (realized, volume) == (4.0, 700.0)  # was (0.0, 0.0)
+
+
+def test_zeros_before_a_controllers_first_trade_are_kept():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _dead_bot_client(
+        [(_T0, [(0.0, 0.0)]), (_T1, [(0.0, 0.0)]), (_T2, [(2.0, 50.0)])]
+    )
+
+    hist = asyncio.run(fetch_instance_history(client, "fresh-bot"))
+
+    assert [r[2] for r in hist] == [0.0, 0.0, 50.0]
+
+
+def test_only_the_dead_controller_is_held_its_live_sibling_keeps_moving():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _dead_bot_client(
+        [
+            (_T1, [(1.0, 100.0), (2.0, 200.0)]),
+            (_T2, [(0.0, 0.0), (3.0, 300.0)]),  # c0 died, c1 still trading
+            (_T3, [(0.0, 0.0), (4.0, 400.0)]),
+        ]
+    )
+
+    hist = asyncio.run(fetch_instance_history(client, "two-strategies"))
+
+    assert [(r[1], r[2]) for r in hist] == [
+        (3.0, 300.0),
+        (4.0, 400.0),
+        (5.0, 500.0),
+    ]
+
+
+def test_a_real_reading_after_a_loss_to_breakeven_is_not_dropped():
+    """Only an all-zero reading is dead: realized PnL back at 0 with volume is real."""
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _dead_bot_client([(_T1, [(2.0, 100.0)]), (_T2, [(0.0, 300.0)])])
+
+    hist = asyncio.run(fetch_instance_history(client, "breakeven"))
+
+    assert [(r[1], r[2]) for r in hist] == [(2.0, 100.0), (0.0, 300.0)]
+
+
 # ── Provider wiring ──
 
 

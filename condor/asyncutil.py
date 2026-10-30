@@ -44,6 +44,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Hashable, Iterator, TypeVar
 
+from condor.runtime import code_guard
+
 T = TypeVar("T")
 
 
@@ -117,7 +119,7 @@ class SingleFlight:
     helps once an answer has *arrived*, so this is what collapses the burst of
     identical requests that all miss a cold cache at the same instant.
 
-    Three guards, each of which one of the hand-rolled copies had and the others
+    Four guards, each of which one of the hand-rolled copies had and the others
     lacked:
 
     * **Shielded.** The work runs as a detached task and awaiters ``shield`` it,
@@ -132,6 +134,12 @@ class SingleFlight:
       previous run's outcome, a failure included. So a settled task is never
       reused and the next caller genuinely retries — a failure is shared by the
       waiters that were already on it, never remembered for the ones after.
+
+    * **No borrowed scope.** The task runs in a copy of the caller's context
+      with the ``code_guard`` scope stripped out. Without it, whichever caller
+      happened to be first on a key handed the shared fetch its own scope —
+      a ``run_code`` snippet first on a key would cut every other waiter off
+      mid-fetch with its own ``CodeRunDeadline`` once its budget ran out.
 
     The done-callback is identity-checked, so a callback that fires late can
     only ever evict its own entry and never a newer task registered under the
@@ -153,7 +161,12 @@ class SingleFlight:
             else None
         )
         if task is None:
-            task = asyncio.ensure_future(factory())
+            # Detached: the fetch is shared across every caller of this key,
+            # so it must not inherit whichever one happens to start it — a
+            # run_code snippet first on the key would otherwise hand its
+            # deadline to every other waiter, cutting them off mid-fetch with
+            # a CodeRunDeadline their own except Exception cannot catch.
+            task = loop.create_task(factory(), context=code_guard.detached_context())
             self._inflight[key] = (loop, task)
 
             def _clear(finished: asyncio.Task, _key: Hashable = key) -> None:

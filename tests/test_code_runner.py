@@ -161,6 +161,26 @@ def test_a_timeout_is_cut_and_keeps_what_was_printed(store):
     assert "Timed out after 1s" in out["error"]
 
 
+def test_a_cleanup_that_swallows_cancellation_does_not_hang_the_run(store, monkeypatch):
+    """The guard's own interrupt only fires on executing code, never on a
+    suspended await — so a ``finally`` that outlives its one cancellation with
+    an unbounded await of its own (``finally: await asyncio.sleep(3600)``)
+    must still time out this call rather than hang it forever.
+    """
+    monkeypatch.setattr(code_runner, "_CLEANUP_GRACE", 0.2)
+    out = run(
+        "import asyncio\n"
+        "try:\n"
+        "    await asyncio.sleep(30)\n"
+        "finally:\n"
+        "    await asyncio.sleep(30)\n",
+        timeout=1,
+    )
+
+    assert out["status"] == "timeout"
+    assert "cleanup did not finish" in out["error"]
+
+
 # ── capture isolation ──
 
 

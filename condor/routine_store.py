@@ -44,6 +44,7 @@ from condor.memory.paths import (
     iter_agent_slugs,
     shared_routines_roots,
 )
+from condor.runtime import code_guard
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     PendingRoutine,
@@ -810,12 +811,24 @@ class RoutineStore:
                     source_name=base_name,
                 ),
                 primitives.bind_context(ctx),
+                # Routines are agent-written code on the main loop too: the
+                # same policy as run_code, and exit() is an error, not a
+                # shutdown (condor/runtime/code_guard.py).
+                code_guard.guarded(code_guard.routine_scope(instance_id)),
+                code_guard.contain_exit(),
             ):
                 cfg = routine.config_class(**config)
                 raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")
+        except code_guard.CodeRunDeadline as e:
+            # A routine called under a snippet's deadline ran past it. Recorded
+            # like any failure: a BaseException passing through here would
+            # leave the instance "running" with no result, forever.
+            logger.warning(f"Routine {routine.name}[{instance_id}] interrupted: {e}")
+            result = RoutineResult(text=f"Error: CodeRunDeadline: {e}")
+            failed = True
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(
@@ -937,10 +950,13 @@ class RoutineStore:
             on_complete=on_complete,
         )
 
+        # Detached: a background run started from a snippet must not inherit
+        # that snippet's deadline and die with it (code_guard).
         task = asyncio.create_task(
             self._run_oneshot(
                 instance_id, routine, config, server_name, user_id, agent=agent
-            )
+            ),
+            context=code_guard.detached_context(),
         )
         self._tasks[instance_id] = task
         return instance_id
@@ -997,10 +1013,13 @@ class RoutineStore:
             session_key=session_key,
         )
 
+        # Detached: a background run started from a snippet must not inherit
+        # that snippet's deadline and die with it (code_guard).
         task = asyncio.create_task(
             self._run_continuous(
                 instance_id, routine, config, server_name, user_id, agent=agent
-            )
+            ),
+            context=code_guard.detached_context(),
         )
         self._tasks[instance_id] = task
         return instance_id
@@ -1053,10 +1072,13 @@ class RoutineStore:
             schedule={"type": "interval", "interval_sec": interval_sec},
         )
 
+        # Detached: a background run started from a snippet must not inherit
+        # that snippet's deadline and die with it (code_guard).
         task = asyncio.create_task(
             self._run_scheduled(
                 instance_id, routine, config, server_name, interval_sec, user_id
-            )
+            ),
+            context=code_guard.detached_context(),
         )
         self._tasks[instance_id] = task
         return instance_id

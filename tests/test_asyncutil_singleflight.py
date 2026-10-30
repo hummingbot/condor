@@ -1,16 +1,18 @@
 """Tests for ARCH-606: ``condor.asyncutil.SingleFlight``.
 
 The idiom was hand-rolled seven times across ``condor/`` and no two copies
-carried the same guards. These cover the three the class folds together —
-shield, same-loop, not-done — plus the identity-checked done-callback, on the
-class itself rather than through one of its call sites.
+carried the same guards. These cover the four the class folds together —
+shield, same-loop, not-done, no borrowed scope — plus the identity-checked
+done-callback, on the class itself rather than through one of its call sites.
 """
 
 import asyncio
+import os
 
 import pytest
 
 from condor.asyncutil import SingleFlight
+from condor.runtime import code_guard
 
 
 def test_concurrent_callers_of_one_key_share_a_single_run():
@@ -108,6 +110,53 @@ def test_an_entry_from_another_loop_is_never_awaited():
     sf._inflight["k"] = (object(), object())
 
     assert asyncio.run(sf.run("k", _work)) == "fresh"
+
+
+def test_the_shared_fetch_does_not_inherit_a_guarded_callers_scope():
+    """A run_code snippet first on a key must not hand its deadline to every
+    other waiter joining the same fetch: the shared task runs detached from
+    whichever caller's context happened to start it.
+    """
+    seen = {}
+
+    async def _work():
+        seen["scope"] = code_guard.current_scope()
+        await asyncio.sleep(0.01)
+        return "value"
+
+    async def _go():
+        sf = SingleFlight()
+        # Already past its deadline, as a timed-out snippet's scope would be.
+        scope = code_guard.GuardScope(label="snippet", deadline=0.0)
+        with code_guard.guarded(scope):
+            return await sf.run("k", _work)
+
+    assert asyncio.run(_go()) == "value"
+    assert seen["scope"] is None
+
+
+def test_an_unrelated_waiter_is_not_cut_by_the_first_callers_expired_scope():
+    """The symptom this guards against: an ordinary caller joining a fetch a
+    timed-out snippet happened to start first must get the real result, not
+    the snippet's CodeRunDeadline. ``os.listdir`` is an audited call, so it is
+    where the leaked scope's expired deadline would actually fire.
+    """
+
+    async def _work():
+        await asyncio.sleep(0.01)
+        os.listdir(".")
+        return "value"
+
+    async def _go():
+        sf = SingleFlight()
+        scope = code_guard.GuardScope(label="snippet", deadline=0.0)
+        with code_guard.guarded(scope):
+            snippet_call = asyncio.ensure_future(sf.run("k", _work))
+        # No scope here: an ordinary dashboard request joining the same key.
+        plain_call = asyncio.ensure_future(sf.run("k", _work))
+        return await asyncio.gather(snippet_call, plain_call, return_exceptions=True)
+
+    assert asyncio.run(_go()) == ["value", "value"]
 
 
 def test_a_late_done_callback_cannot_evict_a_newer_task():
