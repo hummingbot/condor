@@ -9,7 +9,7 @@ from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from condor.runtime.events import EventType, RuntimeEvent
-from utils.telegram_formatters import escape_markdown_v2
+from utils.telegram_formatters import escape_markdown_v2, escape_markdown_v2_code
 
 from .menu import stop_generating_keyboard
 
@@ -50,14 +50,28 @@ def _convert_table_row(m: re.Match) -> str:
     return "  ".join(cells)
 
 
-_LINK_RE = re.compile(r"\[[^\]\n]+\]\(https?://[^)\s]+\)")
-_ENTITY_RE = re.compile(r"\*[^*\n]+\*|_[^_\n]+_")
+# Code and links must be handled as whole units: their delimiters are part of
+# the entity, and their bodies obey different escape rules than the text.
+_CODE_OR_LINK_RE = re.compile(
+    r"(?P<fence>```[\s\S]*?```)"
+    r"|(?P<code>`[^`\n]+`)"
+    r"|(?P<link>\[(?P<label>[^\]\n]+)\]\((?P<url>https?://[^)\s]+)\))"
+)
 _PLACEHOLDER_RE = re.compile(r"\x00\d+\x00")
 _BOLD_ITALIC_RE = re.compile(
     r"\*\*(.+?)\*\*"  # bold
     r"|(?<!\*)\*([^*\n]+?)\*(?!\*)"  # single-star italic
     r"|(?<![_*])_([^_\n]+?)_(?![_*])"  # underscore italic
 )
+
+
+def _escape_text(text: str) -> str:
+    """Escape a MarkdownV2 text run, doubling literal backslashes first.
+
+    ``escape_markdown_v2`` leaves ``\\`` alone, so an original backslash would
+    swallow the character after it (or cancel an escape added next to it).
+    """
+    return escape_markdown_v2(text.replace("\\", "\\\\"))
 
 
 def _to_telegram_markdown(text: str) -> str:
@@ -70,10 +84,6 @@ def _to_telegram_markdown(text: str) -> str:
     """
     protected: list[str] = []
 
-    def _protect(m: re.Match) -> str:
-        protected.append(m.group(0))
-        return f"\x00{len(protected) - 1}\x00"
-
     def _conv(m: re.Match) -> str:
         inner = next(g for g in m.groups() if g is not None)
         # A link inside bold/italic: keep the link, drop the markers —
@@ -81,10 +91,34 @@ def _to_telegram_markdown(text: str) -> str:
         if _PLACEHOLDER_RE.fullmatch(inner):
             return inner
         marker = "*" if m.group(1) is not None else "_"
-        return f"{marker}{escape_markdown_v2(inner)}{marker}"
+        # Protect the entity as it is produced. A later pass must not see its
+        # markers and escape them again — a heading used to be escaped twice.
+        protected.append(f"{marker}{_escape_text(inner)}{marker}")
+        return f"\x00{len(protected) - 1}\x00"
 
-    # 1. Atomic entities that must survive verbatim: code and links.
-    result = re.sub(r"```[\s\S]*?```|`[^`\n]+`|" + _LINK_RE.pattern, _protect, text)
+    def _protect_code_or_link(m: re.Match) -> str:
+        if m.group("fence") is not None:
+            raw = m.group("fence")
+            newline = raw.find("\n")
+            if newline == -1:
+                head, body = "```", raw[3:-3]
+            else:
+                # The opening fence may carry a language tag; keep it as-is.
+                head, body = raw[: newline + 1], raw[newline + 1 : -3]
+            protected.append(f"{head}{escape_markdown_v2_code(body)}```")
+        elif m.group("code") is not None:
+            body = m.group("code")[1:-1]
+            protected.append(f"`{escape_markdown_v2_code(body)}`")
+        else:
+            # Inside (...) only ')' and '\' are special; the label is a text
+            # run and needs the full escape set.
+            label = _escape_text(m.group("label"))
+            url = m.group("url").replace("\\", "\\\\").replace(")", "\\)")
+            protected.append(f"[{label}]({url})")
+        return f"\x00{len(protected) - 1}\x00"
+
+    # 1. Atomic entities that carry their own escape rules: code and links.
+    result = _CODE_OR_LINK_RE.sub(_protect_code_or_link, text)
 
     # 2. Convert markdown, escaping the inner content of each entity.
     result = _HEADER_RE.sub(_conv, result)
@@ -94,9 +128,9 @@ def _to_telegram_markdown(text: str) -> str:
     result = _TABLE_ROW_RE.sub(_convert_table_row, result)
     result = _BOLD_ITALIC_RE.sub(_conv, result)
 
-    # 3. Protect the entities just produced, then escape the gaps.
-    result = _ENTITY_RE.sub(_protect, result)
-    result = escape_markdown_v2(result)
+    # 3. Escape the gaps. Entities are placeholders by now, so this cannot
+    # touch their markers or their already-escaped content.
+    result = _escape_text(result)
 
     # 4. Collapse blank lines and restore protected entities (inner first).
     result = re.sub(r"(\n[ \t]*){3,}", "\n\n", result)
@@ -107,29 +141,86 @@ def _to_telegram_markdown(text: str) -> str:
     return result
 
 
+_MDV2_LINK_RE = re.compile(r"\[((?:\\.|[^\\\]])*)\]\(((?:\\.|[^\\)])*)\)")
+
+
+def _severs_escape(text: str, at: int) -> bool:
+    """True when cutting at ``at`` leaves an odd number of backslashes behind."""
+    run = 0
+    i = at - 1
+    while i >= 0 and text[i] == "\\":
+        run += 1
+        i -= 1
+    return run % 2 == 1
+
+
+def _find_unescaped(text: str, char: str, start: int) -> int:
+    """Index of the next ``char`` that is not itself escaped, or -1."""
+    for i in range(start, len(text)):
+        if text[i] == char and not _severs_escape(text, i):
+            return i
+    return -1
+
+
+def _unescape_mdv2(text: str) -> str:
+    return re.sub(r"\\(.)", r"\1", text)
+
+
 def _mdv2_to_plain(text: str) -> str:
     """Turn escaped MarkdownV2 back into readable text.
 
     A parse rejection is retried without parse_mode. Reusing the escaped text
     there shows every backslash to the user, so unescape the punctuation and
-    drop the entity markers the converter added.
+    drop the entity markers the converter added. Code spans and links are
+    opaque: their contents are only unescaped, never stripped, or a ``*`` the
+    user wrote inside a code block would vanish from the retry.
     """
     out: list[str] = []
     i = 0
-    while i < len(text):
-        c = text[i]
-        if c == "\\" and i + 1 < len(text):
+    n = len(text)
+    while i < n:
+        if text.startswith("```", i):
+            end = text.find("```", i + 3)
+            stop = n if end == -1 else end
+            out.append("```" + _unescape_mdv2(text[i + 3 : stop]))
+            if end == -1:
+                i = n
+            else:
+                out.append("```")
+                i = end + 3
+            continue
+        if text[i] == "`":
+            end = _find_unescaped(text, "`", i + 1)
+            stop = n if end == -1 else end
+            out.append("`" + _unescape_mdv2(text[i + 1 : stop]))
+            if end == -1:
+                i = n
+            else:
+                out.append("`")
+                i = end + 1
+            continue
+        if text[i] == "[":
+            m = _MDV2_LINK_RE.match(text, i)
+            if m:
+                out.append(
+                    f"[{_unescape_mdv2(m.group(1))}]({_unescape_mdv2(m.group(2))})"
+                )
+                i = m.end()
+                continue
+        if text[i] == "\\" and i + 1 < n:
             out.append(text[i + 1])
             i += 2
             continue
-        if c not in "*_~`":
-            out.append(c)
+        if text[i] in "*_~":
+            i += 1
+            continue
+        out.append(text[i])
         i += 1
     return "".join(out)
 
 
 def _split_text(text: str, max_len: int) -> list[str]:
-    """Split text at paragraph boundaries."""
+    """Split text at paragraph boundaries, never inside an escape pair."""
     chunks = []
     while len(text) > max_len:
         split_at = text.rfind("\n\n", 0, max_len)
@@ -137,6 +228,10 @@ def _split_text(text: str, max_len: int) -> list[str]:
             split_at = text.rfind("\n", 0, max_len)
         if split_at == -1:
             split_at = max_len
+        # A chunk ending in a lone '\' escapes nothing: Telegram rejects the
+        # message and the plain fallback leaves a stray backslash on screen.
+        if split_at > 0 and _severs_escape(text, split_at):
+            split_at -= 1
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip("\n")
     if text:
@@ -275,7 +370,7 @@ class TelegramStreamer:
         parse_mode = None
 
         if self._prefix:
-            parts.append(escape_markdown_v2(self._prefix) if final else self._prefix)
+            parts.append(_escape_text(self._prefix) if final else self._prefix)
 
         buf = self._buffer.strip()
         stopped = final and self._stop_reason == "cancelled"
@@ -294,7 +389,7 @@ class TelegramStreamer:
             # along in the final MarkdownV2 message, so its parens and dashes
             # must be escaped or the whole message fails to parse and falls
             # back to plain text, showing raw markdown.
-            parts.append(escape_markdown_v2(tool_block) if final else tool_block)
+            parts.append(_escape_text(tool_block) if final else tool_block)
 
         if buf:
             if final:
@@ -320,6 +415,7 @@ class TelegramStreamer:
             parse_mode = "MarkdownV2"
         else:
             parts.append(r"_\(no response\)_")
+            parse_mode = "MarkdownV2"
 
         # Say why the answer ends where it does, so a /stop that lands mid
         # sentence does not read as the agent giving up on its own.
@@ -459,8 +555,9 @@ class TelegramStreamer:
                 msg = await self._bot.send_message(
                     chat_id=self._chat_id,
                     text=text,
+                    parse_mode=parse_mode,
                 )
-                self._last_sent[msg.message_id] = (text, None, None)
+                self._last_sent[msg.message_id] = (text, parse_mode, None)
                 return msg.message_id
             except Exception:
                 return None

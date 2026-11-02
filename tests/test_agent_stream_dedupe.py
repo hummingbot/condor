@@ -274,3 +274,73 @@ def test_plain_fallback_strips_escapes_and_entity_markers():
 
     assert "\\" not in plain
     assert plain == "Rapport LP — SOL à $103.95 (~$188) · uPnL +4.16 %"
+
+
+def test_plain_fallback_keeps_code_and_backslashes_verbatim():
+    """Stripping markers is only safe outside code: a `*` the user typed in a
+    span is content, and a literal backslash must survive the round trip."""
+    source = "Use `a*b_c` and C:\\tmp\\out"
+    assert _mdv2_to_plain(_to_telegram_markdown(source)) == source
+
+
+def test_a_heading_is_escaped_once():
+    """The header pass produced `*...*`, then the emphasis pass escaped the
+    backslashes it had just added a second time."""
+    assert _to_telegram_markdown("# Report (v2)") == r"*Report \(v2\)*"
+
+
+def test_a_link_label_is_escaped():
+    assert (
+        _to_telegram_markdown("[SOL_USDC pool](https://x.com/a)")
+        == r"[SOL\_USDC pool](https://x.com/a)"
+    )
+
+
+def test_code_keeps_its_backslashes():
+    assert _to_telegram_markdown("`C:\\tmp`") == "`C:\\\\tmp`"
+
+
+def test_a_rate_limited_send_retries_with_the_parse_mode():
+    """Dropping parse_mode on retry would show `*bold*` and `\\.` literally."""
+    from telegram.error import RetryAfter
+
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                raise RetryAfter(0)
+            return SimpleNamespace(message_id=7)
+
+    streamer = TelegramStreamer(bot=Bot(), chat_id=CHAT_ID, message_id=MAIN_ID)
+    asyncio.run(streamer._send("*hi*", "MarkdownV2"))
+
+    assert calls[-1]["parse_mode"] == "MarkdownV2"
+    assert calls[-1]["text"] == "*hi*"
+
+
+def test_an_empty_answer_is_sent_with_markdown():
+    """`_\\(no response\\)_` sent as plain text shows its escapes."""
+    bot, streamer = _streamer()
+
+    async def drive():
+        await streamer.process_event(RuntimeEvent.done("end_turn"))
+        await streamer.finalize()
+
+    asyncio.run(drive())
+
+    assert bot.edits[-1] == (MAIN_ID, r"_\(no response\)_", "MarkdownV2")
+
+
+def test_a_split_never_severs_an_escape():
+    from handlers.agents.stream import _split_text
+
+    text = "a" * 10 + "\\" + "b" * 20
+    chunks = _split_text(text, 11)
+    assert chunks[0] == "a" * 10
+    assert chunks[1].startswith("\\b")
+
+    # The pair is intact, so the cut is fine where it was.
+    text2 = "a" * 10 + "\\\\" + "b" * 20
+    assert _split_text(text2, 12)[0] == "a" * 10 + "\\\\"
