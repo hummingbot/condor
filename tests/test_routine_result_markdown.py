@@ -8,6 +8,7 @@ scheduled routine goes quiet forever while the job keeps firing.
 """
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -67,7 +68,7 @@ def render_markdown_v2(text: str) -> str:
                     f"Can't parse entities: character '[' is reserved "
                     f"and must be escaped at byte offset {i}"
                 )
-            out.append(text[i + 1 : end].replace("\\", ""))
+            out.append(re.sub(r"\\(.)", r"\1", text[i + 1 : end]))
             i = close + 1
             continue
         if c in "*_":
@@ -208,9 +209,7 @@ def test_italic_only_result_renders_italic_outside_code_block():
 
 
 def test_mixed_emphasis_and_link_renders():
-    out = format_routine_result(
-        "**Bold** and *italic* and [link](https://x.example)"
-    )
+    out = format_routine_result("**Bold** and *italic* and [link](https://x.example)")
     assert "```" not in out
     assert render_markdown_v2(out) == "Bold and italic and link"
 
@@ -220,6 +219,21 @@ def test_link_result_renders_clickable_link():
     assert "```" not in out
     assert "](https://www.geckoterminal.com/solana)" in out
     assert render_markdown_v2(out) == "GeckoTerminal"
+
+
+def test_backslashes_survive_in_text_and_emphasis():
+    # A literal backslash must be doubled before the reserved characters are
+    # escaped, or Telegram reads it as an escape and swallows the next char:
+    # `C:\tmp\out.json` would render as `C:tmpout.json`.
+    out = format_routine_result("**Status** C:\\tmp\\out.json")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Status C:\\tmp\\out.json"
+
+
+def test_link_label_keeps_its_backslashes():
+    out = format_routine_result("[C:\\tmp\\out.json](https://x.example)")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "C:\\tmp\\out.json"
 
 
 def test_link_with_backslash_in_url_is_escaped():
