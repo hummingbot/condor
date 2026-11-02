@@ -6,6 +6,7 @@ import {
   formatCompactUsd,
   formatCompactVolume,
   formatCurrency,
+  formatCurrencyPrecise,
   formatCurrencyPnl,
   formatCurrencyVolume,
   formatQuoteAmount,
@@ -170,6 +171,23 @@ describe("the minus sign sits before the currency symbol", () => {
     expect(formatCurrency(-0)).toBe("$0.00");
     expect(formatCurrency(-0, "R$")).toBe("R$0.00");
     expect(formatCurrencyPnl(-0)).toBe("+$0.00");
+  });
+});
+
+describe("formatCurrencyPrecise", () => {
+  it("keeps the digits of a sub-cent amount instead of rounding it to zero", () => {
+    // An LP fee of 0.00136 USDC read `$0.00` once converted; the DEX cards
+    // still show `$0.0014`, so the portfolio must not disagree.
+    expect(formatCurrencyPrecise(0.00136)).toBe("$0.0014");
+    expect(formatCurrencyPrecise(-0.00136)).toBe("-$0.0014");
+    expect(formatCurrencyPrecise(0.00136, "€")).toBe("€0.0014");
+  });
+
+  it("is formatCurrency at and above a cent, and for zero", () => {
+    for (const v of [0, 0.01, 1.5, 12.34, 12_345, 2_500_000]) {
+      expect(formatCurrencyPrecise(v)).toBe(formatCurrency(v));
+      expect(formatCurrencyPrecise(-v, "R$")).toBe(formatCurrency(-v, "R$"));
+    }
   });
 });
 

@@ -23,6 +23,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { LP_REFRESH_MS } from "@/components/dex/lp-position";
 import type { ExecutorInfo } from "@/lib/api";
 
 const getExecutors = vi.fn();
@@ -237,5 +238,36 @@ describe("useLpPositions", () => {
     // The 31st range — the one the slice dropped — shows its USD price rather
     // than falling back to quote units.
     expect(document.querySelector('[data-pool="pool-30"]')?.textContent).toBe("2.5");
+  });
+
+  it("reprices on the positions' own beat, so a page left open is not frozen", async () => {
+    // The pool row carries the quote's USD price the cards multiply by; without
+    // a timer that price stays at whatever it was when the page opened.
+    vi.useFakeTimers();
+    try {
+      getExecutors.mockResolvedValue([executor("1", "solana", "pool-a", 900)]);
+      getDexPoolsByAddress.mockResolvedValue({
+        pools: [{ address: "pool-a", quote_token_price_usd: 2.5 }],
+      });
+
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={client}>
+            <Harness />
+          </QueryClientProvider>,
+        );
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      expect(getDexPoolsByAddress).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LP_REFRESH_MS + 1_000);
+      });
+      expect(getDexPoolsByAddress).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

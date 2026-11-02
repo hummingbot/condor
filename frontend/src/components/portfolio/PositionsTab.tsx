@@ -64,6 +64,8 @@ interface Props {
   convert: (value: number, quote: string) => { value: number; converted: boolean };
   formatValue: (val: number, quote: string) => string;
   formatPnlValue: (val: number, quote: string) => string;
+  /** Same conversion as `formatValue`, but a sub-cent fee keeps its digits. */
+  formatFeeValue: (val: number, quote: string) => string;
 }
 
 /**
@@ -86,6 +88,7 @@ export function PositionsTab({
   convert,
   formatValue,
   formatPnlValue,
+  formatFeeValue,
 }: Props) {
   const navigate = useNavigate();
 
@@ -301,7 +304,7 @@ export function PositionsTab({
                       <td className={`${TDR} text-[var(--color-text-muted)]`}>
                         {pos.feesQuote === null
                           ? "—"
-                          : formatValue(pos.feesQuote, pos.quote)}
+                          : formatFeeValue(pos.feesQuote, pos.quote)}
                       </td>
                       <td className={TDR} style={{ color: pnlColor(pos.pnl) }}>
                         {formatPnlValue(pos.pnl, pos.quote)}

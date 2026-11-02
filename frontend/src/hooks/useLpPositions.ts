@@ -143,8 +143,11 @@ export function useLpPositions(server: string | null): {
       return map;
     },
     enabled: !!server && Object.keys(byNetwork).length > 0,
-    // A pair label does not change; only the TVL beside it does.
+    // A pair label does not change, but the quote's USD price beside it does —
+    // the cards multiply by it, so a page left open must not freeze at the
+    // price it was opened on. Same beat as the positions it prices.
     staleTime: 5 * 60_000,
+    refetchInterval: LP_REFRESH_MS,
   });
 
   const label = useMemo(

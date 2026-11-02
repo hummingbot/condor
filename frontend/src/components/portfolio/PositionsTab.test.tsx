@@ -22,7 +22,11 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ConsolidatedPosition, ExecutorInfo } from "@/lib/api";
-import { formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import {
+  formatCurrencyPnl,
+  formatCurrencyPrecise,
+  formatCurrencyVolume,
+} from "@/lib/formatters";
 import { formatWithRate } from "@/lib/rates";
 import type { LpPosition } from "@/components/dex/lp-position";
 import { useLpPositions } from "@/hooks/useLpPositions";
@@ -138,6 +142,7 @@ interface RenderOpts {
   /** Override the euro stand-in to exercise the real rate seam's fallback. */
   formatValue?: (val: number, quote?: string) => string;
   formatPnlValue?: (val: number, quote?: string) => string;
+  formatFeeValue?: (val: number, quote?: string) => string;
 }
 
 async function render(opts: RenderOpts = {}) {
@@ -158,6 +163,7 @@ async function render(opts: RenderOpts = {}) {
             convert={(value) => ({ value: value / 2, converted: true })}
             formatValue={opts.formatValue ?? ((val) => fmtValue(val / 2))}
             formatPnlValue={opts.formatPnlValue ?? ((val) => fmtPnl(val / 2))}
+            formatFeeValue={opts.formatFeeValue ?? ((val) => fmtValue(val / 2))}
           />
         </MemoryRouter>
       </QueryClientProvider>,
@@ -299,6 +305,19 @@ describe("liquidity", () => {
     expect(row).toContain("SOL ⚠");
     expect(row).not.toContain("$");
   });
+
+  it("keeps a sub-cent fee instead of rounding it to zero", async () => {
+    // P2: the fee column went through `formatValue`, whose `$` branch has two
+    // decimals — 0.00136 USDC read `$0.00` while the /dex cards kept the digits.
+    await render({
+      lpPositions: [lpPosition({ feesQuote: 0.00136 })],
+      formatFeeValue: (val, quote) =>
+        formatWithRate(formatCurrencyPrecise, {}, "USDT")(val, quote),
+    });
+
+    const row = document.querySelector("[data-lp-row]")!.textContent!;
+    expect(row).toContain("$0.0014");
+  });
 });
 
 describe("the tab never mutates anything", () => {
@@ -348,6 +367,7 @@ describe("an LP range older than the newest page of executors", () => {
         convert={(value) => ({ value, converted: true })}
         formatValue={fmtValue}
         formatPnlValue={fmtPnl}
+        formatFeeValue={fmtValue}
       />
     );
   }

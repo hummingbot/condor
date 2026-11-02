@@ -885,6 +885,7 @@ export function Portfolio() {
   const {
     convert,
     formatValueDetailed,
+    formatFeeValue,
     formatPnlValue,
     resolvedSymbol: currencySymbol,
   } = useRates(quoteCurrencies);
@@ -1089,6 +1090,7 @@ export function Portfolio() {
           convert={convert}
           formatValue={formatValueDetailed}
           formatPnlValue={formatPnlValue}
+          formatFeeValue={formatFeeValue}
         />
       </div>
     </div>
