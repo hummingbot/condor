@@ -130,6 +130,9 @@ export function DexPool() {
     queryFn: () => api.getDexPoolByAddress(server!, address, network),
     enabled: !!server && !!network && !!address,
     staleTime: 60 * 1000,
+    // The range bar multiplies by this pool's quote price, so the page must
+    // follow it rather than freeze at the price it was opened on.
+    refetchInterval: 60 * 1000,
   });
 
   // Registering the pool's tokens with Gateway is part of opening the pool, not
