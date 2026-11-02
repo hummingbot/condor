@@ -9,6 +9,7 @@ from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from condor.runtime.events import EventType, RuntimeEvent
+from utils.telegram_formatters import escape_markdown_v2
 
 from .menu import stop_generating_keyboard
 
@@ -30,15 +31,13 @@ _DOT_FRAMES = ["", ".", "..", "..."]
 QUEUED_LABEL = (
     "⏳ Queued — waiting for the current answer to finish.\n/stop interrupts it."
 )
-STOPPED_LABEL = "⏹ _Stopped._"
+STOPPED_LABEL = r"⏹ _Stopped\._"
 
 # How much of the live reasoning to keep on screen (tail chars). Keeps the
 # streamed message small while still showing the agent's current train of thought.
 MAX_REASONING_LEN = 600
 
 # Markdown conversion patterns
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
-_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
 _HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _BLOCKQUOTE_RE = re.compile(r"^>\s?(.*)$", re.MULTILINE)
 _HR_RE = re.compile(r"^-{3,}$", re.MULTILINE)
@@ -51,31 +50,82 @@ def _convert_table_row(m: re.Match) -> str:
     return "  ".join(cells)
 
 
+_LINK_RE = re.compile(r"\[[^\]\n]+\]\(https?://[^)\s]+\)")
+_ENTITY_RE = re.compile(r"\*[^*\n]+\*|_[^_\n]+_")
+_PLACEHOLDER_RE = re.compile(r"\x00\d+\x00")
+_BOLD_ITALIC_RE = re.compile(
+    r"\*\*(.+?)\*\*"  # bold
+    r"|(?<!\*)\*([^*\n]+?)\*(?!\*)"  # single-star italic
+    r"|(?<![_*])_([^_\n]+?)_(?![_*])"  # underscore italic
+)
+
+
 def _to_telegram_markdown(text: str) -> str:
-    """Convert standard Markdown to Telegram Markdown v1."""
+    """Convert standard Markdown to Telegram MarkdownV2.
+
+    Links, code and the converted entities are kept; the text between them is
+    escaped so the message parses. An unescaped special char makes Telegram
+    reject the whole message, and the caller then falls back to plain text,
+    which shows raw markdown (e.g. ``[label](url)`` instead of a link).
+    """
     protected: list[str] = []
 
     def _protect(m: re.Match) -> str:
         protected.append(m.group(0))
         return f"\x00{len(protected) - 1}\x00"
 
-    result = re.sub(r"```[\s\S]*?```|`[^`\n]+`", _protect, text)
+    def _conv(m: re.Match) -> str:
+        inner = next(g for g in m.groups() if g is not None)
+        # A link inside bold/italic: keep the link, drop the markers —
+        # Telegram MarkdownV2 does not nest entities.
+        if _PLACEHOLDER_RE.fullmatch(inner):
+            return inner
+        marker = "*" if m.group(1) is not None else "_"
+        return f"{marker}{escape_markdown_v2(inner)}{marker}"
 
-    result = _HEADER_RE.sub(r"*\1*", result)
+    # 1. Atomic entities that must survive verbatim: code and links.
+    result = re.sub(r"```[\s\S]*?```|`[^`\n]+`|" + _LINK_RE.pattern, _protect, text)
+
+    # 2. Convert markdown, escaping the inner content of each entity.
+    result = _HEADER_RE.sub(_conv, result)
     result = _BLOCKQUOTE_RE.sub(r"\1", result)
     result = _HR_RE.sub("", result)
     result = _TABLE_SEP_RE.sub("", result)
     result = _TABLE_ROW_RE.sub(_convert_table_row, result)
-    result = _BOLD_RE.sub(r"*\1*", result)
-    result = _ITALIC_RE.sub(r"_\1_", result)
+    result = _BOLD_ITALIC_RE.sub(_conv, result)
 
+    # 3. Protect the entities just produced, then escape the gaps.
+    result = _ENTITY_RE.sub(_protect, result)
+    result = escape_markdown_v2(result)
+
+    # 4. Collapse blank lines and restore protected entities (inner first).
     result = re.sub(r"(\n[ \t]*){3,}", "\n\n", result)
     result = result.lstrip("\n")
-
-    for i, original in enumerate(protected):
-        result = result.replace(f"\x00{i}\x00", original)
+    for i in range(len(protected) - 1, -1, -1):
+        result = result.replace(f"\x00{i}\x00", protected[i])
 
     return result
+
+
+def _mdv2_to_plain(text: str) -> str:
+    """Turn escaped MarkdownV2 back into readable text.
+
+    A parse rejection is retried without parse_mode. Reusing the escaped text
+    there shows every backslash to the user, so unescape the punctuation and
+    drop the entity markers the converter added.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if c not in "*_~`":
+            out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _split_text(text: str, max_len: int) -> list[str]:
@@ -225,7 +275,7 @@ class TelegramStreamer:
         parse_mode = None
 
         if self._prefix:
-            parts.append(self._prefix)
+            parts.append(escape_markdown_v2(self._prefix) if final else self._prefix)
 
         buf = self._buffer.strip()
         stopped = final and self._stop_reason == "cancelled"
@@ -240,12 +290,16 @@ class TelegramStreamer:
 
         tool_block = self._build_tool_block()
         if tool_block:
-            parts.append(tool_block)
+            # The tool block is plain text (icons, titles, elapsed) and rides
+            # along in the final MarkdownV2 message, so its parens and dashes
+            # must be escaped or the whole message fails to parse and falls
+            # back to plain text, showing raw markdown.
+            parts.append(escape_markdown_v2(tool_block) if final else tool_block)
 
         if buf:
             if final:
                 parts.append(_to_telegram_markdown(buf))
-                parse_mode = "Markdown"
+                parse_mode = "MarkdownV2"
             else:
                 parts.append(buf)
         elif not final:
@@ -259,19 +313,19 @@ class TelegramStreamer:
                     else _THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)]
                 )
         elif stopped:
-            parts.append("_(stopped before answering)_")
-            parse_mode = "Markdown"
+            parts.append(r"_\(stopped before answering\)_")
+            parse_mode = "MarkdownV2"
         elif self._finished_tools:
-            parts.append("_(done)_")
-            parse_mode = "Markdown"
+            parts.append(r"_\(done\)_")
+            parse_mode = "MarkdownV2"
         else:
-            parts.append("_(no response)_")
+            parts.append(r"_\(no response\)_")
 
         # Say why the answer ends where it does, so a /stop that lands mid
         # sentence does not read as the agent giving up on its own.
         if stopped and buf:
             parts.append(STOPPED_LABEL)
-            parse_mode = "Markdown"
+            parse_mode = "MarkdownV2"
 
         return "\n\n".join(parts), parse_mode
 
@@ -351,11 +405,16 @@ class TelegramStreamer:
         except BadRequest as e:
             if "not modified" not in str(e).lower():
                 if parse_mode:
-                    # The retry carries the same text, so drop the entry rather
-                    # than let the cache mistake the fallback for a no-op.
+                    # Drop the entry rather than let the cache mistake the
+                    # fallback for a no-op, and unescape: raw MarkdownV2 sent
+                    # without parse_mode shows every backslash.
                     self._last_sent.pop(message_id, None)
+                    log.warning("MarkdownV2 rejected, resending plain: %s", e)
                     await self._edit(
-                        message_id, text, parse_mode=None, reply_markup=reply_markup
+                        message_id,
+                        _mdv2_to_plain(text),
+                        parse_mode=None,
+                        reply_markup=reply_markup,
                     )
                 else:
                     log.warning("Failed to edit message: %s", e)
@@ -389,9 +448,10 @@ class TelegramStreamer:
             )
             self._last_sent[msg.message_id] = (text, parse_mode, None)
             return msg.message_id
-        except BadRequest:
+        except BadRequest as e:
             if parse_mode:
-                return await self._send(text, parse_mode=None)
+                log.warning("MarkdownV2 rejected, sending plain: %s", e)
+                return await self._send(_mdv2_to_plain(text), parse_mode=None)
             return None
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)

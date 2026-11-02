@@ -13,7 +13,12 @@ from types import SimpleNamespace
 from telegram.error import BadRequest
 
 from condor.runtime.events import EventType, RuntimeEvent
-from handlers.agents.stream import MAX_MESSAGE_LEN, TelegramStreamer
+from handlers.agents.stream import (
+    MAX_MESSAGE_LEN,
+    TelegramStreamer,
+    _mdv2_to_plain,
+    _to_telegram_markdown,
+)
 
 CHAT_ID = 4242
 MAIN_ID = 1
@@ -104,7 +109,7 @@ def test_finalize_re_sends_identical_text_as_markdown():
 
     assert bot.edits == [
         (MAIN_ID, "plain answer with no markup", None),
-        (MAIN_ID, "plain answer with no markup", "Markdown"),
+        (MAIN_ID, "plain answer with no markup", "MarkdownV2"),
     ]
 
 
@@ -124,7 +129,7 @@ def test_finalize_reformats_every_chunk_of_a_long_answer():
     ids = [MAIN_ID] + streamer._continuation_ids
     final_edits = bot.edits[opening:]
     assert [mid for mid, _, _ in final_edits] == ids
-    assert all(mode == "Markdown" for _, _, mode in final_edits)
+    assert all(mode == "MarkdownV2" for _, _, mode in final_edits)
 
 
 def test_the_thinking_pulse_still_animates_every_tick():
@@ -142,7 +147,7 @@ def test_the_thinking_pulse_still_animates_every_tick():
 
 
 def test_a_parse_failure_still_retries_without_parse_mode():
-    """The plain-text fallback carries the same text — it must not be deduped."""
+    """The fallback must send readable text, not the MarkdownV2 escapes."""
     bot, streamer = _streamer(fail_parse_mode=True)
 
     async def drive():
@@ -153,9 +158,10 @@ def test_a_parse_failure_still_retries_without_parse_mode():
 
     asyncio.run(drive())
 
-    text = "answer with a stray _ underscore"
-    # Streaming edit, then the Markdown attempt fails and comes back as plain.
-    assert bot.edits == [(MAIN_ID, text, None), (MAIN_ID, text, None)]
+    # Streaming edit, then the MarkdownV2 attempt fails and comes back as plain.
+    # The retry is unescaped: sending the raw `\_` would show a backslash.
+    plain = "answer with a stray _ underscore"
+    assert bot.edits == [(MAIN_ID, plain, None), (MAIN_ID, plain, None)]
 
 
 def test_a_not_modified_rejection_is_remembered():
@@ -200,6 +206,53 @@ def test_a_failed_edit_is_retried_on_the_next_tick():
     assert attempts == ["same", "same"]
 
 
+def test_final_tool_block_is_escaped_for_markdown_v2():
+    """The finished-tool line rides in the final MarkdownV2 message, so its
+    parens must be escaped or the whole message fails to parse and falls back
+    to plain text, showing raw markdown (the link bug)."""
+    bot, streamer = _streamer()
+
+    async def drive():
+        await streamer.process_event(
+            RuntimeEvent(
+                type=EventType.TOOL_CALL,
+                data={
+                    "tool_call_id": "tc1",
+                    "title": "Routine solana_dex_lp_expert/solana_pool_scanner_adaptive_band done",
+                    "status": "running",
+                    "kind": "routine",
+                    "input": "",
+                },
+            )
+        )
+        await streamer.process_event(
+            RuntimeEvent(
+                type=EventType.TOOL_UPDATE,
+                data={
+                    "tool_call_id": "tc1",
+                    "status": "completed",
+                    "title": "Routine solana_dex_lp_expert/solana_pool_scanner_adaptive_band done",
+                    "output": "",
+                },
+            )
+        )
+        await _feed(
+            streamer,
+            "Scan terminé — **1 match** :\n\n1. [META / SOL](https://x.com/a) (Raydium Clmm)",
+        )
+        await streamer.process_event(RuntimeEvent.done("end_turn"))
+        await streamer.finalize()
+
+    asyncio.run(drive())
+
+    final_text = bot.edits[-1][1]
+    assert final_text.startswith(
+        "✅ Routine solana dex lp expert/solana pool scanner adaptive band done \\("
+    )
+    assert "\\(" in final_text.split("\n\n")[0]
+    assert "Scan terminé — *1 match*" in final_text
+
+
 def test_chunking_assumption_holds():
     """Guards the premise: the split point does not move as the answer grows."""
     from handlers.agents.stream import _split_text
@@ -210,3 +263,14 @@ def test_chunking_assumption_holds():
 
     assert len(first) == 3
     assert grown[:-1] == first[:-1]
+
+
+def test_plain_fallback_strips_escapes_and_entity_markers():
+    """A rejected answer must not reach the user as a wall of backslashes."""
+    source = "**Rapport LP** — SOL à $103.95 (~$188) · uPnL **+4.16 %**"
+    escaped = _to_telegram_markdown(source)
+
+    plain = _mdv2_to_plain(escaped)
+
+    assert "\\" not in plain
+    assert plain == "Rapport LP — SOL à $103.95 (~$188) · uPnL +4.16 %"
