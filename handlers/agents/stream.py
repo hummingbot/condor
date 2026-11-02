@@ -219,19 +219,29 @@ def _mdv2_to_plain(text: str) -> str:
     return "".join(out)
 
 
+def _choose_split(text: str, max_len: int) -> int:
+    """Pick where one chunk ends, without severing an escape or stalling."""
+    split_at = text.rfind("\n\n", 0, max_len)
+    if split_at == -1:
+        split_at = text.rfind("\n", 0, max_len)
+    if split_at == -1:
+        split_at = max_len
+    # A chunk ending in a lone '\' escapes nothing: Telegram rejects the
+    # message and the plain fallback leaves a stray backslash on screen.
+    if split_at > 0 and _severs_escape(text, split_at):
+        split_at -= 1
+    if split_at <= 0:
+        # Backing off a lone '\' landed on the very start. Every cut must
+        # consume a character or the loop below never shrinks the text.
+        split_at = max_len - 1 if _severs_escape(text, max_len) else max_len
+    return split_at
+
+
 def _split_text(text: str, max_len: int) -> list[str]:
     """Split text at paragraph boundaries, never inside an escape pair."""
     chunks = []
     while len(text) > max_len:
-        split_at = text.rfind("\n\n", 0, max_len)
-        if split_at == -1:
-            split_at = text.rfind("\n", 0, max_len)
-        if split_at == -1:
-            split_at = max_len
-        # A chunk ending in a lone '\' escapes nothing: Telegram rejects the
-        # message and the plain fallback leaves a stray backslash on screen.
-        if split_at > 0 and _severs_escape(text, split_at):
-            split_at -= 1
+        split_at = _choose_split(text, max_len)
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip("\n")
     if text:

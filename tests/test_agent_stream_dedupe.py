@@ -344,3 +344,23 @@ def test_a_split_never_severs_an_escape():
     # The pair is intact, so the cut is fine where it was.
     text2 = "a" * 10 + "\\\\" + "b" * 20
     assert _split_text(text2, 12)[0] == "a" * 10 + "\\\\"
+
+
+def test_a_backslash_before_a_paragraph_break_still_advances():
+    """Backing off a lone '\\' must never land on the start of the text: the
+    next pass would pick index 0, hand the whole string back, and the edit
+    loop would spin without yielding to any other chat."""
+    from handlers.agents.stream import _choose_split, _split_text
+
+    text = "\\\n\n" + "x" * 30
+    assert _choose_split(text, 10) > 0
+    assert all(len(chunk) <= 10 for chunk in _split_text(text, 10))
+
+
+def test_the_split_keeps_an_escape_pair_whole():
+    from handlers.agents.stream import _choose_split
+
+    # A backslash right at the limit: cut before it.
+    assert _choose_split("a" * 9 + "\\b", 10) == 9
+    # Two backslashes are one escaped backslash; the limit is fine.
+    assert _choose_split("a" * 9 + "\\\\b", 11) == 11
