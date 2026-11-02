@@ -70,3 +70,20 @@ def test_an_executor_with_neither_field_prints_no_fee_line():
     )
     assert "Fees Earned" not in out
     assert "Fees Paid" not in out
+
+
+def test_an_lp_type_nested_in_config_still_reads_its_earned_fees():
+    """Some payloads keep the type only in ``config``, where the create path writes it."""
+    out = format_executor_detail(
+        {
+            "id": "nested",
+            "status": "RUNNING",
+            "config": {"type": "lp_executor", "trading_pair": "DJT-USDC"},
+            "cum_fees_quote": _TX_FEE,
+            "custom_info": {"fees_earned_quote": _EARNED},
+        }
+    )
+    assert "Type: lp_executor" in out
+    assert "Fees Earned: $0.074624" in out
+    assert "Fees Paid" not in out
+    assert "$0.000023" not in out

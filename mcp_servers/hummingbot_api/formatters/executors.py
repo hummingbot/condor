@@ -61,6 +61,21 @@ def format_executor_types_table(executor_types: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
+def executor_type_of(executor: dict[str, Any], default: str = "unknown") -> str:
+    """The executor's type, wherever its payload keeps it.
+
+    Some responses put it at the top level, others only inside ``config`` —
+    the create path writes ``merged_config["type"]`` there. Read only the top
+    level and an LP executor whose type is nested is taken for a non-LP: its
+    detail view swaps the fee income it earned for the transaction cost it paid.
+    """
+    config = executor.get("config")
+    nested = config.get("type") if isinstance(config, dict) else None
+    return str(
+        get_field(executor, "type", "executor_type", default=nested or default)
+    )
+
+
 def format_executors_table(executors: list[dict[str, Any]]) -> str:
     """
     Format a list of executors as a table.
@@ -84,9 +99,7 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
     rows = []
     for executor in executors:
         exec_id = str(get_field(executor, "id", "executor_id", default=""))
-        exec_type = str(
-            get_field(executor, "type", "executor_type", default="unknown")
-        )[:15]
+        exec_type = executor_type_of(executor)[:15]
         connector = str(get_field(executor, "connector_name", default=""))[:17]
         trading_pair = str(get_field(executor, "trading_pair", default=""))[:10]
         status = str(get_field(executor, "status", default="unknown"))
@@ -139,7 +152,7 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
 
     # Basic info
     output += f"ID: {get_field(executor, 'id', 'executor_id', default='N/A')}\n"
-    output += f"Type: {get_field(executor, 'type', 'executor_type', default='N/A')}\n"
+    output += f"Type: {executor_type_of(executor, default='N/A')}\n"
     output += f"Status: {get_field(executor, 'status', default='N/A')}\n"
 
     close_type = get_field(executor, "close_type", default=None)
@@ -211,7 +224,7 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
 
     # An LP executor's ``cum_fees_quote`` is the on-chain transaction cost, never
     # its fee income (that is ``custom_info.fees_earned_quote``), so LP has no fallback.
-    executor_type = get_field(executor, "type", "executor_type", default="unknown")
+    executor_type = executor_type_of(executor)
     if executor_type == "lp_executor":
         fees_earned = custom_info.get("fees_earned_quote")
         if fees_earned is not None and fees_earned != "N/A":
