@@ -354,7 +354,11 @@ export function DexPool() {
     );
   }
 
-  if (poolError || !pool) {
+  // Only a page with nothing to show falls back to the error view. A failed
+  // refresh keeps the last good pool: the polling timer makes an occasional
+  // rate limit or network blip likely, and trading away an open chart over it
+  // is worse than showing a price one interval old.
+  if (!pool) {
     // A pool that could not be *read* is not a pool that does not exist: the
     // route answers 503 with a reason when GeckoTerminal refused, and retrying
     // in a few seconds is the fix — not walking back to the browser.
