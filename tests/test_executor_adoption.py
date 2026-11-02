@@ -899,3 +899,20 @@ def test_the_snapshot_records_the_adopted_book(tmp_path, monkeypatch):
 
     assert recorded["open_count"] == 1
     assert recorded["reading"] == "ok"
+
+
+def test_the_snapshot_keeps_the_drawdown_denominator_scoped_to_its_pnl(
+    tmp_path, monkeypatch
+):
+    """Adopted size must not dilute a drawdown whose PnL excludes it."""
+    engine, _ = _engine(tmp_path, monkeypatch, [])
+    engine._last_skill_data = {"executors": [], "total_exposure": 100.0}
+    engine._adopted_executors = [{"id": "dead-1", "amount": 9000.0}]
+    engine._tick_reading = "ok"
+
+    recorded: dict = {}
+    engine.journal = SimpleNamespace(record_snapshot=lambda **kw: recorded.update(kw))
+    engine._record_reading_snapshot()
+
+    assert recorded["open_count"] == 1  # the book is recorded...
+    assert recorded["position_size"] == 100.0  # ...but the ratio stays in one scope

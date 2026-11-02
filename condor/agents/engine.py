@@ -1408,7 +1408,10 @@ class TickEngine:
             self._journal_mode_mismatch(tick_num)
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-            skill_executors = len(self._last_skill_data.get("executors", []))
+            # The book, not the provider's session-scoped rows: the summary is
+            # what the agent reads back, and an adopted band missing from it is
+            # a band it is told it does not have.
+            skill_executors = self._book_totals()[0]
             self._record_reading_snapshot()
 
             if failure:
@@ -1964,12 +1967,20 @@ class TickEngine:
         non-readings again. A blocked tick that still could not read adds an
         ``empty`` line and stays blocked, correctly.
         """
-        open_count, position_size = self._book_totals()
+        open_count, _ = self._book_totals()
         self.journal.record_snapshot(
             total_pnl=self._last_skill_data.get("total_pnl", 0.0),
             total_volume=self._last_skill_data.get("total_volume", 0.0),
             open_count=open_count,
-            position_size=position_size,
+            # Exposure stays the provider's own, because it is the denominator
+            # of the drawdown over this same PnL: an adopted band's PnL is not
+            # in ``total_pnl``, so counting its size here would shrink the
+            # percentage until the configured pause and shutdown limits stopped
+            # firing. The book *count* is recorded because it is the number the
+            # agent reads, and there it costs nothing.
+            position_size=float(
+                self._last_skill_data.get("total_exposure", 0.0) or 0.0
+            ),
             # Whether the figures above are a reading at all ([[FEAT-137]],
             # [[CORR-725]]). Written onto the line because the four of them
             # are the same zeros either way: without it the guard reading
