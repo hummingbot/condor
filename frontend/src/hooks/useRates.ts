@@ -2,7 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import { api } from "@/lib/api";
-import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import {
+  formatCurrency,
+  formatCurrencyPrecise,
+  formatCurrencyPnl,
+  formatCurrencyVolume,
+} from "@/lib/formatters";
 import { formatWithRate, rateFor, resolveSymbol, STABLECOINS, type ConvertFn } from "@/lib/rates";
 import { useDisplayCurrency } from "./useDisplayCurrency";
 import { useServer } from "./useServer";
@@ -102,12 +107,19 @@ export function useRates(quoteCurrencies: string[]) {
     [rates, currency],
   );
 
+  // Fees keep sub-cent precision: a 0.00136 USDC fee must not read `$0.00`.
+  const formatFeeValue = useMemo(
+    () => formatWithRate(formatCurrencyPrecise, rates, currency),
+    [rates, currency],
+  );
+
   return {
     rates: rates ?? {},
     convert,
     formatValue,
     formatPnlValue,
     formatValueDetailed,
+    formatFeeValue,
     isLoading,
     currency,
     currencySymbol,

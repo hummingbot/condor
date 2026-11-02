@@ -161,6 +161,18 @@ export function formatCurrency(val: number, symbol = "$") {
 }
 
 /**
+ * `formatCurrency` for amounts a cent would round away: an LP fee of `0.00136`
+ * keeps its digits (`$0.0014`) instead of reading `$0.00`. Everything at or
+ * above a cent is unchanged, so only the fee column uses this.
+ */
+export function formatCurrencyPrecise(val: number, symbol = "$") {
+  if (val !== 0 && Math.abs(val) < 0.01) {
+    return withSign(val, (abs) => symbol + abs.toPrecision(2));
+  }
+  return formatCurrency(val, symbol);
+}
+
+/**
  * Quote assets a `$` renders correctly, mirroring `DOLLAR_QUOTES` in
  * `condor/agents/quote_render.py`. The two have to agree: an operator reads the
  * dashboard's limits and the agent's own journal about the same ceiling.

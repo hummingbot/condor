@@ -2,9 +2,9 @@ import { ArrowRight, Layers } from "lucide-react";
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { feeAmount, lpStateStyle, rangeFraction, type LpPosition } from "@/components/dex/lp-position";
+import { lpStateStyle, rangeFraction, type LpPosition } from "@/components/dex/lp-position";
 import { type ConsolidatedPosition } from "@/lib/api";
-import { formatPnl, formatPriceSig, formatUsd, pnlColor } from "@/lib/formatters";
+import { formatPriceSig, pnlColor } from "@/lib/formatters";
 
 /** The quote a hold's numbers are denominated in — its pair's, as elsewhere. */
 function quoteOf(pair: string): string {
@@ -64,6 +64,8 @@ interface Props {
   convert: (value: number, quote: string) => { value: number; converted: boolean };
   formatValue: (val: number, quote: string) => string;
   formatPnlValue: (val: number, quote: string) => string;
+  /** Same conversion as `formatValue`, but a sub-cent fee keeps its digits. */
+  formatFeeValue: (val: number, quote: string) => string;
 }
 
 /**
@@ -86,6 +88,7 @@ export function PositionsTab({
   convert,
   formatValue,
   formatPnlValue,
+  formatFeeValue,
 }: Props) {
   const navigate = useNavigate();
 
@@ -294,13 +297,17 @@ export function PositionsTab({
                         </span>
                       </td>
                       <td className={TDR}>
-                        {pos.valueQuote === null ? "—" : formatUsd(pos.valueQuote)}
+                        {pos.valueQuote === null
+                          ? "—"
+                          : formatValue(pos.valueQuote, pos.quote)}
                       </td>
                       <td className={`${TDR} text-[var(--color-text-muted)]`}>
-                        {pos.feesQuote === null ? "—" : feeAmount(pos.feesQuote)}
+                        {pos.feesQuote === null
+                          ? "—"
+                          : formatFeeValue(pos.feesQuote, pos.quote)}
                       </td>
                       <td className={TDR} style={{ color: pnlColor(pos.pnl) }}>
-                        {formatPnl(pos.pnl)}
+                        {formatPnlValue(pos.pnl, pos.quote)}
                       </td>
                       <td className="px-2 text-right">
                         <ArrowRight className="h-3.5 w-3.5 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100" />
