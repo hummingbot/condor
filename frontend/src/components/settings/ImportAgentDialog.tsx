@@ -66,10 +66,11 @@ function categoriesOf(findings: AgentBundleFinding[]): string[] {
  *
  * `kept` is the half that matters: those rows are the files where the update
  * did *not* do what upstream asked, because the bytes on disk are the
- * operator's and nobody else can reproduce them.
+ * operator's and nobody else can reproduce them. `added` has no static entry
+ * here — its label depends on the plan's own mute lists (see `addedLabel`),
+ * because a hub update's skills do not arrive muted (FEAT-146).
  */
 const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
-  added: { label: "new — arrives muted" },
   changed: { label: "replaced" },
   unchanged: { label: "unchanged" },
   local_only: { label: "your copy kept — upstream did not change it", kept: true },
@@ -80,6 +81,24 @@ const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
     kept: true,
   },
 };
+
+/**
+ * What an `added` row should say, per the plan's own mute lists rather than
+ * assuming every new file lands switched off (FEAT-146): a hub update's
+ * skills are not muted, so a plain file's path is checked against what
+ * actually got muted instead of being told a blanket story.
+ */
+function addedLabel(path: string, mutes: { routines: string[]; skills: string[] }): string {
+  const parts = path.split("/");
+  if (parts.length === 2 && parts[0] === "routines" && path.endsWith(".py")) {
+    const name = parts[1].slice(0, -".py".length);
+    return mutes.routines.includes(name) ? "new — arrives muted" : "new";
+  }
+  if (parts.length > 2 && parts[0] === "skills") {
+    return mutes.skills.includes(parts[1]) ? "new — arrives muted" : "new — enabled on arrival";
+  }
+  return "new";
+}
 
 /** The verdicts worth showing first: everything that is not `unchanged`. */
 const VERDICT_ORDER = [
@@ -367,8 +386,12 @@ export function ImportAgentDialog({
                 cannot give it
               </p>
               <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-                None of this stops the import — everything arrives muted anyway. It is
-                what will not work until you fix it.
+                {/* Routines always arrive muted; a hub import's skills do not
+                    (FEAT-146), so the reassurance only holds when every
+                    carried skill is actually in `plan.mutes`. */}
+                {plan.requires.skills.carried.every((s) => plan.mutes.skills.includes(s))
+                  ? "None of this stops the import — everything arrives muted anyway. It is what will not work until you fix it."
+                  : "None of this stops the import. Its code arrives muted regardless, but this agent's skills do not — they land ready to use. This is what will not work until you fix it."}
               </p>
               <ul className="space-y-0.5">
                 {plan.unmet.map((u) => (
@@ -638,7 +661,10 @@ export function ImportAgentDialog({
                       a.path.localeCompare(b.path),
                   )
                   .map((f) => {
-                    const copy = VERDICT_COPY[f.verdict];
+                    const copy =
+                      f.verdict === "added"
+                        ? { label: addedLabel(f.path, update.mutes) }
+                        : VERDICT_COPY[f.verdict];
                     return (
                       <li
                         key={f.path}
