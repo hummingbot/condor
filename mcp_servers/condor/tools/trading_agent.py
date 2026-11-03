@@ -418,9 +418,12 @@ def _hub_browse(query: str, page: int) -> dict:
         "trust": (
             "Only an approved version is ever listed here, but that is a gate "
             "on the catalogue, not a security boundary for code. Its declared "
-            "skills and tools install enabled, exactly as reviewed; a routine "
-            "is code, so it still arrives muted with no execution consent, "
-            "and the review on install is the gate there."
+            "skills, tools and routines install enabled, exactly as reviewed; "
+            "a routine is still code, but here the review is the control — "
+            "installing from the hub grants execution consent for that exact "
+            "version and digest, so nothing further is asked before it can "
+            "run. Editing the routine's file afterwards, or importing it from "
+            "anywhere else, keeps the ordinary per-file gate."
         ),
     }
 
@@ -453,9 +456,12 @@ def _hub_get(slug: str) -> dict:
         "trust": (
             "Only an approved version is ever listed here, but that is a gate "
             "on the catalogue, not a security boundary for code. Its declared "
-            "skills and tools install enabled, exactly as reviewed; a routine "
-            "is code, so it still arrives muted with no execution consent, "
-            "and the review on install is the gate there."
+            "skills, tools and routines install enabled, exactly as reviewed; "
+            "a routine is still code, but here the review is the control — "
+            "installing from the hub grants execution consent for that exact "
+            "version and digest, so nothing further is asked before it can "
+            "run. Editing the routine's file afterwards, or importing it from "
+            "anywhere else, keeps the ordinary per-file gate."
         ),
     }
 
@@ -473,13 +479,17 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
     function and not the caller. ``as_slug`` is only ever a rename for a
     collision that is a *different* agent.
 
-    Everything the import door promises holds for *code* unchanged: every
-    executable file is named in the result, a routine arrives muted, no
-    imported ``.py`` may execute until the operator allows it, and nothing is
-    started. Its declared skills and tools, though, install enabled — the hub
-    already reviewed this exact content before ever serving it (FEAT-146), so
-    there is nothing a second mute on prose would buy. Report the
-    ``findings`` and the ``unmet`` list; neither blocks the install.
+    Every executable file is still named in the result, and nothing is
+    started. But its declared skills, tools and routines install enabled —
+    the hub already reviewed this exact content before ever serving it
+    (FEAT-146, widened to routines in FEAT-150), so there is nothing a second
+    mute on prose would buy — and, the owner's later trust-boundary call,
+    every routine it carries lands with execution consent already granted
+    for this exact version and digest, so nothing further is asked before it
+    can run. Editing the routine's file afterwards, or importing the same
+    bytes from anywhere but the hub, puts the ordinary per-file
+    :mod:`condor.agents.code_trust` gate back. Report the ``findings`` and
+    the ``unmet`` list; neither blocks the install.
 
     Connectors are left unasked here for the same reason the file import leaves
     them: resolving them needs an async Hummingbot client and this is a
