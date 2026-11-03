@@ -444,6 +444,12 @@ def build_mcp_servers_for_session(
             TELEGRAM_BOT_TOKEN=_bot_token(),
             CONDOR_AGENTS_ROOT=str(local_agents_root()),
             CONDOR_STOCK_AGENTS_ROOT=str(stock_agents_root()),
+            # The dashboard's bind coordinates, resolved by the main process at
+            # boot. Re-resolving WEB_HOST in the child is not equivalent: a
+            # Tailscale lookup that failed at boot can recover later, and the
+            # child would then target an address the server never bound.
+            CONDOR_INTERNAL_API_HOST=os.environ.get("CONDOR_INTERNAL_API_HOST", ""),
+            CONDOR_INTERNAL_API_PORT=os.environ.get("CONDOR_INTERNAL_API_PORT", ""),
         ),
     }
 

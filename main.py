@@ -1002,6 +1002,14 @@ def main() -> None:
         raise SystemExit(1)
     warn_shadowed_env()
 
+    # MCP children must reach the dashboard at the address *this* process bound.
+    # They would otherwise resolve WEB_HOST again on their own, and a Tailscale
+    # lookup that failed at boot and recovered later would send them to a tailnet
+    # address nothing is listening on. Pin the resolved coordinates once, here,
+    # and let them travel to the children through the MCP server env.
+    os.environ.setdefault("CONDOR_INTERNAL_API_HOST", WEB_HOST)
+    os.environ.setdefault("CONDOR_INTERNAL_API_PORT", str(BIND_PORT))
+
     # Reap any ACP/MCP subprocess trees orphaned by a prior hard kill (kill -9,
     # OOM, power loss) before we spawn our own — those bypass teardown().
     try:
@@ -1126,7 +1134,7 @@ async def _run_dual(application: Application) -> None:
             "Dashboard on http://%s:%s — local mode stays on loopback even "
             "with Tailscale enabled (no login on this dashboard).",
             WEB_HOST,
-            WEB_PORT,
+            BIND_PORT,
         )
     elif USE_TAILSCALE:
         from utils.tailscale import is_tailnet_ip
@@ -1135,7 +1143,7 @@ async def _run_dual(application: Application) -> None:
             logger.info(
                 "Dashboard on http://%s:%s — reachable on the tailnet only.",
                 WEB_HOST,
-                WEB_PORT,
+                BIND_PORT,
             )
         elif os.environ.get("WEB_HOST", "").strip():
             # An explicit WEB_HOST is a deliberate opt-out, not a failed
@@ -1144,7 +1152,7 @@ async def _run_dual(application: Application) -> None:
             logger.info(
                 "Dashboard on http://%s:%s — WEB_HOST was set explicitly.",
                 WEB_HOST,
-                WEB_PORT,
+                BIND_PORT,
             )
         else:
             from utils.tailscale import ensure_serve
@@ -1155,7 +1163,7 @@ async def _run_dual(application: Application) -> None:
                 "back to `tailscale serve`.",
                 WEB_HOST,
             )
-            if not await ensure_serve(WEB_PORT):
+            if not await ensure_serve(WEB_PORT, BIND_PORT):
                 logger.error(
                     "Dashboard bound to %s; tailnet forwarding could not be "
                     "confirmed, so it will NOT be reachable remotely. Check "
@@ -1239,11 +1247,11 @@ async def _run_dual(application: Application) -> None:
         logger.info(
             "Starting Condor in local mode (no Telegram): dashboard on http://%s:%s",
             WEB_HOST,
-            WEB_PORT,
+            BIND_PORT,
         )
     else:
         logger.info(
-            "Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT
+            "Starting Condor: Telegram bot + web dashboard on port %s", BIND_PORT
         )
 
     # Handle shutdown signals

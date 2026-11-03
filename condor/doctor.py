@@ -362,9 +362,9 @@ def _is_public_bind(addr: str) -> bool:
 
 
 def check_dashboard_port() -> list[Check]:
-    from utils.config import USE_TAILSCALE, WEB_PORT
+    from utils.config import BIND_PORT, USE_TAILSCALE
 
-    binds = _listening_binds(WEB_PORT)
+    binds = _listening_binds(BIND_PORT)
     if not binds:
         # Normal right after `make install` -- Condor has never been started
         # yet, so there is nothing to bind-check. Not a warning: it would fire
@@ -374,11 +374,11 @@ def check_dashboard_port() -> list[Check]:
                 "Dashboard port",
                 OK,
                 f"not running yet — start with `make run` to check the real "
-                f"{WEB_PORT} bind",
+                f"{BIND_PORT} bind",
             )
         ]
 
-    owner = _listening_process(WEB_PORT)
+    owner = _listening_process(BIND_PORT)
     held_by = f" (held by {owner})" if owner else ""
 
     public = [b for b in binds if _is_public_bind(b)]
@@ -396,7 +396,7 @@ def check_dashboard_port() -> list[Check]:
                 Check(
                     "Dashboard port",
                     FAIL,
-                    f"USE_TAILSCALE=true but {WEB_PORT} is bound to "
+                    f"USE_TAILSCALE=true but {BIND_PORT} is bound to "
                     f"{public[0]} (all interfaces){held_by} — should be this "
                     "node's tailnet address only",
                 )
@@ -417,14 +417,14 @@ def check_dashboard_port() -> list[Check]:
                 Check(
                     "Dashboard port",
                     OK,
-                    f"{tailnet}:{WEB_PORT} — tailnet only{held_by}",
+                    f"{tailnet}:{BIND_PORT} — tailnet only{held_by}",
                 )
             ]
         return [
             Check(
                 "Dashboard port",
                 WARN,
-                f"USE_TAILSCALE=true but {WEB_PORT} is bound to "
+                f"USE_TAILSCALE=true but {BIND_PORT} is bound to "
                 f"{hosts[0]}{held_by}, not a tailnet address — reachable from "
                 "this machine only. Condor falls back to loopback when it "
                 "cannot read the tailnet IP: check `tailscale status`, then "
@@ -449,7 +449,7 @@ def check_dashboard_port() -> list[Check]:
             Check(
                 "Dashboard port",
                 FAIL if LOCAL_MODE else WARN,
-                f"{WEB_PORT} is reachable on all interfaces{held_by} — "
+                f"{BIND_PORT} is reachable on all interfaces{held_by} — "
                 + (
                     "local mode has no login at all, so this is open to "
                     f"anyone who can route to it. {remedy}."
@@ -458,7 +458,7 @@ def check_dashboard_port() -> list[Check]:
                 ),
             )
         ]
-    return [Check("Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only{held_by}")]
+    return [Check("Dashboard port", OK, f"127.0.0.1:{BIND_PORT} only{held_by}")]
 
 
 # ── Tailscale ────────────────────────────────────────────────────────────────
