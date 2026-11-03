@@ -418,6 +418,31 @@ def test_new_items_arrive_muted_and_curation_survives(installed):
     assert mutes["skills"] == {"recon"}
 
 
+def test_mute_routines_false_lands_a_newly_added_routine_enabled_on_update():
+    """FEAT-150: a hub update, like a hub install, passes ``mute_routines=False``
+    — a newly added routine lands available rather than muted, but it still
+    needs the operator's allow before it can run (FEAT-147): that gate does
+    not move for any mute flag here."""
+    from condor.agents import code_trust
+
+    ab.apply(ab.plan(_bundle(), user_id=7, mute_routines=False), user_id=7)
+    assert load_mutes("drifter")["routines"] == set()
+
+    result = ab.apply_update(
+        ab.plan_update(_newer(), "drifter", mute_routines=False), user_id=7
+    )
+
+    # `probe` is genuinely new and lands unmuted; `recon` was already known
+    # (unchanged) so the update does not touch its mute state at all.
+    assert result["mutes"] == {"routines": [], "skills": []}
+    mutes = load_mutes("drifter")
+    assert mutes["routines"] == set()
+    assert mutes["skills"] == {"recon"}
+
+    source = (agent_home("drifter") / "routines" / "probe.py").read_text("utf-8")
+    assert not code_trust.allowed("drifter", "probe", source)
+
+
 def test_a_replaced_routine_needs_consent_again(installed):
     from condor.agents import code_trust
 

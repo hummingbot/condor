@@ -420,13 +420,14 @@ def test_imported_code_arrives_muted_and_the_agent_is_registered(traveller):
     assert AgentStore().get("arrival") is not None
 
 
-def test_mute_skills_false_lands_every_declared_skill_enabled_but_not_a_routine(
+def test_mute_skills_false_alone_lands_every_declared_skill_enabled_but_not_a_routine(
     traveller,
 ):
-    """FEAT-146: the hub install path passes ``mute_skills=False`` because it
-    already reviewed this exact content. A skill — prose, never executed —
-    lands enabled; a routine stays muted and execution-gated either way, since
-    it is code and provenance never shortens that gate (FEAT-147)."""
+    """``mute_skills`` and ``mute_routines`` are independent flags. A skill —
+    prose, never executed — lands enabled when only ``mute_skills=False`` is
+    passed; a routine stays muted under its own, separate default, and stays
+    execution-gated either way, since it is code and provenance never
+    shortens *that* gate (FEAT-147)."""
     from condor.agents import code_trust
     from routines.base import assistant_routines
 
@@ -447,6 +448,37 @@ def test_mute_skills_false_lands_every_declared_skill_enabled_but_not_a_routine(
     assert "r" not in assistant_routines("arrival", force_reload=True)
     source = agent_home("arrival") / "routines" / "r.py"
     assert not code_trust.allowed("arrival", "r", source.read_text())
+
+
+def test_mute_routines_false_lands_the_routine_enabled_but_still_pending_consent(
+    traveller,
+):
+    """FEAT-150: the hub install path passes ``mute_routines=False`` too, so
+    an imported routine is available to the agent exactly like a locally
+    created one's — but "available" is not "armed to execute" (FEAT-147):
+    ``code_trust`` still requires the operator to allow its exact content
+    before it can run, and that gate does not move for any flag here."""
+    from condor.agents import code_trust
+    from routines.base import assistant_routines, pending_routines
+
+    plan = ab.plan(
+        _bundle_for(traveller), as_slug="arrival", user_id=7, mute_routines=False
+    )
+    ab.apply(plan, user_id=7)
+
+    muted = load_mutes("arrival")
+    assert muted["routines"] == set()
+    assert muted["skills"] == {"s"}
+    # Unmuted, so the operator sees it as pending rather than as something
+    # that first needs unmuting before it is even listed.
+    assert [row.name for row in pending_routines("arrival")] == ["r"]
+    # And "available" never means "running": no execution consent yet.
+    assert "r" not in assistant_routines("arrival", force_reload=True)
+    source = agent_home("arrival") / "routines" / "r.py"
+    assert not code_trust.allowed("arrival", "r", source.read_text())
+
+    code_trust.allow("arrival", "r", source.read_text())
+    assert "r" in assistant_routines("arrival", force_reload=True)
 
 
 def test_mute_skills_false_grants_no_tool_the_bundle_did_not_declare(traveller):

@@ -26,13 +26,16 @@ here is a list of places to look.
   Everything else warns.
 - **Import** refuses *nothing new*. :func:`condor.agents.bundle.plan`'s existing
   refusals (unknown schema, wrong kind, digest mismatch, path traversal) stand.
-  A routine lands muted regardless of where the bundle came from — it is
-  code — and these findings are what the operator reads before unmuting it.
-  A skill lands muted too, by the same logic, *unless* this import is the
-  hub's own install (``mute_skills=False``): there, the hub's own review
-  already read this exact content before ever serving it, so these findings
-  are what the operator may still want to look at, not a gate its skills
-  have to clear a second time.
+  A routine is code and still needs :func:`condor.agents.code_trust.allow`
+  regardless of where the bundle came from — these findings are what the
+  operator reads before allowing it to run. Muting — whether the agent is
+  even *told about* a routine or a skill — is a separate, cheaper gate: both
+  land muted by the same cautious default, *unless* this import is the hub's
+  own install (``mute_skills=False``, ``mute_routines=False``): there, the
+  hub's own review already read this exact content before ever serving it,
+  so these findings are what the operator may still want to look at, not a
+  gate its skills or routines have to clear a second time before the agent
+  may use them.
 - **A hub** re-runs this same function on a submission rather than trusting
   whoever exported it. In the hub case the exporter *is* the adversary and runs
   their own copy of the exporter, so an export-side check is advice and the

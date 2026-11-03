@@ -32,21 +32,26 @@ un-second-guessed — it is the one answer to "what is this agent, as opposed to
 what this install accumulated", and a second filter here would leave two
 selectors disagreeing.
 
-**What arrives switched off.** Every imported routine is muted
-(:mod:`condor.memory.mutes`) and arrives without execution consent
-(:mod:`condor.agents.code_trust`, FEAT-147) — code, so provenance never
-shortens that gate. A mute says what the agent is told about, and is
-subtracted *after* discovery has already imported the file, so on its own it
-left the review surfaces — the ``/routines`` list and the source viewer —
-running the very code they were opened to review. Consent says what may
-execute at all, per file and by content digest. A skill is muted the same
-way by default (``mute_skills=True``), because nobody has reviewed a bundle
-"from a friend" — except on the one path that already carried its own review
-before this install ever saw it: the hub install passes ``mute_skills=False``
-(FEAT-146), since a skill is prose, never executed, and was already read by
-whoever approved the version before it was ever served. Import creates; it
-never overwrites, never starts anything, and never writes into the shipped
-tree.
+**What arrives switched off, and what never does.** Two gates, and only one
+of them ever varies by provenance. Every imported routine arrives without
+execution consent (:mod:`condor.agents.code_trust`, FEAT-147) — code, so
+provenance never shortens *that* gate: no imported ``.py`` may execute, per
+file and by content digest, until the operator allows it, whether it came
+from a file, a friend or the hub's own install. A mute is the other gate —
+whether the agent is even told about something — and it is the one a review
+can stand in for: both a routine and a skill are muted on arrival by default
+(``mute_routines=True``, ``mute_skills=True``), because nobody has reviewed a
+bundle "from a friend". The hub install passes both ``False`` (FEAT-146,
+widened to routines in FEAT-150), since the hub already reviewed this exact
+content before ever serving it — its declared skills and routines land
+enabled, exactly as a locally created agent's would, and the operator reads
+only the review findings, not a second "now unmute it" pass. A mute says
+what the agent is told about, and is subtracted *after* discovery has
+already imported the file, so on its own it left the review surfaces — the
+``/routines`` list and the source viewer — running the very code they were
+opened to review; that is what the unconditional consent gate is for.
+Import creates; it never overwrites, never starts anything, and never writes
+into the shipped tree.
 
 **Who this agent is, and what it needs** (FEAT-143). A bundle that travels
 between strangers carries four more manifest fields, all in schema 1 because
@@ -90,9 +95,10 @@ new version lands beside the old under ``<slug>_2``, the memory forks, and the
 dashboard lists two agents one of which is stale. :func:`plan_update` shows
 what would change file by file and writes nothing; :func:`apply_update` writes
 exactly that. Library files are replaced, runtime output is untouched, a file
-the operator edited keeps its bytes, whatever arrives new is muted (skills
-too, unless this is a hub update — the same ``mute_skills=False`` exception
-:func:`plan` takes), and nothing is started. Its bookkeeping is
+the operator edited keeps its bytes, whatever arrives new is muted (skills and
+routines too, unless this is a hub update — the same ``mute_skills=False``,
+``mute_routines=False`` exception :func:`plan` takes), and nothing is
+started. Its bookkeeping is
 :data:`STAMP_FILENAME` — a dotfile in the home, so the export cannot see it.
 """
 
@@ -906,6 +912,7 @@ def plan(
     available_connectors: Sequence[str] | None = None,
     available_tools: Sequence[str] | None = None,
     mute_skills: bool = True,
+    mute_routines: bool = True,
 ) -> ImportPlan:
     """Everything a human needs to decide, computed without writing anything.
 
@@ -919,16 +926,20 @@ def plan(
     connector list needs an async Hummingbot client. Leaving either ``None``
     means "not asked", and nothing of that kind is then reported unmet.
 
-    ``mute_skills=False`` is the hub install's own call (FEAT-146): the hub
-    already reviewed this exact content before ever serving it, so its
-    declared skills — prose, never executed — and its declared ``tools:``
-    allowlist (never muted by this function at all; see :data:`BundleRequires.tools`)
-    land enabled, exactly as the reviewed version declared them, with no
-    second approval invented on top of the hub's own. A declared *routine* is
-    unaffected either way: it is code, :func:`apply` always mutes it and arms
-    :mod:`condor.agents.code_trust` on it, and nothing about provenance
-    shortens that gate. A plain file import keeps the cautious default —
-    nobody reviewed a bundle "from a friend" before it reached this call.
+    ``mute_skills=False`` and ``mute_routines=False`` are the hub install's own
+    call (FEAT-146, widened to routines in FEAT-150): the hub already reviewed
+    this exact content before ever serving it, so its declared skills — prose,
+    never executed — and its declared routines, plus its declared ``tools:``
+    allowlist (never muted by this function at all; see
+    :data:`BundleRequires.tools`), land enabled, exactly as the reviewed
+    version declared them and exactly as a locally created agent's would, with
+    no second approval invented on top of the hub's own. A plain file import
+    keeps the cautious default for both — nobody reviewed a bundle "from a
+    friend" before it reached this call. Neither flag touches
+    :mod:`condor.agents.code_trust`: :func:`apply` always arms it on every
+    routine the bundle carries, because a routine is code and *that* gate
+    never varies by provenance — unmuted only means the agent may be told
+    about the routine, not that it may run yet.
 
     Every refusal is collected rather than raised, so a reviewer sees all of
     them at once; :func:`apply` is the one that turns them into an error. An
@@ -1005,7 +1016,9 @@ def plan(
         executables=executables,
         total_bytes=sum(row.bytes for row in planned + executables),
         stamps={CREATED_BY_KEY: str(user_id), SERVER_NAME_KEY: ""},
-        mutes=_mutes_for(sorted(seen), mute_skills=mute_skills),
+        mutes=_mutes_for(
+            sorted(seen), mute_skills=mute_skills, mute_routines=mute_routines
+        ),
         agent_key=agent_key,
         agent_key_inherited=inherited,
         collision=collision,
@@ -1091,24 +1104,34 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
 def _next_step(import_plan: ImportPlan) -> str:
     """What the operator has to do now, naming only what actually arrived muted.
 
-    A hub install's ``mutes`` carries no skill names at all
-    (``mute_skills=False`` in :func:`plan`), so this says so rather than
-    repeating the file import's "unmute the ones you want" sentence over an
-    empty list.
+    Muting and :mod:`condor.agents.code_trust` consent are two different
+    gates (see the module docstring), and this says so: the "allow" sentence
+    is unconditional whenever the bundle carries any routine at all, muted or
+    not — a hub install's routines arrive unmuted (FEAT-150) but still need
+    their content allowed before they can run, exactly like a plain import's.
+    The "unmute" sentence that follows only names what this particular import
+    actually muted. A hub install's ``mutes`` carries no skill or routine
+    names at all (``mute_skills=False``, ``mute_routines=False`` in
+    :func:`plan`), so this says so rather than repeating the file import's
+    "unmute the ones you want" sentence over an empty list.
     """
     parts = ["Nothing is running, and nothing it brought has been executed."]
+    if import_plan.executables:
+        parts.append(
+            "Every routine still needs you to allow it, by content, before "
+            "it can run."
+        )
     muted_routines = bool(import_plan.mutes.get("routines"))
     muted_skills = bool(import_plan.mutes.get("skills"))
     if muted_routines and muted_skills:
         parts.append(
-            "Read each imported routine and skill, then allow the routines "
-            "you want to run here and unmute the ones you want this agent to "
-            "use."
+            "Read each imported routine and skill, then unmute the ones you "
+            "want this agent to use."
         )
     elif muted_routines:
         parts.append(
-            "Read each imported routine, then allow the ones you want to run "
-            "here and unmute them."
+            "Read each imported routine, then unmute the ones you want this "
+            "agent to use."
         )
     elif muted_skills:
         parts.append(
@@ -1279,7 +1302,9 @@ def _collision_message(import_plan: ImportPlan) -> str:
     return f"Agent '{import_plan.collision}' already exists{tail}"
 
 
-def _mutes_for(paths: list[str], *, mute_skills: bool = True) -> dict[str, list[str]]:
+def _mutes_for(
+    paths: list[str], *, mute_skills: bool = True, mute_routines: bool = True
+) -> dict[str, list[str]]:
     """The routine names and skill slugs an import would switch off.
 
     A routine is ``routines/<name>.py`` and its name is the file stem, exactly
@@ -1288,22 +1313,30 @@ def _mutes_for(paths: list[str], *, mute_skills: bool = True) -> dict[str, list[
     a controller only runs after a deliberate sync to a Hummingbot server,
     which is already its own separate act.
 
-    ``mute_skills=False`` is the hub install's own exception (FEAT-146): a
-    skill is prose, never executed, and the hub already reviewed it before
-    ever serving it, so a second "read it, then unmute it" pass buys nothing a
-    plain file import's unreviewed skill still needs. A routine stays muted
-    (and still needs :func:`condor.agents.code_trust.allow`) regardless of
-    this flag — it is code, and *that* gate does not vary by provenance.
+    ``mute_skills=False`` and ``mute_routines=False`` are the hub install's
+    own exception (FEAT-146, widened to routines in FEAT-150): a skill is
+    prose, never executed, and a routine is code that still needs
+    :func:`condor.agents.code_trust.allow` regardless of either flag — but
+    the hub already reviewed both before ever serving them, so a second
+    "read it, then unmute it" pass buys nothing a plain file import's
+    unreviewed content still needs. Muting is deliberately two independent
+    flags rather than one, even though every caller today sets them together:
+    the two land enabled for the same reason (the hub's review), not because
+    one is a special case of the other.
     """
-    routines = sorted(
-        {
-            path.split("/")[1][: -len(".py")]
-            for path in paths
-            if path.startswith("routines/")
-            and path.endswith(".py")
-            and len(path.split("/")) == 2
-            and not path.split("/")[1].startswith("_")
-        }
+    routines = (
+        sorted(
+            {
+                path.split("/")[1][: -len(".py")]
+                for path in paths
+                if path.startswith("routines/")
+                and path.endswith(".py")
+                and len(path.split("/")) == 2
+                and not path.split("/")[1].startswith("_")
+            }
+        )
+        if mute_routines
+        else []
     )
     skills = (
         sorted(
@@ -1829,7 +1862,11 @@ def _classify(
 
 
 def _added_mutes(
-    added: Sequence[str], known: Sequence[str], *, mute_skills: bool = True
+    added: Sequence[str],
+    known: Sequence[str],
+    *,
+    mute_skills: bool = True,
+    mute_routines: bool = True,
 ) -> dict[str, list[str]]:
     """The routines and skills an update switches off: the genuinely new ones.
 
@@ -1839,12 +1876,17 @@ def _added_mutes(
     the diff already told the operator which instructions changed. An item the
     operator unmuted after reading it stays unmuted.
 
-    ``mute_skills`` is :func:`_mutes_for`'s own flag, threaded through so a
-    hub update never mutes a newly-added skill either — the same exception
-    :func:`plan_update` takes for a fresh hub install.
+    ``mute_skills``/``mute_routines`` are :func:`_mutes_for`'s own flags,
+    threaded through so a hub update never mutes a newly-added skill or
+    routine either — the same exception :func:`plan_update` takes for a fresh
+    hub install.
     """
-    fresh = _mutes_for(sorted(added), mute_skills=mute_skills)
-    had = _mutes_for(sorted(known), mute_skills=mute_skills)
+    fresh = _mutes_for(
+        sorted(added), mute_skills=mute_skills, mute_routines=mute_routines
+    )
+    had = _mutes_for(
+        sorted(known), mute_skills=mute_skills, mute_routines=mute_routines
+    )
     return {
         kind: [name for name in names if name not in set(had[kind])]
         for kind, names in fresh.items()
@@ -1857,6 +1899,7 @@ def plan_update(
     available_connectors: Sequence[str] | None = None,
     available_tools: Sequence[str] | None = None,
     mute_skills: bool = True,
+    mute_routines: bool = True,
 ) -> UpdatePlan:
     """What updating ``slug`` from ``bundle`` would do. Writes nothing.
 
@@ -1871,10 +1914,13 @@ def plan_update(
     can supply, passed in rather than fetched so the module stays headless.
     ``None`` means "not asked", exactly as in :func:`unmet_of`.
 
-    ``mute_skills`` is :func:`plan`'s own flag, passed through to
-    :func:`_added_mutes` so a hub update never mutes a newly-added skill
-    either — the same exception a fresh hub install takes, for the same
-    reason (the hub already reviewed this content).
+    ``mute_skills``/``mute_routines`` are :func:`plan`'s own flags, passed
+    through to :func:`_added_mutes` so a hub update never mutes a newly-added
+    skill or routine either — the same exception a fresh hub install takes,
+    for the same reason (the hub already reviewed this content). Neither flag
+    touches :mod:`condor.agents.code_trust`: :func:`apply_update` always
+    re-arms it, and a changed or added routine's content is pending again
+    regardless of either flag.
     """
     from condor.agents.agent import AgentStore
 
@@ -2100,6 +2146,7 @@ def plan_update(
                 - {row.path for row in rows if row.verdict == ADDED}
             ),
             mute_skills=mute_skills,
+            mute_routines=mute_routines,
         ),
         blockers=blockers,
         warnings=warnings,

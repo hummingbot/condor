@@ -68,7 +68,8 @@ function categoriesOf(findings: AgentBundleFinding[]): string[] {
  * did *not* do what upstream asked, because the bytes on disk are the
  * operator's and nobody else can reproduce them. `added` has no static entry
  * here — its label depends on the plan's own mute lists (see `addedLabel`),
- * because a hub update's skills do not arrive muted (FEAT-146).
+ * because a hub update's skills and routines do not arrive muted (FEAT-146,
+ * widened to routines in FEAT-150).
  */
 const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
   changed: { label: "replaced" },
@@ -84,15 +85,20 @@ const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
 
 /**
  * What an `added` row should say, per the plan's own mute lists rather than
- * assuming every new file lands switched off (FEAT-146): a hub update's
- * skills are not muted, so a plain file's path is checked against what
- * actually got muted instead of being told a blanket story.
+ * assuming every new file lands switched off (FEAT-146, widened to routines
+ * in FEAT-150): a hub update's skills and routines are not muted, so a
+ * plain file's path is checked against what actually got muted instead of
+ * being told a blanket story. An unmuted routine still isn't "ready to run"
+ * the way an unmuted skill is — it needs its content allowed (FEAT-147)
+ * independently of muting.
  */
 function addedLabel(path: string, mutes: { routines: string[]; skills: string[] }): string {
   const parts = path.split("/");
   if (parts.length === 2 && parts[0] === "routines" && path.endsWith(".py")) {
     const name = parts[1].slice(0, -".py".length);
-    return mutes.routines.includes(name) ? "new — arrives muted" : "new";
+    // Unmuted is not "ready to run" for a routine the way it is for a skill:
+    // it still needs its content allowed (FEAT-147), muted or not.
+    return mutes.routines.includes(name) ? "new — arrives muted" : "new — needs your allow";
   }
   if (parts.length > 2 && parts[0] === "skills") {
     return mutes.skills.includes(parts[1]) ? "new — arrives muted" : "new — enabled on arrival";
@@ -386,12 +392,30 @@ export function ImportAgentDialog({
                 cannot give it
               </p>
               <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-                {/* Routines always arrive muted; a hub import's skills do not
-                    (FEAT-146), so the reassurance only holds when every
-                    carried skill is actually in `plan.mutes`. */}
-                {plan.requires.skills.carried.every((s) => plan.mutes.skills.includes(s))
-                  ? "None of this stops the import — everything arrives muted anyway. It is what will not work until you fix it."
-                  : "None of this stops the import. Its code arrives muted regardless, but this agent's skills do not — they land ready to use. This is what will not work until you fix it."}
+                {/* A hub import's routines do not arrive muted any more than
+                    its skills do (FEAT-150), so the reassurance is read off
+                    `plan.mutes` for both rather than assuming routines are
+                    always the muted half. */}
+                {(() => {
+                  const carriedRoutines = plan.executables
+                    .filter((f) => f.path.startsWith("routines/") && f.path.endsWith(".py"))
+                    .map((f) => f.path.split("/")[1].slice(0, -".py".length));
+                  const routinesMuted = carriedRoutines.every((r) =>
+                    plan.mutes.routines.includes(r),
+                  );
+                  const skillsMuted = plan.requires.skills.carried.every((s) =>
+                    plan.mutes.skills.includes(s),
+                  );
+                  if (routinesMuted && skillsMuted) {
+                    return "None of this stops the import — everything arrives muted anyway. It is what will not work until you fix it.";
+                  }
+                  if (!routinesMuted && !skillsMuted) {
+                    return "None of this stops the import. Nothing here is muted — its skills and routines land ready to use, though every routine still needs you to allow it before it runs. This is what will not work until you fix it.";
+                  }
+                  return routinesMuted
+                    ? "None of this stops the import. Its routines arrive muted, but this agent's skills do not — they land ready to use. This is what will not work until you fix it."
+                    : "None of this stops the import. Its routines arrive unmuted (still pending your allow before they run), but its skills are muted. This is what will not work until you fix it.";
+                })()}
               </p>
               <ul className="space-y-0.5">
                 {plan.unmet.map((u) => (

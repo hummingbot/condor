@@ -9,30 +9,34 @@ bytes the operator could have downloaded themselves.
 **The trust model, in three sentences.** It is the decision the rest of this
 module hangs off, and every surface that renders a listing repeats it.
 
-1. *A bundle's code is untrusted wherever it came from, and the gate is on the
-   receiving install.* Condor installs any well-formed bundle — from a file,
-   from a friend, from the hub — and never requires a hub signature. A
-   routine is code, and the gate on it never varies by provenance: every
-   executable file named before anything is written (FEAT-133), no execution
-   consent for any imported ``.py`` (FEAT-147), nothing started, and the
-   operator allowing it file by file after reading it. A skill is prose and
-   never executed, so it is muted on arrival the same cautious way only when
-   nobody has reviewed the bundle it travelled in — which is every path
-   except the hub's own install (point 2 says why that one is different;
-   :func:`condor.agents.bundle.plan`'s ``mute_skills=False`` is where it is
-   decided).
+1. *A bundle's code is untrusted wherever it came from, and the execution gate
+   is on the receiving install, never on provenance.* Condor installs any
+   well-formed bundle — from a file, from a friend, from the hub — and never
+   requires a hub signature. A routine is code: every executable file is
+   named before anything is written (FEAT-133), and no imported ``.py`` has
+   execution consent (FEAT-147) until the operator allows it file by file
+   after reading it — nothing started, and that gate never varies by
+   provenance. Whether the agent is even *told about* a routine or a skill at
+   all is a separate, cheaper gate — muting — and that one is exactly where
+   provenance is allowed to matter: both are muted on arrival the same
+   cautious way when nobody has reviewed the bundle they travelled in — which
+   is every path except the hub's own install (point 2 says why that one is
+   different; :func:`condor.agents.bundle.plan`'s ``mute_skills=False``,
+   ``mute_routines=False`` is where it is decided — FEAT-146 for skills,
+   widened to routines in FEAT-150).
 2. *The hub is a discovery and moderation service, not a security boundary for
    code.* Only an ``APPROVED`` version is ever served at all (PR #111's
    ``AgentVersionStatus``) — a human or an AI reviewer passed it before
    :func:`get` can even see it — but that is a gate on what reaches the
    catalogue, not a claim read by anything in this module that decides
-   whether to write, and it buys a hub-installed *routine* nothing: FEAT-147's
-   execution consent still gates it file by file, same as any other bundle.
-   What the review *does* cover, and what point 1's exception trusts it for,
-   is content nothing here ever executes — a skill's prose and the
-   declared ``tools:`` allowlist — because an approved bundle is not the
-   bundle the operator will run after editing it here, but it is exactly the
-   bytes a reviewer already read before this install ever asked for them.
+   whether to write, and it buys a hub-installed *routine* nothing on the
+   execution side: FEAT-147's execution consent still gates it file by file,
+   same as any other bundle. What the review *does* cover, and what point 1's
+   exception trusts it for, is availability — a skill's prose, a routine's
+   declared behaviour before it is ever allowed to run, and the declared
+   ``tools:`` allowlist — because an approved bundle is not the bundle the
+   operator will run after editing it here, but it is exactly the bytes a
+   reviewer already read before this install ever asked for them.
 3. *Integrity between hub and client is a content digest over HTTPS, not a
    signature.* :func:`fetch` verifies the downloaded bytes against the
    ``X-Agent-Sha256`` header the same response carries, before any caller

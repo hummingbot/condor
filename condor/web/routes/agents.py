@@ -948,11 +948,12 @@ class UpdateAgentMdRequest(BaseModel):
 HUB_TRUST = (
     "The hub is a discovery service, not a security boundary for code. Only a "
     "version a reviewer already approved is ever served, but that is a gate "
-    "on what reaches the catalogue, not a signature. Its declared skills and "
-    "tools land enabled, exactly as the reviewed version declared them — "
-    "that review is why. A routine is code, though, and no review shortens "
-    "that gate: it arrives muted with no execution consent, and what "
-    "protects you there is reading it before you unmute it."
+    "on what reaches the catalogue, not a signature. Its declared skills, "
+    "tools and routines land enabled, exactly as the reviewed version "
+    "declared them — that review is why. A routine is still code, though, "
+    "and no review shortens its execution gate: it arrives with no execution "
+    "consent, and what protects you there is reading it before you allow it "
+    "to run."
 )
 
 
@@ -5308,8 +5309,12 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
         available_connectors=connectors,
         available_tools=tools,
         # The hub already reviewed this exact content before ever serving
-        # it: its skills land enabled, never muted a second time (FEAT-146).
+        # it: its skills and routines land enabled, never muted a second
+        # time (FEAT-146, widened to routines in FEAT-150). Execution
+        # consent (condor.agents.code_trust) is untouched by either flag —
+        # a routine still needs to be allowed, by content, before it runs.
         mute_skills=False,
+        mute_routines=False,
     )
     if plan.is_update:
         return (
@@ -5322,6 +5327,7 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
                 available_connectors=connectors,
                 available_tools=tools,
                 mute_skills=False,
+                mute_routines=False,
             ),
         )
     return listing, fetched, "install", plan
@@ -5423,7 +5429,7 @@ async def install_from_hub(
     req: HubInstallRequest | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Install this agent version, with its code switched off.
+    """Install this agent version, ready to use like a locally created agent.
 
     Re-fetches and re-plans rather than trusting anything the client carried
     back — the same rule ``/import`` and ``/{slug}/update`` follow, and it
@@ -5432,11 +5438,12 @@ async def install_from_hub(
 
     It lands through FEAT-133's ``apply`` or FEAT-145's ``apply_update``, which
     is to say through exactly the gate the file path uses — with one
-    exception the hub earns and a plain file never does (FEAT-146): its
-    declared skills and tools land enabled, since the hub already reviewed
-    this exact content before ever serving it. Nothing about where this came
-    from shortens the gate on *code*, though: a routine still arrives muted,
-    no imported ``.py`` has execution consent, and nothing is started.
+    exception the hub earns and a plain file never does (FEAT-146, widened to
+    routines in FEAT-150): its declared skills, tools and routines land
+    enabled, since the hub already reviewed this exact content before ever
+    serving it. Nothing about where this came from shortens the gate on
+    *execution*, though: no imported ``.py`` has execution consent regardless
+    of mute state, and nothing is started.
     """
     from condor.agents import bundle as agent_bundle
 

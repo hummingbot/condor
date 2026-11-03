@@ -2418,8 +2418,10 @@ def test_install_succeeds_when_the_pinned_digest_still_matches(offered, fake_hub
     assert res.json()["plan"]["imported"] is True
 
 
-def test_an_installed_hub_agent_arrives_muted_with_nothing_running(offered):
-    """A routine stays muted regardless of provenance — it is code (FEAT-147)."""
+def test_an_installed_hub_agent_arrives_unmuted_with_nothing_running(offered):
+    """FEAT-150: a hub install's routines arrive unmuted, same as its skills
+    and tools — the hub already reviewed this exact content. Nothing is
+    started regardless: muting is a visibility gate, not an execution one."""
     from condor.agents.engine import get_all_engines
 
     res = _client().post("/hub/agents/traveller/install")
@@ -2427,9 +2429,10 @@ def test_an_installed_hub_agent_arrives_muted_with_nothing_running(offered):
     assert res.status_code == 200
     assert AgentStore().get("traveller") is not None
     muted = load_mutes("traveller")
-    assert muted["routines"] == {"r"}
+    assert muted["routines"] == set()
     assert not [a for a in get_all_engines() if a.startswith("traveller")]
-    assert "unmute" in res.json()["plan"]["next_step"]
+    assert "allow" in res.json()["plan"]["next_step"]
+    assert "unmute" not in res.json()["plan"]["next_step"]
 
 
 def test_a_hub_installed_skill_lands_enabled_with_no_second_approval(offered):
@@ -2445,9 +2448,8 @@ def test_a_hub_installed_skill_lands_enabled_with_no_second_approval(offered):
     muted = load_mutes("traveller")
     assert muted["skills"] == set()
     assert "s" in {row["slug"] for row in SkillStore("traveller").catalog()}
-    # The routine still needs its own gesture (next test); the skill needs
-    # none of this install's own wording to say so.
-    assert "skill" not in res.json()["plan"]["next_step"]
+    # Neither needs unmuting, and the wording says so with no mention of it.
+    assert "unmute" not in res.json()["plan"]["next_step"]
 
 
 def test_an_imported_routine_has_no_execution_consent_on_the_hub_path(offered):
@@ -2514,7 +2516,7 @@ def test_every_hub_surface_carries_the_one_trust_sentence(offered):
 
     assert "not a security boundary for code" in body["trust"]
     assert "land enabled" in body["trust"]
-    assert "arrives muted with no execution consent" in body["trust"]
+    assert "arrives with no execution consent" in body["trust"]
 
 
 # ── Hub-listing status for an installed agent (CORR-812) ─────────────────
