@@ -2321,6 +2321,27 @@ def test_a_listing_of_an_agent_already_here_is_an_update(traveller, fake_hub):
     assert body["plan"]["installed_agent_uid"] == installed_uid
 
 
+def test_a_hub_update_also_lands_a_newly_added_skill_enabled(traveller, fake_hub):
+    """FEAT-146's exception threads through ``plan_update`` too, not only a
+    fresh install: a skill a newer hub version adds is never muted either."""
+    from condor.memory.skills import SkillStore
+
+    ab.build("traveller")  # mints and stamps this agent's agent_uid on disk
+    _write(
+        traveller / "skills" / "new_skill" / "SKILL.md",
+        "---\nname: new_skill\ndescription: d\nwhen_to_use: whenever\n"
+        "source: builtin\n---\n\nLook again.\n",
+    )
+    fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+
+    res = _client().post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    assert res.json()["verb"] == "update"
+    assert load_mutes("traveller").get("skills", set()) == set()
+    assert "new_skill" in {row["slug"] for row in SkillStore("traveller").catalog()}
+
+
 def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
     client = _client()
 
@@ -2398,6 +2419,7 @@ def test_install_succeeds_when_the_pinned_digest_still_matches(offered, fake_hub
 
 
 def test_an_installed_hub_agent_arrives_muted_with_nothing_running(offered):
+    """A routine stays muted regardless of provenance — it is code (FEAT-147)."""
     from condor.agents.engine import get_all_engines
 
     res = _client().post("/hub/agents/traveller/install")
@@ -2406,9 +2428,26 @@ def test_an_installed_hub_agent_arrives_muted_with_nothing_running(offered):
     assert AgentStore().get("traveller") is not None
     muted = load_mutes("traveller")
     assert muted["routines"] == {"r"}
-    assert muted["skills"] == {"s"}
     assert not [a for a in get_all_engines() if a.startswith("traveller")]
     assert "unmute" in res.json()["plan"]["next_step"]
+
+
+def test_a_hub_installed_skill_lands_enabled_with_no_second_approval(offered):
+    """FEAT-146: the hub already reviewed this exact content before serving
+    it, so a skill — prose, never executed — needs no unmuting here, unlike
+    the plain file import path (``test_imported_code_arrives_muted_and_the_
+    agent_is_registered`` in ``tests/test_agent_bundle.py``)."""
+    from condor.memory.skills import SkillStore
+
+    res = _client().post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    muted = load_mutes("traveller")
+    assert muted["skills"] == set()
+    assert "s" in {row["slug"] for row in SkillStore("traveller").catalog()}
+    # The routine still needs its own gesture (next test); the skill needs
+    # none of this install's own wording to say so.
+    assert "skill" not in res.json()["plan"]["next_step"]
 
 
 def test_an_imported_routine_has_no_execution_consent_on_the_hub_path(offered):
@@ -2473,8 +2512,9 @@ def test_a_seat_installs_from_chat_without_the_admins_token(
 def test_every_hub_surface_carries_the_one_trust_sentence(offered):
     body = _client().get("/hub/agents/traveller").json()
 
-    assert "not a security boundary" in body["trust"]
-    assert "muted and unstarted" in body["trust"]
+    assert "not a security boundary for code" in body["trust"]
+    assert "land enabled" in body["trust"]
+    assert "arrives muted with no execution consent" in body["trust"]
 
 
 # ── Hub-listing status for an installed agent (CORR-812) ─────────────────
@@ -2986,7 +3026,11 @@ def test_manage_agents_installs_from_the_hub(offered, monkeypatch):
     assert result["verb"] == "install"
     assert result["imported"] is True
     assert result["listing"]["slug"] == "traveller"
-    assert load_mutes("traveller")["routines"] == {"r"}
+    muted = load_mutes("traveller")
+    assert muted["routines"] == {"r"}
+    # FEAT-146: the hub already reviewed this content, so a skill — unlike a
+    # routine, which is code — needs no second approval on this door either.
+    assert muted["skills"] == set()
 
 
 def test_manage_agents_hub_install_records_provenance(offered, fake_hub, monkeypatch):

@@ -22,11 +22,15 @@ travels unchanged.
 Every defense here runs independently of whatever the hub already checked
 at upload (``agent-package.ts``'s ``validateAgentPackage``, which caps file
 count, per-file size, total size, rejects symlinks and unsafe paths before
-ever storing the zip). ``condor/hub.py``'s trust model — "a bundle is
-untrusted code wherever it came from, and the gate is on the receiving
-install" — draws no exception for bytes a service already claims to have
-validated, because the one byte stream this install actually reads is the
-one that arrived in this process, not the one that left Botcamp's.
+ever storing the zip). ``condor/hub.py``'s trust model — "a bundle's code is
+untrusted wherever it came from, and the gate is on the receiving install" —
+draws no exception for bytes a service already claims to have validated,
+because the one byte stream this install actually reads is the one that
+arrived in this process, not the one that left Botcamp's. That trust model's
+one exception (a hub bundle's declared skills and tools, never its code)
+is decided later, in :func:`condor.agents.bundle.plan`, not here: this
+module only turns bytes into a :class:`~condor.agents.bundle.Bundle` and
+never writes anything.
 """
 
 from __future__ import annotations

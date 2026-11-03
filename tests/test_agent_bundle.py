@@ -420,6 +420,54 @@ def test_imported_code_arrives_muted_and_the_agent_is_registered(traveller):
     assert AgentStore().get("arrival") is not None
 
 
+def test_mute_skills_false_lands_every_declared_skill_enabled_but_not_a_routine(
+    traveller,
+):
+    """FEAT-146: the hub install path passes ``mute_skills=False`` because it
+    already reviewed this exact content. A skill — prose, never executed —
+    lands enabled; a routine stays muted and execution-gated either way, since
+    it is code and provenance never shortens that gate (FEAT-147)."""
+    from condor.agents import code_trust
+    from routines.base import assistant_routines
+
+    _write(
+        traveller / "skills" / "second" / "SKILL.md",
+        SKILL_MD.format(slug="second", body="Look twice."),
+    )
+
+    plan = ab.plan(
+        _bundle_for(traveller), as_slug="arrival", user_id=7, mute_skills=False
+    )
+    ab.apply(plan, user_id=7)
+
+    muted = load_mutes("arrival")
+    assert muted["skills"] == set()
+    assert muted["routines"] == {"r"}
+    assert {row["slug"] for row in SkillStore("arrival").catalog()} == {"s", "second"}
+    assert "r" not in assistant_routines("arrival", force_reload=True)
+    source = agent_home("arrival") / "routines" / "r.py"
+    assert not code_trust.allowed("arrival", "r", source.read_text())
+
+
+def test_mute_skills_false_grants_no_tool_the_bundle_did_not_declare(traveller):
+    """``tools:`` was never gated by a mute at all (``_mutes_for`` only ever
+    names routines and skills) — a hub import does not change that, it only
+    confirms the declared allowlist still travels verbatim."""
+    _write(
+        traveller / "AGENT.md",
+        _agent_md(extra="").replace("tools: []\n", "tools: [manage_skill, delegate]\n"),
+    )
+
+    plan = ab.plan(
+        _bundle_for(traveller), as_slug="arrival", user_id=7, mute_skills=False
+    )
+    ab.apply(plan, user_id=7)
+
+    agent = AgentStore().get("arrival")
+    assert "manage_skill" in agent.tools and "delegate" in agent.tools
+    assert "unrelated_tool" not in agent.tools
+
+
 def test_a_muted_import_is_offered_to_nobody_until_it_is_unmuted(traveller):
     """Both gestures are needed for a routine, and they are separate (FEAT-147).
 

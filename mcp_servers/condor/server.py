@@ -916,9 +916,11 @@ async def manage_agents(
       verified against the download's own integrity header before anything
       parses them, and then this is exactly the import door: an agent already
       installed here becomes an UPGRADE automatically (`verb` says which
-      happened), everything arrives MUTED, no imported routine may execute
-      until the user allows it, and nothing is started. Report `findings` and
-      `unmet`; neither blocks it.
+      happened). A routine still arrives MUTED with no execution consent —
+      it is code, and that gate never varies by provenance — but its declared
+      skills and tools install enabled, because the hub already reviewed this
+      exact content before ever serving it. Nothing is started either way.
+      Report `findings` and `unmet`; neither blocks it.
     - "publish_hub": ADMIN ONLY, and not the same thing as "publish" — that
       one copies an agent into this repo's tracked library, this one uploads it
       to the hub for strangers (requires agent_slug; `notes` and `author_name`

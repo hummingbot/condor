@@ -417,8 +417,10 @@ def _hub_browse(query: str, page: int) -> dict:
         "page": page,
         "trust": (
             "Only an approved version is ever listed here, but that is a gate "
-            "on the catalogue, not a security boundary. Whatever you install "
-            "arrives muted and unstarted, and the review on install is the gate."
+            "on the catalogue, not a security boundary for code. Its declared "
+            "skills and tools install enabled, exactly as reviewed; a routine "
+            "is code, so it still arrives muted with no execution consent, "
+            "and the review on install is the gate there."
         ),
     }
 
@@ -450,8 +452,10 @@ def _hub_get(slug: str) -> dict:
         "listing": listing.model_dump(),
         "trust": (
             "Only an approved version is ever listed here, but that is a gate "
-            "on the catalogue, not a security boundary. Whatever you install "
-            "arrives muted and unstarted, and the review on install is the gate."
+            "on the catalogue, not a security boundary for code. Its declared "
+            "skills and tools install enabled, exactly as reviewed; a routine "
+            "is code, so it still arrives muted with no execution consent, "
+            "and the review on install is the gate there."
         ),
     }
 
@@ -469,10 +473,13 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
     function and not the caller. ``as_slug`` is only ever a rename for a
     collision that is a *different* agent.
 
-    Everything the import door promises holds unchanged: every executable file
-    is named in the result, routines and skills arrive muted, no imported
-    ``.py`` may execute until the operator allows it, and nothing is started.
-    Report the ``findings`` and the ``unmet`` list; neither blocks the install.
+    Everything the import door promises holds for *code* unchanged: every
+    executable file is named in the result, a routine arrives muted, no
+    imported ``.py`` may execute until the operator allows it, and nothing is
+    started. Its declared skills and tools, though, install enabled — the hub
+    already reviewed this exact content before ever serving it (FEAT-146), so
+    there is nothing a second mute on prose would buy. Report the
+    ``findings`` and the ``unmet`` list; neither blocks the install.
 
     Connectors are left unasked here for the same reason the file import leaves
     them: resolving them needs an async Hummingbot client and this is a
@@ -502,10 +509,15 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
         as_slug=as_slug or "",
         user_id=settings.user_id,
         available_tools=tools,
+        # The hub already reviewed this exact content before ever serving
+        # it: its skills land enabled, never muted a second time (FEAT-146).
+        mute_skills=False,
     )
     listing_row = listing.model_dump()
     if plan.is_update:
-        update = agent_bundle.plan_update(bundle, plan.collision, available_tools=tools)
+        update = agent_bundle.plan_update(
+            bundle, plan.collision, available_tools=tools, mute_skills=False
+        )
         try:
             result = agent_bundle.apply_update(update, user_id=settings.user_id)
         except ValueError as exc:
