@@ -44,7 +44,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 # Single WEB_URL param: full URL including port if needed (e.g. http://myserver.com:8088)
-# Falls back to WEB_PORT for backward compat, then default 8088
+# WEB_PORT is the port this process listens on; it wins over the port inside
+# WEB_URL, which may describe a reverse proxy (caddy, traefik...) on another
+# port or on 443. Without a proxy the two simply match. Falls back to the
+# URL's port, then to the scheme default.
 _web_url_raw = os.environ.get("WEB_URL", "").strip()
 _web_port_raw = os.environ.get("WEB_PORT", "").strip()
 
@@ -52,25 +55,16 @@ if _web_url_raw:
     WEB_URL = _web_url_raw.rstrip("/")
     _parsed = urlparse(WEB_URL)
 
-    if _parsed.port:
-        WEB_PORT = _parsed.port
-    elif _web_port_raw:
+    if _web_port_raw:
         WEB_PORT = int(_web_port_raw)
+    elif _parsed.port:
+        WEB_PORT = _parsed.port
     else:
         WEB_PORT = 443 if _parsed.scheme == "https" else 80
 else:
     WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
     WEB_URL = f"http://localhost:{WEB_PORT}"
 
-# BIND_PORT is the local port the process actually listens on. WEB_URL/WEB_PORT
-# is the externally advertised address -- possibly a reverse proxy (caddy,
-# traefik, haproxy...) on 443 or another port. The two are deliberately
-# independent: without a proxy they simply match, so BIND_PORT defaults to
-# WEB_PORT. The bind *host* stays WEB_HOST (resolve_web_host), which already
-# carries the local-mode / Tailscale "fail closed" logic.
-_bind_port_raw = os.environ.get("BIND_PORT", "").strip()
-
-BIND_PORT = int(_bind_port_raw) if _bind_port_raw else WEB_PORT
 
 # ── Telemetry (FEAT-023) ──
 # An operator override, in both directions. An unset value means "no override",

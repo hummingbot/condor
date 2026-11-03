@@ -72,13 +72,8 @@ async def _run(*args: str, timeout: float = 15) -> tuple[int, str]:
     return proc.returncode, (stdout or b"").decode(errors="replace").strip()
 
 
-async def ensure_serve(port: int, target_port: int | None = None) -> bool:
-    """Ensure the tailnet forwards ``port`` to ``127.0.0.1:target_port``.
-
-    ``port`` is the port users reach on the tailnet; ``target_port`` is where
-    the dashboard actually listens and defaults to ``port`` when they match
-    (no reverse proxy). They differ when an external ``WEB_URL`` advertises
-    another port than ``BIND_PORT``.
+async def ensure_serve(port: int) -> bool:
+    """Ensure the tailnet forwards ``port`` to ``127.0.0.1:port``.
 
     Idempotent: checks ``tailscale serve status`` first and only runs
     ``tailscale serve --bg`` when the port isn't already forwarded. Never
@@ -88,8 +83,6 @@ async def ensure_serve(port: int, target_port: int | None = None) -> bool:
     forwarded; callers must not fall back to a public bind on failure, since
     the whole point of binding to 127.0.0.1 is to fail closed, not open.
     """
-    target = port if target_port is None else target_port
-
     code, out = await _run("tailscale", "serve", "status")
     if code == 0 and f":{port}" in out:
         return True
@@ -98,7 +91,7 @@ async def ensure_serve(port: int, target_port: int | None = None) -> bool:
     # a single target plus a port flag and reject the old two-positional form
     # outright ("invalid argument format", tested against 1.102.3).
     code, out = await _run(
-        "tailscale", "serve", "--bg", f"--http={port}", f"http://127.0.0.1:{target}"
+        "tailscale", "serve", "--bg", f"--http={port}", f"http://127.0.0.1:{port}"
     )
     if code == 0:
         return True
@@ -113,6 +106,6 @@ async def ensure_serve(port: int, target_port: int | None = None) -> bool:
         port,
         out,
         port,
-        target,
+        port,
     )
     return False

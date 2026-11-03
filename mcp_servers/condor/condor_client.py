@@ -1,7 +1,6 @@
 """HTTP client for calling the Condor main-process web API."""
 
 import ipaddress
-import os
 import re
 
 import aiohttp
@@ -26,24 +25,17 @@ async def call_main_api(
     """
     from condor.runtime.timeouts import TIMEOUTS
     from condor.web.auth import create_jwt
-    from utils.config import BIND_PORT, WEB_HOST
+    from utils.config import WEB_HOST, WEB_PORT
 
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
 
     # The MCP server is a child of the main process, so it must reach the
     # dashboard at the address the dashboard actually listens on: WEB_HOST on
-    # BIND_PORT, not the externally advertised WEB_URL. The main process pins
-    # that pair in CONDOR_INTERNAL_API_* at boot; preferring it keeps us from
-    # re-resolving WEB_HOST here, where a Tailscale lookup that failed at boot
-    # and recovered later would point at an address nothing listens on.
-    host = os.environ.get("CONDOR_INTERNAL_API_HOST", "").strip() or WEB_HOST
-    port = os.environ.get("CONDOR_INTERNAL_API_PORT", "").strip()
-    port = int(port) if port else BIND_PORT
-
-    # A wildcard bind (0.0.0.0 / ::) is a listen address, never a connect
-    # destination, so it is normalized back to loopback; IPv6 literals need
-    # brackets in a URL.
+    # WEB_PORT, not the externally advertised WEB_URL. A wildcard bind
+    # (0.0.0.0 / ::) is a listen address, never a connect destination, so it is
+    # normalized back to loopback; IPv6 literals need brackets in a URL.
+    host = WEB_HOST
 
     try:
         ip = ipaddress.ip_address(host)
@@ -56,7 +48,7 @@ async def call_main_api(
     except ValueError:
         pass
 
-    url = f"http://{host}:{port}/api/v1{path}"
+    url = f"http://{host}:{WEB_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}
 
