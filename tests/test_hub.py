@@ -2369,6 +2369,36 @@ def test_a_hub_update_grants_execution_consent_for_the_routines_it_writes(
     )
 
 
+def test_a_hub_update_grants_execution_consent_for_a_crlf_routine_too(
+    traveller, fake_hub
+):
+    """The update path's own ``code_trust.allow`` call (``apply_update``)
+    has the same CRLF-digest bug as the fresh-install one: covered
+    separately because it reads its text from ``update_plan.files`` rather
+    than from ``import_plan.bundle.files`` directly."""
+    from condor.agents import code_trust
+    from routines.base import pending_routines
+
+    ab.build("traveller")  # mints and stamps this agent's agent_uid on disk
+    _write(
+        traveller / "routines" / "r.py",
+        (ROUTINE_PY + "\n# v2\n").replace("\n", "\r\n"),
+    )
+    fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+
+    res = _client().post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    assert res.json()["verb"] == "update"
+    assert code_trust.allowed(
+        "traveller", "r", (traveller / "routines" / "r.py").read_text()
+    )
+    # The surface fengtality actually clicked (PR #314 round 2): a routine
+    # ``pending_routines`` still lists is one the Routines tab renders an
+    # "allow" chip for, no matter what ``code_trust.allowed`` says elsewhere.
+    assert pending_routines("traveller") == []
+
+
 def test_a_hub_update_conflict_does_not_grant_consent_for_the_kept_local_file(
     offered, fake_hub
 ):
@@ -2540,6 +2570,38 @@ def test_a_hub_installed_routine_has_execution_consent_for_the_reviewed_bytes(
     # Still armed — a hub install is still a gated agent, just one the hub's
     # own review already allowed every routine on.
     assert code_trust.is_armed("traveller")
+
+
+def test_a_hub_installed_routine_with_crlf_line_endings_still_has_execution_consent(
+    traveller, fake_hub
+):
+    """Greptile, PR #314 round 2: a CRLF zip entry survives ``decode``
+    untouched, so the digest ``code_trust.allow`` stored at import time
+    has to be computed over the same folding the runtime applies when it
+    re-hashes the file off disk (``Path.read_text()`` always turns CRLF
+    into ``\\n``) — otherwise a hub-reviewed CRLF routine reads as
+    "changed" forever and the operator has to allow it by hand anyway.
+
+    That "by hand anyway" is exactly what the human reviewer hit by
+    screenshot after the earlier consent commits landed: the Routines tab's
+    "allow" chip is driven by ``pending_routines``, not by
+    ``code_trust.allowed`` directly, so this also pins that list empty.
+    """
+    import shutil
+
+    from condor.agents import code_trust
+    from routines.base import pending_routines
+
+    _write(traveller / "routines" / "r.py", ROUTINE_PY.replace("\n", "\r\n"))
+    fake_hub.offer("traveller", _zip_agent("traveller"), name="Traveller")
+    shutil.rmtree(traveller)
+
+    res = _client().post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    source = agent_home("traveller") / "routines" / "r.py"
+    assert code_trust.allowed("traveller", "r", source.read_text())
+    assert pending_routines("traveller") == []
 
 
 def test_editing_a_hub_installed_routine_does_not_inherit_its_consent(offered):
