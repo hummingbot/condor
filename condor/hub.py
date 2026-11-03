@@ -1833,6 +1833,42 @@ def me(token: str) -> MeInfo:
     )
 
 
+#: Bounds on the disclaimer's wording as the hub serves it. It is rendered as
+#: plain text in the review, so these only keep a hostile hub from filling
+#: the dialog.
+MAX_CLONE_TERMS_TEXT = 2000
+MAX_CLONE_TERMS_ACK = 300
+
+
+class CloneTerms(BaseModel):
+    """Botcamp's Clone to Condor disclaimer, as ``GET /api/condor/terms``
+    serves it — the same wording the strategy page's dialog shows, so Condor
+    never asks for an acceptance of text Botcamp no longer uses.
+    """
+
+    text: str = ""
+    acknowledgement: str = ""
+
+
+def clone_terms() -> CloneTerms:
+    """The disclaimer's current wording, read from the hub.
+
+    Anonymous: it is the text the website shows to anyone. Raises
+    :class:`HubError` when the hub does not answer with both parts, rather
+    than letting the dashboard offer a checkbox with nothing to agree to.
+    """
+    what = "Botcamp's clone disclaimer"
+    reply = _send("GET", f"{HUB_URL}/condor/terms")
+    terms = _model(_enveloped(_json(reply, what)), CloneTerms, what)
+    text = terms.text.strip()
+    ack = terms.acknowledgement.strip()
+    if not text or not ack:
+        raise HubError(f"The hub's answer for {what} is missing its wording")
+    if len(text) > MAX_CLONE_TERMS_TEXT or len(ack) > MAX_CLONE_TERMS_ACK:
+        raise HubError(f"The hub's answer for {what} is over the length limit")
+    return CloneTerms(text=text, acknowledgement=ack)
+
+
 def accept_clone_terms(token: str) -> None:
     """Record, on the linked Botcamp account, that its owner accepted the
     Clone to Condor disclaimer — the same once-per-account acceptance the

@@ -164,9 +164,15 @@ beforeEach(() => {
         });
       }
       requests.push({ url, method: init?.method ?? "GET" });
-      if (url === "/api/v1/hub/clone-terms") {
+      if (url === "/api/v1/hub/clone-terms" && init?.method === "POST") {
         termsAccepted = true;
         return json({ accepted: true });
+      }
+      if (url === "/api/v1/hub/clone-terms") {
+        return json({
+          text: "Botcamp's own wording: this is someone else's code.",
+          acknowledgement: "I understand, and I'll review every agent.",
+        });
       }
       if (url.includes("/install") && !termsAccepted) {
         return new Response(
@@ -579,11 +585,19 @@ it("lets the operator accept Botcamp's clone disclaimer in place, then reviews",
   await click("Review");
   await waitFor(() => container.querySelector("[data-hub-clone-terms]") !== null);
 
-  // The checkbox replaces the "go to the website" error, and nothing is
-  // recorded until it is ticked.
+  // The checkbox replaces the "go to the website" error, shows Botcamp's own
+  // wording, and nothing is recorded until it is ticked.
+  await waitFor(() => container.querySelector("[data-hub-clone-terms-text]") !== null);
   expect(container.querySelector("[data-import-error]")).toBeNull();
+  expect(container.querySelector("[data-hub-clone-terms]")?.textContent).toContain(
+    "Botcamp's own wording",
+  );
+  expect(container.querySelector("[data-hub-clone-terms]")?.textContent).toContain(
+    "I understand, and I'll review every agent.",
+  );
   expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
     "POST /api/v1/hub/agents/river_scalper/install/preview",
+    "GET /api/v1/hub/clone-terms",
   ]);
 
   const box = container.querySelector(
@@ -596,6 +610,7 @@ it("lets the operator accept Botcamp's clone disclaimer in place, then reviews",
 
   expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
     "POST /api/v1/hub/agents/river_scalper/install/preview",
+    "GET /api/v1/hub/clone-terms",
     "POST /api/v1/hub/clone-terms",
     "POST /api/v1/hub/agents/river_scalper/install/preview",
   ]);
@@ -603,4 +618,28 @@ it("lets the operator accept Botcamp's clone disclaimer in place, then reviews",
   expect(container.querySelector("[data-hub-clone-terms-accepted]")?.textContent).toContain(
     "You accepted Botcamp's clone disclaimer",
   );
+});
+
+it("offers no checkbox when Botcamp's disclaimer can't be loaded", async () => {
+  termsAccepted = false;
+  const realFetch = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) =>
+      url === "/api/v1/hub/clone-terms" && (init?.method ?? "GET") === "GET"
+        ? json({ detail: "The hub refused Botcamp's clone disclaimer (500)" }, 502)
+        : realFetch(url, init),
+    ),
+  );
+  cataloguePages = [[entry("river_scalper")]];
+  await render();
+  await waitFor(() => container.querySelector("[data-hub-catalogue-entry]") !== null);
+  await click("Review");
+  await waitFor(() =>
+    (container.querySelector("[data-hub-clone-terms]")?.textContent ?? "").includes(
+      "Could not load the disclaimer",
+    ),
+  );
+
+  expect(container.querySelector("[data-hub-clone-terms] input[type='checkbox']")).toBeNull();
 });

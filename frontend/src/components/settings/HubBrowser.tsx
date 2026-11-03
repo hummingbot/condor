@@ -1,6 +1,7 @@
 import {
   useInfiniteQuery,
   useMutation,
+  useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import {
@@ -589,11 +590,17 @@ function AgentCard({
  * accepted it once; ticking the box records that on the account, the same
  * as the checkbox on a strategy's page, and re-runs the review.
  *
- * The wording is Botcamp's own (`CloneToCondorButton` in botcamp-site) — it
- * is what the account is recorded as having agreed to, so keep them in step.
+ * The wording is read from Botcamp (`GET /api/condor/terms`), the same text
+ * its own dialog shows: the account is recorded as agreeing to it, so Condor
+ * keeps no copy that could drift. No wording, no checkbox.
  */
 function CloneTermsGate({ onAccepted }: { onAccepted: () => void }) {
   const queryClient = useQueryClient();
+  const terms = useQuery({
+    queryKey: ["hub-clone-terms"],
+    queryFn: api.getHubCloneTerms,
+    retry: false,
+  });
   const accept = useMutation({
     mutationFn: () => api.acceptHubCloneTerms(),
     onSuccess: () => {
@@ -610,28 +617,43 @@ function CloneTermsGate({ onAccepted }: { onAccepted: () => void }) {
       <p className="font-semibold text-[var(--color-text)]">
         Accept Botcamp&apos;s clone disclaimer to continue
       </p>
-      <p className="text-[var(--color-text-muted)]">
-        This is someone else&apos;s code. Botcamp reviewed this version once,
-        which is no guarantee it&apos;s safe or profitable. Read the Code tab
-        and each routine before you switch it on, and try it without real funds
-        first. You&apos;re responsible for what it does with your exchange
-        keys.
-      </p>
-      <label className="flex cursor-pointer items-start gap-2 text-[var(--color-text)]">
-        <input
-          type="checkbox"
-          checked={accept.isPending || accept.isSuccess}
-          disabled={accept.isPending || accept.isSuccess}
-          onChange={(e) => e.target.checked && accept.mutate()}
-          className="mt-0.5"
-        />
-        <span>
-          I understand, and I&apos;ll review every agent before running it.
-          <span className="block text-[var(--color-text-muted)]">
-            Saved on your Botcamp account. You only do this once.
-          </span>
-        </span>
-      </label>
+      {terms.isLoading && (
+        <p className="flex items-center gap-2 text-[var(--color-text-muted)]">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading the
+          disclaimer from Botcamp…
+        </p>
+      )}
+      {terms.error && (
+        <p role="alert" className="text-[var(--color-red)]">
+          Could not load the disclaimer from Botcamp:{" "}
+          {(terms.error as Error).message}
+        </p>
+      )}
+      {terms.data && (
+        <>
+          <p
+            data-hub-clone-terms-text
+            className="whitespace-pre-line text-[var(--color-text-muted)]"
+          >
+            {terms.data.text}
+          </p>
+          <label className="flex cursor-pointer items-start gap-2 text-[var(--color-text)]">
+            <input
+              type="checkbox"
+              checked={accept.isPending || accept.isSuccess}
+              disabled={accept.isPending || accept.isSuccess}
+              onChange={(e) => e.target.checked && accept.mutate()}
+              className="mt-0.5"
+            />
+            <span>
+              {terms.data.acknowledgement}
+              <span className="block text-[var(--color-text-muted)]">
+                Saved on your Botcamp account. You only do this once.
+              </span>
+            </span>
+          </label>
+        </>
+      )}
       {accept.isPending && (
         <p className="flex items-center gap-2 text-[var(--color-text-muted)]">
           <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…

@@ -5326,6 +5326,20 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
     return listing, fetched, "install", plan
 
 
+@hub_router.get("/clone-terms")
+async def get_hub_clone_terms(user: WebUser = Depends(get_current_user)):
+    """Botcamp's Clone to Condor disclaimer, in Botcamp's current wording —
+    what the review shows above the checkbox."""
+    from condor import hub
+    from condor.hub import HubError
+
+    try:
+        terms = await asyncio.to_thread(hub.clone_terms)
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return terms.model_dump()
+
+
 @hub_router.post("/clone-terms")
 async def accept_hub_clone_terms(user: WebUser = Depends(get_current_user)):
     """Accept Botcamp's Clone to Condor disclaimer for the linked account.

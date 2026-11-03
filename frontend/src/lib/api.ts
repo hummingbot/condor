@@ -4112,6 +4112,11 @@ export const api = {
   getHubListing: (slug: string) =>
     apiFetch<HubCatalogue>(`/api/v1/hub/agents/${encodeURIComponent(slug)}`),
 
+  /** Botcamp's Clone to Condor disclaimer, in Botcamp's current wording —
+   *  shown above the checkbox, never a copy kept in Condor. */
+  getHubCloneTerms: () =>
+    apiFetch<{ text: string; acknowledgement: string }>("/api/v1/hub/clone-terms"),
+
   /** Accept Botcamp's Clone to Condor disclaimer on the linked account —
    *  once per account, the same record the checkbox on botcamp.xyz writes.
    *  Admin-only: the install's Botcamp token is the admin's. */

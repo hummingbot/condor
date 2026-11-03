@@ -3324,3 +3324,59 @@ def test_an_account_without_a_profile_slug_still_reads(fake_hub):
     assert info.user.slug == ""
     assert info.user.name == "Ada"
     assert info.condor_terms_accepted_at is None
+
+
+def test_the_clone_disclaimer_wording_is_read_from_the_hub_without_a_token(fake_hub):
+    fake_hub.overrides[("GET", "/condor/terms")] = _ok(
+        {
+            "data": {
+                "text": "  Someone else's code.  ",
+                "acknowledgement": "I understand.",
+            }
+        }
+    )
+
+    terms = hub.clone_terms()
+
+    assert (terms.text, terms.acknowledgement) == (
+        "Someone else's code.",
+        "I understand.",
+    )
+    (call,) = fake_hub.calls
+    assert (call.method, call.url, call.token) == (
+        "GET",
+        f"{HUB_BASE}/condor/terms",
+        "",
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"text": "", "acknowledgement": "I understand."},
+        {"text": "Someone else's code.", "acknowledgement": ""},
+        {"text": "x" * (hub.MAX_CLONE_TERMS_TEXT + 1), "acknowledgement": "ok"},
+        {"text": "ok", "acknowledgement": "x" * (hub.MAX_CLONE_TERMS_ACK + 1)},
+    ],
+)
+def test_clone_disclaimer_wording_that_is_missing_or_oversized_is_refused(
+    fake_hub, data
+):
+    fake_hub.overrides[("GET", "/condor/terms")] = _ok({"data": data})
+
+    with pytest.raises(hub.HubError):
+        hub.clone_terms()
+
+
+def test_the_review_reads_the_clone_disclaimer_through_condor(fake_hub, cm):
+    fake_hub.overrides[("GET", "/condor/terms")] = _ok(
+        {"data": {"text": "Someone else's code.", "acknowledgement": "I understand."}}
+    )
+
+    res = _client(admin=False).get("/hub/clone-terms")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "text": "Someone else's code.",
+        "acknowledgement": "I understand.",
+    }
