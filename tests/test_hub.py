@@ -3251,6 +3251,7 @@ def test_accepting_the_clone_disclaimer_posts_with_the_linked_token(fake_hub):
         f"{HUB_BASE}/condor/terms",
         "bc_live_x",
     )
+    assert call.body == {"acknowledged": True}
 
 
 def test_accepting_the_clone_disclaimer_without_a_profile_sends_nothing(fake_hub):

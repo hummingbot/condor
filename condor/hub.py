@@ -1877,12 +1877,20 @@ def accept_clone_terms(token: str) -> None:
     Raises :class:`NoTokenError` without sending anything when no profile is
     linked: the acceptance belongs to an account, and an anonymous request
     has none to put it on.
+
+    Says ``acknowledged: true`` in the body, so Botcamp has the tick itself on
+    record rather than inferring it from the call.
     """
     if not (token or "").strip():
         raise NoTokenError(
             "No Botcamp profile is linked. Connect one in the Agent Hub (Agents → Hub)."
         )
-    reply = _send("POST", f"{HUB_URL}/condor/terms", token=token.strip())
+    reply = _send(
+        "POST",
+        f"{HUB_URL}/condor/terms",
+        token=token.strip(),
+        payload=json.dumps({"acknowledged": True}).encode("utf-8"),
+    )
     _clear_token_if_revoked(reply)
     _json(reply, "the clone disclaimer acceptance")
 
