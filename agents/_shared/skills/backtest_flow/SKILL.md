@@ -1,13 +1,14 @@
 ---
 name: backtest_flow
-description: The shared backtesting contract — intake, how to run the routines, and the
-  rules that hold for every strategy family. Family-specific thresholds live with the
-  agent that owns them.
+description: The shared backtesting contract — intake, how to run the routines, and
+  the rules that hold for every strategy family. Family-specific thresholds live with
+  the agent that owns them.
 when_to_use: User asks to run a backtest, test a strategy, or compare configs — any
   backtest-related request. Also the reference any agent reads before running the
   backtest routines itself.
 created: '2026-08-05T05:55:31Z'
 source: chat
+references_routine: backtest_chart
 ---
 
 ## Backtest Flow

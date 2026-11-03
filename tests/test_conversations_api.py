@@ -31,7 +31,6 @@ class FakeConfigManager:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """A throwaway conversation root, plus a real router to drive it."""
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(
         routes, "get_config_manager", lambda: FakeConfigManager({ADMIN.id})
     )
@@ -72,6 +71,32 @@ def test_get_returns_meta_and_transcript(store):
     assert body["meta"]["id"] == meta.id
     assert [t["role"] for t in body["turns"]] == ["user", "assistant"]
     assert body["turns"][0]["text"] == "what is my pnl?"
+
+
+def test_the_running_token_total_rides_the_meta(store):
+    """FEAT-120: no route change — the total is on the model both routes dump."""
+    from condor.acp.usage import TokenUsage
+
+    meta = new_conversation(USER.id, "web", agent_key="claude-code")
+    append_turn(USER.id, meta.id, TurnEntry(role="user", text="hello"))
+    append_turn(
+        USER.id,
+        meta.id,
+        TurnEntry(
+            role="assistant",
+            text="hi back",
+            usage=TokenUsage(
+                input_tokens=1200, output_tokens=30, cost_usd=0.02
+            ).to_dict(),
+        ),
+    )
+
+    body = _client(USER).get(f"/conversations/{meta.id}").json()
+    assert body["meta"]["usage"]["total_tokens"] == 1230
+    assert body["meta"]["usage"]["cost_usd"] == 0.02
+    assert body["turns"][-1]["usage"]["input_tokens"] == 1200
+    listed = _client(USER).get("/conversations").json()
+    assert listed[0]["usage"]["input_tokens"] == 1200
 
 
 def test_unknown_conversation_is_404(store):
@@ -134,3 +159,93 @@ def test_delete_is_the_only_way_to_lose_a_transcript(store):
     assert body["deleted"] is True
     assert conversations.get_conversation(USER.id, meta.id) is None
     assert _client(USER).get("/conversations").json() == []
+
+
+# ── Attachments (FEAT-098) ──
+#
+# The store's own rules are pinned in ``tests/test_attachments_store.py``; here
+# only the route's half matters — the status codes a composer has to be able to
+# read, and the fact that the ownership rule already on this router covers the
+# new pair without a second implementation.
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def _upload(user: WebUser, conv_id: str, data: bytes, mime: str = "image/png"):
+    return _client(user).post(
+        f"/conversations/{conv_id}/attachments",
+        files={"file": ("shot.png", data, mime)},
+    )
+
+
+def test_an_image_round_trips_through_the_routes(store):
+    meta = _seed(USER.id)
+
+    posted = _upload(USER, meta.id, PNG)
+    assert posted.status_code == 200
+    body = posted.json()
+    assert body["mime"] == "image/png"
+    assert body["bytes"] == len(PNG)
+
+    got = _client(USER).get(f"/conversations/{meta.id}/attachments/{body['id']}")
+    assert got.status_code == 200
+    assert got.content == PNG
+    assert got.headers["content-type"] == "image/png"
+
+
+def test_the_response_never_carries_the_filename(store):
+    """The chip shows the name from the local ``File``; nothing else ever has it."""
+    meta = _seed(USER.id)
+    body = _upload(USER, meta.id, PNG).json()
+    assert "shot.png" not in str(body)
+    assert set(body) == {"id", "mime", "bytes"}
+
+
+def test_a_file_over_the_cap_is_413(store):
+    meta = _seed(USER.id)
+    from condor.runtime import attachments
+
+    resp = _upload(USER, meta.id, PNG + b"\x00" * attachments.MAX_BYTES)
+    assert resp.status_code == 413
+    assert "limit" in resp.json()["detail"]
+
+
+def test_a_non_image_is_415_however_it_is_labelled(store):
+    meta = _seed(USER.id)
+    resp = _upload(USER, meta.id, b"PK\x03\x04 zip", mime="image/png")
+    assert resp.status_code == 415
+    assert "PNG" in resp.json()["detail"]
+
+
+def test_uploading_into_another_users_conversation_is_refused(store):
+    meta = _seed(OTHER_ID)
+    assert _upload(USER, meta.id, PNG).status_code == 404
+    assert (
+        _client(USER)
+        .post(
+            f"/conversations/{meta.id}/attachments?user_id={OTHER_ID}",
+            files={"file": ("x.png", PNG, "image/png")},
+        )
+        .status_code
+        == 403
+    )
+
+
+def test_reading_another_users_attachment_is_refused(store):
+    mine = _seed(USER.id)
+    theirs = _seed(OTHER_ID)
+    att_id = _upload(USER, mine.id, PNG).json()["id"]
+
+    # Right id, wrong conversation — and the owner's own tree does not hold it.
+    assert (
+        _client(USER)
+        .get(f"/conversations/{theirs.id}/attachments/{att_id}")
+        .status_code
+        == 404
+    )
+
+
+def test_a_traversal_in_the_url_is_404_not_a_file(store):
+    meta = _seed(USER.id)
+    resp = _client(USER).get(f"/conversations/{meta.id}/attachments/..%2Fmeta.json")
+    assert resp.status_code == 404

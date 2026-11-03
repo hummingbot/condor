@@ -21,6 +21,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from handlers._deeds import record_telegram_deed
 from handlers.cex._shared import (
     get_cex_balances,
     get_correct_pair_format,
@@ -55,8 +56,8 @@ from ._shared import (
     set_controller_config,
 )
 from .controllers import get_controller_info, get_supported_controller_types
+from .controllers._analysis import calculate_natr
 from .controllers.grid_strike.grid_analysis import (
-    calculate_natr,
     generate_theoretical_grid,
     suggest_grid_params,
 )
@@ -5633,6 +5634,19 @@ async def handle_execute_deploy(
             or "successfully" in message.lower()
             or "created" in message.lower()
         )
+        # The one deed that also claims ownership: the subject is what
+        # ``owned_bots.json`` is keyed on, so a bot deployed from Telegram is as
+        # attributable as one a tick deployed (CORR-622).
+        record_telegram_deed(
+            update,
+            verb="manage_bots:deploy",
+            summary=(
+                f"Deploy bot '{instance_name}' with controllers {controllers_config}"
+            ),
+            subject=instance_name,
+            ok=is_success,
+            error=message,
+        )
 
         if is_success:
             await query.message.edit_text(
@@ -6174,6 +6188,14 @@ async def process_deploy_custom_name_input(
             status == "success"
             or "successfully" in message.lower()
             or "created" in message.lower()
+        )
+        record_telegram_deed(
+            update,
+            verb="manage_bots:deploy",
+            summary=f"Deploy bot '{custom_name}' with controllers {controllers}",
+            subject=custom_name,
+            ok=is_success,
+            error=message,
         )
 
         if is_success:

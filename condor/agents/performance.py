@@ -15,6 +15,7 @@ from functools import partial
 from typing import Any
 
 from condor.fetchers._pagination import walk_pages
+from condor.fetchers.executors import EXECUTORS_PAGE_SIZE
 
 log = logging.getLogger(__name__)
 
@@ -167,40 +168,44 @@ def _merge_bot_perf(
     the bot snapshot reports how many positions closed but not how each one ended,
     so a bot-mode agent has no per-trade outcome to derive one from.
     """
+    from condor.agents.attribution import apply_fee_fallback, fold_sliced_window
     from condor.fetchers.bot_performance import bot_executor_rows
 
     rows = bot_executor_rows(bot)
     open_rows = [r for r in rows if r["status"] == "RUNNING"]
 
     if window is None:
-        closes = int(bot.get("closed_trades", 0) or 0)
-        volume_added = float(bot.get("volume_traded", 0) or 0)
-        fees_added = float(bot.get("cum_fees_quote", 0) or 0)
-        perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
-        perf.volume += volume_added
-        perf.fees += fees_added
+        # Lifetime aggregate, folded through the same shared rule as a window so
+        # the fees_known heuristic exists exactly once (condor.agents.attribution).
+        # The lifetime aggregate has no fee *column*: ``cum_fees_quote`` is what
+        # ``_aggregate_by_bot`` sums off ``positions_summary``, i.e. the fees of the
+        # positions open at this instant, with every closed position's fees missing.
+        # So it is the fallback figure, not a window's fees — fold a zero fee slot
+        # and let ``apply_fee_fallback`` add it and stamp ``fees_known=False``
+        # ([[CORR-219]]). ``perf.fees`` lands on the same number either way; only
+        # the certainty changes.
+        fold_sliced_window(
+            perf,
+            (
+                float(bot.get("realized_pnl_quote", 0) or 0),
+                float(bot.get("volume_traded", 0) or 0),
+                float(bot.get("closed_trades", 0) or 0),
+                0.0,
+            ),
+        )
+        apply_fee_fallback(perf, 0.0, bot)
     else:
-        realized, volume, trades, fees = window
-        closes = int(round(trades))
-        perf.realized_pnl += realized
-        perf.volume += volume
-        # A backend that reports no cumulative fee column slices to zero; the
-        # live open-position figure is then the only one there is.
-        fees_added = fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
-        volume_added = volume
-        perf.fees += fees_added
-
-    # Traded but charged nothing: the fee column is missing, not the fees.
-    if volume_added > 0 and fees_added == 0.0:
-        perf.fees_known = False
+        # Fold the RAW sliced window, then top up: the fees_known heuristic must
+        # see the unsubstituted fee column, and the fallback stamps its own flag.
+        # Same order as the web rollup, so the two surfaces cannot disagree.
+        fold_sliced_window(perf, window)
+        apply_fee_fallback(perf, window[3], bot)
 
     for ct, n in (bot.get("close_type_counts") or {}).items():
         perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(
             n or 0
         )
 
-    perf.trade_count += closes
-    perf.closed_count += closes
     perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
     perf.controllers = perf.controllers + list(bot.get("controllers", []))
@@ -238,7 +243,7 @@ async def fetch_agent_pnl_series(
         fetch_all_bot_performance,
         fetch_archived_instances,
         fetch_base_histories,
-        slice_history,
+        slice_history_series,
     )
 
     bases = [b for b in (bot_names or []) if b]
@@ -267,10 +272,13 @@ async def fetch_agent_pnl_series(
     # One point per instant any instance was sampled. Each is the whole session's
     # cumulative at that moment, so the curve is continuous across a redeploy
     # rather than restarting at zero with each new bot.
+    # Single merge pass over all instances instead of a slice_history rescan
+    # per stamp — same values, O(stamps + rows) instead of O(stamps × rows).
     stamps = sorted({t for h in instances for t, *_ in h if since <= t <= end})
     series: list[dict[str, Any]] = []
-    for t in stamps:
-        realized, volume, _trades, _fees = slice_history(instances, since, t)
+    for t, realized, volume, _trades, _fees in slice_history_series(
+        instances, since, stamps
+    ):
         series.append(
             {
                 "timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
@@ -294,16 +302,9 @@ def _merge_stopped_bot_perf(
     the normal way a session ends. Everything an open position would contribute
     (unrealized PnL, executor rows) is correctly absent.
     """
-    realized, volume, trades, fees = window
-    closes = int(round(trades))
-    perf.realized_pnl += realized
-    perf.volume += volume
-    perf.fees += fees
-    if volume > 0 and fees == 0.0:
-        perf.fees_known = False
-    perf.trade_count += closes
-    perf.closed_count += closes
-    perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
+    from condor.agents.attribution import fold_sliced_window
+
+    fold_sliced_window(perf, window)
 
 
 def _build_perf_from_rows(
@@ -376,10 +377,14 @@ async def fetch_agent_performance_batch(
     # the backend sometimes returned partial data for some controller_ids,
     # causing sessions with many executors to appear as zero in the rollup
     # while the per-session endpoint showed the correct numbers.
-    PAGE_SIZE = 50
+    # The page size belongs to the layer that owns this endpoint, not to this
+    # call site: asking for 50 where ``fetchers.executors`` asks 500 of the same
+    # ``search_executors`` cost 10x the sequential round trips for the same rows.
+    PAGE_SIZE = EXECUTORS_PAGE_SIZE
     # Safety cap, expressed in rows: the walker counts what it accumulated, not
     # how many times it looped, and its own terminal guards end a stalled walk.
-    MAX_PAGES = 200  # → 10,000 executors per agent
+    # Stated as rows so it stays put when the page size moves.
+    MAX_ROWS = 10_000  # executors per agent
 
     async def _fetch_rows(aid: str) -> list[dict]:
         rows: list[dict] = []
@@ -388,7 +393,7 @@ async def fetch_agent_performance_batch(
                 partial(client.executors.search_executors, controller_ids=[aid]),
                 _extract_executors_list,
                 page_size=PAGE_SIZE,
-                max_items=MAX_PAGES * PAGE_SIZE,
+                max_items=MAX_ROWS,
             ):
                 for ex in page:
                     if isinstance(ex, dict):

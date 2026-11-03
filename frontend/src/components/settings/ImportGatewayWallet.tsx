@@ -114,7 +114,13 @@ export function ImportGatewayWallet({
             <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Private key</label>
             <input
               type="password"
-              autoComplete="off"
+              // Browsers ignore autocomplete="off" on password fields; "new-password" is the value
+              // they honor to suppress save/autofill prompts, so the pasted key never lands in a
+              // cloud-synced password vault. data-1p-ignore / data-lpignore opt out of 1Password
+              // and LastPass detection. No `name` attr — heuristics would flag it as a credential.
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
               value={key}
               onChange={(e) => setKey(e.target.value)}
               disabled={saving}

@@ -7,7 +7,7 @@ budget eviction or a crashed ACP bridge silently deleted the chat.
 They are separate here. The session still dies with the process — that is what
 a subprocess is. The conversation is a directory:
 
-    condor/.runtime/conversations/{user_id}/{conv_id}/
+    .condor/users/{user_id}/conversations/{conv_id}/
         meta.json                  # atomic merge, via registry_file.write_status()
         transcript.jsonl           # append-only, bounded; one JSON object per line
         transcript_archive.jsonl   # turns retired out of the file above
@@ -40,6 +40,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from condor import paths
+from condor.acp.client import (
+    ToolCallEvent,
+    ToolCallUpdate,
+    fold_tool_call_event,
+    normalize_tool_title,
+)
+from condor.acp.usage import TokenUsage
 from condor.fsutil import atomic_write_bytes
 from condor.runtime.events import EventType
 from condor.runtime.registry_file import read_status, write_status
@@ -49,10 +57,6 @@ log = logging.getLogger(__name__)
 META_FILENAME = "meta.json"
 TRANSCRIPT_FILENAME = "transcript.jsonl"
 TRANSCRIPT_ARCHIVE_FILENAME = "transcript_archive.jsonl"
-
-# conv_id and user_id both become directory names, so neither may escape one.
-# Same guard, same reason, as state.py's namespace check.
-_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Upper bound on the replayed transcript, in characters. Load-bearing, not
 # cosmetic: a 300-turn conversation replayed whole would eat the context
@@ -173,12 +177,19 @@ def _utcnow() -> datetime:
 
 
 def _validate(value: str) -> str:
-    if not value or not _SAFE_ID.match(value):
+    """``paths.safe_id`` under this module's own error type.
+
+    The guard is shared (one regex, in ``condor.paths``); the exception is not,
+    because ``chat_ws`` and the conversations route both catch
+    :class:`ConversationIdError` to answer 400 rather than 500.
+    """
+    try:
+        return paths.safe_id(value)
+    except paths.UnsafeIdError as exc:
         raise ConversationIdError(
             f"Invalid conversation id {value!r}: "
             "use letters, digits, dot, dash or underscore."
-        )
-    return value
+        ) from exc
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -208,6 +219,18 @@ def _redact(value, depth: int = 0):
     if isinstance(value, (list, tuple)):
         return [_redact(v, depth + 1) for v in value]
     return value
+
+
+def _dict_or_none(raw) -> dict | None:
+    """``raw`` as arguments the shared fold can read, or ``None``.
+
+    ``fold_tool_call_event`` guards ``input`` with a plain truthiness test so a
+    late, fuller payload can fill a field an earlier event left empty. Handing
+    it anything that is not a non-empty dict — a serialized scalar, ``{}`` from
+    an announcement whose input is still streaming — would either be ignored or
+    stored as something a reader of ``input`` cannot use.
+    """
+    return raw if isinstance(raw, dict) and raw else None
 
 
 def _tool_input(raw, limit: int = TOOL_INPUT_MAX_CHARS) -> dict | None:
@@ -242,6 +265,15 @@ class ConversationMeta(BaseModel):
     Extra keys on disk are ignored (pydantic's default), so a meta written
     before a field was dropped — ``mode``, retired with the persona axis in
     FEAT-033 — still loads instead of failing the whole conversation list.
+
+    ``share_delete_token`` is the one field that is read from disk but never
+    serialized. It is a *capability*: whoever holds it can delete the shared
+    row from the collector, which is exactly why the owner keeps it and nobody
+    else receives it. Every route that returns a conversation dumps this model,
+    and one of them (``?user_id=``, admin only) returns someone else's — so a
+    plain field would hand an admin the token for a share that is not theirs to
+    revoke. ``exclude=True`` keeps it out of every dump; writes go through
+    ``update_meta``'s explicit kwargs, which are unaffected.
     """
 
     id: str
@@ -258,6 +290,62 @@ class ConversationMeta(BaseModel):
     turn_count: int = 0
     last_snippet: str = ""
 
+    # ── Sharing (FEAT-054) ──
+    # Optional, defaulted, and tolerated in both directions like every other
+    # field here: a meta written before this existed loads unchanged, and one
+    # written by a newer build still loads in an older one.
+    share_id: str = Field(
+        default="",
+        description="Stable per conversation once shared; '' = never shared.",
+    )
+    share_revision: int = Field(
+        default=0, description="Bumped on each re-share; the server upserts on it."
+    )
+    shared_at: datetime | None = None
+    share_delete_token: str = Field(
+        default="",
+        exclude=True,
+        description="The capability that revokes the share. Local only.",
+    )
+
+    # ── Automatic sharing (FEAT-055) ──
+    share_excluded: bool = Field(
+        default=False,
+        description="The user took this one chat out of the sweep. Honoured forever.",
+    )
+    share_turn_count: int = Field(
+        default=0,
+        description="``turn_count`` at the last share; growth past it re-shares.",
+    )
+    multi_author: bool = Field(
+        default=False,
+        description=(
+            "Another human can speak in the room this was born in — a Telegram "
+            "group. The sweep never takes one: a user consents for themselves."
+        ),
+    )
+
+    # ── Reflection (FEAT-073) ──
+    # The marker is the *attempt*, not the success: a conversation whose answer
+    # could not be parsed is stamped all the same, because retrying an
+    # unparseable answer forever on a job queue is how a background pass becomes
+    # a token leak. ``reflected_ok`` is what distinguishes "we learned nothing
+    # from it" from "we never looked", which is a support question, not a
+    # scheduling one.
+    reflected_at: datetime | None = None
+    reflected_ok: bool = Field(
+        default=False, description="Did the pass actually learn something?"
+    )
+
+    # ── Token usage (FEAT-120) ──
+    # The running total, in ``TokenUsage.to_dict()``'s shape. A plain dict and
+    # not a nested model because ``write_status`` merges top-level keys. Empty
+    # on every conversation older than this, which reads as "not measured".
+    usage: dict = Field(
+        default_factory=dict,
+        description="Running TokenUsage total; {} = unknown (before FEAT-120).",
+    )
+
 
 class TurnEntry(BaseModel):
     """One line of the transcript.
@@ -267,7 +355,11 @@ class TurnEntry(BaseModel):
     written before a field existed still parses, and unknown keys are ignored,
     so a line written by a newer build still loads here. Anything added later
     must keep both halves of that bargain — optional, with a default that reads
-    as "not recorded" rather than as a real value.
+    as "not recorded" rather than as a real value. That default is also what
+    makes the shape safe to grow: ``condor.sharing.scrub`` reads its redaction
+    coverage off these fields rather than naming them, so a text field added
+    here is scrubbed the day it is added, and one whose type the scrubber cannot
+    walk is dropped to its default instead of being shared raw.
 
     The attribution fields say which brain produced the turn. They live on the
     turn rather than only on ``ConversationMeta`` because the meta is
@@ -282,6 +374,16 @@ class TurnEntry(BaseModel):
     one. Empty means the stream never reported an ending — the abandoned
     generator (page reload, WS disconnect), and every turn written before this
     field existed.
+
+    ``events`` is the *order* the run happened in, which ``thought`` and
+    ``tool_calls`` cannot express: a turn that thinks, calls a tool, thinks
+    again and calls a second one lands in those two fields as one merged
+    reasoning blob beside a flat list, and no reader can put the four steps
+    back. It is additive and derived — the two flat fields are still written
+    in full — so every existing reader (``replay_context``, ``condor.sharing``,
+    Telegram, an older client) is untouched, and a turn recorded before this
+    existed simply has an empty list, which reads as "the order was not kept"
+    rather than as "nothing happened".
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -308,28 +410,44 @@ class TurnEntry(BaseModel):
     stop_reason: str = Field(
         default="", description="Assistant turns: how the stream ended; '' = unknown."
     )
+    attachments: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "User turns: what was handed over with the words. Per element "
+            "{id, mime, bytes} — an id under this conversation's attachments/ "
+            "directory, its type, and its size. Never the payload and never a "
+            "filename."
+        ),
+    )
+    events: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "The run in the order it happened: {type: 'thought', text} and "
+            "{type: 'tool', id} naming an entry of tool_calls. Derived — the "
+            "reasoning is the same text as thought, and the tool detail is not "
+            "repeated here. Empty = order not recorded (pre-ARCH-330 turns)."
+        ),
+    )
+    usage: dict = Field(
+        default_factory=dict,
+        description=(
+            "What this turn cost, in TokenUsage.to_dict()'s shape, on the last "
+            "entry the turn wrote. Includes anything spent since the previous "
+            "turn outside one (/compact). Empty = not measured (pre-FEAT-120)."
+        ),
+    )
 
 
 # ── Paths ──
 
 
-def _root() -> Path:
-    """Where every conversation lives.
-
-    Derived from ``_DATA_ROOT`` exactly as ``state.py`` derives its own root, so
-    a test that repoints one repoints both.
-    """
-    from condor.agents.agent import _DATA_ROOT
-
-    return Path(_DATA_ROOT).parent / "condor" / ".runtime" / "conversations"
-
-
 def _user_dir(user_id: int | str) -> Path:
-    return _root() / _validate(str(user_id))
+    """This user's conversations. The store is partitioned by owner (FEAT-051)."""
+    return paths.conversations_dir(_validate(str(user_id)))
 
 
 def _conv_dir(user_id: int | str, conv_id: str) -> Path:
-    return _user_dir(user_id) / _validate(str(conv_id))
+    return paths.conversation_dir(_validate(str(user_id)), _validate(str(conv_id)))
 
 
 # ── Store ──
@@ -342,8 +460,17 @@ def new_conversation(
     agent_key: str = "",
     agent_slug: str = "",
     server_name: str | None = None,
+    multi_author: bool = False,
 ) -> ConversationMeta:
-    """Mint an empty conversation and persist its meta."""
+    """Mint an empty conversation and persist its meta.
+
+    ``multi_author`` is recorded at birth because that is the only moment the
+    fact is known: a turn carries which *brain* produced it but not which human
+    typed it, and the recorder is built from the session's owner, so by the time
+    a second person's words are on disk they are indistinguishable from the
+    owner's. The caller who provisioned the session knows whether the room admits
+    anyone else, and says so here (FEAT-055).
+    """
     now = _utcnow()
     meta = ConversationMeta(
         id=uuid.uuid4().hex[:12],
@@ -354,6 +481,7 @@ def new_conversation(
         server_name=server_name,
         created_at=now,
         updated_at=now,
+        multi_author=bool(multi_author),
     )
     write_status(_conv_dir(user_id, meta.id), META_FILENAME, **_meta_fields(meta))
     return meta
@@ -375,9 +503,35 @@ def get_conversation(user_id: int, conv_id: str) -> ConversationMeta | None:
         return None
 
 
+def _meta_mtime(base: Path, name: str) -> int:
+    """When this conversation's meta was last written, in ns, or 0 if unreadable.
+
+    Nanoseconds and not ``st_mtime``: a float epoch loses resolution below a
+    fraction of a microsecond, and conversations minted back to back are that
+    close. A missing or unstatable meta sorts last, which is also where a
+    directory with nothing to parse belongs.
+    """
+    try:
+        return (base / name / META_FILENAME).stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMeta]:
     """This user's conversations, newest first.
 
+    Only as many ``meta.json`` files are parsed as the caller asked for. The
+    store is never pruned, so N grows for the life of the install, and reading
+    every meta to hand back one row is a cost the dashboard rail and its
+    prewarm used to pay on the same event loop as the chat socket (PERF-328).
+    Instead each directory is stat'ed — one syscall, no read, no parse — and
+    the candidates are walked newest ``meta.json`` first, stopping as soon as
+    ``limit`` metas have parsed. ``write_status`` stamps ``updated_at`` in the
+    same breath it renames the file into place, so the mtime order and the
+    ``updated_at`` order are the same order; the result is still sorted on
+    ``updated_at`` so the contract does not lean on the filesystem's clock.
+
+    ``limit=0`` walks everything, which the sharing sweep and reflection need.
     Reads only ``meta.json`` per directory. One without a readable meta (hand
     deleted, half written) is skipped rather than failing the whole listing.
     """
@@ -385,20 +539,32 @@ def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMe
     if not base.is_dir():
         return []
 
-    metas: list[ConversationMeta] = []
     try:
-        children = sorted(base.iterdir())
+        with os.scandir(base) as entries:
+            names = [entry.name for entry in entries if entry.is_dir()]
     except OSError:
         return []
-    for child in children:
-        if not child.is_dir():
+
+    if limit:
+        # Name breaks an mtime tie so two metas written inside one filesystem
+        # tick keep the ascending-name order the old full sort gave them.
+        names.sort(key=lambda name: (-_meta_mtime(base, name), name))
+    else:
+        # Every meta is parsed anyway, so a caller asking for all of them
+        # should not also pay for a stat per conversation.
+        names.sort()
+
+    metas: list[ConversationMeta] = []
+    for name in names:
+        meta = get_conversation(user_id, name)
+        if meta is None:
             continue
-        meta = get_conversation(user_id, child.name)
-        if meta is not None:
-            metas.append(meta)
+        metas.append(meta)
+        if limit and len(metas) >= limit:
+            break
 
     metas.sort(key=lambda m: m.updated_at, reverse=True)
-    return metas[:limit] if limit else metas
+    return metas
 
 
 def _iter_lines_reverse(path: Path, *, block: int | None = None) -> Iterator[bytes]:
@@ -554,6 +720,12 @@ def append_turn(user_id: int, conv_id: str, entry: TurnEntry) -> None:
         fields["title"] = _truncate(entry.text, TITLE_MAX_CHARS)
     if entry.role == "assistant" and entry.text:
         fields["last_snippet"] = _truncate(entry.text, SNIPPET_MAX_CHARS)
+    if entry.usage:
+        # Beside ``turn_count`` and on exactly its terms: one read-modify-write
+        # per turn, merged under ``write_status``'s lock.
+        fields["usage"] = (
+            TokenUsage.from_dict(meta.usage) + TokenUsage.from_dict(entry.usage)
+        ).to_dict()
     write_status(conv_dir, META_FILENAME, **fields)
 
 
@@ -812,6 +984,7 @@ class Recorder:
         agent_key: str = "",
         agent_slug: str = "",
         user_kind: str = "",
+        attachments: list[dict] | None = None,
     ):
         self.enabled = bool(conv_id) and user_id is not None
         self.user_id = user_id
@@ -826,10 +999,28 @@ class Recorder:
         # records an unattributed turn instead of failing to record at all.
         self._agent_key = agent_key
         self._agent_slug = agent_slug
+        # What was handed over with the words (FEAT-098). Beside ``user_text``
+        # because it belongs to the same turn and is written by the same append:
+        # the bytes are already on disk under the conversation, so this is the
+        # reference that lets a reload put the picture back in the user's own
+        # bubble instead of only the model remembering it.
+        self._attachments = list(attachments or [])
         self._text: list[str] = []
         self._thought: list[str] = []
+        # Keyed by tool_call_id, in the shape ``fold_tool_call_event`` folds
+        # into — the fold's spelling, not disk's. ``_recorded_calls`` renames
+        # and bounds it on the way out.
         self._tools: dict[str, dict] = {}
+        # The order those two were produced in (ARCH-330). A third accumulator
+        # rather than a replacement for either, because ``thought`` and
+        # ``tool_calls`` are the shape every existing reader of a transcript
+        # already knows: this says how they interleaved, and they still say
+        # what was in them.
+        self._events: list[dict] = []
         self._error = ""
+        # What this turn cost, handed in by the funnel (FEAT-120) — once at
+        # DONE and once more in its ``finally``, which after a DONE adds zero.
+        self._usage = TokenUsage()
         # Stays empty unless a DONE arrives: an abandoned generator never
         # reports an ending, and "unknown" is the honest record of that.
         self._stop = ""
@@ -838,41 +1029,146 @@ class Recorder:
             _live_recorders.add(self)
 
     def observe(self, event) -> None:
-        """Accumulate one ``RuntimeEvent``. Never writes."""
+        """Accumulate one ``RuntimeEvent``. Never writes.
+
+        The tool-call reduction is :func:`fold_tool_call_event`, the same one
+        the tick engine, the delegate sink and ``Session.prompt_stream`` run —
+        not a fourth copy of the create/patch rules. The recorder used to fold
+        by hand and disagreed with the shared one on the part that matters: a
+        repeat announcement replaced the entry wholesale, and an update merged
+        only ``status`` and ``output``, so arguments that the ACP adapter
+        supplies late (FEAT-102) never reached disk and every ACP-bridged chat
+        turn was persisted with ``"input": null``.
+
+        What stays the recorder's own business is what disk asks of it, and it
+        happens at :meth:`_recorded_calls` rather than here: redaction and
+        clipping of the arguments, truncation of the output, and the on-disk
+        key naming. Doing it after the fold rather than during is deliberate —
+        redacting on arrival would hand the fold an already-clipped ``input``
+        and a later, fuller one could no longer replace it.
+
+        Arrival order is the one thing that *cannot* be recovered later, so it
+        is recorded here as it happens (ARCH-330): a reasoning step extends the
+        run's trailing thought entry, a newly announced call appends a step
+        naming it. Both accumulators keep being filled beside it — this only
+        remembers how they took turns.
+        """
         if not self.enabled:
             return
         if event.type == EventType.TEXT:
             self._text.append(event.text)
         elif event.type == EventType.THOUGHT:
             self._thought.append(event.text)
+            self._note_thought(event.text)
         elif event.type == EventType.TOOL_CALL:
+            # Not keyed on the id alone: an adapter that does not identify its
+            # calls still gets one entry per call rather than one entry
+            # overwritten N times.
             call_id = str(event.field("tool_call_id") or len(self._tools))
-            self._tools[call_id] = {
-                "id": call_id,
-                "title": str(event.field("title") or ""),
-                "status": str(event.field("status") or ""),
-                "kind": str(event.field("kind") or ""),
-                "input": _tool_input(event.field("input")),
-                "output": "",
-            }
+            created = fold_tool_call_event(
+                self._tools,
+                ToolCallEvent(
+                    tool_call_id=call_id,
+                    # The transcript is the record, and it is read forever, so
+                    # a title that says nothing is recognised as nothing here
+                    # rather than written down verbatim (CORR-327). The same
+                    # seam the ACP client normalizes on, applied again at the
+                    # last gate before disk because a producer that is not the
+                    # ACP wire (the pydantic-ai client, the tick relay) reaches
+                    # the recorder without passing it.
+                    title=normalize_tool_title(event.field("title"))
+                    or normalize_tool_title(event.field("kind")),
+                    status=str(event.field("status") or ""),
+                    kind=str(event.field("kind") or ""),
+                    input=_dict_or_none(event.field("input")),
+                ),
+            )
+            # The fold returns the entry only when it *created* one, so a
+            # re-announcement of a call already in flight patches it without
+            # putting a second step in the run.
+            if created is not None:
+                self._events.append({"type": "tool", "id": call_id})
         elif event.type == EventType.TOOL_UPDATE:
-            call_id = str(event.field("tool_call_id") or "")
-            call = self._tools.get(call_id)
-            if call:
-                call["status"] = str(event.field("status") or call["status"])
-                # Merge an output only when there is one. The pydantic-ai path
-                # emits a bare "completed" update the moment the call is issued
-                # and carries the real result on the following
-                # ``ModelRequestNode``; on ACP the order is the other way
-                # round. Either way a later empty value must not erase a
-                # result that already arrived.
-                output = _truncate(event.field("output") or "", TOOL_OUTPUT_MAX_CHARS)
-                if output:
-                    call["output"] = output
+            fold_tool_call_event(
+                self._tools,
+                ToolCallUpdate(
+                    tool_call_id=str(event.field("tool_call_id") or ""),
+                    status=str(event.field("status") or ""),
+                    # No ``kind`` fallback on an update, unlike the create
+                    # above: the fold overwrites the name whenever the update
+                    # carries one, so an update whose title says nothing must
+                    # stay empty and leave the announced name standing.
+                    title=normalize_tool_title(event.field("title")),
+                    output=str(event.field("output") or ""),
+                    input=_dict_or_none(event.field("input")),
+                ),
+            )
         elif event.type == EventType.ERROR:
             self._error = str(event.field("message", "") or "")
         elif event.type == EventType.DONE:
             self._stop = event.stop_reason
+
+    def note_usage(self, usage: TokenUsage) -> None:
+        """Add to what this turn is charged. Never writes."""
+        if self.enabled:
+            self._usage = self._usage + usage
+
+    def _note_thought(self, text: str) -> None:
+        """Extend the run's trailing reasoning step, or open a new one.
+
+        Reasoning arrives one token-sized chunk at a time, so a step per chunk
+        would be thousands of entries saying nothing about order. Consecutive
+        chunks are one step, and only a tool call landing between them starts
+        another — which is exactly the interleaving this list exists to keep.
+        Merging is also what makes the list a faithful projection: the steps'
+        text concatenates back to ``thought`` byte for byte.
+        """
+        if not text:
+            return
+        if self._events and self._events[-1]["type"] == "thought":
+            self._events[-1]["text"] += text
+        else:
+            self._events.append({"type": "thought", "text": text})
+
+    def _recorded_events(self, calls: list[dict]) -> list[dict]:
+        """The run's order in the shape the transcript stores.
+
+        A tool step *names* its call rather than repeating it. The payload is
+        redacted, clipped and truncated once, in ``tool_calls``, and copying it
+        here would both double the line and give a reader two versions of one
+        call to disagree about. A step naming a call that did not reach disk is
+        dropped, so the two fields can never contradict each other.
+        """
+        known = {str(call.get("id") or "") for call in calls}
+        return [
+            dict(event)
+            for event in self._events
+            if event["type"] != "tool" or event["id"] in known
+        ]
+
+    def _recorded_calls(self) -> list[dict]:
+        """The folded calls in the shape the transcript stores.
+
+        The fold speaks the key names the tick and delegate paths share
+        (``name``); a transcript has always said ``title``, and
+        ``TurnEntry.tool_calls`` documents that spelling to every reader of a
+        share. One rename, in one place, instead of a second fold.
+
+        ``output`` is defaulted to ``""`` rather than omitted so a call that
+        never reported a result still lands on disk with the same key set as
+        one that did.
+        """
+        return [
+            {
+                "id": str(call.get("id") or ""),
+                "title": str(call.get("name") or ""),
+                "status": str(call.get("status") or ""),
+                "kind": str(call.get("kind") or ""),
+                "input": _tool_input(call.get("input")),
+                "output": _truncate(call.get("output") or "", TOOL_OUTPUT_MAX_CHARS),
+            }
+            for call in self._tools.values()
+        ]
 
     def _attribution(self) -> dict:
         """What this recorder knows about who produced the turn.
@@ -900,30 +1196,36 @@ class Recorder:
             opening = (
                 TurnEntry(role="system", text=self._user_text, kind=self._user_kind)
                 if self._user_kind
-                else TurnEntry(role="user", text=self._user_text)
+                else TurnEntry(
+                    role="user",
+                    text=self._user_text,
+                    attachments=self._attachments,
+                )
             )
-            append_turn(self.user_id, self.conv_id, opening)
+            entries = [opening]
             text = "".join(self._text)
-            tools = list(self._tools.values())
+            tools = self._recorded_calls()
             if text or tools or self._thought:
-                append_turn(
-                    self.user_id,
-                    self.conv_id,
+                entries.append(
                     TurnEntry(
                         role="assistant",
                         text=text,
                         thought="".join(self._thought),
                         tool_calls=tools,
+                        events=self._recorded_events(tools),
                         stop_reason=self._stop,
                         **self._attribution(),
-                    ),
+                    )
                 )
             elif self._error:
-                append_turn(
-                    self.user_id,
-                    self.conv_id,
-                    TurnEntry(role="system", text=self._error, kind="error"),
-                )
+                entries.append(TurnEntry(role="system", text=self._error, kind="error"))
+            # On the *last* entry written — the answer, else the error, else the
+            # opening line — so a turn that failed or never answered still adds
+            # what it spent to the conversation's total.
+            if not self._usage.is_zero():
+                entries[-1].usage = self._usage.to_dict()
+            for entry in entries:
+                append_turn(self.user_id, self.conv_id, entry)
         except Exception:  # noqa: BLE001 - recording must not break a prompt
             log.warning("Could not record turn for %s", self.conv_id, exc_info=True)
 

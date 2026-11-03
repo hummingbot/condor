@@ -6,7 +6,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+from condor.fetchers.portfolio import (
+    PORTFOLIO_HISTORY_RANGES,
+    UNIFIED_ACCOUNT_NOTE,
+    balance_value,
+    dedupe_unified_accounts,
+)
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import (
     BalanceItem,
@@ -16,6 +22,7 @@ from condor.web.models import (
     PortfolioResponse,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -31,8 +38,6 @@ async def get_portfolio(
 ):
     cm = get_config_manager()
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         if refresh:
             # Bypass SDS cache — force exchange re-fetch via Hummingbot
@@ -47,8 +52,8 @@ async def get_portfolio(
                 name, ServerDataType.PORTFOLIO
             )
     except Exception as e:
-        logger.warning("Portfolio fetch exception for %s: %s", name, e)
-        raise HTTPException(status_code=502, detail=f"Failed to get portfolio: {e}")
+        logger.exception("Portfolio fetch failed for '%s'", name)
+        raise upstream_error("Failed to get portfolio", e)
 
     if state is None:
         # Check if fetch is registered
@@ -72,6 +77,7 @@ async def get_portfolio(
 
     # Parse portfolio state into structured response
     # API returns: {account_name: {connector_name: [balance_dicts]}}
+    state, unified = dedupe_unified_accounts(state)
     connectors: list[ConnectorBalance] = []
     total_usd = 0.0
 
@@ -97,7 +103,7 @@ async def get_portfolio(
                             "available_units", item.get("available_balance", total_bal)
                         )
                     )
-                    usd_val = float(item.get("value", item.get("usd_value", 0)))
+                    usd_val = balance_value(item)
 
                     if not token:
                         continue
@@ -121,48 +127,16 @@ async def get_portfolio(
                         connector=connector_name,
                         balances=balances,
                         total_usd=connector_total,
+                        note=(
+                            UNIFIED_ACCOUNT_NOTE
+                            if (account_name, connector_name) in unified
+                            else None
+                        ),
                     )
                 )
 
-    _dedupe_hyperliquid_unified(connectors)
     total_usd = sum(c.total_usd for c in connectors)
     return PortfolioResponse(server=name, connectors=connectors, total_usd=total_usd)
-
-
-# Hyperliquid stable/quote symbols (perp margin reports "USD", spot holds "USDC").
-_HL_STABLES = {"USD", "USDC"}
-
-
-def _dedupe_hyperliquid_unified(connectors: list[ConnectorBalance]) -> None:
-    """Avoid double-counting Hyperliquid balances for unified / portfolio-margin accounts.
-
-    In unified or portfolio-margin mode the SAME USDC collateral is reported by BOTH the spot
-    (``hyperliquid``) and perp (``hyperliquid_perpetual``) clearinghouse states, which inflates the
-    portfolio. Hyperliquid exposes no account-mode flag, so detect the unified case by the near-equal
-    shared stable balance and drop the perp duplicate — Hyperliquid's own guidance is to use the spot
-    clearinghouse state as the unified account balance. No-op in standard mode, where the spot and
-    perp balances are separate and differ. Mutates ``connectors`` in place.
-    """
-    spot = next((c for c in connectors if c.connector == "hyperliquid"), None)
-    perp = next((c for c in connectors if c.connector == "hyperliquid_perpetual"), None)
-    if spot is None or perp is None:
-        return
-
-    spot_stable = sum(b.usd_value for b in spot.balances if b.token in _HL_STABLES)
-    perp_stable = sum(b.usd_value for b in perp.balances if b.token in _HL_STABLES)
-    if spot_stable <= 0 or perp_stable <= 0:
-        return
-
-    # Unified when the perp stable collateral matches the spot stable within ~1% (one shared pool).
-    if abs(perp_stable - spot_stable) > max(0.01, 0.01 * spot_stable):
-        return
-
-    # Drop the duplicated stable collateral from the perp side; keep any non-stable (perp-only) items.
-    perp.balances = [b for b in perp.balances if b.token not in _HL_STABLES]
-    perp.total_usd = sum(b.usd_value for b in perp.balances)
-    perp.note = (
-        "Unified account — USDC balance is reflected in the hyperliquid (spot) balance."
-    )
 
 
 @router.get(
@@ -174,8 +148,6 @@ async def get_portfolio_history(
     breakdown: bool = Query(False),
     user: WebUser = Depends(require_server_access),
 ):
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # The raw snapshots are the same regardless of *breakdown* (parsing happens
     # below), so the cache key is the range alone. SDS coalesces concurrent
@@ -365,7 +337,7 @@ def _extract_token_values(data: object) -> dict[str, float]:
                     for item in inner:
                         if isinstance(item, dict):
                             token = item.get("token", item.get("asset", ""))
-                            usd = float(item.get("value", item.get("usd_value", 0)))
+                            usd = balance_value(item)
                             if token and usd > 0:
                                 tokens[token] = tokens.get(token, 0) + usd
     return tokens
@@ -384,15 +356,10 @@ def _extract_connector_totals(data: object) -> dict[str, float]:
                     s = 0.0
                     for item in inner:
                         if isinstance(item, dict):
-                            s += float(item.get("value", item.get("usd_value", 0)))
+                            s += balance_value(item)
                     totals[key] = s
                 elif isinstance(inner, (int, float)):
                     totals[key] = float(inner)
         elif isinstance(val, (int, float)):
             totals[account] = float(val)
     return totals
-
-
-def _sum_snapshot_value(data: object) -> float:
-    """Sum USD values from a portfolio snapshot (nested account/connector/balances)."""
-    return sum(_extract_connector_totals(data).values())

@@ -2,40 +2,61 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.fetchers.executors import normalize_executor_side
+from condor.archived_controllers import group_by_controller
+from condor.fetchers._identifiers import IdentifierError, validate_db_path
+from condor.fetchers.archived_run import (
+    ArchivedRunUnavailable,
+    cached_run,
+    extract_bot_name,
+    fetch_archived_run,
+)
+from condor.reports import subjects
+from condor.reports.store import list_reports
 from condor.web.auth import require_server_access
 from condor.web.models import (
     ArchivedBotPerformance,
     ArchivedBotSummary,
-    NormalizedExecutor,
+    ArchivedControllerRollup,
+    ArchivedControllers,
+    ArchivedRunReport,
     PaginatedExecutors,
-    PnlPoint,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["archived"])
 
-# Module-level cache for archived data (immutable, no TTL needed)
-# Key: (server_name, db_path) -> cached result
-_performance_cache: dict[tuple[str, str], ArchivedBotPerformance] = {}
-_executors_cache: dict[tuple[str, str], list[NormalizedExecutor]] = {}
+
+def _checked_db_path(db_path: str) -> str:
+    """The database to read, or a 400 for a value that is not a database path.
+
+    ``db_path`` arrives as a *query* parameter — so unlike a path parameter it
+    still carries ``/``, ``..``, ``?`` and ``#`` — and ends up interpolated raw
+    into the upstream URL (``f"/archived-bots/{db_path}/summary"``), where yarl
+    parses rather than escapes it. Refused here, before a client is built, so a
+    rejected value never becomes an authenticated GET against some other backend
+    endpoint (SEC-591, the SEC-115 class).
+    """
+    try:
+        return validate_db_path(db_path)
+    except IdentifierError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-def _extract_bot_name(db_path: str) -> str:
-    name = os.path.basename(db_path)
-    if name.endswith(".sqlite"):
-        name = name[:-7]
-    elif name.endswith(".db"):
-        name = name[:-3]
-    return name
+async def _load_run(client: Any, name: str, db_path: str) -> ArchivedBotPerformance:
+    """The run's performance, or the HTTP answer for why it cannot be read."""
+    try:
+        return await fetch_archived_run(client, name, db_path)
+    except ArchivedRunUnavailable as e:
+        raise HTTPException(status_code=404 if e.missing else 502, detail=e.detail)
 
 
 async def _get_bot_summary(client: Any, db_path: str) -> ArchivedBotSummary | None:
@@ -46,7 +67,7 @@ async def _get_bot_summary(client: Any, db_path: str) -> ArchivedBotSummary | No
             return None
 
         return ArchivedBotSummary(
-            bot_name=summary.get("bot_name") or _extract_bot_name(db_path),
+            bot_name=summary.get("bot_name") or extract_bot_name(db_path),
             db_path=db_path,
             total_trades=int(summary.get("total_trades", 0)),
             total_orders=int(summary.get("total_orders", 0)),
@@ -60,254 +81,6 @@ async def _get_bot_summary(client: Any, db_path: str) -> ArchivedBotSummary | No
         return None
 
 
-def _parse_json_field(val: Any) -> dict:
-    """Parse a field that may be a JSON string or already a dict."""
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str) and val.strip().startswith("{"):
-        import json
-
-        try:
-            return json.loads(val)
-        except Exception:
-            return {}
-    return {}
-
-
-def _to_epoch_seconds(ts: Any) -> float:
-    """Convert various timestamp formats to epoch seconds."""
-    if ts is None:
-        return 0.0
-    if isinstance(ts, (int, float)):
-        return ts / 1000 if ts > 1e12 else float(ts)
-    if hasattr(ts, "timestamp"):
-        return ts.timestamp()
-    return 0.0
-
-
-def _normalize_executors(raw: list[dict]) -> list[NormalizedExecutor]:
-    """Map raw executor dicts from hummingbot DB to normalized format."""
-    result = []
-    for ex in raw:
-        if not isinstance(ex, dict):
-            continue
-
-        custom_info = _parse_json_field(ex.get("custom_info", {}))
-        config = _parse_json_field(ex.get("config", {}))
-
-        # Resolve side from multiple sources
-        side_raw = ex.get("side") or custom_info.get("side") or config.get("side", "")
-
-        # Resolve connector
-        connector = str(
-            ex.get("connector", "")
-            or ex.get("connector_name", "")
-            or config.get("connector_name", "")
-        )
-
-        # Resolve trading pair
-        trading_pair = str(ex.get("trading_pair", "") or config.get("trading_pair", ""))
-
-        # Resolve prices
-        entry_price = float(
-            ex.get("entry_price", 0)
-            or custom_info.get("current_position_average_price", 0)
-            or 0
-        )
-        close_price = float(
-            ex.get("close_price", 0)
-            or ex.get("current_price", 0)
-            or custom_info.get("close_price", 0)
-            or 0
-        )
-
-        # Resolve PnL and fees
-        pnl = float(ex.get("net_pnl_quote", 0) or ex.get("pnl", 0) or 0)
-        fees = float(ex.get("cum_fees_quote", 0) or 0)
-        volume = float(ex.get("filled_amount_quote", 0) or ex.get("volume", 0) or 0)
-        net_pnl_pct = float(ex.get("net_pnl_pct", 0) or 0)
-
-        result.append(
-            NormalizedExecutor(
-                id=str(ex.get("id", "") or ex.get("executor_id", "")),
-                type=str(
-                    ex.get("type", "")
-                    or ex.get("executor_type", "")
-                    or config.get("type", "position")
-                ),
-                connector=connector,
-                trading_pair=trading_pair,
-                side=normalize_executor_side(side_raw),
-                status=str(ex.get("status", "") or "closed"),
-                close_type=str(ex.get("close_type", "") or ""),
-                pnl=pnl,
-                volume=volume,
-                timestamp=_to_epoch_seconds(ex.get("timestamp")),
-                close_timestamp=_to_epoch_seconds(ex.get("close_timestamp")),
-                entry_price=entry_price,
-                current_price=close_price,
-                cum_fees_quote=fees,
-                net_pnl_pct=net_pnl_pct,
-                controller_id=str(ex.get("controller_id", "")),
-                custom_info=custom_info,
-                config=config,
-            )
-        )
-    return result
-
-
-def _derive_primary_pair(
-    executors: list[NormalizedExecutor],
-    exchanges: list[str],
-    trading_pairs: list[str],
-) -> tuple[str, str]:
-    """Find the most common connector + trading pair from executors."""
-    from collections import Counter
-
-    pair_counts: Counter[tuple[str, str]] = Counter()
-    for ex in executors:
-        if ex.connector and ex.trading_pair:
-            pair_counts[(ex.connector, ex.trading_pair)] += 1
-
-    if pair_counts:
-        (connector, pair), _ = pair_counts.most_common(1)[0]
-        return connector, pair
-
-    # Fallback to summary data
-    connector = exchanges[0] if exchanges else ""
-    pair = trading_pairs[0] if trading_pairs else ""
-    return connector, pair
-
-
-async def _fetch_and_cache_performance(
-    client: Any, name: str, db_path: str
-) -> ArchivedBotPerformance:
-    """Fetch full performance data and cache it."""
-    cache_key = (name, db_path)
-
-    # Check cache first
-    if cache_key in _performance_cache:
-        return _performance_cache[cache_key]
-
-    # Fetch summary
-    try:
-        summary = await client.archived_bots.get_database_summary(db_path)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch summary: {e}")
-
-    if not summary or not isinstance(summary, dict):
-        raise HTTPException(status_code=404, detail="Database not found")
-
-    bot_name = summary.get("bot_name") or _extract_bot_name(db_path)
-    trading_pairs = summary.get("trading_pairs", [])
-    exchanges = summary.get("exchanges", [])
-
-    # Fetch all trades (paginated)
-    all_trades: list[dict] = []
-    offset = 0
-    limit = 500
-    while True:
-        try:
-            resp = await client.archived_bots.get_database_trades(
-                db_path, limit=limit, offset=offset
-            )
-        except Exception:
-            break
-        if not resp:
-            break
-        trades = resp.get("trades", [])
-        if not trades:
-            break
-        all_trades.extend(trades)
-        if len(trades) < limit:
-            break
-        offset += limit
-
-    # Fetch executors
-    raw_executors: list[dict] = []
-    try:
-        exec_resp = await client.archived_bots.get_database_executors(db_path)
-        if exec_resp and isinstance(exec_resp, dict):
-            raw_executors = exec_resp.get("executors", [])
-        elif exec_resp and isinstance(exec_resp, list):
-            raw_executors = exec_resp
-    except Exception:
-        pass
-
-    # Normalize executors to consistent field names
-    executors = _normalize_executors(raw_executors)
-
-    # Cache executors separately for pagination
-    _executors_cache[cache_key] = executors
-
-    # Derive primary connector and trading pair
-    primary_connector, primary_trading_pair = _derive_primary_pair(
-        executors, exchanges, trading_pairs
-    )
-
-    # Calculate PnL from trades
-    from condor.archived_pnl import calculate_pnl_from_trades
-
-    pnl_data = calculate_pnl_from_trades(all_trades)
-
-    # Count buy/sell
-    buy_count = sum(1 for t in all_trades if t.get("trade_type", "").upper() == "BUY")
-    sell_count = len(all_trades) - buy_count
-
-    # Convert cumulative_pnl to PnlPoint list with epoch seconds
-    raw_cumulative = pnl_data.get("cumulative_pnl", [])
-    cumulative_pnl: list[PnlPoint] = []
-    for point in raw_cumulative:
-        ts = point.get("timestamp")
-        if ts is None:
-            continue
-        if hasattr(ts, "timestamp"):
-            epoch = ts.timestamp()
-        elif isinstance(ts, (int, float)):
-            epoch = ts / 1000 if ts > 1e12 else ts
-        else:
-            continue
-        cumulative_pnl.append(PnlPoint(timestamp=epoch, pnl=point.get("pnl", 0)))
-
-    # Downsample if >5000 points
-    if len(cumulative_pnl) > 5000:
-        step = len(cumulative_pnl) // 5000
-        cumulative_pnl = cumulative_pnl[::step]
-        if cumulative_pnl[-1] != raw_cumulative[-1]:
-            last = raw_cumulative[-1]
-            ts = last.get("timestamp")
-            if hasattr(ts, "timestamp"):
-                epoch = ts.timestamp()
-            elif isinstance(ts, (int, float)):
-                epoch = ts / 1000 if ts > 1e12 else ts
-            else:
-                epoch = 0
-            cumulative_pnl.append(PnlPoint(timestamp=epoch, pnl=last.get("pnl", 0)))
-
-    result = ArchivedBotPerformance(
-        bot_name=bot_name,
-        db_path=db_path,
-        total_pnl=pnl_data.get("total_pnl", 0),
-        total_fees=pnl_data.get("total_fees", 0),
-        total_volume=pnl_data.get("total_volume", 0),
-        trade_count=len(all_trades),
-        buy_count=buy_count,
-        sell_count=sell_count,
-        pnl_by_pair=pnl_data.get("pnl_by_pair", {}),
-        cumulative_pnl=cumulative_pnl,
-        trading_pairs=trading_pairs,
-        exchanges=exchanges,
-        executors=executors,
-        primary_connector=primary_connector,
-        primary_trading_pair=primary_trading_pair,
-        executor_count=len(executors),
-    )
-
-    # Cache full result
-    _performance_cache[cache_key] = result
-    return result
-
-
 @router.get("/servers/{name}/archived")
 async def list_archived_bots(name: str, user: WebUser = Depends(require_server_access)):
     cm = get_config_manager()
@@ -317,7 +90,8 @@ async def list_archived_bots(name: str, user: WebUser = Depends(require_server_a
     try:
         databases = await client.archived_bots.list_databases()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to list databases: {e}")
+        logger.exception("Failed to list archived databases on '%s'", name)
+        raise upstream_error("Failed to list databases", e)
 
     if not databases or not isinstance(databases, list):
         return {"bots": []}
@@ -357,11 +131,13 @@ async def get_archived_performance(
     ),
     user: WebUser = Depends(require_server_access),
 ):
+    db_path = _checked_db_path(db_path)
+
     cm = get_config_manager()
 
     client = await cm.get_client(name)
 
-    perf = await _fetch_and_cache_performance(client, name, db_path)
+    perf = await _load_run(client, name, db_path)
 
     if not include_executors:
         # Return without executors for fast initial load
@@ -378,16 +154,18 @@ async def get_archived_executors(
     limit: int = Query(50, ge=1, le=200),
     user: WebUser = Depends(require_server_access),
 ):
+    db_path = _checked_db_path(db_path)
+
     cm = get_config_manager()
 
-    cache_key = (name, db_path)
-
-    # If executors not cached yet, trigger a full fetch
-    if cache_key not in _executors_cache:
+    # Page out of the cached performance entry; on a miss, trigger the full
+    # (single-flight) fetch.
+    perf = cached_run(name, db_path)
+    if perf is None:
         client = await cm.get_client(name)
-        await _fetch_and_cache_performance(client, name, db_path)
+        perf = await _load_run(client, name, db_path)
 
-    executors = _executors_cache.get(cache_key, [])
+    executors = perf.executors
     page = executors[offset : offset + limit]
 
     return PaginatedExecutors(
@@ -395,4 +173,65 @@ async def get_archived_executors(
         total=len(executors),
         offset=offset,
         limit=limit,
+    )
+
+
+@router.get("/servers/{name}/archived/controllers", response_model=ArchivedControllers)
+async def get_archived_controllers(
+    name: str,
+    db_path: str = Query(..., description="Database path"),
+    user: WebUser = Depends(require_server_access),
+):
+    """The run, split into the controllers that ran inside it.
+
+    Reads the same cached performance object the run's header and executor
+    pages come from, so expanding a row costs nothing once the run is warm.
+    """
+    db_path = _checked_db_path(db_path)
+
+    perf = cached_run(name, db_path)
+    if perf is None:
+        client = await get_config_manager().get_client(name)
+        perf = await _load_run(client, name, db_path)
+
+    return ArchivedControllers(
+        controllers=[
+            ArchivedControllerRollup(**asdict(rollup))
+            for rollup in group_by_controller(perf.executors)
+        ]
+    )
+
+
+@router.get("/servers/{name}/archived/report", response_model=ArchivedRunReport)
+async def get_archived_report(
+    name: str,
+    db_path: str = Query(..., description="Database path"),
+    controller_id: str = Query("", description="Controller inside the run, or all"),
+    user: WebUser = Depends(require_server_access),
+):
+    """The stored report for this run (or controller), if one was ever made.
+
+    The subject key is built here, from the parts, never accepted pre-built:
+    the server is the one the caller was granted access to, so a lookup cannot
+    be pointed at another server's reports by spelling its key.
+
+    A miss is the ordinary case — nothing has charted this subject yet, or the
+    report index has since been pruned past it — so it answers 200 with a null
+    id rather than a 404.
+    """
+    db_path = _checked_db_path(db_path)
+
+    entries, _ = list_reports(
+        subject=subjects.bot_run(name, db_path, controller_id),
+        owner_id=user.id,
+        limit=1,
+    )
+    if not entries:
+        return ArchivedRunReport()
+
+    entry = entries[0]
+    return ArchivedRunReport(
+        report_id=entry.get("id"),
+        created_at=entry.get("created_at"),
+        title=entry.get("title", ""),
     )

@@ -8,16 +8,19 @@ per-endpoint: it walks the real FastAPI app and asserts that every server-scoped
 route carries one of the ``require_server_access*`` dependencies, with a small
 explicit allowlist for the routes that deliberately answer differently.
 
-Three shapes exist, and they are not interchangeable:
+Two shapes exist, and they are not interchangeable:
 
 * ``/servers/{name}/...``   → ``require_server_access``
-* ``/servers/{server_name}/...`` → ``require_server_access_by_server_name``
 * ``?server=...``          → ``require_server_access_query``
 
-and a fourth that no path/query dependency can cover — the server name arriving
+and a third that no path/query dependency can cover — the server name arriving
 in the request **body** — which uses the shared ``check_server_access`` helper
 the dependencies are built on. Those sites are pinned by source inspection
 below, because there is no signature for FastAPI to reflect on.
+
+The sweep below also recognises a ``{server_name}`` path parameter, a shape no
+route uses today (READ-595 deleted the last two): a route reintroducing it is
+reported as unguarded rather than quietly skipped.
 """
 
 from __future__ import annotations
@@ -36,14 +39,12 @@ from condor.web.auth import (
     check_server_access,
     get_current_user,
     require_server_access,
-    require_server_access_by_server_name,
     require_server_access_query,
 )
 from condor.web.models import WebUser
 
 GUARDS = {
     require_server_access,
-    require_server_access_by_server_name,
     require_server_access_query,
 }
 
@@ -67,6 +68,16 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/settings/servers/{name}/default"): "404-shaped, non-enumerable",
 }
 
+# Routes where ``?server=`` narrows a listing rather than scoping it. The
+# backtest archive spans every server the caller can reach (FEAT-075), so the
+# parameter is an optional filter and authorization is applied by *dropping*
+# what the caller may not see. A guard here would be wrong twice: it would make
+# the filter mandatory, and it would answer 403 for a server whose existence the
+# caller should not learn. Pinned by ``test_filtering_routes_filter_by_access``.
+FILTERED: dict[tuple[str, str], str] = {
+    ("GET", "/api/v1/backtesting/archive"): "authorization filters, not gates",
+}
+
 # Routes that read a server but have never had an access check. NOT a licence:
 # each is a live gap, listed so the sweep above stays green while they are
 # fixed under their own item rather than silently smuggled into SEC-147.
@@ -85,7 +96,6 @@ BODY_SITES = [
     ("condor.web.routes.sessions", "_respawn"),
     ("condor.web.routes.sessions", "create_session"),
     ("condor.web.routes.agents", "update_agent_config"),
-    ("condor.web.routes.agents", "consult_agent"),
     ("condor.web.routes.agents", "delegate_agent"),
     ("condor.web.routes.agents", "_start"),
 ]
@@ -129,7 +139,7 @@ def test_every_server_scoped_route_carries_the_guard(app):
             continue
         for method in methods:
             key = (method, route.path)
-            if key in ALLOWLIST or key in KNOWN_GAPS:
+            if key in ALLOWLIST or key in KNOWN_GAPS or key in FILTERED:
                 continue
             missing.append(f"{method} {route.path} ({why}) -> {route.name}")
     assert not missing, (
@@ -158,11 +168,6 @@ def test_each_shape_uses_the_dependency_that_matches_it(app):
             query_params = {p.name for p in sub.query_params}
             if sub.call is require_server_access and "name" not in path_params:
                 wrong.append(f"{route.path}: require_server_access has no {{name}}")
-            if (
-                sub.call is require_server_access_by_server_name
-                and "server_name" not in path_params
-            ):
-                wrong.append(f"{route.path}: no {{server_name}} path param")
             if sub.call is require_server_access_query and "server" not in query_params:
                 wrong.append(f"{route.path}: no ?server= query param")
     assert not wrong, wrong
@@ -192,6 +197,30 @@ def test_allowlisted_routes_still_check_access_inline(app):
         source = inspect.getsource(route.endpoint)
         assert "has_server_access" in source, key
         assert "Server not found" in source, key
+
+
+def test_filtering_routes_filter_by_access(app):
+    """The filtering exception is not an unguarded one: it drops what it must.
+
+    ``has_server_access`` has to appear on the path the endpoint takes, and the
+    result has to be a *filter* over the accessible set rather than a refusal —
+    which is what ``_accessible_servers`` is. The behaviour itself is pinned in
+    ``tests/test_backtest_archive_routes.py``; this keeps the sweep honest.
+    """
+    import condor.web.routes.backtesting as bt_routes
+
+    by_key = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in route.methods:
+            by_key[(method, route.path)] = route
+
+    assert "has_server_access" in inspect.getsource(bt_routes._accessible_servers)
+    for key in FILTERED:
+        route = by_key.get(key)
+        assert route is not None, f"filtering route no longer exists: {key}"
+        assert "_accessible_servers" in inspect.getsource(route.endpoint), key
 
 
 def test_body_param_sites_call_the_shared_helper():
@@ -230,13 +259,6 @@ def test_path_guard_returns_the_user_on_an_owned_server(deny):
     assert asyncio.run(require_server_access(OWNED, user=USER)) is USER
 
 
-def test_server_name_alias_guard_refuses_a_foreign_server(deny):
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(require_server_access_by_server_name(FOREIGN, user=USER))
-    assert exc.value.status_code == 403
-    assert asyncio.run(require_server_access_by_server_name(OWNED, user=USER)) is USER
-
-
 def test_query_guard_refuses_a_foreign_server(deny):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(require_server_access_query(FOREIGN, user=USER))
@@ -273,8 +295,6 @@ def client(app, deny):
         ("GET", f"/api/v1/settings/gateway/status?server={FOREIGN}"),
         ("GET", f"/api/v1/settings/credentials?server={FOREIGN}"),
         ("GET", f"/api/v1/routines/options/controller_configs?server={FOREIGN}"),
-        # {server_name} path param
-        ("POST", f"/api/v1/routines/servers/{FOREIGN}/some_routine/run"),
     ],
 )
 def test_a_foreign_server_is_refused_over_http(client, method, url):

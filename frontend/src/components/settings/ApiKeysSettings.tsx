@@ -7,15 +7,16 @@ import {
   Loader2,
   Plus,
   Star,
-  Trash2,
   Wallet,
-  X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
+import { CREDENTIAL_FIELD_PATTERNS } from "@/lib/credential-fields";
+import { credentialsQuery, gatewayWalletsQuery, invalidateCredentialQueries } from "@/lib/queryClient";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
 import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
 
@@ -52,21 +53,6 @@ const WALLET_CHAINS: { chain: WalletChain; label: string }[] = [
   { chain: "ethereum", label: "Ethereum/EVM" },
 ];
 
-// Substrings that mark a connector config field as a sensitive credential.
-// Connector keys vary (api_key, secret_key, passphrase, private_key, api_token,
-// mnemonic, seed, ...), so we match by substring on both the field name and type
-// rather than the few exact names ("secret"/"password") covered before.
-const CREDENTIAL_FIELD_PATTERNS = [
-  "secret",
-  "password",
-  "passphrase",
-  "key",
-  "token",
-  "private",
-  "mnemonic",
-  "seed",
-];
-
 function isCredentialField(key: string, type?: string): boolean {
   const haystack = `${key} ${type ?? ""}`.toLowerCase();
   return CREDENTIAL_FIELD_PATTERNS.some((p) => haystack.includes(p));
@@ -86,14 +72,14 @@ export function ApiKeysSettings() {
   const [confirmDeleteWallet, setConfirmDeleteWallet] = useState<string | null>(null);
 
   const { data: credsData, isLoading: loadingCreds } = useQuery({
-    queryKey: ["settings-credentials", server],
+    ...credentialsQuery(server),
     queryFn: () => api.getCredentials(server!),
     enabled: !!server,
   });
 
   // Gateway wallets — an error (e.g. Gateway not running) renders as a muted note, not a failure.
   const { data: walletsData, error: walletsError } = useQuery({
-    queryKey: ["gateway-wallets", server],
+    ...gatewayWalletsQuery(server),
     queryFn: () => api.getGatewayWallets(server!),
     enabled: !!server,
     retry: false,
@@ -122,20 +108,27 @@ export function ApiKeysSettings() {
     staleTime: 30 * 60 * 1000,
   });
 
-  // Prefetch config-maps for all connectors when the exchange list loads
-  useEffect(() => {
-    const connectors: ConnectorInfo[] = connectorsData?.connectors ?? [];
-    if (!server || connectors.length === 0) return;
-    for (const c of connectors) {
+  // Warm the config-map cache for the ONE connector the pointer/focus is on, rather
+  // than every connector in the list (PERF-349): /settings/connectors/{name}/config-map
+  // is uncached on the backend, so a whole-list prefetch was 30-40 fresh round trips
+  // for a config map the user was never going to open. Same key and staleTime as the
+  // real query below, so a click after a hover still hits a warm cache.
+  const prefetchConfigMap = useCallback(
+    (name: string) => {
+      if (!server) return;
       qc.prefetchQuery({
-        queryKey: ["settings-config-map", server, c.name],
-        queryFn: () => api.getConnectorConfigMap(server, c.name),
+        queryKey: ["settings-config-map", server, name],
+        queryFn: () => api.getConnectorConfigMap(server, name),
         staleTime: 30 * 60 * 1000,
       });
-    }
-  }, [connectorsData, server, qc]);
+    },
+    [qc, server],
+  );
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["settings-credentials", server] });
+  // Adding, deleting or (via ConnectHyperliquid, below) connecting a credential
+  // has to invalidate more than the credential list itself — see
+  // invalidateCredentialQueries (CORR-353).
+  const invalidate = () => invalidateCredentialQueries(qc, server);
 
   const addMut = useMutation({
     mutationFn: () =>
@@ -151,7 +144,8 @@ export function ApiKeysSettings() {
     onSuccess: () => { invalidate(); setConfirmDelete(null); },
   });
 
-  const invalidateWallets = () => qc.invalidateQueries({ queryKey: ["gateway-wallets", server] });
+  const invalidateWallets = () =>
+    qc.invalidateQueries({ queryKey: gatewayWalletsQuery(server).queryKey });
 
   const defaultWalletMut = useMutation({
     mutationFn: (w: { chain: string; address: string }) => api.setDefaultGatewayWallet(server!, w),
@@ -215,11 +209,18 @@ export function ApiKeysSettings() {
     const cm = configMapData.config_map;
     return Object.entries(cm).map(([key, val]) => {
       const v = val as Record<string, unknown>;
+      const required = v.required !== false;
+      // `prompt` is the connector's own wording for the field ("Enter your Binance
+      // API key") and says far more than the raw key does; older API servers don't
+      // send it yet, so the label alone has to keep working. When the field is
+      // optional the prompt usually ends in "(optional)" — the badge beside the
+      // label already says that, so don't say it twice.
+      const prompt = ((v.prompt as string) || (v.description as string) || "").trim();
       return {
         key,
         type: (v.type as string) || "string",
-        required: v.required !== false,
-        description: (v.description as string) || "",
+        required,
+        prompt: required ? prompt : prompt.replace(/\s*\(optional\)\s*$/i, ""),
         isSecret: isCredentialField(key, v.type as string | undefined),
       };
     });
@@ -377,6 +378,8 @@ export function ApiKeysSettings() {
                 <button
                   key={c.name}
                   disabled={alreadyConnected}
+                  onMouseEnter={alreadyConnected ? undefined : () => prefetchConfigMap(c.name)}
+                  onFocus={alreadyConnected ? undefined : () => prefetchConfigMap(c.name)}
                   onClick={() =>
                     setFlow({
                       ...flow,
@@ -437,12 +440,26 @@ export function ApiKeysSettings() {
           <div className="space-y-3">
             {configFields.map((f) => (
               <div key={f.key}>
-                <label className="mb-1 flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
+                <label className="mb-0.5 flex items-baseline gap-1.5 text-xs font-medium text-[var(--color-text)]">
                   {f.key}
-                  {f.required && <span className="text-[var(--color-red)]">*</span>}
+                  {f.required ? (
+                    <span
+                      title="Required"
+                      aria-label="required"
+                      className="text-base font-bold leading-none text-[var(--color-red)]"
+                    >
+                      *
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-normal uppercase tracking-wide text-[var(--color-text-muted)]">
+                      optional
+                    </span>
+                  )}
                 </label>
-                {f.description && (
-                  <p className="mb-1 text-[10px] text-[var(--color-text-muted)]/60">{f.description}</p>
+                {f.prompt && (
+                  <p className="mb-1.5 text-[11px] leading-snug text-[var(--color-text-muted)]">
+                    {f.prompt}
+                  </p>
                 )}
                 <input
                   type={f.isSecret ? "password" : "text"}
@@ -559,35 +576,15 @@ export function ApiKeysSettings() {
                       </span>
                     </div>
 
-                    {confirmDelete === c.connector_name ? (
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => deleteMut.mutate(c.connector_name)}
-                          disabled={deleteMut.isPending}
-                          className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
-                          title="Confirm delete"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => setConfirmDelete(null)}
-                          className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                          title="Cancel delete"
-                          aria-label="Cancel delete"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmDelete(c.connector_name)}
-                        disabled={!isOwner}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
-                        title={isOwner ? "Delete credential" : OWNER_ONLY_HINT}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
+                    <InlineConfirm
+                      confirming={confirmDelete === c.connector_name}
+                      onRequest={() => setConfirmDelete(c.connector_name)}
+                      onConfirm={() => deleteMut.mutate(c.connector_name)}
+                      onCancel={() => setConfirmDelete(null)}
+                      pending={deleteMut.isPending}
+                      disabled={!isOwner}
+                      triggerLabel={isOwner ? "Delete credential" : OWNER_ONLY_HINT}
+                    />
                   </div>
                 ))}
               </div>
@@ -662,37 +659,21 @@ export function ApiKeysSettings() {
                         <Star className="h-3.5 w-3.5" />
                       </button>
                     )}
-                    {confirmDeleteWallet === walletKey ? (
-                      <>
-                        <button
-                          onClick={() =>
-                            deleteWalletMut.mutate({ chain: w.chain, address: w.address })
-                          }
-                          disabled={deleteWalletMut.isPending}
-                          className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
-                          title="Confirm remove"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => setConfirmDeleteWallet(null)}
-                          className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                          title="Cancel remove"
-                          aria-label="Cancel remove"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={() => setConfirmDeleteWallet(walletKey)}
-                        disabled={!isOwner}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
-                        title={isOwner ? "Remove wallet from Gateway" : OWNER_ONLY_HINT}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
+                    <InlineConfirm
+                      confirming={confirmDeleteWallet === walletKey}
+                      onRequest={() => setConfirmDeleteWallet(walletKey)}
+                      onConfirm={() =>
+                        deleteWalletMut.mutate({ chain: w.chain, address: w.address })
+                      }
+                      onCancel={() => setConfirmDeleteWallet(null)}
+                      pending={deleteWalletMut.isPending}
+                      disabled={!isOwner}
+                      triggerLabel={
+                        isOwner ? "Remove wallet from Gateway" : OWNER_ONLY_HINT
+                      }
+                      confirmLabel="Confirm remove"
+                      cancelLabel="Cancel remove"
+                    />
                   </div>
                 </div>
               );

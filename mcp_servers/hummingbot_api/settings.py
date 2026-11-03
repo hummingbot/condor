@@ -9,10 +9,16 @@ import aiohttp
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from mcp_servers._profiles import parse_profile_flags
 from mcp_servers.hummingbot_api.exceptions import ConfigurationError
 
 CONFIG_DIR = Path.home() / ".hummingbot_mcp"
 SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
+
+#: Default tool profile (FEAT-066). ``full`` on purpose: this server is also run
+#: standalone (the uvx console script, an external MCP host, the checked-in
+#: `.mcp.json`), and a launch with no flag has to keep serving the whole surface.
+DEFAULT_TOOL_PROFILE = "full"
 
 
 class ServerConfig(BaseModel):
@@ -65,6 +71,20 @@ class Settings(BaseModel):
     server_name: str = Field(default="default")
     default_account: str = Field(default="master_account")
 
+    # Which slice of the tool surface this process registers (FEAT-066). For an
+    # ACP-driven seat the mounted surface IS the permission model, so this is a
+    # security boundary, not a convenience: see ``server.TOOL_PROFILES``.
+    tool_profile: str = Field(default=DEFAULT_TOOL_PROFILE)
+
+    # Tools the operator switched off for the agent this seat belongs to
+    # (FEAT-091). Subtracted from the profile in ``server.register_tools``, so a
+    # muted tool is never registered and the model is never told it exists — the
+    # only enforcement that also holds on an ACP seat, which cannot be handed an
+    # allowlist. This server knows nothing of ``agents/``: the spawner reads the
+    # mute file and passes the names, which is what keeps a market-data server
+    # free of the agent registry.
+    muted_tools: tuple[str, ...] = Field(default=())
+
     # Connection settings
     connection_timeout: float = Field(default=30.0)
     max_retries: int = Field(default=3)
@@ -103,6 +123,7 @@ def get_settings() -> Settings:
     """Get application settings from server configuration"""
     try:
         server_config = _load_server_config()
+        tool_profile, muted_tools = parse_profile_flags(DEFAULT_TOOL_PROFILE)
 
         return Settings(
             api_url=server_config.url,
@@ -113,6 +134,8 @@ def get_settings() -> Settings:
             max_retries=int(os.getenv("HUMMINGBOT_MAX_RETRIES", "3")),
             retry_delay=float(os.getenv("HUMMINGBOT_RETRY_DELAY", "2.0")),
             log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
+            tool_profile=tool_profile,
+            muted_tools=muted_tools,
         )
     except Exception as e:
         raise ConfigurationError(f"Failed to load configuration: {e}")

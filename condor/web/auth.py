@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
 import secrets
@@ -13,14 +11,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
 from condor.web.models import WebUser
-from config_manager import UserRole, get_config_manager
-from utils.config import TELEGRAM_TOKEN
+from config_manager import ServerPermission, UserRole, get_config_manager
 
 logger = logging.getLogger(__name__)
 
 _ALGORITHM = "HS256"
 _TOKEN_EXPIRE_SECONDS = 86400  # 24 hours
-_AUTH_WINDOW_SECONDS = 86400  # accept auth_date within 24 hours
 _LOGIN_TOKEN_TTL = 300  # one-time login tokens valid for 5 minutes
 
 _bearer_scheme = HTTPBearer()
@@ -44,28 +40,6 @@ def _jwt_secret() -> str:
     if web_secret:
         return web_secret
     return get_config_manager().get_or_create_web_jwt_secret()
-
-
-# ── Telegram Login Widget verification ──
-
-
-def verify_telegram_login(data: dict) -> bool:
-    """Verify data from the Telegram Login Widget using HMAC-SHA256."""
-    check_hash = data.get("hash", "")
-    auth_date = data.get("auth_date", 0)
-
-    # Check auth_date freshness
-    if abs(time.time() - int(auth_date)) > _AUTH_WINDOW_SECONDS:
-        return False
-
-    # Build check string (alphabetically sorted key=value, excluding hash)
-    filtered = {k: v for k, v in data.items() if k != "hash"}
-    check_string = "\n".join(f"{k}={v}" for k, v in sorted(filtered.items()))
-
-    secret_key = hashlib.sha256(TELEGRAM_TOKEN.encode()).digest()
-    computed = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
-
-    return hmac.compare_digest(computed, check_hash)
 
 
 # ── JWT helpers ──
@@ -154,6 +128,47 @@ async def get_current_user(
     )
 
 
+# ── Role gates ──
+
+
+def require_admin(user: WebUser) -> None:
+    """Refuse anyone who is not a Condor admin.
+
+    The role is re-read from the ConfigManager rather than trusted from the JWT
+    claim, so demoting a user takes effect on their next request rather than
+    when their 24h token expires.
+
+    Lives here, beside the server-scoped gates below, because it is the same
+    kind of thing: the one implementation of a permission line that more than
+    one router needs. It began as ``_require_admin`` in ``routes/admin.py`` and
+    was promoted when ``routes/updates.py`` needed the same line — importing a
+    private name across modules is how a gate quietly grows a second, drifting
+    copy.
+    """
+    if not get_config_manager().is_admin(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+
+def report_owner_filter(user: WebUser) -> int | None:
+    """Whose reports a listing may show: everyone's for admins, own otherwise.
+
+    ``None`` disables the store's owner filter — the admin override the other
+    server-data surfaces already grant (``_owner`` in conversations,
+    ``_require_ownership`` in sessions). Anyone else is scoped to entries
+    stamped with their own id; legacy entries with no owner are dropped for
+    them (fail closed, SEC-196).
+
+    Lives here rather than in ``routes/reports.py`` (SEC-593) because the
+    per-routine, per-strategy and per-session report listings need the same
+    line, and ``require_admin`` above records what happens when a gate is
+    imported privately across route modules instead: it grows copies.
+    """
+    return None if get_config_manager().is_admin(user.id) else user.id
+
+
 # ── Server-scoped access (SEC-147) ──
 
 
@@ -176,6 +191,33 @@ def check_server_access(user_id: int, server_name: str) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
 
+def require_owner(cm, user_id: int, server_name: str) -> None:
+    """Enforce the OWNER line on top of the TRADER floor every route already has.
+
+    The rule (SEC-153, extended to the gateway by SEC-166, and to the gateway
+    token list by SEC-207):
+
+    * **Reading** a server's state — status, logs, wallet and network listings,
+      configured connectors — needs TRADER. A shared trader has to be able to
+      see what they are trading against, and to tell the owner when it is down.
+    * **Trading** on a server needs TRADER. That is what the share is for.
+    * **Mutating a server's configuration or its infrastructure** needs OWNER.
+      Exchange credentials, the gateway container lifecycle, the private keys
+      in its keystore, the RPC endpoints it dials and the entries on its token
+      list are all the owner's machine, not a trading action — and each of them
+      can break the owner's running bots for everyone else on the server.
+
+    Admins keep the bypass they hold everywhere else in the web layer.
+
+    Lives here rather than in ``routes/settings.py`` (its first home) because
+    it is the ceiling to this module's floor, and a second hand-copied
+    implementation in the next router that needs it is how the line drifts.
+    """
+    perm = cm.get_server_permission(user_id, server_name)
+    if perm != ServerPermission.OWNER and not cm.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+
 async def require_server_access(
     name: str, user: WebUser = Depends(get_current_user)
 ) -> WebUser:
@@ -191,14 +233,6 @@ async def require_server_access(
     return user
 
 
-async def require_server_access_by_server_name(
-    server_name: str, user: WebUser = Depends(get_current_user)
-) -> WebUser:
-    """Same as :func:`require_server_access` for a ``{server_name}`` path param."""
-    check_server_access(user.id, server_name)
-    return user
-
-
 async def require_server_access_query(
     server: str = Query(...), user: WebUser = Depends(get_current_user)
 ) -> WebUser:
@@ -210,28 +244,6 @@ async def require_server_access_query(
 # ── One-time login tokens (generated from Telegram /web command) ──
 
 
-def create_login_token(user_id: int, username: str = "", first_name: str = "") -> str:
-    """Create a one-time login token for a Telegram user."""
-    # Clean up expired tokens
-    now = time.time()
-    expired = [
-        k
-        for k, v in _pending_login_tokens.items()
-        if now - v["created_at"] > _LOGIN_TOKEN_TTL
-    ]
-    for k in expired:
-        _pending_login_tokens.pop(k, None)
-
-    token = secrets.token_urlsafe(32)
-    _pending_login_tokens[token] = {
-        "user_id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "created_at": now,
-    }
-    return token
-
-
 def _gc_expired_login_tokens(now: float) -> None:
     """Remove expired one-time login tokens from the in-memory store."""
     expired = [
@@ -241,6 +253,21 @@ def _gc_expired_login_tokens(now: float) -> None:
     ]
     for k in expired:
         _pending_login_tokens.pop(k, None)
+
+
+def create_login_token(user_id: int, username: str = "", first_name: str = "") -> str:
+    """Create a one-time login token for a Telegram user."""
+    now = time.time()
+    _gc_expired_login_tokens(now)
+
+    token = secrets.token_urlsafe(32)
+    _pending_login_tokens[token] = {
+        "user_id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "created_at": now,
+    }
+    return token
 
 
 def redeem_login_token(token: str) -> Optional[dict]:
@@ -259,10 +286,6 @@ def redeem_login_token(token: str) -> Optional[dict]:
 
     info = _pending_login_tokens.pop(token, None)
     if info is None:
-        return None
-
-    # Reject expired tokens (already popped above).
-    if now - info["created_at"] > _LOGIN_TOKEN_TTL:
         return None
 
     return info

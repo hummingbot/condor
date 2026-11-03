@@ -3,6 +3,33 @@
 Patterns for fetching market data, candles, order book, portfolio, and executor
 data from a Hummingbot server inside a routine.
 
+## Before the raw client: `condor.fetchers`
+
+Most of what a routine needs is already a documented function — normalized
+candles with a fallback ladder, resolved cross-rates, portfolio state, executor
+rows. Those are the **first** thing to reach for, and the live inventory lives in
+the code, not in this file:
+
+```python
+from condor.primitives import catalog, describe
+print(catalog("market_data"))                              # what exists
+print(describe("market_data.fetch_historical_candles"))    # exact signature
+```
+
+Every one of them takes the `client` below as its first argument:
+
+```python
+from condor.fetchers.market_data import fetch_historical_candles
+
+rows = await fetch_historical_candles(
+    client, "binance", "SOL-USDT", interval="1h", start_time=start, limit=200
+)
+```
+
+Use the raw client methods documented below when no fetcher covers what you
+need. **Do not maintain a function list here** — `catalog()` is generated from
+the code and cannot drift; a list in this file can.
+
 ## Getting the Client
 
 ```python

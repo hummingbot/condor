@@ -68,6 +68,13 @@ class _Cm:
     def has_server_access(self, user_id, name, *a, **kw):
         return name in self.grants.get(user_id, [])
 
+    def get_server_permission(self, user_id, name):
+        # This double grants at OWNER level, so the seat keeps ``full`` and
+        # these tests stay about reach, not about the admin ring (SEC-252).
+        from config_manager import ServerPermission
+
+        return ServerPermission.OWNER if name in self.grants.get(user_id, []) else None
+
     def get_accessible_servers(self, user_id):
         if self._accessible is not None:
             return list(self._accessible)
@@ -220,11 +227,11 @@ class _FakeClient:
 @pytest.fixture
 def registry(monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _FakeClient)
-    monkeypatch.setattr(session_module, "PydanticAIClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.pydantic_ai_client.PydanticAIClient", _FakeClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     return session_module
 

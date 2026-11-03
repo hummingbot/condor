@@ -1,18 +1,77 @@
-"""Delegate a one-off task to a background agent instance.
+"""Hand work to another agent -- detached, or blocking for an answer.
 
-DELEGATE is the async, unattended sibling of CONSULT: instead of blocking for an
-answer, it hands a goal-oriented task to a detached Agent that runs until done,
-then notifies the user. This tool just calls back into the main process (where the
-agent runtime lives) via the web API and returns a ``task_id`` to poll/stop.
+DELEGATE is the single channel for reaching another agent, in two shapes:
+
+* ``start`` gives a goal-oriented task to a *detached* Agent that runs until
+  done and then notifies the user. Returns a ``task_id`` to poll/stop.
+* ``ask`` blocks and returns the agent's answer as a string. This is inter-agent
+  communication: one agent needs another domain's answer to carry on with its
+  own reasoning.
+
+An attended seat should prefer ``start`` (with ``on_complete="resume"`` when it
+wants the answer itself): the user gets a task id, a progress list and a
+transcript instead of a frozen turn. An **unattended** seat -- a tick, a
+background worker -- has no such choice, which is why ``ask`` exists: it runs for
+nobody's conversation, so ``resume`` has nothing to wake and ``notify`` would
+send the answer to the user rather than to the agent that needed it.
+
+This tool just calls back into the main process, where the agent runtime lives,
+via the web API.
 """
 
 from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.settings import caller_slug as _caller_slug
 from mcp_servers.condor.settings import settings
 
 # What the asking conversation gets when the task ends. Spelled out here rather
 # than imported from ``condor.agents.delegate``: this runs in the MCP subprocess,
 # which deliberately talks to the main process over HTTP and never imports it.
 ON_COMPLETE_CHOICES = ("notify", "resume")
+
+# Long enough to cover an ask's model/tool latency without holding the caller's
+# turn open indefinitely. An ask is blocking, so this bound is the caller's too.
+ASK_TIMEOUT_SEC = 180.0
+
+# The default wall-clock budget for a background task, stated here only so the
+# tool can tell the caller what it is getting when it asks for nothing. The
+# route owns the real default and the upper bound (ARCH-310); this subprocess
+# never imports the main process, so a mismatch is caught by a test rather than
+# by an import.
+DEFAULT_TIMEOUT_SEC = 900
+
+# How the user tracks a delegation, per surface. The two surfaces have genuinely
+# different UIs for this, and the hint is quoted back to the user verbatim, so a
+# dashboard-only install was being told to run a command it does not have
+# (CORR-262). Only the middle clause varies -- the "do NOT invent a status
+# command" guard is what the hint existed for and is surface-independent.
+TRACK_TELEGRAM = (
+    "they can check progress anytime with the /delegations command in Telegram"
+)
+TRACK_DASHBOARD = (
+    "they can check progress anytime in the dashboard, in the Tasks list of the "
+    "chat's context dock"
+)
+
+
+def _next_steps(session_key: str) -> str:
+    """The tracking hint for the surface this subprocess was spawned from.
+
+    ``session_key`` is a canonical key ("web:7:slot-1", "tg:42", …) minted by
+    ``_spawn_session``; the prefix is the surface. An unknown or empty key means
+    the seat is not a Telegram chat (a background worker, a tick, an external MCP
+    host), so the dashboard wording is the honest default: it names a UI that
+    exists on
+    every install, while /delegations only exists where Telegram does.
+    """
+    surface = (session_key or "").split(":", 1)[0].strip().lower()
+    where = TRACK_TELEGRAM if surface == "tg" else TRACK_DASHBOARD
+    return (
+        "Running in the background — the user is notified automatically when it "
+        "finishes, and the outcome is written into this conversation and shown "
+        f"here as it lands. Tell them {where}. You can poll it yourself "
+        'with delegate(action="get", task_id="<id>"). Do NOT invent any '
+        "other status command (e.g. there is no /task command)."
+    )
 
 
 async def delegate(
@@ -21,9 +80,56 @@ async def delegate(
     task: str = "",
     task_id: str = "",
     on_complete: str = "notify",
+    timeout_sec: int = 0,
+    context: str = "",
 ) -> dict:
-    """Dispatch a delegate action (start | list | get | stop)."""
+    """Dispatch a delegate action (start | ask | list | get | stop)."""
     action = (action or "").lower()
+
+    if action == "ask":
+        if not agent or not task:
+            return {"error": "agent and task are required to ask an agent"}
+        # Depth 1, structurally (the same shape the two guards below draw around
+        # ``start``). An ask is auto-approved and its caller is blocked waiting
+        # on it, so a target free to ask onward would nest blocked callers with
+        # nobody watching any of them. ``start`` stays open from here: a detached
+        # task does not hold this turn open behind it.
+        if settings.ask_target:
+            return {
+                "error": (
+                    "Nested ask refused: you are already answering another "
+                    "agent's ask, and it is blocked waiting on you. Answer from "
+                    "what you know, or hand the longer job to a detached agent "
+                    'with delegate(action="start", ...) and say so in your '
+                    "answer."
+                )
+            }
+        if agent == settings.agent_slug:
+            return {
+                "error": (
+                    f"Self-ask refused: '{agent}' is you. Answer the question "
+                    "yourself rather than round-tripping through a copy of your "
+                    "own brain. (To run long work as a background copy of "
+                    'yourself, use delegate(action="start", agent='
+                    f'"{settings.agent_slug}", ...).)'
+                )
+            }
+        return await call_main_api(
+            "POST",
+            f"/agents/{agent}/ask",
+            {
+                "task": task,
+                "context": context,
+                "chat_id": settings.chat_id,
+                "user_id": settings.user_id,
+                "server_name": settings.active_server or None,
+                # Who is asking, stamped onto the ask's record (FEAT-058) so an
+                # agent's Activity tab can say "asked by condor" rather than only
+                # that something asked. Same rule ``run_code`` attributes with.
+                "caller": _caller_slug(),
+            },
+            timeout=ASK_TIMEOUT_SEC,
+        )
 
     if action == "start":
         # Hard stop, not a prompt rule (FEAT-032): a background worker runs with
@@ -70,31 +176,33 @@ async def delegate(
                     f"got '{on_complete}'"
                 )
             }
+        body = {
+            "task": task,
+            "chat_id": settings.chat_id,
+            "user_id": settings.user_id,
+            "server_name": settings.active_server or None,
+            # Provenance: the route resolves this to the conversation that
+            # asked for the work, so the chat can watch what it started.
+            "session_key": settings.session_key,
+            "on_complete": on_complete,
+        }
+        # Only sent when the caller actually asked for a budget: omitting the
+        # key leaves the route's default in one place instead of pinning a copy
+        # of it into every request this subprocess makes (ARCH-310). The bounds
+        # are the route's to enforce -- it answers a bad one with a 400 whose
+        # detail says the limit, which reaches the model as an error.
+        if timeout_sec:
+            body["timeout_s"] = int(timeout_sec)
         result = await call_main_api(
             "POST",
             f"/agents/{agent}/delegate",
-            {
-                "task": task,
-                "chat_id": settings.chat_id,
-                "user_id": settings.user_id,
-                "server_name": settings.active_server or None,
-                # Provenance: the route resolves this to the conversation that
-                # asked for the work, so the chat can watch what it started.
-                "session_key": settings.session_key,
-                "on_complete": on_complete,
-            },
+            body,
         )
         # Spell out how the user tracks this so the model never INVENTS a status
-        # command. There is no "/task" command — the user-facing one is
-        # "/delegations"; the user is also pinged automatically on completion.
+        # command, and name the surface they are actually on: there is no "/task"
+        # command anywhere, and no "/delegations" one outside Telegram.
         if isinstance(result, dict) and not result.get("error"):
-            result["next_steps"] = (
-                "Running in the background — the user is notified automatically "
-                "when it finishes. Tell them they can check progress anytime with "
-                "the /delegations command in Telegram. You can poll it yourself "
-                'with delegate(action="get", task_id="<id>"). Do NOT invent any '
-                "other status command (e.g. there is no /task command)."
-            )
+            result["next_steps"] = _next_steps(settings.session_key)
             if on_complete == "resume":
                 # Said explicitly so the model ends its turn instead of
                 # burning it polling for a result that will be handed to it.
@@ -118,4 +226,4 @@ async def delegate(
             return {"error": "task_id is required for stop"}
         return await call_main_api("POST", f"/agents/delegations/{task_id}/stop")
 
-    return {"error": f"Unknown action '{action}'. Use start | list | get | stop."}
+    return {"error": f"Unknown action '{action}'. Use start | ask | list | get | stop."}

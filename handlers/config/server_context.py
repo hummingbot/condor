@@ -28,7 +28,7 @@ async def get_server_context_header(user_data: dict = None) -> Tuple[str, bool]:
         # Get user's preferred server
         default_server = None
         if user_data:
-            from handlers.config.user_preferences import get_active_server
+            from condor.preferences import get_active_server
 
             default_server = get_active_server(user_data)
         if not default_server:
@@ -99,7 +99,7 @@ async def get_gateway_status_info(
 
         preferred = None
         if user_data:
-            from handlers.config.user_preferences import get_active_server
+            from condor.preferences import get_active_server
 
             preferred = get_active_server(user_data)
         client = await get_config_manager().get_client_for_chat(

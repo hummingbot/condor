@@ -93,7 +93,7 @@ the exit (pool, reason, realized pnl_pct, fees, duration) as a `learning` if the
 ### 3. Detect — ONE routine call (only if free > 0)
 ```
 manage_routines(action="run", name="easya_graduation_monitor",
-  strategy_id="meteora_launch_lp.launch_lp_operator",
+  agent="meteora_launch_lp",
   config={"max_age_hours": <entry.max_age_hours>, "min_tvl_usd": <entry.min_tvl_usd>,
           "min_vol24h_usd": <entry.min_vol24h_usd>, "verified_only": <entry.require_verified>, "top_n": 5})
 ```

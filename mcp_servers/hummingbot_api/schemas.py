@@ -8,234 +8,11 @@ and documentation across the codebase.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
-
-# ==============================================================================
-# Executor Management Schemas
-# ==============================================================================
-
-
-class ManageExecutorsRequest(BaseModel):
-    """Request model for managing executors with progressive disclosure.
-
-    Progressive Flow Stages:
-    1. No params -> List available executor types with descriptions
-    2. executor_type only -> Show config schema with user defaults applied
-    3. action="create" + executor_config -> Create executor (merged with defaults)
-    4. action="search" -> Search/list executors (or get detail if executor_id provided)
-    5. action="stop" + executor_id -> Stop executor
-    6. action="get_logs" + executor_id -> Get executor logs
-    7. action="get_preferences" -> View saved preferences
-    8. action="save_preferences" + preferences_content -> Save preferences file
-    9. action="reset_preferences" -> Reset preferences to defaults
-    10. action="positions_summary" -> Get positions (or specific if connector_name+trading_pair given)
-    11. action="clear_position" + connector_name + trading_pair -> Clear position
-    """
-
-    action: (
-        Literal[
-            "create",
-            "search",
-            "stop",
-            "get_logs",
-            "get_preferences",
-            "save_preferences",
-            "reset_preferences",
-            "positions_summary",
-            "clear_position",
-            "performance_report",
-        ]
-        | None
-    ) = Field(
-        default=None,
-        description="Action to perform. Leave empty to see executor types or show schema.",
-    )
-
-    executor_type: str | None = Field(
-        default=None,
-        description="Type of executor (e.g., 'position_executor', 'dca_executor'). Leave empty to list types.",
-    )
-
-    executor_config: dict[str, Any] | None = Field(
-        default=None,
-        description="Configuration for creating an executor. Required for 'create' action.",
-    )
-
-    executor_id: str | None = Field(
-        default=None,
-        description="Executor ID for 'get' or 'stop' actions.",
-    )
-
-    # Log options
-    log_level: str | None = Field(
-        default=None,
-        description="Filter logs by level (ERROR, WARNING, INFO, DEBUG). Only for 'get_logs' action.",
-    )
-
-    # Search filters
-    account_names: list[str] | None = Field(
-        default=None,
-        description="Filter by account names.",
-    )
-
-    connector_names: list[str] | None = Field(
-        default=None,
-        description="Filter by connector names.",
-    )
-
-    trading_pairs: list[str] | None = Field(
-        default=None,
-        description="Filter by trading pairs.",
-    )
-
-    executor_types: list[str] | None = Field(
-        default=None,
-        description="Filter by executor types for search.",
-    )
-
-    status: str | None = Field(
-        default=None,
-        description="Filter by status (e.g., 'RUNNING', 'TERMINATED').",
-    )
-
-    # Pagination
-    cursor: str | None = Field(
-        default=None,
-        description="Pagination cursor for search results.",
-    )
-
-    limit: int = Field(
-        default=50,
-        description="Maximum number of results to return.",
-        ge=1,
-        le=1000,
-    )
-
-    # Stop options
-    keep_position: bool = Field(
-        default=False,
-        description="When stopping, keep the position open instead of closing it.",
-    )
-
-    # Preferences
-    save_as_default: bool = Field(
-        default=False,
-        description="Save the executor_config as default for this executor_type.",
-    )
-
-    preferences_content: str | None = Field(
-        default=None,
-        description="Complete markdown content for the preferences file. Used with 'save_preferences' action.",
-    )
-
-    account_name: str | None = Field(
-        default=None,
-        description="Account name for creating executors. Defaults to 'master_account'.",
-    )
-
-    # Position management fields (for positions_summary, get_position, clear_position)
-    connector_name: str | None = Field(
-        default=None,
-        description="Connector name for position filtering or clearing.",
-    )
-
-    trading_pair: str | None = Field(
-        default=None,
-        description="Trading pair for position filtering or clearing.",
-    )
-
-    controller_id: str | None = Field(
-        default=None,
-        description="Controller ID that owns this executor. Used for create, positions_summary, get_position, clear_position, and performance_report.",
-    )
-
-    controller_ids: list[str] | None = Field(
-        default=None,
-        description="Filter by controller IDs (for search).",
-    )
-
-    @field_validator("executor_type")
-    @classmethod
-    def validate_executor_type(cls, v: str | None) -> str | None:
-        """Validate executor type format if provided."""
-        if v is not None:
-            v = v.lower().replace(" ", "_").replace("-", "_")
-        return v
-
-    def get_flow_stage(self) -> str:
-        """Determine which stage of the flow we're in."""
-        if self.action == "get_preferences":
-            return "get_preferences"
-        elif self.action == "save_preferences" and self.preferences_content:
-            return "save_preferences"
-        elif self.action == "reset_preferences":
-            return "reset_preferences"
-        elif self.action == "search":
-            return "search"
-        elif self.action == "stop" and self.executor_id:
-            return "stop"
-        elif self.action == "get_logs" and self.executor_id:
-            return "get_logs"
-        elif self.action == "create" and self.executor_config:
-            return "create"
-        elif self.action == "positions_summary":
-            return "positions_summary"
-        elif (
-            self.action == "clear_position"
-            and self.connector_name
-            and self.trading_pair
-        ):
-            return "clear_position"
-        elif self.action == "performance_report":
-            return "performance_report"
-        elif self.executor_type is not None:
-            return "show_schema"
-        else:
-            return "list_types"
-
+from pydantic import BaseModel, Field
 
 # ==============================================================================
 # Gateway Management Schemas
 # ==============================================================================
-
-
-class GatewayContainerRequest(BaseModel):
-    """Request model for Gateway container management with progressive disclosure.
-
-    This model supports container lifecycle management:
-    - get_status: Check if Gateway is running and get container details
-    - start: Start Gateway container with configuration
-    - stop: Stop Gateway container
-    - restart: Restart Gateway (optionally with new configuration)
-    - get_logs: Retrieve Gateway container logs
-    """
-
-    action: Literal["get_status", "start", "stop", "restart", "get_logs"] = Field(
-        description="Action to perform on Gateway container"
-    )
-
-    config: dict[str, Any] | None = Field(
-        default=None,
-        description="Gateway configuration (used for 'start', optional for 'restart'). "
-        "The Hummingbot API runs Gateway secured (TLS + mTLS) and manages the "
-        "certificates/passphrase itself using its own CONFIG_PASSWORD (hummingbot-api "
-        "SEC-048), so no passphrase is needed here. "
-        "Fields: image (Docker image, default: hummingbot/gateway:development), "
-        "port (exposed port, default: 15888).",
-        examples=[
-            {
-                "image": "hummingbot/gateway:development",
-                "port": 15888,
-            }
-        ],
-    )
-
-    tail: int | None = Field(
-        default=100,
-        ge=1,
-        le=200,
-        description="Number of log lines to retrieve (only for 'get_logs' action, default: 100, max: 200)",
-    )
 
 
 class GatewayConfigRequest(BaseModel):
@@ -245,18 +22,22 @@ class GatewayConfigRequest(BaseModel):
 
     Resource Types:
     - chains: Blockchain chains (get all chains)
-    - networks: Network configurations (list, get, update) - format: 'chain-network'
+    - networks: Network configurations (list, get) - format: 'chain-network'
     - tokens: Token configurations (list, add, delete, save) per network
-    - connectors: DEX connector configurations (list, get, update)
+    - connectors: DEX connector configurations (list, get)
     - pools: Liquidity pools (list, add, delete, save) per connector/network
-    - wallets: Wallet management (add, delete) for blockchain chains
+    - wallets: Configured wallets per chain (list only — a wallet is added or
+      removed in the Condor dashboard, never through an agent)
+
+    Networks and connectors are read-only here. Their config holds the RPC every
+    transaction is broadcast through and the slippage every swap inherits, so it
+    is changed by the server owner in Condor, never through an agent.
 
     Actions:
     - list: List available resources
     - get: Get specific resource configuration
-    - update: Update resource configuration
-    - add: Add new resource (tokens, pools, wallets) - requires full details
-    - delete: Delete resource (tokens, pools, wallets)
+    - add: Add new resource (tokens, pools) - requires full details
+    - delete: Delete resource (tokens, pools)
     - save: Save resource by address only (tokens, pools) - auto-fetches details
     """
 
@@ -264,7 +45,7 @@ class GatewayConfigRequest(BaseModel):
         "chains", "networks", "tokens", "connectors", "pools", "wallets"
     ] = Field(description="Type of resource to manage")
 
-    action: Literal["list", "get", "update", "add", "delete", "save"] = Field(
+    action: Literal["list", "get", "add", "delete", "save"] = Field(
         description="Action to perform on the resource"
     )
 
@@ -281,18 +62,6 @@ class GatewayConfigRequest(BaseModel):
         description="DEX connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap'). "
         "Required for connector operations and pool list operations",
         examples=["meteora", "raydium", "orca", "uniswap", "pancakeswap"],
-    )
-
-    # Configuration data
-    config_updates: dict[str, Any] | None = Field(
-        default=None,
-        description="Configuration updates as key-value pairs. "
-        "Keys can be in snake_case or camelCase. "
-        "Required for 'update' action",
-        examples=[
-            {"slippage_pct": 0.5, "timeout": 30000},
-            {"node_url": "https://api.mainnet-beta.solana.com"},
-        ],
     )
 
     # Token-specific fields
@@ -359,17 +128,8 @@ class GatewayConfigRequest(BaseModel):
     # Wallet-specific fields
     chain: str | None = Field(
         default=None,
-        description="Blockchain chain for wallet (e.g., 'solana', 'ethereum'). Required for wallet operations",
+        description="Blockchain chain to filter wallets by (e.g., 'solana', 'ethereum')",
         examples=["solana", "ethereum", "avalanche", "polygon"],
-    )
-
-    private_key: str | None = Field(
-        default=None,
-        description="Private key for wallet. Required for 'add' wallet action",
-    )
-
-    wallet_address: str | None = Field(
-        default=None, description="Wallet address. Required for 'delete' wallet action"
     )
 
 
@@ -394,9 +154,13 @@ class GatewaySwapRequest(BaseModel):
     4. action="search" + filters -> Query swap history
     """
 
-    action: Literal["quote", "execute", "search", "get_status"] = Field(
-        description="Action to perform: 'quote' (get price), 'execute' (perform swap), "
-        "'search' (query history), 'get_status' (check tx status)"
+    action: Literal["quote", "execute", "execute_quote", "search", "get_status"] = (
+        Field(
+            description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
+            "price found at execution), 'execute_quote' (execute a quote you already have, by its "
+            "quote_id — the price you were shown is the price you get), 'search' (query history), "
+            "'get_status' (check tx status)"
+        )
     )
 
     # Common swap parameters (required for quote/execute)
@@ -433,9 +197,17 @@ class GatewaySwapRequest(BaseModel):
     )
 
     slippage_pct: str | None = Field(
-        default="1.0",
-        description="Maximum slippage percentage (optional, default: 1.0). "
-        "Example: '1.5' for 1.5% slippage tolerance",
+        default=None,
+        description="Maximum slippage percentage (optional). "
+        "Omit to use the connector's configured slippage. "
+        "Example: '1.5' for 1.5% slippage tolerance ('0' is a real value, not 'use default')",
+    )
+
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters for quote/execute (optional). "
+        "Supported key: 'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers only) - "
+        "allow an approximate quote when no exact-out route exists",
     )
 
     # Execute-specific parameter
@@ -444,32 +216,23 @@ class GatewaySwapRequest(BaseModel):
         description="Wallet address for execute action (optional, uses default wallet if not provided)",
     )
 
+    # Execute-quote parameter
+    quote_id: str | None = Field(
+        default=None,
+        description="quote_id from a prior quote action (required for execute_quote). Only the "
+        "router connectors return one — jupiter, dflow, okx, titan, 0x — because only they hold "
+        "a price; a pool-scoped connector prices against the pool at execution and has none.",
+    )
+
     # Get status parameter
     transaction_hash: str | None = Field(
         default=None, description="Transaction hash (required for get_status action)"
     )
 
-    # Search parameters (all optional)
-    search_connector: str | None = Field(
-        default=None,
-        description="Filter by connector for search action (e.g., 'jupiter')",
-    )
-
-    search_network: str | None = Field(
-        default=None,
-        description="Filter by network for search action (e.g., 'solana-mainnet-beta')",
-    )
-
-    search_wallet_address: str | None = Field(
-        default=None, description="Filter by wallet address for search action"
-    )
-
-    search_trading_pair: str | None = Field(
-        default=None,
-        description="Filter by trading pair for search action. Supports symbols and addresses "
-        "(e.g., 'SOL-USDC', 'TOKEN_ADDRESS_1-TOKEN_ADDRESS_2')",
-    )
-
+    # Search parameters (all optional). The search action reuses `connector`,
+    # `network`, `wallet_address` and `trading_pair` as filters: each action is
+    # now its own registered tool (FEAT-064), so nothing has to disambiguate a
+    # filter from a quote parameter inside one signature any more.
     status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = Field(
         default=None, description="Filter by transaction status for search action"
     )
@@ -508,7 +271,7 @@ class GatewayCLMMRequest(BaseModel):
     - list_pools: Get list of available CLMM pools with filtering/sorting
     - get_pool_info: Get detailed information about a specific pool
 
-    To manage LP positions, use `manage_executors` with `lp_executor` type.
+    To manage LP positions, use `create_lp_executor`.
     To check on-chain positions, use `get_portfolio_overview` with `include_lp_positions=True`.
     """
 
@@ -531,6 +294,18 @@ class GatewayCLMMRequest(BaseModel):
         default=None, description="Pool contract address (required for get_pool_info)"
     )
 
+    bin_count: int = Field(
+        default=0,
+        ge=0,
+        le=401,
+        description=(
+            "For get_pool_info: if > 0, include the per-tick liquidity distribution "
+            "(`bins`) around the active price. Meteora always returns its bins; "
+            "orca, raydium, uniswap and pancakeswap compute them on request. "
+            "Default 0 skips the extra on-chain reads."
+        ),
+    )
+
     # Pool listing parameters
     page: int = Field(
         default=0, ge=0, description="Page number for list_pools (default: 0)"
@@ -549,7 +324,11 @@ class GatewayCLMMRequest(BaseModel):
     )
 
     sort_key: str | None = Field(
-        default="volume", description="Sort by field (volume, tvl, feetvlratio, etc.)"
+        default="tvl",
+        description="Sort by field. Defaults to tvl — depth is the LP question, and "
+        "volume ties at zero across every pool on a quiet pair. "
+        "meteora: tvl, volume, feetvlratio. "
+        "orca: tvl, volume, fees, rewards, yieldovertvl.",
     )
 
     order_by: str | None = Field(
@@ -590,8 +369,6 @@ class AMMRequest(BaseModel):
             "pool_info",
             "position_info",
             "positions_owned",
-            "quote_swap",
-            "execute_swap",
             "quote_liquidity",
             "add_liquidity",
             "remove_liquidity",
@@ -609,7 +386,8 @@ class AMMRequest(BaseModel):
     )
     network: str | None = Field(
         default=None,
-        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'base-mainnet'",
+        description="Network ID in 'chain-network' format, built from Gateway's chain/network "
+        "config names. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'ethereum-base'",
     )
     wallet_address: str | None = Field(
         default=None,
@@ -621,20 +399,13 @@ class AMMRequest(BaseModel):
         description="Meteora NFT position: REQUIRED for remove_liquidity, optional for add_liquidity (omit = open a new position). Ignored by fungible-LP AMMs.",
     )
 
-    # Swap params
+    # Token params
     base_token: str | None = Field(
-        default=None,
-        description="Base token symbol or address (swap direction / pool base)",
+        default=None, description="Base token symbol or address (create_pool)"
     )
     quote_token: str | None = Field(
         default=None,
         description="Quote token symbol or address (pool quote, for create_pool)",
-    )
-    amount: str | None = Field(
-        default=None, description="Swap amount (as string; parsed to Decimal)"
-    )
-    side: Literal["BUY", "SELL"] | None = Field(
-        default=None, description="Swap direction"
     )
     slippage_pct: str | None = Field(
         default=None, description="Maximum slippage percentage (as string)"
@@ -659,18 +430,113 @@ class AMMRequest(BaseModel):
         default=None,
         description="Initial price as quote per base (create_pool; overrides quote_token_amount)",
     )
-    config_address: str | None = Field(
+    extra_params: dict[str, Any] | None = Field(
         default=None,
-        description="Meteora DAMM v2 config account address (required for meteora create_pool)",
+        description="Connector-specific create_pool params under Gateway's own names: "
+        "configAddress (meteora DAMM v2, required there), ammConfigIndex (raydium CPMM). "
+        "uniswap/pancakeswap (EVM) AMM take no extra params. Unknown keys are "
+        "rejected by the API with a 400.",
     )
-    fee_config_index: int | None = Field(
+
+
+class CLMMRequest(BaseModel):
+    """Request model for the direct, chain- & DEX-agnostic CLMM tool (manage_clmm).
+
+    Drives concentrated-liquidity position operations across Meteora DLMM, Raydium CLMM, Orca
+    Whirlpools (Solana), and Uniswap V3 / PancakeSwap V3 (EVM).
+
+    Progressive disclosure: action=None returns the CLMM guide.
+
+    This is the direct, unmanaged path. The managed path for normal LP work is
+    create_lp_executor, which owns range monitoring, rebalancing and close retries.
+    Use manage_clmm to inspect positions and to recover orphaned ones that no executor owns
+    any more — a terminated executor cannot be told to close its position.
+    """
+
+    action: (
+        Literal[
+            "position_info",
+            "open",
+            "add_liquidity",
+            "remove_liquidity",
+            "close",
+            "collect_fees",
+            "create_pool",
+        ]
+        | None
+    ) = Field(
+        default=None, description="CLMM action. Leave empty to load the CLMM guide."
+    )
+
+    connector: str | None = Field(
         default=None,
-        description="Raydium CPMM fee config index (optional, create_pool)",
+        description="CLMM connector (required for any action): 'meteora', 'raydium', 'orca', "
+        "'pancakeswap-sol' (Solana), 'uniswap', 'pancakeswap' (EVM). A '<name>/clmm' form is "
+        "accepted, so an orphan record's lp_provider (e.g. 'orca/clmm') can be passed through "
+        "unchanged.",
     )
-    gas_price: str | None = Field(
+    network: str | None = Field(
         default=None,
-        description="Uniswap (EVM) gas price in gwei (optional, create_pool)",
+        description="Network ID in 'chain-network' format, built from Gateway's chain/network "
+        "config names. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'ethereum-base', "
+        "'ethereum-bsc'",
     )
-    max_gas: int | None = Field(
-        default=None, description="Uniswap (EVM) max gas limit (optional, create_pool)"
+    wallet_address: str | None = Field(
+        default=None,
+        description="Wallet address (optional, uses default if not provided)",
+    )
+    pool_address: str | None = Field(
+        default=None,
+        description="Pool contract address. Required for open. Optional and informational "
+        "everywhere else: the API never reads it on close or collect_fees (Gateway needs only "
+        "position_address, and the pre-close fee snapshot does not use it), and position_info "
+        "lists every position the wallet owns without a pool filter.",
+    )
+    position_address: str | None = Field(
+        default=None,
+        description="Position NFT address. Required for add_liquidity, remove_liquidity, close, collect_fees.",
+    )
+
+    # Range params (open)
+    lower_price: str | None = Field(
+        default=None, description="Lower price bound of the position range (open)"
+    )
+    upper_price: str | None = Field(
+        default=None, description="Upper price bound of the position range (open)"
+    )
+
+    # Liquidity params
+    base_token_amount: str | None = Field(
+        default=None, description="Base token amount (open / add_liquidity)"
+    )
+    quote_token_amount: str | None = Field(
+        default=None, description="Quote token amount (open / add_liquidity)"
+    )
+    percentage_to_remove: str | None = Field(
+        default=None,
+        description="Percentage of liquidity to remove, 0-100 (remove_liquidity). 100 empties the position but "
+        "leaves the account open — use action='close' to withdraw and close it.",
+    )
+    slippage_pct: str | None = Field(
+        default=None, description="Maximum slippage percentage (as string)"
+    )
+
+    # create_pool params
+    base_token: str | None = Field(
+        default=None, description="Base token symbol or address (create_pool)"
+    )
+    quote_token: str | None = Field(
+        default=None, description="Quote token symbol or address (create_pool)"
+    )
+    initial_price: str | None = Field(
+        default=None,
+        description="Initial pool price as quote per base (create_pool, optional — "
+        "the API fetches the market price when omitted)",
+    )
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters under Gateway's own names. "
+        "open/add_liquidity: strategyType (meteora DLMM, e.g. {'strategyType': 0}). "
+        "create_pool: binStep (meteora/orca), feeBps (meteora/uniswap/pancakeswap), "
+        "ammConfigIndex (raydium/pancakeswap-sol). Unknown keys are rejected by the API with a 400.",
     )

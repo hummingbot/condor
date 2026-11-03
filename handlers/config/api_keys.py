@@ -12,12 +12,12 @@ from urllib.parse import quote, urlparse
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor.preferences import get_active_server
 from utils.auth import restricted
 from utils.config import WEB_URL
 from utils.telegram_formatters import escape_markdown_v2
 
 from .server_context import build_config_message_header, format_server_selection_needed
-from .user_preferences import get_active_server
 
 logger = logging.getLogger(__name__)
 

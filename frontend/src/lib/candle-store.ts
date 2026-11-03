@@ -41,6 +41,26 @@ function normalizeTimestamp(ts: number): number {
   return ts > 1e12 ? ts / 1000 : ts;
 }
 
+/**
+ * Canonical candle store/WS channel key. The optional pool segment pins the
+ * stream to one DEX pool; omitted (every CLOB chart) the key keeps its five
+ * segments, byte for byte. Every consumer must build keys through this —
+ * hand-rebuilt templates drift (a missing pool segment subscribes a listener
+ * to a channel that never notifies).
+ */
+export function candleChannelKey(
+  server: string,
+  connector: string,
+  pair: string,
+  interval: string,
+  poolAddress?: string,
+): string {
+  return (
+    `candles:${server}:${connector}:${pair}:${interval}` +
+    (poolAddress ? `:${poolAddress}` : "")
+  );
+}
+
 function sortedFromMap(map: Map<number, CandleData>): CandleData[] {
   return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
 }

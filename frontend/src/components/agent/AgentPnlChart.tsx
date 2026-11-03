@@ -86,7 +86,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
         }
 
         const pnl = (seriesData as { value: number }).value;
-        const pnlColor = pnl >= 0 ? colors.up : colors.down;
+        const pnlCssColor = pnl >= 0 ? colors.up : colors.down;
         const ts = typeof param.time === "number" ? param.time : 0;
         const date = new Date(ts * 1000);
         const timeStr = date.toLocaleString("en-US", {
@@ -98,7 +98,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
         tooltip.innerHTML = `
           <div style="color:#9ca3af;font-size:10px;margin-bottom:2px">${timeStr}</div>
-          <div style="color:${pnlColor};font-weight:600;font-size:13px">${formatCurrencyPnl(pnl)}</div>
+          <div style="color:${pnlCssColor};font-weight:600;font-size:13px">${formatCurrencyPnl(pnl)}</div>
         `;
         tooltip.style.display = "block";
 

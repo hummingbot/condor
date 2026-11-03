@@ -18,6 +18,17 @@ what a routine reaches. It follows that calling ``execute_code`` is handing over
 the whole process, so every caller must gate it at least as tightly as
 ``condor/web/routes/code.py`` does (SEC-151); "the caller is authenticated" is
 not a gate.
+
+Which means the ``code_run`` preference that gate honors is **admin-equivalent
+by construction**, not a narrower permission that happens to include code: a
+snippet reaches the API client, the config, every ``condor.*`` module and the
+process itself, so granting it grants everything a confirmation prompt stands in
+front of elsewhere (SEC-616). Grant it as you would admin. A snippet is not
+confirmed per call on purpose — gating it by name would put a prompt in front of
+every agent tick's market read — so this grant, the per-run record in
+``condor/code_runs.py`` and the action-log row
+(:func:`condor.runtime.danger.is_code_execution_call`) are the whole containment;
+unattended dry-run sessions refuse it outright in ``condor/agents/risk.py``.
 """
 
 from __future__ import annotations
@@ -124,23 +135,40 @@ def _render_result(namespace: dict) -> str:
 
 
 async def _run_in_task(
-    compiled, namespace: dict, buffer, agent: str, source: str, out: dict
+    compiled,
+    namespace: dict,
+    buffer,
+    agent: str,
+    source: str,
+    out: dict,
+    owner_id: int = 0,
 ):
     """The snippet itself, in its own task context.
 
     Setting the capture ContextVar *here* (not in the caller) is what keeps the
     buffer private to this run, and the report id is read in a ``finally`` so a
     snippet that saved a report and then raised still reports it.
+    ``owner_id`` is the authenticated caller (``chat_id`` in ``execute_code``);
+    it stamps any report the snippet saves so the web routes can authorize
+    reads/deletes against it (SEC-196). ``bind_context`` publishes the same
+    context object the snippet sees, so a ``call_routine`` inside it inherits
+    this run's server and user instead of an ambient default (FEAT-052).
     """
+    from condor.primitives import bind_context
+
     _CAPTURE.set(buffer)
-    reports.reset_last_report_id()
-    try:
-        with reports.attribute_to(agent), reports.default_source("code", source):
+    with (
+        reports.run_scope(
+            owner=owner_id, agent=agent, source_type="code", source_name=source
+        ),
+        bind_context(namespace.get("context")),
+    ):
+        try:
             outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
             if inspect.isawaitable(outcome):
                 await outcome
-    finally:
-        out["report_id"] = reports.get_last_report_id() or ""
+        finally:
+            out["report_id"] = reports.get_last_report_id() or ""
 
 
 async def execute_code(
@@ -167,6 +195,10 @@ async def execute_code(
         id=run_id,
         created=time.time(),
         agent=agent,
+        # The same authenticated id that resolves the client and stamps the
+        # run's reports. Recording it is what lets a listing authorize its rows
+        # without opening them (FEAT-061); 0 when nothing authenticated.
+        user_id=chat_id,
         label=label,
         server=server_name,
         code=code,
@@ -207,7 +239,15 @@ async def execute_code(
     _install_stdout_proxy()
     out: dict = {"report_id": ""}
     task = asyncio.create_task(
-        _run_in_task(compiled, namespace, buffer, agent, label or run_id, out)
+        _run_in_task(
+            compiled,
+            namespace,
+            buffer,
+            agent,
+            label or run_id,
+            out,
+            owner_id=chat_id,
+        )
     )
     try:
         await asyncio.wait_for(task, timeout=timeout)

@@ -5,7 +5,7 @@ import { api, type Ticker } from "@/lib/api";
 
 /**
  * 24h tickers for a connector, already sorted by USD volume (highest first) by the
- * backend. Shared by PairSelector and MarketsPanel so both hit one cached query.
+ * backend. Shared by PairSelector and MarketBrowser so both hit one cached query.
  *
  * @param enabled Pass false for venues with no ticker endpoint (gateway DEX
  *   networks), where the request would only 502.

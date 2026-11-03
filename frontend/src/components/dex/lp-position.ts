@@ -1,6 +1,8 @@
 import { type ExecutorInfo } from "@/lib/api";
 import { formatUsd } from "@/lib/formatters";
 
+import { num } from "./format";
+
 /** LP executors are the only ones the DEX pages can route to a pool. */
 export const LP_EXECUTOR_TYPE = "lp_executor";
 
@@ -21,12 +23,6 @@ export const LP_REFRESH_MS = 20_000;
  * query — one cache entry, and opening a pool from the strip costs no fetch.
  */
 export const RECENT_LP_EXECUTORS = 200;
-
-function num(v: unknown): number | null {
-  if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : null;
-}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -116,4 +112,20 @@ export function lpStateStyle(state: string): {
     color: "var(--color-text-muted)",
     bg: "var(--color-surface)",
   };
+}
+
+/**
+ * Where the price sits inside the range, as a 0–1 fraction, or `null`.
+ *
+ * The number a CLMM position is actually about: a range you are 95% of the way
+ * through is one swap from earning nothing, and no amount of reading two price
+ * strings makes that as obvious as a marker does.
+ *
+ * Lives here rather than beside one renderer because the bar above a pool's
+ * chart and the portfolio's liquidity table draw the same marker.
+ */
+export function rangeFraction(pos: LpPosition, price: number | null): number | null {
+  const { lowerPrice: lo, upperPrice: hi } = pos;
+  if (!lo || !hi || hi <= lo || !price || price <= 0) return null;
+  return Math.min(1, Math.max(0, (price - lo) / (hi - lo)));
 }

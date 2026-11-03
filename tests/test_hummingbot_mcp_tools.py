@@ -22,7 +22,7 @@ import pytest
 
 from mcp_servers.hummingbot_api.tools.controllers import modify_controllers
 from mcp_servers.hummingbot_api.tools.portfolio import (
-    MAX_CONCURRENT_POOL_FETCHES,
+    MAX_CONCURRENT_POSITION_FETCHES,
     get_portfolio_overview,
 )
 
@@ -44,6 +44,53 @@ class FakeControllers:
 class FakeControllerClient:
     def __init__(self):
         self.controllers = FakeControllers()
+
+
+class FakeConfigControllers:
+    """Only the config endpoints a delete legitimately needs."""
+
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_controller_config(self, config_name):
+        self.deleted.append(config_name)
+        return {"message": f"Config {config_name} deleted"}
+
+
+class NoOrchestrationClient:
+    """A config delete must never reach bot_orchestration at all."""
+
+    def __init__(self):
+        self.controllers = FakeConfigControllers()
+
+    @property
+    def bot_orchestration(self):
+        raise AssertionError(
+            "deleting a controller config must not touch bot_orchestration"
+        )
+
+
+def test_deleting_a_config_does_not_redeploy_controllers():
+    """The delete endpoint stands alone; a redeploy after it only ever raised.
+
+    The stray ``deploy_v2_controllers()`` here was called with zero arguments
+    against a three-required-argument signature, so it raised TypeError *after*
+    the config was already deleted: the tool mutated and then reported failure.
+    """
+    client = NoOrchestrationClient()
+    result = asyncio.run(
+        modify_controllers(
+            client,
+            action="delete",
+            target="config",
+            config_name="ema_trend_v1_sol",
+        )
+    )
+
+    assert client.controllers.deleted == ["ema_trend_v1_sol"]
+    assert result["action"] == "delete"
+    assert result["config_name"] == "ema_trend_v1_sol"
+    assert result["message"].startswith("Config deleted:")
 
 
 def test_controller_upload_sends_a_controller_object_not_a_bare_string():
@@ -77,19 +124,64 @@ def test_the_backtesting_tools_are_gone():
         import mcp_servers.hummingbot_api.tools.backtesting  # noqa: F401
 
 
+def test_the_gateway_container_tool_is_gone():
+    """The dashboard (Settings → Gateway) is the one place to run the container.
+
+    It already did every action the tool had, logs included, behind the
+    server-owner check. So the hint on a failed Gateway call points the user
+    there instead of at a tool.
+    """
+    import mcp_servers.hummingbot_api.server as server
+    from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT
+    from mcp_servers.hummingbot_api.profiles import TOOL_DESCRIPTIONS
+
+    assert not hasattr(server, "manage_gateway_container")
+    assert "manage_gateway_container" not in TOOL_DESCRIPTIONS
+    assert "manage_gateway_container" not in GATEWAY_LOG_HINT
+
+
+def test_no_agent_can_write_a_network_or_connector_config():
+    """The RPC and a connector's slippage are the server owner's, set in Condor.
+
+    A write there repoints every later transaction, so it is not something a
+    model may do even behind a confirmation. The tool cannot name it at all.
+    The action and the payload that carried it are both gone.
+    """
+    import inspect
+
+    import pydantic
+
+    import mcp_servers.hummingbot_api.server as server
+    from mcp_servers.hummingbot_api.schemas import GatewayConfigRequest
+
+    params = inspect.signature(server.manage_gateway_config).parameters
+    assert "config_updates" not in params
+    assert "update" not in str(params["action"].annotation)
+    assert "config_updates" not in GatewayConfigRequest.model_fields
+
+    for resource in ("networks", "connectors"):
+        with pytest.raises(pydantic.ValidationError):
+            GatewayConfigRequest(resource_type=resource, action="update")
+
+
 POOL_LATENCY = 0.05
 
 
 class FakeGatewayClmm:
-    """CLMM surface where each pool read costs POOL_LATENCY, as an on-chain read does.
+    """CLMM surface where each venue read costs POOL_LATENCY, as an on-chain read does.
 
-    ``failing_pool`` raises the way a dead RPC does, so the skip-and-continue
-    behaviour of the serial loop stays pinned.
+    ``get_positions_owned`` mirrors the real SDK signature exactly — connector,
+    network, wallet_address, and NO pool_address. Gateway's positions-owned has
+    no pool filter; every returned row carries its own ``pool_address``. A fake
+    that accepted one hid a live TypeError at two call sites.
+
+    ``failing_venue`` raises the way a dead RPC does, so the skip-and-continue
+    behaviour stays pinned.
     """
 
-    def __init__(self, pools, failing_pool=None):
+    def __init__(self, pools, failing_venue=None):
         self.pools = pools
-        self.failing_pool = failing_pool
+        self.failing_venue = failing_venue
         self.max_in_flight = 0
         self._in_flight = 0
 
@@ -101,21 +193,22 @@ class FakeGatewayClmm:
             ]
         }
 
-    async def get_positions_owned(
-        self, connector, network, pool_address, wallet_address=None
-    ):
+    async def get_positions_owned(self, connector, network, wallet_address=None):
         self._in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self._in_flight)
         try:
             await asyncio.sleep(POOL_LATENCY)
-            if pool_address == self.failing_pool:
+            if (connector, network) == self.failing_venue:
                 raise RuntimeError("gateway RPC down")
-            # No connector/network of its own: the tool stamps them per pool.
+            # No connector/network of its own: the tool stamps them per venue.
             return [
                 {
                     "trading_pair": f"PAIR-{pool_address}",
                     "position_address": pool_address,
+                    "pool_address": pool_address,
                 }
+                for (c, n, pool_address) in self.pools
+                if (c, n) == (connector, network)
             ]
         finally:
             self._in_flight -= 1
@@ -138,9 +231,9 @@ def _lp_overview(client):
     )
 
 
-def test_clmm_pools_are_fetched_concurrently_not_one_at_a_time():
-    """K on-chain pool reads must cost ~1 round-trip, not K of them stacked."""
-    pools = [("meteora", "mainnet-beta", f"pool{i}") for i in range(8)]
+def test_clmm_venues_are_fetched_concurrently_not_one_at_a_time():
+    """K on-chain venue reads must cost ~1 round-trip, not K of them stacked."""
+    pools = [("meteora", f"net{i}", f"pool{i}") for i in range(8)]
     clmm = FakeGatewayClmm(pools)
 
     start = time.monotonic()
@@ -150,22 +243,37 @@ def test_clmm_pools_are_fetched_concurrently_not_one_at_a_time():
     serial = len(pools) * POOL_LATENCY
     assert (
         elapsed < serial / 2
-    ), f"{len(pools)} pools took {elapsed:.3f}s; serial would be ~{serial:.3f}s"
+    ), f"{len(pools)} venues took {elapsed:.3f}s; serial would be ~{serial:.3f}s"
 
     section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
     assert section["total_positions"] == len(pools)
 
 
-def test_one_failing_pool_is_skipped_and_the_rest_still_return():
-    """A dead pool degrades exactly as it did serially: logged, skipped, no propagation."""
-    pools = [("meteora", "mainnet-beta", f"pool{i}") for i in range(4)]
-    clmm = FakeGatewayClmm(pools, failing_pool="pool2")
+def test_one_failing_venue_is_skipped_and_the_rest_still_return():
+    """A dead venue degrades gracefully: logged, skipped, no propagation."""
+    pools = [("meteora", f"net{i}", f"pool{i}") for i in range(4)]
+    clmm = FakeGatewayClmm(pools, failing_venue=("meteora", "net2"))
 
     result = _lp_overview(FakeGatewayClient(clmm))
 
     section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
     assert section["total_positions"] == 3
     assert "pool2" not in section["content"]
+
+
+def test_one_venue_with_many_pools_is_read_once_and_not_duplicated():
+    """positions-owned takes no pool filter: querying per pool would repeat the
+    same list once per pool. One call per venue, each position exactly once."""
+    pools = [("meteora", "mainnet-beta", f"pool{i}") for i in range(5)]
+    clmm = FakeGatewayClmm(pools)
+
+    result = _lp_overview(FakeGatewayClient(clmm))
+
+    assert clmm.max_in_flight == 1, "five pools on one venue is one Gateway read"
+    section = next(s for s in result["sections"] if s["title"] == "LP Positions (CLMM)")
+    assert section["total_positions"] == len(pools)
+    for _, _, pool_address in pools:
+        assert section["content"].count(f"PAIR-{pool_address}") == 1
 
 
 def test_each_position_keeps_its_own_pools_connector_and_network():
@@ -189,17 +297,17 @@ def test_each_position_keeps_its_own_pools_connector_and_network():
         ), f"{pool_address} was stamped with the wrong connector"
 
 
-def test_pool_fan_out_is_bounded_by_an_explicit_constant():
-    """A many-pool account must not burst unlimited simultaneous Gateway requests."""
+def test_position_fan_out_is_bounded_by_an_explicit_constant():
+    """A many-venue account must not burst unlimited simultaneous Gateway requests."""
     pools = [
-        ("meteora", "mainnet-beta", f"pool{i}")
-        for i in range(MAX_CONCURRENT_POOL_FETCHES * 3)
+        ("meteora", f"net{i}", f"pool{i}")
+        for i in range(MAX_CONCURRENT_POSITION_FETCHES * 3)
     ]
     clmm = FakeGatewayClmm(pools)
 
     _lp_overview(FakeGatewayClient(clmm))
 
-    assert clmm.max_in_flight <= MAX_CONCURRENT_POOL_FETCHES
+    assert clmm.max_in_flight <= MAX_CONCURRENT_POSITION_FETCHES
     assert clmm.max_in_flight > 1, "the reads should still overlap"
 
 

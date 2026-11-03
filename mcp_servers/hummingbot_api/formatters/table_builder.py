@@ -5,7 +5,7 @@ This module provides the TableBuilder class and ColumnDef dataclass that standar
 table creation, reducing code duplication across all formatters.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .base import format_table_separator
@@ -222,38 +222,4 @@ class TableBuilder:
             Formatted table string with title
         """
         table = self.build(data, empty_message)
-        if data:
-            return f"{title}\n\n{table}"
         return f"{title}\n\n{table}"
-
-
-def create_simple_table(
-    data: list[dict[str, Any]],
-    column_config: list[tuple[str, str, int]],
-    empty_message: str = "No data found.",
-) -> str:
-    """
-    Convenience function to create a simple table without defining ColumnDef objects.
-
-    Args:
-        data: List of dictionaries containing the data
-        column_config: List of tuples (name, key, width) for each column
-        empty_message: Message to return if data is empty
-
-    Returns:
-        Formatted table string
-
-    Example:
-        >>> data = [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]
-        >>> config = [("Name", "name", 10), ("Age", "age", 5)]
-        >>> print(create_simple_table(data, config))
-        Name       | Age
-        ------------------
-        Alice      | 30
-        Bob        | 25
-    """
-    columns = [
-        ColumnDef(name=name, key=key, width=width) for name, key, width in column_config
-    ]
-    builder = TableBuilder(columns, empty_message=empty_message)
-    return builder.build(data)

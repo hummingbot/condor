@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from condor.runtime import danger
 from condor.runtime.timeouts import TIMEOUTS
 from condor.telemetry import taps as telemetry_taps
 
@@ -88,12 +89,22 @@ class PendingConfirmation:
             "user_id": self.user_id,
             "summary": self.summary,
             "origin": self.origin,
+            # The call itself, normalized once here so every surface previews
+            # the same thing the gate judged: the bare tool name and its
+            # arguments, or ``None`` when they could not be read. A summary line
+            # alone is what made the prompt read like a notice rather than a
+            # command waiting to run.
+            "tool": danger.tool_call_name(self.tool_call),
+            "input": danger.tool_call_input(self.tool_call),
             "tool_call": self.tool_call,
             "options": self.options,
             "status": self.status.value,
             "selected_option_id": self.selected_option_id,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
+            # Relative, so a surface can count down without trusting its own
+            # clock to agree with this one about what ``expires_at`` means.
+            "expires_in": max(0.0, self.expires_at - time.time()),
         }
 
 
@@ -331,6 +342,29 @@ def describe_origin(session_key: str) -> str:
     return who or where or ""
 
 
+def _summarize(tool_call: dict[str, Any]) -> str:
+    """The confirmation line, or a truthful stand-in when rendering it raises.
+
+    ``format_tool_summary`` is pure formatting, but it reads *wire* arguments
+    whose shapes nothing has coerced yet, and it runs inside the permission
+    callback — where the ACP client turns any exception into a *cancellation*.
+    A formatting bug there therefore denies a funds call no human ever saw
+    (CORR-294). Belt and braces: the branch that raised still gets fixed, this
+    only guarantees the failure surfaces as a prompt someone can refuse.
+
+    The stand-in qualifies the name rather than returning it bare, matching
+    ``format_tool_summary``'s own "(arguments could not be read)" line: a bare
+    tool name reads like a rendered summary, and that is treated as a defect.
+    It describes nothing about the call it cannot vouch for.
+    """
+    try:
+        return danger.format_tool_summary(tool_call)
+    except Exception:
+        tool_name = tool_call.get("tool") or tool_call.get("title") or "Unknown"
+        log.exception("Could not summarize %s; prompting with its name", tool_name)
+        return f"{tool_name} (arguments could not be summarized)"
+
+
 def build_permission_callback(
     session_key: str,
     user_id: int,
@@ -352,21 +386,19 @@ def build_permission_callback(
     async def permission_callback(
         tool_call: dict[str, Any], options: list[dict[str, Any]]
     ) -> dict[str, Any]:
-        from handlers.agents._shared import BLOCKED_TOOLS, is_dangerous_tool_call
-        from handlers.agents.confirmation import format_tool_summary
-
         tool_name = tool_call.get("tool", "") or tool_call.get("title", "")
-        if tool_name in BLOCKED_TOOLS:
+        # Read through the module so a monkeypatched BLOCKED_TOOLS is honored.
+        if tool_name in danger.BLOCKED_TOOLS:
             log.warning("Blocked tool %s for session %s", tool_name, session_key)
             return CANCELLED
 
-        if not is_dangerous_tool_call(tool_call):
+        if not danger.is_dangerous_tool_call(tool_call):
             return _select_allow(options)
 
         pending = _registry.register(
             session_key=session_key,
             user_id=user_id,
-            summary=format_tool_summary(tool_call),
+            summary=_summarize(tool_call),
             origin=describe_origin(session_key),
             tool_call=tool_call,
             options=options,

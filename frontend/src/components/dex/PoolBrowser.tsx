@@ -11,6 +11,8 @@ import { useNavigate } from "react-router-dom";
 import type { PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
 
+import { num, pct, poolLabel, usdCompact } from "./format";
+
 type SortKey =
   | "name"
   | "dex_id"
@@ -21,50 +23,15 @@ type SortKey =
   | "apy";
 type SortDir = "asc" | "desc";
 
-/**
- * Both upstreams answer numbers as strings (and GeckoTerminal answers pandas NaN
- * for a missing figure). The backend settles that before it serializes, so this
- * is the second line of defence rather than the first — but it is the one that
- * decides whether a stray string blanks one cell or takes down the whole page.
- */
-function num(v: unknown): number | null {
-  if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : null;
-}
-
-function usd(v: unknown): string {
-  const n = num(v);
-  if (!n) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
-  return `$${n.toFixed(2)}`;
-}
-
-function pct(v: unknown): string {
-  const n = num(v);
-  if (n === null) return "—";
-  if (Math.abs(n) >= 10_000) return `${(n / 1000).toFixed(0)}K%`;
-  return `${n.toFixed(2)}%`;
-}
-
-/** Sorting compares numbers, and a missing figure sorts last in either direction. */
-function sortValue(p: PoolSummary, key: SortKey): number {
-  return num(p[key as keyof PoolSummary]) ?? -Infinity;
+/** Null-preserving so the comparator can push missing figures last either way. */
+function sortValue(p: PoolSummary, key: SortKey): number | null {
+  return num(p[key as keyof PoolSummary]);
 }
 
 /** Orca's Gateway listing carries no yield at all; the backend derives one. */
 const ESTIMATED_YIELD_HINT =
   "Estimated: 24h volume x the pool's base fee tier, over TVL. " +
   "This connector reports no yield of its own.";
-
-function pairLabel(p: PoolSummary): string {
-  const base = p.base_symbol && p.base_symbol !== "???" ? p.base_symbol : null;
-  const quote =
-    p.quote_symbol && p.quote_symbol !== "???" ? p.quote_symbol : null;
-  return base && quote ? `${base}-${quote}` : p.name || p.address.slice(0, 8);
-}
 
 function SortTh({
   label,
@@ -156,9 +123,19 @@ export function PoolBrowser({
     const rows = [...pools];
     rows.sort((a, b) => {
       let cmp: number;
-      if (sortKey === "name") cmp = pairLabel(a).localeCompare(pairLabel(b));
+      if (sortKey === "name") cmp = poolLabel(a).localeCompare(poolLabel(b));
       else if (sortKey === "dex_id") cmp = a.dex_id.localeCompare(b.dex_id);
-      else cmp = sortValue(a, sortKey) - sortValue(b, sortKey);
+      else {
+        const av = sortValue(a, sortKey);
+        const bv = sortValue(b, sortKey);
+        // A missing figure sorts last in either direction, so it sits outside
+        // the direction flip below.
+        if (av === null || bv === null) {
+          if (av === bv) return 0;
+          return av === null ? 1 : -1;
+        }
+        cmp = av - bv;
+      }
       return sortDir === "asc" ? cmp : -cmp;
     });
     return rows;
@@ -334,7 +311,7 @@ export function PoolBrowser({
                     </button>
                   </td>
                   <td className="px-4 py-2.5 font-medium">
-                    {pairLabel(p)}
+                    {poolLabel(p)}
                     {!p.tradable && (
                       <span className="ml-2 text-[10px] font-normal text-[var(--color-text-muted)]">
                         not on Gateway
@@ -345,10 +322,10 @@ export function PoolBrowser({
                     {p.dex_id}
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
-                    {usd(p.reserve_usd)}
+                    {usdCompact(p.reserve_usd)}
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
-                    {usd(p.volume_24h)}
+                    {usdCompact(p.volume_24h)}
                   </td>
                   <td
                     className={`px-4 py-2.5 text-right tabular-nums ${

@@ -1,8 +1,9 @@
 """HTTP client for calling the Condor main-process web API."""
 
-import re
-import aiohttp
 import ipaddress
+import re
+
+import aiohttp
 
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
@@ -17,19 +18,24 @@ async def call_main_api(
     main process so they survive beyond the MCP subprocess lifecycle.
 
     ``timeout`` defaults to the shared policy (condor.runtime.timeouts) but
-    callers that block on the main process (e.g. a consult that awaits a user
-    confirmation) should pass a larger value.
+    callers that block on the main process (e.g. a routine run waited on inline)
+    should pass a larger value.
 
     Raises APIError on failure instead of returning {"error": ...}.
     """
     from condor.runtime.timeouts import TIMEOUTS
     from condor.web.auth import create_jwt
-    from utils.config import BIND_HOST, BIND_PORT 
+    from utils.config import BIND_PORT, WEB_HOST
 
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
 
-    host = BIND_HOST
+    # The MCP server is a child of the main process, so it must reach the
+    # dashboard at the address the dashboard actually listens on: WEB_HOST on
+    # BIND_PORT, not the externally advertised WEB_URL. A wildcard bind
+    # (0.0.0.0 / ::) is a listen address, never a connect destination, so it is
+    # normalized back to loopback; IPv6 literals need brackets in a URL.
+    host = WEB_HOST
 
     try:
         ip = ipaddress.ip_address(host)

@@ -29,15 +29,19 @@ class FakePermission:
 
 
 class FakeConfigManager:
-    def __init__(self, servers, permission="owner"):
+    def __init__(self, servers, permission="owner", default=None):
         self._servers = servers
         self._permission = permission
+        self._default = default
 
     def list_accessible_servers(self, user_id):
         return self._servers
 
     def get_server_permission(self, user_id, name):
         return FakePermission(self._permission) if self._permission else None
+
+    def get_chat_default_server(self, chat_id):
+        return self._default
 
 
 class FakeSDS:
@@ -105,7 +109,12 @@ def test_three_slow_servers_resolve_in_one_timeout_not_three(monkeypatch):
 
 
 def test_all_online_response_is_unchanged(monkeypatch):
-    """Names, hosts, ports, online flags, permission and sort order hold."""
+    """Names, hosts, ports, online flags, permission and sort order hold.
+
+    ``shared_with`` joined the payload with FEAT-088 and is additive: it is
+    populated only for a server's owner, and this fixture's permission object is
+    not the real enum, so every row takes the empty branch.
+    """
     sds = FakeSDS(
         statuses={n: {"status": "online"} for n in three_servers()},
         delay=0,
@@ -119,6 +128,8 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "port": 8000,
             "online": True,
             "permission": "owner",
+            "is_default": False,
+            "shared_with": [],
         },
         {
             "name": "bravo",
@@ -126,6 +137,8 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "port": 8001,
             "online": True,
             "permission": "owner",
+            "is_default": False,
+            "shared_with": [],
         },
         {
             "name": "charlie",
@@ -133,6 +146,8 @@ def test_all_online_response_is_unchanged(monkeypatch):
             "port": 8002,
             "online": True,
             "permission": "owner",
+            "is_default": False,
+            "shared_with": [],
         },
     ]
 
@@ -195,3 +210,81 @@ def test_missing_permission_falls_back_to_trader(monkeypatch):
     client = build_client(monkeypatch, cm, sds)
 
     assert {r["permission"] for r in client.get("/servers").json()} == {"trader"}
+
+
+def test_the_chat_default_server_is_the_only_one_flagged(monkeypatch):
+    """The selector seeds itself from this flag, so exactly one row carries it.
+
+    Without it the dashboard could not tell which server Telegram's
+    ``chat_defaults`` points at, and the Settings star had nothing to fill in —
+    the click looked like it did nothing at all.
+    """
+    sds = FakeSDS(statuses={n: {"status": "online"} for n in three_servers()}, delay=0)
+    cm = FakeConfigManager(three_servers(), default="bravo")
+    client = build_client(monkeypatch, cm, sds)
+
+    assert {r["name"]: r["is_default"] for r in client.get("/servers").json()} == {
+        "alpha": False,
+        "bravo": True,
+        "charlie": False,
+    }
+
+
+def test_no_default_flags_nothing(monkeypatch):
+    sds = FakeSDS(statuses={n: {"status": "online"} for n in three_servers()}, delay=0)
+    client = build_client(monkeypatch, FakeConfigManager(three_servers()), sds)
+
+    assert not any(r["is_default"] for r in client.get("/servers").json())
+
+
+# ── The settings listing is this same listing (ARCH-285) ──
+
+
+def build_settings_client(monkeypatch, cm, sds):
+    """Mount only the settings router; it reads ``servers_routes.server_rows``."""
+    import condor.web.routes.settings as settings_routes
+
+    monkeypatch.setattr(servers_routes, "get_config_manager", lambda: cm)
+    monkeypatch.setattr(servers_routes, "get_server_data_service", lambda: sds)
+    app = FastAPI()
+    app.include_router(settings_routes.router)
+    app.dependency_overrides[get_current_user] = lambda: USER
+    return TestClient(app)
+
+
+def test_settings_servers_survives_a_raising_fetch(monkeypatch):
+    """The settings copy fetched unguarded, so one bad server 500'd the page."""
+    sds = FakeSDS(
+        statuses={n: {"status": "online"} for n in three_servers()},
+        delay=0,
+        raises=["bravo"],
+    )
+    client = build_settings_client(monkeypatch, FakeConfigManager(three_servers()), sds)
+
+    resp = client.get("/settings/servers")
+    assert resp.status_code == 200
+    assert {r["name"]: r["online"] for r in resp.json()} == {
+        "alpha": True,
+        "bravo": False,
+        "charlie": True,
+    }
+
+
+def test_both_server_listings_return_the_same_payload(monkeypatch):
+    """One builder, so the settings page can never render a staler shape."""
+    cm = FakeConfigManager(three_servers(), default="bravo")
+
+    def rows(build, path):
+        sds = FakeSDS(
+            statuses={
+                "alpha": {"status": "online"},
+                "bravo": {"status": "online"},
+                "charlie": None,
+            },
+            delay=0,
+        )
+        return build(monkeypatch, cm, sds).get(path).json()
+
+    assert rows(build_settings_client, "/settings/servers") == rows(
+        build_client, "/servers"
+    )

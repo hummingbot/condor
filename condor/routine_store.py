@@ -2,6 +2,27 @@
 
 Bridges Telegram handler and web API so both can see
 the same instances, schedule runs, and read results.
+
+**Routine definitions are install-wide, not per-user (SEC-617).** One Condor
+install is a single shared agent workspace, not a set of tenants: every
+approved user sees every agent (``GET /agents`` calls ``list_all()`` unscoped)
+and ``_strategy_principal`` in ``web/routes/agents.py`` states it outright —
+agents and their strategies "are a single global store, not partitioned by
+owner the way conversations and delegations are". So a routine's *definition* —
+its name, description, ``fields`` schema and source — is readable by any
+approved user, including the agent-prefixed ones, and that is the design rather
+than a gap in it. Scoping the routine slice alone would make the model
+incoherent in the other direction: you could not read the source of a routine
+belonging to an agent you can already list and inspect.
+
+What *is* per-user is the activity on top of those definitions, and that
+partitioning has shipped: reports (SEC-196, SEC-593), conversations, sessions,
+delegations, and the instances below, which ``routes/routines.py`` filters with
+``_owns``. The line to hold when editing this module is therefore: a definition
+is public to the install, a *run* and its output belong to whoever made it.
+Promoting definitions to per-user is a tenancy decision for the whole agent
+layer — ``GET /agents`` and the strategy routes first — not something to
+retrofit here.
 """
 
 from __future__ import annotations
@@ -16,17 +37,54 @@ from pathlib import Path
 from typing import Any
 
 import condor.reports as reports
-from condor import routine_hooks
+from condor import primitives, routine_hooks
+from condor.memory.paths import (
+    agent_home_layers,
+    iter_agent_slugs,
+    shared_routines_roots,
+)
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
+    _merged_from,
     discover_routines,
-    discover_routines_from_path,
     get_routine,
+    library_dir,
     normalize_result,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _agent_routine_dirs(slug: str) -> tuple:
+    """An agent's routine dirs in read order: local first, then shipped."""
+    return tuple(home / "routines" for home in agent_home_layers(slug))
+
+
+def routine_source_roots() -> tuple[Path, ...]:
+    """Every directory :meth:`RoutineStore._discover_all` imports routine files from.
+
+    The allowlist a reader of routine source confines itself to (CORR-585): the
+    general library, the shared library in both layers, and each agent's own
+    ``routines/`` dir in both layers — the agent *homes* themselves stay out, so
+    a journal or a memory store next door is never in scope. ``_shared`` is
+    named explicitly because ``iter_agent_slugs`` skips the ``_``-prefixed
+    library dirs.
+
+    Every root comes back resolved, so a caller comparing with
+    :meth:`pathlib.Path.is_relative_to` against an equally resolved path admits
+    neither ``..`` nor a symlink out of one, and (unlike a string prefix) never
+    mistakes a sibling like ``routines_backup/`` for the library.
+    """
+    roots = [library_dir(), *shared_routines_roots()]
+    for slug in iter_agent_slugs():
+        roots.extend(_agent_routine_dirs(slug))
+    resolved: list[Path] = []
+    for root in roots:
+        candidate = root.resolve()
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return tuple(resolved)
 
 
 class _HttpBot:
@@ -94,6 +152,32 @@ class _HttpBot:
         data = {k: v for k, v in kw.items() if v is not None}
         return await self._post("editMessageText", data)
 
+    def has_token(self) -> bool:
+        """Can this actually deliver? Without a token every send is a no-op.
+
+        Read by ``delegate.resolve_bot`` so the ladder can fall through to the
+        dashboard bell rather than to a sender that silently drops the message.
+        """
+        return bool(self._token)
+
+    async def get_chat_member(self, *a, **kw):
+        """Raw ``getChatMember`` envelope — the web routes' chat-ownership check
+        (SEC-198) reads ``result.status`` out of it when no live bot is around."""
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        user_id = kw.get("user_id") or (a[1] if len(a) > 1 else None)
+        return await self._post(
+            "getChatMember", {"chat_id": chat_id, "user_id": user_id}
+        )
+
+    async def get_chat(self, *a, **kw):
+        """Raw ``getChat`` envelope — the identity backfill (FEAT-088) reads
+        ``first_name`` / ``last_name`` / ``username`` out of ``result`` when no
+        live bot is around. For a private chat the bot already knows, which is
+        every registered user by construction, this is the only source of a name
+        for someone who has not spoken since their record was written."""
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        return await self._post("getChat", {"chat_id": chat_id})
+
 
 _http_bot = _HttpBot()
 
@@ -121,11 +205,42 @@ def _run_outcome_text(routine_name: str, summary: str, error: str | None) -> str
     return f"✅ Routine {routine_name} done\n\n{(summary or '').strip()}".rstrip()
 
 
+def _normalize_on_complete(value: str) -> str:
+    """``notify`` unless the caller asked for a wake. Lazy like every other
+    ``condor.runtime`` touchpoint in this module."""
+    from condor.runtime.wake import normalize_on_complete
+
+    return normalize_on_complete(value)
+
+
+RESUME_INSTRUCTION = (
+    "Continue with whatever you were going to do with this run. The result "
+    "above is clipped — read the whole thing with manage_routines("
+    "action='get_instance', name='{instance_id}') if you need it. If the run "
+    "failed, fix what caused it or tell the user; do not silently retry the "
+    "same config. If nothing remains, say so in one line — do not restate the "
+    "result."
+)
+
+
+def _run_resume_text(instance_id: str, outcome: str) -> str:
+    """The turn a woken conversation reads when a run it started finishes.
+
+    Built on :func:`_run_outcome_text` so the wake, the bell and the transcript
+    note cannot tell three different stories about one run. The closing
+    instruction is the cost control that matters in practice: without it the
+    common wake turn is the agent paraphrasing a result the user can already
+    read — the same lesson ``delegate.RESUME_INSTRUCTION`` encodes.
+    """
+    instruction = RESUME_INSTRUCTION.format(instance_id=instance_id)
+    return f"[routine complete] {outcome}\n\n{instruction}"
+
+
 class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
-        from condor.preferences import USER_PREFERENCES_KEY
+        from condor.preferences import SERVER_PIN_KEY, USER_PREFERENCES_KEY
 
         self._chat_id = chat_id
         # The server this run was launched against, readable by name — for a routine
@@ -137,8 +252,12 @@ class WebRoutineContext:
         # "preferences" while the preference API reads USER_PREFERENCES_KEY
         # ("user_preferences"), so the server a web or agent run was launched with
         # never reached its client — every such run silently picked the chat default.
+        # Pinned, not preferred: this run was launched against `server_name`, so
+        # the chat's own default must not override it — the chat may well be a
+        # chat whose default is a different server (see `get_effective_server`).
         self._user_data: dict[str, Any] = {
             USER_PREFERENCES_KEY: {"general": {"active_server": server_name}},
+            SERVER_PIN_KEY: True,
         }
 
     @property
@@ -213,37 +332,33 @@ class RoutineStore:
         """
         all_routines = dict(discover_routines())
 
-        # Scan agents/*/routines/
-        agents_dir = Path(__file__).resolve().parent.parent / "agents"
-        if agents_dir.exists():
-            for agent_dir in sorted(agents_dir.iterdir()):
-                # `_`-prefixed dirs are not agents (`_shared`, `_defaults`) —
-                # same rule as AgentStore._iter_agent_dirs, so a library dir can
-                # never surface here as a routine owner named `_shared/...`.
-                if agent_dir.name.startswith("_"):
-                    continue
-                routines_path = agent_dir / "routines"
-                if not routines_path.is_dir():
-                    continue
-                slug = agent_dir.name
-                agent_routines = discover_routines_from_path(
-                    routines_path, agent_slug=slug
-                )
-                for rname, rinfo in agent_routines.items():
-                    # Shallow-copy before prefixing: the RoutineInfo is shared
-                    # with the discovery cache and must keep its bare name.
-                    prefixed_info = copy.copy(rinfo)
-                    prefixed_info.name = f"{slug}/{rname}"
-                    all_routines[prefixed_info.name] = prefixed_info
+        # Scan <root>/*/routines/ across both agent roots (FEAT-115): the
+        # `_`-prefixed library dirs are skipped by ``iter_agent_slugs``, so one
+        # can never surface here as a routine owner named `_shared/...`, and a
+        # local routine shadows the shipped one of the same name.
+        for slug in iter_agent_slugs():
+            agent_routines = _merged_from(_agent_routine_dirs(slug), agent_slug=slug)
+            for rname, rinfo in agent_routines.items():
+                # Shallow-copy before prefixing: the RoutineInfo is shared
+                # with the discovery cache and must keep its bare name.
+                prefixed_info = copy.copy(rinfo)
+                prefixed_info.name = f"{slug}/{rname}"
+                all_routines[prefixed_info.name] = prefixed_info
 
         return all_routines
 
-    def _get_report_counts(self) -> dict[str, int]:
-        """Get report count per routine source_name."""
+    def _get_report_counts(self, owner_id: int | None = None) -> dict[str, int]:
+        """Get report count per routine source_name.
+
+        ``owner_id`` scopes the tally the way ``list_reports`` does (SEC-593):
+        an unscoped count is still a read on another user's reports — it says
+        how many they ran — so the web callers pass the caller's filter and
+        only an admin (or an internal, already-per-user caller) gets ``None``.
+        """
         try:
             from condor.reports import list_reports
 
-            reports, _ = list_reports(limit=1000)
+            reports, _ = list_reports(limit=1000, owner_id=owner_id)
             counts: dict[str, int] = {}
             for r in reports:
                 sn = r.get("source_name", "")
@@ -253,9 +368,17 @@ class RoutineStore:
         except Exception:
             return {}
 
-    def list_routines(self) -> list[dict]:
+    def list_routines(self, owner_id: int | None = None) -> list[dict]:
+        """Every discovered routine, with the caller's report tally on each.
+
+        ``owner_id`` scopes the ``report_count`` only — it is the report filter
+        of :meth:`_get_report_counts`, not a visibility filter on the rows. The
+        row set is deliberately the whole install's: see the module docstring
+        (SEC-617) for why definitions are install-wide while the runs counted
+        beside them are per-user.
+        """
         all_routines = self._discover_all()
-        report_counts = self._get_report_counts()
+        report_counts = self._get_report_counts(owner_id)
         out = []
         for name, info in all_routines.items():
             out.append(
@@ -283,6 +406,30 @@ class RoutineStore:
                 entry["has_result"] = True
             out.append(entry)
         return out
+
+    def set_on_complete(self, instance_id: str, on_complete: str) -> str | None:
+        """Change what a run's conversation gets when it ends. Returns its status.
+
+        For the caller that started out waiting and ran out of patience: a
+        blocking ``run`` that hits its budget leaves a live run and an agent
+        holding an instance id, and without this its only options are to poll or
+        to forget. Flipping the still-running instance to ``resume`` turns it
+        into the ``run_async`` it should have been.
+
+        ``None`` when the instance is unknown; otherwise the status it had *at
+        the moment of the check*, and the change is applied only while that is
+        ``running``. Synchronous on purpose: ``_execute_and_record`` sets the
+        final status and reports the run without yielding in between, so a
+        check-and-set that never awaits cannot land between the two and cause
+        the outcome to be delivered twice.
+        """
+        meta = self._instances.get(instance_id)
+        if not meta:
+            return None
+        status = meta.get("status")
+        if status == "running":
+            meta["on_complete"] = _normalize_on_complete(on_complete)
+        return status
 
     def get_instance(self, instance_id: str) -> dict | None:
         meta = self._instances.get(instance_id)
@@ -421,24 +568,53 @@ class RoutineStore:
         ``system`` turn so the replay reads it as a parenthetical note rather
         than as the agent's own words.
 
-        The push is what the user *sees*. A recorded turn reaches an already-open
+        The push is what the user *sees*, and which of the two pushes it is is
+        the caller's ``on_complete``. A recorded turn reaches an already-open
         dashboard only when the page is reloaded, so a run that failed thirty
         seconds in stayed invisible until someone refreshed. ``deliver_note``
-        shows the same line immediately and costs nothing: a finished routine is
-        worth showing, not worth a model turn to announce it.
+        shows the same line immediately and costs nothing — the right delivery
+        for a run a *human* started, which is worth showing and not worth a
+        model turn to announce.
+
+        ``resume`` is for the other caller: an agent that submitted the run with
+        ``run_async`` and ended its turn. A note leaves that agent asleep holding
+        an instance id, which is why it used to sit in a polling loop burning a
+        turn a minute instead — the run finishing is the event it was waiting
+        for, so it is handed the outcome and continues (ARCH-089/FEAT-034).
+        Exactly one of the two fires: the resume turn already carries the
+        outcome, and a wake that found nothing live falls back to the note, so a
+        closed tab loses nothing it used to get.
 
         A run with no conversation behind it — the scheduler, the dashboard, the
-        Telegram menu, an instance restored on boot — is a no-op: ``record_system``
-        ignores an empty id and a run with no session key reaches no surface.
-        Neither delivery is allowed to raise: a missing note must not cost the
-        user the run's own result or its hooks.
+        Telegram menu, an instance restored on boot — still lights the owner's
+        bell (FEAT-048) and is otherwise a no-op: ``record_system`` ignores an
+        empty id and a run with no session key reaches no surface. No delivery
+        is allowed to raise: a missing note must not cost the user the run's own
+        result or its hooks.
         """
         meta = self._instances.get(instance_id) or {}
+        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
+
+        # The bell is addressed to the *owner*, not to a conversation, so it is
+        # the one surface a scheduled or dashboard-started run can reach.
+        try:
+            from condor.notifications import record
+
+            await record(
+                meta.get("user_id"),
+                text,
+                kind="routine",
+                link="/routines?tab=reports",
+            )
+        except Exception:
+            logger.debug(
+                f"Could not notify owner about run {instance_id}", exc_info=True
+            )
+
         conversation_id = meta.get("conversation_id") or ""
         if not conversation_id:
             return
 
-        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
         try:
             from condor.runtime.conversations import record_system
 
@@ -452,14 +628,39 @@ class RoutineStore:
         session_key = meta.get("session_key") or ""
         if not session_key:
             return
-        try:
-            from condor.runtime import wake
 
+        from condor.runtime import wake
+
+        if meta.get("on_complete") == wake.ON_COMPLETE_RESUME:
+            try:
+                woke = await wake.resume_session(
+                    session_key=session_key,
+                    conversation_id=conversation_id,
+                    text=_run_resume_text(instance_id, text),
+                    kind="resume",
+                )
+            except Exception:
+                logger.debug(
+                    f"Could not resume conversation {conversation_id} "
+                    f"for run {instance_id}",
+                    exc_info=True,
+                )
+                woke = False
+            if woke:
+                return
+            # Nothing live to wake — the tab may still be open, so fall through
+            # to the note rather than leaving the run's outcome unpushed.
+
+        try:
             await wake.deliver_note(
                 session_key=session_key,
                 conversation_id=conversation_id,
                 text=text,
                 kind="routine",
+                # The same owner the bell above is addressed to, so a note
+                # whose session has since been reaped still reaches the tabs
+                # that are watching (CORR-263).
+                user_id=meta.get("user_id"),
             )
         except Exception:
             logger.debug(
@@ -476,6 +677,7 @@ class RoutineStore:
         source: str,
         conversation_id: str = "",
         session_key: str = "",
+        on_complete: str = "",
         **extra,
     ) -> dict:
         """Fresh instance-metadata dict shared by execute/start_continuous/schedule.
@@ -485,6 +687,12 @@ class RoutineStore:
         live session behind that conversation, which the outcome is *shown* in
         while it is still open. Both empty for everything with no conversation
         behind it (dashboard, Telegram, restored schedules).
+
+        ``on_complete`` says which push that outcome gets — a note to read, or a
+        turn the asking agent continues from (see :meth:`_report_run`). Anything
+        unrecognised, this default included, is ``notify``: the delivery that
+        spends nothing is the only safe thing to assume about a caller that did
+        not ask.
         """
         return {
             "routine_name": routine_name,
@@ -495,6 +703,7 @@ class RoutineStore:
             "user_id": user_id,
             "conversation_id": conversation_id,
             "session_key": session_key,
+            "on_complete": _normalize_on_complete(on_complete),
             "created_at": time.time(),
             "last_run_at": None,
             "last_result": None,
@@ -535,17 +744,29 @@ class RoutineStore:
         """
         ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
         start = time.time()
-        reports.reset_last_report_id()
         error_msg = None
         failed = False
+        # The bare name (not "agent_slug/name") is what both report lookups
+        # match on, and what routines that do call .source() already use.
+        base_name = (routine.name or "").split("/")[-1]
         try:
-            cfg = routine.config_class(**config)
-            # The bare name (not "agent_slug/name") is what both report lookups
-            # match on, and what routines that do call .source() already use.
-            base_name = (routine.name or "").split("/")[-1]
-            with reports.attribute_to(agent or _agent_of(routine)):
-                with reports.default_source("routine", base_name):
-                    raw = await routine.run_fn(cfg, ctx)
+            # run_scope is the one place the four attribution calls live
+            # (ARCH-217): it resets the last report id and records who this run
+            # executes for (SEC-196), which assistant asked, and the source that
+            # keeps its reports findable. The context is published so a nested
+            # call_routine() inside this routine inherits its server, bot and
+            # user (FEAT-052).
+            with (
+                reports.run_scope(
+                    owner=user_id,
+                    agent=agent or _agent_of(routine),
+                    source_type="routine",
+                    source_name=base_name,
+                ),
+                primitives.bind_context(ctx),
+            ):
+                cfg = routine.config_class(**config)
+                raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")
@@ -619,10 +840,7 @@ class RoutineStore:
         # Try agent format: slug/name
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
-            agents_dir = (
-                Path(__file__).resolve().parent.parent / "agents" / slug / "routines"
-            )
-            agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
+            agent_routines = _merged_from(_agent_routine_dirs(slug), agent_slug=slug)
             return agent_routines.get(rname)
         return None
 
@@ -635,12 +853,15 @@ class RoutineStore:
         agent: str = "",
         conversation_id: str = "",
         session_key: str = "",
+        on_complete: str = "",
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id.
 
         ``agent`` overrides report attribution (see ``_execute_and_record``);
         ``conversation_id`` and ``session_key`` are where the finished run
-        reports back to and shows itself (see ``_report_run``).
+        reports back to and shows itself, and ``on_complete`` whether that
+        session is merely shown the outcome or woken with it (see
+        ``_report_run``).
         """
         routine = self._resolve_routine(routine_name)
         if not routine:
@@ -655,6 +876,7 @@ class RoutineStore:
             source="web",
             conversation_id=conversation_id,
             session_key=session_key,
+            on_complete=on_complete,
         )
 
         task = asyncio.create_task(

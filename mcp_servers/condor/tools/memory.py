@@ -1,8 +1,8 @@
 """User memory tool — thin MCP wrapper over condor.memory.MemoryStore.
 
 Resolves the store by ``settings.user_id`` (already injected into the MCP
-process) and derives the audit ``source`` from ``settings.agent_slug`` so the
-LLM never has to report who is writing.
+process) and derives the audit ``source`` from ``settings.specialist_slug`` so
+the LLM never has to report who is writing.
 """
 
 from condor.memory import MemoryStore
@@ -14,7 +14,8 @@ def _source() -> str:
 
 
 def _store() -> MemoryStore:
-    # agent_slug selects this assistant's store (FEAT-003); empty -> chat condor.
+    # specialist_slug selects this assistant's store (FEAT-003); empty -> chat
+    # condor.
     return MemoryStore(settings.user_id, settings.specialist_slug or None)
 
 

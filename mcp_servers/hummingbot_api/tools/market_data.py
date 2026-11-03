@@ -1,18 +1,38 @@
 """
 Market data operations business logic.
 
-This module provides the core business logic for market data operations including
-prices, candles, funding rates, and order books.
+Two functions, and neither renders a series into a table (ARCH-308). ``get_prices``
+answers a single quote in text because a quote read once and not computed on is
+answered completely by its text. ``get_market_data`` answers candles in **rows** —
+a list of ``{timestamp, open, high, low, close, volume}`` dicts, the same shape
+``client.market_data.*`` returns inside ``run_code`` — so nothing read here has to
+be fetched a second time to be averaged or compared.
+
+Its reason to exist is dry-run (CORR-625). A snippet and a routine both hold the
+unrestricted API client, so a rehearsal auto-approves neither (SEC-616, SEC-626),
+which left a dry run with no structured candle read at all. This tool takes
+parameters, not code: there is nothing in it to write with, in any mode.
 """
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
-from mcp_servers.hummingbot_api.formatters import (
-    format_candles_as_table,
-    format_order_book_as_table,
-    format_prices_as_table,
+from condor.fetchers.market_data import (
+    fetch_candle_connectors,
+    fetch_historical_candles,
 )
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.formatters import format_prices_as_table
+
+#: The tool's actions. Every one of them reads; the set is deliberately closed,
+#: and ``condor.runtime.danger`` pins it against this literal so an action added
+#: here without a thought about what it touches cannot quietly become callable
+#: in a dry run.
+MARKET_DATA_ACTIONS = ("candles", "historical_candles", "connectors")
+
+#: Rows per candle request. The cap is context, not throughput: a tick that asks
+#: for 5000 1m candles spends its whole window reading them back.
+MAX_CANDLE_RECORDS = 1000
 
 
 async def get_prices(
@@ -51,229 +71,87 @@ async def get_prices(
     }
 
 
-async def get_candles(
+async def get_market_data(
     client: Any,
-    connector_name: str,
-    trading_pair: str,
-    interval: str = "1h",
-    days: int = 30,
+    action: str,
+    connector_name: str = "",
+    trading_pair: str = "",
+    interval: str = "1m",
+    max_records: int = 200,
+    start_time: int | None = None,
+    end_time: int | None = None,
 ) -> dict[str, Any]:
-    """
-    Get candle data for a trading pair.
+    """Read candles as rows, or list the connectors that serve them.
+
+    Delegates to the fetchers every other candle consumer in Condor already uses
+    (``condor.fetchers.market_data``), so this tool inherits their payload-shape
+    handling and their fallback ladder rather than restating it: the two candle
+    actions are the same fetcher with and without a time range.
 
     Args:
         client: Hummingbot API client
-        connector_name: Exchange connector name
-        trading_pair: Trading pair
-        interval: Candle interval (e.g., '1h', '5m', '1d')
-        days: Number of days of historical data
+        action: One of :data:`MARKET_DATA_ACTIONS`
+        connector_name: Exchange connector name (candle actions)
+        trading_pair: Pair to read (candle actions)
+        interval: Candle interval, e.g. "1m", "1h", "4h", "1d"
+        max_records: How many rows to return, capped at :data:`MAX_CANDLE_RECORDS`
+        start_time / end_time: Unix epoch seconds, for "historical_candles"
 
     Returns:
-        Dictionary containing candles data and formatted table
-
-    Raises:
-        ValueError: If connector doesn't support candles or interval is invalid
+        A dict whose candle rows are floats, not a rendered table.
     """
-    # Check if connector supports candle data
-    available_connectors = await client.market_data.get_available_candle_connectors()
-    if connector_name not in available_connectors:
-        raise ValueError(
-            f"Connector '{connector_name}' does not support candle data. "
-            f"Available connectors: {available_connectors}"
+    if action == "connectors":
+        return {
+            "action": action,
+            "connectors": await fetch_candle_connectors(client),
+        }
+
+    if action not in ("candles", "historical_candles"):
+        raise ToolError(
+            f"unknown action {action!r} — expected one of "
+            f"{', '.join(MARKET_DATA_ACTIONS)}"
         )
 
-    # Calculate max records based on interval
-    if interval.endswith("m"):
-        max_records = 1440 * days  # 1440 minutes in a day
-    elif interval.endswith("h"):
-        max_records = 24 * days
-    elif interval.endswith("d"):
-        max_records = days
-    elif interval.endswith("w"):
-        max_records = 7 * days
+    if not connector_name:
+        raise ToolError(f"connector_name is required for the {action} action")
+    if not trading_pair:
+        raise ToolError(f"trading_pair is required for the {action} action")
+
+    limit = max(1, min(int(max_records), MAX_CANDLE_RECORDS))
+
+    if action == "historical_candles":
+        if start_time is None:
+            raise ToolError(
+                "start_time is required for the historical_candles action — use "
+                "action='candles' for the most recent window instead"
+            )
+        rows = await fetch_historical_candles(
+            client,
+            connector_name,
+            trading_pair,
+            interval,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            fallback_on_error=True,
+        )
     else:
-        raise ValueError(
-            f"Unsupported interval format: {interval}. "
-            f"Use '1m', '5m', '15m', '30m', '1h', '4h', '1d', or '1w'."
+        # No start_time skips the ranged call entirely and the `limit` fallback
+        # answers, which is exactly "the most recent `limit` candles".
+        rows = await fetch_historical_candles(
+            client,
+            connector_name,
+            trading_pair,
+            interval,
+            start_time=None,
+            limit=limit,
         )
-
-    # Adjust for interval multiplier
-    interval_num = interval[:-1]
-    if interval_num:
-        max_records = int(max_records / int(interval_num))
-
-    # Fetch candles
-    candles = await client.market_data.get_candles(
-        connector_name=connector_name,
-        trading_pair=trading_pair,
-        interval=interval,
-        max_records=max_records,
-    )
-
-    # Format candles as table
-    candles_table = format_candles_as_table(candles)
 
     return {
-        "candles": candles,
-        "candles_table": candles_table,
+        "action": action,
         "connector_name": connector_name,
         "trading_pair": trading_pair,
         "interval": interval,
-        "total_candles": len(candles),
+        "count": len(rows),
+        "candles": rows,
     }
-
-
-async def get_funding_rate(
-    client: Any, connector_name: str, trading_pair: str
-) -> dict[str, Any]:
-    """
-    Get funding rate for a perpetual trading pair.
-
-    Args:
-        client: Hummingbot API client
-        connector_name: Exchange connector name (must have '_perpetual')
-        trading_pair: Trading pair
-
-    Returns:
-        Dictionary containing funding rate data
-
-    Raises:
-        ValueError: If connector is not a perpetual connector
-    """
-    if "_perpetual" not in connector_name:
-        raise ValueError(
-            f"Connector '{connector_name}' is not a perpetual connector. "
-            f"Funding rates are only available for perpetual connectors."
-        )
-
-    # Fetch funding rate
-    funding_rate = await client.market_data.get_funding_info(
-        connector_name=connector_name, trading_pair=trading_pair
-    )
-
-    # Format data
-    next_funding_time = funding_rate.get("next_funding_time", 0)
-    time_str = (
-        datetime.fromtimestamp(next_funding_time).strftime("%Y-%m-%d %H:%M:%S")
-        if next_funding_time
-        else "N/A"
-    )
-
-    rate = funding_rate.get("funding_rate", 0)
-    rate_pct = rate * 100  # Convert to percentage
-
-    return {
-        "connector_name": connector_name,
-        "trading_pair": trading_pair,
-        "funding_rate": rate,
-        "funding_rate_pct": rate_pct,
-        "mark_price": funding_rate.get("mark_price", 0),
-        "index_price": funding_rate.get("index_price", 0),
-        "next_funding_time": time_str,
-    }
-
-
-async def get_order_book(
-    client: Any,
-    connector_name: str,
-    trading_pair: str,
-    query_type: Literal[
-        "snapshot",
-        "volume_for_price",
-        "price_for_volume",
-        "quote_volume_for_price",
-        "price_for_quote_volume",
-    ],
-    query_value: float | None = None,
-    is_buy: bool = True,
-) -> dict[str, Any]:
-    """
-    Get order book data for a trading pair.
-
-    Args:
-        client: Hummingbot API client
-        connector_name: Exchange connector name
-        trading_pair: Trading pair
-        query_type: Type of order book query
-        query_value: Value for query (required for non-snapshot queries)
-        is_buy: Whether to analyze buy or sell side
-
-    Returns:
-        Dictionary containing order book data
-
-    Raises:
-        ValueError: If query_value is missing for non-snapshot queries
-    """
-    if query_type == "snapshot":
-        # Get full order book snapshot
-        order_book = await client.market_data.get_order_book(
-            connector_name=connector_name, trading_pair=trading_pair
-        )
-
-        # Format order book as table
-        order_book_table = format_order_book_as_table(order_book)
-
-        timestamp = order_book.get("timestamp", 0)
-        time_str = (
-            datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-            if timestamp
-            else "N/A"
-        )
-
-        return {
-            "query_type": "snapshot",
-            "order_book": order_book,
-            "order_book_table": order_book_table,
-            "connector_name": connector_name,
-            "trading_pair": trading_pair,
-            "timestamp": time_str,
-        }
-    else:
-        # Handle query-based requests
-        if query_value is None:
-            raise ValueError(
-                f"query_value must be provided for query_type '{query_type}'"
-            )
-
-        # Execute appropriate query
-        if query_type == "volume_for_price":
-            result = await client.market_data.get_volume_for_price(
-                connector_name=connector_name,
-                trading_pair=trading_pair,
-                price=query_value,
-                is_buy=is_buy,
-            )
-        elif query_type == "price_for_volume":
-            result = await client.market_data.get_price_for_volume(
-                connector_name=connector_name,
-                trading_pair=trading_pair,
-                volume=query_value,
-                is_buy=is_buy,
-            )
-        elif query_type == "quote_volume_for_price":
-            result = await client.market_data.get_quote_volume_for_price(
-                connector_name=connector_name,
-                trading_pair=trading_pair,
-                price=query_value,
-                is_buy=is_buy,
-            )
-        elif query_type == "price_for_quote_volume":
-            result = await client.market_data.get_price_for_quote_volume(
-                connector_name=connector_name,
-                trading_pair=trading_pair,
-                quote_volume=query_value,
-                is_buy=is_buy,
-            )
-        else:
-            raise ValueError(f"Unsupported query type: {query_type}")
-
-        side_str = "BUY" if is_buy else "SELL"
-
-        return {
-            "query_type": query_type,
-            "result": result,
-            "connector_name": connector_name,
-            "trading_pair": trading_pair,
-            "query_value": query_value,
-            "side": side_str,
-        }

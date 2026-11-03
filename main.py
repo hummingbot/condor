@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -19,11 +19,24 @@ from telegram.ext import (
     filters,
 )
 
+from condor import paths
 from condor.persistence import SafePicklePersistence
 from condor.telemetry import taps as telemetry_taps
 from handlers import cancel_command, clear_all_input_states
 from utils.auth import restricted
-from utils.config import TELEGRAM_TOKEN, BIND_HOST, BIND_PORT, WEB_URL, WEB_PORT
+from utils.config import (
+    BIND_PORT,
+    LOCAL_MODE,
+    TELEGRAM_TOKEN,
+    USE_TAILSCALE,
+    WEB_HOST,
+    WEB_PORT,
+    WEB_URL,
+    ConfigError,
+    check_local_user,
+    check_startup_config,
+    warn_shadowed_env,
+)
 
 # Enable logging
 logging.basicConfig(
@@ -55,6 +68,25 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def _dashboard_button_url(url: str) -> str | None:
+    """The dashboard link Telegram will accept in an inline URL button, if any.
+
+    Telegram rejects ``localhost`` outright ("Wrong HTTP URL") but accepts the
+    loopback IP, so the local default (``http://localhost:8088``) still gets a
+    button by swapping the host — which is what a Telegram client running on
+    the same machine needs anyway. Any other dotless hostname (a bare LAN name)
+    has no such equivalent, so those keep the copy-paste link only.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host == "localhost":
+        parsed = parsed._replace(netloc=parsed.netloc.replace(host, "127.0.0.1", 1))
+        return parsed.geturl()
+    if "." not in host:
+        return None
+    return url
+
+
 @restricted
 async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate a one-time login link for the web dashboard."""
@@ -69,22 +101,43 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
     )
 
+    button_url = _dashboard_button_url(url)
+    keyboard = (
+        InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🌐 Open Dashboard", url=button_url)]]
+        )
+        if button_url
+        else None
+    )
+
     if is_localhost:
+        # A loopback button only opens on the machine running the bot, so the
+        # raw link stays visible for a phone on the same network to adapt.
+        text = (
+            f"🌐 *Web Dashboard*\n\n"
+            f"Open this link in your browser:\n`{url}`\n\n"
+            f"_Link valid for 5 minutes\\._"
+        )
+    else:
+        text = (
+            "🌐 *Web Dashboard*\n\n"
+            "Tap the button below to open the dashboard\\.\n"
+            "_Link valid for 5 minutes\\._"
+        )
+
+    try:
+        await update.message.reply_text(
+            text, reply_markup=keyboard, parse_mode="MarkdownV2"
+        )
+    except BadRequest:
+        # Telegram refuses URL buttons it can't parse (host without a public
+        # TLD, an unusual scheme). Losing the button must not lose the link.
+        if keyboard is None:
+            raise
         await update.message.reply_text(
             f"🌐 *Web Dashboard*\n\n"
             f"Open this link in your browser:\n`{url}`\n\n"
             f"_Link valid for 5 minutes\\._",
-            parse_mode="MarkdownV2",
-        )
-    else:
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 Open Dashboard", url=url)]]
-        )
-        await update.message.reply_text(
-            "🌐 *Web Dashboard*\n\n"
-            "Tap the button below to open the dashboard\\.\n"
-            "_Link valid for 5 minutes\\._",
-            reply_markup=keyboard,
             parse_mode="MarkdownV2",
         )
 
@@ -92,10 +145,16 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display available commands (BotFather style)."""
     from config_manager import UserRole, get_config_manager
-    from utils.auth import _notify_admin_new_user
+    from utils.auth import _capture_identity, _notify_admin_new_user
 
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "No username"
+    tg_user = update.effective_user
+    user_id = tg_user.id
+    username = tg_user.username or ""
+    # What to print where the reply says "Username:". An absent handle is shown
+    # as absent rather than stored as the "No username" string the record used
+    # to carry (FEAT-088) — the sentinel was a display default that leaked into
+    # config.yml and became a name the admin panel then had to render.
+    handle_display = f"@{username}" if username else "not set"
 
     cm = get_config_manager()
     role = cm.get_user_role(user_id)
@@ -113,7 +172,7 @@ Your access request is awaiting admin approval.
 
 Your Info:
 User ID: {user_id}
-Username: @{username}
+Username: {handle_display}
 
 You will be notified when approved."""
         await update.message.reply_text(reply_text)
@@ -121,7 +180,12 @@ You will be notified when approved."""
 
     # Handle new users - register as pending
     if role is None:
-        is_new = cm.register_pending(user_id, username)
+        is_new = cm.register_pending(
+            user_id,
+            username,
+            first_name=tg_user.first_name,
+            last_name=tg_user.last_name,
+        )
         if is_new:
             await _notify_admin_new_user(context, user_id, username)
 
@@ -131,13 +195,14 @@ Your request has been sent to the admin for approval.
 
 Your Info:
 User ID: {user_id}
-Username: @{username}
+Username: {handle_display}
 
 You will be notified when approved."""
         await update.message.reply_text(reply_text)
         return
 
     # User is approved (USER or ADMIN role)
+    _capture_identity(update)
     clear_all_input_states(context)
 
     reply_text = """I can help you create and manage trading bots on any CEX or DEX using Hummingbot API servers\\.
@@ -204,61 +269,72 @@ async def start_callback_handler(
             await _show_admin_menu(query, context)
 
 
+# Modules the handlers import from that do not live under ``handlers/``, and
+# that are safe to re-execute. Everything under ``handlers/`` itself is
+# discovered by :func:`_discover_handler_modules`.
+#
+# ``routines/`` is deliberately absent: routines have their own mtime-aware
+# discovery in ``routines.base.discover_routines(force_reload=True)``, which
+# owns reimporting individual routine modules. Only the base module is listed,
+# so that machinery itself stays fresh.
+_EXTRA_RELOAD_MODULES = (
+    "config_manager",
+    "utils.auth",
+    "utils.telegram_formatters",
+    "routines.base",
+)
+
+
+def _discover_handler_modules() -> list[str]:
+    """Every module under ``handlers/``, children before parents.
+
+    Derived rather than hand-listed. A hand-maintained list drifts, and it
+    drifts *silently*: ``reload_handlers`` skips any name not in
+    ``sys.modules``, so a stale entry is a no-op and a missing entry means the
+    watcher logs a successful reload while the running bot keeps the old code.
+    That is worse than no hot-reload, because it reports success. The list this
+    replaced named three ``handlers.dex.swap_*`` modules that no longer exist
+    and omitted six that do, including ``handlers.dex.router``.
+
+    Naming every module matters because ``importlib.reload`` is NOT recursive:
+    reloading ``handlers.dex`` re-executes its ``__init__``, but its
+    ``from .router import ...`` re-binds the *cached* ``handlers.dex.router``,
+    so an edit there is missed unless that module is reloaded in its own right.
+
+    For the same reason children sort before parents: by the time a package's
+    ``__init__`` re-executes, the submodules it imports from have already been
+    refreshed.
+    """
+    root = Path(__file__).parent / "handlers"
+    modules: set[str] = set()
+    for path in root.rglob("*.py"):
+        parts = path.relative_to(root.parent).with_suffix("").parts
+        # Per-agent runtime stores can sit under a watched tree (FEAT-003) and
+        # are data, not code — the file watcher skips them for the same reason.
+        if "__pycache__" in parts or "store" in parts:
+            continue
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts:
+            modules.add(".".join(parts))
+    return sorted(modules, key=lambda name: (-name.count("."), name))
+
+
 def reload_handlers():
     """Reload all handler modules."""
-    modules_to_reload = [
-        "handlers.portfolio",
-        "handlers.bots",
-        "handlers.bots.menu",
-        "handlers.bots.controllers",
-        "handlers.bots._shared",
-        "handlers.executors",
-        "handlers.executors.menu",
-        "handlers.executors.grid",
-        "handlers.executors.position",
-        "handlers.executors._shared",
-        "handlers.trading",
-        "handlers.trading.router",
-        "handlers.cex",
-        "handlers.cex.menu",
-        "handlers.cex.trade",
-        "handlers.cex.orders",
-        "handlers.cex.positions",
-        "handlers.cex._shared",
-        "handlers.dex",
-        "handlers.dex.menu",
-        "handlers.dex.swap_quote",
-        "handlers.dex.swap_execute",
-        "handlers.dex.swap_history",
-        "handlers.dex.pools",
-        "handlers.dex._shared",
-        "handlers.config",
-        "handlers.config.servers",
-        "handlers.config.api_keys",
-        "handlers.config.gateway",
-        "handlers.config.user_preferences",
-        "routines.base",
-        "handlers.routines",
-        "handlers.agents",
-        "handlers.agents.menu",
-        # NOTE: no "condor.runtime.*" module belongs in this list. The runtime
-        # holds live subprocess handles (agent sessions); re-executing those
-        # modules resets the registry and silently orphans every running agent.
-        "handlers.agents.stream",
-        "handlers.agents.confirmation",
-        "handlers.agents._shared",
-        "handlers.memory",
-        "handlers.admin",
-        "handlers.admin.update",
-        "utils.auth",
-        "utils.telegram_formatters",
-        "config_manager",
-    ]
+    # NOTE: no "condor.runtime.*" module belongs here. The runtime holds live
+    # subprocess handles (agent sessions); re-executing those modules resets
+    # the registry and silently orphans every running agent. The discovery
+    # above only walks handlers/, so it cannot pull them in.
+    modules_to_reload = [*_EXTRA_RELOAD_MODULES, *_discover_handler_modules()]
 
+    reloaded = 0
     for module_name in modules_to_reload:
         if module_name in sys.modules:
             importlib.reload(sys.modules[module_name])
-            logger.info(f"Reloaded module: {module_name}")
+            logger.debug(f"Reloaded module: {module_name}")
+            reloaded += 1
+    logger.info(f"Reloaded {reloaded} modules")
 
     # Re-register fetch functions after reload (preserves in-memory cache)
     try:
@@ -387,7 +463,7 @@ def register_handlers(application: Application) -> None:
         CallbackQueryHandler(admin_callback_handler, pattern="^admin:")
     )
 
-    # Telemetry consent prompt (FEAT-023): three buttons, admin only
+    # Telemetry notice (FEAT-023): Got it / Turn off, admin only
     from condor.telemetry import prompt as telemetry_prompt
 
     application.add_handler(
@@ -500,7 +576,7 @@ async def register_bot_commands(application: Application) -> None:
     if ADMIN_USER_ID:
         admin_commands = commands + [
             BotCommand("admin", "Admin panel - manage users and access"),
-            BotCommand("update", "Check for updates and restart"),
+            BotCommand("update", "Check for and install updates"),
         ]
         try:
             await application.bot.set_my_commands(
@@ -516,6 +592,8 @@ async def _notify_interrupted_runs(bot, report) -> None:
     One summary per chat rather than a message per run: a crash with several
     live loops would otherwise spam the user at the worst possible moment.
     """
+    from condor.notifications import announce, user_for_chat
+
     by_chat: dict[int, list] = {}
     for run in report.interrupted:
         status = None
@@ -534,10 +612,60 @@ async def _notify_interrupted_runs(bot, report) -> None:
         for run in runs:
             suffix = " — restarted" if run.restarted else ""
             lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        text = "\n".join(lines)
+        # Telegram and the bell (FEAT-048) in one call: ``announce`` resolves
+        # the sender once and files the notice exactly once, including when the
+        # sender *is* the bell (local mode, FEAT-049). A private chat id is the
+        # owner's user id; a group has no dashboard owner, so a group summary is
+        # simply not filed anywhere.
         try:
-            await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            await announce(
+                user_for_chat(chat_id), chat_id, text, kind="system", bot=bot
+            )
         except Exception:
             logger.warning("Could not notify chat %s about interrupted runs", chat_id)
+
+
+def _outbound_bot(application: Application):
+    """The object this process sends user-facing messages through.
+
+    Telegram mode: the real PTB bot, exactly as before. Local mode: there is no
+    Telegram behind the placeholder token, so outbound messages go to the
+    dashboard bell instead (:class:`condor.notifications.NotifyBot`, FEAT-048).
+    Everything downstream — the routine store, the session health monitor, the
+    interrupted-run summaries — keeps calling ``send_message`` and neither knows
+    nor cares which surface it reached.
+    """
+    if not LOCAL_MODE:
+        return application.bot
+    from condor.notifications import NotifyBot
+
+    return NotifyBot()
+
+
+# Strong references to fire-and-forget boot tasks. asyncio only holds a weak
+# one, so a task nobody awaits can be garbage-collected mid-flight; keeping the
+# handle here (and discarding it on completion) is the documented fix.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, label: str) -> asyncio.Task:
+    """Run ``coro`` off the critical path, logging rather than swallowing errors.
+
+    For work the process wants done soon but must not wait for — cache warm-up
+    being the case that used to gate the uvicorn bind behind a dead server's
+    connect timeouts.
+    """
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+    def _report(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception() is not None:
+            logger.error("%s failed: %s", label, t.exception())
+
+    task.add_done_callback(_report)
+    return task
 
 
 async def startup(application: Application) -> None:
@@ -550,6 +678,15 @@ async def startup(application: Application) -> None:
     and never run — which is exactly how boot reconciliation silently died.
     Called explicitly from :func:`_run_dual`, before the first update is served.
     """
+    # First, before anything reads a conversation or reconciles a delegation:
+    # settle where the runtime store lives (FEAT-051). Idempotent, so this is a
+    # no-op on every boot after the first; it is a named public function rather
+    # than inline code because a second entry point (a CLI, a worker) would have
+    # to call it too.
+    from condor.migrations import ensure_migrated
+
+    ensure_migrated()
+
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
@@ -560,8 +697,28 @@ async def startup(application: Application) -> None:
 
     asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
 
-    # Register command menus (public + admin overlay)
-    await register_bot_commands(application)
+    # Same reason, different work: bringing the backtest archive to its tiered
+    # v2 layout (FEAT-075) parses and re-compresses every saved payload, which
+    # is minutes on a store measured in gigabytes. It is deliberately NOT part
+    # of ``ensure_migrated`` above -- that one runs before the first update is
+    # served. The archive degrades honestly while this runs (summaries report
+    # ``status: unknown`` and the dashboard says "indexing"), so the tab stays
+    # usable throughout, and the work is per-file and idempotent so a crash
+    # resumes rather than restarts.
+    from condor.backtest_store import migrate_backtest_archive
+
+    asyncio.get_event_loop().run_in_executor(None, migrate_backtest_archive)
+
+    # Whatever this process pushes at users from here on. In local mode there is
+    # no Telegram to push to, so it is the dashboard bell (FEAT-048) instead —
+    # which is what keeps the documented "context.bot is never None" contract
+    # true for routines with no bot behind them.
+    outbound_bot = _outbound_bot(application)
+
+    # Register command menus (public + admin overlay). Pure Telegram: there is
+    # no command menu to publish when nothing polls.
+    if not LOCAL_MODE:
+        await register_bot_commands(application)
 
     # Restore scheduled routine jobs from persistence
     from handlers.routines import restore_scheduled_jobs
@@ -571,7 +728,7 @@ async def startup(application: Application) -> None:
     # Inject Telegram bot into routine store so web-triggered routines can send messages
     from condor.routine_store import get_routine_store
 
-    get_routine_store().set_bot(application.bot)
+    get_routine_store().set_bot(outbound_bot)
 
     # Start ServerDataService (unified server-centric cache)
     from condor.server_data_service import get_server_data_service
@@ -580,7 +737,21 @@ async def startup(application: Application) -> None:
     sds_register()
     sds = get_server_data_service()
     sds.start()
-    await sds.auto_subscribe_servers()
+    # Warm the cache in the background, never on the critical path: every
+    # subscription's initial fetch opens a client, and client creation is
+    # serialized per server (ConfigManager._client_locks), so one unreachable
+    # server used to hold the Telegram start and the uvicorn bind behind a
+    # queue of connect timeouts. A cold read degrades to what a down server
+    # already returns (None) and the poll loop fills it in; a reachable server
+    # is warm within a second either way.
+    _spawn_background(sds.auto_subscribe_servers(), "SDS auto-subscribe")
+
+    # Ride the ticker-pool poll the SDS just started: an hourly price snapshot
+    # per server is the only source of 24h change on the CLOB side, and it costs
+    # no upstream request (FEAT-053).
+    from condor import ticker_history
+
+    ticker_history.install_listener()
 
     # Start agent session health monitor. The health monitor is process
     # lifecycle, not a session operation, so it is driven off the module
@@ -588,7 +759,7 @@ async def startup(application: Application) -> None:
     from condor.runtime import sessions as runtime_sessions
     from condor.runtime.confirmations import get_registry
 
-    await runtime_sessions.start_health_monitor(application.bot)
+    await runtime_sessions.start_health_monitor(outbound_bot)
     # Sweeps expired approvals so a request nobody answers is denied, not leaked.
     await get_registry().start()
 
@@ -604,7 +775,7 @@ async def startup(application: Application) -> None:
                 report.total,
                 len(report.restarted),
             )
-            await _notify_interrupted_runs(application.bot, report)
+            await _notify_interrupted_runs(outbound_bot, report)
     except Exception:
         logger.exception("Boot reconciliation failed; continuing startup")
 
@@ -626,6 +797,32 @@ async def startup(application: Application) -> None:
         logger.info("Telemetry level: %s", level)
     except Exception:
         logger.exception("Telemetry init failed (continuing without it)")
+
+    # Conversation sharing (FEAT-054, FEAT-055). Two jobs, deliberately not part
+    # of the telemetry block above: they share no consent record, no queue and
+    # no endpoint with it. Both are free on an install where nobody has opted
+    # in — the delivery job finds an empty queue and the sweep finds no user at
+    # ``always``, and neither touches the network.
+    try:
+        from condor.sharing import share as sharing
+        from condor.sharing import sweep as sharing_sweep
+
+        sharing.register_jobs(application)
+        sharing_sweep.register_jobs(application)
+    except Exception:
+        logger.exception("Sharing job registration failed (continuing without it)")
+
+    # Reflection (FEAT-073): read a finished conversation back once, for the
+    # facts and the intents in it. The sharing sweep's neighbour by shape and
+    # not by subject — it shares no consent record, no queue and no endpoint
+    # with it, and nothing it reads leaves the machine. Free on an install with
+    # nothing finished to read, and off entirely with CONDOR_REFLECTION=off.
+    try:
+        from condor.agents import reflection
+
+        reflection.register_jobs(application)
+    except Exception:
+        logger.exception("Reflection job registration failed (continuing without it)")
 
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
@@ -740,13 +937,14 @@ def get_persistence() -> SafePicklePersistence:
     """
     Build a persistence object that works both locally and in Docker.
     - Uses an env var override if provided.
-    - Defaults to <project_root>/data/condor_bot_data.pickle.
+    - Defaults to <project_root>/data/condor_bot_data.pickle, resolved through
+      condor.paths.data_dir() so $CONDOR_DATA_DIR repoints the whole
+      operational store at once rather than this one file.
     - Ensures the parent directory exists, but does NOT create the file.
     - Uses SafePicklePersistence for atomic writes, backup recovery,
       and ephemeral key filtering.
     """
-    base_dir = Path(__file__).parent
-    default_path = base_dir / "data" / "condor_bot_data.pickle"
+    default_path = paths.data_dir() / "condor_bot_data.pickle"
 
     persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
 
@@ -790,6 +988,20 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
 
 def main() -> None:
     """Run the bot."""
+    # Refuse to start on a configuration that cannot mean what it says: telegram
+    # mode (the default) with no token used to surface as an InvalidToken
+    # traceback from inside PTB, and must never be quietly read as "local mode".
+    # check_local_user() is the same idea one layer in — local mode logs in with
+    # no password, so who it logs in as is settled here, at boot, and not as a
+    # 500 from /auth/local-login with the browser already open.
+    try:
+        check_startup_config()
+        check_local_user()
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1)
+    warn_shadowed_env()
+
     # Reap any ACP/MCP subprocess trees orphaned by a prior hard kill (kill -9,
     # OOM, power loss) before we spawn our own — those bypass teardown().
     try:
@@ -808,9 +1020,18 @@ def main() -> None:
     # Create the Application with persistence enabled. No post_init/post_shutdown
     # hooks: they only fire from run_polling/run_webhook, and _run_dual owns the
     # lifecycle — startup() and teardown() are called there, explicitly.
+    # In local mode there is no token and nothing polls; the placeholder exists
+    # only so the Application (and with it job_queue, CallbackContext and the
+    # handler registry) can be built at all. Nothing ever calls Telegram with it.
+    # PTB's 5s defaults kill startup on a slow link: initialize() calls getMe,
+    # and one connect that takes >5s raises TimedOut and exits the process.
     application = (
         Application.builder()
-        .token(TELEGRAM_TOKEN)
+        .token(TELEGRAM_TOKEN or "0:local")
+        .connect_timeout(20)
+        .read_timeout(20)
+        .get_updates_connect_timeout(20)
+        .get_updates_read_timeout(30)
         .persistence(persistence)
         .concurrent_updates(True)
         .build()
@@ -837,6 +1058,26 @@ def main() -> None:
             exec_restart()  # never returns
 
 
+def _web_server_config(web_app):
+    """uvicorn's config for the dashboard, isolated so the bind address is testable.
+
+    ``WEB_HOST`` is ``0.0.0.0`` in telegram mode (unchanged) and loopback in
+    local mode, where the dashboard has no login at all, or when Tailscale is
+    enabled, where `tailscale serve` is what actually exposes it — see
+    :func:`utils.config.resolve_web_host` for why that is not negotiable by
+    accident.
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        web_app,
+        host=WEB_HOST,
+        port=BIND_PORT,
+        log_level="info",
+        access_log=False,
+    )
+
+
 async def _run_dual(application: Application) -> None:
     """Run the Telegram bot and FastAPI web server concurrently."""
     import signal
@@ -850,24 +1091,96 @@ async def _run_dual(application: Application) -> None:
     # initialize() and start_polling() — the same slot PTB gives post_init — so
     # commands, caches and boot reconciliation are settled before the first
     # update is dispatched.
-    await application.initialize()
-    await startup(application)
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    await application.start()
+    #
+    # Local mode skips that lifecycle rather than faking it (FEAT-049): the
+    # Application is built but never initialized, so nothing polls and no handler
+    # can dispatch — the Telegram surface is inert, not mocked. The job queue is
+    # started directly, which is all scheduled routines, update checks and
+    # signals actually need.
+    if LOCAL_MODE:
+        await startup(application)
+        await application.job_queue.start()
+    else:
+        await application.initialize()
+        await startup(application)
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await application.start()
 
-    # Create and start the web server
+    # Create and start the web server. With Tailscale on, WEB_HOST
+    # (utils.config.resolve_web_host) is normally this node's own tailnet
+    # address, which needs no proxy: the port is on the tailnet and on no
+    # public interface, full stop.
+    #
+    # `tailscale serve` is only the fallback for when that address could not be
+    # resolved -- daemon not up yet, node not registered -- in which case the
+    # bind failed closed to loopback and a proxy is the only way anything
+    # reaches it. Serve needs the daemon socket, which refuses unprivileged
+    # callers, so this often cannot succeed either; say so plainly rather than
+    # leaving the dashboard silently unreachable.
     web_app = create_app()
-    config = uvicorn.Config(
-        web_app,
-        host=BIND_HOST,
-        port=BIND_PORT,
-        log_level="info",
-        access_log=False,
-    )
-    server = uvicorn.Server(config)
+    if USE_TAILSCALE and LOCAL_MODE:
+        # Local mode keeps loopback even with Tailscale on: the dashboard has
+        # no login, and a tailnet is a smaller audience than the internet, not
+        # an authenticated one. Intended, so no proxy and no warning.
+        logger.info(
+            "Dashboard on http://%s:%s — local mode stays on loopback even "
+            "with Tailscale enabled (no login on this dashboard).",
+            WEB_HOST,
+            WEB_PORT,
+        )
+    elif USE_TAILSCALE:
+        from utils.tailscale import is_tailnet_ip
+
+        if is_tailnet_ip(WEB_HOST):
+            logger.info(
+                "Dashboard on http://%s:%s — reachable on the tailnet only.",
+                WEB_HOST,
+                WEB_PORT,
+            )
+        elif os.environ.get("WEB_HOST", "").strip():
+            # An explicit WEB_HOST is a deliberate opt-out, not a failed
+            # lookup. Warning about a tailnet address we were never asked to
+            # find would report someone's own choice as a fault.
+            logger.info(
+                "Dashboard on http://%s:%s — WEB_HOST was set explicitly.",
+                WEB_HOST,
+                WEB_PORT,
+            )
+        else:
+            from utils.tailscale import ensure_serve
+
+            logger.warning(
+                "USE_TAILSCALE is set but this node's tailnet address could "
+                "not be determined, so the dashboard bound to %s. Falling "
+                "back to `tailscale serve`.",
+                WEB_HOST,
+            )
+            if not await ensure_serve(WEB_PORT):
+                logger.error(
+                    "Dashboard bound to %s; tailnet forwarding could not be "
+                    "confirmed, so it will NOT be reachable remotely. Check "
+                    "`tailscale status`, then restart Condor to pick up the "
+                    "tailnet address.",
+                    WEB_HOST,
+                )
+    server = uvicorn.Server(_web_server_config(web_app))
 
     # Start WebSocket manager
     get_ws_manager().start()
+
+    # A run the journal still calls live is a run no process is driving: this one
+    # just booted, and a run is only ever executed by the process that started
+    # it. Judged before anything else looks at it, and deliberately *outside*
+    # the admin block below -- an install with no ADMIN_USER_ID used to leave
+    # the journal live for ever, which is a settings panel stuck on a spinner
+    # that neither a reload nor a relaunch could clear.
+    from condor import updates
+
+    try:
+        finished = await updates.finalize_pending_run()
+    except Exception:
+        logger.warning("Could not finalize the pending update run", exc_info=True)
+        finished = None
 
     # Notify admin that Condor has started
     from utils.config import ADMIN_USER_ID
@@ -882,21 +1195,56 @@ async def _run_dual(application: Application) -> None:
                 get_current_branch(), get_local_commit()
             )
             version = f" ({branch} @ {commit})" if commit else ""
-            await application.bot.send_message(
-                chat_id=int(ADMIN_USER_ID),
-                text=f"Condor is online and ready.{version}",
+            boot_text = f"Condor is online and ready.{version}"
+
+            # Judged above, before the admin block, so the panel is correct even
+            # on an install with nobody to tell. What is left here is the
+            # telling: a Condor old enough to exec itself at the end of an
+            # update could not report its own outcome, because the process that
+            # would have is the one that died (FEAT-070).
+            if finished is not None and finished.state == "succeeded":
+                moved = f"{(finished.from_commit or '')[:7]} → {commit}"
+                boot_text = f"Update complete: {branch} {moved}. Condor is ready."
+            elif finished is not None:
+                boot_text = f"Update failed: {finished.error} Condor is ready.{version}"
+
+            # One call reaches Telegram *and* the dashboard bell (FEAT-048), so
+            # an admin who only has the browser open still sees which commit
+            # came up -- and whether the update that asked for it worked.
+            from condor import notifications
+
+            await notifications.announce(
+                int(ADMIN_USER_ID),
+                None if LOCAL_MODE else int(ADMIN_USER_ID),
+                boot_text,
+                kind="system",
+                bot=None if LOCAL_MODE else application.bot,
             )
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
 
-        # Ask, once, whether this install wants to be counted (FEAT-023). Sent
-        # next to the boot notification because that is the one moment the admin
-        # is already looking. Until it is answered, nothing is collected.
-        from condor.telemetry.prompt import maybe_prompt_admin
+        # Tell the admin, once, that usage summaries are on and how to turn
+        # them off (FEAT-023). Sent next to the boot notification because that
+        # is the one moment the admin is already looking. Until the notice is
+        # delivered, only the install count is sent. It is a Telegram message
+        # with inline buttons, so local mode is skipped here and told in the
+        # dashboard instead (the notice strip). Either way the install is
+        # already counted: `telemetry.init()` does that at the ping floor.
+        if not LOCAL_MODE:
+            from condor.telemetry.prompt import maybe_prompt_admin
 
-        await maybe_prompt_admin(application.bot)
+            await maybe_prompt_admin(application.bot)
 
-    logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
+    if LOCAL_MODE:
+        logger.info(
+            "Starting Condor in local mode (no Telegram): dashboard on http://%s:%s",
+            WEB_HOST,
+            WEB_PORT,
+        )
+    else:
+        logger.info(
+            "Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT
+        )
 
     # Handle shutdown signals
     shutdown_event = asyncio.Event()
@@ -927,12 +1275,22 @@ async def _run_dual(application: Application) -> None:
             logger.exception("Web server crashed during shutdown")
         # Run each step independently so one failure can't skip the rest.
         # teardown() runs last, mirroring where post_shutdown would have sat.
-        for name, step in (
-            ("updater.stop", application.updater.stop),
-            ("application.stop", application.stop),
-            ("application.shutdown", application.shutdown),
-            ("teardown", partial(teardown, application)),
-        ):
+        # Local mode never initialized or started the Application, so the PTB
+        # stop steps would only raise "not running" — it has a job queue to stop
+        # and nothing else.
+        if LOCAL_MODE:
+            steps = (
+                ("job_queue.stop", application.job_queue.stop),
+                ("teardown", partial(teardown, application)),
+            )
+        else:
+            steps = (
+                ("updater.stop", application.updater.stop),
+                ("application.stop", application.stop),
+                ("application.shutdown", application.shutdown),
+                ("teardown", partial(teardown, application)),
+            )
+        for name, step in steps:
             try:
                 await step()
             except Exception:

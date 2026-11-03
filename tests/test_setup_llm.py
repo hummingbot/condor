@@ -11,13 +11,13 @@ import asyncio
 import pytest
 
 from condor import setup_llm
-from handlers.agents._shared import (
+from condor.llm.openrouter_models import OpenRouterModel
+from condor.llm.options import (
     AGENT_OPTIONS,
     RECOMMENDED_AGENT,
     selectable_agent_options,
 )
-from handlers.agents.openrouter_models import OpenRouterModel
-from handlers.agents.readiness import MISSING, READY, UNVERIFIED, Readiness
+from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
 
 
 def scripted(answers):
@@ -220,6 +220,40 @@ def test_current_default_last_resort(monkeypatch):
     assert setup_llm.current_default({}) == "claude-code"
 
 
+# ── auto-installing a missing CLI bridge ────────────────────────────────────
+
+
+def test_install_bridge_runs_the_computed_command(monkeypatch):
+    calls = {}
+
+    class FakeResult:
+        returncode = 0
+
+    def fake_run(args):
+        calls["args"] = args
+        return FakeResult()
+
+    monkeypatch.setattr(setup_llm.subprocess, "run", fake_run)
+
+    assert setup_llm._install_bridge("gemini", say=lambda *a: None) is True
+    assert calls["args"] == ["npm", "install", "-g", "@google/gemini-cli"]
+
+
+def test_install_bridge_reports_a_nonzero_exit(monkeypatch):
+    class FakeResult:
+        returncode = 1
+
+    monkeypatch.setattr(setup_llm.subprocess, "run", lambda args: FakeResult())
+    lines, say = recorder()
+
+    assert setup_llm._install_bridge("gemini", say=say) is False
+    assert any("Install failed" in line for line in lines)
+
+
+def test_install_bridge_has_nothing_to_run_for_an_unmapped_base():
+    assert setup_llm._install_bridge("does-not-exist") is False
+
+
 # ── the prompt loop ─────────────────────────────────────────────────────────
 
 
@@ -245,18 +279,72 @@ def test_menu_marks_the_current_default_and_badges_each_row():
     assert "s. Skip" in text
 
 
-def test_an_unready_model_cannot_be_picked():
+def test_picking_a_missing_bridge_installs_it_and_proceeds(monkeypatch):
+    """Selecting a not-yet-installed CLI bridge installs it right there, in place."""
+    options = setup_llm.menu_options()
+    gemini = list(options).index("gemini") + 1
+    lines, say = recorder()
+    installed = {}
+
+    def fake_install(base, say):
+        installed["base"] = base
+        return True
+
+    async def now_ready(base, env=None):
+        return Readiness(READY, "installed and logged in")
+
+    monkeypatch.setattr(setup_llm, "_install_bridge", fake_install)
+    monkeypatch.setattr(setup_llm.readiness, "probe", now_ready)
+
+    picked = setup_llm.choose(
+        options,
+        dict(READY_STATES),  # a copy: this run mutates its own states cache
+        "claude-code",
+        {},
+        ask=scripted([str(gemini)]),
+        say=say,
+    )
+
+    assert picked == ("gemini", {})
+    assert installed["base"] == "gemini"
+    assert any("installed and logged in" in line for line in lines)
+
+
+def test_a_failed_bridge_install_reprompts(monkeypatch):
+    """Selecting a bridge whose install fails falls back to the old behavior: reprompt."""
     options = setup_llm.menu_options()
     gemini = list(options).index("gemini") + 1
     claude = list(options).index("claude-code") + 1
     lines, say = recorder()
 
+    monkeypatch.setattr(setup_llm, "_install_bridge", lambda base, say: False)
+
     picked = setup_llm.choose(
         options,
-        READY_STATES,
+        dict(READY_STATES),
         "claude-code",
         {},
         ask=scripted([str(gemini), str(claude)]),
+        say=say,
+    )
+
+    assert picked == ("claude-code", {})
+    assert any("isn't ready" in line for line in lines)
+
+
+def test_a_missing_local_server_has_no_installer_and_just_reprompts():
+    """lmstudio:/ollama: aren't ACP bridges -- MISSING there is never auto-installed."""
+    options = setup_llm.menu_options()
+    lmstudio = list(options).index("lmstudio:") + 1
+    claude = list(options).index("claude-code") + 1
+    lines, say = recorder()
+
+    picked = setup_llm.choose(
+        options,
+        dict(READY_STATES),
+        "claude-code",
+        {},
+        ask=scripted([str(lmstudio), str(claude)]),
         say=say,
     )
 
@@ -519,3 +607,58 @@ def test_a_pick_is_written_and_reported(fake_env_file, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Saved CONDOR_DEFAULT_AGENT=ollama:qwen3:32b" in out
     assert "Default model: ollama:qwen3:32b" in out
+
+
+def test_main_installs_the_skipped_defaults_bridge_in_the_same_run(
+    fake_env_file, monkeypatch, capsys
+):
+    """`choose()` only auto-installs on an explicit pick. This covers "the
+    picker was skipped, but the effective (previous/recommended) default
+    still needs its bridge" -- in this same process, not a separate pass
+    tacked on after the fact."""
+    monkeypatch.setattr(setup_llm.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(setup_llm, "choose", lambda *a, **k: None)
+    fake_env_file.write_text("CONDOR_DEFAULT_AGENT=claude-code\n")
+
+    async def missing(bases, env=None):
+        return {
+            b: Readiness(MISSING, "not installed — npm install -g x") for b in bases
+        }
+
+    async def now_ready(base, env=None):
+        return Readiness(READY, "installed and logged in")
+
+    installed = {}
+
+    def fake_install(base, say=print):
+        installed["base"] = base
+        return True
+
+    monkeypatch.setattr(setup_llm.readiness, "probe_all", missing)
+    monkeypatch.setattr(setup_llm.readiness, "probe", now_ready)
+    monkeypatch.setattr(setup_llm, "_install_bridge", fake_install)
+
+    assert setup_llm.main([]) == 0
+
+    assert installed["base"] == "claude-code"
+    assert "installed and logged in" in capsys.readouterr().out
+
+
+def test_main_status_only_never_installs_anything(fake_env_file, monkeypatch):
+    """`--status` promises to change nothing -- including not running an install."""
+
+    async def missing(bases, env=None):
+        return {
+            b: Readiness(MISSING, "not installed — npm install -g x") for b in bases
+        }
+
+    monkeypatch.setattr(setup_llm.readiness, "probe_all", missing)
+    fake_env_file.write_text("CONDOR_DEFAULT_AGENT=claude-code\n")
+
+    called = []
+    monkeypatch.setattr(
+        setup_llm, "_install_bridge", lambda *a, **k: called.append(1) or True
+    )
+
+    assert setup_llm.main(["--status"]) == 0
+    assert called == []

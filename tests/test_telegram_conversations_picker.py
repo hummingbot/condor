@@ -118,7 +118,6 @@ class _World:
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """A throwaway conversation root, shared by the handlers and the REST router."""
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     return tmp_path
 
 

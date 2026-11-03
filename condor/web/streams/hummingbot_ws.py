@@ -1,0 +1,634 @@
+"""Streams bridged from the Hummingbot backend WS endpoints, plus the
+controller-performance REST poll.
+
+``HummingbotStreamsMixin`` is mixed into ``WebSocketManager``, which provides
+the host surface. It owns the shared
+connect/reconnect skeleton (``_run_ws_stream``) and every per-protocol
+handler built on it: trades and order book (``/ws/market-data``), executors,
+bots, positions and performance (``/ws/executors``), and the 30s
+controller-performance poll. Channel names and message shapes are part of the
+dashboard's wire contract — the frontend depends on them byte-for-byte.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+import aiohttp
+
+from condor.server_data_service import ServerDataType, get_server_data_service
+
+logger = logging.getLogger(__name__)
+
+# What a stream should do about the error that broke it.
+WS_RETRY = "retry"
+WS_SLOW_RETRY = "slow_retry"
+WS_PERMANENT = "permanent"
+
+# Backoff ceilings, in seconds, for the two retrying verdicts.
+WS_RETRY_CAP = 60
+WS_SLOW_RETRY_CAP = 300
+
+# Handshake statuses that mean the upstream refused us rather than failed.
+_REFUSED_STATUSES = frozenset({401, 403, 404})
+
+
+class HummingbotStreamsMixin:
+    """Upstream Hummingbot WS stream family and its shared reconnect skeleton."""
+
+    if TYPE_CHECKING:
+        # Stream task state, initialized by WebSocketManager.__init__.
+        _controller_perf_tasks: dict[str, asyncio.Task]
+        # Host surface, provided by WebSocketManager.
+        _last_data: dict[str, Any]
+
+        async def broadcast(self, channel: str, data: Any) -> None: ...
+
+        async def _broadcast_update(self, channel: str, data: Any) -> None: ...
+
+        def _has_subscribers(self, channel: str) -> bool: ...
+
+    # -- Transforms (REST-shape parity for WS broadcasts) --
+
+    @staticmethod
+    def _transform_executors(raw_data: Any) -> list[dict]:
+        """Transform raw executor data to ExecutorInfo-compatible dicts for WS broadcast."""
+        from condor.fetchers.executors import extract_executors_list
+        from condor.web.models import ExecutorInfo
+
+        executors_list = extract_executors_list(raw_data)
+        result = []
+        for ex in executors_list:
+            info = ExecutorInfo.from_raw(ex)
+            if info:
+                result.append(info.model_dump())
+        return result
+
+    @staticmethod
+    async def _transform_bots(server_name: str, raw_data: Any) -> dict:
+        """Transform raw BOTS_STATUS data to a BotsPageResponse-compatible dict.
+
+        Shares the REST route's builder *and* its enrichment: a frame that
+        omitted the controller configs, deploy timestamps and DB performance
+        left the client patching every row back out of the last REST payload.
+        """
+        from condor.web.routes.bots import enriched_bots_page
+
+        return await enriched_bots_page(server_name, raw_data)
+
+    async def _broadcast_bots_update(
+        self, channel: str, server_name: str, raw_data: Any
+    ) -> None:
+        """Enrich a raw BOTS_STATUS payload and broadcast it, if it changed.
+
+        Enrichment is an await, so every bots frame is built inside a task —
+        including the ones triggered by the synchronous SDS cache listener.
+        """
+        try:
+            data = await self._transform_bots(server_name, raw_data)
+            self._overlay_stopping_state(server_name, data)
+        except Exception as e:
+            logger.debug("Failed to transform bots data for WS: %s", e)
+            return
+        await self._broadcast_update(channel, data)
+
+    @staticmethod
+    def _transform_controller_perf(raw_data: Any) -> list[dict]:
+        """Transform raw controller performance into ControllerPerformanceSnapshot dicts.
+
+        The frontend merges these frames into the same react-query cache the
+        REST history endpoint fills, so they have to be the same shape: the
+        upstream payload nests the numbers under ``performance``, and a frame
+        broadcast unflattened would append points whose PnL and volume all read
+        as ``undefined``.
+        """
+        from condor.fetchers.bot_performance import extract_snapshots
+        from condor.web.models import ControllerPerformanceSnapshot
+
+        return [
+            ControllerPerformanceSnapshot.from_raw(s).model_dump()
+            for s in extract_snapshots(raw_data)
+        ]
+
+    @staticmethod
+    def _overlay_stopping_state(server_name: str, data: dict) -> None:
+        """Apply transitional 'stopping' state to WS broadcast data."""
+        from condor.web.routes.bots import overlay_stopping_state
+
+        overlay_stopping_state(
+            server_name, data.get("controllers", []), data.get("bots", [])
+        )
+
+    # -- Shared skeleton --
+
+    @staticmethod
+    def _classify_ws_error(exc: BaseException) -> str:
+        """Say what a stream should do about the exception that broke it.
+
+        A refused handshake is read off ``.status``, which aiohttp puts on the
+        exception, and never off the rendered message. What ``str(exc)`` for a
+        broken stream actually carries is a trading pair, a connection id, a
+        timestamp and a host:port — any of which can spell "401" or "404"
+        without anything having been refused.
+
+        Being refused is not permanent either. hummingbot-api rejects bad
+        credentials with an HTTP 401 on the handshake, and credentials are
+        rotated by hand: giving up would mean a key fixed five seconds later
+        only takes effect at the next Condor restart. It is retried on a long
+        leash instead, slowly enough not to hammer a server that is saying no.
+
+        An invalid trading pair is the one verdict left that is really
+        permanent. The symbol is wrong for this connector, no number of
+        retries makes it right, and it arrives as prose in a message rather
+        than as a status of its own, so it is still matched as text — on words
+        that cannot collide with a number the way a bare "404" can
+        (issue #134).
+        """
+        if (
+            isinstance(exc, aiohttp.WSServerHandshakeError)
+            and exc.status in _REFUSED_STATUSES
+        ):
+            return WS_SLOW_RETRY
+
+        lowered = str(exc).lower()
+        if "appears to be invalid" in lowered or "invalid symbol" in lowered:
+            return WS_PERMANENT
+
+        return WS_RETRY
+
+    async def _run_ws_stream(
+        self,
+        channel: str,
+        server_name: str,
+        *,
+        label: str,
+        open_ws: Callable[[Any], Any],
+        subscribe: Callable[[Any], Awaitable[None]],
+        on_message: Callable[[dict], Awaitable[None]],
+        backoff_on_empty_close: bool = False,
+    ) -> None:
+        """Shared connect/reconnect skeleton for all Hummingbot WS streams.
+
+        Owns the while-True loop, subscriber check, heartbeat/error message
+        handling, error classification (``_classify_ws_error``) and
+        exponential backoff capped at ``WS_RETRY_CAP`` — or, for a stream the
+        upstream is refusing, at the longer ``WS_SLOW_RETRY_CAP``. Each stream
+        supplies only:
+
+        - ``open_ws``: client -> the WS async context manager to enter
+          (e.g. ``lambda c: c.ws.market_data()``).
+        - ``subscribe``: performs the subscription on the open socket.
+        - ``on_message``: handles data messages (heartbeat/error are
+          handled here).
+
+        ``backoff_on_empty_close`` reproduces the executor stream's
+        behavior: don't reset backoff on subscribe; after a clean close,
+        reset it only if at least one message arrived, otherwise back off
+        (guards against a server that accepts then immediately drops).
+        """
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+        lower_label = label[0].lower() + label[1:]
+        subscribed_label = label if label.endswith("WS") else f"{label} WS"
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with open_ws(client) as ws:
+                    await subscribe(ws)
+                    logger.info("%s subscribed: %s", subscribed_label, channel)
+                    if not backoff_on_empty_close:
+                        backoff = 5
+                    got_message = False
+                    async for msg in ws:
+                        if not self._has_subscribers(channel):
+                            logger.info(
+                                "No subscribers for %s, closing %s stream",
+                                channel,
+                                lower_label,
+                            )
+                            return
+
+                        got_message = True
+                        msg_type = msg.get("type")
+                        if msg_type == "heartbeat":
+                            continue
+                        if msg_type == "error":
+                            logger.warning(
+                                "%s stream error for %s: %s",
+                                label,
+                                channel,
+                                msg.get("message", "unknown error"),
+                            )
+                            break
+                        await on_message(msg)
+
+                    if backoff_on_empty_close:
+                        # Connection closed cleanly — back off if short-lived
+                        if got_message:
+                            backoff = 5
+                        else:
+                            logger.warning(
+                                "%s stream closed immediately for %s, "
+                                "reconnecting in %ds...",
+                                label,
+                                channel,
+                                backoff,
+                            )
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 2, WS_RETRY_CAP)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                verdict = self._classify_ws_error(e)
+                if verdict == WS_PERMANENT:
+                    logger.error(
+                        "%s stream permanent error for %s: %s — giving up",
+                        label,
+                        channel,
+                        e,
+                    )
+                    return
+
+                cap = WS_SLOW_RETRY_CAP if verdict == WS_SLOW_RETRY else WS_RETRY_CAP
+                logger.warning(
+                    "%s stream error for %s: %s, reconnecting in %ds...",
+                    label,
+                    channel,
+                    e,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, cap)
+
+    # -- Trade streaming --
+
+    async def _trade_stream(self, channel: str) -> None:
+        parts = channel.split(":")
+        if len(parts) < 4:
+            return
+        _, server_name, connector, pair = parts[:4]
+
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_trades(
+                connector,
+                pair,
+                update_interval=1.0,
+            )
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "trades":
+                return
+            trade_data = msg.get("data", [])
+            trades = []
+            for t in trade_data:
+                if isinstance(t, dict):
+                    trades.append(
+                        {
+                            "price": float(t.get("price", 0)),
+                            "amount": float(t.get("amount", t.get("quantity", 0))),
+                            "side": t.get("side", t.get("trade_type", "buy")).lower(),
+                            "timestamp": float(t.get("timestamp", 0)),
+                        }
+                    )
+            if trades:
+                await self.broadcast(channel, {"type": "trades", "data": trades})
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Trade",
+            open_ws=lambda client: client.ws.market_data(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
+
+    # -- Order book streaming --
+
+    async def _order_book_stream(self, channel: str) -> None:
+        parts = channel.split(":")
+        if len(parts) < 4:
+            return
+        _, server_name, connector, pair = parts[:4]
+
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_order_book(
+                connector,
+                pair,
+                depth=20,
+                update_interval=1.0,
+            )
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "order_book":
+                return
+            raw_data = msg.get("data", {})
+            bids = []
+            asks = []
+            for b in raw_data.get("bids") or []:
+                if isinstance(b, dict):
+                    bids.append(
+                        {
+                            "price": float(b.get("price", 0)),
+                            "amount": float(b.get("amount", b.get("quantity", 0))),
+                        }
+                    )
+                elif isinstance(b, (list, tuple)) and len(b) >= 2:
+                    bids.append({"price": float(b[0]), "amount": float(b[1])})
+            for a in raw_data.get("asks") or []:
+                if isinstance(a, dict):
+                    asks.append(
+                        {
+                            "price": float(a.get("price", 0)),
+                            "amount": float(a.get("amount", a.get("quantity", 0))),
+                        }
+                    )
+                elif isinstance(a, (list, tuple)) and len(a) >= 2:
+                    asks.append({"price": float(a[0]), "amount": float(a[1])})
+            await self.broadcast(channel, {"bids": bids, "asks": asks})
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Order book",
+            open_ws=lambda client: client.ws.market_data(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
+
+    # -- Executor streaming (via Hummingbot WS) --
+
+    async def _executor_stream(self, channel: str) -> None:
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+
+        # Try SDS cache first (pre-warmed by auto_subscribe_servers or REST prefetch)
+        if channel not in self._last_data:
+            sds = get_server_data_service()
+            cached = sds.get(server_name, ServerDataType.EXECUTORS)
+            if cached is not None:
+                executors = self._transform_executors(cached)
+                if executors:
+                    await self.broadcast(channel, executors)
+                    logger.info(
+                        "Executor SDS cache hit: %d executors for %s",
+                        len(executors),
+                        channel,
+                    )
+
+        # Wait briefly for SDS to be populated by a concurrent REST request
+        # (usePrefetchData fires getExecutors which calls get_or_fetch on SDS)
+        if channel not in self._last_data:
+            sds = get_server_data_service()
+            for _ in range(6):  # up to 3 seconds
+                await asyncio.sleep(0.5)
+                cached = sds.get(server_name, ServerDataType.EXECUTORS)
+                if cached is not None:
+                    executors = self._transform_executors(cached)
+                    if executors:
+                        await self.broadcast(channel, executors)
+                        logger.info(
+                            "Executor SDS cache populated during wait: %d executors for %s",
+                            len(executors),
+                            channel,
+                        )
+                    break
+
+        # Progressive pre-fetch only if we still have no data
+        if channel not in self._last_data:
+            try:
+                from condor.fetchers._pagination import walk_pages
+                from condor.fetchers.executors import (
+                    extract_executors_list as _extract_executors_list,
+                )
+
+                sds = get_server_data_service()
+                client = await cm.get_client(server_name)
+                all_raw: list[dict] = []
+                # Rows already through ExecutorInfo, accumulated page by page.
+                # Transforming the *whole* accumulated list on every page made
+                # this quadratic: with FIRST_PAGE/NEXT_PAGE/MAX_PREFETCH below,
+                # a 5k history cost ~27k pydantic validations instead of 5k, all
+                # on the event loop the candle and bots broadcasts share.
+                # ``_transform_executors`` is a pure per-item map over a list
+                # (``extract_executors_list`` passes a list through untouched),
+                # so transforming each page once yields the identical snapshot.
+                transformed: list[dict] = []
+                page_num = 0
+                FIRST_PAGE = 50
+                NEXT_PAGE = 500
+                MAX_PREFETCH = 5000
+
+                # A small first page so the tab paints before the long pages land.
+                async for page in walk_pages(
+                    client.executors.search_executors,
+                    _extract_executors_list,
+                    page_size=NEXT_PAGE,
+                    first_page_size=FIRST_PAGE,
+                    max_items=MAX_PREFETCH,
+                ):
+                    all_raw.extend(page)
+                    transformed.extend(self._transform_executors(page))
+
+                    # Broadcast the accumulated snapshot after each page. It is
+                    # copied because ``broadcast`` retains what it is handed as
+                    # the channel's last-known payload, which the next page
+                    # would otherwise keep mutating underneath it.
+                    if transformed:
+                        await self.broadcast(channel, list(transformed))
+                        logger.info(
+                            "Executor pre-fetch page %d: %d executors (total %d) for %s",
+                            page_num,
+                            len(page),
+                            len(transformed),
+                            channel,
+                        )
+                    page_num += 1
+
+                # Cache in SDS so other consumers benefit
+                sds.put(server_name, ServerDataType.EXECUTORS, all_raw)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning("Executor pre-fetch failed for %s: %s", channel, e)
+
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_executors(update_interval=2.0)
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "executors":
+                return
+            executors = self._transform_executors(msg.get("data", []))
+            await self._broadcast_update(channel, executors)
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Executor",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+            backoff_on_empty_close=True,
+        )
+
+    # -- Bots WS streaming (via Hummingbot /ws/executors all_bots_status) --
+
+    async def _bots_ws_stream(self, channel: str) -> None:
+        """Stream all_bots_status from Hummingbot /ws/executors and update SDS cache."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        # Send SDS-cached bots data as initial snapshot
+        if channel not in self._last_data:
+            sds = get_server_data_service()
+            cached = sds.get(server_name, ServerDataType.BOTS_STATUS)
+            if cached is not None:
+                try:
+                    data = await self._transform_bots(server_name, cached)
+                    await self.broadcast(channel, data)
+                except Exception as e:
+                    logger.debug("Failed to send initial bots snapshot: %s", e)
+
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_all_bots_status(update_interval=5.0)
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "all_bots_status":
+                return
+            raw_data = msg.get("data", {})
+            # Update SDS cache so REST and Telegram benefit
+            get_server_data_service().put(
+                server_name, ServerDataType.BOTS_STATUS, raw_data
+            )
+            await self._broadcast_bots_update(channel, server_name, raw_data)
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Bots WS",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
+
+    # -- Positions WS streaming (via Hummingbot /ws/executors positions) --
+
+    async def _positions_ws_stream(self, channel: str) -> None:
+        """Stream positions from Hummingbot /ws/executors and update SDS cache."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_positions(update_interval=5.0)
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "positions":
+                return
+            raw_data = msg.get("data", [])
+            # Update SDS cache
+            get_server_data_service().put(
+                server_name, ServerDataType.POSITIONS, raw_data
+            )
+            await self._broadcast_update(channel, raw_data)
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Positions WS",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
+
+    # -- Performance WS streaming (via Hummingbot /ws/executors performance) --
+
+    async def _performance_ws_stream(self, channel: str) -> None:
+        """Stream performance from Hummingbot /ws/executors and update SDS cache."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_performance(update_interval=5.0)
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "performance":
+                return
+            await self._broadcast_update(channel, msg.get("data", {}))
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Performance WS",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
+
+    # -- Controller Performance polling stream --
+
+    async def _controller_perf_stream(self, channel: str) -> None:
+        """Poll latest controller performance every 30s and broadcast snapshots."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from condor.fetchers.bot_performance import fetch_latest_snapshots
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        while True:
+            try:
+                if not self._has_subscribers(channel):
+                    logger.info(
+                        "No subscribers for %s, stopping controller perf stream",
+                        channel,
+                    )
+                    self._controller_perf_tasks.pop(channel, None)
+                    return
+
+                client = await cm.get_client(server_name)
+                # Shared whole-server cache: this 30s poll asks for the very
+                # payload the bots-page enrichment and the controller-performance
+                # routes ask for, so a poll that coincides with one of them costs
+                # no round-trip at all.
+                result = await fetch_latest_snapshots(client)
+
+                snapshots = self._transform_controller_perf(result)
+
+                if snapshots:
+                    await self._broadcast_update(channel, {"snapshots": snapshots})
+                    backoff = 5
+
+                await asyncio.sleep(30)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(
+                    "Controller perf stream error for %s: %s, retrying in %ds...",
+                    channel,
+                    e,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)

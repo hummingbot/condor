@@ -209,9 +209,7 @@ def test_route_rejects_traversal_and_caches_nothing(monkeypatch, payload):
 
     sds._get_client = _fake_get_client
     sds.register_fetch(ServerDataType.TRADING_RULES, _spy_fetch)
-    monkeypatch.setattr(
-        "condor.server_data_service.get_server_data_service", lambda: sds
-    )
+    monkeypatch.setattr("condor.web.routes.market.get_server_data_service", lambda: sds)
 
     resp = _client(monkeypatch).get(
         "/servers/srv/market/trading-rules", params={"connector": payload}
@@ -235,9 +233,7 @@ def test_route_still_serves_a_legit_connector(monkeypatch):
 
     sds._get_client = _fake_get_client
     sds.register_fetch(ServerDataType.TRADING_RULES, _fetch)
-    monkeypatch.setattr(
-        "condor.server_data_service.get_server_data_service", lambda: sds
-    )
+    monkeypatch.setattr("condor.web.routes.market.get_server_data_service", lambda: sds)
 
     resp = _client(monkeypatch).get(
         "/servers/srv/market/trading-rules", params={"connector": "binance"}

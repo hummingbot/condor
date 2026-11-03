@@ -1,27 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import {
-  Area,
-  CartesianGrid,
-  ComposedChart,
-  Legend,
-  Line,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 
-import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor, toMs } from "@/lib/formatters";
-import { positionQuoteValue, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
-import { getThemeColors } from "@/lib/theme-colors";
-import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
+import { api, type ControllerInfo, type ControllerPerformanceHistoryAllResponse } from "@/lib/api";
+import { controllerKey } from "@/lib/controller-identity";
+import { historyRowBudget } from "@/lib/history-pagination";
+import {
+  HISTORY_REFETCH_MS,
+  TAIL_MAX_PAGES,
+  refreshControllerHistory,
+} from "@/lib/history-refresh";
+import { aggregatePnlSeries, samplingIntervalSince } from "@/lib/pnl-chart";
+import { controllerPerfHistoryQuery } from "@/lib/queryClient";
+import type { ConvertFn } from "@/lib/rates";
+import { PnlEvolutionChart } from "./PnlEvolutionChart";
 
 // ── Component ──
-
-type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
 
 interface Props {
   server: string;
@@ -30,73 +23,92 @@ interface Props {
   deployedAt?: string | null;
   height?: number;
   currencySymbol?: string;
-  tradingPair?: string;
   convert?: ConvertFn;
   controller?: ControllerInfo;
 }
 
-export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", tradingPair, convert, controller }: Props) {
+/**
+ * One controller's PNL chart: this component owns the history query and the
+ * loading/empty states around it. The drawing is PnlEvolutionChart's (ARCH-242)
+ * and the fold is aggregatePnlSeries' (ARCH-243).
+ */
+export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", convert, controller }: Props) {
+  // How finely to sample depends on how long this controller has actually been
+  // running: a month-old bot at 5m is 8,640 points to draw a line 720 hourly
+  // ones draw identically — and the route caps a page at 1000 rows, so asking
+  // for them silently returned a truncated history (PERF-238). Memoised on the
+  // deploy time rather than recomputed from a live clock each render: the
+  // thresholds are days apart, so a session that crosses one can carry the
+  // finer interval until it remounts, and in exchange the query key is stable.
+  const interval = useMemo(() => samplingIntervalSince(deployedAt), [deployedAt]);
+
   const { data: raw, isLoading } = useQuery({
-    queryKey: ["controller-perf-history", server, controllerId, deployedAt],
-    queryFn: () =>
-      api.getControllerPerformanceHistory(server, {
-        controller_id: controllerId,
-        bot_name: botName,
-        interval: "5m",
-        limit: 1000,
-        start_time: deployedAt ?? undefined,
-      }),
-    refetchInterval: 60_000,
+    // Built by the factory, not by hand: the shared socket routes live frames
+    // into this entry by a prefix of the key, and the ordering that keeps that
+    // working — bot before controller, interval last — is stated once on
+    // `controllerPerfHistoryQuery` (ARCH-285).
+    queryKey: controllerPerfHistoryQuery(server, {
+      botName,
+      controllerId,
+      start: deployedAt,
+      interval,
+    }).queryKey,
+    // The first load is walked page by page: a page holds 1000 ROWS, and while
+    // one controller is usually one row per instant, the bucketing is not
+    // guaranteed to be — so the ceiling on a single request is a ceiling on the
+    // visible window unless the cursor is followed (CORR-237). Every page
+    // carries `interval` unchanged, so the series is one resolution end to end
+    // (PERF-238).
+    //
+    // Every *later* load is a tail: the `controller_perf` channel has been
+    // pushing this controller's newest snapshot into this very entry all along,
+    // so re-requesting the window from `deployedAt` re-downloaded a history
+    // that was already here — and after CORR-237, re-downloaded it as several
+    // sequential requests (PERF-239). The previous entry is read from the cache
+    // rather than from a ref because that is what the refresh has to extend,
+    // and because the socket writes into it between refreshes. Reading it under
+    // this query's own key is also what keeps the interval part of the cache
+    // identity: the key ends with it (PERF-238), so a tail can never be spliced
+    // onto a series sampled at another resolution.
+    queryFn: ({ signal, queryKey: key, client }) => {
+      const budget = historyRowBudget(1);
+      const load = (startTime: string | undefined, maxPages?: number) =>
+        api.getControllerPerformanceHistoryAll(
+          server,
+          {
+            controller_id: controllerId,
+            bot_name: botName,
+            interval,
+            start_time: startTime,
+          },
+          { maxRows: budget, maxPages, signal },
+        );
+      return refreshControllerHistory({
+        previous: client.getQueryData<ControllerPerformanceHistoryAllResponse>(key),
+        interval,
+        full: () => load(deployedAt ?? undefined),
+        tail: (from) => load(from, TAIL_MAX_PAGES),
+        maxRows: budget,
+      });
+    },
+    // The socket is the update path; this is only the net under it.
+    refetchInterval: HISTORY_REFETCH_MS,
     staleTime: 30_000,
   });
 
   const snapshots = raw?.snapshots ?? [];
 
-  const { data, hasPosition, latest } = useMemo(() => {
-    if (snapshots.length === 0) return { data: [], hasPosition: false, latest: null };
+  // The fold keys on bot + controller, so the enabled set holds that composite
+  // and not the bare id (CORR-241).
+  const seriesKey = controllerKey({ bot_name: botName, controller_id: controllerId });
 
-    const quote = tradingPair?.split("-")[1] || "USDT";
-    const cv = (val: number) => convert ? convert(val, quote).value : val;
-
-    const sorted = [...snapshots].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
-    let hasPos = false;
-
-    const pts: PnlChartPoint[] = sorted.map((s) => {
-      let posValue = 0;
-      if (s.positions_summary) {
-        posValue = positionQuoteValue(s.positions_summary as Record<string, unknown>[]);
-      }
-      if (posValue !== 0) hasPos = true;
-
-      return {
-        time: toMs(s.timestamp),
-        realized: cv(s.realized_pnl_quote),
-        unrealized: cv(s.unrealized_pnl_quote),
-        total: cv(s.realized_pnl_quote + s.unrealized_pnl_quote),
-        volume: cv(s.volume_traded),
-        position: cv(posValue),
-      };
-    });
-
-    // Append live "now" point from controller so graph ends at real-time values
-    if (controller) {
-      let livePos = 0;
-      if (Array.isArray(controller.positions_summary)) {
-        livePos = positionQuoteValue(controller.positions_summary as Record<string, unknown>[]);
-      }
-      if (livePos !== 0) hasPos = true;
-      pts.push({
-        time: Date.now(),
-        realized: cv(controller.realized_pnl_quote),
-        unrealized: cv(controller.unrealized_pnl_quote),
-        total: cv(controller.realized_pnl_quote + controller.unrealized_pnl_quote),
-        volume: cv(controller.volume_traded),
-        position: cv(livePos),
-      });
-    }
-
-    return { data: pts, hasPosition: hasPos, latest: pts[pts.length - 1] || null };
-  }, [snapshots, convert, tradingPair, controller]);
+  // One controller is the degenerate case of the aggregate fold: a single
+  // enabled key, so the shared function does the sorting, the conversion and
+  // the live "now" point (ARCH-243) instead of a second hand-rolled copy here.
+  const data = useMemo(
+    () => aggregatePnlSeries(snapshots, new Set([seriesKey]), controller ? [controller] : [], convert),
+    [snapshots, seriesKey, controller, convert],
+  );
 
   if (isLoading) {
     return (
@@ -117,138 +129,24 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     );
   }
 
-  const tc = getThemeColors();
-  const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const pnlH = Math.round(height * 0.65);
-  const bottomH = height - pnlH;
-  const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
-  const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
-  const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-      {/* Header with live stats */}
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          PnL Evolution
-        </p>
-        {latest && (
-          <div className="flex items-center gap-3 text-xs tabular-nums">
-            <span style={{ color: pnlColor(latest.total) }} className="font-semibold">
-              {fmtPnl(latest.total)}
-            </span>
-            <span className="text-[var(--color-text-muted)]">
-              R: <span style={{ color: "var(--color-green)" }}>{fmtPnl(latest.realized)}</span>
-            </span>
-            <span className="text-[var(--color-text-muted)]">
-              U: <span style={{ color: PNL_SERIES_COLORS.unrealized }}>{fmtPnl(latest.unrealized)}</span>
-            </span>
-            <span className="text-[var(--color-text-muted)]">
-              Vol: <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* PnL chart */}
-      <div className="px-1">
-        <ResponsiveContainer width="100%" height={pnlH}>
-          <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} syncId="ctrl">
-            <defs>
-              <linearGradient id="ctrlPnlGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
-                <stop offset="95%" stopColor={totalColor} stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
-            <XAxis
-              dataKey="time"
-              type="number"
-              domain={["dataMin", "dataMax"]}
-              tickFormatter={formatTime}
-              tick={false}
-              stroke="var(--color-border)"
-              tickLine={false}
-              height={1}
-            />
-            <YAxis
-              tickFormatter={fmtAxis}
-              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
-              stroke="var(--color-border)"
-              tickLine={false}
-              axisLine={false}
-              width={52}
-            />
-            {hasPosition && (
-              <YAxis
-                yAxisId="spacer"
-                orientation="right"
-                tick={false}
-                tickLine={false}
-                axisLine={false}
-                width={52}
-              />
-            )}
-            <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
-            <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
-            <Area type="monotone" dataKey="total" stroke="none" fill="url(#ctrlPnlGrad)" activeDot={false} legendType="none" />
-            <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
-            <Legend
-              verticalAlign="top"
-              align="right"
-              iconType="plainline"
-              wrapperStyle={{ fontSize: 10, paddingBottom: 4 }}
-              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Volume + Position chart */}
-      <div className="px-1">
-        <ResponsiveContainer width="100%" height={bottomH}>
-          <ComposedChart data={data} margin={{ top: 4, right: 12, left: 0, bottom: 4 }} syncId="ctrl">
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
-            <XAxis
-              dataKey="time"
-              type="number"
-              domain={["dataMin", "dataMax"]}
-              tickFormatter={formatTime}
-              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
-              stroke="var(--color-border)"
-              tickLine={false}
-            />
-            <YAxis
-              yAxisId="vol"
-              tickFormatter={fmtVolAxis}
-              tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.volume }}
-              stroke="var(--color-border)"
-              tickLine={false}
-              axisLine={false}
-              width={52}
-            />
-            {hasPosition && (
-              <YAxis
-                yAxisId="pos"
-                orientation="right"
-                tickFormatter={fmtVolAxis}
-                tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.position }}
-                stroke="var(--color-border)"
-                tickLine={false}
-                axisLine={false}
-                width={52}
-              />
-            )}
-            <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
-            <Line yAxisId="vol" type="monotone" dataKey="volume" stroke={PNL_SERIES_COLORS.volume} strokeWidth={1.5} dot={false} />
-            {hasPosition && (
-              <Line yAxisId="pos" type="monotone" dataKey="position" stroke={PNL_SERIES_COLORS.position} strokeWidth={1.5} dot={false} />
-            )}
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
+    <PnlEvolutionChart
+      data={data}
+      title="PnL Evolution"
+      pnlHeight={pnlH}
+      volumeHeight={height - pnlH}
+      currencySymbol={currencySymbol}
+      notice={
+        raw?.truncated
+          ? {
+              label: "partial history",
+              detail:
+                "This controller has more stored history than one chart may load at once, so the series starts later than its deploy.",
+            }
+          : undefined
+      }
+    />
   );
 }

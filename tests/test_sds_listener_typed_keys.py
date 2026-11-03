@@ -16,6 +16,9 @@ channel, and no per-data-type string synthesis creeps back into SDS.
 
 import asyncio
 import inspect
+import json
+
+import pytest
 
 from condor.server_data_service import (
     CacheKey,
@@ -25,13 +28,19 @@ from condor.server_data_service import (
 )
 from condor.web.ws_manager import WebSocketManager, _Connection, channel_for_key
 
+# These connections are stand-ins with no config entry; `broadcast` re-reads
+# server access per frame since SEC-592 and would revoke them mid-test.
+pytestmark = pytest.mark.usefixtures("ws_access_granted")
+
 
 class _FakeWS:
     def __init__(self):
         self.sent: list[dict] = []
 
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
+    async def send_text(self, raw: str) -> None:
+        # The manager encodes each frame once per broadcast and fans out text
+        # (PERF-210); decode here so assertions stay in terms of the payload.
+        self.sent.append(json.loads(raw))
 
 
 def _manager_with_subscriber(channel: str) -> tuple[WebSocketManager, _FakeWS]:

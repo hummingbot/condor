@@ -1,4 +1,5 @@
 import type { ExecutorInfo } from "./api";
+import { escapeHtml, formatPriceSig } from "./formatters";
 import { getThemeColors, pnlHexColor, sideColor } from "./theme-colors";
 
 // ── Overlay Model ──
@@ -67,9 +68,39 @@ export interface ExecutorOverlay {
 
 // ── Helpers ──
 
+/** Values already reported, so a bad executor cannot flood the console. */
+const reportedSides = new Set<string>();
+
+/**
+ * The drawn direction, from the one side field the backend guarantees canonical.
+ *
+ * `executor.side` is the only normalized side on the wire: `build_executor_row`
+ * folds `custom_info.side`, `config.side` and the top-level field into it through
+ * `normalize_executor_side` (condor/fetchers/executors.py), while `custom_info`
+ * and `config` are copied onto the model verbatim (condor/web/models.py). The
+ * overlays used to prefer those raw dicts, so a long whose `custom_info.side` was
+ * the stringified enum `TradeType.BUY` -- the shape hummingbot actually emits --
+ * matched neither of the old literals and was drawn as a short: down arrow, sell
+ * colour, stop loss above entry, and nothing logged (CORR-280).
+ *
+ * Anything but the canonical pair is now a broken contract upstream rather than a
+ * value to guess at, so it is reported instead of being quietly filed under sell.
+ * A warning and not a throw: overlays are recomputed for every executor on every
+ * chart tick with no `try` above them, so one unknown side must not blank a chart
+ * full of good ones. An empty side is not a contract breach -- an LP position has
+ * no direction and the hover card already labels that type `range`.
+ */
 function normSide(side: string): "buy" | "sell" {
-  const s = side.toLowerCase();
-  return s === "buy" || s === "1" ? "buy" : "sell";
+  const s = String(side ?? "").toUpperCase();
+  if (s === "BUY") return "buy";
+  if (s !== "SELL" && s !== "" && !reportedSides.has(s)) {
+    reportedSides.add(s);
+    console.warn(
+      `[executor-overlays] un-normalized executor side ${JSON.stringify(side)}; ` +
+        "expected BUY/SELL from normalize_executor_side. Drawing it as a sell.",
+    );
+  }
+  return "sell";
 }
 
 function closeTypeLabel(closeType: string): string {
@@ -87,11 +118,65 @@ function isActiveStatus(status: string): boolean {
   return s === "running" || s === "active_position" || s === "active";
 }
 
+/**
+ * The executor's span on the chart: its own timestamps, clamped to now while a
+ * bound is still missing. An open executor has no `close_timestamp`, and a
+ * malformed one can arrive with neither, so both ends fall back to the present
+ * rather than to 1970 -- which would stretch every chart back to the epoch.
+ */
+function lifetimeRange(executor: ExecutorInfo): { start: number; end: number } {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    start: executor.timestamp > 0 ? executor.timestamp : now,
+    end: executor.close_timestamp > 0 ? executor.close_timestamp : now,
+  };
+}
+
+/** The parts of an overlay each executor type draws for itself. */
+type OverlayExtras = Pick<ExecutorOverlay, "priceLines" | "markers"> &
+  Partial<Pick<ExecutorOverlay, "segment" | "gridBox" | "entryPrice" | "exitPrice">>;
+
+/**
+ * Every overlay field that is copied off the executor unchanged.
+ *
+ * The five `compute*Overlay` builders differ only in `type`, the lines, markers
+ * and prices they derive, and whether they draw a `segment` or a `gridBox`; the
+ * other ten fields were written out by hand five times, so adding one to
+ * `ExecutorOverlay` was five edits and forgetting one of them was a silent
+ * per-type drift for the optional fields (the shape CORR-280 shipped once, with
+ * `side` read differently per builder). Each builder now returns through here.
+ *
+ * `range` is a parameter only so a builder that already needed the bounds --
+ * to size a grid box or an order's segment -- draws the box and the time range
+ * from the same clamp instead of two calls to `Date.now()`.
+ */
+function baseOverlay(
+  executor: ExecutorInfo,
+  type: string,
+  extras: OverlayExtras,
+  range: { start: number; end: number } = lifetimeRange(executor),
+): ExecutorOverlay {
+  return {
+    executorId: executor.id,
+    type,
+    side: normSide(executor.side),
+    status: executor.status,
+    closeType: executor.close_type,
+    pnl: executor.pnl,
+    pnlPct: executor.net_pnl_pct,
+    volume: executor.volume,
+    fees: executor.cum_fees_quote,
+    timeRange: range,
+    config: executor.config,
+    ...extras,
+  };
+}
+
 // ── Position Executor Overlay ──
 
 function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
-  const side = normSide(String(customInfo.side || executor.side));
+  const side = normSide(executor.side);
   const config = executor.config || {};
   const entry =
     Number(customInfo.current_position_average_price) ||
@@ -213,49 +298,33 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
     });
   }
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
-
-  return {
-    executorId: executor.id,
-    type: "position",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
+  return baseOverlay(executor, "position", {
     priceLines: lines,
     markers,
     segment,
-    timeRange: { start, end },
-    config: executor.config,
     entryPrice: entry,
     exitPrice: closePrice,
-  };
+  });
 }
 
 // ── Grid Executor Overlay ──
 
 function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
-  const side = normSide(executor.side);
   const config = executor.config || {};
 
   const startPrice = Number(config.start_price);
   const endPrice = Number(config.end_price);
   const limitPrice = Number(config.limit_price);
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+  const range = lifetimeRange(executor);
 
   // Grid box: rectangle from start_price to end_price over the executor lifetime
   let gridBox: GridBox | undefined;
-  if (startPrice > 0 && endPrice > 0 && start > 0) {
+  if (startPrice > 0 && endPrice > 0 && range.start > 0) {
     const profitable = executor.pnl >= 0;
     gridBox = {
-      startTime: start,
-      endTime: end,
+      startTime: range.start,
+      endTime: range.end,
       startPrice,
       endPrice,
       limitPrice: limitPrice > 0 ? limitPrice : undefined,
@@ -263,24 +332,18 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
     };
   }
 
-  return {
-    executorId: executor.id,
-    type: "grid",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
-    priceLines: [],
-    markers: [],
-    gridBox,
-    timeRange: { start, end },
-    config: executor.config,
-    entryPrice: startPrice,
-    exitPrice: endPrice,
-  };
+  return baseOverlay(
+    executor,
+    "grid",
+    {
+      priceLines: [],
+      markers: [],
+      gridBox,
+      entryPrice: startPrice,
+      exitPrice: endPrice,
+    },
+    range,
+  );
 }
 
 // ── LP Executor Overlay ──
@@ -302,7 +365,6 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
 function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
   const config = executor.config || {};
-  const side = normSide(String(customInfo.side || executor.side || config.side));
 
   // custom_info wins: a CLMM position is snapped to the venue's bins, so the
   // on-chain bounds are not the requested ones, and the box has to show where the
@@ -315,14 +377,13 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const lower = num(customInfo.lower_price ?? customInfo.price_lower ?? config.lower_price);
   const upper = num(customInfo.upper_price ?? customInfo.price_upper ?? config.upper_price);
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+  const range = lifetimeRange(executor);
 
   let gridBox: GridBox | undefined;
-  if (lower > 0 && upper > 0 && start > 0) {
+  if (lower > 0 && upper > 0 && range.start > 0) {
     gridBox = {
-      startTime: start,
-      endTime: end,
+      startTime: range.start,
+      endTime: range.end,
       // startPrice is the box's dashed edge and endPrice its solid one; the grid
       // overlay puts start_price (the far bound) first, so upper goes first here.
       startPrice: upper,
@@ -331,24 +392,18 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
     };
   }
 
-  return {
-    executorId: executor.id,
-    type: "lp",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
-    priceLines: [],
-    markers: [],
-    gridBox,
-    timeRange: { start, end },
-    config: executor.config,
-    entryPrice: lower,
-    exitPrice: upper,
-  };
+  return baseOverlay(
+    executor,
+    "lp",
+    {
+      priceLines: [],
+      markers: [],
+      gridBox,
+      entryPrice: lower,
+      exitPrice: upper,
+    },
+    range,
+  );
 }
 
 // ── Order Executor Overlay ──
@@ -356,7 +411,7 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
 function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
   const config = executor.config || {};
-  const side = normSide(String(customInfo.side || executor.side || config.side));
+  const side = normSide(executor.side);
   const lines: PriceLine[] = [];
   const markers: ChartMarker[] = [];
 
@@ -380,8 +435,8 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const descriptiveLabel = `${sideLabel}${amountStr}${chaserSuffix}`;
 
   const active = isActiveStatus(executor.status);
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+  const range = lifetimeRange(executor);
+  const start = range.start;
 
   let segment: ExecutorSegment | undefined;
 
@@ -442,31 +497,25 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
     }
   }
 
-  return {
-    executorId: executor.id,
-    type: "order",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
-    priceLines: lines,
-    markers,
-    segment,
-    timeRange: { start, end },
-    config: executor.config,
-    entryPrice: orderPrice,
-    exitPrice: closePrice,
-  };
+  return baseOverlay(
+    executor,
+    "order",
+    {
+      priceLines: lines,
+      markers,
+      segment,
+      entryPrice: orderPrice,
+      exitPrice: closePrice,
+    },
+    range,
+  );
 }
 
 // ── Generic Executor Overlay (fallback) ──
 
 function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
-  const side = normSide(String(customInfo.side || executor.side));
+  const side = normSide(executor.side);
   const lines: PriceLine[] = [];
   const markers: ChartMarker[] = [];
   const entryPrice =
@@ -522,27 +571,13 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
     });
   }
 
-  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
-  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
-
-  return {
-    executorId: executor.id,
-    type: executor.type?.toLowerCase() || "unknown",
-    side,
-    status: executor.status,
-    closeType: executor.close_type,
-    pnl: executor.pnl,
-    pnlPct: executor.net_pnl_pct,
-    volume: executor.volume,
-    fees: executor.cum_fees_quote,
+  return baseOverlay(executor, executor.type?.toLowerCase() || "unknown", {
     priceLines: lines,
     markers,
     segment,
-    timeRange: { start, end },
-    config: executor.config,
     entryPrice: entryPrice,
     exitPrice: closePrice,
-  };
+  });
 }
 
 // ── Public API ──
@@ -624,4 +659,207 @@ export function groupExecutorsByMarket(
     else groups.set(key, [ex]);
   }
   return Array.from(groups.entries());
+}
+
+// ── Hover Card ──
+
+/**
+ * How the card spells money.
+ *
+ * The two charts that draw it read different currencies — the trade pane
+ * converts the pair's quote asset into the reader's display currency
+ * (ARCH-207), the executor chart converts its own pair's — so the card takes
+ * the formatters instead of picking one. `formatValue` is for magnitudes
+ * (volume, fees, notional), `formatPnl` for the signed number.
+ */
+export interface OverlayTooltipFormatters {
+  formatValue: (val: number) => string;
+  formatPnl: (val: number) => string;
+}
+
+/**
+ * The hover card describing one overlay, as an HTML string.
+ *
+ * It lived twice — once in TradeChart and once in ExecutorChart — and the two
+ * copies drifted in every direction they could: one was theme-aware and the
+ * other hardcoded the dark palette into markup sitting on `--color-surface`
+ * (white on white in the light theme), one drew LP bounds and the other did
+ * not, one used the canonical `formatPriceSig` and the other re-hand-rolled
+ * that ladder, one converted currency and the other said dollars. This is the
+ * union of what each got right, in the module that already owns the overlay
+ * vocabulary it describes.
+ *
+ * Every value that comes off the backend — ids, sides, statuses, close types,
+ * and every config field a detail row prints — is passed through `escapeHtml`
+ * (SEC-018), which is the fix this duplication previously cost two edits.
+ * Colours come from `getThemeColors()` rather than a local `getComputedStyle`,
+ * which is CORR-057's rule.
+ */
+export function renderOverlayTooltipHtml(
+  o: ExecutorOverlay,
+  { formatValue, formatPnl }: OverlayTooltipFormatters,
+): string {
+  const { textMuted, border, green, red } = getThemeColors();
+
+  const pnlClr = pnlHexColor(o.pnl);
+  const pnlStr = escapeHtml(formatPnl(o.pnl));
+  const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
+  const volStr = escapeHtml(formatValue(o.volume));
+  const feesStr = o.fees ? escapeHtml(formatValue(o.fees)) : "";
+
+  // An LP position has no direction -- it is `RANGE` -- and the buy/sell
+  // normalization files everything that is not a buy under "sell", which
+  // labelled a live two-sided range position `SELL`. Neutral for that type.
+  const isRangeSide = o.type === "lp";
+  const sideLabel = isRangeSide ? "range" : o.side;
+  const sideClr = isRangeSide ? "#9ca3af" : sideColor(o.side);
+  const sideBg = isRangeSide
+    ? "rgba(156,163,175,0.15)"
+    : o.side === "buy"
+      ? "rgba(34,197,94,0.15)"
+      : "rgba(239,68,68,0.15)";
+  const active = isActiveStatus(o.status);
+  const statusBg = active ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
+  const statusClr = active ? green : "#9ca3af";
+
+  // Build config detail rows
+  const cfg = o.config || {};
+  const tripleBarrier: Record<string, unknown> = (() => {
+    const raw = cfg.triple_barrier_config;
+    if (!raw) return {};
+    if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
+    return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  })();
+
+  let detailRows = "";
+  const addRow = (label: string, value: string, color?: string) => {
+    detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
+  };
+
+  // Range-box details. Any executor drawn as a box describes itself by its
+  // bounds, not by an entry→exit pair; only the labels differ per type.
+  const entryPrice = o.entryPrice ?? o.segment?.entryPrice;
+  const exitPrice = o.exitPrice ?? o.segment?.exitPrice;
+  if (o.gridBox) {
+    if (o.type === "lp") {
+      // startPrice is the box's upper edge (see computeLpOverlay).
+      addRow("Upper Price", formatPriceSig(o.gridBox.startPrice));
+      addRow("Lower Price", formatPriceSig(o.gridBox.endPrice));
+      if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
+    } else {
+      addRow("Start Price", formatPriceSig(o.gridBox.startPrice));
+      addRow("End Price", formatPriceSig(o.gridBox.endPrice));
+      if (o.gridBox.limitPrice) addRow("Limit Price", formatPriceSig(o.gridBox.limitPrice));
+    }
+  } else if (entryPrice && entryPrice > 0) {
+    addRow("Entry", formatPriceSig(entryPrice));
+    if (exitPrice && exitPrice > 0 && exitPrice !== entryPrice) {
+      addRow(active ? "Current" : "Close", formatPriceSig(exitPrice));
+    }
+  }
+
+  if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
+  if (cfg.total_amount_quote != null) addRow("Amount", formatValue(Number(cfg.total_amount_quote)));
+  else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
+
+  const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
+  if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, green);
+  const sl = Number(cfg.stop_loss);
+  if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, red);
+  if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
+
+  return `
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}…</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(sideLabel)}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
+            <span style="background:${border};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${border}">${escapeHtml(o.type.toUpperCase())}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${escapeHtml(o.closeType)}</span>` : ""}
+          </div>
+          <div style="border-top:1px solid ${border};margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px">${volStr}</div></div>
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px">${feesStr || "—"}</div></div>
+          </div>
+          ${detailRows ? `<div style="border-top:1px solid ${border};margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
+        `;
+}
+
+/**
+ * The tooltip element as the crosshair handlers drive it: show it over an
+ * overlay, or hide it (PERF-348).
+ *
+ * `renderOverlayTooltipHtml` above is a ~100-line string build that reads the
+ * theme, `JSON.parse`s a config and escapes a dozen rows, and both charts used
+ * to run it — plus the `innerHTML` reparse of ~20 nodes and the forced layout
+ * of the `offsetHeight` read that follows it — on *every* crosshair move, i.e.
+ * ~60/s for as long as the pointer sits anywhere inside an executor box. The
+ * card is a pure function of its arguments, so all but the first of those are
+ * identical work.
+ *
+ * `show()` therefore rewrites the DOM only when one of the three arguments
+ * that produced the current card changed identity, and otherwise reuses the
+ * height it measured then, leaving only the `left`/`top` writes per move.
+ *
+ * Staleness is bounded by that key being the render's *whole* input:
+ *
+ *  - the overlay object — rebuilt by `computeMultiOverlays` on each executors
+ *    refetch, and react-query's structural sharing gives it a new identity
+ *    exactly when one of its values (PnL included) actually changed, so a new
+ *    PnL repaints the card on the first move after it lands;
+ *  - both formatters — a display-currency switch mints new ones, so the card
+ *    reprints in the new currency.
+ *
+ * `hide()` forgets the card as well, so re-entering the same overlay draws a
+ * fresh one rather than trusting markup left over from before.
+ */
+export interface OverlayTooltipView {
+  /** Draw `o` in `el` (rebuilding only if needed) and return the card's height. */
+  show(el: HTMLElement, o: ExecutorOverlay, formatters: OverlayTooltipFormatters): number;
+  /** Hide `el` and forget what was drawn in it. */
+  hide(el: HTMLElement): void;
+}
+
+export function createOverlayTooltipView(): OverlayTooltipView {
+  let el: HTMLElement | null = null;
+  let overlay: ExecutorOverlay | null = null;
+  let formatValue: OverlayTooltipFormatters["formatValue"] | null = null;
+  let formatPnl: OverlayTooltipFormatters["formatPnl"] | null = null;
+  let height = 0;
+
+  return {
+    show(nextEl, nextOverlay, formatters) {
+      if (
+        nextEl !== el ||
+        nextOverlay !== overlay ||
+        formatters.formatValue !== formatValue ||
+        formatters.formatPnl !== formatPnl
+      ) {
+        nextEl.innerHTML = renderOverlayTooltipHtml(nextOverlay, formatters);
+        el = nextEl;
+        overlay = nextOverlay;
+        formatValue = formatters.formatValue;
+        formatPnl = formatters.formatPnl;
+        height = 0;
+      }
+      nextEl.style.display = "block";
+      // Measured only after the card is displayed — `offsetHeight` is 0 while
+      // it is `display:none`, which is what the 200 fallback is for.
+      if (!height) height = nextEl.offsetHeight || 200;
+      return height;
+    },
+    hide(nextEl) {
+      nextEl.style.display = "none";
+      if (nextEl === el) {
+        el = null;
+        overlay = null;
+        formatValue = null;
+        formatPnl = null;
+        height = 0;
+      }
+    },
+  };
 }

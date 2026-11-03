@@ -49,6 +49,15 @@ export interface MetricEntry {
 export interface ParsedJournal {
   summary: JournalSummary;
   decisions: Decision[];
+  /**
+   * The trim marker the journal leaves when Decisions overflow into
+   * `journal_archive.md`, verbatim — or `""` when nothing has been archived.
+   *
+   * Without it the panel silently shows the newest 20 and a long run reads as
+   * one that never opened a position: the tick-1 deploy is simply gone from the
+   * list, with nothing saying it was moved rather than never made.
+   */
+  decisionsArchived: string;
   ticks: TickEntry[];
   executors: ExecutorEntry[];
   metrics: MetricEntry[];
@@ -109,11 +118,13 @@ function getSection(text: string, name: string): string {
 
 export function parseJournal(content: string): ParsedJournal {
   const summary = parseSummary(getSection(content, "Summary"));
-  const decisions = parseDecisions(getSection(content, "Decisions"));
+  const decisionsSection = getSection(content, "Decisions");
+  const decisions = parseDecisions(decisionsSection);
+  const decisionsArchived = parseArchiveMarker(decisionsSection);
   const ticks = parseTicks(getSection(content, "Ticks"));
   const executors = parseExecutors(getSection(content, "Executors"));
   const metrics = parseMetrics(getSection(content, "Snapshots"));
-  return { summary, decisions, ticks, executors, metrics };
+  return { summary, decisions, decisionsArchived, ticks, executors, metrics };
 }
 
 function parseSummary(text: string): JournalSummary {
@@ -148,6 +159,14 @@ function parseSummary(text: string): JournalSummary {
   }
 
   return result;
+}
+
+/** The journal's own trim marker, if the section carries one (it leads the section). */
+function parseArchiveMarker(text: string): string {
+  for (const line of text.split("\n")) {
+    if (line.startsWith("- archived ")) return line.slice(2).trim();
+  }
+  return "";
 }
 
 function parseDecisions(text: string): Decision[] {

@@ -94,10 +94,12 @@ def _note_user(hashed: str | None, surface: str) -> None:
 @_quiet
 def feature_first_use(feature: str) -> None:
     """Fire once per install, ever. The activation funnel."""
-    if not _on():
-        return
     from condor.telemetry import consent
 
+    # Gated on `usage`, not merely "on": at the ping floor the event could
+    # never be sent, and the features_seen list should not accumulate for it.
+    if consent.level() != consent.USAGE:
+        return
     if consent.mark_feature_seen(feature):
         emit("feature_first_use", feature=feature)
 
@@ -280,9 +282,14 @@ def agent_turn(
     outcome: str = "done",
     surface: str = "other",
     tools: dict | None = None,
+    secrets: dict | None = None,
 ) -> None:
     """One turn through ``condor.runtime.client.prompt`` — the single funnel
-    Telegram, the dashboard and MCP all cross."""
+    Telegram, the dashboard and MCP all cross.
+
+    ``secrets`` is ``{kind: count}`` for the key-shaped runs the funnel found
+    in the turn (FEAT-056) — how often a paste is caught, never what was in it.
+    """
     _surface_counts[surface] = _surface_counts.get(surface, 0) + 1
     emit(
         "agent_turn",
@@ -294,6 +301,7 @@ def agent_turn(
         outcome=outcome,
         surface=surface,
         tools=tools,
+        secrets=secrets,
     )
 
 

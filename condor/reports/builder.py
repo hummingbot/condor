@@ -36,11 +36,20 @@ _INTERACTIVE_SECTION_TYPES = {
 
 
 class ReportBuilder:
+    """Compose a report section by section, then ``save()`` it.
+
+    The one output surface a routine or a snippet renders through: KPIs,
+    tables, Plotly charts and prose accumulate on the builder and are written
+    as a single HTML report the dashboard can open. ``source(type, name)`` is
+    what files it under the producing routine.
+    """
+
     def __init__(self, title: str = "Report"):
         self._title = title
         self._source_type: str = ""
         self._source_name: str = ""
         self._tags: list[str] = []
+        self._subject: str = ""
         self._sections: list[dict] = []
         self._datasets: dict[str, list[dict]] = {}
         self._manual_order = False
@@ -49,6 +58,16 @@ class ReportBuilder:
     def source(self, source_type: str, source_name: str) -> ReportBuilder:
         self._source_type = source_type
         self._source_name = source_name
+        return self
+
+    def subject(self, key: str) -> ReportBuilder:
+        """Record what this report is *about*, so it can be found again by it.
+
+        ``key`` must come from :mod:`condor.reports.subjects`, never be spelled
+        as a literal — that module is the only place a key is built, on both the
+        stamping and the looking-up side.
+        """
+        self._subject = key or ""
         return self
 
     def tags(self, tags: list[str]) -> ReportBuilder:
@@ -99,8 +118,27 @@ class ReportBuilder:
         )
         return self
 
-    def plotly(self, fig: Any) -> ReportBuilder:
-        content = fig.to_html(full_html=False, include_plotlyjs=False)
+    def plotly(self, fig: Any, optimize: bool = True) -> ReportBuilder:
+        """Attach a Plotly figure.
+
+        Large figures are re-encoded for display (see
+        :mod:`condor.reports.figure_opt`): evenly spaced x arrays collapse to
+        ``x0``/``dx`` and dense traces move to the WebGL renderer, which keeps a
+        month of 1m candles both small on disk and smooth to pan. The figure
+        passed in is not mutated, so a caller that also exports it via kaleido
+        still holds a plain SVG figure. Pass ``optimize=False`` when the report
+        needs the figure serialized exactly as built.
+        """
+        if optimize:
+            import plotly.io as pio
+
+            from condor.reports.figure_opt import optimize_figure
+
+            content = pio.to_html(
+                optimize_figure(fig), full_html=False, include_plotlyjs=False
+            )
+        else:
+            content = fig.to_html(full_html=False, include_plotlyjs=False)
         self._sections.append({"type": "plotly", "content": content})
         return self
 
@@ -421,7 +459,9 @@ class ReportBuilder:
             meta_badges=meta_badges,
             sections_html=sections_html,
             report_spec=report_spec,
-            plotly_script=rendering.plotly_script() if needs_plotly else "",
+            plotly_script=(
+                rendering.ensure_plotly_asset(charts_dir) if needs_plotly else ""
+            ),
             report_runtime=(
                 f"<script>{rendering.report_runtime()}</script>"
                 if interactive_sections or self._auto_refresh_seconds is not None
@@ -441,6 +481,7 @@ class ReportBuilder:
                 entry["updated_at"] = now.isoformat()
                 entry["title"] = self._title
                 entry["tags"] = self._tags
+                entry["subject"] = self._subject
                 store._write_index(entries)
                 store._last_report_id.set(report_id)
                 logger.info(f"Report updated: {entry['filename']}")
@@ -459,7 +500,15 @@ class ReportBuilder:
                 "source_type": source_type,
                 "source_name": source_name,
                 "tags": self._tags,
+                # What the report is about, if anything (FEAT-078): an opaque
+                # key from condor.reports.subjects, matched exactly on lookup.
+                "subject": self._subject,
                 "agent": store._report_agent.get() or "condor",
+                # The authenticated principal the run executes for (SEC-196):
+                # every runner wraps execution in store.attribute_owner, and the
+                # web routes authorize reads/deletes against this id. None (no
+                # wrapper, e.g. a bare script) makes the report admin-only.
+                "user_id": store._report_owner.get(),
             }
             entries = store._read_index()
             entries.append(entry)

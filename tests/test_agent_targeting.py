@@ -1,9 +1,9 @@
 """Which library does a `manage_skill` / `manage_routines` write land in?
 
 Skills and routines are both keyed by the **agent** — there is no per-strategy
-library — so the target parameter is `agent`. The old `strategy_id` spelling
-stays accepted (older MCP hosts and playbooks name it) and resolves a composite
-"agent_slug.strategy_slug" key to its *owning agent*.
+library — so the only target parameter is `agent`. A composite
+"agent_slug.strategy_slug" key is still tolerated there and resolves to its
+*owning agent* (the `strategy_id` alias itself is gone — FEAT-067).
 
 These tests pin the resolution, because getting it wrong is silent: the skill
 lands in Condor's own library and only the chat ever sees it.
@@ -16,7 +16,6 @@ import pytest
 
 from condor.agents import agent as agent_module
 from condor.agents import strategy as strategy_module
-from condor.memory import paths as paths_module
 from mcp_servers.condor.settings import settings
 from mcp_servers.condor.tools import skills as skills_tool
 
@@ -45,8 +44,12 @@ class _FakeStrategyStore:
 
 @pytest.fixture
 def chat(tmp_path, monkeypatch):
-    """Run as the chat condor (no bound specialist), rooted at a tmp project."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    """Run as the chat condor (no bound specialist), rooted at a tmp project.
+
+    The ``agents/`` root is already under ``tmp_path`` for every test
+    (``conftest``'s ``_isolated_runtime_root``); only the stores this module
+    fakes out are wired here.
+    """
     monkeypatch.setattr(agent_module, "AgentStore", _FakeAgentStore)
     monkeypatch.setattr(strategy_module, "StrategyStore", _FakeStrategyStore)
     monkeypatch.setattr(settings, "agent_slug", "")
@@ -80,17 +83,17 @@ def test_without_a_target_the_chat_writes_its_own(chat):
     assert (chat / "agents" / "condor" / "skills" / "band_walk" / "SKILL.md").exists()
 
 
-def test_strategy_id_alias_resolves_to_the_owning_agent(chat):
-    """The deprecated spelling still works — and a strategy key lands one level up."""
-    _create(strategy_id=STRATEGY_KEY)
+def test_a_strategy_key_resolves_to_the_owning_agent(chat):
+    """A composite key is tolerated on `agent` — and lands one level up."""
+    _create(agent=STRATEGY_KEY)
 
     assert (chat / "agents" / AGENT_SLUG / "skills" / "band_walk" / "SKILL.md").exists()
 
 
-def test_agent_wins_over_the_deprecated_alias(chat):
-    _create(agent=AGENT_SLUG, strategy_id="nonexistent.thing")
-
-    assert (chat / "agents" / AGENT_SLUG / "skills" / "band_walk" / "SKILL.md").exists()
+def test_the_deprecated_alias_is_gone(chat):
+    """`strategy_id` was removed from the signature — passing it is an error."""
+    with pytest.raises(TypeError):
+        _create(strategy_id=STRATEGY_KEY)
 
 
 def test_unknown_target_errors_instead_of_writing_to_the_chat(chat):
@@ -103,7 +106,6 @@ def test_unknown_target_errors_instead_of_writing_to_the_chat(chat):
 
 def test_a_launched_agent_writes_only_to_its_own_library(tmp_path, monkeypatch):
     """A specialist ignores nothing and targets nobody else: its slug is the scope."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(settings, "agent_slug", AGENT_SLUG)
 
     _create()
@@ -115,7 +117,6 @@ def test_a_launched_agent_writes_only_to_its_own_library(tmp_path, monkeypatch):
 
 def test_an_agent_cannot_publish_to_every_agent(tmp_path, monkeypatch):
     """`shared` is honored only in Condor's library — an agent may not publish."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(settings, "agent_slug", AGENT_SLUG)
 
     result = _create(shared=True)

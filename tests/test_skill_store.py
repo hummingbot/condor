@@ -9,16 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from condor.memory import paths as paths_module
 from condor.memory import skills as skills_module
 from condor.memory.skills import SkillStore
 from condor.memory.store import _atomic_write
 
 
 @pytest.fixture
-def project_root(tmp_path, monkeypatch):
-    """Point the project root at a tmp dir so builtin skills resolve under it."""
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+def project_root(tmp_path):
+    """The tmp root the suite-wide fixture already points ``agents/`` under."""
     return tmp_path
 
 
@@ -586,7 +584,7 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
     # always parse cleanly, never a torn/interleaved one.
     import threading
 
-    from condor.memory.store import _parse_frontmatter
+    from condor.frontmatter import parse_frontmatter
 
     s = SkillStore()
     target = s.skills_dir / "shared" / "SKILL.md"
@@ -608,7 +606,7 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
     for t in threads:
         t.join()
 
-    meta, body = _parse_frontmatter(target.read_text())
+    meta, body = parse_frontmatter(target.read_text())
     assert meta.get("name") == "shared"
     assert body == "x" * 5000
     assert list(target.parent.glob("*.tmp")) == []

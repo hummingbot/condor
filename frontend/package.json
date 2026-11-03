@@ -9,12 +9,16 @@
     "lint": "eslint .",
     "lint:ci": "node scripts/lint-baseline.mjs",
     "lint:baseline": "node scripts/lint-baseline.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/lang-yaml": "^6.1.3",
     "@codemirror/theme-one-dark": "^6.1.3",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
     "@tanstack/react-query": "^5.95.2",
     "@types/js-yaml": "^4.0.9",
     "codemirror": "^6.0.2",
@@ -40,9 +44,11 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
+    "jsdom": "^30.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.57.0",
-    "vite": "^8.0.1"
+    "vite": "^8.0.1",
+    "vitest": "^4.1.11"
   }
 }

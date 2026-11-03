@@ -436,8 +436,8 @@ async def set_default_server(
 ) -> None:
     """Set server as default for this user/chat"""
     try:
+        from condor.preferences import set_active_server
         from config_manager import get_config_manager
-        from handlers.config.user_preferences import set_active_server
         from handlers.dex._shared import invalidate_cache
 
         # Save to user_data (in-memory, pickle persistence)
@@ -512,7 +512,7 @@ async def delete_server(
             return
 
         # Check if this is the user's current default server
-        from handlers.config.user_preferences import get_active_server
+        from condor.preferences import get_active_server
 
         was_current = get_active_server(context.user_data) == server_name
 
@@ -523,13 +523,8 @@ async def delete_server(
             # Invalidate cache if we deleted the server that was in use
             if was_current:
                 invalidate_cache(context.user_data, "all")
-                # Also invalidate SDS (server-scoped)
-                try:
-                    from condor.server_data_service import get_server_data_service
-
-                    get_server_data_service().invalidate_server(server_name)
-                except Exception:
-                    pass
+                # SDS is invalidated by ConfigManager.delete_server itself now
+                # (config_manager.py _invalidate_server_caches).
                 logger.info(
                     f"Cache invalidated after deleting current server '{server_name}'"
                 )
@@ -1194,7 +1189,7 @@ async def handle_modify_value_input(
             logger.info(f"Successfully modified {field} for server {server_name}")
 
             # Invalidate cache if this is the user's current default server
-            from handlers.config.user_preferences import get_active_server
+            from condor.preferences import get_active_server
 
             if get_active_server(context.user_data) == server_name:
                 from handlers.dex._shared import invalidate_cache

@@ -10,7 +10,6 @@ import {
   SelectField,
   ToggleField,
   ValidationMessages,
-  type FieldDispatch,
 } from "./fields";
 import type { ExecutorValidation } from "./types";
 import type { DexPoolInfo } from "@/lib/api";
@@ -78,6 +77,13 @@ interface Props {
   pair?: string;
   pool?: DexPoolInfo;
   poolFetching?: boolean;
+  /**
+   * The pool's DLMM bin step in basis points, when the caller knows it. Only the
+   * pool workspace does — the resolve-by-pair endpoint the create page uses does
+   * not report one — and it is what turns a too-wide range into a warning here
+   * rather than a Gateway error at open time.
+   */
+  binStep?: number | null;
   /** Wallet balance behind the percentage presets; `null` when it is unknown. */
   baseAvailable?: number | null;
   quoteAvailable?: number | null;
@@ -87,6 +93,12 @@ interface Props {
    */
   baseSymbol?: string;
   quoteSymbol?: string;
+  /**
+   * Set when the page itself pins the pool (the DEX pool workspace). The panel
+   * then just states the address — resolution status, an editable address and a
+   * provider picker would only second-guess a decision already made.
+   */
+  lockedPoolAddress?: string;
 }
 
 export function LPConfigPanel({
@@ -97,13 +109,13 @@ export function LPConfigPanel({
   pair,
   pool,
   poolFetching,
+  binStep,
   baseAvailable = null,
   quoteAvailable = null,
   baseSymbol,
   quoteSymbol,
+  lockedPoolAddress,
 }: Props) {
-  const d = dispatch as FieldDispatch;
-
   // A DEX pair's chart can be blank (no candles for the pool) while the pool's own
   // price is known, so the resolved pool is a second source for the anchor.
   const price = currentPrice && currentPrice > 0 ? currentPrice : pool?.current_price ?? null;
@@ -120,75 +132,86 @@ export function LPConfigPanel({
     }
   }, [price, unanchored]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const warnings = rangeWarnings(state, price);
+  // Only DLMM pools carry a bin step, so passing it through unconditionally is
+  // enough to scope the bin-count warning to the pools the cap applies to.
+  const warnings = rangeWarnings(state, price, binStep);
   const unsupported = !!pool && !pool.lp_supported;
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Resolved pool */}
-      <div className="space-y-2">
-        <SectionHeader>Pool</SectionHeader>
-        {poolFetching && !pool ? (
-          <p className="text-[10px] text-[var(--color-text-muted)]">Resolving pool…</p>
-        ) : unsupported ? (
-          <div className="rounded border border-amber-400/30 bg-amber-400/10 p-2">
-            <p className="flex items-start gap-1 text-[10px] text-amber-400">
-              <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
-              <span>
-                The deepest pool for this pair is on{" "}
-                <span className="font-mono">{pool?.dex_id ?? "an unknown venue"}</span>, which
-                is not a CLMM venue. Enter a pool address and provider by hand.
+      {lockedPoolAddress ? (
+        <p
+          className="font-mono text-[10px] text-[var(--color-text-muted)]"
+          title={lockedPoolAddress}
+        >
+          {truncateAddress(lockedPoolAddress)}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          <SectionHeader>Pool</SectionHeader>
+          {poolFetching && !pool ? (
+            <p className="text-[10px] text-[var(--color-text-muted)]">Resolving pool…</p>
+          ) : unsupported ? (
+            <div className="rounded border border-amber-400/30 bg-amber-400/10 p-2">
+              <p className="flex items-start gap-1 text-[10px] text-amber-400">
+                <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+                <span>
+                  The deepest pool for this pair is on{" "}
+                  <span className="font-mono">{pool?.dex_id ?? "an unknown venue"}</span>, which
+                  is not a CLMM venue. Enter a pool address and provider by hand.
+                </span>
+              </p>
+            </div>
+          ) : pool?.pool_address ? (
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+              <span className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 font-medium text-[var(--color-text)]">
+                {pool.dex_id}
               </span>
+              <span className="font-mono" title={pool.pool_address}>
+                {truncateAddress(pool.pool_address)}
+              </span>
+              {pool.current_price != null && (
+                <span className="font-mono">
+                  {formatPoolPrice(pool.current_price)} {quoteAsset}
+                </span>
+              )}
+              {state.poolTouched && (
+                <span className="rounded bg-[var(--color-primary)]/15 px-1.5 py-0.5 text-[var(--color-primary)]">
+                  overridden
+                </span>
+              )}
+            </div>
+          ) : (
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              No pool found for this pair. Enter one by hand.
             </p>
-          </div>
-        ) : pool?.pool_address ? (
-          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
-            <span className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 font-medium text-[var(--color-text)]">
-              {pool.dex_id}
-            </span>
-            <span className="font-mono" title={pool.pool_address}>
-              {truncateAddress(pool.pool_address)}
-            </span>
-            {pool.current_price != null && (
-              <span className="font-mono">
-                {formatPoolPrice(pool.current_price)} {quoteAsset}
-              </span>
-            )}
-            {state.poolTouched && (
-              <span className="rounded bg-[var(--color-primary)]/15 px-1.5 py-0.5 text-[var(--color-primary)]">
-                overridden
-              </span>
-            )}
-          </div>
-        ) : (
-          <p className="text-[10px] text-[var(--color-text-muted)]">
-            No pool found for this pair. Enter one by hand.
-          </p>
-        )}
+          )}
 
-        <div>
-          <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-            Pool Address
-          </label>
-          <input
-            type="text"
-            value={state.pool_address}
-            onChange={(e) =>
-              d({ type: "SET_FIELD", field: "pool_address", value: e.target.value.trim() })
-            }
-            placeholder="Pool contract address"
-            spellCheck={false}
-            className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-[11px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+          <div>
+            <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
+              Pool Address
+            </label>
+            <input
+              type="text"
+              value={state.pool_address}
+              onChange={(e) =>
+                dispatch({ type: "SET_FIELD", field: "pool_address", value: e.target.value.trim() })
+              }
+              placeholder="Pool contract address"
+              spellCheck={false}
+              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-[11px] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+            />
+          </div>
+          <SelectField
+            label="LP Provider"
+            value={state.lp_provider}
+            field="lp_provider"
+            dispatch={dispatch}
+            options={PROVIDER_OPTIONS}
           />
         </div>
-        <SelectField
-          label="LP Provider"
-          value={state.lp_provider}
-          field="lp_provider"
-          dispatch={d}
-          options={PROVIDER_OPTIONS}
-        />
-      </div>
+      )}
 
       {/* Side */}
       <div className="space-y-2">
@@ -248,7 +271,7 @@ export function LPConfigPanel({
           value={state.upper_price}
           field="upper_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={state.upper_price > state.lower_price}
         />
         <PriceField
@@ -256,7 +279,7 @@ export function LPConfigPanel({
           value={state.lower_price}
           field="lower_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={state.lower_price > 0 && state.lower_price < state.upper_price}
         />
       </div>
@@ -269,7 +292,7 @@ export function LPConfigPanel({
           value={state.upper_limit_price}
           field="upper_limit_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={state.upper_limit_price > state.upper_price}
           hint="Close when price rises to this level"
         />
@@ -278,7 +301,7 @@ export function LPConfigPanel({
           value={state.lower_limit_price}
           field="lower_limit_price"
           activePickField={state.activePickField}
-          dispatch={d}
+          dispatch={dispatch}
           valid={
             state.lower_limit_price > 0 && state.lower_limit_price < state.lower_price
           }
@@ -297,7 +320,7 @@ export function LPConfigPanel({
             label={`Base Amount (${baseAsset})`}
             value={state.base_amount}
             field="base_amount"
-            dispatch={d}
+            dispatch={dispatch}
             step={0.001}
             min={0}
           />
@@ -305,7 +328,7 @@ export function LPConfigPanel({
             available={baseAvailable}
             symbol={baseAsset}
             onPick={(pct) =>
-              d({ type: "SET_FIELD", field: "base_amount", value: sizeFrom(baseAvailable, pct) })
+              dispatch({ type: "SET_FIELD", field: "base_amount", value: sizeFrom(baseAvailable, pct) })
             }
           />
         </div>
@@ -314,7 +337,7 @@ export function LPConfigPanel({
             label={`Quote Amount (${quoteAsset})`}
             value={state.quote_amount}
             field="quote_amount"
-            dispatch={d}
+            dispatch={dispatch}
             step={0.001}
             min={0}
           />
@@ -322,7 +345,7 @@ export function LPConfigPanel({
             available={quoteAvailable}
             symbol={quoteAsset}
             onPick={(pct) =>
-              d({ type: "SET_FIELD", field: "quote_amount", value: sizeFrom(quoteAvailable, pct) })
+              dispatch({ type: "SET_FIELD", field: "quote_amount", value: sizeFrom(quoteAvailable, pct) })
             }
           />
         </div>
@@ -335,7 +358,7 @@ export function LPConfigPanel({
           label="Keep Position"
           value={state.keep_position}
           field="keep_position"
-          dispatch={d}
+          dispatch={dispatch}
         />
         <p className="text-[10px] text-[var(--color-text-muted)]">
           On close, keep the net token change as a spot position instead of swapping
@@ -350,14 +373,14 @@ export function LPConfigPanel({
         <AdvancedSection
           open={state.showAdvanced}
           onToggle={() =>
-            d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })
+            dispatch({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })
           }
         >
           <SelectField
             label="Meteora Strategy"
             value={state.strategy_type}
             field="strategy_type"
-            dispatch={d}
+            dispatch={dispatch}
             options={STRATEGY_TYPE_OPTIONS}
           />
         </AdvancedSection>

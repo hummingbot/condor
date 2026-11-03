@@ -32,10 +32,6 @@ logger = logging.getLogger(__name__)
 # apart from a plain ticker like "BTC".
 ADDRESS_RE = re.compile(r"^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$")
 
-# GeckoTerminal answers are shared across users, so one process-wide dict backs the
-# OHLCV cache for every dashboard viewer.
-_ohlcv_cache: dict = {}
-
 
 def uses_gecko_candles(connector: str) -> bool:
     """Whether this connector's candles come from GeckoTerminal, not the API."""
@@ -72,9 +68,10 @@ async def _pool_ohlcv(
             # Prices in the quote token, matching the scale of the entry and range
             # prices the executor overlays draw on the same chart.
             currency="token",
-            # A live poll wants the newest candle, and the shared cache holds a
-            # pool for five minutes — long enough to freeze a streaming chart.
-            user_data=_ohlcv_cache if use_cache else None,
+            # A live poll wants the newest candle, and pool_data's shared cache
+            # holds a pool for five minutes — long enough to freeze a streaming
+            # chart — so use_cache=False bypasses the cached copy.
+            use_cache=use_cache,
             limit=limit,
             before_timestamp=before_timestamp,
             token=token,
@@ -146,14 +143,16 @@ async def fetch_dex_candles(
     timeframe = normalize_timeframe(interval)
     tf_seconds = timeframe_seconds(timeframe)
     # The chart asks for a window; GeckoTerminal answers with a count walking back
-    # from before_timestamp. Asking for the raw `limit` would return ~16h of 1m
-    # candles for a ten-minute position.
+    # from before_timestamp. This is how many candles that window is, so a
+    # ten-minute position is not handed ~16h of 1m candles to squeeze into itself.
+    # It sizes the *answer*, not the upstream request: pool_data holds each pool as
+    # one growing series and buys a full page whenever it has to go upstream.
     count = candles_needed(start_time, end_time, timeframe)
 
-    # Only pin before_timestamp for a window that has already closed. A live chart
-    # would otherwise mint a new cache key on every request as its end drifts,
-    # re-hitting GeckoTerminal each time; "latest candles" is both correct and
-    # cacheable for it.
+    # Only pin before_timestamp for a window that has already closed — which also
+    # makes it immutable, and so servable from the stored series forever. A live
+    # chart pinning its drifting end instead would re-ask upstream for a window it
+    # already holds; "latest candles" is both correct and cacheable for it.
     before = (
         int(end_time)
         if end_time is not None and end_time < time.time() - tf_seconds

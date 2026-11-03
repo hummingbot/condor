@@ -19,13 +19,26 @@ import logging
 from condor.runtime import TELEGRAM
 from condor.runtime.events import RuntimeEvent
 from condor.runtime.keys import SessionKey
-from condor.runtime.wake import register_sink_factory
+from condor.runtime.wake import register_note_sink, register_sink_factory
+from utils.telegram_formatters import escape_markdown_v2
 
 from .stream import TelegramStreamer
 
 log = logging.getLogger(__name__)
 
 PLACEHOLDER = "Thinking..."
+
+# What a note is *about*, in one glyph. The web client separates a note from
+# the agent's own words with an inset border; Telegram has no such affordance,
+# so the marker is what stops a routine's outcome from reading as the agent
+# saying it. Kinds are the ones ``ChatMessage.tsx`` renders as notes.
+NOTE_MARKERS = {
+    "routine": "⚙️",
+    "delegation": "🤖",
+    "resume": "↩️",
+    "notification": "🔔",
+}
+DEFAULT_NOTE_MARKER = "ℹ️"
 
 
 def _message_id_of(sent) -> int | None:
@@ -89,4 +102,49 @@ def _telegram_wake_sink(
     return TelegramWakeSink(chat_id) if chat_id is not None else None
 
 
+def note_text(text: str, kind: str) -> str:
+    """The note as one MarkdownV2 message: a kind marker, then the note."""
+    marker = NOTE_MARKERS.get(kind, DEFAULT_NOTE_MARKER)
+    return f"{marker} {escape_markdown_v2(text)}"
+
+
+async def _deliver_note(
+    key: SessionKey, user_id: int | None, text: str, kind: str
+) -> None:
+    """Show an out-of-band transcript note in a Telegram chat (CORR-266).
+
+    The Telegram half of the channel whose web half is ``chat_ws._deliver_note``.
+    Without it ``wake.deliver_note`` ran its whole gauntlet for a ``tg:`` key and
+    then found no sink to hand the note to, so every note addressed at Telegram
+    was dropped without a log line — a routine that finished while the user was
+    looking at the chat said nothing.
+
+    Sent as its own message rather than streamed: a note is already-recorded
+    text, not a turn, so there is nothing to edit into place.
+
+    A chat this process cannot reach leaves this inert rather than failing the
+    caller, the same contract :meth:`TelegramWakeSink.open` states: the note is
+    in the transcript either way, and ``wake._guard`` swallows what does raise.
+    """
+    from condor.agents.delegate import resolve_bot
+
+    chat_id = key.telegram_chat_id
+    if chat_id is None:
+        return
+
+    bot = resolve_bot()
+    body = note_text(text, kind)
+    try:
+        await bot.send_message(chat_id=chat_id, text=body, parse_mode="MarkdownV2")
+    except Exception:  # noqa: BLE001 - bad markup is retried as plain text
+        # Same rule as ``notifications._send``: the user must get the note,
+        # ugly, rather than not get it at all.
+        log.debug("Note rejected as MarkdownV2 for chat %s; retrying plain", chat_id)
+        await bot.send_message(chat_id=chat_id, text=text)
+
+
+# Both halves of the channel, registered here rather than imported by the
+# runtime: ``condor.runtime`` must not depend on handler code (see
+# ``client._local()``). The web surface registers the same pair in ``chat_ws``.
 register_sink_factory(TELEGRAM, _telegram_wake_sink)
+register_note_sink(TELEGRAM, _deliver_note)

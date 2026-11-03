@@ -54,12 +54,11 @@ def no_client(monkeypatch):
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(reports, "CHARTS_DIR", tmp_path / "reports")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     monkeypatch.setattr(
-        reports, "INDEX_FILE", tmp_path / "reports" / "reports_index.json"
-    )
-    monkeypatch.setattr(
-        rendering, "plotly_script", lambda: "<script>window.Plotly={};</script>"
+        rendering,
+        "plotly_bundle",
+        lambda: "/**\n* plotly.js v0.0.0\n*/\nwindow.Plotly={};",
     )
     return tmp_path / "reports"
 
@@ -230,6 +229,51 @@ def test_a_snippet_that_saves_a_report_gets_a_report_id(store, reports_dir):
     assert entry["agent"] == "quant"
     assert entry["source_type"] == "code"
     assert entry["source_name"] == "funding drift"
+
+
+def test_a_routine_called_from_a_snippet_is_filed_under_the_snippets_agent(
+    store, reports_dir, monkeypatch
+):
+    """ARCH-217: the nested report lands in the dock the enclosing run does.
+
+    The nested runner used to hardcode the inner routine's own library owner,
+    which is ``"condor"`` for every shared routine — so an agent that composed
+    work out of ``call_routine`` filed the result under Condor while its own
+    snippet report was stamped with the agent, and ``list_reports`` matches
+    ``agent`` exactly, so the agent's dock never showed it.
+    """
+    from pydantic import BaseModel
+
+    from condor import routine_store
+    from routines.base import RoutineInfo
+
+    class _Config(BaseModel):
+        """A routine from the shared library."""
+
+    async def inner(config, context):
+        builder = reports.ReportBuilder("Nested report")
+        builder.markdown("hi")
+        await builder.save()
+        return "done"
+
+    library = {
+        "inner": RoutineInfo(
+            name="inner", config_class=_Config, run_fn=inner, source="global"
+        )
+    }
+    monkeypatch.setattr(routine_store, "get_routine", library.get)
+
+    out = run(
+        "from condor.primitives import call_routine\n"
+        "result = (await call_routine('inner')).report_id",
+        agent="quant",
+        label="composed",
+    )
+
+    assert out["status"] == "ok", out.get("output")
+    assert reports.get_report(out["result"])["agent"] == "quant"
+    listed, _ = reports.list_reports(agent="quant")
+    assert [entry["title"] for entry in listed] == ["Nested report"]
 
 
 def test_a_report_saved_before_a_failure_is_still_reported(store, reports_dir):

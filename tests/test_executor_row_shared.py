@@ -150,12 +150,12 @@ def test_connector_from_config_is_not_dropped():
 
 MARKERS = ("current_position_average_price", "break_even_price", "held_position_orders")
 
-# ``condor/web/routes/archived.py`` reads ``current_position_average_price`` too,
+# ``condor/fetchers/archived_run.py`` reads ``current_position_average_price`` too,
 # but it is not a copy of this transform: it maps *archived* executors out of a DB
 # export, where the row's price is by definition the close price and the
 # timestamps arrive as ISO strings. It is listed here so a real second copy of the
 # live transform still trips the assertion below.
-KNOWN_SEPARATE_TRANSFORMS = {"condor/web/routes/archived.py"}
+KNOWN_SEPARATE_TRANSFORMS = {"condor/fetchers/archived_run.py"}
 
 
 @pytest.mark.parametrize("marker", MARKERS)
@@ -189,3 +189,42 @@ def test_ws_broadcast_does_not_reach_into_the_route_module():
     source = (REPO_ROOT / "condor" / "web" / "ws_manager.py").read_text()
 
     assert "_build_executor_info" not in source
+
+
+# ── Ownership: whose executor is this ──
+#
+# HAPI stores the creator's tag on the executor *record*: the MCP create path
+# pops ``controller_id`` out of the config so it "never travels inside the
+# config", and what is left there is the backend schema's default, "main".
+# Reading the config first therefore normalized an agent's own executor as owned
+# by "main" -- which dropped it from the session ledger and made the workspace
+# warn that the run had deployed something it did not own, while HAPI had the
+# ownership right the whole time.
+
+
+def test_the_creators_tag_outranks_the_configs_default():
+    ex = {
+        "id": "e1",
+        "status": "RUNNING",
+        "controller_id": "adaptive_grid_trader.sol_usdt_adaptive_grid_7",
+        "config": {"controller_id": "main"},
+    }
+
+    assert (
+        build_executor_row(ex)["controller_id"]
+        == "adaptive_grid_trader.sol_usdt_adaptive_grid_7"
+    )
+    assert (
+        _executor_row(ex)["controller_id"]
+        == "adaptive_grid_trader.sol_usdt_adaptive_grid_7"
+    )
+
+
+def test_the_config_still_answers_when_the_record_carries_no_tag():
+    """WS-format rows and older records keep working."""
+    assert (
+        build_executor_row({"config": {"controller_id": "pmm_1"}})["controller_id"]
+        == "pmm_1"
+    )
+    assert build_executor_row({"controller_id": "pmm_1"})["controller_id"] == "pmm_1"
+    assert build_executor_row({"id": "e1"})["controller_id"] == ""

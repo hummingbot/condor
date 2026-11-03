@@ -1,30 +1,45 @@
 """Unit tests for the risk-limit gate (CORR-046).
 
 The per-tick RiskState snapshot must accumulate approved executor creates so
-that multiple ``manage_executors(create)`` calls within the same tick are gated
+that multiple ``create_*_executor`` calls within the same tick are gated
 against the running totals (executor count and exposure), not the frozen
 pre-tick numbers.
 """
 
 import asyncio
 
+import pytest
+
 from condor.agents.risk import (
+    RefusalLog,
     RiskEngine,
     RiskLimits,
     RiskState,
+    _planned_amount_quote,
     auto_approve_with_risk_check,
 )
 
 
 def _create_call(amount: float = 100.0) -> dict:
     return {
-        "tool": "manage_executors",
+        "tool": "create_grid_executor",
         "input": {
-            "action": "create",
-            "executor_config": {
-                "controller_id": "test_controller",
-                "total_amount_quote": amount,
-            },
+            "controller_id": "test_controller",
+            "connector_name": "binance",
+            "trading_pair": "SOL-USDT",
+            "total_amount_quote": amount,
+        },
+    }
+
+
+def _order_call(amount: str | float) -> dict:
+    return {
+        "tool": "create_order_executor",
+        "input": {
+            "controller_id": "test_controller",
+            "connector_name": "solana-mainnet-beta",
+            "trading_pair": "PUMP-USDC",
+            "amount": amount,
         },
     }
 
@@ -42,11 +57,11 @@ def test_second_create_blocked_by_executor_count():
     engine = RiskEngine(RiskLimits(max_open_executors=5))
     state = RiskState(executor_count=4)
 
-    allowed, _ = engine.check_executor_action(_create_call(), state)
+    allowed, _ = engine.check_executor_action(_create_call(), state, 100.0)
     assert allowed
     assert state.executor_count == 5
 
-    allowed, reason = engine.check_executor_action(_create_call(), state)
+    allowed, reason = engine.check_executor_action(_create_call(), state, 100.0)
     assert not allowed
     assert "Max open executors" in reason
 
@@ -56,11 +71,11 @@ def test_cumulative_exposure_blocks_second_create():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=300.0)
 
-    allowed, _ = engine.check_executor_action(_create_call(150.0), state)
+    allowed, _ = engine.check_executor_action(_create_call(150.0), state, 150.0)
     assert allowed
     assert state.total_exposure == 450.0
 
-    allowed, reason = engine.check_executor_action(_create_call(150.0), state)
+    allowed, reason = engine.check_executor_action(_create_call(150.0), state, 150.0)
     assert not allowed
     assert "position limit" in reason
 
@@ -69,21 +84,101 @@ def test_rejected_create_does_not_accumulate():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=400.0)
 
-    allowed, _ = engine.check_executor_action(_create_call(200.0), state)
+    allowed, _ = engine.check_executor_action(_create_call(200.0), state, 200.0)
     assert not allowed
     assert state.total_exposure == 400.0
     assert state.executor_count == 0
 
 
-def test_non_create_actions_do_not_accumulate():
+def test_non_create_tools_do_not_accumulate():
+    """`stop_executor` is dangerous by name but reduces exposure, so it is not gated."""
     engine = RiskEngine(RiskLimits())
     state = RiskState(executor_count=2, total_exposure=100.0)
 
-    call = {"tool": "manage_executors", "input": {"action": "stop", "executor_id": "x"}}
+    call = {"tool": "stop_executor", "input": {"executor_id": "x"}}
     allowed, _ = engine.check_executor_action(call, state)
     assert allowed
     assert state.executor_count == 2
     assert state.total_exposure == 100.0
+
+
+class _MarketData:
+    def __init__(self, price):
+        self.price = price
+
+    async def get_prices(self, connector_name, trading_pairs):
+        # The real client accepts either a bare pair or a list and wraps
+        # the bare one before it posts; mirror that so this stub answers
+        # the same way for both spellings.
+        pairs = (
+            [trading_pairs] if isinstance(trading_pairs, str) else list(trading_pairs)
+        )
+        return {"prices": {pairs[0]: self.price} if self.price else {}}
+
+
+class _PriceClient:
+    def __init__(self, price):
+        self.market_data = _MarketData(price)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args", "expected"),
+    [
+        ("create_grid_executor", {"total_amount_quote": 12}, 12),
+        ("create_dca_executor", {"amounts_quote": [4, 5]}, 9),
+        ("create_order_executor", {"amount": 3}, 6),
+        # The "$" form is already the notional and must NOT be priced as base.
+        ("create_order_executor", {"amount": "$7"}, 7),
+        ("create_position_executor", {"amount": 4}, 8),
+        ("create_lp_executor", {"base_amount": 3, "quote_amount": 4}, 10),
+    ],
+)
+def test_planned_amount_quote_uses_each_executor_capital_field(
+    tool_name, args, expected
+):
+    args.update(connector_name="solana-mainnet-beta", trading_pair="PUMP-USDC")
+
+    amount = asyncio.run(_planned_amount_quote(tool_name, args, _PriceClient(2)))
+
+    assert amount == pytest.approx(expected)
+
+
+def test_planned_amount_quote_refuses_an_unknown_executor_tool():
+    """An unpriced create is cancelled, never approved blind."""
+    with pytest.raises(ValueError):
+        asyncio.run(
+            _planned_amount_quote(
+                "create_twap_executor", {"amount": 1}, _PriceClient(2)
+            )
+        )
+
+
+def test_oracle_prices_market_order_before_risk_check():
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=10.0)),
+        state,
+        price_client=_PriceClient(0.002285209543),
+    )
+
+    result = asyncio.run(callback(_order_call("653.238363"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(653.238363 * 0.002285209543)
+
+
+def test_missing_oracle_price_blocks_market_order():
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=10.0)),
+        state,
+        price_client=_PriceClient(None),
+    )
+
+    result = asyncio.run(callback(_order_call("653.238363"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +258,8 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
 
 # ---------------------------------------------------------------------------
 # dry_run must block manage_bots deploy/mutate actions too, not just
-# manage_executors/place_order/gateway swaps — manage_bots(deploy) places real
-# capital via a controller-based bot, a separate path from manage_executors.
+# the executor creates/place_order/gateway swaps — manage_bots(deploy) places
+# real capital via a controller-based bot, a separate path from the executors.
 # ---------------------------------------------------------------------------
 
 
@@ -323,7 +418,7 @@ def test_loop_mode_still_approves_bot_stop():
 
 def _tagged_call(controller_id) -> dict:
     call = _create_call()
-    call["input"]["executor_config"]["controller_id"] = controller_id
+    call["input"]["controller_id"] = controller_id
     return call
 
 
@@ -362,3 +457,521 @@ def test_missing_controller_id_still_cancelled_without_an_agent_id():
         asyncio.run(callback(_tagged_call("anything"), _OPTIONS))["outcome"]["outcome"]
         == "selected"
     )
+
+
+# ---------------------------------------------------------------------------
+# loop mode: manage_amm signs straight from the Gateway wallet, so the position
+# limit has to reach it too (SEC-224). Both failure modes are covered: a
+# signature over the limit must be refused, and a legitimate one under the
+# limit must still go through.
+# ---------------------------------------------------------------------------
+
+
+class _AmmClient:
+    """A price client whose AMM pool quotes ``price`` per base token."""
+
+    def __init__(self, pool_price=None, market_price=None):
+        self.gateway_amm = _GatewayAmm(pool_price)
+        self.market_data = _MarketData(market_price)
+
+
+class _GatewayAmm:
+    def __init__(self, price):
+        self.price = price
+        self.calls = 0
+
+    async def get_pool_info(self, connector, network, pool_address):
+        self.calls += 1
+        return {"price": self.price} if self.price is not None else {}
+
+
+def _amm_call(action: str, **extra) -> dict:
+    return {
+        "tool": "mcp__mcp-hummingbot__manage_amm",
+        "input": {
+            "action": action,
+            "connector": "meteora",
+            "network": "solana-mainnet-beta",
+            **extra,
+        },
+    }
+
+
+def _swap_call(amount: str, pair: str = "SOL-USDC") -> dict:
+    """A signing ``execute_swap`` call.
+
+    The swap used to be ``manage_amm(execute_swap)`` and was priced off the
+    pool quote. It is its own pair-scoped tool now, so the gate prices it from
+    the market feed instead -- the same number, reached the way this tool
+    identifies its market. It carries no ``action``: the tool name is what says
+    this call signs (FEAT-064).
+    """
+    return {
+        "tool": "mcp__mcp-hummingbot__execute_swap",
+        "input": {
+            "connector": "meteora",
+            "network": "solana-mainnet-beta",
+            "trading_pair": pair,
+            "side": "BUY",
+            "amount": amount,
+        },
+    }
+
+
+def _amm_callback(limit: float = 500.0, client=None, state=None, mode="loop"):
+    state = state if state is not None else RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=limit)),
+        state,
+        execution_mode=mode,
+        price_client=client,
+    )
+    return callback, state
+
+
+def test_loop_mode_blocks_swap_over_the_position_limit():
+    callback, state = _amm_callback(limit=100.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_refusal_reason_names_the_position_limit():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=100.0))
+    allowed, reason = engine.check_dex_action(_swap_call("1"), RiskState(), 200.0)
+
+    assert not allowed
+    assert "100.00" in reason and "200.00" in reason
+
+
+def test_loop_mode_allows_swap_under_the_position_limit():
+    """The too-tight failure mode: a legitimate swap must still go through."""
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(market_price=200.0))
+
+    result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(200.0)
+
+
+@pytest.mark.parametrize(
+    "action", ["quote_swap", "pool_info", "position_info", "positions_owned"]
+)
+def test_loop_mode_leaves_amm_reads_unchecked(action):
+    """Reads are not signatures: they must not be priced or risk-checked.
+
+    ``price_client=None`` makes any pricing attempt fail closed, so a
+    ``selected`` outcome proves the gate never ran.
+    """
+    callback, state = _amm_callback(limit=1.0, client=None)
+
+    result = asyncio.run(callback(_amm_call(action, pool_address="PooL1111"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_blocks_swap_that_cannot_be_priced():
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(pool_price=None))
+
+    result = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_blocks_swap_with_an_unreadable_amount():
+    callback, state = _amm_callback(limit=500.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(callback(_swap_call("a lot"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_two_swaps_gated_against_the_accumulated_exposure():
+    client = _AmmClient(market_price=200.0)
+    callback, state = _amm_callback(limit=300.0, client=client)
+
+    async def _drive():
+        return (
+            await callback(_swap_call("1"), _OPTIONS),
+            await callback(_swap_call("1"), _OPTIONS),
+        )
+
+    first, second = asyncio.run(_drive())
+
+    assert first["outcome"]["outcome"] == "selected"
+    assert second["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == pytest.approx(200.0)
+
+
+def test_loop_mode_allows_remove_liquidity_under_a_breached_limit():
+    """Withdrawing is risk-reducing, like a bot stop: never block an exit."""
+    callback, state = _amm_callback(
+        limit=100.0, client=None, state=RiskState(total_exposure=5_000.0)
+    )
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "remove_liquidity",
+                pool_address="PooL1111",
+                position_address="Pos11111",
+                percentage_to_remove="100",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(5_000.0)
+
+
+def test_loop_mode_prices_add_liquidity_on_both_legs():
+    client = _AmmClient(pool_price=200.0)
+    callback, state = _amm_callback(limit=500.0, client=client)
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "add_liquidity",
+                pool_address="PooL1111",
+                base_token_amount="1",
+                quote_token_amount="150",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(350.0)
+
+
+def test_loop_mode_blocks_add_liquidity_over_the_position_limit():
+    callback, state = _amm_callback(limit=300.0, client=_AmmClient(pool_price=200.0))
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "add_liquidity",
+                pool_address="PooL1111",
+                base_token_amount="1",
+                quote_token_amount="150",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
+
+
+def test_loop_mode_prices_create_pool_from_its_declared_initial_price():
+    """No pool exists yet, so the seed price comes from the payload."""
+    client = _AmmClient(pool_price=None)
+    callback, state = _amm_callback(limit=500.0, client=client)
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "create_pool",
+                base_token="SOL",
+                quote_token="USDC",
+                base_token_amount="1",
+                initial_price="200",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(200.0)
+    assert client.gateway_amm.calls == 0
+
+
+def test_loop_mode_prices_market_seeded_create_pool_from_the_pair():
+    """Only base_token_amount given: fall back to the market price of the pair."""
+    client = _AmmClient(pool_price=None, market_price=200.0)
+    callback, state = _amm_callback(limit=500.0, client=client)
+
+    result = asyncio.run(
+        callback(
+            _amm_call(
+                "create_pool",
+                base_token="SOL",
+                quote_token="USDC",
+                base_token_amount="1",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(200.0)
+
+
+def test_dry_run_still_blocks_amm_signatures_and_allows_reads():
+    """The dry-run branch predates this gate and must keep working unchanged."""
+    callback, _ = _amm_callback(
+        limit=500.0, client=_AmmClient(pool_price=200.0), mode="dry_run"
+    )
+
+    blocked = asyncio.run(callback(_swap_call("1"), _OPTIONS))
+    read = asyncio.run(callback(_amm_call("pool_info", pool_address="P"), _OPTIONS))
+
+    assert blocked["outcome"]["outcome"] == "cancelled"
+    assert read["outcome"]["outcome"] == "selected"
+
+
+def test_amm_guide_load_is_not_risk_checked():
+    """action=None is the guide load; it signs nothing and must stay free."""
+    callback, state = _amm_callback(limit=1.0, client=None)
+
+    result = asyncio.run(
+        callback({"tool": "mcp__mcp-hummingbot__manage_amm", "input": {}}, _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == 0
+
+
+# ---------------------------------------------------------------------------
+# run_code is ungated by name on purpose (it is how a tick reads a market since
+# ARCH-308), which left one way to mutate the world from inside a dry run: a
+# snippet holding the unrestricted API client (SEC-616).
+# ---------------------------------------------------------------------------
+
+
+def _code_call(**args) -> dict:
+    return {"tool": "mcp__condor__run_code", "input": args}
+
+
+def test_a_dry_run_cannot_execute_a_snippet():
+    engine = RiskEngine(RiskLimits())
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        engine, RiskState(), execution_mode="dry_run", refusals=refusals
+    )
+
+    result = asyncio.run(
+        callback(
+            _code_call(code="await client.gateway.start({'image': 'x'})"), _OPTIONS
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "run_code"
+    assert "dry-run" in noted["reason"]
+
+
+def test_a_dry_run_refuses_a_snippet_whose_action_cannot_be_read():
+    """The tool's own default is ``run``, so an absent action is an execution."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (
+        _code_call(code="print(1)"),
+        {"tool": "run_code", "input": None},
+        _code_call(action=None, code="print(1)"),
+    ):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "cancelled", call
+
+
+def test_a_dry_run_still_reads_its_past_runs():
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (_code_call(action="history"), _code_call(action="get", run_id="cr_1")):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "selected", call
+
+
+def test_a_live_loop_still_runs_snippets_without_a_confirmation():
+    """The refusal is dry-run's, not a new gate: loop mode is unchanged."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="loop"
+    )
+
+    result = asyncio.run(
+        callback(_code_call(code="await client.market_data.candles(...)"), _OPTIONS)
+    )
+
+    assert result["outcome"]["outcome"] == "selected"
+
+
+# ---------------------------------------------------------------------------
+# manage_routines is ungated by name for the same reason run_code is, and left
+# the same hole one door over: a routine is Python, so a dry run could write one
+# and execute it holding the unrestricted client (SEC-626).
+# ---------------------------------------------------------------------------
+
+
+def _routine_call(**args) -> dict:
+    return {"tool": "mcp__condor__manage_routines", "input": args}
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["run", "run_async", "start", "create_routine", "edit_routine", "delete_routine"],
+)
+def test_a_dry_run_cannot_write_or_execute_a_routine(action):
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()),
+        RiskState(),
+        execution_mode="dry_run",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _routine_call(
+                action=action,
+                name="pwn",
+                code="async def run(config, context):\n    await client.gateway.start({})",
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "cancelled", action
+    (noted,) = refusals.drain()
+    assert noted["tool"] == "manage_routines"
+    assert "dry-run" in noted["reason"]
+
+
+def test_a_dry_run_refuses_a_routine_stop_it_cannot_own():
+    """It can reach neither `start` nor `run_async`, so the instance is a live seat's."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    result = asyncio.run(callback(_routine_call(action="stop", name="ri_1"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_a_dry_run_refuses_a_routine_action_it_cannot_read():
+    """Fails closed, so a newly added action cannot default to allowed."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (
+        {"tool": "manage_routines", "input": None},
+        _routine_call(name="x"),
+        _routine_call(action=None, name="x"),
+        _routine_call(action="publish_routine", name="x"),
+    ):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "cancelled", call
+
+
+@pytest.mark.parametrize(
+    "action", ["list", "describe", "read_routine", "get_instance", "list_instances"]
+)
+def test_a_dry_run_still_reads_the_routine_library(action):
+    """Rehearsal needs to see what exists and what it does; a read executes nothing."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    result = asyncio.run(callback(_routine_call(action=action, name="scan"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected", action
+
+
+@pytest.mark.parametrize("mode", ["loop", "attended"])
+def test_other_modes_still_run_routines_without_a_confirmation(mode):
+    """The refusal is dry-run's, not a new gate: loop and attended are unchanged."""
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "manage_routines" not in DANGEROUS_TOOLS
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode=mode
+    )
+
+    for action in ("run", "start", "create_routine", "list"):
+        call = _routine_call(action=action, name="scan")
+        assert is_dangerous_tool_call(call) is False, action
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "selected", action
+
+
+# ---------------------------------------------------------------------------
+# Refusing both doors onto arbitrary Python left a rehearsal unable to read a
+# candle. `get_market_data` is the way back: parameters, not code (CORR-625).
+# ---------------------------------------------------------------------------
+
+
+def _market_call(**args) -> dict:
+    return {"tool": "mcp__mcp-hummingbot__get_market_data", "input": args}
+
+
+@pytest.mark.parametrize("action", ["candles", "historical_candles", "connectors"])
+def test_a_dry_run_reads_candles_without_a_refusal(action):
+    """The point of the item: a rehearsal reads a market with no `run_code`."""
+    refusals = RefusalLog()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()),
+        RiskState(),
+        execution_mode="dry_run",
+        refusals=refusals,
+    )
+
+    result = asyncio.run(
+        callback(
+            _market_call(
+                action=action,
+                connector_name="binance_perpetual",
+                trading_pair="SOL-USDT",
+                interval="1h",
+                start_time=1_757_000_000,
+            ),
+            _OPTIONS,
+        )
+    )
+
+    assert result["outcome"]["outcome"] == "selected", action
+    assert refusals.drain() == []
+
+
+def test_a_dry_run_refuses_a_market_data_action_it_cannot_read():
+    """The read-only path stays read-only: an action nobody classified is not a
+    read this build can vouch for, so it fails closed like its siblings."""
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode="dry_run"
+    )
+
+    for call in (
+        {"tool": "get_market_data", "input": None},
+        _market_call(trading_pair="SOL-USDT"),
+        _market_call(action=None),
+        _market_call(action="subscribe"),
+    ):
+        result = asyncio.run(callback(call, _OPTIONS))
+        assert result["outcome"]["outcome"] == "cancelled", call
+
+
+@pytest.mark.parametrize("mode", ["loop", "attended", "run_once"])
+def test_the_candle_reader_needs_no_confirmation_in_any_mode(mode):
+    """It is a read, so it is never a prompt — dry-run included."""
+    from condor.runtime.danger import DANGEROUS_TOOLS, is_dangerous_tool_call
+
+    assert "get_market_data" not in DANGEROUS_TOOLS
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits()), RiskState(), execution_mode=mode
+    )
+
+    call = _market_call(
+        action="candles", connector_name="binance", trading_pair="SOL-USDC"
+    )
+    assert is_dangerous_tool_call(call) is False
+    assert asyncio.run(callback(call, _OPTIONS))["outcome"]["outcome"] == "selected"

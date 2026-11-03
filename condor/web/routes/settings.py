@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import logging
+import re
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.web.auth import get_current_user, require_server_access_query
+from condor.server_data_service import (
+    CREDENTIAL_DERIVED,
+    ServerDataType,
+    get_server_data_service,
+)
+from condor.web.auth import (
+    get_current_user,
+    require_owner,
+    require_server_access_query,
+)
 from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
@@ -20,6 +30,7 @@ from condor.web.models import (
     WebUser,
 )
 from condor.web.routes._errors import upstream_error
+from condor.web.routes.servers import server_rows
 from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -30,26 +41,11 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 # ── Helpers ──
 
 
-def _require_owner(cm, user_id: int, server_name: str):
-    """Enforce the OWNER line on top of the TRADER floor every route already has.
-
-    The rule this file draws (SEC-153, extended to the gateway by SEC-166):
-
-    * **Reading** a server's state — status, logs, wallet and network listings,
-      configured connectors — needs TRADER. A shared trader has to be able to
-      see what they are trading against, and to tell the owner when it is down.
-    * **Trading** on a server needs TRADER. That is what the share is for.
-    * **Mutating a server's configuration or its infrastructure** needs OWNER.
-      Exchange credentials, the gateway container lifecycle, the private keys
-      in its keystore and the RPC endpoints it dials are all the owner's
-      machine, not a trading action — and each of them can break the owner's
-      running bots for everyone else on the server.
-
-    Admins keep the bypass they hold everywhere else in this module.
-    """
-    perm = cm.get_server_permission(user_id, server_name)
-    if perm != ServerPermission.OWNER and not cm.is_admin(user_id):
-        raise HTTPException(status_code=403, detail="Owner access required")
+# The OWNER ceiling this module drew now lives in ``condor.web.auth`` beside the
+# TRADER floor it sits on: ``routes/dex.py`` needs the same line for the gateway
+# token list (SEC-207), and one shared helper is the only way that line stays in
+# one place. Kept under its original private name so this module reads unchanged.
+_require_owner = require_owner
 
 
 async def _get_client(cm, server_name: str):
@@ -71,35 +67,13 @@ async def _get_client(cm, server_name: str):
 
 @router.get("/servers", response_model=list[ServerInfo])
 async def list_settings_servers(user: WebUser = Depends(get_current_user)):
-    cm = get_config_manager()
-    accessible = cm.list_accessible_servers(user.id)
+    """The same listing ``GET /servers`` serves, under the settings prefix.
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
-    sds = get_server_data_service()
-
-    # Fetch status for all servers concurrently (uses SDS cache, instant if warm)
-    async def _get_status(name: str) -> dict:
-        result = await sds.get_or_fetch(name, ServerDataType.SERVER_STATUS)
-        return result if isinstance(result, dict) else {}
-
-    statuses = await asyncio.gather(*[_get_status(name) for name in accessible])
-
-    results = []
-    for (name, cfg), status in zip(accessible.items(), statuses):
-        perm = cm.get_server_permission(user.id, name)
-        online = status.get("status") == "online"
-        results.append(
-            ServerInfo(
-                name=name,
-                host=cfg.get("host", ""),
-                port=cfg.get("port", 0),
-                online=online,
-                permission=perm.value if perm else "trader",
-            )
-        )
-
-    return sorted(results, key=lambda s: (not s.online, s.name))
+    The settings page renders the very fields that endpoint builds (permission,
+    the default star, the shared-with line), so it reads the shared builder
+    rather than keeping a second copy that drifts (ARCH-285).
+    """
+    return await server_rows(user)
 
 
 @router.post("/servers")
@@ -158,10 +132,25 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=404, detail="Server not found")
     cm.set_chat_default_server(user.id, name)
+    # Both records Telegram's own "set default" writes, or the two disagree:
+    # `chat_defaults` is what `get_effective_server` resolves, while the general
+    # preference is what a routine, an agent or MCP reads as the active server.
+    # Writing only the first left those surfaces pinned to the previous choice.
+    from condor.preferences import load_user_data_for, set_active_server
+
+    set_active_server(load_user_data_for(user.id), name)
     return {"default": True, "name": name}
 
 
 # ── Gateway ──
+
+#: Last `running` state observed per server, so `gateway_status` can detect the
+#: false → true transition — the only moment Gateway can actually answer
+#: `list_networks()`, which decides VENUES' `clmm_lp` trait and half of its
+#: `credentialed` trait (condor/fetchers/connectors.py:47, CORR-614). Invalidating
+#: on `gateway_start`/`gateway_restart`'s 200 instead would refetch mid-boot and
+#: cache a gateway-less answer for a fresh 600s.
+_gateway_was_running: dict[str, bool] = {}
 
 
 @router.get("/gateway/status")
@@ -181,8 +170,12 @@ async def gateway_status(
             result["image"] = info.get("image", None)
             result["created_at"] = info.get("created", info.get("created_at", None))
             result["container_status"] = info.get("status", None)
+        if is_running and not _gateway_was_running.get(server, False):
+            get_server_data_service().invalidate(server, ServerDataType.VENUES)
+        _gateway_was_running[server] = is_running
         return result
     except Exception:
+        _gateway_was_running[server] = False
         return {"running": False, "info": None}
 
 
@@ -235,6 +228,11 @@ async def gateway_start(
     # host. That is the owner's decision, not a shared trader's.
     _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
+    # Deliberately does not invalidate VENUES here: this returns right after a
+    # detached `containers.run` with no readiness wait, so a refetch triggered
+    # now lands mid-boot, `list_networks` 503s, and `fetch_venues` would cache
+    # a gateway-less list for a fresh 600s. `gateway_status` invalidates once
+    # Gateway is actually observed running (CORR-614).
     try:
         result = await client.gateway.start(
             {
@@ -260,10 +258,14 @@ async def gateway_stop(
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.stop()
-        return {"stopped": True, "result": result}
     except Exception as e:
         logger.exception("Failed to stop gateway on '%s'", server)
         raise upstream_error("Failed to stop gateway", e)
+    # Outside the try: the stop already succeeded — `container.stop()` blocks,
+    # so the new answer (no venues) is already true — and an invalidation
+    # error here must not be reported as a failed stop (CORR-614).
+    get_server_data_service().invalidate(server, ServerDataType.VENUES)
+    return {"stopped": True, "result": result}
 
 
 @router.post("/gateway/restart")
@@ -275,6 +277,8 @@ async def gateway_restart(
     # A restart drops in-flight DEX orders for everyone on the server.
     _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
+    # Same reasoning as gateway_start: no invalidation here, `gateway_status`
+    # catches the real transition once the container is back up (CORR-614).
     try:
         result = await client.gateway.restart()
         return {"restarted": True, "result": result}
@@ -299,6 +303,46 @@ async def gateway_logs(
 
 
 # ── Gateway Networks (RPC) ──
+
+_URL_VALUE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
+
+
+def _redact_url(value: str) -> str:
+    """Collapse a URL to scheme://host, hiding every part that can carry a secret.
+
+    Paid RPC providers embed the API key either in the query string
+    (Helius: ``?api-key=<secret>``) or in the path (Infura ``/v3/<key>``,
+    Alchemy ``/v2/<key>``), and a URL can also carry userinfo. Rather than
+    pattern-match key shapes, keep only the parts that cannot hold a
+    credential — scheme, host, port — and mask everything else whenever any of
+    it is present. A bare endpoint stays readable so a trader can still tell
+    which node they are trading against.
+    """
+    parts = urlsplit(value)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    has_secret_bearing_part = (
+        parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or parts.path not in ("", "/")
+    )
+    if has_secret_bearing_part:
+        return f"{parts.scheme}://{host}/…"
+    return value
+
+
+def _redact_network_config(value):
+    """Recursively mask URL-shaped strings in a network config (SEC-197)."""
+    if isinstance(value, dict):
+        return {k: _redact_network_config(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_network_config(v) for v in value]
+    if isinstance(value, str) and _URL_VALUE.match(value):
+        return _redact_url(value)
+    return value
 
 
 @router.get("/gateway/networks")
@@ -326,10 +370,20 @@ async def gateway_network_config(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Reading gateway state stays at TRADER (see _require_owner's docstring),
+    # but the RPC URL in a network config embeds the owner's paid provider API
+    # key. Redact it server-side for anyone below the OWNER line — same admin
+    # bypass as _require_owner — instead of shipping the secret and hiding it
+    # in the UI (SEC-197). Redaction cannot corrupt a save: the POST below is
+    # owner-gated, and owners always receive the full values.
+    perm = cm.get_server_permission(user.id, server)
+    is_owner = perm == ServerPermission.OWNER or cm.is_admin(user.id)
     client = await _get_client(cm, server)
     try:
         config = await client.gateway.get_network_config(network_id)
-        return {"network_id": network_id, "config": config}
+        if not is_owner:
+            config = _redact_network_config(config)
+        return {"network_id": network_id, "config": config, "redacted": not is_owner}
     except Exception as e:
         logger.exception(
             "Failed to fetch gateway network config '%s' from '%s'", network_id, server
@@ -600,8 +654,6 @@ async def list_connectors(
     user: WebUser = Depends(require_server_access_query),
 ):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     sds = get_server_data_service()
     raw = await sds.get_or_fetch(server, ServerDataType.ALL_CONNECTORS)
     if raw is None:
@@ -665,16 +717,15 @@ async def add_credential(
             connector_name=req.connector_name,
             credentials=req.credentials,
         )
-        # Invalidate configured connectors cache
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
-        get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
-        return {"added": True, "result": result}
     except Exception as e:
         logger.exception(
             "Failed to add credentials for '%s' on '%s'", req.connector_name, server
         )
         raise upstream_error("Failed to add credentials", e)
+    # Outside the try: the credential write already succeeded, and an
+    # exception here must not be swallowed and re-reported as a failed add.
+    get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
+    return {"added": True, "result": result}
 
 
 @router.delete("/credentials/{connector}")
@@ -692,12 +743,9 @@ async def delete_credential(
             account_name="master_account",
             connector_name=connector,
         )
-        # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
-        sds = get_server_data_service()
-        sds.invalidate(server, ServerDataType.CONNECTORS)
-        sds.invalidate(server, ServerDataType.PORTFOLIO)
+        # Invalidate every credential-derived cache so the removed key
+        # disappears immediately (including VENUES' `credentialed` trait).
+        get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)
         return {"deleted": True, "result": result}
     except Exception as e:
         logger.exception(
@@ -742,16 +790,16 @@ async def add_custom_provider(
     the key is accepted, and the response is OpenAI-shaped — all in one round
     trip — and returns the model list the caller needs anyway.
     """
+    from condor.llm.custom_models import (
+        CustomProviderError,
+        fetch_models,
+        normalize_base_url,
+    )
     from condor.preferences import (
         load_user_data_for,
         save_custom_provider,
         suggest_provider_name,
         unique_provider_name,
-    )
-    from handlers.agents.custom_models import (
-        CustomProviderError,
-        fetch_models,
-        normalize_base_url,
     )
 
     raw_url = (body.get("base_url") or "").strip()
@@ -789,8 +837,8 @@ async def get_custom_provider_models(
     user: WebUser = Depends(get_current_user),
 ):
     """Fetch the current chat model list for a saved endpoint."""
+    from condor.llm.custom_models import CustomProviderError, fetch_models
     from condor.preferences import find_custom_provider, load_user_data_for
-    from handlers.agents.custom_models import CustomProviderError, fetch_models
 
     provider = find_custom_provider(load_user_data_for(user.id), name)
     if provider is None:
@@ -826,13 +874,20 @@ async def delete_custom_provider(
 async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
     """What this install has agreed to, and whether it could send anything.
 
-    ``endpoint_configured`` is the honest answer to "is this thing on": with no
-    ``CONDOR_TELEMETRY_URL`` set — the shipped state — nothing can be
-    transmitted no matter what the consent says, and events only accumulate in
-    a capped local file.
+    The collector address is fixed in the source, so consent is the only thing
+    that decides whether anything is transmitted: at level ``off`` no event is
+    recorded in the first place.
+
+    Readable by every seat on purpose — anyone using an install should be able
+    to see what it shares — while ``can_change`` reports who may actually
+    answer. That is the admin, because consent is install-wide, and it is also
+    the discriminator the dashboard consent card uses, so asking costs no
+    second request. ``disclosure`` is the same copy the Telegram prompt sends.
     """
     from condor.telemetry import consent, emitter, outbox
+    from condor.telemetry.prompt import DISCLOSURE
 
+    cm = get_config_manager()
     return {
         "consent": consent.state(),
         "level": consent.level(),
@@ -840,18 +895,54 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
         "endpoint_configured": bool(outbox.endpoint()),
         "pending_events": emitter.buffered(),
         "privacy_doc": "PRIVACY.md",
+        "can_change": cm.is_admin(user.id),
+        "notice_shown": consent.notice_shown(),
+        "disclosure": DISCLOSURE,
+    }
+
+
+@router.post("/telemetry/notice")
+async def mark_telemetry_notice_shown(user: WebUser = Depends(get_current_user)):
+    """Record that the dashboard showed the admin the telemetry notice.
+
+    Posted by the notice strip when it renders. It is the dashboard's delivery
+    receipt — the equivalent of the Telegram message having been sent — and it
+    is what moves an unanswered install from the ping floor to ``usage``, so it
+    counts only for the admin, who is the one being told. It changes nothing
+    for an install that has already answered or whose level the environment
+    pins; ``consent.mark_notice_shown`` enforces both.
+    """
+    from condor.telemetry import consent
+
+    if not get_config_manager().is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Telemetry is an install-wide setting; only the admin is notified",
+        )
+    consent.mark_notice_shown()
+    return {
+        "level": consent.level(),
+        "consent": consent.state(),
+        "notice_shown": consent.notice_shown(),
     }
 
 
 @router.put("/telemetry")
 async def set_telemetry_settings(
-    level: str = Query(..., description="off | ping | usage"),
+    level: str = Query(..., description="ping | usage | off"),
     user: WebUser = Depends(get_current_user),
 ):
     """Change the install's telemetry level. Admin only, and reversible.
 
-    Setting ``off`` is a withdrawal, not a pause: the buffer and the outbox are
-    deleted, so nothing already recorded can be sent later.
+    An unanswered install is at ``ping`` until it has been shown the notice and
+    at ``usage`` after — silence is not refusal — but ``off`` is a real answer here, because an admin who wants
+    this install to report nothing must have a way to say so in the product
+    rather than only by editing ``.env``. It is recorded as a refusal in
+    ``config.yml``, so it survives upgrades; ``ping``/``usage`` re-enable.
+
+    Turning off, like downgrading from ``usage``, is a withdrawal rather than a
+    pause: the buffer and the outbox are deleted, so nothing already recorded
+    can be sent later.
     """
     from condor.telemetry import consent
 
@@ -863,7 +954,8 @@ async def set_telemetry_settings(
         )
     if level not in consent.LEVELS:
         raise HTTPException(
-            status_code=400, detail=f"level must be one of {', '.join(consent.LEVELS)}"
+            status_code=400,
+            detail=f"level must be one of {', '.join(consent.LEVELS)}",
         )
     if consent.env_overridden():
         raise HTTPException(
@@ -871,5 +963,5 @@ async def set_telemetry_settings(
             detail="CONDOR_TELEMETRY is set in the environment and overrides this setting",
         )
 
-    applied = consent.set_level(level)
+    applied = consent.deny() if level == consent.OFF else consent.set_level(level)
     return {"level": applied, "consent": consent.state()}

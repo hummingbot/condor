@@ -26,6 +26,14 @@ export const DELEGATION_STATUS: Record<
     text: "text-amber-400",
     label: "INTERRUPTED",
   },
+  // A code run cut off by its own budget: not a snippet that raised, and not a
+  // clean finish either — so it reads beside `interrupted`, its nearest
+  // relative, because in both something outside the run ended it (FEAT-061).
+  timeout: {
+    dot: "bg-amber-400",
+    text: "text-amber-400",
+    label: "TIMEOUT",
+  },
   // A transcript too old to say how it ended. Honest beats a guess.
   unknown: {
     dot: "bg-[var(--color-text-muted)]/30",

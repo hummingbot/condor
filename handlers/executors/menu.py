@@ -892,7 +892,7 @@ async def handle_confirm_stop_executor(
                         full_id = ex_id
                         break
         try:
-            await stop_executor(client, full_id, keep_position=False)
+            stop_result = await stop_executor(client, full_id, keep_position=False)
         finally:
             # Either way the cached view is stale: a stop that failed to answer
             # may still have gone through upstream.
@@ -908,8 +908,25 @@ async def handle_confirm_stop_executor(
         keyboard = [
             [InlineKeyboardButton("📋 Back to List", callback_data="executors:menu")]
         ]
+        if (stop_result or {}).get("status") == "already_terminated":
+            # No-op stop: the executor was already terminal. A generic "stopped"
+            # would hide the one payload that matters — an orphaned position.
+            text = (
+                f"ℹ️ *Executor Already Terminated*\n\n"
+                f"🆔 `{escape_markdown_v2(full_id[:30])}`\n"
+                f"Close type: `{escape_markdown_v2(str(stop_result.get('close_type')))}`"
+            )
+            if stop_result.get("orphaned_position"):
+                text += (
+                    f"\n\n🚨 *Orphaned position still open on\\-chain:*\n"
+                    f"`{escape_markdown_v2(str(stop_result.get('position_address')))}`\n"
+                    "Stopping did not close it — the executor had already terminated\\. "
+                    "Ask the agent to close it with `manage_clmm`, then mark it recovered\\."
+                )
+        else:
+            text = f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`"
         await query.message.edit_text(
-            f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
+            text,
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )

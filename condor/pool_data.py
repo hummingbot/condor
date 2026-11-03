@@ -15,9 +15,10 @@ functions rather than building GeckoTerminal URLs themselves.
 import asyncio
 import logging
 import math
+import os
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -25,17 +26,11 @@ from geckoterminal_py import GeckoTerminalAsyncClient
 from geckoterminal_py import constants as GECKO_CONSTANTS
 from glom import glom
 
+import utils.config  # noqa: F401  (imported for its load_dotenv() side effect)
 from condor import orca_api
-from condor.cache import evict_expired, get_cached, set_cached
-from config_manager import get_client
+from condor.asyncutil import SingleFlight
 
 logger = logging.getLogger(__name__)
-
-# The conversation cache these functions write into is shared with the Telegram DEX
-# handlers, which read and invalidate it by group under the "_cache" namespace (see
-# handlers/dex/_shared). Entries written under any other namespace would survive an
-# invalidation the handler thinks it performed, so this must stay in step with it.
-_CACHE_NS = "_cache"
 
 # CLMM venues an ``lp_executor`` can open a position on: (brand, the qualifiers its
 # GeckoTerminal dex id must carry, the gecko networks it exists on). Deliberately
@@ -165,6 +160,9 @@ DEX_TO_GECKO = {
 }
 
 # Cache TTLs
+# Only a *forming* candle needs this: every closed candle is immutable, so the
+# series store below serves a window that has already ended without re-asking,
+# however old the copy is. This is the freshness of the tail alone.
 OHLCV_CACHE_TTL = 300  # 5 minutes
 BINS_CACHE_TTL = 60  # 1 minute
 TOKEN_SYMBOL_TTL = 24 * 3600  # a mint's ticker does not change
@@ -251,6 +249,133 @@ def candles_needed(start: Optional[float], end: Optional[float], timeframe: str)
     return max(1, min(span + 2, GECKO_OHLCV_MAX))
 
 
+# ── How this process reaches GeckoTerminal ──
+# Exactly two supported configurations, and no third:
+#
+# * **No key** (the default). GeckoTerminal's public API is free and needs no
+#   account. Every guard below is shaped by its ~30 requests/minute *per IP*,
+#   shared with every other caller on this host.
+# * **A CoinGecko Analyst key.** The same data, served as CoinGecko's
+#   ``/onchain`` endpoints at 500 requests/minute.
+#
+# CoinGecko's free *Demo* key is deliberately not supported: on the ``/onchain``
+# endpoints it carries the same ~30/min ceiling as no key at all, so it would be
+# a third configuration to document and test that buys nothing over the default.
+# A Demo key set here is rejected by the paid host, which `_note_key_rejected`
+# turns into a fall back to keyless rather than a dead DEX page.
+#
+# So the key is not a credential this module needs to function — it is the single
+# input that decides how much of the pool browser's walk we can afford, which is
+# why it widens the budget and the walk depth together rather than only swapping
+# a URL.
+_GECKO_PUBLIC_URL = "https://api.geckoterminal.com/api/v2"
+_GECKO_ANALYST_URL = "https://pro-api.coingecko.com/api/v3/onchain"
+
+# The same key also unlocks CoinGecko's ordinary *market* endpoints (/global,
+# /coins/markets, /search/trending) — one level up from the /onchain mirror above,
+# and the surface an agent routine reads for cross-market context. The plan and the
+# auth header are identical there; only the host pair differs, so a surface is a
+# row in this table rather than a second copy of the analyst/public branch.
+_GECKO_SURFACE_URLS: Dict[str, Tuple[str, str]] = {
+    # surface: (keyless host, Analyst host)
+    "onchain": (_GECKO_PUBLIC_URL, _GECKO_ANALYST_URL),
+    "market": (
+        "https://api.coingecko.com/api/v3",
+        "https://pro-api.coingecko.com/api/v3",
+    ),
+}
+
+# Per-minute budget by plan, each held under the published ceiling so a burst
+# straddling the window boundary still lands inside it, and so a Telegram handler
+# racing the dashboard has headroom: 25 under the public ~30, 400 under Analyst's
+# 500.
+_GECKO_PLAN_RATE_LIMITS = {"public": 25, "analyst": 400}
+# Concurrency rises with the budget, but far less: past a dozen sockets the walk
+# is bounded by gecko's own latency, not by ours.
+_GECKO_PLAN_CONCURRENCY = {"public": 4, "analyst": 12}
+
+# Set when the paid host has rejected the configured key. Sticky for the life of
+# the process: the key does not become valid again on the next request, and
+# re-asking once per call would spend the budget discovering the same 401.
+_gecko_key_rejected = False
+
+
+def _gecko_key() -> str:
+    return (os.environ.get("COINGECKO_API_KEY") or "").strip()
+
+
+def gecko_plan() -> str:
+    """``"analyst"`` or ``"public"`` — how this process reaches gecko.
+
+    ``public`` is the supported default, not a degraded mode. It is also where a
+    rejected key lands, so this answers what is actually in use rather than what
+    was configured.
+    """
+    if _gecko_key() and not _gecko_key_rejected:
+        return "analyst"
+    return "public"
+
+
+def coingecko_access(surface: str = "onchain") -> Tuple[str, Dict[str, str]]:
+    """``(base_url, extra headers)`` for the plan in use, on one CoinGecko surface.
+
+    The single place that decides how the configured key is sent, so callers
+    outside this module — an agent routine reading the market endpoints, say —
+    inherit the plan resolution *and* its fallback (a key the paid host rejected
+    stops being sent everywhere at once) instead of re-deriving the branch and
+    drifting from it. ``surface`` selects only the host pair: ``"onchain"`` for
+    GeckoTerminal's pool data, ``"market"`` for CoinGecko's market endpoints.
+
+    The public tier returns no headers at all so the library keeps its own
+    versioned ``Accept``, which is a GeckoTerminal-specific pin and means nothing
+    to the CoinGecko host.
+    """
+    try:
+        public_url, analyst_url = _GECKO_SURFACE_URLS[surface]
+    except KeyError:
+        raise ValueError(f"unknown CoinGecko surface: {surface!r}") from None
+    if gecko_plan() == "analyst":
+        return analyst_url, {
+            "Accept": "application/json",
+            "x-cg-pro-api-key": _gecko_key(),
+        }
+    return public_url, {}
+
+
+def _is_key_rejected(exc: BaseException) -> bool:
+    """Whether the paid host refused the key, as opposed to refusing a request.
+
+    Only 401 and 403 count. A 404 is a pool that does not exist, and gecko also
+    answers 401 past page 10 on the *public* API — which is why this is consulted
+    only while a key is actually in use.
+    """
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    return status in (401, 403)
+
+
+def _note_key_rejected() -> None:
+    """Fall back to the keyless API for the rest of the process.
+
+    A bad key must not be worse than no key: without this the 401 propagates,
+    every caller degrades to an empty list, and the whole DEX surface reads as a
+    chain with no pools. Loud, because the operator paid for a plan they are not
+    getting — and because the usual cause is a free Demo key, which this build
+    does not support.
+    """
+    global _gecko_key_rejected
+    if _gecko_key_rejected:
+        return
+    _gecko_key_rejected = True
+    logger.error(
+        "CoinGecko rejected COINGECKO_API_KEY (401/403) — falling back to the "
+        "keyless GeckoTerminal API at %d requests/minute. Condor supports an "
+        "Analyst (or higher) key; a free Demo key is not accepted by this host.",
+        _GECKO_PLAN_RATE_LIMITS["public"],
+    )
+    configure_gecko_access()
+
+
 # ── GeckoTerminal client ──
 # One client (and so one httpx connection pool) for the process. Constructing a
 # fresh GeckoTerminalAsyncClient per call leaks an unclosed httpx.AsyncClient
@@ -261,20 +386,26 @@ _gecko_client_instance: Optional[GeckoTerminalAsyncClient] = None
 def _gecko_client() -> GeckoTerminalAsyncClient:
     global _gecko_client_instance
     if _gecko_client_instance is None:
-        _gecko_client_instance = GeckoTerminalAsyncClient()
+        client = GeckoTerminalAsyncClient()
+        base_url, headers = coingecko_access("onchain")
+        # Set on the *instance*, not the class: `base_url` and `headers` are class
+        # attributes on GeckoTerminalClientBase, so assigning to the class would
+        # reconfigure the library for anything else importing it in-process.
+        client.base_url = base_url
+        # The httpx client is built with `headers=self.headers` in __init__, so the
+        # class attribute is already baked in by now — the auth header has to go
+        # onto the live client rather than onto `client.headers`.
+        if headers:
+            client.client.headers.update(headers)
         # geckoterminal_py builds its httpx client with no timeout override, so a
         # slow chain listing blocks for httpx's 5s default and then fails outright.
         # A read timeout well above that is worth more than a fast empty table.
-        try:
-            _gecko_client_instance._client.timeout = httpx.Timeout(
-                _GECKO_TIMEOUT, connect=5.0
-            )
-        except Exception:  # pragma: no cover - a library layout change, not an error
-            logger.debug("could not set gecko client timeout", exc_info=True)
+        client.client.timeout = httpx.Timeout(_GECKO_TIMEOUT, connect=5.0)
+        _gecko_client_instance = client
     return _gecko_client_instance
 
 
-# GeckoTerminal's free tier is ~30 requests/minute *per IP*, and that budget is
+# GeckoTerminal's public tier is ~30 requests/minute *per IP*, and that budget is
 # shared by every dashboard viewer, the candle poll loop and the pool browser at
 # once. Three separate guards defend it, because they fail differently:
 #
@@ -287,15 +418,19 @@ def _gecko_client() -> GeckoTerminalAsyncClient:
 # * ``_trip_breaker`` (circuit) stops calling at all for a moment once gecko has
 #   said 429. Every request sent during a throttled window is spent for nothing
 #   and keeps the window rolling, so the cheapest response is silence.
-_GECKO_MAX_CONCURRENCY = 4
+#
+# A paid key widens the first two. It does not remove them: the budget is finite
+# on every plan, and a 429 costs just as much when there is more headroom to
+# waste. `configure_gecko_access()` below is what sets them from the plan.
 _GECKO_TIMEOUT = 15.0
 _GECKO_RETRIES = 2
+_GECKO_RATE_WINDOW = 60.0
 _gecko_semaphore: Optional[asyncio.Semaphore] = None
 
-# Held under gecko's ~30 so a burst that straddles the window boundary still
-# lands inside it, and so a Telegram handler racing the dashboard has headroom.
-_GECKO_RATE_LIMIT = 25
-_GECKO_RATE_WINDOW = 60.0
+# Set by configure_gecko_access() at import. Left as module globals rather than
+# read through a function at each use so the guards stay monkeypatchable in tests.
+_GECKO_MAX_CONCURRENCY = _GECKO_PLAN_CONCURRENCY["public"]
+_GECKO_RATE_LIMIT = _GECKO_PLAN_RATE_LIMITS["public"]
 
 # How long a caller will queue for a slot before giving up. A web request is
 # waiting on the other end, and this module's standing answer to "no budget" is
@@ -307,6 +442,40 @@ _GECKO_MAX_WAIT = 5.0
 # of the way, short enough that a chart recovers on its next poll rather than
 # staying blank until someone reloads.
 _GECKO_COOLDOWN = 20.0
+
+# How deep the pool browser may walk, by plan. On the public tier these are set
+# by what a walk *costs* rather than by what would answer best; a paid budget
+# lets them be set by the question instead. GECKO_MAX_PAGE is the ceiling on both
+# because gecko answers 401 past page 10 — that is its limit, not our budget's,
+# so a key does not lift it.
+_GECKO_PLAN_FILTER_WALK = {"public": 3, "analyst": 10}
+_GECKO_PLAN_SCOPED_MAX = {"public": 8, "analyst": 30}
+
+
+def configure_gecko_access() -> str:
+    """Point the module at the configured plan and size the guards for it.
+
+    Called once at import, again by anything that changes the environment
+    afterwards (tests, a re-read .env), and again if the key is rejected. Drops
+    the cached client so the next call builds one against the host now in force,
+    and returns the plan now in force.
+    """
+    global _GECKO_MAX_CONCURRENCY, _GECKO_RATE_LIMIT
+    global _GECKO_FILTER_WALK_PAGES, _GECKO_SCOPED_MAX_REQUESTS
+    global _gecko_client_instance, _gecko_semaphore
+
+    plan = gecko_plan()
+    _GECKO_RATE_LIMIT = _GECKO_PLAN_RATE_LIMITS[plan]
+    _GECKO_MAX_CONCURRENCY = _GECKO_PLAN_CONCURRENCY[plan]
+    _GECKO_FILTER_WALK_PAGES = min(_GECKO_PLAN_FILTER_WALK[plan], GECKO_MAX_PAGE)
+    _GECKO_SCOPED_MAX_REQUESTS = _GECKO_PLAN_SCOPED_MAX[plan]
+
+    # The old client holds the old base URL, headers and concurrency gate. It is
+    # dropped rather than reconfigured: it may have requests in flight against
+    # the previous host, and those should finish on it.
+    _gecko_client_instance = None
+    _gecko_semaphore = None
+    return plan
 
 
 class GeckoRateLimited(RuntimeError):
@@ -424,6 +593,13 @@ def gecko_health() -> Dict[str, Any]:
         "cooldown_remaining": max(0.0, _gecko_cooldown_until - now),
         "requests_last_minute": recent,
         "budget": _GECKO_RATE_LIMIT,
+        # Which plan the budget belongs to, so "we are throttled" can be read
+        # alongside "on 25/min, keyless" rather than looking like a paid tier
+        # failing. Never the key itself.
+        "plan": gecko_plan(),
+        # True when a key is configured but the paid host refused it, which is
+        # otherwise indistinguishable from having set no key at all.
+        "key_rejected": _gecko_key_rejected,
         "count_429": _gecko_429_count,
         "last_429_age": (now - _gecko_last_429) if _gecko_last_429 else None,
         "throttled_calls": _gecko_throttled_calls,
@@ -437,8 +613,9 @@ def reset_gecko_throttle() -> None:
     wall-clock minute and would otherwise throttle themselves.
     """
     global _gecko_cooldown_until, _gecko_last_429, _gecko_429_count
-    global _gecko_throttled_calls
+    global _gecko_throttled_calls, _gecko_key_rejected
     _gecko_call_times.clear()
+    _gecko_key_rejected = False
     _gecko_inflight.clear()
     _gecko_cooldown_until = 0.0
     _gecko_last_429 = 0.0
@@ -453,6 +630,8 @@ def reset_gecko_throttle() -> None:
         _token_symbol_cache,
         _token_pool_cache,
         _pair_pool_cache,
+        _ohlcv_series,
+        _pool_bins_cache,
     ):
         cache.clear()
 
@@ -470,14 +649,28 @@ async def gecko_call(method: str, *args: Any, **kwargs: Any) -> Any:
     gecko's limit is a per-minute window, so no backoff short enough to sit inside
     a web request will clear it, and a retry only spends more of the very budget
     that is exhausted. It trips the breaker instead. A 404, or the 401 gecko
-    answers past page 10, is a final answer and is raised on the first attempt.
+    answers past page 10 of the public API, is a final answer and is raised on the
+    first attempt.
+
+    The one exception is a key the paid host refuses, which is not this request's
+    fault and is answered by changing hosts rather than by failing.
     """
+    # Whether *this* call went out keyed, captured before the fallback can flip it.
+    # A 401 means two different things on the two hosts — a rejected key on the
+    # paid one, page 10 on the public one — so the check has to know which it was.
+    keyed = gecko_plan() == "analyst"
     for attempt in range(_GECKO_RETRIES + 1):
         await _acquire_rate_slot()
         try:
             async with _gecko_gate():
                 return await getattr(_gecko_client(), method)(*args, **kwargs)
         except Exception as e:  # noqa: BLE001 - re-raised below when not retryable
+            if keyed and _is_key_rejected(e):
+                # Does not spend the retry budget: the fallback changes the host,
+                # so this is the first attempt at the request, not a second one.
+                # It cannot recur — the retry below is keyless by construction.
+                _note_key_rejected()
+                return await gecko_call(method, *args, **kwargs)
             if _is_rate_limited(e):
                 if not isinstance(e, GeckoRateLimited):
                     _trip_breaker()
@@ -505,33 +698,17 @@ _GECKO_BACKOFF = (0.4, 1.0)
 # air, so every one of them misses the cache and opens its own gecko request — the
 # fastest way there is to spend the minute's budget. This collapses concurrent
 # callers of the same key onto one upstream request.
-_gecko_inflight: Dict[Tuple, "asyncio.Task"] = {}
+_gecko_inflight = SingleFlight()
 
 
 async def _single_flight(key: Tuple, factory) -> Any:
-    """Run ``factory()`` once per key, sharing its result with every concurrent caller.
-
-    The work runs as a detached task and awaiters ``shield`` it, so the very thing
-    that causes the stampede — a viewer navigating away and cancelling their
-    request — cannot also cancel the fetch the remaining viewers are waiting on.
-    """
-    task = _gecko_inflight.get(key)
-    if task is None or task.done():
-        task = asyncio.ensure_future(factory())
-        _gecko_inflight[key] = task
-
-        def _clear(finished: "asyncio.Task", _key: Tuple = key) -> None:
-            if _gecko_inflight.get(_key) is finished:
-                _gecko_inflight.pop(_key, None)
-
-        task.add_done_callback(_clear)
-    return await asyncio.shield(task)
+    """Run ``factory()`` once per key, sharing its result with every concurrent caller."""
+    return await _gecko_inflight.run(key, factory)
 
 
 # ── Small TTL caches for token lookups ──
-# These answers are process-wide (not per-user) and tiny, so they live here rather
-# than in a caller's user_data. Capped so an unbounded stream of distinct mints
-# cannot grow them without limit.
+# These answers are process-wide (not per-user) and tiny. Capped so an unbounded
+# stream of distinct mints cannot grow them without limit.
 _TOKEN_CACHE_MAX = 512
 _token_symbol_cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
 # Both hold normalized pool dicts, and an empty dict for "asked, there is no such
@@ -948,29 +1125,38 @@ async def fetch_ohlcv(
     network: str,
     timeframe: str = "1h",
     currency: str = "usd",
-    user_data: dict = None,
     limit: int = 100,
     before_timestamp: Optional[int] = None,
     token: str = "base",
+    use_cache: bool = True,
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
-    Concurrent callers asking for the same upstream window share one request, no
-    matter what key each of them caches the answer under.
+    A pool's candles are global, not per-user, so they are held once for the
+    process as a growing *series* (see ``_CandleSeries``) rather than as one entry
+    per window: every caller — the dashboard's backfill, its live poll, a Telegram
+    chart, a routine — slices the window it wants out of the same rows, and only
+    the candles nobody has fetched yet cost a request.
 
     Args:
         pool_address: Pool contract address
         network: Network identifier (will be converted to GeckoTerminal format)
         timeframe: OHLCV timeframe (see GECKO_TIMEFRAMES)
         currency: Price currency - "usd" or "token" (quote token)
-        user_data: Optional user_data dict for caching
-        limit: Number of candles to fetch (capped at GECKO_OHLCV_MAX)
+        limit: How many candles to *return*, newest last (capped at
+            GECKO_OHLCV_MAX). It no longer sizes the upstream request: a request
+            costs the same whatever its limit, so a cold series always buys the
+            full GECKO_OHLCV_MAX and a warm one buys only its missing tail.
         before_timestamp: Unix seconds; candles walk back from here. None asks for
-            the latest candles, which is also what keeps a live chart's cache key
-            stable — pass it only for a window that has actually closed.
+            the latest candles.
         token: Which side of the pool to price, "base" or "quote". "quote" flips
             the series, for a venue pair quoted the other way round from the pool
             (``XRP-RLUSD`` against a ``RLUSD / XRP`` pool).
+        use_cache: False forces the live edge to be re-fetched — for a poll that
+            must see the forming candle rather than one up to ``OHLCV_CACHE_TTL``
+            old. It never discards history: the fresh candles are merged into the
+            same series every cached reader shares. A window that has already
+            closed is immutable and is served from memory either way.
 
     Returns:
         Tuple of (ohlcv_list, error_message)
@@ -982,119 +1168,347 @@ async def fetch_ohlcv(
         timeframe = normalize_timeframe(timeframe)
         limit = max(1, min(int(limit), GECKO_OHLCV_MAX))
 
-        # Check cache. limit/before_timestamp belong to the key: the same pool
-        # charted over a historical window and over the live one are different
-        # answers.
-        if user_data is not None:
-            cache_key = (
-                f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
-                f"_{token}_{limit}_{before_timestamp or 0}"
+        # The series is keyed by what identifies it upstream. The window the
+        # caller wants is deliberately absent: that is what lets a 7-day chart, a
+        # 3-day chart and a 5-candle poll on one pool share a single copy.
+        series_key = (gecko_network, pool_address, timeframe, currency, token)
+        series = _get_series(series_key)
+
+        end = float(before_timestamp) if before_timestamp else time.time()
+        oldest_wanted = end - limit * timeframe_seconds(timeframe)
+
+        if series.serves(oldest_wanted, end, use_cache):
+            return series.slice(end, limit), None
+
+        # One upstream request per call, spent where it unblocks this window.
+        # Reaching further back than one page is left to the next call: a chart
+        # scrolling into history walks back a thousand candles at a time rather
+        # than opening several requests at once.
+        needs_history = (
+            series.rows and not series.exhausted and series.oldest > oldest_wanted
+        )
+        req_before: Optional[int]
+        if needs_history:
+            # Walk back from whichever ceiling is lower — our oldest row, which
+            # pages back contiguously behind what we hold, or the caller's own
+            # ``before_timestamp``, which lands on a distant closed window in one
+            # request instead of paging all the way down to it.
+            req_before = int(min(series.oldest, end))
+            req_limit = GECKO_OHLCV_MAX
+        else:
+            req_before = int(before_timestamp) if before_timestamp else None
+            req_limit = (
+                GECKO_OHLCV_MAX if req_before else _tail_count(series, timeframe)
             )
-            cached = get_cached(
-                user_data, cache_key, ttl=OHLCV_CACHE_TTL, namespace=_CACHE_NS
-            )
-            if cached is not None:
-                return cached, None
-            # Sweep on miss, as cached_call does. Historical windows mint a fresh
-            # key per executor, so a long-lived caller would otherwise accumulate
-            # one entry per chart forever.
-            evict_expired(user_data, namespace=_CACHE_NS)
 
-        async def _fetch_upstream() -> Optional[List]:
-            # Pass all parameters explicitly:
-            # - currency="token" means price in quote token (not USD)
-            # - token="base" means OHLCV for the base token
-            result = await gecko_call(
-                "get_ohlcv",
-                gecko_network,
-                pool_address,
-                timeframe,
-                before_timestamp=before_timestamp,
-                currency=currency,
-                token=token,
-                limit=limit,
-            )
-
-            # Parse response - handle different formats
-            rows = None
-
-            try:
-                import pandas as pd
-
-                if isinstance(result, pd.DataFrame):
-                    if not result.empty:
-                        # Convert DataFrame to list format
-                        rows = result.values.tolist()
-            except ImportError:
-                pass
-
-            if rows is None:
-                if isinstance(result, list):
-                    rows = result
-                elif isinstance(result, dict):
-                    # Try nested structure
-                    data = result.get("data", result)
-                    if isinstance(data, dict):
-                        attrs = data.get("attributes", data)
-                        rows = attrs.get("ohlcv_list", [])
-                    elif isinstance(data, list):
-                        rows = data
-
-            # Debug logging: show price range from OHLCV data
-            if rows:
-                try:
-                    closes = [float(c[4]) for c in rows if len(c) > 4 and c[4]]
-                    if closes:
-                        logger.info(
-                            f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
-                            f"{len(rows)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]"
-                        )
-                except Exception as e:
-                    logger.debug(f"Could not log OHLCV price range: {e}")
-
-            return rows
-
-        # Coalesce on the UPSTREAM window — pool, timeframe, currency, priced side
-        # and window — never on the caller's cache key. The TTL caches above are
-        # per-caller and only help once an answer has landed, so two callers whose
-        # own keys differ (a chart keyed by trading pair and one keyed by pool, the
-        # dashboard's shared cache and a chat's user_data) still resolve to the very
-        # same GeckoTerminal window and would each spend a request for it. Keyed
-        # here, they collapse onto one. A fetch that raises reaches every waiter and
-        # is cached by nobody. The rows are shared between callers: read-only.
-        ohlcv_list = await _single_flight(
-            (
-                "ohlcv",
+        # Coalesce on the upstream request: a stored series only helps once an
+        # answer has landed, so concurrent callers of the same request (a
+        # cache-bypassing live poll racing a chart render, say) would each spend
+        # a request without this. A fetch that raises reaches every waiter and is
+        # stored by nobody.
+        flight_key = ("ohlcv", *series_key, req_limit, req_before or 0)
+        rows = await _single_flight(
+            flight_key,
+            lambda: _fetch_ohlcv_upstream(
                 gecko_network,
                 pool_address,
                 timeframe,
                 currency,
                 token,
-                limit,
-                before_timestamp or 0,
+                req_limit,
+                req_before,
             ),
-            _fetch_upstream,
         )
 
-        if not ohlcv_list:
+        if rows:
+            # Re-read the series: an eviction may have dropped it while the
+            # request was open, and merging into a detached object would throw
+            # the answer away.
+            series = _get_series(series_key)
+            series.merge(rows, req_limit, req_before, timeframe_seconds(timeframe))
+
+        served = series.slice(end, limit)
+        if not served:
             return None, "No OHLCV data available"
-
-        # Cache result
-        if user_data is not None:
-            set_cached(user_data, cache_key, ohlcv_list, namespace=_CACHE_NS)
-
-        return ohlcv_list, None
+        return served, None
 
     except Exception as e:
         logger.error(f"Error fetching OHLCV: {e}", exc_info=True)
         return None, f"Failed to fetch OHLCV: {str(e)}"
 
 
-# Bins for one pool, keyed ``(connector, pool_address)``. Used when no caller
-# supplies a ``user_data`` to cache in — i.e. by the web dashboard, where every
-# viewer of a pool would otherwise open its own Gateway call at the same cadence.
-# Same one-minute TTL as the per-chat cache: bins move with every swap through
-# the active bin, so a longer one would draw liquidity that has already left.
+async def _fetch_ohlcv_upstream(
+    gecko_network: str,
+    pool_address: str,
+    timeframe: str,
+    currency: str,
+    token: str,
+    limit: int,
+    before_timestamp: Optional[int],
+) -> Optional[List]:
+    """One GeckoTerminal OHLCV request, normalized to a list of rows."""
+    # Pass all parameters explicitly:
+    # - currency="token" means price in quote token (not USD)
+    # - token="base" means OHLCV for the base token
+    result = await gecko_call(
+        "get_ohlcv",
+        gecko_network,
+        pool_address,
+        timeframe,
+        before_timestamp=before_timestamp,
+        currency=currency,
+        token=token,
+        limit=limit,
+    )
+
+    # Parse response - handle different formats
+    rows = None
+
+    try:
+        import pandas as pd
+
+        if isinstance(result, pd.DataFrame):
+            if not result.empty:
+                # Convert DataFrame to list format
+                rows = result.values.tolist()
+    except ImportError:
+        pass
+
+    if rows is None:
+        if isinstance(result, list):
+            rows = result
+        elif isinstance(result, dict):
+            # Try nested structure
+            data = result.get("data", result)
+            if isinstance(data, dict):
+                attrs = data.get("attributes", data)
+                rows = attrs.get("ohlcv_list", [])
+            elif isinstance(data, list):
+                rows = data
+
+    # Debug logging: show price range from OHLCV data
+    if rows:
+        try:
+            closes = [float(c[4]) for c in rows if len(c) > 4 and c[4]]
+            if closes:
+                logger.info(
+                    f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
+                    f"{len(rows)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]"
+                )
+        except Exception as e:
+            logger.debug(f"Could not log OHLCV price range: {e}")
+
+    return rows
+
+
+# ── OHLCV series store ──
+#
+# A pool's candles are one growing series, not a set of independent windows.
+# Keying the cache by the *upstream request* (limit + before_timestamp) treated
+# them as independent: the pool page's 7-day backfill, the same page's 3-day
+# button, and the live poll's 5-candle tail were three entries holding three
+# overlapping copies of the same candles, and a caller whose window differed by
+# one candle from a cached one paid a fresh request for data already in memory.
+#
+# Two facts make the series form strictly better:
+#
+# * **A request costs the same whatever its `limit`.** GeckoTerminal's budget is
+#   counted in requests, so a cold series always asks for the full
+#   ``GECKO_OHLCV_MAX`` — the most history one request can buy — and every later
+#   caller slices what it needs out of that.
+# * **A closed candle never changes.** So only the tail is perishable: a window
+#   that has already ended is served from memory regardless of age, and a live
+#   window only needs the candles minted since the last fetch (``_tail_count``),
+#   not the whole series again.
+#
+# Memory is bounded on both axes — ``_SERIES_MAX_ROWS`` per pool and
+# ``_SERIES_MAX`` pools, evicted least-recently-used — because the old cache was
+# not: it capped *entries*, not rows, so 512 windows of up to 1000 candles each
+# was a ~67MB ceiling for a process that only ever charts a handful of pools.
+# Measured, the ceiling here is ~18MB fully occupied (581KB per full series), and
+# a few hundred KB in the normal case of one or two open charts.
+
+# Rows kept per pool/timeframe: the live page plus one page of history walked
+# back behind it, with headroom. Trimming drops the oldest rows, so a *much*
+# older window — a finished executor from last month, charted while a live chart
+# on the same pool and timeframe holds the tail — falls outside the series and is
+# a cold read again. That is the deliberate edge of the bound, not an oversight.
+_SERIES_MAX_ROWS = 2 * GECKO_OHLCV_MAX + 100
+# Distinct (network, pool, timeframe, currency, token) series held at once.
+_SERIES_MAX = 32
+
+
+class _CandleSeries:
+    """One pool's candles at one timeframe, and what we know about their edges.
+
+    ``rows`` is timestamp-keyed because GeckoTerminal omits empty buckets: a pool
+    with no trades for an hour returns no candles for it, so a series can never be
+    treated as a dense array, and merging has to be by timestamp.
+
+    Coverage is tracked rather than inferred, for the same reason — a gap in the
+    middle is indistinguishable from missing data unless we remember what we
+    actually asked for. It is a single *interval*, not a ceiling, because a
+    request can land anywhere: the distant-jump below reaches a closed window ten
+    days back in one call, and a live poll only ever buys the newest page, so the
+    two together would otherwise look like one contiguous stretch with an
+    unfetched week in the middle.
+
+    * ``covered_from`` / ``covered_to`` — the span this series is known
+      *complete* over. A fetch returns every candle upstream has between the
+      oldest row it answered with and its ``before_timestamp``, so those bounds
+      become fact: a later window inside them is answered from memory, forever,
+      no matter how stale the series is. A fetch that lands clear of the interval
+      *replaces* it rather than widening it — one honest block beats two blocks
+      pretending to be one.
+    * ``exhausted`` — upstream returned fewer rows than the maximum asked for, so
+      there is no more history behind ``oldest``: the covered interval reaches
+      down forever. Without this a chart of a pool younger than its window would
+      re-ask for the same missing history on every single render.
+    * ``tail_fetched_at`` — when the *live* edge (``before_timestamp=None``) was
+      last refreshed. Only a historical fetch leaves this untouched, so a series
+      built from a closed window never poses as a fresh live one.
+    """
+
+    __slots__ = ("rows", "covered_from", "covered_to", "exhausted", "tail_fetched_at")
+
+    def __init__(self) -> None:
+        self.rows: Dict[float, List] = {}
+        self.covered_from: float = math.inf
+        self.covered_to: float = 0.0
+        self.exhausted: bool = False
+        self.tail_fetched_at: float = 0.0
+
+    @property
+    def oldest(self) -> Optional[float]:
+        return min(self.rows) if self.rows else None
+
+    @property
+    def newest(self) -> Optional[float]:
+        return max(self.rows) if self.rows else None
+
+    def merge(
+        self, fetched: List, requested: int, before: Optional[int], tf_seconds: float
+    ) -> None:
+        """Fold an upstream answer in, and record what it proves about the edges."""
+        block: Dict[float, List] = {}
+        kept = 0
+        for row in fetched:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                continue
+            try:
+                ts = float(row[0])
+            except (TypeError, ValueError):
+                continue
+            block[ts] = list(row)
+            kept += 1
+
+        # Upstream answers with the newest `requested` candles before `before`,
+        # so a short answer means it has nothing older left to give: this block
+        # reaches all the way down.
+        short = kept < requested
+        # Everything between the block's floor and the request's ceiling is now
+        # known — including the buckets that came back empty, which is what lets
+        # a gappy pool be served from memory instead of re-asked forever.
+        ceiling = float(before) if before else time.time()
+        floor = -math.inf if short else (min(block) if block else ceiling)
+
+        # A block clear of what we already hold leaves an unfetched gap between
+        # the two, and a series that claimed the gap would answer a window inside
+        # it with rows from the wrong period. Keep the new block alone instead —
+        # the same one request any cold read costs. (An answer with no usable
+        # rows proves nothing worth throwing a warm series away for.)
+        disjoint = (
+            bool(self.rows)
+            and bool(block)
+            and (
+                floor > self.covered_to + tf_seconds
+                or ceiling < self.covered_from - tf_seconds
+            )
+        )
+        if disjoint:
+            self.rows = block
+            self.covered_from = floor
+            self.covered_to = ceiling
+            self.exhausted = short
+            # The rows just dropped included whatever live edge we held, so the
+            # series is no longer a fresh one until a live fetch says so below.
+            self.tail_fetched_at = 0.0
+        else:
+            self.rows.update(block)
+            self.covered_from = min(self.covered_from, floor)
+            self.covered_to = max(self.covered_to, ceiling)
+            if short:
+                self.exhausted = True
+        if not before:
+            self.tail_fetched_at = time.time()
+
+        # Trim oldest-first: the live edge is what every caller shares. The rows
+        # dropped are no longer covered, so the floor rises with them.
+        if len(self.rows) > _SERIES_MAX_ROWS:
+            for ts in sorted(self.rows)[: len(self.rows) - _SERIES_MAX_ROWS]:
+                del self.rows[ts]
+            self.covered_from = min(self.rows)
+            self.exhausted = False
+
+    def serves(self, oldest_wanted: float, end: float, use_cache: bool) -> bool:
+        """Whether this series can answer ``[oldest_wanted, end]`` on its own."""
+        if not self.rows:
+            return False
+        deep_enough = self.exhausted or self.covered_from <= oldest_wanted
+        if not deep_enough:
+            return False
+        # A window that has already closed is immutable — age is irrelevant.
+        if end <= self.covered_to:
+            return True
+        # The live edge, on the other hand, is only as good as its last refresh.
+        return use_cache and (time.time() - self.tail_fetched_at) < OHLCV_CACHE_TTL
+
+    def slice(self, end: float, limit: int) -> List:
+        """The newest ``limit`` rows at or before ``end``, ascending."""
+        stamps = [ts for ts in sorted(self.rows) if ts <= end]
+        return [self.rows[ts] for ts in stamps[-limit:]]
+
+
+# Keyed by what identifies a series upstream — never by the window a caller
+# happens to want, which is the whole point.
+_ohlcv_series: "OrderedDict[Tuple, _CandleSeries]" = OrderedDict()
+
+
+def _get_series(key: Tuple) -> _CandleSeries:
+    """The series for ``key``, created if new, marked most-recently-used."""
+    series = _ohlcv_series.get(key)
+    if series is None:
+        series = _CandleSeries()
+        _ohlcv_series[key] = series
+    _ohlcv_series.move_to_end(key)
+    while len(_ohlcv_series) > _SERIES_MAX:
+        _ohlcv_series.popitem(last=False)
+    return series
+
+
+def _tail_count(series: _CandleSeries, timeframe: str) -> int:
+    """How many candles to ask for to catch a warm series up to now.
+
+    The "only add what is missing" half of the store: a chart that polled three
+    minutes ago needs the candles minted since, not the thousand it already
+    holds. A cold series has no tail to extend and takes the full request.
+    """
+    newest = series.newest
+    if newest is None:
+        return GECKO_OHLCV_MAX
+    behind = time.time() - newest
+    # Two candles of headroom: the forming one, and the one it just closed.
+    return max(
+        2, min(math.ceil(behind / timeframe_seconds(timeframe)) + 2, GECKO_OHLCV_MAX)
+    )
+
+
+# Liquidity bins per ``(connector, pool_address)``. A global answer — a pool's
+# liquidity does not depend on who is asking — so it is cached once for the
+# process and every viewer (web dashboard, any Telegram chat) shares one upstream
+# call. One-minute TTL: bins move with every swap through the active bin, so a
+# longer one would draw liquidity that has already left. (Candles live in
+# ``_ohlcv_series`` above, which is a series rather than a per-window cache.)
 _pool_bins_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -1102,9 +1516,6 @@ async def fetch_liquidity_bins(
     pool_address: str,
     connector: str = "meteora",
     network: str = "solana-mainnet-beta",
-    user_data: dict = None,
-    chat_id: int = None,
-    context=None,
     client=None,
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
@@ -1113,13 +1524,10 @@ async def fetch_liquidity_bins(
         pool_address: Pool contract address
         connector: DEX connector (meteora, raydium, orca)
         network: Network identifier
-        user_data: Optional user_data dict for caching. When omitted the result
-            is cached process-wide instead, so callers with no conversation of
-            their own (the web dashboard) still share one Gateway call per pool.
-        chat_id: Chat ID for per-chat server selection
-        client: An already-resolved API client. The web side holds a server
-            *name* and resolves its client through the config manager, which the
-            ``get_client(chat_id)`` path below cannot express.
+        client: An already-resolved API client, required to reach Gateway.
+            Resolving one is the caller's job — the web side holds a server
+            *name*, a Telegram handler a chat id, and each has its own accessor
+            for turning that into a client.
 
     Returns:
         Tuple of (bins_list, pool_info, error_message)
@@ -1131,21 +1539,10 @@ async def fetch_liquidity_bins(
         if not can_fetch_liquidity(connector):
             return None, None, f"Liquidity data not available for {connector}"
 
-        # Check cache
-        cache_key = f"pool_bins_{connector}_{pool_address}"
-        if user_data is not None:
-            cached = get_cached(
-                user_data, cache_key, ttl=BINS_CACHE_TTL, namespace=_CACHE_NS
-            )
-        else:
-            cached = _ttl_get(
-                _pool_bins_cache, (connector, pool_address), BINS_CACHE_TTL
-            )
+        cached = _ttl_get(_pool_bins_cache, (connector, pool_address), BINS_CACHE_TTL)
         if cached is not None:
             return cached.get("bins"), cached, None
 
-        if client is None:
-            client = await get_client(chat_id, context=context)
         if not client:
             return None, None, "Gateway client not available"
 
@@ -1205,13 +1602,7 @@ async def fetch_liquidity_bins(
 
         bins = pool_info.get("bins", [])
 
-        # Cache result
-        if user_data is not None:
-            set_cached(user_data, cache_key, pool_info, namespace=_CACHE_NS)
-        else:
-            _ttl_put(
-                _pool_bins_cache, (connector, pool_address), pool_info, BINS_CACHE_TTL
-            )
+        _ttl_put(_pool_bins_cache, (connector, pool_address), pool_info, BINS_CACHE_TTL)
 
         return bins, pool_info, None
 
@@ -1495,10 +1886,16 @@ GECKO_MAX_PAGE = 10
 # With a dex filter on, matching rows are scattered across upstream pages and have
 # to be walked for. Capped because the walk costs one rate-limited request per
 # page and the browser is asking for a screenful, not a census.
-_GECKO_FILTER_WALK_PAGES = 3
+#
+# The cap is the reason a venue filter can come back empty and fall back to that
+# venue's own top listing (see list_gecko_pools_page): three pages is not far
+# enough to find a quiet venue in a chain-wide ranking. With a paid key it is
+# raised to the full depth gecko will serve, so the filter answers the question
+# that was actually asked instead of a nearby one.
+_GECKO_FILTER_WALK_PAGES = _GECKO_PLAN_FILTER_WALK["public"]
 # Merging several venues' own listings costs one request per venue per page, so
 # the fan-out is bounded: past this, the chain-wide walk is used instead.
-_GECKO_SCOPED_MAX_REQUESTS = 8
+_GECKO_SCOPED_MAX_REQUESTS = _GECKO_PLAN_SCOPED_MAX["public"]
 
 # The list endpoint behind each view. The library exposes one method per view but
 # none of them take ``page``, so the paths are used directly.
@@ -1517,6 +1914,28 @@ _gateway_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _orca_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _multi_pool_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
 _pool_by_address_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+
+
+def _remember_pool(gnet: str, pool: Dict[str, Any]) -> None:
+    """Index one already-normalized listing row by its address.
+
+    The listings above cache *lists* — a page, a favourites batch — but the
+    primary navigation path is clicking a row you can already see, which asks
+    ``fetch_pool_by_address`` for that one pool. Without this it always missed and
+    spent a fresh single-pool request on the shared GeckoTerminal budget, seconds
+    after the identical row arrived. Every path builds the row with
+    ``_normalize_gecko_pool``, so a listing row and a by-address row are the same
+    dict, and one entry serves both.
+
+    A copy is stored because a listing hands its rows to callers uncopied, and
+    those callers must not be able to reach into this cache through them. Only
+    *found* pools are remembered: an address merely absent from a page is not the
+    known-missing pool that ``fetch_pool_by_address`` caches as ``{}``.
+    """
+    address = str(pool.get("address") or "")
+    if address:
+        _ttl_put(_pool_by_address_cache, (gnet, address), dict(pool), POOL_LIST_TTL)
+
 
 # A pool list is a browser page, not a report: cap what an upstream can be asked
 # for so one query cannot drag a thousand rows through normalization.
@@ -1747,6 +2166,7 @@ def _normalized_gecko_rows(
     rows: List[Dict[str, Any]], network: str, dexes: set
 ) -> List[Dict[str, Any]]:
     """Raw upstream rows → decorated pools, keeping only the venues asked for."""
+    gnet = get_gecko_network(network)
     pools: List[Dict[str, Any]] = []
     for row in rows:
         try:
@@ -1759,6 +2179,7 @@ def _normalized_gecko_rows(
         if dexes and str(pool.get("dex_id") or "").strip().lower() not in dexes:
             continue
         pools.append(pool)
+        _remember_pool(gnet, pool)
     return pools
 
 
@@ -2006,6 +2427,7 @@ async def fetch_pools_by_addresses(
                 continue
             if pool.get("address"):
                 batch_pools.append(pool)
+                _remember_pool(gnet, pool)
         _stale_put(_multi_pool_cache, batch_key, batch_pools)
         pools.extend(dict(row) for row in batch_pools)
 
@@ -2290,3 +2712,9 @@ async def fetch_pool_by_address(
         pool["address"] = pool_address
     _ttl_put(_pool_by_address_cache, key, pool, POOL_LIST_TTL)
     return dict(pool)
+
+
+# Applied at import, once every constant it reads exists. Without a key this is a
+# no-op that reasserts the public defaults; with one it repoints the client and
+# widens the guards before the first request is made.
+configure_gecko_access()

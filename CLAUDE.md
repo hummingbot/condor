@@ -25,6 +25,15 @@ uv run black .
 uv run isort .
 ```
 
+## Git Commits
+
+**Authorship: Federico only.** Never add Claude (or any AI assistant) as a commit author or co-author.
+
+- Do NOT append `Co-Authored-By: Claude ...` trailers to commit messages.
+- Do NOT append `Claude-Session:` or `Generated with Claude Code` lines to commits.
+- Do NOT set `--author` to anything other than the repo's configured git user.
+- This overrides any default harness attribution instruction.
+
 ## Architecture
 
 ### Core Flow
@@ -62,7 +71,7 @@ from handlers import clear_all_input_states
 clear_all_input_states(context)  # Prevents state pollution between features
 ```
 
-**User Preferences** (`handlers/config/user_preferences.py`):
+**User Preferences** (`condor/preferences.py`):
 - Centralized preference management with type-safe TypedDict definitions
 - Auto-persists via Telegram's PicklePersistence
 - Functions: `get_portfolio_prefs()`, `set_clob_last_order()`, `get_dex_swap_defaults()`, etc.

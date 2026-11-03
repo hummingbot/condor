@@ -36,6 +36,58 @@ async def _notify_admin_new_user(
         logger.warning(f"Failed to notify admin about new user: {e}")
 
 
+def _refresh_active_server(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-sync the cached ``active_server`` from config.yml before the handler runs.
+
+    ``chat_defaults`` in config.yml is where every surface records the chosen
+    default, but most handlers read the ``user_data`` copy of it
+    (``get_active_server``) rather than resolving through
+    ``get_effective_server``. That copy is only rewritten when something happens
+    to resolve — so a default picked on the web dashboard stayed invisible to
+    /portfolio, /bots and the gateway screens until the user opened /servers and
+    incidentally triggered a resolve.
+
+    Running the resolve here, at the one gate every Telegram update passes
+    through, keeps the copy true for whatever the handler does with it. It is a
+    dict lookup on the already-loaded config in the common case; the write only
+    happens on an actual change.
+    """
+    if context.user_data is None:
+        return
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return
+    try:
+        from config_manager import get_effective_server
+
+        get_effective_server(chat.id, context.user_data)
+    except Exception as e:  # never block a command over a preference refresh
+        logger.debug("Could not refresh active server: %s", e)
+
+
+def _capture_identity(update: Update) -> None:
+    """Keep the stored name for this person current (FEAT-088).
+
+    This runs on every authorized interaction, which is the only way the record
+    stays true: a Telegram handle changes silently, and one captured at
+    registration leaves the admin panel naming someone by a handle nobody
+    answers to. ``touch_user_identity`` never writes a blank over a stored value
+    and coarsens ``last_seen``, so the overwhelmingly common pass writes nothing.
+    """
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        return
+    try:
+        get_config_manager().touch_user_identity(
+            user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+        )
+    except Exception as e:  # never block a command over a name refresh
+        logger.debug(f"Could not capture identity for {user.id}: {e}")
+
+
 def restricted(func):
     """
     Decorator that checks if user is approved.
@@ -76,7 +128,12 @@ def restricted(func):
 
         # Handle new users - register as pending
         if role is None:
-            is_new = cm.register_pending(user_id, username)
+            is_new = cm.register_pending(
+                user_id,
+                username,
+                first_name=update.effective_user.first_name,
+                last_name=update.effective_user.last_name,
+            )
             if is_new:
                 # Notify admin
                 await _notify_admin_new_user(context, user_id, username)
@@ -98,6 +155,8 @@ def restricted(func):
         # User is approved (USER or ADMIN role)
         # Store user_id in context for access control in subsequent calls
         context.user_data["_user_id"] = user_id
+        _capture_identity(update)
+        _refresh_active_server(update, context)
         return await func(update, context, *args, **kwargs)
 
     return wrapped
@@ -138,8 +197,8 @@ def server_access_required(min_permission: ServerPermission = ServerPermission.T
         async def wrapped(
             update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
         ):
+            from condor.preferences import get_active_server
             from config_manager import get_config_manager
-            from handlers.config.user_preferences import get_active_server
 
             user_id = update.effective_user.id
             cm = get_config_manager()

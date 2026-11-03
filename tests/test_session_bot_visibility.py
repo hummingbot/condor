@@ -234,7 +234,13 @@ def test_volume_without_a_fee_column_reads_as_unknown_not_free():
     assert perf.fees_known is False
 
 
-def test_a_bot_that_reports_fees_keeps_them_known():
+def test_a_lifetime_fee_column_keeps_its_figure_but_not_its_certainty():
+    # An un-sliced bot-mode agent has no fee *column*: ``cum_fees_quote`` is summed
+    # off ``positions_summary``, so it covers the positions open at this instant and
+    # omits every fee already paid on every closed position. That is a floor, which
+    # is exactly what ``fees_known=False`` means — the figure is kept unchanged, the
+    # certainty is not ([[CORR-219]]). This used to assert ``True`` over the same
+    # 0.42 and overstated net PnL by the closed-position fees.
     client = _FakeClient(
         snapshots=[
             {
@@ -252,8 +258,11 @@ def test_a_bot_that_reports_fees_keeps_them_known():
         ],
     )
     perf = asyncio.run(fetch_agent_performance(client, "agent_1", bot_names=["b"]))
+    # Only the flag moves: the number, and everything folded beside it, is identical.
     assert perf.fees == 0.42
-    assert perf.fees_known is True
+    assert perf.fees_known is False
+    assert perf.realized_pnl == 5.0
+    assert perf.volume == 100.0
 
 
 def test_executor_mode_sessions_are_untouched():
@@ -338,7 +347,7 @@ def test_canvas_endpoint_serves_sections_and_revisions(tmp_path, monkeypatch):
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir})(),
+        lambda slug, sslug: type("S", (), {"home": sdir})(),
     )
     out = asyncio.run(agents_route.get_session_canvas("ag", "st", 1, user=_User()))
     assert out["sections"]["thesis"].startswith("Trend following")
@@ -356,7 +365,7 @@ def test_report_endpoint_returns_null_for_a_session_that_kept_none(
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir})(),
+        lambda slug, sslug: type("S", (), {"home": sdir})(),
     )
     monkeypatch.setattr(
         "condor.reports.list_reports", lambda **kw: ([], 0), raising=False
@@ -370,7 +379,7 @@ def test_report_endpoint_matches_the_session_it_was_written_for(tmp_path, monkey
     monkeypatch.setattr(
         agents_route,
         "_get_strategy",
-        lambda slug, sslug: type("S", (), {"dir": sdir})(),
+        lambda slug, sslug: type("S", (), {"home": sdir})(),
     )
     rows = [
         {

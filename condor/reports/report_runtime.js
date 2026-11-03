@@ -16,7 +16,13 @@
   const datasets = spec.datasets || {};
   const autoRefreshSeconds = Number(spec.auto_refresh_seconds);
   const autoRefreshEnabled = Number.isFinite(autoRefreshSeconds) && autoRefreshSeconds >= 1;
-  const offlineSnapshot = autoRefreshEnabled && window.location.protocol === "file:";
+  // Anything that is not a live http(s) page is a snapshot: a downloaded file
+  // (file:), Telegram's in-app viewer or an Android content:// URL, and the
+  // dashboard's srcdoc frame (about:). reloadReport() navigates window.location,
+  // which in all of those goes to a dead URL and blanks the report, so
+  // auto-refresh stays off outside a real server-backed page.
+  const offlineSnapshot =
+    autoRefreshEnabled && !/^https?:$/.test(window.location.protocol || "");
   let autoRefreshPaused = false;
   let autoRefreshTimer = null;
   const rowsBySource = {};
@@ -886,7 +892,7 @@
     let liveControls = "";
     if (autoRefreshEnabled && offlineSnapshot) {
       liveControls = '<div class="live-controls"><span class="live-badge offline">Offline snapshot</span>' +
-        '<span class="report-status">Auto-refresh is disabled for downloaded reports.</span></div>';
+        '<span class="report-status">Auto-refresh needs a live server; this is a snapshot.</span></div>';
     } else if (autoRefreshEnabled) {
       const interval = autoRefreshSeconds + (autoRefreshSeconds === 1 ? " second" : " seconds");
       liveControls = '<div class="live-controls"><span class="live-badge">Live</span>' +

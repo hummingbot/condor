@@ -7,7 +7,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from handlers.config.user_preferences import get_clob_account
+from condor.preferences import get_clob_account
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
 
 logger = logging.getLogger(__name__)

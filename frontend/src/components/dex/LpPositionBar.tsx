@@ -1,29 +1,14 @@
 import { useMemo } from "react";
 
-import { feeAmount, lpStateStyle, readLpPosition, type LpPosition } from "./lp-position";
+import {
+  feeAmount,
+  lpStateStyle,
+  rangeFraction,
+  readLpPosition,
+  type LpPosition,
+} from "./lp-position";
 import { type ExecutorInfo } from "@/lib/api";
-import { formatPnl, isExecutorActive, pnlColor } from "@/lib/formatters";
-
-/** Prices here span memecoin to majors, so significant digits, not decimals. */
-function fmtPrice(price: number | null): string {
-  if (price === null || !Number.isFinite(price) || price <= 0) return "—";
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toPrecision(5);
-}
-
-/**
- * Where the price sits inside the range, as a 0–1 fraction, or `null`.
- *
- * The number a CLMM position is actually about: a range you are 95% of the way
- * through is one swap from earning nothing, and no amount of reading two price
- * strings makes that as obvious as a marker does.
- */
-function rangeFraction(pos: LpPosition, price: number | null): number | null {
-  const { lowerPrice: lo, upperPrice: hi } = pos;
-  if (!lo || !hi || hi <= lo || !price || price <= 0) return null;
-  return Math.min(1, Math.max(0, (price - lo) / (hi - lo)));
-}
+import { formatPnl, formatPriceSig, isExecutorActive, pnlColor } from "@/lib/formatters";
 
 interface Props {
   /** The pool's executors, already scoped to this pool by the page. */
@@ -91,7 +76,7 @@ export function LpPositionBar({
 
             {/* Range, with the price's place inside it */}
             <span className="flex items-center gap-1.5 font-mono tabular-nums">
-              <span className="text-[var(--color-text-muted)]">{fmtPrice(pos.lowerPrice)}</span>
+              <span className="text-[var(--color-text-muted)]">{formatPriceSig(pos.lowerPrice)}</span>
               <span className="relative h-1 w-16 overflow-hidden rounded-full bg-[var(--color-border)]">
                 {fraction !== null && (
                   <span
@@ -103,7 +88,7 @@ export function LpPositionBar({
                   />
                 )}
               </span>
-              <span className="text-[var(--color-text-muted)]">{fmtPrice(pos.upperPrice)}</span>
+              <span className="text-[var(--color-text-muted)]">{formatPriceSig(pos.upperPrice)}</span>
             </span>
 
             <span className="ml-auto flex items-center gap-4 font-mono tabular-nums">

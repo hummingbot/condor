@@ -5,22 +5,27 @@ import sys
 
 import pytest
 
-from condor.memory.paths import shared_routines_root
+from condor.memory.paths import shared_routines_roots
 
 
 def load_shared_routine(name: str):
-    """Import a routine from ``agents/_shared/routines`` as a module.
+    """Import a routine from the **shipped** ``agents/_shared/routines``.
 
     A shared routine (FEAT-038) lives outside any package, so it has no dotted
     import path — production loads it exactly this way, from its file. Tests that
     need the module's internals (not just the ``RoutineInfo``) go through here so
     they exercise the same loading the routine actually gets.
+
+    Explicitly the stock layer: these are library files the repo ships, and the
+    isolation fixture below repoints *both* roots at empty tmp dirs. Callers
+    import at module scope, before any fixture runs, which is what makes this
+    resolve the real repo — the ``[1]`` keeps it doing so if that ever changes.
     """
     module_name = f"shared_routine_{name}"
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    path = shared_routines_root() / f"{name}.py"
+    path = shared_routines_roots()[1] / f"{name}.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if not spec or not spec.loader:  # pragma: no cover - a missing file is the bug
         raise ImportError(f"No shared routine '{name}' at {path}")
@@ -43,3 +48,76 @@ def _reset_gecko_throttle():
 
     reset_gecko_throttle()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime_root(tmp_path, monkeypatch):
+    """Keep every durable root out of the developer's live install.
+
+    For as long as every store derived its own root there was nothing to
+    repoint, so four test modules each had to remember to monkeypatch a private
+    ``_root`` and four others forgot -- which is how 812 stub conversations
+    ended up in a real install (FEAT-051). One env var per root, one fixture.
+
+    The second line covers ``data/``: the bell, the routine hooks, the backtest
+    store and the code runs used to need a per-module monkeypatch of a private
+    name each (and a test that forgot appended to the running install's
+    notification bell, or dropped a record among the live ones in
+    ``data/code_runs/``). They all resolve through ``condor.paths`` now, so
+    ``$CONDOR_DATA_DIR`` moves the lot.
+
+    The last two lines cover the agent tree, which is **two** roots since
+    FEAT-115: every ``MemoryStore`` and ``SkillStore`` hangs off the writable one
+    and ``mkdir(parents=True)``s on write, so a module that did not monkeypatch
+    ``condor.memory.paths._PROJECT_ROOT`` by hand wrote into the developer's own
+    memory and skill library -- it left an ``audit.log`` for a ``user_424242``
+    that appears nowhere in the repo. Ten modules remembered; the knob means none
+    of them has to (CORR-220).
+
+    **Both** roots are repointed, and the stock one at an empty directory. A
+    test that saw the real shipped library layered under its tmp root would get
+    the developer's whole agent registry back in every listing, and the isolation
+    the previous paragraph describes would be only half true. A test that really
+    wants the shipped tree names it (``load_shared_routine`` above, and the few
+    that assert on ``agents/condor/AGENT.md``).
+
+    The last line covers ``reports/``, the root that arrived last (ARCH-605).
+    It used to be a module constant in ``condor/reports/store.py``, so the only
+    way to isolate it was to monkeypatch a *pair* of names -- and eighteen test
+    modules did, by hand. One env var replaces all thirty-six.
+
+    ``tmp_path / "agents"`` and not ``condor-agents`` for the writable root:
+    ``tmp_path`` stands in for the repo root in the agent tests, so the registry
+    and the stores stay one tree.
+    """
+    from condor import paths
+
+    monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "condor-runtime"))
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "condor-data"))
+    monkeypatch.setenv(paths.AGENTS_ROOT_ENV, str(tmp_path / "agents"))
+    monkeypatch.setenv(paths.STOCK_AGENTS_ROOT_ENV, str(tmp_path / "stock-agents"))
+    monkeypatch.setenv(paths.REPORTS_DIR_ENV, str(tmp_path / "reports"))
+
+
+@pytest.fixture
+def ws_access_granted(monkeypatch):
+    """Let every WS connection reach every server, for the duration of a test.
+
+    Since SEC-592 ``WebSocketManager.broadcast`` re-reads the subscriber's
+    server access on every frame, so that revoking a share takes effect on an
+    open socket instead of at the next tab reload. A module whose
+    ``_Connection`` is a bare stand-in (``user_id=1``, no entry in any config)
+    would otherwise have its subscription revoked mid-test. These modules
+    exercise the fan-out and the stream lifecycle, not the gate — the gate has
+    its own module, ``test_ws_broadcast_access_revocation``.
+    """
+    import config_manager
+
+    class _PermissiveCM:
+        def get_user_role(self, user_id):
+            return config_manager.UserRole.USER
+
+        def has_server_access(self, *_args, **_kwargs):
+            return True
+
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _PermissiveCM())

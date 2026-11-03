@@ -12,6 +12,13 @@ so there is one implementation rather than five. These tests pin both halves of
 the contract: the client loses the address, and the operator does not — the full
 exception still reaches the server log, because a redaction that also destroys
 the diagnostic is not a fix.
+
+SEC-590 extended the sweep to the three modules none of those items listed —
+``archived``, ``portfolio``, ``dex`` — and to ``condor/fetchers/archived_run.py``,
+which built the same leak one call deeper and handed it to the route as an
+``ArchivedRunUnavailable.detail``. The static guard below now also rejects the
+f-string form (``detail=f"...{e}"``) those three used, which is why three audits
+in a row could re-discover the same pattern: the guard only knew ``detail=str(e)``.
 """
 
 import asyncio
@@ -19,6 +26,7 @@ import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 from aiohttp import ClientConnectorError, ClientResponseError, RequestInfo
@@ -26,9 +34,14 @@ from fastapi import HTTPException
 from multidict import CIMultiDict
 from yarl import URL
 
+import condor.fetchers.archived_run as archived_run_module
+import condor.fetchers.gateway_tokens as gateway_tokens_module
+import condor.web.routes.archived as archived_module
 import condor.web.routes.bots as bots_module
 import condor.web.routes.controller_performance as cperf_module
+import condor.web.routes.dex as dex_module
 import condor.web.routes.market as market_module
+import condor.web.routes.portfolio as portfolio_module
 import condor.web.routes.settings as settings_module
 from condor.web.models import WebUser
 
@@ -123,11 +136,65 @@ def _cperf_delete_run():
     )
 
 
+def _archived_list_databases():
+    return asyncio.run(archived_module.list_archived_bots(name="srv", user=_USER))
+
+
+def _portfolio_refresh():
+    return asyncio.run(
+        portfolio_module.get_portfolio(name="srv", refresh=True, user=_USER)
+    )
+
+
+# Wrapped SOL, purely as a syntactically valid mint for the address parser.
+_SOL_MINT = "So11111111111111111111111111111111111111112"
+
+
+def _dex_add_token():
+    """The token-registration route, entered at the branch that can actually raise.
+
+    ``ensure_tokens_listed`` folds its own upstream errors into a ``failed``
+    verdict, so the handler's catch-all is never reached through it. What does
+    reach it is the second question the collision branch asks: Gateway refuses
+    the ticker, and the follow-up lookup naming the current holder is the call
+    that blips. The stand-in for that lookup reaches through the client it is
+    handed, so it raises whatever the fixture bound rather than a second, made-up
+    error.
+    """
+
+    async def _symbol_taken(_client, _network, addresses, **_kwargs):
+        return {address: "symbol_taken" for address in addresses}
+
+    async def _holder_lookup_fails(client, *_args, **_kwargs):
+        return await client.gateway.get_tokens()
+
+    with (
+        mock.patch.object(gateway_tokens_module, "ensure_tokens_listed", _symbol_taken),
+        mock.patch.object(
+            gateway_tokens_module, "find_symbol_holder", _holder_lookup_fails
+        ),
+    ):
+        return asyncio.run(
+            dex_module.add_dex_token(
+                name="srv",
+                body=dex_module.AddTokenRequest(
+                    network="solana-mainnet-beta",
+                    address=_SOL_MINT,
+                    symbol="WSOL",
+                ),
+                user=_USER,
+            )
+        )
+
+
 ENDPOINTS = [
     pytest.param(bots_module, _bots_status, id="bots-get-bot-status"),
     pytest.param(settings_module, _settings_pull_status, id="settings-pull-status"),
     pytest.param(market_module, _market_order_book, id="market-order-book"),
     pytest.param(cperf_module, _cperf_delete_run, id="cperf-delete-bot-run"),
+    pytest.param(archived_module, _archived_list_databases, id="archived-list-dbs"),
+    pytest.param(portfolio_module, _portfolio_refresh, id="portfolio-refresh"),
+    pytest.param(dex_module, _dex_add_token, id="dex-add-token"),
 ]
 
 
@@ -205,6 +272,38 @@ def test_the_full_exception_still_reaches_the_server_log(
     ), "the traceback is what makes the log entry actionable"
 
 
+# --- The fetcher one call deeper, whose detail the route re-raises verbatim ---
+
+
+def test_the_archived_run_fetcher_does_not_hand_the_address_to_the_route(
+    failing_backend, caplog
+):
+    """``ArchivedRunUnavailable.detail`` becomes the 502 body unchanged.
+
+    ``archived.py::_load_run`` re-raises it as-is, so a detail built with
+    ``str(e)`` leaks the backend exactly as if the route had interpolated it
+    itself — the redaction has to happen where the string is built.
+    """
+    failing_backend(archived_module, _transport_error())
+
+    with caplog.at_level(logging.ERROR, logger=archived_run_module.__name__):
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(
+                archived_module.get_archived_performance(
+                    name="srv",
+                    db_path="/data/leak-probe.sqlite",
+                    include_executors=False,
+                    user=_USER,
+                )
+            )
+
+    assert caught.value.status_code == 502, "a reachable-but-broken backend is a 502"
+    assert BACKEND_HOST not in caught.value.detail
+    assert BACKEND_PORT not in caught.value.detail
+    assert BACKEND_URL not in caught.value.detail
+    assert BACKEND_HOST in caplog.text, "the operator still gets the address"
+
+
 # --- The settings helper every settings endpoint funnels through ---
 
 
@@ -248,10 +347,21 @@ def test_an_unknown_server_still_says_so(monkeypatch):
 
 # --- The pattern must not creep back in ---
 
-_LEAK = re.compile(r"detail=str\((e|exc)\)")
+# Both shapes of the same mistake. Only the first was pinned until SEC-590, and
+# the three modules that item found all used the second — which is how the rule
+# survived three audits without the guard ever noticing.
+_LEAK = re.compile(r"""detail=(?:str\((?:e|exc)\)|f["'][^"']*\{\s*(?:e|exc)\b)""")
 _BARE_EXCEPT = re.compile(r"^\s*except (Exception|BaseException) as (e|exc):")
 
-CONVERTED_MODULES = [bots_module, settings_module, market_module, cperf_module]
+CONVERTED_MODULES = [
+    bots_module,
+    settings_module,
+    market_module,
+    cperf_module,
+    archived_module,
+    portfolio_module,
+    dex_module,
+]
 
 
 @pytest.mark.parametrize(

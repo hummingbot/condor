@@ -30,7 +30,7 @@ high asymmetric impact as a red flag too.)
 ### 2. Objective on-chain + static gates — one routine call
 ```
 manage_routines(action="run", name="launch_safety_check",
-  strategy_id="meteora_launch_lp.launch_lp_operator",
+  agent="meteora_launch_lp",
   config={"pool_address": <pool>, "rpc_url": <private RPC>, "require_verified": false,
           "require_mint_renounced": true, "require_freeze_disabled": true,
           "max_top10_holder_pct": 60, "min_tvl_usd": 10000})

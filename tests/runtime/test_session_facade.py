@@ -47,12 +47,12 @@ class _FakeClient:
 def registry(monkeypatch):
     """Empty registry with the subprocess + context machinery stubbed out."""
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _FakeClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     # Lives in condor.runtime.binding now; patch it at the source so both the
     # bound and unbound resolution paths see the stub.
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     return session_module
 

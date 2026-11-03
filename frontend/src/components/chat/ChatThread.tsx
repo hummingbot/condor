@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
-import type { ChatSlot } from "@/hooks/useChatSocket";
-import type { ChatAgentOption } from "@/lib/api";
+import type { ChatSlot, PermissionRequest } from "@/hooks/useChatSocket";
+import { CHAT_SLUG, type AgentSummary, type ChatAgentOption } from "@/lib/api";
+import { speakerNames } from "@/lib/agentColor";
+import { ApprovalPrompt } from "./ApprovalPrompt";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
+import { ConversationUsage } from "./ConversationUsage";
+import { Starters, type Starter } from "./Starters";
 
 /** How close to the end still counts as "following the answer", in pixels. */
 const NEAR_BOTTOM_PX = 80;
@@ -24,11 +28,11 @@ export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): 
 /**
  * The conversation itself, at any width.
  *
- * The 480 px overlay panel and the `/agents` workspace render this same
- * component, so a tool call, a thought block or a handover divider can never
- * look like two different things depending on where the user opened the chat.
- * Everything around it — who is answering, which conversations exist — is the
- * surface's business; this is only the transcript and the composer.
+ * The chat workspace at `/` renders this at whatever width the rail leaves it,
+ * so a tool call, a thought block or a handover divider looks the same on a
+ * phone as on a wide screen. Everything around it — who is answering, which
+ * conversations exist — is the workspace's business; this is only the
+ * transcript and the composer.
  */
 export function ChatThread({
   slot,
@@ -42,9 +46,12 @@ export function ChatThread({
   onSend,
   onAbort,
   emptyState,
+  starters = [],
   boundAgent,
+  roster,
   columnClassName = "",
   autoFocus = false,
+  composerLeading,
 }: {
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
@@ -56,28 +63,88 @@ export function ChatThread({
    * identical to a dropped one is the bug this replaces.
    */
   isQueued?: boolean;
-  permissionRequest: {
-    request_id: string;
-    summary: string;
-    origin?: string;
-  } | null;
+  permissionRequest: PermissionRequest | null;
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
   onDismissSwitchError?: () => void;
-  onSend: (text: string) => void;
+  /** `files` only when the user attached something; the starters below call
+   *  this with words alone and are untouched by it existing (FEAT-098). */
+  onSend: (text: string, files?: File[]) => void;
   onAbort: () => void;
   /** Rendered instead of a transcript when there is no slot. */
   emptyState?: React.ReactNode;
+  /**
+   * Openers for a session that exists but has not been written in yet. The
+   * `emptyState` hero carries its own copy for the no-slot case; these are the
+   * same list, kept on screen for as long as the transcript is empty.
+   */
+  starters?: Starter[];
   /**
    * The domain Agent this conversation is bound to, when the surface knows it.
    * A bound chat opens under that agent's name — the user picked Backpack MM,
    * so "Condor / General trading assistant" would name the wrong counterpart.
    */
   boundAgent?: { name: string; description?: string };
+  /**
+   * The domain-Agent roster, used only to put a name to a turn's stamped slug.
+   *
+   * Deliberately not `agents`, which is the *brain* roster — model options
+   * keyed by `agent_key` — and cannot resolve an Agent slug at all. Optional:
+   * without it a turn still resolves to the conversation's own binding or to
+   * its slug, which is a worse label but never a wrong one.
+   */
+  roster?: AgentSummary[];
   /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
   columnClassName?: string;
   autoFocus?: boolean;
+  /**
+   * Controls the surface wants at the left edge of the composer, acting on
+   * this conversation — sharing it, today. Passed straight through to
+   * `ChatInput`: the thread does not own the gesture, it only owns the one box
+   * that is unmistakably about the chat on screen.
+   */
+  composerLeading?: React.ReactNode;
 }) {
+  /**
+   * A stamped slug's display name.
+   *
+   * `""` is the default agent — Condor under whatever name the roster gives
+   * it. A slug the roster does not know still names itself rather than
+   * borrowing the current binding's name, which is the whole failure this
+   * replaces; the binding is only allowed to answer for its own slug.
+   */
+  const resolveSpeaker = useCallback(
+    (slug: string) => {
+      const match = roster?.find((a) => a.slug === (slug || CHAT_SLUG));
+      if (match) return match.name;
+      if (!slug) return "Condor";
+      if (slug === slot?.info.agent_slug)
+        return boundAgent?.name || slot?.info.label || slug;
+      return slug;
+    },
+    [roster, slot?.info.agent_slug, slot?.info.label, boundAgent?.name],
+  );
+
+  /**
+   * Who is answering at each point of the transcript.
+   *
+   * Resolved here rather than in the message because a turn that carries no
+   * attribution — a user line, a divider, anything recorded before the backend
+   * stamped one — is only placeable by walking the handovers around it, and
+   * that needs the whole list. Turns that do carry it answer for themselves.
+   * The name is also the key the gutter colour is hashed from, which is what
+   * makes a transcript with two counterparts in it scannable at a glance.
+   */
+  const speakers = useMemo(
+    () =>
+      speakerNames(
+        slot?.messages ?? [],
+        boundAgent?.name || slot?.info.label || "Assistant",
+        resolveSpeaker,
+      ),
+    [slot?.messages, slot?.info.label, boundAgent?.name, resolveSpeaker],
+  );
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | null>(null);
@@ -142,38 +209,6 @@ export function ChatThread({
 
   return (
     <>
-      {/* Permission request banner */}
-      {permissionRequest && (
-        <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
-            <div className="flex-1 text-sm">
-              <p className="font-medium text-[var(--color-yellow)]">
-                Confirm action
-                {permissionRequest.origin ? ` — ${permissionRequest.origin}` : ""}
-              </p>
-              <p className="mt-0.5 text-[var(--color-text-muted)]">
-                {permissionRequest.summary}
-              </p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  onClick={() => onResolvePermission(permissionRequest.request_id, true)}
-                  className="rounded bg-[var(--color-green)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={() => onResolvePermission(permissionRequest.request_id, false)}
-                  className="rounded bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Switch failure — the header still shows whoever is actually answering */}
       {switchError && (
         <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-400">
@@ -184,6 +219,8 @@ export function ChatThread({
           </button>
         </div>
       )}
+
+      <ConversationUsage usage={slot?.usage} />
 
       {/* Messages area */}
       <div ref={scrollAreaRef} className="flex-1 overflow-y-auto px-4 py-4">
@@ -230,6 +267,14 @@ export function ChatThread({
                   Warming up — type away, it will be sent
                 </p>
               )}
+              {/* Still offered here, not only on the hero: the session spawns
+                  before the first word is typed, and the openers used to
+                  vanish with it. */}
+              <Starters
+                starters={starters}
+                onAsk={onSend}
+                className="mt-5 max-w-sm"
+              />
             </div>
           ) : (
             // Which bubble is being written into is the transcript's own
@@ -239,12 +284,19 @@ export function ChatThread({
             // snapped the still-running bubble's thinking and tool blocks shut
             // the instant such a note landed behind it. `isStreaming` is
             // already scoped to the slot on screen.
-            slot.messages.map((msg) => (
-              <ChatMessageView key={msg.id} message={msg} live={isStreaming && !!msg.open} />
+            slot.messages.map((msg, i) => (
+              <ChatMessageView
+                key={msg.id}
+                message={msg}
+                live={isStreaming && !!msg.open}
+                agentName={speakers[i]}
+              />
             ))
           )}
           {isQueued && (
-            <div className="mb-3 flex items-center gap-1.5 pl-8 text-[11px] text-[var(--color-text-muted)]">
+            // Indented to the gutter every turn now hangs from, not to the
+            // avatar that used to sit there.
+            <div className="mb-3 flex items-center gap-1.5 pl-3 text-[11px] text-[var(--color-text-muted)]">
               <Loader2 className="h-3 w-3 animate-spin" />
               Waiting its turn
             </div>
@@ -253,23 +305,49 @@ export function ChatThread({
         </div>
       </div>
 
-      {/* Input */}
+      {/* Input — the same `px-4` as the transcript's scroll area, so the box
+          lines up with the turns above it at every width instead of running
+          to the pane's edges on a narrow one. */}
       {slot && (
-        <div className={columnClassName}>
-          <ChatInput
-            onSend={onSend}
-            // Deliberately not `disabled={isStreaming}`. The composer stays
-            // live while the agent answers: sending mid-answer is how the user
-            // redirects it, and a dead input was the reason the correction had
-            // nowhere to go (FEAT-030).
-            isStreaming={isStreaming}
-            onAbort={onAbort}
-            autoFocus={autoFocus}
-            // The composer names whoever is bound: a chat with Backpack MM is
-            // not a chat with Condor, and the placeholder was the last place
-            // the UI still said otherwise (FEAT-025).
-            placeholder={`Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`}
-          />
+        <div className="px-4 pb-4 pt-1">
+          <div className={columnClassName}>
+            {/* On the composer, not above the transcript: the paused call sits
+                where the user is already looking and cannot scroll away. */}
+            {permissionRequest && (
+              <ApprovalPrompt
+                // One mount per request, so each counts down from its own clock.
+                key={permissionRequest.request_id}
+                request={permissionRequest}
+                onResolve={onResolvePermission}
+              />
+            )}
+            <ChatInput
+              onSend={onSend}
+              // Deliberately not `disabled={isStreaming}`. The composer stays
+              // live while the agent answers: sending mid-answer is how the user
+              // redirects it, and a dead input was the reason the correction had
+              // nowhere to go (FEAT-030).
+              isStreaming={isStreaming}
+              onAbort={onAbort}
+              autoFocus={autoFocus}
+              // The composer names whoever is bound: a chat with Backpack MM is
+              // not a chat with Condor, and the placeholder was the last place
+              // the UI still said otherwise (FEAT-025).
+              // While a call is paused the box says what it is waiting on:
+              // a reply sent now steers the agent and denies that call.
+              placeholder={
+                permissionRequest
+                  ? "Allow or deny the call above first — a message here cancels it"
+                  : `Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`
+              }
+              leading={composerLeading}
+              // Half-written words survive leaving the page, per conversation.
+              // Keyed on the conversation rather than the slot: a session that is
+              // reaped and respawned is the same chat to the person writing in
+              // it, and the slot id it comes back under is not the one they left.
+              draftKey={slot.info.conversation_id || slot.info.slot_id}
+            />
+          </div>
         </div>
       )}
     </>

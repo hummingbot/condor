@@ -268,13 +268,29 @@ def _picked_model_label(sentinel_key: str, current_llm: str) -> str | None:
     return f"• {_PICKER_SENTINELS[sentinel_key]} — {current_llm.partition(':')[2]}"
 
 
-def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
+def _settings_keyboard(
+    current_llm: str,
+    secret_notices: bool = True,
+    readiness_states: dict | None = None,
+) -> InlineKeyboardMarkup:
     """Build LLM picker keyboard.
 
     The current selection is marked with a bullet. If the user has previously
     picked a model through a sentinel row (agent_llm like "openrouter:<slug>"
     or "custom@venice:<model-id>"), that sentinel row matches and shows the pick.
+
+    ``readiness_states`` (provider base → Readiness, from
+    :func:`condor.llm.readiness.probe_all`) marks the rows this machine cannot
+    run today with a ⚠️. They stay pickable on purpose, unlike the dashboard's:
+    choosing here only sets a preference, and someone about to run
+    ``ollama serve`` is entitled to pick it first. Omitted = nothing was probed,
+    which marks nothing.
+
+    The last row is the key-shape warning switch (FEAT-056), which is here
+    because a preference with no way back on is not a preference.
     """
+    from condor.llm.readiness import base_of
+
     keyboard = []
     for key, info in AGENT_OPTIONS.items():
         label = info["label"]
@@ -285,9 +301,20 @@ def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
             label = picked
         elif key == current_llm:
             label = f"• {label}"
+        state = (readiness_states or {}).get(base_of(key))
+        if state is not None and not state.usable:
+            label = f"⚠️ {label}"
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"agent:set_llm:{key}")]
         )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                f"Key-shape warnings: {'on' if secret_notices else 'off'}",
+                callback_data="agent:secret_notices_toggle",
+            )
+        ]
+    )
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -580,6 +607,10 @@ def _no_session_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Start", callback_data="agent:start"),
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
         ],
+        # Here too, not only beside a live session: picking the specialist is
+        # how you say which one to *raise*, and hanging it off a running
+        # subprocess made the coordinator the only thing a chat could start as.
+        [InlineKeyboardButton("Talk to", callback_data="agent:talk_to")],
         # Reachable with no session precisely because this is when it is wanted:
         # the chat whose subprocess is gone is the one whose owner is looking for
         # what they were saying yesterday.
@@ -640,6 +671,9 @@ async def show_agent_menu(
             lines.append(f"Talking to: {bound.name or bound.slug}")
         lines.append(f"LLM: {llm_label}")
         lines.append("\nStart a session or adjust settings below.")
+        # Said where the choice is made: "Start" boots whoever the chat is bound
+        # to, so the way to start it as somebody else has to be visible here.
+        lines.append('"Talk to" starts it as a specialist — or /agent <name>.')
         text = "\n".join(lines)
         keyboard = _no_session_keyboard()
 

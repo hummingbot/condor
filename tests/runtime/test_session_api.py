@@ -52,12 +52,12 @@ class _ScriptedClient:
 @pytest.fixture
 def registry(monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _ScriptedClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _ScriptedClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     # Lives in condor.runtime.binding now; patch it at the source so both the
     # bound and unbound resolution paths see the stub.
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     return session_module
 
@@ -200,6 +200,9 @@ def test_ws_contract_unchanged():
         "slot_id": "slot1",
         "tool_call_id": "t1",
         "status": "completed",
+        # An update that names nothing stays null, so the client keeps the name
+        # the create frame gave it.
+        "title": None,
     }
 
     beat = _to_ws_message(
@@ -210,13 +213,37 @@ def test_ws_contract_unchanged():
     done = _to_ws_message(
         RuntimeEvent.from_acp(PromptDone(stop_reason="end_turn")), "s"
     )
-    assert done == {"event": "prompt_done", "slot_id": "s", "stop_reason": "end_turn"}
+    # ``usage`` is an added key (FEAT-120): what the funnel charged the turn,
+    # null on a DONE it did not charge — this one never went through it.
+    assert done == {
+        "event": "prompt_done",
+        "slot_id": "s",
+        "stop_reason": "end_turn",
+        "usage": None,
+    }
 
     err = _to_ws_message(RuntimeEvent.error("nope"), "slot1")
     assert err == {"event": "error", "slot_id": "slot1", "message": "nope"}
 
     # Permission requests travel out-of-band through the permission callback.
     assert _to_ws_message(RuntimeEvent(type=EventType.PERMISSION), "slot1") is None
+
+
+def test_tool_update_carries_the_title_it_was_given():
+    """A name that arrives on the update must reach the wire (CORR-327).
+
+    The ACP adapter announces some calls with a placeholder title and only
+    names them on the following update. While ``_to_ws_message`` dropped the
+    field, the dashboard showed the generic label for the whole call and picked
+    up the real name only when a reload replayed the transcript.
+    """
+    update = _to_ws_message(
+        RuntimeEvent.from_acp(
+            ToolCallUpdate(tool_call_id="t1", status="in_progress", title="Read")
+        ),
+        "slot1",
+    )
+    assert update["title"] == "Read"
 
 
 # ── Facade-level prompting ──

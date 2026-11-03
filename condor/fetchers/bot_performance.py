@@ -20,10 +20,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from functools import partial
 from typing import Any, Iterable
 
+from condor.asyncutil import SingleFlight
 from condor.fetchers._pagination import collect_pages
 from condor.fetchers.executors import normalize_executor_side
 
@@ -188,9 +189,20 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
 # in-flight coalescing collapses that burst into one round-trip and one
 # aggregation shared by every caller, while staying far fresher than the 30s TTL
 # the agents route already tolerates above this call.
+#
+# Two layers over the one round-trip, because the callers want two different
+# shapes of the same payload: the web routes and streams want the raw snapshot
+# rows, the agents rollup wants them aggregated by bot. Caching only the raw
+# rows would re-run the aggregation on every ``fetch_all_bot_performance`` hit,
+# and caching only the aggregate is what left the raw callers issuing their own
+# byte-identical whole-server request (PERF-579). Both layers are stamped when
+# the value is *inserted*, never before the fetch starts, so a round-trip slower
+# than the TTL cannot write an entry that is already stale (CORR-584).
 _SNAPSHOT_TTL = 5.0
 _snapshot_cache: dict[str, tuple[float, dict[str, dict]]] = {}
-_snapshot_inflight: dict[str, tuple[Any, asyncio.Task]] = {}
+_snapshot_inflight = SingleFlight()
+_raw_snapshot_cache: dict[str, tuple[float, list[dict]]] = {}
+_raw_snapshot_inflight = SingleFlight()
 
 
 def _server_key(client: Any) -> str:
@@ -205,14 +217,55 @@ def _server_key(client: Any) -> str:
 
 
 def clear_snapshot_cache() -> None:
-    """Drop every cached whole-server snapshot (tests, server reconfiguration)."""
+    """Drop every cached whole-server snapshot (tests, server reconfiguration).
+
+    Empties both layers — the raw rows and the aggregate built from them — so a
+    test that clears the cache cannot have one layer serve the other's stale
+    answer.
+    """
     _snapshot_cache.clear()
     _snapshot_inflight.clear()
+    _raw_snapshot_cache.clear()
+    _raw_snapshot_inflight.clear()
+
+
+async def _fetch_snapshots(client: Any) -> list[dict]:
+    result = await client.bot_orchestration.get_latest_controller_performance()
+    return extract_snapshots(result)
+
+
+async def fetch_latest_snapshots(client: Any) -> list[dict]:
+    """Return the latest controller-performance snapshot rows for the whole server.
+
+    One row per controller of every bot the API has ever orchestrated — the
+    finished ones included, since the rows outlive the bot. No filter argument:
+    this is the whole-server call whose payload is identical for every caller,
+    which is exactly what makes it cacheable. A caller that needs one bot's rows
+    must issue its own filtered request rather than take this cache.
+
+    Cached per server for ``_SNAPSHOT_TTL`` seconds and coalesced while in
+    flight, so the bots-page enrichment, the ``/controller-performance/latest``
+    route, the terminated-controllers route and the WS poller share one
+    round-trip instead of issuing four. A fetch that raises is never cached: the
+    exception propagates to every waiter and the next call retries — this cache
+    never hands back a previous value to paper over a failure. The returned list
+    is shared between callers and must be treated as read-only.
+    """
+    key = _server_key(client)
+    if not key:
+        return await _fetch_snapshots(client)
+
+    entry = _raw_snapshot_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
+        return entry[1]
+
+    snapshots = await _raw_snapshot_inflight.run(key, lambda: _fetch_snapshots(client))
+    _raw_snapshot_cache[key] = (time.monotonic(), snapshots)
+    return snapshots
 
 
 async def _fetch_and_aggregate(client: Any) -> dict[str, dict]:
-    result = await client.bot_orchestration.get_latest_controller_performance()
-    return _aggregate_by_bot(extract_snapshots(result))
+    return _aggregate_by_bot(await fetch_latest_snapshots(client))
 
 
 async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
@@ -237,17 +290,7 @@ async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
     if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
         return entry[1]
 
-    # Reuse an in-flight fetch only from the loop that created it: a task is
-    # bound to its loop and awaiting it from another one raises.
-    loop = asyncio.get_running_loop()
-    inflight = _snapshot_inflight.get(key)
-    task = inflight[1] if inflight is not None and inflight[0] is loop else None
-    if task is None:
-        task = asyncio.ensure_future(_fetch_and_aggregate(client))
-        _snapshot_inflight[key] = (loop, task)
-        task.add_done_callback(lambda _t, k=key: _snapshot_inflight.pop(k, None))
-
-    agg = await task
+    agg = await _snapshot_inflight.run(key, lambda: _fetch_and_aggregate(client))
     _snapshot_cache[key] = (time.monotonic(), agg)
     return agg
 
@@ -366,7 +409,7 @@ def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, d
 # instance, and changes only when a bot is stopped — a short TTL is plenty and
 # keeps the per-tick rollup from re-listing on every call.
 _ARCHIVED_TTL = 60.0
-_archived_cache: dict[str, tuple[float, list[str]]] = {}
+_archived_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
 
 def _archived_name(db_path: str) -> str:
@@ -378,12 +421,21 @@ def _archived_name(db_path: str) -> str:
     return name
 
 
-async def fetch_archived_instances(client: Any) -> list[str]:
-    """Names of stopped/archived bot instances on this server.
+async def fetch_archived_paths(client: Any) -> dict[str, str]:
+    """Instance name -> archived database path for every stopped bot on this server.
+
+    The instance name *is* the join key back to a ``bot_runs`` row: a deployment
+    writes ``bot_name == instance_name`` (hummingbot-api
+    ``routers/bot_orchestration.py``) and archives the instance directory under
+    that same name, so the two surfaces address the same run by the same string.
 
     Best-effort: a backend without the archived-bots endpoint, or one that errors,
-    yields ``[]`` and the caller falls back to live-only discovery — which
+    yields ``{}`` and the caller falls back to live-only discovery — which
     under-reports stopped bots but is never wrong about running ones.
+
+    Cheap by construction — the upstream listing is a directory walk that opens no
+    database — so this is safe to call on a polling route. The short TTL only keeps
+    a per-tick rollup from re-listing on every call.
     """
     key = _server_key(client)
     entry = _archived_cache.get(key) if key else None
@@ -392,9 +444,9 @@ async def fetch_archived_instances(client: Any) -> list[str]:
     try:
         databases = await client.archived_bots.list_databases()
     except Exception as e:
-        logger.debug("fetch_archived_instances failed: %s", e)
-        return []
-    names: list[str] = []
+        logger.debug("fetch_archived_paths failed: %s", e)
+        return {}
+    paths: dict[str, str] = {}
     for db in databases or []:
         if isinstance(db, str):
             path = db
@@ -406,11 +458,15 @@ async def fetch_archived_instances(client: Any) -> list[str]:
             continue
         name = _archived_name(path)
         if name:
-            names.append(name)
-    names = sorted(set(names))
+            paths.setdefault(name, path)
     if key:
-        _archived_cache[key] = (time.monotonic(), names)
-    return names
+        _archived_cache[key] = (time.monotonic(), paths)
+    return paths
+
+
+async def fetch_archived_instances(client: Any) -> list[str]:
+    """Names of stopped/archived bot instances on this server."""
+    return sorted(await fetch_archived_paths(client))
 
 
 def clear_archived_cache() -> None:
@@ -475,6 +531,32 @@ MAX_HISTORY_ROWS = 5000
 HISTORY_PAGE_SIZE = 500
 
 
+# ── Per-instance history cache ──
+# The cursor walk is the expensive end of the pipeline — up to 10 sequential
+# 500-row pages per instance, fanned out over up to MAX_HISTORY_INSTANCES
+# instances — and every consumer walks the same rows: one session-detail request
+# triggers it twice back-to-back (performance rollup, then PnL series), and the
+# tick engine repeats it every tick while the dashboard polls the same strategy.
+# The rows are identical across those call sites because the fetch takes no
+# since/until — window slicing happens downstream — so a short TTL plus in-flight
+# coalescing (the _snapshot_cache idiom above) collapses the redundancy while
+# staying fresher than the 30s route-level cache layered on top. Bounded as an
+# LRU: keys accumulate one entry per (server, instance, interval) and stopped
+# instances would otherwise pin their pages forever.
+_HISTORY_TTL = 20.0
+_HISTORY_CACHE_MAX = 256
+_history_cache: OrderedDict[
+    tuple, tuple[float, list[tuple[float, float, float, float, float]]]
+] = OrderedDict()
+_history_inflight = SingleFlight()
+
+
+def clear_history_cache() -> None:
+    """Drop every cached instance history (tests, server reconfiguration)."""
+    _history_cache.clear()
+    _history_inflight.clear()
+
+
 async def fetch_instance_history(
     client: Any,
     instance_name: str,
@@ -521,7 +603,57 @@ async def fetch_instance_history(
     error, including one raised part-way through the walk — a partial timeline is
     the same silent misattribution as a truncated one, so the caller degrades to
     "no history" instead of to "wrong history".
+
+    Cached per ``(server, instance, interval, limit, max_rows)`` for
+    ``_HISTORY_TTL`` seconds and coalesced while in flight, so concurrent callers
+    share one cursor walk. A walk that raises is never cached — every waiter gets
+    the ``[]`` degrade and the next call retries — and an unidentifiable client
+    (no ``base_url``) bypasses the cache entirely, like the snapshot cache above.
+    The returned rows are shared between callers and must be treated as
+    read-only.
     """
+    server = _server_key(client)
+    if not server:
+        try:
+            return await _walk_instance_history(
+                client, instance_name, interval, limit, max_rows
+            )
+        except Exception as e:
+            logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+            return []
+
+    key = (server, instance_name, interval, limit, max_rows)
+    entry = _history_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _HISTORY_TTL:
+        _history_cache.move_to_end(key)
+        return entry[1]
+
+    try:
+        rows = await _history_inflight.run(
+            key,
+            lambda: _walk_instance_history(
+                client, instance_name, interval, limit, max_rows
+            ),
+        )
+    except Exception as e:
+        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+        return []
+
+    _history_cache[key] = (time.monotonic(), rows)
+    _history_cache.move_to_end(key)
+    while len(_history_cache) > _HISTORY_CACHE_MAX:
+        _history_cache.popitem(last=False)
+    return rows
+
+
+async def _walk_instance_history(
+    client: Any,
+    instance_name: str,
+    interval: str,
+    limit: int,
+    max_rows: int,
+) -> list[tuple[float, float, float, float, float]]:
+    """One uncached cursor walk + forward-carry merge. Raises on API error."""
 
     def _warn_truncated() -> None:
         # Older buckets were dropped, and everything before the oldest retained
@@ -535,21 +667,17 @@ async def fetch_instance_history(
             interval,
         )
 
-    try:
-        rows: list[dict] = await collect_pages(
-            partial(
-                client.bot_orchestration.get_controller_performance_history,
-                bot_name=instance_name,
-                interval=interval,
-            ),
-            extract_history_rows,
-            page_size=limit,
-            max_items=max_rows,
-            on_truncated=_warn_truncated,
-        )
-    except Exception as e:
-        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
-        return []
+    rows: list[dict] = await collect_pages(
+        partial(
+            client.bot_orchestration.get_controller_performance_history,
+            bot_name=instance_name,
+            interval=interval,
+        ),
+        extract_history_rows,
+        page_size=limit,
+        max_items=max_rows,
+        on_truncated=_warn_truncated,
+    )
 
     # One cumulative series per controller. A repeated (controller, timestamp)
     # keeps the last value read, which is what the endpoint means by re-reporting
@@ -643,6 +771,52 @@ def slice_history(
         trades += t_e - t_s
         fees += f_e - f_s
     return realized, volume, trades, fees
+
+
+def slice_history_series(
+    histories: list[list[tuple[float, float, float, float, float]]],
+    start: float,
+    stamps: list[float],
+) -> list[tuple[float, float, float, float, float]]:
+    """:func:`slice_history` evaluated at every instant of ascending ``stamps``.
+
+    Identical output to ``[slice_history(histories, start, t) for t in stamps]``
+    — same per-instance differencing in the same order — but computed in one
+    merge pass: the ``cum_at(start)`` baseline is constant across stamps so it
+    is taken once per instance, and each instance's cursor only ever advances
+    as the stamps increase (the same carry idiom
+    :func:`fetch_instance_history` uses internally). That turns the naive
+    O(stamps × rows) rescan into O(stamps + rows) per instance, which matters
+    on the per-tick and per-request paths that rebuild whole-session curves
+    from near-cap histories.
+
+    Returns ``[(t, realized, volume, trades, fees), …]``, one row per stamp.
+    """
+    bases = [_cum_at(h, start) for h in histories]
+    cursors = [-1] * len(histories)
+    carried: list[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * len(
+        histories
+    )
+
+    out: list[tuple[float, float, float, float, float]] = []
+    for t in stamps:
+        realized = volume = trades = fees = 0.0
+        for i, h in enumerate(histories):
+            j = cursors[i]
+            while j + 1 < len(h) and h[j + 1][0] <= t:
+                j += 1
+            if j != cursors[i]:
+                cursors[i] = j
+                row = h[j]
+                carried[i] = (row[1], row[2], row[3], row[4])
+            r_e, v_e, t_e, f_e = carried[i]
+            r_s, v_s, t_s, f_s = bases[i]
+            realized += r_e - r_s
+            volume += v_e - v_s
+            trades += t_e - t_s
+            fees += f_e - f_s
+        out.append((t, realized, volume, trades, fees))
+    return out
 
 
 # One shared fetch of every owned base's instance histories, at a resolution that

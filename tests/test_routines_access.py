@@ -1,10 +1,10 @@
 """Tests for SEC-045: routine run/schedule endpoints must enforce server access.
 
-The four execution endpoints (``/routines/servers/{server}/{routine}/run``,
-``.../schedule``, ``/routines/run``, ``/routines/schedule``) accept an
-arbitrary ``server_name``. Without a ``has_server_access`` gate, any approved
-user could run/schedule routines against servers owned by other users, using
-those servers' stored API credentials (cross-server IDOR).
+The execution endpoints (``/routines/run``, ``/routines/start``,
+``/routines/schedule``) take an arbitrary ``server_name`` in the request body.
+Without a ``has_server_access`` gate, any approved user could run/schedule
+routines against servers owned by other users, using those servers' stored API
+credentials (cross-server IDOR).
 """
 
 import pytest
@@ -30,6 +30,7 @@ class FakeRoutineStore:
         self.agents = []
         self.conversations = []
         self.session_keys = []
+        self.on_completes = []
 
     async def execute(
         self,
@@ -40,11 +41,13 @@ class FakeRoutineStore:
         agent="",
         conversation_id="",
         session_key="",
+        on_complete="",
     ):
         self.execute_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
         self.conversations.append(conversation_id)
         self.session_keys.append(session_key)
+        self.on_completes.append(on_complete)
         return "inst-run"
 
     async def schedule(
@@ -124,26 +127,6 @@ def client_and_cm(monkeypatch):
 # ── Denied: no access to the target server ──
 
 
-def test_run_denied_on_foreign_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{FOREIGN_SERVER}/some_routine/run",
-        json={"config": {}},
-    )
-    assert resp.status_code == 403
-    assert store.execute_calls == []
-
-
-def test_schedule_denied_on_foreign_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{FOREIGN_SERVER}/some_routine/schedule",
-        json={"config": {}, "interval_sec": 60},
-    )
-    assert resp.status_code == 403
-    assert store.schedule_calls == []
-
-
 def test_run_v2_denied_on_foreign_server(client_and_store):
     client, store = client_and_store
     resp = client.post(
@@ -169,28 +152,6 @@ def test_schedule_v2_denied_on_foreign_server(client_and_store):
 
 
 # ── Allowed: user has access to the target server ──
-
-
-def test_run_allowed_on_owned_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{OWNED_SERVER}/some_routine/run",
-        json={"config": {}},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"instance_id": "inst-run"}
-    assert store.execute_calls == [("some_routine", OWNED_SERVER, USER.id)]
-
-
-def test_schedule_allowed_on_owned_server(client_and_store):
-    client, store = client_and_store
-    resp = client.post(
-        f"/routines/servers/{OWNED_SERVER}/some_routine/schedule",
-        json={"config": {}, "interval_sec": 60},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"instance_id": "inst-sched"}
-    assert store.schedule_calls == [("some_routine", OWNED_SERVER, USER.id)]
 
 
 def test_run_v2_allowed_on_owned_server(client_and_store):
@@ -322,6 +283,53 @@ def test_a_dashboard_run_has_no_conversation_behind_it(client_and_store, monkeyp
         json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
     )
     assert store.conversations == [""]
+
+
+def test_a_run_can_ask_to_wake_the_agent_that_started_it(client_and_store, monkeypatch):
+    """What a slow run submitted from chat needs: a turn, not a note to nobody."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "session_key": "web:1:slot-1",
+            "on_complete": "resume",
+        },
+    )
+    assert store.on_completes == ["resume"]
+
+
+def test_a_dashboard_run_never_pays_for_a_turn(client_and_store, monkeypatch):
+    """The field is opt-in: a human watching the page is who ``notify`` is for."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
+    )
+    assert store.on_completes == ["notify"]
+
+
+def test_an_unknown_on_complete_is_rejected_rather_than_guessed(
+    client_and_store, monkeypatch
+):
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    resp = client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "on_complete": "explode",
+        },
+    )
+    assert resp.status_code == 400
+    assert store.execute_calls == []
 
 
 # ── SEC-159: the field-options route is server-scoped too ──

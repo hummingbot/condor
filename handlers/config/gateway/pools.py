@@ -6,7 +6,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from ..user_preferences import get_active_server
+from condor.preferences import get_active_server
+
 from ._shared import (
     escape_markdown_v2,
     extract_network_id,

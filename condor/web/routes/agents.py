@@ -1,12 +1,13 @@
 """Trading Agents API routes.
 
 An **Agent** is the top-level unit: identity + shared brain (memory/skills) that
-``condor`` can *consult*. An Agent **owns strategies** — playbooks that loop via
-``TickEngine``. So the route shape is::
+``condor`` can hand work to. An Agent **owns strategies** — playbooks that loop
+via ``TickEngine``. So the route shape is::
 
     /agents                                  -> list Agents (+ their strategies)
     /agents/{slug}                           -> Agent detail
-    /agents/{slug}/consult                   -> run the Agent's brain to completion
+    /agents/{slug}/ask                       -> run the Agent's brain, return the answer
+    /agents/{slug}/delegate                  -> run the Agent's brain in the background
     /agents/{slug}/strategies                -> CRUD strategies under an Agent
     /agents/{slug}/strategies/{sslug}/...    -> per-strategy run/journal/perf
 
@@ -19,15 +20,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
+from collections import OrderedDict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from condor.agents.ownership import OwnedBot
+from condor.agents.attribution import (
+    DeploymentRow,
+    apply_bot_mode_pnl,
+    build_deployments,
+    current_owner_bases,
+    session_ownership,
+)
+from condor.agents.run_records import KIND_CODE
 from condor.agents.sessions_index import (
     count_experiments,
     count_sessions,
@@ -39,7 +48,13 @@ from condor.agents.sessions_index import (
     list_session_snapshots,
     list_sessions,
 )
-from condor.web.auth import check_server_access, get_current_user
+from condor.fsutil import atomic_write_text
+from condor.layering import fork_if_stock
+from condor.web.auth import (
+    check_server_access,
+    get_current_user,
+    report_owner_filter,
+)
 from condor.web.models import ReportSummary, WebUser
 
 # ── Simple in-memory TTL cache for performance data ──
@@ -52,7 +67,28 @@ _PERF_TTL = 30.0  # seconds
 # Only ids that are inactive (no registered engine, not the newest session),
 # fetched successfully, with open_count == 0, and not in controller mode land
 # here; everything else keeps flowing through the 30s TTL path above.
-_CLOSED_PERF_CACHE: dict[str, Any] = {}
+# Bounded LRU (same idiom as condor.fetchers.archived_run): each entry holds the
+# full executor rows, so an unbounded dict would grow with every session ever
+# run for the life of the process. Eviction is always safe — a miss just flows
+# through the normal fetch path and re-freezes.
+_CLOSED_PERF_CACHE_MAX = 256
+_CLOSED_PERF_CACHE: OrderedDict[str, Any] = OrderedDict()
+
+
+def _closed_perf_get(agent_id: str) -> Any | None:
+    """Return the frozen entry, marking it most-recently-used."""
+    perf = _CLOSED_PERF_CACHE.get(agent_id)
+    if perf is not None:
+        _CLOSED_PERF_CACHE.move_to_end(agent_id)
+    return perf
+
+
+def _closed_perf_put(agent_id: str, perf: Any) -> None:
+    """Store a frozen entry, evicting the least-recently-used past the cap."""
+    _CLOSED_PERF_CACHE[agent_id] = perf
+    _CLOSED_PERF_CACHE.move_to_end(agent_id)
+    while len(_CLOSED_PERF_CACHE) > _CLOSED_PERF_CACHE_MAX:
+        _CLOSED_PERF_CACHE.popitem(last=False)
 
 
 def _cache_get(key: str) -> Any | None:
@@ -104,6 +140,21 @@ class RunningInstance(BaseModel):
     tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
+    # ── The loop's pulse ──
+    # The engine has computed all of this since it was written; the model just
+    # never carried it, so every strategy view could say a loop was "running"
+    # and nothing about when it last ran, what it did, or whether it failed.
+    # Same four fields the fleet band already shows (``LiveLoopModel``), so the
+    # two surfaces describe one loop in one vocabulary.
+    #: Unix seconds the current tick started, 0 before the first one.
+    last_tick_at: float = 0.0
+    #: 0 = unbounded; otherwise the tick this session stops at.
+    max_ticks: int = 0
+    #: What the loop last *said* — the journal's `Last action:` line.
+    last_action: str = ""
+    #: What the loop last *did* — one ``AgentAction`` row, or null.
+    last_did: dict[str, Any] | None = None
+    last_error: str = ""
 
 
 class StrategySummary(BaseModel):
@@ -119,6 +170,10 @@ class StrategySummary(BaseModel):
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
+    #: Where this strategy's records live — its own config's server, empty when
+    #: it declared none. Carried so a reader can *fold* those records and not
+    #: only read the rollup computed from them (ARCH-324).
+    server_name: str = ""
     instances: list[RunningInstance] = []
 
 
@@ -141,6 +196,12 @@ class AgentSummary(BaseModel):
     total_pnl: float = 0.0
     total_volume: float = 0.0
     open_positions: int = 0
+    #: The agent's server *pin* — empty means "follow whichever server the chat
+    #: is on", which is what most agents declare. ``AgentDetail`` has carried it
+    #: since the workspace needed it; the summary did not, which is why the home
+    #: overview could roll an agent's runs up but never fold its records
+    #: (ARCH-324). A strategy's own ``server_name`` overrides it.
+    server_name: str = ""
     instances: list[RunningInstance] = []
 
 
@@ -148,6 +209,12 @@ class AgentPerformanceModel(BaseModel):
     agent_id: str
     session_num: int = 0
     kind: str = "session"  # session | experiment
+    #: For an experiment, which kind: ``dry_run`` or ``run_once``. Empty for a
+    #: session, whose mode is always ``loop``. A reader has to be able to tell a
+    #: simulation apart from a single real tick — both land in ``dry_runs/``.
+    execution_mode: str = ""
+    #: An experiment whose snapshot recorded an error (parsed off disk).
+    error: bool = False
     status: str = ""
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
@@ -216,6 +283,181 @@ class AgentDetail(BaseModel):
     strategies: list[StrategySummary] = []
 
 
+class SkillCard(BaseModel):
+    """One playbook in the Agent's library. Metadata only — body on demand."""
+
+    slug: str
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    # From the shared library (``agents/_shared/skills``) rather than this
+    # Agent's own, and — when it also cannot write there — inherited read-only.
+    shared: bool = False
+    inherited: bool = False
+    # Switched off for this Agent by the operator (FEAT-090): the panel still
+    # lists and opens it, the Agent is never told it exists.
+    muted: bool = False
+    references_routine: str = ""
+    routine_ok: bool = True
+
+
+class SkillProposal(BaseModel):
+    """A playbook the Agent *offered*, waiting for a human (FEAT-074).
+
+    Carries its body, unlike a :class:`SkillCard`: there is at most one of
+    these and the whole point of the card is that somebody reads what they are
+    about to put in every future prompt before accepting it.
+    """
+
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    body: str = ""
+    source: str = ""
+    from_conversation: str = ""
+    created: str = ""
+
+
+class MemoryCard(BaseModel):
+    """One thing this Agent remembers about the caller. Body on demand."""
+
+    name: str
+    description: str = ""
+    type: str = "fact"
+    created: str = ""
+    source: str = ""
+
+
+class RoutineCard(BaseModel):
+    """One script this Agent can run. ``source`` is ``global`` or ``agent:<slug>``."""
+
+    name: str
+    description: str = ""
+    continuous: bool = False
+    source: str = "global"
+    category: str = ""
+    # Switched off for this Agent (FEAT-090). ``/routines`` is unaffected — a
+    # mute says what the Agent is told, never what a person may run.
+    muted: bool = False
+
+
+class StrategyCard(BaseModel):
+    """A strategy row without its performance — see ``/strategies`` for that."""
+
+    slug: str
+    name: str
+    description: str = ""
+    status: str = "idle"
+
+
+class ToolCard(BaseModel):
+    """One tool of this Agent's seat's ring (FEAT-091), and what takes it away.
+
+    Every row of the ring is listed, so a tool switched off can be switched back
+    on. Two things keep a row from being mounted, on every backend alike, since
+    the spawner turns both into ``--mute-tools`` (``toolsets.seat_mutes``):
+    ``muted`` is the operator's switch, and — when the Agent names an allowlist
+    (``AgentBrain.tools_unrestricted`` false) — ``allowlisted`` false means the
+    AGENT.md list leaves it out. What the model is handed is the rows that
+    neither removes.
+    """
+
+    name: str
+    #: ``condor`` or ``hummingbot`` — which subprocess registers it.
+    server: str
+    description: str = ""
+    muted: bool = False
+    allowlisted: bool = False
+
+
+class AgentBrain(BaseModel):
+    """Everything a conversation is actually talking to, in one read.
+
+    Deliberately not folded into :class:`AgentDetail`: that payload is polled
+    every 5s by the agent page and carries the per-strategy performance rollup,
+    while this one is read once when a reader opens the panel and carries the
+    four libraries the model sees in its prompt. Joining them would make every
+    poll pay for a disk walk of the skill and memory stores.
+    """
+
+    slug: str
+    name: str
+    description: str = ""
+    agent_md: str = ""
+    agent_key: str = ""
+    when_to_consult: str = ""
+    server_required: bool = True
+    server_name: str = ""
+    # Every tool this Agent's seat mounts, each with its switch (FEAT-091) —
+    # the real surface, not the AGENT.md allowlist, which for an ACP seat is
+    # decoration. ``tools_unrestricted`` still reports on the allowlist: empty
+    # means it names nothing, which is a different statement from "no tools", so
+    # the reader is told which of the two it is rather than shown "0".
+    tools: list[ToolCard] = []
+    tools_unrestricted: bool = True
+    skills: list[SkillCard] = []
+    # The one playbook the Agent has offered and nobody has ruled on yet. It
+    # rides along with the libraries because the panel already reads them all in
+    # one fetch — a review surface that cost its own query and its own loading
+    # state would be a worse trade than a nullable field.
+    skill_proposal: SkillProposal | None = None
+    memories: list[MemoryCard] = []
+    routines: list[RoutineCard] = []
+    strategies: list[StrategyCard] = []
+
+
+class SkillBody(BaseModel):
+    """A playbook read in full."""
+
+    slug: str
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    body: str = ""
+    shared: bool = False
+    inherited: bool = False
+    # Switched off for this Agent by the operator (FEAT-090): the panel still
+    # lists and opens it, the Agent is never told it exists.
+    muted: bool = False
+    references_routine: str = ""
+    routine_ok: bool = True
+    files: list[str] = []
+
+
+class MemoryBody(BaseModel):
+    """A memory read in full."""
+
+    name: str
+    body: str = ""
+
+
+class StarterRow(BaseModel):
+    """One learned opener, in the shape the chip renders (FEAT-073).
+
+    ``prompt`` is sent verbatim on click and is the label, because the label
+    *is* the message — the reflection pass names an intent as the sentence the
+    user would send to start it again. It is carried explicitly all the same, so
+    the wire says what will be sent rather than leaving the client to infer it.
+    """
+
+    title: str
+    hint: str = ""
+    prompt: str = ""
+    icon: str = ""
+    skill: str = ""
+
+
+class StarterList(BaseModel):
+    """What this Agent has learned the caller asks it for. Learned rows only."""
+
+    starters: list[StarterRow] = []
+
+
+# How many learned openers the chip row can hold. The store keeps more so a
+# revived intent can climb back without being re-learned; this is what fits.
+STARTERS_SERVED = 3
+
+
 class StrategyDetail(BaseModel):
     slug: str
     agent_slug: str
@@ -238,6 +480,130 @@ class SnapshotSummary(BaseModel):
     file: str = ""
 
 
+class RunRow(BaseModel):
+    """One run of an agent, as the workspace's rail reads it (FEAT-099, FEAT-111).
+
+    The wire shape of :func:`condor.agents.all_runs.list_all_runs`: a loop's
+    session or experiment, plus the two kinds that belong to no strategy — a
+    delegation and a conversation. There is deliberately **no money here** — see
+    the route below.
+    """
+
+    #: ``s:3`` | ``e:1`` | ``d:abc123`` | ``c:7f3a`` — the ``?run=`` value,
+    #: unique across every kind. The pre-FEAT-111 two-character form (``s3``)
+    #: is still *parsed* by the reader; it is no longer written.
+    run_id: str
+    #: ``session`` | ``experiment`` | ``delegation`` | ``conversation``.
+    kind: str
+    #: The opaque half of ``run_id``: a number as a string for a loop run, a
+    #: task or conversation id for the other two.
+    id: str = ""
+    #: The ordinal, for the two kinds that have one. ``0`` otherwise.
+    number: int
+    agent_id: str = ""
+    status: str = ""
+    execution_mode: str = ""
+    tick_count: int = 0
+    snapshot_count: int = 0
+    #: ``journal.md``'s ctime. The file's creation, not the first tick.
+    started_at: float | None = None
+    #: The last recorded heartbeat, or ``None`` while the run is still live.
+    ended_at: float | None = None
+    error: bool = False
+    #: Whether ``actions.jsonl`` exists at all. A run written before FEAT-097
+    #: has none, and its ticks must not be coloured "did nothing".
+    has_actions_log: bool = False
+    #: Empty for a delegation and a conversation: a strategy is a loop concept.
+    strategy_slug: str = ""
+    strategy_name: str = ""
+    #: What this run was about, for the kinds that have no strategy to name —
+    #: a conversation's title, a delegation's ask. Empty for a loop run.
+    title: str = ""
+
+
+class RunsResponse(BaseModel):
+    runs: list[RunRow] = []
+
+
+class ActionModel(BaseModel):
+    """One mutating tool call a session made (FEAT-097).
+
+    The wire shape of ``condor.agents.actions.AgentAction``; see that module for
+    why the record stores a rendered summary rather than a tool's result.
+    """
+
+    tick: int
+    at: float = 0.0
+    tool: str = ""
+    verb: str = ""
+    summary: str = ""
+    ok: bool = False
+    error: str = ""
+
+
+# ── The fleet map (FEAT-096) ──
+# The wire shape of condor.agents.fleet_map's dataclasses; see that module for
+# what each field is and why the map is cheap enough for the bots page to poll.
+
+
+class LiveLoopModel(BaseModel):
+    agent_id: str
+    session_num: int = 0
+    status: str = ""
+    tick_count: int = 0
+    last_tick_at: float = 0.0
+    frequency_sec: int = 60
+    last_action: str = ""
+    #: What the loop last *did* — one ``AgentAction`` row, or null. See
+    #: ``condor.agents.actions``; the band shows it above ``last_action``.
+    last_did: dict[str, Any] | None = None
+    last_error: str = ""
+
+
+class FleetOwnerModel(BaseModel):
+    run_key: str
+    agent_slug: str
+    agent_name: str
+    strategy_slug: str
+    strategy_name: str
+    namespace: str
+    declared_bots: list[str] = []
+    agent_ids: list[str] = []
+    live: LiveLoopModel | None = None
+
+
+class DeedRefModel(BaseModel):
+    """The run a record was traced back to by a deed Condor recorded (FEAT-106)."""
+
+    run_key: str
+    run_id: str = ""
+    at: float = 0.0
+
+
+class DeedIndexModel(BaseModel):
+    """What Condor's own logs can attribute, and how far back they reach.
+
+    The wire shape of ``condor.agents.deed_index.DeedIndex``. Matched **after**
+    the two enforced rules on ``FleetOwnerModel``: a namespace is a proof and a
+    deed is a report, and an enforced answer must never lose to an observed one.
+    """
+
+    #: Bot base name → the run that made it.
+    bots: dict[str, DeedRefModel] = {}
+    #: Epoch seconds before which Condor did not record everything it did, or
+    #: ``0.0`` when it never has. The one timestamp that separates "made outside
+    #: Condor" from "made before the ledger existed".
+    since: float = 0.0
+
+
+class FleetMapResponse(BaseModel):
+    owners: list[FleetOwnerModel] = []
+    #: Additive: a client that ignores this field behaves exactly as it did
+    #: before FEAT-106, because the pseudo-runs appended to ``owners`` carry an
+    #: empty namespace and so match nothing by name.
+    deeds: DeedIndexModel = Field(default_factory=DeedIndexModel)
+
+
 class CreateAgentRequest(BaseModel):
     name: str
     description: str = ""
@@ -251,6 +617,35 @@ class CreateAgentRequest(BaseModel):
 
 class UpdateAgentMdRequest(BaseModel):
     content: str
+
+
+class SkillWriteRequest(BaseModel):
+    """A playbook, created or patched from the knowledge panel.
+
+    Every field is optional so an edit can move one line without restating the
+    playbook; ``create`` enforces its own required set (name, description,
+    when_to_use, body) and answers with an error the route turns into a 400.
+    ``references_routine=""`` clears the reference, which is why it defaults to
+    ``None`` — "leave it alone" and "unlink it" are different requests.
+    """
+
+    name: str = ""
+    description: str = ""
+    when_to_use: str = ""
+    body: str = ""
+    references_routine: str | None = None
+
+
+class MemoryWriteRequest(BaseModel):
+    """One thing the Agent should remember about the caller.
+
+    ``MemoryStore.write`` creates or overwrites by slug, so this is the payload
+    for both — the URL carries the name.
+    """
+
+    content: str
+    description: str
+    type: str = "fact"
 
 
 class AgentConfigRequest(BaseModel):
@@ -269,9 +664,56 @@ class AgentConfigRequest(BaseModel):
     agent_key: str | None = Field(
         default=None,
         description="The model this Agent answers on, everywhere it runs — "
-        "chat, consult, delegate and loops. Empty string clears it, falling "
+        "chat, delegate and loops. Empty string clears it, falling "
         "back to the chat's default model.",
     )
+
+
+class RestartOnBootRequest(BaseModel):
+    """Whether this strategy's loop comes back after Condor restarts."""
+
+    enabled: bool = Field(
+        description="True makes the boot pass start a fresh session for an "
+        "interrupted run of this strategy; False leaves it stopped."
+    )
+
+
+class ClaimBotRequest(BaseModel):
+    """Attribute a bot that is already running to one of this strategy's runs."""
+
+    bot_name: str = Field(
+        description="The bot to claim. A deploy suffix (-YYYYMMDD-HHMMSS) is "
+        "stripped, so the running instance and its base name both work."
+    )
+    session_num: int = Field(
+        default=0,
+        description="Which session owns it; 0 = the newest one on disk.",
+    )
+    since: float = Field(
+        default=0.0,
+        description="Epoch seconds the ownership window opens at. 0 = now, "
+        "which under-reports a bot that has been trading for hours; pass the "
+        "bot's own deploy time to attribute what it already made.",
+    )
+
+
+class UnclaimBotRequest(BaseModel):
+    """Take a bot back off this strategy — the undo of a claim."""
+
+    bot_name: str = Field(
+        description="The bot to unassign. A deploy suffix (-YYYYMMDD-HHMMSS) is "
+        "stripped, so the running instance and its base name both work."
+    )
+
+
+class MuteRequest(BaseModel):
+    """Switch one item off for this Agent, or back on (FEAT-090, FEAT-091)."""
+
+    kind: str = Field(description='"skill", "routine" or "tool".')
+    name: str = Field(
+        description="The playbook's slug, the routine's name, or the tool's name."
+    )
+    muted: bool = Field(description="True switches it off, False restores it.")
 
 
 class CreateStrategyRequest(BaseModel):
@@ -304,12 +746,16 @@ class SetStateRequest(BaseModel):
     clear: bool = False
 
 
-class ConsultRequest(BaseModel):
+class AskRequest(BaseModel):
     task: str
     context: str = ""
     chat_id: int = 0
     user_id: int | None = None
     server_name: str | None = None
+    # Which agent is asking, for the ask's record (FEAT-058). "" is a person
+    # asking directly. A label on a record the caller already owns, so there is
+    # nothing here a web caller could spoof it into meaning.
+    caller: str = ""
 
 
 class StartStrategyRequest(BaseModel):
@@ -319,12 +765,33 @@ class StartStrategyRequest(BaseModel):
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
+# ── The delegation budget (ARCH-310) ──
+#
+# ``timeout_s`` is the wall-clock ceiling ``start_delegation`` puts around the
+# whole background run. 900s stays the DEFAULT -- a reasonable guard against a
+# runaway unattended session -- but a caller who knows the job is longer (a
+# multi-step build, a research sweep) can raise it instead of having the work
+# silently cut in half. The bounds are not decoration: 0 or a negative would
+# make ``asyncio.wait_for`` kill the worker before its first tool call, and an
+# ACP prompt has its own ~31-minute hard ceiling, so a budget beyond that buys
+# nothing but a longer wait for the same cut-off.
+DEFAULT_DELEGATE_TIMEOUT_S = 900  # in sync with delegate.DEFAULT_TIMEOUT_S (pinned)
+MAX_DELEGATE_TIMEOUT_S = 1800
+# ...and 900s is also the FLOOR. Since ARCH-310 a caller can name its own budget,
+# and the caller is usually a model, which guesses: a real run was handed 300s and
+# cut off mid-answer, having been given a third of the budget nobody asked to
+# shorten. Raising the budget is a real need; lowering it below the default never
+# was, so an ask under the floor is quietly raised to it rather than refused --
+# a 400 would only cost the model a turn to retry with the number we already want.
+MIN_DELEGATE_TIMEOUT_S = 900
+
+
 class DelegateRequest(BaseModel):
     task: str
     chat_id: int = 0  # Telegram chat for the completion notification
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
-    timeout_s: int = 900
+    timeout_s: int = DEFAULT_DELEGATE_TIMEOUT_S
     # Canonical key of the session asking for the work (posted by the condor MCP
     # server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
     session_key: str = ""
@@ -388,18 +855,89 @@ def _get_engines_for(agent_slug: str, sslug: str) -> list:
 # code that owns the layout. This module keeps only HTTP concerns.
 
 
-async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
-    """Resolve a Hummingbot API client for a strategy, based on its config.yml."""
+def _strategy_server(strategy_dir: Path, default_config: dict | None) -> str:
+    """Which server this strategy's records live on, or ``""`` when it has none.
+
+    The one answer to that question, so the client this module fetches
+    performance with and the server name it *reports* cannot drift apart. A
+    reader that folds a strategy's records has to fetch them from the same
+    place the rollup was computed from, or the two numbers are about two
+    fleets (ARCH-324).
+
+    Empty is a real state, not a missing one: ``AgentConfig`` defaults to
+    ``"local"``, so an empty string is a strategy that explicitly declared no
+    server — and the caller is expected to say so rather than substitute one.
+    """
     from condor.agents.config import load_agent_config
-    from config_manager import get_config_manager
 
     try:
-        cfg = load_agent_config(strategy_dir, default_config)
+        return load_agent_config(strategy_dir, default_config).server_name or ""
     except Exception:
-        return None, ""
-    server_name = cfg.server_name or ""
+        return ""
+
+
+def _strategy_principal(strategy, user: WebUser) -> int:
+    """Whose reach a strategy's stored server name is held to.
+
+    Normally the caller: agents and their strategies are a single global store,
+    not partitioned by owner the way conversations and delegations are, so the
+    only principal these routes resolve is the one holding the JWT.
+
+    The exception is an admin, for whom ``has_server_access`` answers True on
+    any name at all. Reading someone else's strategy is not an administrative
+    act on their behalf, so an admin is held to the *creator's* reach instead —
+    the same subject-not-caller rule ``conversations.py`` applies (SEC-333), and
+    the reason an admin stops seeing a fleet once the user who built the
+    strategy has been cut off from it. A strategy with no recorded creator
+    (``created_by == 0``: everything written before the field existed) has no
+    subject to stand in, so the caller remains the principal.
+    """
+    from config_manager import get_config_manager
+
+    creator = int(getattr(strategy, "created_by", 0) or 0)
+    if creator and get_config_manager().is_admin(user.id):
+        return creator
+    return user.id
+
+
+def _may_use_strategy_server(server_name: str, principal: int) -> bool:
+    """Whether ``principal`` may turn ``server_name`` into credentials.
+
+    The stored-name predicate (SEC-334), which lives on the ConfigManager
+    beside ``has_server_access`` because four other callers — the tick engine,
+    session and toolset resolvers, and ``conversations.py`` — need the same
+    rule and cannot import the web layer (ARCH-587). The level it applies is
+    the TRADER floor ``check_server_access`` applies to every server-scoped web
+    call.
+    """
+    from config_manager import get_config_manager, may_use_stored_server
+
+    return may_use_stored_server(get_config_manager(), principal, server_name)
+
+
+async def _get_client_for_strategy(
+    strategy_dir: Path, default_config: dict | None, principal: int
+):
+    """Resolve a Hummingbot API client for a strategy, based on its config.yml.
+
+    The single choke point where a strategy's stored server name becomes an
+    authenticated client, and therefore where the name is checked against
+    ``principal`` (SEC-334). Refusal is the state this module already renders —
+    no client, no money — not an error: a strategy the caller cannot price is
+    listed exactly like one whose server is offline or was never configured.
+    """
+    from config_manager import get_config_manager
+
+    server_name = _strategy_server(strategy_dir, default_config)
     if not server_name:
         return None, ""
+    if not _may_use_strategy_server(server_name, principal):
+        log.warning(
+            "strategy: %s cannot reach server %s; serving it unpriced",
+            principal,
+            server_name,
+        )
+        return None, server_name
     cm = get_config_manager()
     try:
         client = await cm.get_client(server_name)
@@ -409,253 +947,55 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
     return client, server_name
 
 
-def _session_bot_base(strategy_dir: Path, default_config: dict | None, num: int) -> str:
-    """Bot base name a session operates: per-session config, else strategy default.
-
-    A non-empty per-session ``bot_name`` wins (so runtime-named bots that record
-    their deployed name resolve), but an empty/absent one falls back to the
-    strategy default — early sessions predating the config's ``bot_name`` saved it
-    as ``''`` and must still map to the shared bot they operated. Empty string when
-    neither is set (direct-executor strategies). Shared by the per-session PnL
-    distribution and the operator's live-executor view so both resolve identically.
-    """
-    from condor.agents.config import load_full_config
-    from condor.agents.sessions_index import find_session_dir
-
-    default_base = (default_config or {}).get("bot_name", "") or ""
-    sd = find_session_dir(strategy_dir, num)
-    if not sd:
-        return default_base
-    return load_full_config(sd, default_config).get("bot_name", "") or default_base
-
-
-def _session_start_epoch(strategy_dir: Path, num: int) -> float:
-    """Session start time: config.yml is written once at start, so its mtime is stable."""
-    from condor.agents.sessions_index import find_session_dir
-
-    sd = find_session_dir(strategy_dir, num)
-    if not sd:
-        return 0.0
-    cfg = sd / "config.yml"
-    target = cfg if cfg.exists() else sd
-    try:
-        return os.path.getmtime(target)
-    except OSError:
-        return 0.0
-
-
-def _session_ownership(
-    strategy_dir: Path, default_config: dict | None, num: int
-) -> list[OwnedBot]:
-    """Bases a session owned and the instant it took each over, oldest first.
-
-    Two sources, in order:
-
-    1. ``{session_dir}/owned_bots.json`` — the ledger [[FEAT-017]] writes, which
-       knows both the bases (a session may operate several) and the exact takeover
-       instant, whether the bot was deployed here or adopted after a restart.
-    2. the legacy shim — a session predating the ledger resolves its single
-       ``bot_name`` as one owned bot ``since`` the session started, reproducing the
-       session-start tiling attribution used before the ledger existed.
-
-    Empty for direct-executor strategies, whose per-session executor attribution
-    already stands and must not be touched.
-    """
-    from condor.agents.ownership import read_owned
-
-    owned = read_owned(find_session_dir(strategy_dir, num))
-    if owned:
-        return owned
-    base = _session_bot_base(strategy_dir, default_config, num)
-    if not base:
-        return []
-    start = _session_start_epoch(strategy_dir, num)
-    return [OwnedBot(base=base, origin="legacy", since=start, last_seen=start)]
-
-
-def _owner_windows(
-    real_sessions: list, strategy_dir: Path, default_config: dict | None
-) -> dict[str, list[tuple[float, Any, float]]]:
-    """``{base: [(since, session, until), …]}`` — owners, oldest takeover first.
-
-    The windows a base's owners occupy tile ``[since_i, since_{i+1})`` and the last
-    one runs to now, so slicing over them reproduces the bot's whole cumulative with
-    no gap and no double count. Keyed per base rather than globally per session
-    number: two bases handed over at different moments never share a timeline.
-
-    ``until`` is the instant the session released the bot, or ``0.0`` while it
-    still holds it. A released last window stops there rather than running to now,
-    which is the one case where the tiling deliberately leaves a gap: PnL a bot
-    earned with no session operating it belongs to no session.
-    """
-    owners: dict[str, list[tuple[float, Any, float]]] = {}
-    for s in real_sessions:
-        for ob in _session_ownership(strategy_dir, default_config, s.session_num):
-            owners.setdefault(ob.base, []).append((ob.since, s, ob.until))
-    for lst in owners.values():
-        lst.sort(key=lambda t: (t[0], t[1].session_num))
-    return owners
-
-
-def _current_owner_bases(
-    strategy_dir: Path,
-    default_config: dict | None,
-    session_nums: list[int],
-    num: int,
-) -> list[str]:
-    """Bases ``num`` is the CURRENT owner of — the last takeover by ``since``.
-
-    A bot's live open positions belong to whoever operates it now, so this is the
-    gate for merging them into one session's view. Same rule
-    :func:`_apply_bot_mode_pnl` applies to live unrealized PnL, kept here as one
-    lookup over the same windows so the rollup and the per-session detail can
-    never disagree about who holds the open book. A session that released the bot
-    is not its current owner, so an ended session shows no live open book.
-    """
-    last: dict[str, tuple[float, int, float]] = {}
-    for n in session_nums:
-        for ob in _session_ownership(strategy_dir, default_config, n):
-            if last.get(ob.base, (float("-inf"), -1, 0.0))[:2] <= (ob.since, n):
-                last[ob.base] = (ob.since, n, ob.until)
-    return sorted(
-        base for base, (_, owner, until) in last.items() if owner == num and until <= 0
-    )
-
-
-async def _apply_bot_mode_pnl(
-    real_sessions: list, strategy_dir: Path, default_config: dict | None, client: Any
-) -> None:
-    """Distribute each owned bot's PnL across the sessions that operated it.
-
-    One rule covers deploy and handover: every owned bot is attributed by slicing
-    its history over ``[since, next_owner.since or now)``, where ``since`` is the
-    takeover instant the ownership ledger recorded. A bot the session *deployed*
-    has no history before its ``since``, so the general rule already hands it the
-    whole instance — the exact case falls out instead of needing its own branch.
-
-    Live unrealized PnL, fees and open positions go to each base's LAST owner by
-    ``since`` — a lookup in the ledger where it used to be a ``max(session_num)``
-    guess, so a new session that never adopted the bot no longer inherits its
-    open book.
-
-    Works uniformly for single- and multi-controller bots (history sums controllers
-    per instance) and for a base re-launched under several instances. Strategies
-    whose sessions own no bot (direct-executor agents) are left untouched.
-    """
-    from condor.fetchers.bot_performance import (
-        bot_executor_rows,
-        fetch_all_bot_performance,
-        fetch_archived_instances,
-        fetch_base_histories,
-        resolve_bots,
-        slice_history,
-    )
-
-    if not client or not real_sessions:
-        return
-    owners = _owner_windows(real_sessions, strategy_dir, default_config)
-    bases = sorted(owners)
-    if not bases:
-        return  # direct-executor strategy — nothing to attribute
-
-    try:
-        all_perf = await fetch_all_bot_performance(client)
-    except Exception as e:
-        log.warning("bot perf fetch for %s failed: %s", strategy_dir.name, e)
-        return
-
-    now = time.time()
-    # The oldest takeover across every base sets how far back the histories must
-    # reach; sampling resolution is chosen from it so no owner's window falls off
-    # the end of the retained rows.
-    earliest = min(
-        (since for lst in owners.values() for since, _, _ in lst if since > 0),
-        default=0.0,
-    )
-    # Archived instances carry the realized PnL of every bot a session stopped —
-    # the normal end state of a finished session, and invisible in the live
-    # snapshot. Same universe the live agent's own view uses, so the dashboard and
-    # the tick loop cannot disagree about what a session earned.
-    archived = await fetch_archived_instances(client)
-    histories_by_base = await fetch_base_histories(
-        client, all_perf, bases, earliest, now, extra_names=archived
-    )
-
-    live = resolve_bots(all_perf, bases)
-    for base in bases:
-        window_owners = owners[base]
-        insts = histories_by_base.get(base, [])
-
-        # Realized / volume / trades / fees: one window per owner, tiling the
-        # timeline. A released window (the session stopped and left the bot
-        # running) ends at its release instant, so PnL earned while no session
-        # was operating the bot is attributed to nobody instead of accruing to
-        # whoever happened to hold last.
-        sliced_fees = 0.0
-        for i, (since, s, until) in enumerate(window_owners):
-            end = window_owners[i + 1][0] if i + 1 < len(window_owners) else now
-            if until > 0:
-                end = min(end, until)
-            if end <= since:
-                continue
-            realized, volume, trades, fees = slice_history(insts, since, end)
-            s.realized_pnl += realized
-            s.volume += volume
-            # Sliced closes are round-trip closes, so they are this session's
-            # trades AND its closed positions — the same two counters
-            # _merge_bot_perf bumps, so the session detail and this rollup report
-            # one number.
-            s.trade_count += int(round(trades))
-            s.closed_count += int(round(trades))
-            s.fees += fees
-            sliced_fees += fees
-            # Volume with no fee is a missing column, not a free trade.
-            if volume > 0 and fees == 0.0:
-                s.fees_known = False
-            s.total_pnl = s.realized_pnl + s.unrealized_pnl
-
-        # Live unrealized + open positions → the base's current owner, unless it
-        # has released the bot: an ended session holds no open book.
-        bot = live.get(base)
-        if not bot:
-            continue
-        last_since, operator, last_until = window_owners[-1]
-        if last_until > 0:
-            continue
-        b_rows = bot_executor_rows(bot)
-        operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
-        # Fees come from the sliced history when the backend reports a cumulative
-        # figure. When it does not, that column is all zeros and the only fees
-        # available are the live open-position ones — attributed to the current
-        # operator as before rather than silently dropped.
-        if sliced_fees == 0.0:
-            operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
-        operator.open_count += sum(1 for r in b_rows if r["status"] == "RUNNING")
-        operator.executors = list(operator.executors) + b_rows
-        operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl
+# ── Session-ownership PnL attribution ──
+# The whole engine — session ownership resolution, owner-window tiling, the
+# slice-and-merge fee rules, and the current-owner rule for the live open book —
+# lives in condor.agents.attribution ([[ARCH-191]]), shared with the agent's own
+# view (condor.agents.performance) so the dashboard and the tick loop compute
+# from one implementation. This module keeps only HTTP concerns and the caches.
 
 
 async def _compute_strategy_performance(
-    run_key: str, strategy_dir: Path, default_config: dict | None
+    run_key: str, strategy_dir: Path, default_config: dict | None, principal: int
 ):
     """Return list of AgentPerformanceModel plus rolled-up totals.
 
     The assembled rollup is cached ~30s (``_PERF_CACHE``); underneath, closed
     sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
     ids hit the backend after the TTL expires.
+
+    The rollup cache is bucketed by whether ``principal`` may price this
+    strategy at all, because otherwise the guard in ``_get_client_for_strategy``
+    would hold for 30 seconds and then be handed the money anyway by whoever
+    rendered the page first (SEC-334). ``_CLOSED_PERF_CACHE`` needs no such
+    split: it is only ever read on the branch that already has a client.
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
-    cached = _cache_get(f"perf:{run_key}")
+    priced = _may_use_strategy_server(
+        _strategy_server(strategy_dir, default_config), principal
+    )
+    cache_key = f"perf:{run_key}" if priced else f"perf:{run_key}:unpriced"
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     ids = enumerate_agent_ids(run_key, strategy_dir)
-    client, _server = await _get_client_for_strategy(strategy_dir, default_config)
+    client, _server = await _get_client_for_strategy(
+        strategy_dir, default_config, principal
+    )
+
+    # An experiment's identity is on disk, not in the backend: a dry run
+    # simulates and so books nothing, which is why it used to be dropped twice
+    # over — once by a `trade_count == 0` filter that is the *definition* of a
+    # dry run, and again whenever there was no client to price anything with.
+    # Its mode and its error flag come from the snapshot file, so the row can be
+    # built with or without a backend.
+    exp_meta = {e["number"]: e for e in list_experiments(strategy_dir)}
 
     # Per-session executor fetches stay bot-free (bot_names=None below) so closed
     # sessions can be frozen; bot-mode PnL is distributed per session afterward by
-    # _apply_bot_mode_pnl from the controller history, which handles both fixed and
+    # apply_bot_mode_pnl from the controller history, which handles both fixed and
     # runtime-named (per-session config) bots.
     sessions: list[AgentPerformanceModel] = []
     if client and ids:
@@ -677,11 +1017,17 @@ async def _compute_strategy_performance(
         for aid in active_ids:
             _CLOSED_PERF_CACHE.pop(aid, None)
 
-        fetch_ids = [
-            aid
-            for aid, _, _ in ids
-            if aid in active_ids or aid not in _CLOSED_PERF_CACHE
-        ]
+        # Snapshot the frozen entries up front (marking them recently-used) so
+        # an LRU eviction during the await below can't drop a session from
+        # this render.
+        frozen: dict[str, Any] = {}
+        for aid, _, _ in ids:
+            if aid not in active_ids:
+                perf = _closed_perf_get(aid)
+                if perf is not None:
+                    frozen[aid] = perf
+
+        fetch_ids = [aid for aid, _, _ in ids if aid in active_ids or aid not in frozen]
 
         perf_map: dict[str, Any] = {}
         failed_ids: set[str] = set()
@@ -698,7 +1044,7 @@ async def _compute_strategy_performance(
         for agent_id, num, kind in ids:
             perf = perf_map.get(agent_id)
             if perf is None:
-                perf = _CLOSED_PERF_CACHE.get(agent_id)
+                perf = frozen.get(agent_id)
             if perf is None:
                 continue
             # Freeze immutable results: fetched fine, no engine, not the newest
@@ -711,14 +1057,22 @@ async def _compute_strategy_performance(
                 and agent_id not in failed_ids
                 and perf.open_count == 0
             ):
-                _CLOSED_PERF_CACHE[agent_id] = perf
-            if kind == "experiment" and perf.trade_count == 0:
-                continue
+                _closed_perf_put(agent_id, perf)
             sessions.append(
                 AgentPerformanceModel(
                     agent_id=agent_id,
                     session_num=num,
                     kind=kind,
+                    execution_mode=(
+                        exp_meta.get(num, {}).get("execution_mode", "")
+                        if kind == "experiment"
+                        else ""
+                    ),
+                    error=(
+                        bool(exp_meta.get(num, {}).get("error"))
+                        if kind == "experiment"
+                        else False
+                    ),
                     realized_pnl=perf.realized_pnl,
                     unrealized_pnl=perf.unrealized_pnl,
                     total_pnl=perf.total_pnl,
@@ -732,6 +1086,25 @@ async def _compute_strategy_performance(
                 )
             )
 
+    # Every experiment on disk gets a row, whatever the backend could tell us
+    # about it. The block above only runs `if client and ids`, and inside it a
+    # fetch can still come back empty — so without this a dry run vanishes from
+    # the sessions table on exactly the setup where it is most useful: no server
+    # configured, nothing traded, just a simulated tick to read.
+    priced = {s.session_num for s in sessions if s.kind == "experiment"}
+    for num, meta in sorted(exp_meta.items(), reverse=True):
+        if num in priced:
+            continue
+        sessions.append(
+            AgentPerformanceModel(
+                agent_id=f"{run_key}_e{num}",
+                session_num=num,
+                kind="experiment",
+                execution_mode=meta.get("execution_mode", ""),
+                error=bool(meta.get("error")),
+            )
+        )
+
     real_sessions = [s for s in sessions if s.kind == "session"]
 
     # Bot-mode: distribute each operated bot's PnL across the session windows that
@@ -740,7 +1113,7 @@ async def _compute_strategy_performance(
     # bot is DISTRIBUTED — not duplicated — the totals below are a plain additive
     # sum of the rows and stay correct for both modes with no double counting.
     if client and real_sessions:
-        await _apply_bot_mode_pnl(real_sessions, strategy_dir, default_config, client)
+        await apply_bot_mode_pnl(real_sessions, strategy_dir, default_config, client)
 
     totals = {
         "total_pnl": sum(s.total_pnl for s in real_sessions),
@@ -753,11 +1126,17 @@ async def _compute_strategy_performance(
     }
 
     result = (sessions, totals)
-    _cache_set(f"perf:{run_key}", result)
+    _cache_set(cache_key, result)
     return result
 
 
 def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
+    # The same two reads the fleet band makes per live engine — a cached
+    # summary read and a tail of actions.jsonl — reused rather than re-derived,
+    # so "what the loop last did" cannot mean two different things in two
+    # places. Both swallow their own errors and return empty.
+    from condor.agents.fleet_map import read_last_action, read_last_did
+
     info = engine.get_info()
     p = perf_by_id.get(info["agent_id"])
     return RunningInstance(
@@ -782,17 +1161,30 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         agent_key=info.get("agent_key", ""),
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
+        last_tick_at=float(info.get("last_tick_at", 0.0) or 0.0),
+        max_ticks=int(info.get("max_ticks", 0) or 0),
+        last_action=read_last_action(getattr(engine, "journal", None)),
+        last_did=read_last_did(engine),
+        last_error=info.get("last_error", "") or "",
     )
 
 
-async def _build_strategy_summary(strategy) -> StrategySummary:
-    """Roll up disk + engine + performance state for one strategy."""
+async def _build_strategy_summary(strategy, user: WebUser) -> StrategySummary:
+    """Roll up disk + engine + performance state for one strategy.
+
+    Takes the caller because the rollup is money: the figures come from the
+    strategy's stored server, which is only queried for a principal that can
+    still reach it (SEC-334).
+    """
     run_key = _runkey(strategy.agent_slug, strategy.slug)
-    strategy_dir = strategy.dir
+    strategy_dir = strategy.home
 
     try:
         sessions_perf, totals = await _compute_strategy_performance(
-            run_key, strategy_dir, strategy.default_config
+            run_key,
+            strategy_dir,
+            strategy.default_config,
+            _strategy_principal(strategy, user),
         )
     except Exception as e:
         log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
@@ -842,6 +1234,7 @@ async def _build_strategy_summary(strategy) -> StrategySummary:
         total_pnl=float(totals.get("total_pnl", 0.0)),
         total_volume=float(totals.get("volume", 0.0)),
         open_positions=int(totals.get("open_positions", 0)),
+        server_name=_strategy_server(strategy_dir, strategy.default_config),
         instances=instances,
     )
 
@@ -862,7 +1255,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
     owners: list[str] = []
     for agent in agents:
         for strategy in store.list(agent.slug):
-            coros.append(_build_strategy_summary(strategy))
+            coros.append(_build_strategy_summary(strategy, user))
             owners.append(agent.slug)
 
     summaries = await asyncio.gather(*coros, return_exceptions=True)
@@ -882,6 +1275,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 description=agent.description,
                 when_to_consult=agent.consult_hint,
                 agent_key=agent.agent_key,
+                server_name=agent.server_name,
                 strategy_count=len(strat_summaries),
                 strategies=strat_summaries,
                 **_aggregate_strategy_perf(strat_summaries),
@@ -920,12 +1314,64 @@ def _is_admin(user: WebUser) -> bool:
     return get_config_manager().is_admin(user.id)
 
 
+def _delegation_scope(user: WebUser) -> int | None:
+    """Whose delegations this caller reads: their own, or everyone's.
+
+    The store is partitioned by owner (FEAT-051), so this is resolved *before*
+    a path is built — the same idiom as ``_owner()`` in ``conversations.py``. A
+    non-admin does not get someone else's record refused; they cannot name it.
+    ``None`` is the admin scope, and the only one that reaches the unowned
+    legacy records.
+    """
+    return None if _is_admin(user) else user.id
+
+
+# What the store's three status words mean in the wire's vocabulary. `ok` is a
+# run that finished, `error` one that raised — both exact. `timeout` is neither:
+# the snippet was cut off by its budget, which the store bothered to record and
+# the feed therefore keeps rather than flattening into "error".
+_CODE_STATUS = {"ok": "done", "error": "error", "timeout": "timeout"}
+
+
+def _code_run_row(entry: dict) -> dict:
+    """A code-run index entry, in the shape the history feed already renders.
+
+    A wire concern, so it lives beside the route and not in
+    :class:`condor.code_runs.CodeRunStore` — that store knows nothing about
+    delegations and gains nothing by learning.
+
+    The fields a code run has no answer for (a caller, a conversation, a tool
+    count) carry the empty value the wire already uses for "not recorded".
+    ``ended_at`` is derived from a
+    duration the store actually measured, so the feed's median is a real number
+    rather than a stand-in.
+    """
+    created = entry.get("created") or 0.0
+    return {
+        "task_id": entry.get("id") or "",
+        "agent": entry.get("agent") or "",
+        "kind": KIND_CODE,
+        "task": entry.get("label") or "",
+        "status": _CODE_STATUS.get(entry.get("status") or "", "unknown"),
+        "user_id": entry.get("user_id") or 0,
+        "started_at": created,
+        "ended_at": created + (entry.get("duration_ms") or 0) / 1000,
+        "caller": "",
+        "conversation_id": "",
+        "chat_id": 0,
+        "server_name": None,
+        "tool_count": 0,
+    }
+
+
 def _can_see_delegation(record: dict, user: WebUser) -> bool:
     """Admins see everything; everyone else only what they started.
 
-    A record whose ``user_id`` was never written (a transcript from before the
-    status file carried one) belongs to nobody and is therefore admin-only —
-    unowned must not mean unguarded.
+    Still a guard, no longer the fence. On disk the store is partitioned by
+    owner, so a scoped read cannot return a foreign record at all; what is left
+    for this check is the *live registry*, which is one dict for the whole
+    process, and the unowned legacy records an admin can reach — unowned must
+    not mean unguarded.
     """
     return _is_admin(user) or (
         bool(record.get("user_id")) and record["user_id"] == user.id
@@ -939,21 +1385,54 @@ def _visible_record(task_id: str, user: WebUser) -> dict:
     the process that ran it (FEAT-035) — the registry stays the authority for
     anything running *now*, and history answers for everything else.
 
-    Same idiom as ``_require_ownership`` in ``sessions.py``: the caller is
-    compared against the record's own ``user_id``, which ``DelegateTask``
-    carries from the moment it is started. 403 rather than 404 on a foreign
-    task, matching ``conversations.py``.
+    403 when the process still holds a task that is not this caller's; 404 once
+    it is on disk, because there the caller's id is a path segment and a
+    stranger's record is not refused so much as unnameable.
     """
     from condor.agents.delegate import get_delegation
     from condor.agents.delegation_history import read_history
 
     dt = get_delegation(task_id)
-    record = dt.to_dict() if dt is not None else read_history(task_id)
+    record = (
+        dt.to_dict()
+        if dt is not None
+        else read_history(_delegation_scope(user), task_id)
+    )
     if record is None:
         raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
     if not _can_see_delegation(record, user):
         raise HTTPException(status_code=403, detail="Not your delegation")
     return record
+
+
+@router.get("/fleet-map", response_model=FleetMapResponse)
+async def get_fleet_map(user: WebUser = Depends(get_current_user)):
+    """Who owns which trading, and what their loop is doing (FEAT-096).
+
+    The join key the ``/bots`` browser groups by: one row per
+    ``(agent, strategy)``, carrying the namespace that proves bot ownership, the
+    agent ids that tag standalone executors, and the live loop's state.
+
+    Deliberately *not* part of ``GET /agents``, which fans out a performance
+    fetch per session of every strategy and is the most expensive read in the
+    app. This one makes **no Hummingbot API call at all** — a memoised directory
+    walk plus the in-memory loop registry — so the bots page can poll it.
+
+    A literal path, and so registered before the ``/{slug}`` catch-all above.
+    """
+    from condor.agents.deed_index import build_deed_index
+    from condor.agents.fleet_map import build_fleet_map
+
+    index = build_deed_index()
+    return FleetMapResponse(
+        owners=[FleetOwnerModel(**asdict(owner)) for owner in build_fleet_map()],
+        deeds=DeedIndexModel(
+            bots={
+                name: DeedRefModel(**asdict(ref)) for name, ref in index.bots.items()
+            },
+            since=index.since,
+        ),
+    )
 
 
 @router.get("/delegations")
@@ -981,13 +1460,28 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
 @router.get("/delegations/history")
 async def list_delegation_history(
     agent: str | None = None,
+    kind: str = "",
     limit: int = 100,
     user: WebUser = Depends(get_current_user),
 ):
-    """Every delegation ever recorded, newest first — across restarts (FEAT-035).
+    """Every agent run ever recorded, newest first — across restarts (FEAT-035).
 
     Registered above ``/delegations/{task_id}`` so the literal path wins, for the
     same reason the whole block sits above ``/{slug}``.
+
+    The path name is historical, like the directory it reads: since FEAT-058 the
+    store holds more than delegations, so this route answers "what did this agent
+    do" and not only "what was it handed in the background". ``kind`` picks a
+    channel — ``""`` is all of them (an agent's Activity tab, which still lists
+    which lists the consults an agent answered alongside its background tasks),
+    ``"delegate"`` is background tasks only (the chat dock).
+
+    Since FEAT-061 a third channel merges in from a different store: ``"code"``
+    is a snippet the agent ran, read from :class:`condor.code_runs.CodeRunStore`
+    and projected by :func:`_code_run_row`. That source is gated on
+    ``_may_run_code`` in addition to the ownership scope, because a run's
+    recorded stdout is as sensitive as running the snippet was; a caller without
+    that grant gets no code rows and an empty ``?kind=code``, not a 403.
 
     Returns *summary* rows: the bodies (``result``/``error``) are dropped, since
     a hundred rows must not ship a hundred answers — a row that gets opened
@@ -997,18 +1491,56 @@ async def list_delegation_history(
     """
     from condor.agents.delegate import get_all_delegations
     from condor.agents.delegation_history import list_history
+    from condor.agents.run_records import KIND_DELEGATE
+    from condor.code_runs import get_code_run_store
+    from condor.web.routes.code import _may_run_code
 
-    live = {
-        dt.task_id: dt.to_dict()
-        for dt in get_all_delegations().values()
-        if agent in (None, dt.agent_slug)
-    }
-    records = [
-        r
-        for r in list_history(agent_slug=agent, limit=limit)
-        if r["task_id"] not in live
-    ]
+    # Everything in the registry is a delegation by construction, so any other
+    # kind filter simply excludes it rather than needing a field to test.
+    live = (
+        {
+            dt.task_id: dt.to_dict()
+            for dt in get_all_delegations().values()
+            if agent in (None, dt.agent_slug)
+        }
+        if kind in ("", KIND_DELEGATE)
+        else {}
+    )
+    # In a worker thread, not on the loop (PERF-293): the on-disk half of this
+    # list is a directory walk that reads a ``status.json`` per recorded run, up
+    # to retention's caps, and this loop is also uvicorn's and the Telegram
+    # poller's. Same reason and same shape as the sharing routes (PERF-235); the
+    # live registry above and the code-run index below are in-memory reads and
+    # stay inline.
+    history = await asyncio.to_thread(
+        list_history,
+        user_id=_delegation_scope(user),
+        agent_slug=agent,
+        kind=kind or None,
+        limit=limit,
+    )
+    records = [r for r in history if r["task_id"] not in live]
     records.extend(live.values())
+
+    # The third source (FEAT-061). It lives in its own store, keyed by an
+    # in-record owner rather than by a path segment, so the merge is where the
+    # two ownership models meet — scoped by the same `_delegation_scope`
+    # expression the other two use, which is exactly `_owner_filter`'s contract
+    # in reports.py.
+    #
+    # `_may_run_code` gates the whole source: a run's stdout is whatever the
+    # snippet printed, and a caller who may not run code has no business reading
+    # one. `?kind=code` then returns an empty list rather than a 403 — a filter
+    # over a kind you have none of is honestly empty. The cost is deliberate: a
+    # revoked grant also closes the window on that user's own past runs.
+    if kind in ("", KIND_CODE) and _may_run_code(user.id):
+        records.extend(
+            _code_run_row(e)
+            for e in get_code_run_store().list(
+                agent=agent, limit=limit, user_id=_delegation_scope(user)
+            )
+        )
+
     records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
 
     return {
@@ -1055,7 +1587,9 @@ async def get_delegation_events(
     if dt is not None:
         events, markdown = events_for_wire(dt.events), ""
     else:
-        events, markdown = read_history_events(task_id)
+        # The record is already authorized, so read the transcript from its own
+        # owner's directory rather than searching for it again.
+        events, markdown = read_history_events(record.get("user_id") or None, task_id)
 
     return {
         "task_id": task_id,
@@ -1088,7 +1622,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     agent = _get_agent(slug)
     strategies = _strategy_store().list(slug)
     summaries = await asyncio.gather(
-        *[_build_strategy_summary(s) for s in strategies],
+        *[_build_strategy_summary(s, user) for s in strategies],
         return_exceptions=True,
     )
     strat_summaries = [s for s in summaries if isinstance(s, StrategySummary)]
@@ -1097,11 +1631,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         slug=agent.slug,
         name=agent.name,
         description=agent.description,
-        agent_md=(
-            (agent.agent_dir / "AGENT.md").read_text()
-            if (agent.agent_dir / "AGENT.md").exists()
-            else ""
-        ),
+        agent_md=agent.source.read_text() if agent.source else "",
         agent_key=agent.agent_key,
         tools=agent.tools,
         when_to_consult=agent.consult_hint,
@@ -1111,12 +1641,399 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     )
 
 
+# ── The brain, as one read ──
+#
+# What the model is handed at the top of every turn — its AGENT.md, the two
+# indexes ``condor.memory.context`` injects, its tool allowlist, its routine
+# catalog and its strategies — read back for the human on the other side of the
+# conversation. Each library is fetched behind its own guard: a store that
+# cannot be read leaves its section empty rather than blanking the panel, the
+# same rule the prompt builder already follows for the same stores.
+
+
+def _skill_store_for(slug: str):
+    """The Agent's library as the **operator** sees it: muted playbooks included.
+
+    Every read behind this panel wants the whole library — the one view that has
+    to show you what you switched off is the one you switch it off from. The
+    Agent's own view is the store's default (``include_muted=False``), which is
+    what every injection site and the MCP tool build.
+    """
+    from condor.memory import SkillStore
+
+    return SkillStore(slug, include_muted=True)
+
+
+def _memory_store_for(slug: str, user_id: int):
+    from condor.memory import MemoryStore
+
+    return MemoryStore(user_id, slug)
+
+
+def _proposals():
+    from condor.memory import proposals
+
+    return proposals
+
+
+def _strategy_cards(slug: str) -> list[StrategyCard]:
+    """Strategy rows without the performance rollup.
+
+    ``_build_strategy_summary`` fans out to the Hummingbot API for every
+    session's executors; this panel only ever says "running" or "idle", so it
+    reads the same two sources that answer *that* — the live supervisor, then
+    disk — and nothing else.
+    """
+    cards: list[StrategyCard] = []
+    for strategy in _strategy_store().list(slug):
+        status = "idle"
+        engines = _get_engines_for(slug, strategy.slug)
+        if engines:
+            status = engines[0].get_info().get("status", "running")
+        else:
+            disk_info = infer_latest_session_status(
+                strategy.home, _runkey(slug, strategy.slug)
+            )
+            if disk_info:
+                status = disk_info["status"]
+        cards.append(
+            StrategyCard(
+                slug=strategy.slug,
+                name=strategy.name,
+                description=strategy.description,
+                status=status,
+            )
+        )
+    return cards
+
+
+def _routine_cards(slug: str) -> list[RoutineCard]:
+    """Every routine this Agent may run — its own library over the shared one.
+
+    The operator view, like :func:`_skill_store_for`: muted routines are listed
+    and flagged rather than hidden, so the switch that muted one is still there
+    to switch it back.
+    """
+    from condor.memory.mutes import load_mutes
+    from routines.base import assistant_routines
+
+    muted = load_mutes(slug)["routines"]
+    return [
+        RoutineCard(
+            name=name,
+            description=info.description,
+            continuous=info.is_continuous,
+            source=info.source,
+            category=info.category,
+            muted=name in muted,
+        )
+        for name, info in sorted(assistant_routines(slug, include_muted=True).items())
+    ]
+
+
+def _tool_cards(slug: str, allowlist: list[str]) -> list[ToolCard]:
+    """The seat's real tool surface, each row carrying its two flags.
+
+    ``condor.runtime.toolsets.seat_tools`` is the single place that knows what a
+    seat mounts, so the panel asks it rather than re-deriving the rings here.
+    It reads the two ``profiles.py`` leaf modules — never ``server.py``, whose
+    import parses argv and builds a ``FastMCP`` singleton.
+    """
+    from condor.runtime.toolsets import seat_tools
+
+    named = set(allowlist)
+    return [
+        ToolCard(**row, allowlisted=row["name"] in named) for row in seat_tools(slug)
+    ]
+
+
+@router.get("/{slug}/brain", response_model=AgentBrain)
+async def get_agent_brain(slug: str, user: WebUser = Depends(get_current_user)):
+    """The Agent's identity and its four libraries, for the panel behind the chat.
+
+    Memory is per ``(agent, user)``, so this returns *the caller's* memories
+    with this Agent and never another user's — the same scope the Agent's own
+    ``manage_memory`` runs under.
+    """
+    agent = _get_agent(slug)
+
+    agent_md_path = agent.source
+
+    skills: list[SkillCard] = []
+    try:
+        skills = [SkillCard(**row) for row in _skill_store_for(agent.slug).catalog()]
+    except Exception:
+        log.debug("brain: skill catalog failed for %s", slug, exc_info=True)
+
+    proposal: SkillProposal | None = None
+    try:
+        pending = _proposals().get(agent.slug)
+        proposal = SkillProposal(**pending) if pending else None
+    except Exception:
+        log.debug("brain: skill proposal failed for %s", slug, exc_info=True)
+
+    memories: list[MemoryCard] = []
+    try:
+        memories = [
+            MemoryCard(**row)
+            for row in _memory_store_for(agent.slug, user.id).catalog()
+        ]
+    except Exception:
+        log.debug("brain: memory catalog failed for %s", slug, exc_info=True)
+
+    routines: list[RoutineCard] = []
+    try:
+        routines = _routine_cards(agent.slug)
+    except Exception:
+        log.debug("brain: routine catalog failed for %s", slug, exc_info=True)
+
+    strategies: list[StrategyCard] = []
+    try:
+        strategies = _strategy_cards(agent.slug)
+    except Exception:
+        log.debug("brain: strategy cards failed for %s", slug, exc_info=True)
+
+    tools: list[ToolCard] = []
+    try:
+        tools = _tool_cards(agent.slug, agent.tools)
+    except Exception:
+        log.debug("brain: tool cards failed for %s", slug, exc_info=True)
+
+    return AgentBrain(
+        slug=agent.slug,
+        name=agent.name,
+        description=agent.description,
+        agent_md=agent_md_path.read_text() if agent_md_path else "",
+        agent_key=agent.agent_key,
+        when_to_consult=agent.consult_hint,
+        server_required=agent.server_required,
+        server_name=agent.server_name,
+        tools=tools,
+        tools_unrestricted=not agent.tools,
+        skills=skills,
+        skill_proposal=proposal,
+        memories=memories,
+        routines=routines,
+        strategies=strategies,
+    )
+
+
+@router.get("/{slug}/skills/{name}", response_model=SkillBody)
+async def get_agent_skill(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Read one of the Agent's playbooks in full — what ``manage_skill`` reads."""
+    from condor.memory.mutes import is_muted
+    from condor.memory.store import _slugify
+
+    agent = _get_agent(slug)
+    # The operator store, so a muted playbook still opens — you cannot decide
+    # whether to unmute something you are not allowed to read.
+    skill = _skill_store_for(agent.slug).read(name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return SkillBody(
+        slug=name, muted=is_muted(agent.slug, "skill", _slugify(name)), **skill
+    )
+
+
+@router.get("/{slug}/memories/{name}", response_model=MemoryBody)
+async def get_agent_memory(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Read one of the caller's memories with this Agent in full."""
+    agent = _get_agent(slug)
+    body = _memory_store_for(agent.slug, user.id).read(name)
+    if body is None:
+        raise HTTPException(status_code=404, detail=f"Memory '{name}' not found")
+    return MemoryBody(name=name, body=body)
+
+
+@router.get("/{slug}/starters", response_model=StarterList)
+async def get_agent_starters(slug: str, user: WebUser = Depends(get_current_user)):
+    """The openers this Agent learned *this caller* asks it for (FEAT-073).
+
+    Per-user by the same dependency that makes ``/memories`` per-user, because
+    "what you keep asking for" is a fact about one person and serving another's
+    would be the bug, not a nicety.
+
+    **Learned rows only — the static defaults are never sent.** The client has
+    always owned its own cold-start copy and still does, so the split stays
+    clean: the server knows what was learned, the client knows what to say when
+    nothing has been. A user with nothing learned therefore gets an empty list
+    and sees exactly today's chips.
+    """
+    from condor.agents import starters as starters_store
+
+    agent = _get_agent(slug)
+    rows = starters_store.top(user.id, agent.slug, limit=STARTERS_SERVED)
+    return StarterList(
+        starters=[
+            StarterRow(
+                title=row.label,
+                hint=row.hint,
+                prompt=row.label,
+                icon=row.icon,
+                skill=row.skill,
+            )
+            for row in rows
+        ]
+    )
+
+
+# ── The brain, written back ──
+#
+# The stores behind these already own every rule that matters — a shared
+# playbook is read-only for the agent that only inherits it, a memory belongs to
+# one ``(agent, user)`` pair — and they signal a refusal by *returning* an
+# ``{"error": ...}`` dict rather than raising. So each route below is the same
+# three lines: call the store, turn an error dict into a 400, hand back what the
+# panel needs to re-render. Nothing here re-implements a guard.
+
+
+def _store_result(result: dict) -> dict:
+    """Pass a store's answer through, or raise its refusal as a 400."""
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.post("/{slug}/skills")
+async def create_agent_skill(
+    slug: str, req: SkillWriteRequest, user: WebUser = Depends(get_current_user)
+):
+    """Add a playbook to this Agent's own library.
+
+    ``shared`` is deliberately not accepted: publishing to every assistant is
+    Condor's own decision (see ``SkillStore.can_publish``) and is not something
+    a panel button should do silently.
+    """
+    agent = _get_agent(slug)
+    return _store_result(
+        _skill_store_for(agent.slug).create(
+            name=req.name,
+            description=req.description,
+            when_to_use=req.when_to_use,
+            body=req.body,
+            references_routine=req.references_routine,
+            source="web",
+        )
+    )
+
+
+@router.put("/{slug}/skills/{name}")
+async def update_agent_skill(
+    slug: str,
+    name: str,
+    req: SkillWriteRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Patch one of the Agent's playbooks, leaving unsent fields alone."""
+    agent = _get_agent(slug)
+    fields: dict[str, Any] = {}
+    for key in ("description", "when_to_use", "body"):
+        if getattr(req, key):
+            fields[key] = getattr(req, key)
+    # `None` means "leave it alone"; `""` means "unlink the routine".
+    if req.references_routine is not None:
+        fields["references_routine"] = req.references_routine
+    return _store_result(_skill_store_for(agent.slug).edit(name, **fields))
+
+
+@router.delete("/{slug}/skills/{name}")
+async def delete_agent_skill(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Delete one of the Agent's playbooks. Refuses an inherited shared one."""
+    agent = _get_agent(slug)
+    # `delete` answers `True`, `False` for an unknown slug, or a refusal dict.
+    result = _skill_store_for(agent.slug).delete(name)
+    if isinstance(result, dict):
+        raise HTTPException(
+            status_code=400, detail=result.get("error", f"Cannot delete '{name}'")
+        )
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return {"deleted": True}
+
+
+@router.post("/{slug}/skill-proposals/accept")
+async def accept_agent_skill_proposal(
+    slug: str, user: WebUser = Depends(get_current_user)
+):
+    """Turn the offered playbook into a real one in this Agent's own library.
+
+    This is the human in "the agent proposes, a human accepts" (FEAT-074) — the
+    only path by which a proposed playbook ever reaches a prompt. The store does
+    the work with the same ``create`` the panel's New playbook button uses, so
+    what lands is an ordinary skill from here on.
+    """
+    agent = _get_agent(slug)
+    return _store_result(_proposals().accept(agent.slug))
+
+
+@router.delete("/{slug}/skill-proposals")
+async def discard_agent_skill_proposal(
+    slug: str, user: WebUser = Depends(get_current_user)
+):
+    """Throw the offered playbook away. The library is untouched either way."""
+    agent = _get_agent(slug)
+    if not _proposals().discard(agent.slug):
+        raise HTTPException(status_code=404, detail="No proposal is pending")
+    return {"discarded": True}
+
+
+@router.put("/{slug}/memories/{name}")
+async def save_agent_memory(
+    slug: str,
+    name: str,
+    req: MemoryWriteRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Write one of the caller's memories with this Agent — create or overwrite.
+
+    Scoped to ``(agent, caller)`` like the read above, so this can only ever
+    touch the memories this user's own conversations with the Agent produced.
+    """
+    agent = _get_agent(slug)
+    return _store_result(
+        _memory_store_for(agent.slug, user.id).write(
+            name=name,
+            content=req.content,
+            description=req.description,
+            type=req.type,
+            source="web",
+        )
+    )
+
+
+@router.delete("/{slug}/memories/{name}")
+async def delete_agent_memory(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Forget one of the caller's memories with this Agent."""
+    agent = _get_agent(slug)
+    if not _memory_store_for(agent.slug, user.id).delete(name, source="web"):
+        raise HTTPException(status_code=404, detail=f"Memory '{name}' not found")
+    return {"deleted": True}
+
+
 @router.post("", response_model=AgentSummary)
 async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
 ):
     """Create a new Agent (identity + brain; strategies are added separately)."""
     from condor.preferences import get_active_agent_key
+
+    # The pin is the same field ``update_agent_config`` gates below, so it is
+    # gated identically here: creating an Agent already pinned to a server the
+    # caller cannot reach is the edit they are not allowed to make afterwards.
+    # Credentials never actually leak — every resolution site re-checks reach —
+    # but ``SessionBinding.server_name`` reports the stored pin verbatim, so an
+    # ungated create leaves an Agent naming a foreign account in the chat header
+    # and in ``AgentSummary`` (SEC-594). An empty pin needs no access at all.
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     # Same rule as the Telegram/MCP path: an unspecified model inherits the
     # creator's active one rather than defaulting to a guess.
@@ -1146,7 +2063,10 @@ async def update_agent_md(
 ):
     """Update AGENT.md content."""
     agent = _get_agent(slug)
-    (agent.agent_dir / "AGENT.md").write_text(req.content)
+    # Straight past ``AgentStore``, so the stock guard is stated here rather
+    # than inherited: a shipped AGENT.md is forked into the local root first and
+    # this writes the fork (FEAT-115).
+    atomic_write_text(fork_if_stock(agent.slug, "AGENT.md"), req.content)
     return {"updated": True}
 
 
@@ -1157,11 +2077,11 @@ async def update_agent_config(
     """Set the Agent's server pin or model without hand-editing front matter.
 
     ``AgentStore.update`` re-renders the whole front matter, so this is the same
-    write the MCP ``manage_trading_agent`` tool already performs — the web layer
+    write the MCP ``manage_agents`` tool already performs — the web layer
     simply had no door to it, which is why the UI could only offer a text editor.
     """
+    from condor.llm.options import AGENT_OPTIONS
     from config_manager import get_config_manager
-    from handlers.agents._shared import AGENT_OPTIONS
 
     agent = _get_agent(slug)
 
@@ -1194,6 +2114,58 @@ async def update_agent_config(
     }
 
 
+@router.put("/{slug}/mutes")
+async def set_agent_mute(
+    slug: str, req: MuteRequest, user: WebUser = Depends(get_current_user)
+):
+    """Switch one playbook, routine or tool off for this Agent — or back on.
+
+    A mute is curation, not deletion: the item stays on disk, stays listed in
+    this panel and stays editable, and every other Agent reading the same shared
+    file is untouched. What changes is that this Agent is no longer told it
+    exists and can no longer reach it — see :mod:`condor.memory.mutes`.
+
+    It applies from the Agent's next tick, and — since FEAT-093 — from the
+    user's next message in a chat that is already open. A chat session hands its
+    whole configuration to the subprocess once, at ``session/new``, so applying
+    a mute to a live one means rebuilding it; the runtime does that by
+    fingerprinting the resolved binding and comparing it at the start of each
+    turn (:meth:`~condor.runtime.binding.SessionBinding.fingerprint`). Nothing
+    is published from here: this route writes a file, and the read side notices.
+    That is what makes it work across processes — ``manage_agents`` and
+    ``manage_routines`` write the same configuration from the MCP subprocess,
+    which no in-process signal could reach.
+
+    The earlier boundary ("adding an invalidation for that would buy a second at
+    the cost of a moving target") was the right call at the time: the
+    invalidation only became cheap once a content hash made the target stop
+    moving. A *running* delegation still keeps the seat it started with — it is
+    one-shot by construction, and killing it mid-flight to apply a mute is
+    strictly worse.
+
+    A tool name is checked against what this Agent's seat actually mounts
+    (FEAT-091). The subprocess ignores a name it does not know, so an unchecked
+    write would not break anything — it would just let ``mutes.yml`` fill with
+    typos nobody can see, since the panel only renders switches for tools that
+    exist.
+    """
+    from condor.memory.mutes import set_muted
+    from condor.runtime.toolsets import seat_tools
+
+    agent = _get_agent(slug)
+    if (req.kind or "").strip().lower().rstrip("s") == "tool":
+        if req.name not in {row["name"] for row in seat_tools(agent.slug)}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{req.name}' is not a tool this Agent's seat mounts",
+            )
+    try:
+        set_muted(agent.slug, req.kind, req.name, req.muted)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"kind": req.kind, "name": req.name, "muted": req.muted}
+
+
 @router.delete("/{slug}")
 async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
     """Delete an Agent. Refuses if any of its strategies has a running instance."""
@@ -1206,39 +2178,107 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
                 status_code=400,
                 detail="Cannot delete an Agent with running strategies. Stop them first.",
             )
-    _agent_store().delete(slug)
+    try:
+        _agent_store().delete(slug)
+    except ValueError as exc:
+        # `condor` is reserved — deleting the default agent's AGENT.md would
+        # leave every unbound session without instructions or a model. The store
+        # has always refused it; unhandled here that refusal reached the browser
+        # as a 500, which reads as a broken server rather than a rule.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": True}
 
 
-@router.post("/{slug}/consult")
-async def consult_agent(
-    slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
-):
-    """Run an Agent consult (its brain to completion) and return the answer."""
-    from condor.agents.consult import run_consult
+def _chat_member_status(member: Any) -> str | None:
+    """Normalize the two shapes ``get_chat_member`` can answer with.
+
+    A live python-telegram-bot returns a ``ChatMember`` with a ``status``
+    attribute; ``_HttpBot`` hands back Telegram's raw envelope (or ``None``
+    when it has no token). ``None`` means "could not verify".
+    """
+    if member is None:
+        return None
+    if isinstance(member, dict):
+        if not member.get("ok"):
+            return None
+        return (member.get("result") or {}).get("status")
+    return getattr(member, "status", None)
+
+
+async def _check_chat_access(user_id: int, chat_id: int) -> None:
+    """403 unless ``chat_id`` is a chat the caller actually belongs to (SEC-198).
+
+    The routes below forward a body-supplied ``chat_id`` to outbound Telegram
+    sends, so an unchecked value lets any authenticated session speak with the
+    bot's identity into anyone's chat. A private chat's id *is* the Telegram
+    user id, so the common case (and the MCP crossback for private sessions)
+    costs nothing; any other id must be a group the caller is a member of,
+    verified against Telegram itself through the same bot ladder that would
+    deliver the message. Verification failure fails closed: an unverifiable
+    target is a refused target. Admins are exempt, mirroring the delegation
+    ownership gate (SEC-081).
+    """
+    if not chat_id or chat_id == user_id:
+        return
     from config_manager import get_config_manager
+
+    if get_config_manager().is_admin(user_id):
+        return
+    from condor.agents.delegate import resolve_bot
+
+    status = None
+    try:
+        member = await resolve_bot().get_chat_member(chat_id=chat_id, user_id=user_id)
+        status = _chat_member_status(member)
+    except Exception:
+        log.warning(
+            "Could not verify membership of user %s in chat %s", user_id, chat_id
+        )
+    if status is None or status in ("left", "kicked", "banned"):
+        raise HTTPException(
+            status_code=403, detail="chat_id is not a chat you belong to"
+        )
+
+
+@router.post("/{slug}/ask")
+async def ask_agent(
+    slug: str, req: AskRequest, user: WebUser = Depends(get_current_user)
+):
+    """Run an Agent's brain to completion and return the answer to a waiting caller.
+
+    The blocking half of ``delegate`` (``action="ask"``) -- inter-agent
+    communication. Its detached sibling is ``/delegate``, which an attended
+    caller should prefer; this exists for the unattended seats, which have no
+    conversation for ``on_complete="resume"`` to wake.
+    """
+    from condor.agents.agent_run import run_ask
 
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
 
-    # The consult binds the agent's MCP toolset to ``server_name``'s live
+    # The run binds the agent's MCP toolset to ``server_name``'s live
     # credentials, so gate it on server access exactly like the portfolio/bots
-    # routes do — otherwise any session could consult against a server it was
+    # routes do -- otherwise any session could run against a server it was
     # never granted (IDOR). Only enforce when a server is actually requested;
-    # serverless consults need no server scope.
+    # a serverless ask needs no server scope.
     if req.server_name:
         check_server_access(user.id, req.server_name)
+
+    # The chat is where anything this run pushes would land -- same ownership
+    # rule as the push target on /notify (SEC-198).
+    await _check_chat_access(user.id, req.chat_id)
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
     # another user's memory/skill scope.
-    answer = await run_consult(
+    answer = await run_ask(
         slug=slug,
         user_id=user.id,
         chat_id=req.chat_id,
         server_name=req.server_name,
         task=req.task,
         context=req.context,
+        caller=req.caller,
     )
     return {"agent": slug, "answer": answer}
 
@@ -1267,7 +2307,12 @@ async def delegate_agent(
 
     Returns immediately with a ``task_id``; the agent runs unattended (ACP
     auto-approve) until done, then notifies the user. The async sibling of
-    ``/consult``.
+    ``/ask``, and what an attended caller should prefer -- a caller that wants
+    the answer itself asks for ``on_complete="resume"``.
+
+    ``timeout_s`` is the whole run's wall-clock budget: the default 900s, or
+    whatever the caller asked for within the bounds above (ARCH-310) -- an ask
+    below the 900s floor is raised to it.
     """
     from condor.agents.delegate import ON_COMPLETE_CHOICES, start_delegation
     from condor.runtime import wake
@@ -1281,11 +2326,26 @@ async def delegate_agent(
             status_code=400,
             detail=f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}",
         )
+    if not 1 <= req.timeout_s <= MAX_DELEGATE_TIMEOUT_S:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"timeout_s must be between 1 and {MAX_DELEGATE_TIMEOUT_S} "
+                f"seconds (default {DEFAULT_DELEGATE_TIMEOUT_S}; anything under "
+                f"{MIN_DELEGATE_TIMEOUT_S} runs for {MIN_DELEGATE_TIMEOUT_S})"
+            ),
+        )
+    timeout_s = max(req.timeout_s, MIN_DELEGATE_TIMEOUT_S)
 
-    # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
+    # Server-scope gate: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
     if req.server_name:
         check_server_access(user.id, req.server_name)
+
+    # ``chat_id`` is where ``_notify_done`` will push the completion text, so a
+    # foreign chat here would let the delegation's summary (driven by the
+    # caller's task text) land in someone else's chat (SEC-198).
+    await _check_chat_access(user.id, req.chat_id)
 
     conversation_id = await _conversation_for_session(req.session_key)
 
@@ -1302,63 +2362,21 @@ async def delegate_agent(
         )
         on_complete = "notify"
 
-    # Web callers always act as themselves (mirror consult): honoring
-    # ``req.user_id`` here would let any authenticated session run a delegation
-    # under another user's memory scope and server grants.
+    # Web callers always act as themselves: honoring ``req.user_id`` here would
+    # let any authenticated session run a delegation under another user's memory
+    # scope and server grants.
     dt = await start_delegation(
         agent_slug=slug,
         user_id=user.id,
         chat_id=req.chat_id,
         server_name=req.server_name,
         task=req.task,
-        timeout_s=req.timeout_s,
+        timeout_s=timeout_s,
         conversation_id=conversation_id,
         session_key=req.session_key,
         on_complete=on_complete,
     )
     return {"task_id": dt.task_id, "status": dt.status}
-
-
-def _delivered(result: Any) -> bool:
-    """Did a ``send_message`` on the resolved bot actually deliver?
-
-    The ladder returns two different things: a live python-telegram-bot raises
-    on failure and returns a ``Message``, while ``_HttpBot`` never raises and
-    hands back Telegram's raw envelope (or ``None`` when it has no token). Only
-    the envelope can say "no" quietly, so that is the case worth reading.
-    """
-    if result is None:
-        return False
-    if isinstance(result, dict):
-        return bool(result.get("ok"))
-    return True
-
-
-async def _push_to_telegram(chat_id: int, text: str, parse_mode: str) -> bool:
-    """Push a notification through the shared outbound-bot ladder.
-
-    Retries once without ``parse_mode`` because the overwhelmingly common
-    failure is an unescaped ``_`` or ``*`` in text a model wrote: the user must
-    get the message, ugly, rather than not get it at all.
-    """
-    from condor.agents.delegate import resolve_bot
-
-    bot = resolve_bot()
-    if parse_mode:
-        try:
-            if _delivered(
-                await bot.send_message(
-                    chat_id=chat_id, text=text, parse_mode=parse_mode
-                )
-            ):
-                return True
-        except Exception:
-            log.debug("Notification rejected with parse_mode=%s", parse_mode)
-    try:
-        return _delivered(await bot.send_message(chat_id=chat_id, text=text))
-    except Exception:
-        log.warning("Could not deliver notification to chat %s", chat_id)
-        return False
 
 
 @router.post("/notify")
@@ -1379,7 +2397,12 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
     if not req.text:
         raise HTTPException(status_code=400, detail="text is required")
 
-    # The caller is the JWT, never ``req.user_id``: mirror consult/delegate so an
+    # The push target must belong to the caller — mirror the ``req.user_id``
+    # rule below for the outbound address, and refuse before any side effect
+    # (SEC-198).
+    await _check_chat_access(user.id, req.chat_id)
+
+    # The caller is the JWT, never ``req.user_id``: mirror delegate so an
     # authenticated session cannot write into another user's transcript.
     conversation_id = await _conversation_for_session(req.session_key)
     recorded = False
@@ -1396,9 +2419,27 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
                 exc_info=True,
             )
 
+    # The Telegram push and the dashboard bell (FEAT-048) are one decision, not
+    # two: ``announce`` resolves the outbound ladder once and files the bell
+    # entry exactly once — the bottom rung of that ladder records the message
+    # itself, so recording again here duplicated it on every install with no
+    # Telegram (ARCH-212). The bell entry is addressed to the caller themselves,
+    # never to ``req.chat_id``, which may legitimately be a group they belong to
+    # but which has no dashboard owner. This is what makes ``send_notification``
+    # succeed on an install with no Telegram: the tool already counts
+    # ``recorded`` as delivered, and ``sent`` now says the honest "no".
     sent = False
-    if req.chat_id:
-        sent = await _push_to_telegram(req.chat_id, req.text, req.parse_mode)
+    try:
+        from condor.notifications import announce
+
+        delivery = await announce(
+            user.id, req.chat_id, req.text, kind="agent", parse_mode=req.parse_mode
+        )
+        sent = delivery.sent
+        recorded = recorded or delivery.recorded
+    except Exception:
+        log.debug("Could not announce a notification for %s", user.id, exc_info=True)
+
     return {"sent": sent, "recorded": recorded}
 
 
@@ -1411,7 +2452,7 @@ async def list_strategies(slug: str, user: WebUser = Depends(get_current_user)):
     _get_agent(slug)
     strategies = _strategy_store().list(slug)
     summaries = await asyncio.gather(
-        *[_build_strategy_summary(s) for s in strategies],
+        *[_build_strategy_summary(s, user) for s in strategies],
         return_exceptions=True,
     )
     return [s for s in summaries if isinstance(s, StrategySummary)]
@@ -1437,12 +2478,13 @@ async def create_strategy(
     if req.config:
         from condor.agents.config import AgentConfig, save_agent_config
 
-        save_agent_config(strategy.dir, AgentConfig.from_dict(req.config))
+        save_agent_config(strategy.home, AgentConfig.from_dict(req.config))
 
-    learnings_path = strategy.dir / "learnings.md"
+    learnings_path = strategy.home / "learnings.md"
     if not learnings_path.exists():
-        learnings_path.write_text(
-            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n"
+        atomic_write_text(
+            learnings_path,
+            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n",
         )
 
     return StrategySummary(
@@ -1467,7 +2509,7 @@ async def create_default_strategy(slug: str, user: WebUser = Depends(get_current
         raise HTTPException(
             status_code=500, detail=f"Could not create a default loop for '{slug}'"
         )
-    return await _build_strategy_summary(strategy)
+    return await _build_strategy_summary(strategy, user)
 
 
 @router.get("/{slug}/strategies/{sslug}", response_model=StrategyDetail)
@@ -1476,7 +2518,7 @@ async def get_strategy(
 ):
     """Get strategy detail."""
     strategy = _get_strategy(slug, sslug)
-    strategy_dir = strategy.dir
+    strategy_dir = strategy.home
     run_key = _runkey(slug, sslug)
 
     md_path = strategy_dir / "strategy.md"
@@ -1491,7 +2533,10 @@ async def get_strategy(
 
     try:
         sessions_perf, _totals = await _compute_strategy_performance(
-            run_key, strategy_dir, strategy.default_config
+            run_key,
+            strategy_dir,
+            strategy.default_config,
+            _strategy_principal(strategy, user),
         )
     except Exception as e:
         log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
@@ -1541,7 +2586,9 @@ async def update_strategy_md(
 ):
     """Update strategy.md content."""
     strategy = _get_strategy(slug, sslug)
-    (strategy.dir / "strategy.md").write_text(req.content)
+    # Same as ``update_agent_md``: past ``StrategyStore``, so the fork is here.
+    target = fork_if_stock(slug, "strategies", strategy.slug, "strategy.md")
+    atomic_write_text(target, req.content)
     return {"updated": True}
 
 
@@ -1556,9 +2603,9 @@ async def update_strategy_config(
     strategy = _get_strategy(slug, sslug)
     from condor.agents.config import load_full_config, save_full_config
 
-    config_dict = load_full_config(strategy.dir, strategy.default_config)
+    config_dict = load_full_config(strategy.home, strategy.default_config)
     config_dict.update(req.config)
-    save_full_config(strategy.dir, config_dict)
+    save_full_config(strategy.home, config_dict)
     return {"updated": True, "config": config_dict}
 
 
@@ -1574,7 +2621,19 @@ async def delete_strategy(
             status_code=400,
             detail="Cannot delete a running strategy. Stop all instances first.",
         )
-    _strategy_store().delete(slug, sslug)
+    try:
+        removed = _strategy_store().delete(slug, sslug)
+    except ValueError as exc:
+        # A strategy whose ``strategy.md`` is still the shipped one is refused
+        # by the store (layering.stock_delete_error). Unhandled here that
+        # refusal reached the browser as a 500, which the delete dialog reports
+        # as "it may be running" — the one thing it certainly was not.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not remove the strategy folder — see the server log.",
+        )
     return {"deleted": True}
 
 
@@ -1592,7 +2651,10 @@ async def get_strategy_performance(
     strategy = _get_strategy(slug, sslug)
     run_key = _runkey(slug, sslug)
     sessions, totals = await _compute_strategy_performance(
-        run_key, strategy.dir, strategy.default_config
+        run_key,
+        strategy.home,
+        strategy.default_config,
+        _strategy_principal(strategy, user),
     )
     running_ids = {e.agent_id for e in _get_engines_for(slug, sslug) if e.is_running}
     for s in sessions:
@@ -1616,7 +2678,7 @@ async def get_session_executors(
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
     client, _server = await _get_client_for_strategy(
-        strategy.dir, strategy.default_config
+        strategy.home, strategy.default_config, _strategy_principal(strategy, user)
     )
     if client is None:
         return {
@@ -1625,25 +2687,26 @@ async def get_session_executors(
                 agent_id=agent_id, session_num=session_num
             ).model_dump(),
             "pnl_series": [],
+            "deployments": [],
         }
     # Bot-mode: the session operates named bots whose executors live in the bot
     # container, not the agent_id-keyed table. Merge the live positions of every
     # base this session CURRENTLY owns — the same last-owner-by-`since` rule
-    # _apply_bot_mode_pnl uses, so the two views never disagree. A session that
+    # apply_bot_mode_pnl uses, so the two views never disagree. A session that
     # handed its bot over shows only its own direct executors; the live open book
     # belongs to whoever operates the bot now.
     session_nums = [
         n
-        for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.dir)
+        for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.home)
         if k == "session"
     ]
-    bot_names = _current_owner_bases(
-        strategy.dir, strategy.default_config, session_nums, session_num
+    bot_names = current_owner_bases(
+        strategy.home, strategy.default_config, session_nums, session_num
     )
     # Slice the bot to this session's window for the same reason the rollup does:
     # merging the lifetime aggregate here made the session detail disagree with
     # the session's own row in the strategy list.
-    owned = _session_ownership(strategy.dir, strategy.default_config, session_num)
+    owned = session_ownership(strategy.home, strategy.default_config, session_num)
     since = min((b.since for b in owned if b.since > 0), default=0.0)
     perf = await fetch_agent_performance(
         client, agent_id, bot_names=bot_names, since=since
@@ -1686,10 +2749,24 @@ async def get_session_executors(
     except Exception as e:
         log.warning("pnl series for %s failed: %s", agent_id, e)
         pnl_series = []
+    # What this run put into the world (FEAT-100). Every input is already on this
+    # stack; the only new I/O is the actions log, and a run without one simply
+    # gets no tick numbers.
+    from condor.agents.actions import read_actions
+
+    session_dir = find_session_dir(strategy.home, session_num)
+    deployments = build_deployments(
+        owned,
+        bot_names,
+        perf,
+        read_actions(session_dir, limit=2000) if session_dir else [],
+        agent_id,
+    )
     return {
         "executors": perf.executors,
         "performance": model.model_dump(),
         "pnl_series": pnl_series,
+        "deployments": [d.model_dump() for d in deployments],
     }
 
 
@@ -1735,14 +2812,18 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     from condor.agents.engine import TickEngine
     from config_manager import get_config_manager
 
-    config_dict = load_full_config(strategy.dir, strategy.default_config)
+    config_dict = load_full_config(strategy.home, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
+
+    # The engine notifies ``chat_id`` on every tick, so the same ownership rule
+    # as /notify applies to it (SEC-198).
+    await _check_chat_access(user_id, req.chat_id)
 
     # ``TickEngine._resolve_server`` trades on ``config["server_name"]`` and the
     # request body is a free-form dict, so without this gate any authenticated
     # user could start a live loop on another user's stored credentials — the
-    # same check the config pin and consult/delegate already apply. A name the
+    # same check the config pin and delegate already apply. A name the
     # body asked for is held to it strictly; an inherited one (strategy default,
     # or the "local" that AgentConfig fills in) only matters when it resolves to
     # a real server, since otherwise the engine falls through to the caller's
@@ -1763,12 +2844,29 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
         if not cm.get_server(server_name):
             raise HTTPException(status_code=404, detail="Server not found")
 
+    # The model is held to the same up-front check as the server. The loop runs
+    # in the background, so a key that could not run used to answer "started"
+    # and then fail its first tick where nobody saw it.
+    from condor.agents.engine import resolve_agent_key
+    from condor.runtime.llm_client import agent_key_error
+
+    agent_key = resolve_agent_key(config_dict, strategy, agent)
+    problem = await agent_key_error(
+        agent_key,
+        user_id=user_id,
+        base_url_override=config_dict.get("model_base_url") or None,
+    )
+    if problem:
+        raise HTTPException(
+            status_code=422, detail=f"Model '{agent_key}' cannot run: {problem}"
+        )
+
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
-    # Web callers always act as themselves (mirror consult): honoring
+    # Web callers always act as themselves (mirror delegate): honoring
     # ``req.user_id`` would let any authenticated session start the engine
     # under another user's memory scope and accessible-servers fallback.
     new_engine = TickEngine(
@@ -1787,6 +2885,61 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     }
 
 
+# ── Loop lifecycle ──
+
+
+def _owns_engine(engine, user: WebUser) -> bool:
+    """Whether ``user`` is the one who started this loop.
+
+    The owner is the JWT id ``_start`` forces into the ``TickEngine``, which is
+    also the id ``_resolve_server`` keys credentials on — so it is the only
+    thing that may decide who gets to stop, wind down, pause or resume the run.
+    An engine with no owner (``user_id == 0``: a session restored from a status
+    file written before the field existed, whose strategy/agent frontmatter
+    named no creator either — see ``LoopSupervisor._owner_of``) belongs to
+    nobody and stays out of every non-admin's reach, the same call
+    ``routes/routines.py`` makes for an unowned routine instance.
+    """
+    owner = getattr(engine, "user_id", 0) or 0
+    return bool(owner) and owner == user.id
+
+
+def _require_engine_owner(engine, user: WebUser) -> None:
+    """Admins reach every loop; everyone else only their own (SEC-251)."""
+    if _is_admin(user):
+        return
+    if not _owns_engine(engine, user):
+        raise HTTPException(status_code=403, detail="Not your agent")
+
+
+def _authorized_engine(agent_id: str, user: WebUser):
+    """The named engine, 404 if absent and 403 if it belongs to someone else."""
+    from condor.agents.engine import get_engine
+
+    engine = get_engine(agent_id)
+    if not engine:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    _require_engine_owner(engine, user)
+    return engine
+
+
+def _authorized_engines_for(slug: str, sslug: str, user: WebUser) -> list:
+    """Every engine of this strategy the caller may act on (SEC-251).
+
+    ``get_engine``/``for_strategy`` are process-global registries, so the
+    no-``agent_id`` branch would otherwise broadcast over loops started by
+    other users. Filtered rather than checked one by one: someone else's engine
+    is simply not part of the set, and the caller gets the same "no running
+    strategy" a genuinely idle strategy gives them instead of a 403 admitting
+    the run exists.
+    """
+    return [
+        e
+        for e in _get_engines_for(slug, sslug)
+        if _is_admin(user) or _owns_engine(e, user)
+    ]
+
+
 @router.post("/{slug}/strategies/{sslug}/stop")
 async def stop_strategy(
     slug: str,
@@ -1796,14 +2949,9 @@ async def stop_strategy(
 ):
     """Stop a running strategy. If agent_id given, stop that instance; else all."""
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        await engine.stop()
+        await _authorized_engine(agent_id, user).stop()
     else:
-        engines = _get_engines_for(slug, sslug)
+        engines = _authorized_engines_for(slug, sslug, user)
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
         for engine in engines:
@@ -1826,14 +2974,9 @@ async def shutdown_strategy(
     """
     reason = "manual emergency stop"
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        await engine._run_shutdown(reason=reason)
+        await _authorized_engine(agent_id, user)._run_shutdown(reason=reason)
     else:
-        engines = _get_engines_for(slug, sslug)
+        engines = _authorized_engines_for(slug, sslug, user)
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
         for engine in engines:
@@ -1850,16 +2993,16 @@ async def pause_strategy(
 ):
     """Pause a running strategy."""
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine or not engine.is_running:
+        engine = _authorized_engine(agent_id, user)
+        if not engine.is_running:
             raise HTTPException(
                 status_code=404, detail=f"Agent '{agent_id}' not found or not running"
             )
         engine.pause()
     else:
-        engines = [e for e in _get_engines_for(slug, sslug) if e.is_running]
+        engines = [
+            e for e in _authorized_engines_for(slug, sslug, user) if e.is_running
+        ]
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
         engines[0].pause()
@@ -1875,18 +3018,249 @@ async def resume_strategy(
 ):
     """Resume a paused strategy."""
     if agent_id:
-        from condor.agents.engine import get_engine
-
-        engine = get_engine(agent_id)
-        if not engine:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        engine.resume()
+        _authorized_engine(agent_id, user).resume()
     else:
-        engines = _get_engines_for(slug, sslug)
+        engines = _authorized_engines_for(slug, sslug, user)
         if not engines:
             raise HTTPException(status_code=404, detail="No strategy found")
         engines[0].resume()
     return {"resumed": True}
+
+
+@router.post("/{slug}/strategies/{sslug}/restart-on-boot")
+async def set_restart_on_boot(
+    slug: str,
+    sslug: str,
+    req: RestartOnBootRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Opt this strategy's loop in or out of resuming after a Condor restart.
+
+    ``LoopSupervisor.reconcile_boot`` has always been able to restart an
+    interrupted run, but only for a session whose status file carries
+    ``restart_on_boot`` — and nothing ever set it, so every loop died at a
+    restart no matter what its owner wanted. This is the switch.
+
+    It writes in **two places on purpose**, because a strategy has two futures:
+
+    * the stored config, so the *next* session starts opted in; and
+    * every live engine's config, re-recording its status file immediately, so
+      the session already running is covered without being stopped first. That
+      second half is the one that matters in practice — you decide you want a
+      loop to survive restarts precisely while watching it run, and telling
+      someone to stop and restart a live trading loop to set that is telling
+      them to take the risk the switch exists to avoid.
+
+    Persisting to config.yml rather than the strategy's front matter keeps it
+    beside every other run field ``load_full_config`` overlays, which is what
+    ``_restart`` re-reads when the boot pass fires.
+    """
+    from condor.agents.config import load_full_config, save_full_config
+    from condor.runtime.loops import get_supervisor
+
+    strategy = _get_strategy(slug, sslug)
+
+    config = load_full_config(strategy.home, strategy.default_config)
+    config["restart_on_boot"] = req.enabled
+    save_full_config(strategy.home, config)
+
+    # The engines the caller may act on — someone else's loop is simply not in
+    # the set, the same rule stop/pause/resume follow (SEC-251).
+    supervisor = get_supervisor()
+    live = 0
+    for engine in _authorized_engines_for(slug, sslug, user):
+        engine.config["restart_on_boot"] = req.enabled
+        # Re-record rather than wait for the next tick: a loop on an hourly
+        # cadence would otherwise carry the old answer on disk for an hour,
+        # which is exactly the window a restart happens in. Its *current* state
+        # goes back down verbatim — ``LoopState``'s values are these strings —
+        # so recording the flag never also changes what the run claims to be.
+        supervisor.record(engine, engine.status)
+        live += 1
+
+    return {"restart_on_boot": req.enabled, "applied_to_running": live}
+
+
+def _live_ledgers(agent_slug: str, strategy_slug: str, session_dir=None) -> list:
+    """The ledgers a *running* loop for this strategy holds in memory.
+
+    An ownership repair written only to disk does not survive the next thing the
+    loop records: a tick engine keeps its ledger in memory and
+    :meth:`BotLedger._save` rewrites the whole file, so the entry a route just
+    deleted comes straight back — and the entry it just added disappears.
+    ``session_dir`` narrows to the one run the write targeted; without it, every
+    run of the strategy is patched, which is what an unassign wants.
+    """
+    out = []
+    try:
+        engines = _get_engines_for(agent_slug, strategy_slug)
+    except Exception:  # noqa: BLE001 - no supervisor is not a failed repair
+        return out
+    for engine in engines:
+        ledger = getattr(engine, "ledger", None)
+        if ledger is None:
+            continue
+        if (
+            session_dir is not None
+            and getattr(engine, "session_dir", None) != session_dir
+        ):
+            continue
+        out.append(ledger)
+    return out
+
+
+def _reset_ownership_caches(who: str) -> None:
+    """Drop the memoised fleet map, so a repair is visible now and not in a minute.
+
+    Best-effort on purpose: a stale cache is a display that lags by up to
+    ``REGISTRY_TTL``, and that must never turn a completed write into a failed
+    request.
+    """
+    try:
+        from condor.agents.fleet_map import reset_fleet_map_cache
+
+        reset_fleet_map_cache()
+    except Exception:  # noqa: BLE001
+        log.debug("%s: could not reset the fleet map cache", who, exc_info=True)
+
+
+@router.post("/{slug}/strategies/{sslug}/claim-bot")
+async def claim_bot(
+    slug: str,
+    sslug: str,
+    req: ClaimBotRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Attribute an already-running bot to one of this strategy's sessions.
+
+    The repair for a run whose ownership claim never landed. A session records
+    what it deployed in ``owned_bots.json``, and everything downstream —
+    ``condor.agents.attribution``, the strategy's performance panel, the fleet
+    browser's tree — keys on that file. When the claim is lost, the fleet trades
+    on unattributed and every money surface for the agent reads ``$0.00`` while
+    ``/bots`` shows the controllers live with real volume.
+
+    The claim used to be lost routinely: over the ACP bridge a tool call's
+    arguments arrive as ``rawInput``, and until that was translated at the
+    boundary nothing could see *which* bot a ``manage_bots`` call had deployed.
+    That is fixed for new runs, and this is the door for the ones that already
+    happened — plus for the honest general case of a bot deployed by hand, or by
+    a previous install, that someone now wants a strategy to answer for.
+
+    Deliberately **manual**. A name-based sweep is the tempting automation and
+    the wrong one: a bot outside the strategy's namespace looks exactly like
+    somebody else's bot, and claiming another run's trading is a mis-attribution
+    that quietly moves money between two agents' books. A person naming the bot
+    is the only evidence there is.
+
+    ``since`` is the load-bearing parameter. The ledger slices PnL over the
+    window it owns a bot for, so claiming at "now" credits the strategy with
+    nothing it has already made; passing the bot's deploy time is what makes the
+    back-fill actually report the run's history.
+    """
+    from condor.agents.config import load_full_config
+    from condor.agents.ownership import (
+        BotLedger,
+        bot_namespace,
+        declared_names,
+        reown,
+        strip_deploy_suffix,
+    )
+
+    strategy = _get_strategy(slug, sslug)
+
+    base = strip_deploy_suffix((req.bot_name or "").strip())
+    if not base:
+        raise HTTPException(status_code=400, detail="No bot name given")
+
+    sessions_root = strategy.home / "sessions"
+    if req.session_num:
+        session_dir = sessions_root / f"session_{req.session_num}"
+    else:
+        candidates = sorted(
+            (d for d in sessions_root.glob("session_*") if d.is_dir()),
+            key=lambda d: d.stat().st_mtime,
+        )
+        session_dir = candidates[-1] if candidates else None
+    if session_dir is None or not session_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail="This strategy has no session to attribute the bot to. "
+            "Start it once, then claim.",
+        )
+
+    # A claim is the same authority that disowns, so it outranks a standing
+    # disown rather than being silently skipped by the next adoption pass.
+    reown(strategy.home, base)
+
+    namespace = bot_namespace(slug, sslug)
+    config = load_full_config(strategy.home, strategy.default_config)
+    # ``enforced=False``: the claim is the evidence, and the namespace rule is
+    # exactly what a hand-deployed bot fails. ``declared`` carries the name so a
+    # later reopen of this ledger still reads it as owned.
+    ledger = BotLedger(
+        namespace,
+        session_dir,
+        declared=[*declared_names(config, namespace), base],
+        enforced=False,
+    )
+    ledger.adopt(base, req.since or None)
+    for live in _live_ledgers(slug, sslug, session_dir):
+        live.adopt(base, req.since or None)
+
+    _reset_ownership_caches("claim_bot")
+
+    return {
+        "claimed": base,
+        "session": session_dir.name,
+        "owned": [bot.base for bot in ledger.owned()],
+    }
+
+
+@router.post("/{slug}/strategies/{sslug}/unclaim-bot")
+async def unclaim_bot(
+    slug: str,
+    sslug: str,
+    req: UnclaimBotRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Take a bot back off this strategy — the undo of :func:`claim_bot`.
+
+    Claiming was one-way, and that made a misclick permanent in the one place it
+    is least affordable: the claimed window is sliced into the strategy's PnL,
+    so a bot attached to the wrong strategy moves real money onto the wrong
+    book, and the only repair was hand-editing JSON under ``.condor/``.
+
+    Worse, the obvious repair was wrong. Deleting the entry from the newest
+    session looks like it worked and undoes itself on the next restart:
+    ``_adopt_running_bots`` re-derives ownership from the namespace, from every
+    *prior* session's ledger, and from this session's recorded deploys. So this
+    goes through :func:`~condor.agents.ownership.disown`, which clears every
+    session and writes the standing "not ours" that adoption consults first.
+
+    Three surfaces have to agree or the unassign only looks done: the ledgers on
+    disk, the ledger a **running loop** holds in memory (it rewrites the whole
+    file on its next save, restoring exactly what was deleted), and the memoised
+    fleet map the browser reads.
+    """
+    from condor.agents.ownership import disown, strip_deploy_suffix
+
+    strategy = _get_strategy(slug, sslug)
+
+    base = strip_deploy_suffix((req.bot_name or "").strip())
+    if not base:
+        raise HTTPException(status_code=400, detail="No bot name given")
+
+    result = disown(strategy.home, base)
+    live = sum(1 for ledger in _live_ledgers(slug, sslug) if ledger.forget(base))
+
+    _reset_ownership_caches("unclaim_bot")
+
+    return {
+        "unclaimed": base,
+        "sessions": result["sessions"],
+        "live_runs": live,
+    }
 
 
 # ── Learnings ──
@@ -1898,7 +3272,7 @@ async def get_learnings(
 ):
     """Read a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
-    learnings_path = strategy.dir / "learnings.md"
+    learnings_path = strategy.home / "learnings.md"
     content = learnings_path.read_text() if learnings_path.exists() else ""
     return {"content": content}
 
@@ -1912,7 +3286,10 @@ async def update_learnings(
 ):
     """Update a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
-    (strategy.dir / "learnings.md").write_text(req.content)
+    # The third raw write, and the one with no fork question to ask: learnings
+    # are this install's output, so ``home`` is local by construction and there
+    # is no shipped counterpart to shadow.
+    atomic_write_text(strategy.home / "learnings.md", req.content)
     return {"updated": True}
 
 
@@ -1951,9 +3328,52 @@ async def set_strategy_state(
         return {"cleared": clear_state(namespace, req.key)}
     try:
         set_state(namespace, req.key, req.value, expires_in=req.expires_in)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+# ── Runs ──
+
+#: One page of the rail, and the ceiling a caller can ask for. The window is
+#: the rail's own state (a "show more" raises it), so the cap is what stops a
+#: hand-typed ``?limit=`` from turning a 5s poll into an archive dump.
+DEFAULT_RUN_LIMIT = 100
+MAX_RUN_LIMIT = 500
+
+
+@router.get("/{slug}/runs", response_model=RunsResponse)
+async def list_agent_runs(
+    slug: str,
+    limit: int = DEFAULT_RUN_LIMIT,
+    user: WebUser = Depends(get_current_user),
+):
+    """Every stretch of work this agent has done (FEAT-099, FEAT-111).
+
+    Four kinds, one time-ordered list: a loop's ``sessions/session_N/``, an
+    experiment's ``dry_runs/experiment_M.md``, a delegation's status record and
+    a conversation's ``meta.json``. Two of them live under a strategy and two
+    belong to no strategy at all — which is why an agent that only ever gets
+    chatted with, Condor included, used to have an empty Runs rail.
+
+    Deliberately **disk only** — no ``get_client``, no
+    ``_compute_strategy_performance``, no Hummingbot request of any kind — which
+    is exactly what licenses a 5s poll, the same bargain ``fleet-map`` makes.
+    Money is the opposite shape: it fans a backend fetch out per session id, and
+    putting it here would either make the rail slow or make it lie. A run's PnL
+    is read in the run overview, from the strategy's ``/performance`` query.
+
+    ``limit`` is the rail's window, not a filter: a chatty install has hundreds
+    of conversations and the rail asks for a bigger page when the reader wants
+    one. The two per-user kinds are scoped to the caller, because a conversation
+    is private — so two people legitimately see different rails for one agent,
+    and the rail says so rather than letting it read as data loss.
+    """
+    from condor.agents.all_runs import list_all_runs
+
+    _get_agent(slug)
+    rows = list_all_runs(slug, user.id, limit=max(1, min(limit, MAX_RUN_LIMIT)))
+    return RunsResponse(runs=[RunRow(**row) for row in rows])
 
 
 # ── Sessions ──
@@ -1965,7 +3385,7 @@ async def list_strategy_sessions(
 ):
     """List sessions for a strategy."""
     strategy = _get_strategy(slug, sslug)
-    sessions = list_sessions(strategy.dir)
+    sessions = list_sessions(strategy.home)
     return {"sessions": [SessionInfo(**s).model_dump() for s in sessions]}
 
 
@@ -1978,7 +3398,7 @@ async def get_journal(
 ):
     """Read journal.md for a session."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
     journal_path = session_dir / "journal.md"
@@ -2006,7 +3426,7 @@ async def get_session_canvas(
     from condor.agents import canvas as canvas_mod
 
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
     return {
@@ -2038,9 +3458,45 @@ async def get_session_report(
 
     run_key = _runkey(slug, sslug)
     source = f"{run_key}/session_{session_num}"
-    reports, _total = list_reports(source_type="routine", search=run_key, limit=100)
+    reports, _total = list_reports(
+        source_type="routine",
+        search=run_key,
+        limit=100,
+        owner_id=report_owner_filter(user),
+    )
     matched = [r for r in reports if r.get("source_name", "") == source]
     return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/actions")
+async def list_session_actions(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    """What this session actually **did**, oldest-last (FEAT-097).
+
+    One tail read of ``sessions/session_{N}/actions.jsonl`` — **no Hummingbot
+    API call** — so the reviewer's Actions block costs nothing to open. A
+    session that never acted, or one that ran before the log existed, answers
+    ``{"actions": []}`` rather than 404: having done nothing is a normal state,
+    not an error the caller should have to distinguish from a missing session.
+
+    A literal *last* segment, so the ``GET /{slug}`` catch-all does not shadow
+    it — only first segments are at risk there.
+    """
+    strategy = _get_strategy(slug, sslug)
+    session_dir = find_session_dir(strategy.home, session_num)
+    if not session_dir:
+        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
+
+    from condor.agents.actions import read_actions
+
+    limit = max(1, min(limit, 1000))
+    rows = read_actions(session_dir, limit=limit)
+    return {"actions": [ActionModel(**asdict(row)).model_dump() for row in rows]}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots")
@@ -2052,7 +3508,7 @@ async def list_snapshots(
 ):
     """List snapshots for a session."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -2070,7 +3526,7 @@ async def get_snapshot(
 ):
     """Read a specific snapshot."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = find_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.home, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -2090,7 +3546,7 @@ async def list_strategy_experiments(
 ):
     """List experiments for a strategy."""
     strategy = _get_strategy(slug, sslug)
-    experiments = list_experiments(strategy.dir)
+    experiments = list_experiments(strategy.home)
     return {"experiments": [ExperimentInfo(**e).model_dump() for e in experiments]}
 
 
@@ -2100,7 +3556,7 @@ async def get_experiment(
 ):
     """Read an experiment snapshot."""
     strategy = _get_strategy(slug, sslug)
-    path = find_experiment_file(strategy.dir, exp_num)
+    path = find_experiment_file(strategy.home, exp_num)
     if not path:
         raise HTTPException(status_code=404, detail=f"Experiment {exp_num} not found")
     return {"content": path.read_text(), "number": exp_num}
@@ -2123,7 +3579,7 @@ async def get_strategy_routines(
     from condor.routine_store import get_routine_store
 
     store = get_routine_store()
-    all_routines = store.list_routines()
+    all_routines = store.list_routines(owner_id=report_owner_filter(user))
     prefix = f"{slug}/"
     return [r for r in all_routines if r.get("name", "").startswith(prefix)]
 
@@ -2141,7 +3597,12 @@ async def get_strategy_reports(
 
     run_key = _runkey(slug, sslug)
     prefix = f"{run_key}/"
-    reports, _total = list_reports(source_type="routine", search=run_key, limit=limit)
+    reports, _total = list_reports(
+        source_type="routine",
+        search=run_key,
+        limit=limit,
+        owner_id=report_owner_filter(user),
+    )
     matched = [r for r in reports if r.get("source_name", "").startswith(prefix)]
     return {
         "reports": [ReportSummary(**r).model_dump() for r in matched],

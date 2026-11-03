@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 import platform
+import time
+from typing import Any
 
 from hummingbot_api_client import HummingbotAPIClient
 
@@ -157,5 +159,80 @@ class HummingbotClient:
             self._last_error = None
 
 
+# Trading rules change on the venue's own schedule (a listing, a tick-size change),
+# not on ours, so a minute-old answer is as good as a fresh one — and a create is
+# often one of a burst (a DCA ladder, a grid rebuilt level by level), which is
+# exactly where a round trip per call would show.
+TRADING_RULES_TTL_SECONDS = 60.0
+
+
+class TradingRulesCache:
+    """The venue's rules for one ``(connector, pair)``, held for a TTL.
+
+    ``get`` answers ``None`` whenever the venue cannot say — a connector with no
+    rules endpoint (every gateway/DEX one), an empty body, a pair the venue does
+    not list, a request that failed. That is the fail-open answer on purpose: only
+    a rule that is actually present may refuse an order, because a rules outage
+    must not become a trading outage.
+
+    The miss is cached alongside the hit, so a venue that has nothing to say is
+    asked once a minute rather than once an executor.
+    """
+
+    def __init__(self, ttl: float = TRADING_RULES_TTL_SECONDS):
+        self._ttl = ttl
+        self._entries: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+
+    def clear(self) -> None:
+        """Drop every cached answer. Used by tests and by a server reconfigure."""
+        self._entries.clear()
+
+    async def get(
+        self, client: Any, connector_name: str, trading_pair: str
+    ) -> dict[str, Any] | None:
+        """Return the pair's trading rules, or ``None`` if they are unknowable."""
+        key = (connector_name, trading_pair)
+        now = time.monotonic()
+        cached = self._entries.get(key)
+        if cached is not None and (now - cached[0]) < self._ttl:
+            return cached[1]
+
+        rules = await self._fetch(client, connector_name, trading_pair)
+        self._entries[key] = (now, rules)
+        return rules
+
+    @staticmethod
+    async def _fetch(
+        client: Any, connector_name: str, trading_pair: str
+    ) -> dict[str, Any] | None:
+        connectors = getattr(client, "connectors", None)
+        if connectors is None:
+            return None
+        try:
+            result = await connectors.get_trading_rules(
+                connector_name=connector_name, trading_pairs=[trading_pair]
+            )
+        except Exception as exc:
+            logger.warning(
+                "Trading rules unavailable for %s %s, proceeding without them: %s",
+                connector_name,
+                trading_pair,
+                exc,
+            )
+            return None
+
+        if not isinstance(result, dict) or not result:
+            return None
+        rules = result.get(trading_pair)
+        if rules is None and len(result) == 1:
+            # Asked for one pair, got one entry back under the venue's own
+            # spelling of it — that entry is the answer.
+            rules = next(iter(result.values()))
+        return rules if isinstance(rules, dict) else None
+
+
 # Global client instance
 hummingbot_client = HummingbotClient()
+
+# Process-level, shared by every executor create tool.
+trading_rules_cache = TradingRulesCache()

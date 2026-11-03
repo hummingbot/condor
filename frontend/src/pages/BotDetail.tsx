@@ -11,13 +11,12 @@ import {
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import yaml from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import { configToYaml } from "@/lib/configYaml";
+import { configToYaml, validateYamlMapping } from "@/lib/configYaml";
 
 export function BotDetail() {
   const { id } = useParams<{ id: string }>();
@@ -60,16 +59,7 @@ export function BotDetail() {
 
   const handleYamlChange = useCallback((val: string) => {
     setYamlValue(val);
-    try {
-      const parsed = yaml.load(val);
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        setYamlError("YAML must be a mapping (key: value)");
-      } else {
-        setYamlError(null);
-      }
-    } catch (e) {
-      setYamlError(e instanceof Error ? e.message : "Invalid YAML");
-    }
+    setYamlError(validateYamlMapping(val));
   }, []);
 
   const isDirty = yamlValue !== originalYaml;

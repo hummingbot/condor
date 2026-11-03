@@ -18,8 +18,7 @@ from condor.agents.session_report import SessionReport
 
 @pytest.fixture
 def reports_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(rep, "CHARTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(rep, "INDEX_FILE", tmp_path / "reports" / "reports_index.json")
+    monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
     return tmp_path
 
 
@@ -243,9 +242,9 @@ def _engine(tmp_path, monkeypatch, config):
     from condor.agents.engine import TickEngine
     from condor.agents.strategy import Strategy
 
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     strategy = Strategy(agent_slug="brigado", name="Grid")
-    strategy.dir.mkdir(parents=True, exist_ok=True)
+    strategy.home.mkdir(parents=True, exist_ok=True)
     agent = Agent(slug="brigado", name="Brigado")
     return TickEngine(
         agent=agent, strategy=strategy, config=dict(config), chat_id=1, user_id=1

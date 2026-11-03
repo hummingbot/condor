@@ -5,6 +5,8 @@ import logging
 
 from fastapi import APIRouter, Depends
 
+from condor.fetchers.market_data import fetch_current_price
+from condor.server_data_service import ServerDataType, get_server_data_service
 from condor.web.auth import require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
@@ -22,6 +24,14 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         notional_value = abs(float(amount)) * float(entry_price)
     except (ValueError, TypeError):
         notional_value = 0
+    # Which executors this row aggregates. The only attribution the API gives a
+    # held position: a position has no pool of its own, but an LP executor
+    # records the pool it opened in, so the pool workspace can tell a hold that
+    # belongs to the pool on screen from one held in another pool of the same
+    # pair on the same chain.
+    executor_ids = pos.get("executor_ids") or []
+    if not isinstance(executor_ids, list):
+        executor_ids = []
     return {
         "connector_name": pos.get("connector_name") or pos.get("connector") or "",
         "trading_pair": pos.get("trading_pair") or "",
@@ -38,6 +48,7 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         "realized_pnl": pos.get("realized_pnl_quote") or 0,
         "cum_fees": pos.get("cum_fees_quote") or 0,
         "executor_count": pos.get("executor_count") or 0,
+        "executor_ids": [str(i) for i in executor_ids],
         "source": source,
         "source_name": source_name,
     }
@@ -49,8 +60,6 @@ async def get_consolidated_positions(
     user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # Fetch executor positions and bot data in parallel
     async def fetch_executor_positions():
@@ -142,15 +151,13 @@ async def get_consolidated_positions(
         try:
             client = await cm.get_client(name)
             price_tasks = [
-                client.market_data.get_prices(connector_name=conn, trading_pairs=pair)
+                fetch_current_price(client, conn, pair)
                 for conn, pair in pairs_needing_price
             ]
             results = await asyncio.gather(*price_tasks, return_exceptions=True)
-            for (conn, pair), result in zip(pairs_needing_price, results):
-                if isinstance(result, dict):
-                    price = result.get("prices", {}).get(pair)
-                    if price:
-                        pairs_needing_price[(conn, pair)] = float(price)
+            for (conn, pair), price in zip(pairs_needing_price, results):
+                if isinstance(price, (int, float)) and price:
+                    pairs_needing_price[(conn, pair)] = float(price)
 
             for pos in all_positions:
                 if pos["current_price"] == 0:

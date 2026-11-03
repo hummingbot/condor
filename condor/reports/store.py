@@ -9,11 +9,9 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
+from condor import paths
 from condor.fsutil import atomic_write_json, atomic_write_text
 
-# reports/ is a repository-root output directory, not this source package.
-CHARTS_DIR = Path(__file__).resolve().parents[2] / "reports"
-INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
 
 _index_lock = asyncio.Lock()
@@ -26,20 +24,19 @@ _report_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _report_source: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
     "report_source", default=None
 )
+_report_owner: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "report_owner", default=None
+)
 
 
 def _charts_dir() -> Path:
-    # Resolve through the public package so existing runtime overrides of
-    # condor.reports.CHARTS_DIR keep working after the module-to-package split.
-    from . import CHARTS_DIR as configured_dir
-
-    return configured_dir
+    # reports/ is a repository-root output directory, not this source package;
+    # condor.paths owns it, so $CONDOR_REPORTS_DIR moves it after import.
+    return paths.reports_dir()
 
 
 def _index_file() -> Path:
-    from . import INDEX_FILE as configured_file
-
-    return configured_file
+    return paths.reports_index_path()
 
 
 def reset_last_report_id() -> None:
@@ -62,6 +59,34 @@ def attribute_to(agent: str | None):
         _report_agent.reset(token)
 
 
+def current_agent() -> str | None:
+    """The assistant reports are currently attributed to, if any.
+
+    Read by the nested ``call_routine`` runner: a nested run executes in its own
+    copy of the caller's context, so the caller's ``attribute_to`` is still in
+    scope here, and the inner routine can inherit the assistant that asked
+    instead of falling back to its own library owner (ARCH-217).
+    """
+    return _report_agent.get()
+
+
+@contextmanager
+def attribute_owner(user_id: int | None):
+    """Attribute reports saved within this block to an authenticated user id.
+
+    Every runner (routine store, code runner, Telegram routine handler, agent
+    session report) wraps execution with this so ``ReportBuilder.save`` records
+    who the report belongs to — the id the web routes then authorize reads and
+    deletes against (SEC-196). A falsy id (0, None) records no owner, which the
+    routes treat as admin-only, never world-readable.
+    """
+    token = _report_owner.set(int(user_id) if user_id else None)
+    try:
+        yield
+    finally:
+        _report_owner.reset(token)
+
+
 @contextmanager
 def default_source(source_type: str, source_name: str):
     """Stamp reports saved in this block that never called ``ReportBuilder.source()``.
@@ -78,6 +103,36 @@ def default_source(source_type: str, source_name: str):
         yield
     finally:
         _report_source.reset(token)
+
+
+@contextmanager
+def run_scope(
+    *,
+    owner: int | None = None,
+    agent: str | None = None,
+    source_type: str = "",
+    source_name: str = "",
+):
+    """The report-attribution scope every runner of user code enters.
+
+    One block, four effects: the last-report id is reset so the run reports only
+    what *it* saved, and reports saved inside are stamped with the owner allowed
+    to read them (SEC-196), the assistant that asked, and a fallback source that
+    keeps them visible on the Routines page. The routine store, the code runner,
+    the nested ``call_routine`` runner and both Telegram runners enter it here
+    instead of hand-copying the four calls, which had already drifted apart once
+    (ARCH-217).
+
+    ``bind_context`` stays at the call site: each runner publishes a different
+    context object, and ``condor.reports`` must not import ``condor.primitives``.
+    """
+    reset_last_report_id()
+    with (
+        attribute_owner(owner),
+        attribute_to(agent),
+        default_source(source_type, source_name),
+    ):
+        yield
 
 
 def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
@@ -100,6 +155,27 @@ def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
     if path.suffix.lower() != ".html" or not path.is_file():
         return None
     return path.read_text(encoding="utf-8"), entry["filename"]
+
+
+def resolve_report_asset(filename: str) -> Path | None:
+    """Resolve a persisted report asset (the plotly bundle) by name, or None.
+
+    The name is matched against a fixed allowlist pattern before it is joined,
+    and the resolved path must still land inside ``reports/_assets``. This is
+    deliberately *not* a ``/{name}`` handler that reads a caller-supplied path
+    — that shape is what SEC-044 and SEC-112 removed. Assets are vendored
+    library bytes, identical for every user and carrying no account data, so
+    unlike report bodies they need no authentication.
+    """
+    from . import rendering
+
+    if not rendering.PLOTLY_ASSET_PATTERN.fullmatch(filename):
+        return None
+    directory = rendering.assets_dir(_charts_dir()).resolve()
+    path = (directory / filename).resolve()
+    if not path.is_relative_to(directory) or not path.is_file():
+        return None
+    return path
 
 
 def _read_index() -> list[dict]:
@@ -126,12 +202,29 @@ def list_reports(
     tag: str | None = None,
     search: str | None = None,
     agent: str | None = None,
+    subject: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    owner_id: int | None = None,
 ) -> tuple[list[dict], int]:
+    """List index entries, newest first.
+
+    ``owner_id`` scopes the listing to one user's reports: entries whose
+    ``user_id`` differs — including legacy entries with no owner at all —
+    are dropped (fail closed, SEC-196). ``None`` means no owner filter,
+    which the web routes reserve for admins; internal callers that match
+    on ``source_name`` (routine run lists) also pass ``None``.
+
+    ``subject`` matches what a report is about exactly (FEAT-078): pass a key
+    built by :mod:`condor.reports.subjects`. Entries saved without a subject —
+    every entry written before the field existed — never match one, and a key
+    whose report has since been pruned simply matches nothing.
+    """
     entries = _read_index()
     entries.sort(key=lambda entry: entry.get("created_at", ""), reverse=True)
 
+    if owner_id is not None:
+        entries = [entry for entry in entries if entry.get("user_id") == owner_id]
     if source_type:
         entries = [
             entry for entry in entries if entry.get("source_type") == source_type
@@ -140,6 +233,8 @@ def list_reports(
         entries = [entry for entry in entries if tag in entry.get("tags", [])]
     if agent:
         entries = [entry for entry in entries if entry.get("agent") == agent]
+    if subject:
+        entries = [entry for entry in entries if entry.get("subject") == subject]
     if search:
         query = search.lower()
         entries = [
@@ -154,10 +249,16 @@ def list_reports(
     return entries[offset : offset + limit], total
 
 
-def list_reports_grouped() -> list[dict]:
-    """Return the latest report per source name, with count."""
+def list_reports_grouped(owner_id: int | None = None) -> list[dict]:
+    """Return the latest report per source name, with count.
+
+    ``owner_id`` scopes the grouping exactly as in ``list_reports``: ``None``
+    (admin) sees every entry, anyone else only entries stamped with their id.
+    """
     entries = _read_index()
     entries.sort(key=lambda entry: entry.get("created_at", ""), reverse=True)
+    if owner_id is not None:
+        entries = [entry for entry in entries if entry.get("user_id") == owner_id]
     groups: dict[str, dict] = {}
     for entry in entries:
         source_name = entry.get("source_name", "")
@@ -184,6 +285,7 @@ def list_reports_grouped() -> list[dict]:
 
 
 def get_report(report_id: str) -> dict | None:
+    """Return one report's index entry, or None when no report has that id."""
     for entry in _read_index():
         if entry["id"] == report_id:
             return entry
@@ -191,6 +293,7 @@ def get_report(report_id: str) -> dict | None:
 
 
 async def delete_report(report_id: str) -> bool:
+    """Delete a report's HTML and its index entry. True when one was removed."""
     async with _index_lock:
         entries = _read_index()
         new_entries = []

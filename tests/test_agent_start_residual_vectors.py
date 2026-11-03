@@ -223,8 +223,7 @@ class FakeEngine:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, cm):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(engine_module, "TickEngine", FakeEngine)
     FakeEngine.spawned = []
     AgentStore().create(name="Brigado", description="BRL market making")

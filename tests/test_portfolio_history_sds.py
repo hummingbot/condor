@@ -14,6 +14,7 @@ a second subscriber never spawns a duplicate poll.
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,10 @@ from condor.server_data_service import (
 from condor.web.models import WebUser
 from condor.web.routes.portfolio import get_portfolio_history
 from condor.web.ws_manager import WebSocketManager, _Connection
+
+# These connections are stand-ins with no config entry; `broadcast` re-reads
+# server access per frame since SEC-592 and would revoke them mid-test.
+pytestmark = pytest.mark.usefixtures("ws_access_granted")
 
 _USER = WebUser(id=1, role="admin")
 
@@ -110,9 +115,8 @@ def env(monkeypatch):
     def _bind(delay: float = 0.0):
         client = FakeClient(delay=delay)
         sds = _make_sds(client)
-        monkeypatch.setattr(
-            "condor.server_data_service.get_server_data_service", lambda: sds
-        )
+        for module in ("condor.web.routes.portfolio", "condor.web.ws_manager"):
+            monkeypatch.setattr(f"{module}.get_server_data_service", lambda: sds)
         monkeypatch.setattr(
             "condor.web.routes.portfolio.get_config_manager", lambda: _FakeCM()
         )
@@ -443,5 +447,7 @@ class _FakeWS:
     def __init__(self):
         self.sent: list[dict] = []
 
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
+    async def send_text(self, raw: str) -> None:
+        # The manager encodes each frame once per broadcast and fans out text
+        # (PERF-210); decode here so assertions stay in terms of the payload.
+        self.sent.append(json.loads(raw))

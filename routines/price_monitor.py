@@ -9,6 +9,7 @@ import time
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
+from condor.fetchers.market_data import fetch_current_price
 from config_manager import get_client
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -85,10 +86,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     continue
 
                 # Get current price
-                prices = await client.market_data.get_prices(
-                    connector_name=config.connector, trading_pairs=config.trading_pair
+                current_price = await fetch_current_price(
+                    client, config.connector, config.trading_pair
                 )
-                current_price = prices["prices"].get(config.trading_pair)
 
                 if not current_price:
                     await asyncio.sleep(config.interval_sec)

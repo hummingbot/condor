@@ -206,6 +206,9 @@ EVENTS: dict[str, dict[str, PropSpec]] = {
         "surface": _e(*SURFACES),
         # `agent_tools` rides here: a bounded map of tool name -> count.
         "tools": PropSpec("map"),
+        # Key-shaped runs the ingress scrubber found, as kind -> count. A
+        # finding never carries its value, so neither can this.
+        "secrets": PropSpec("map"),
     },
     # An MCP tool call observed from the out-of-process server, which cannot see
     # the turn it belongs to (see condor/telemetry/outbox.py). Not in the

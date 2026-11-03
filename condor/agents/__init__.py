@@ -15,7 +15,7 @@ from .config import (
     save_full_config,
 )
 from .engine import TickEngine
-from .journal import JournalManager, get_session_dir, next_session_number
+from .journal import JournalManager, next_session_number
 from .risk import RiskEngine, RiskLimits
 from .strategy import Strategy, StrategyStore, split_key
 
@@ -30,7 +30,6 @@ __all__ = [
     "save_full_config",
     "TickEngine",
     "JournalManager",
-    "get_session_dir",
     "next_session_number",
     "RiskEngine",
     "RiskLimits",

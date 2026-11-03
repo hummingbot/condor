@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor import dex_candles
+from condor.asyncutil import SingleFlight
+from condor.server_data_service import ServerDataType, get_server_data_service
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -17,8 +18,14 @@ _CANDLE_CACHE_TTL = 30.0  # seconds
 _CANDLE_CACHE_MAX = 50  # hard cap on entries (keys rotate every minute per chart)
 
 
-def _candle_cache_put(key: tuple, value: list, now: float) -> None:
-    """Insert into the candle cache, evicting expired entries and capping size."""
+def _candle_cache_put(key: tuple, value: list) -> None:
+    """Insert into the candle cache, evicting expired entries and capping size.
+
+    The stamp is taken here, at insert time, not at the start of the request:
+    a slow upstream fetch would otherwise write an entry already aged by its
+    own duration, and a fetch longer than the TTL would cache nothing at all.
+    """
+    now = time.monotonic()
     expired = [
         k for k, (ts, _) in _candle_cache.items() if now - ts >= _CANDLE_CACHE_TTL
     ]
@@ -35,10 +42,8 @@ def _candle_cache_put(key: tuple, value: list, now: float) -> None:
 # grid of executor panels for the same pair and window misses a cold cache in
 # all of them at once, and each miss used to fire its own upstream call — N
 # duplicate GeckoTerminal requests against the process-wide rate budget, or N
-# duplicate historical-candle calls to the API server. Same idiom as
-# `_snapshot_inflight` in condor/fetchers/bot_performance.py: one task per key,
-# popped by a done-callback so a failure is retried rather than remembered.
-_candle_inflight: dict[tuple, tuple[asyncio.AbstractEventLoop, asyncio.Task]] = {}
+# duplicate historical-candle calls to the API server.
+_candle_inflight = SingleFlight()
 
 
 from condor.fetchers.market_data import fetch_historical_candles
@@ -85,8 +90,6 @@ async def _fetch_dex_candles(
 @router.get("/servers/{name}/market/connectors")
 async def get_connectors(name: str, user: WebUser = Depends(require_server_access)):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name, ServerDataType.CANDLE_CONNECTORS
@@ -103,8 +106,6 @@ async def get_connected_exchanges(
 ):
     """Get connectors that have credentials configured (accounts connected)."""
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name, ServerDataType.CONNECTORS
@@ -119,17 +120,28 @@ async def get_connected_exchanges(
 async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
     """Venues the trade panel can offer, each with its independent traits.
 
-    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp"}, ...]}``. The panel
-    maps traits to UI decisions itself — which tabs and strategies to render is a
-    product decision, not a server fact; only the facts they rest on come from here.
+    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp", "credentialed"},
+    ...]}``, over the union of the credentialed connectors, the candle-capable
+    connectors and the chartable Gateway networks. The panel maps traits to UI
+    decisions itself — which tabs and strategies to render is a product decision,
+    not a server fact; only the facts they rest on come from here:
+
+    - ``hummingbot_market_data``: the ``/market/tickers``, ``/market/order-book``,
+      ``/market/trading-rules`` and ``/market/prices`` reads answer for this venue.
+      They are public, so a candle-capable venue qualifies without any keys. It
+      promises the venue is chartable, not that all four endpoints answer every
+      time — they degrade per endpoint, so consumers still tolerate an empty one.
+    - ``clmm_lp``: the venue is a Gateway network whose chain hosts a CLMM venue,
+      so an LP position can actually be opened on it.
+    - ``credentialed``: the venue reached the list from a trading source — account
+      credentials or a configured Gateway — rather than from the candle list alone.
+      False means read-only: chart and browse it, but do not offer to trade it.
 
     Answers ``{"venues": []}`` rather than a 502 when the server cannot be described
     at all, so the panel renders its empty state. The fetcher runs ``strict=True``,
-    so that failure is never cached; a gateway-only failure degrades inside the
-    fetcher and still reports the credentialed venues.
+    so that failure is never cached; a gateway- or candle-only failure degrades
+    inside the fetcher and still reports the venues the other sources supplied.
     """
-
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
         result = await get_server_data_service().get_or_fetch(
@@ -213,8 +225,6 @@ async def get_price(
     user: WebUser = Depends(require_server_access),
 ):
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
-
     try:
         result = await get_server_data_service().get_or_fetch(
             name,
@@ -277,7 +287,6 @@ async def get_trading_rules(
 ):
 
     from condor.fetchers._identifiers import IdentifierError, validate_identifier
-    from condor.server_data_service import ServerDataType, get_server_data_service
 
     # Rejected here, not in the fetcher: SDS records a failed fetch as an
     # error-only cache entry, so a bad connector would still mint a key.
@@ -316,6 +325,29 @@ async def get_trading_rules(
     return TradingRulesResponse(connector=connector, rules=rules)
 
 
+def _join_change(server: str, connector: str, tickers: list[TickerItem]) -> None:
+    """Fill in `change_pct` / `change_window_s` from the recorded price history.
+
+    A read of an in-memory ring (`condor.ticker_history`), not of the upstream:
+    the API has no change field on the CLOB path at all, so the reference comes
+    from the ticker-pool snapshots Condor takes off its own poll. Every row that
+    gets a number gets the window it was measured over with it.
+    """
+    from condor import ticker_history
+
+    ref = ticker_history.reference(server)
+    if not ref:
+        return
+
+    prices, window = ref
+    connector_prices = prices.get(connector) or {}
+    for t in tickers:
+        was = connector_prices.get(t.trading_pair)
+        if was and was > 0 and t.price > 0:
+            t.change_pct = (t.price / was - 1) * 100
+            t.change_window_s = window
+
+
 @router.get("/servers/{name}/market/tickers", response_model=TickersResponse)
 async def get_tickers(
     name: str,
@@ -340,6 +372,7 @@ async def get_tickers(
         for pair, data in (result.get("tickers") or {}).items()
         if isinstance(data, dict)
     ]
+    _join_change(name, connector, tickers)
     # Unpriced quotes sort last rather than mixing in at zero volume.
     tickers.sort(
         key=lambda t: (t.usd_volume is not None, t.usd_volume or 0), reverse=True
@@ -506,39 +539,23 @@ async def get_candles(
         return cached[1]
 
     # Cache miss: share one upstream fetch with every concurrent request on this
-    # key. Reuse an in-flight task only from the loop that created it — a task is
-    # bound to its loop and awaiting it from another one raises.
-    loop = asyncio.get_running_loop()
-    inflight = _candle_inflight.get(cache_key)
-    task = (
-        inflight[1]
-        if inflight is not None and inflight[0] is loop and not inflight[1].done()
-        # A finished task lingers until its done-callback runs; joining it would
-        # hand a fresh request the previous fetch's outcome (a failure included).
-        else None
+    # key. SingleFlight shields the shared task, so a request that goes away
+    # cannot cancel the fetch every other waiter on the key is riding on.
+    candles = await _candle_inflight.run(
+        cache_key,
+        lambda: _fetch_candles_upstream(
+            cm,
+            name,
+            connector,
+            trading_pair,
+            interval,
+            limit,
+            start_time,
+            end_time,
+            pool_address,
+        ),
     )
-    if task is None:
-        task = asyncio.ensure_future(
-            _fetch_candles_upstream(
-                cm,
-                name,
-                connector,
-                trading_pair,
-                interval,
-                limit,
-                start_time,
-                end_time,
-                pool_address,
-            )
-        )
-        _candle_inflight[cache_key] = (loop, task)
-        task.add_done_callback(lambda _t, k=cache_key: _candle_inflight.pop(k, None))
-
-    # Shielded: a browser that disconnects mid-request cancels this handler, and
-    # an unshielded `await task` would cancel the shared fetch out from under
-    # every other waiter on the same key.
-    candles = await asyncio.shield(task)
-    _candle_cache_put(cache_key, candles, now)
+    _candle_cache_put(cache_key, candles)
     return candles
 
 

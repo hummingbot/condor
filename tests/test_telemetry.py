@@ -25,10 +25,7 @@ def install(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", None, raising=False)
-    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY_URL", None, raising=False)
-    monkeypatch.setattr(
-        "condor.agents.agent._DATA_ROOT", str(tmp_path / "data"), raising=False
-    )
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path / "data"))
     cm_module.ConfigManager.reset_instance()
     emitter.discard_buffer()
     emitter.set_hosted(True)
@@ -46,23 +43,24 @@ def _grant(level="usage"):
     consent.grant(level)
 
 
-# ── The default is silence ───────────────────────────────────────────────
+# ── The default is the ping floor ────────────────────────────────────────
 
 
-def test_a_fresh_install_is_off_and_stays_off(install):
-    """No consent recorded means no telemetry — not "buffered until asked"."""
+def test_a_fresh_install_pings_and_says_nothing_more(install):
+    """No consent recorded means install counting only — the ping floor."""
     assert consent.state() == consent.UNKNOWN
-    assert consent.level() == consent.OFF
+    assert consent.level() == consent.PING
 
     for name in schema.EVENTS:
         emitter.emit(name, surface="telegram")
 
-    assert emitter.buffered() == 0
-    assert emitter.dropped() == 0
+    names = {e["name"] for e in emitter.drain()[0]}
+    assert names == set(schema.PING_EVENTS)
 
 
-def test_nothing_is_written_to_disk_when_off(install):
-    """Acceptance criterion: no condor/.runtime/telemetry directory is created."""
+def test_usage_events_write_nothing_to_disk_at_the_ping_floor(install):
+    """Acceptance criterion: no telemetry directory is created at all by
+    activity that the install has no consent to report."""
     emitter.set_hosted(False)  # the spooling path, which is the one that does I/O
     emitter.emit("command", name="portfolio", surface="telegram")
     assert not outbox.root().exists()
@@ -84,7 +82,7 @@ def test_env_off_overrides_a_granted_consent(install, monkeypatch):
 def test_a_nonsense_env_level_is_ignored_not_obeyed(install, monkeypatch):
     monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "yes-please", raising=False)
     consent.refresh()
-    assert consent.level() == consent.OFF
+    assert consent.level() == consent.PING  # the floor, not whatever was typed
 
 
 def test_ping_level_sends_only_the_adoption_events(install):
@@ -100,8 +98,8 @@ def test_ping_level_sends_only_the_adoption_events(install):
 # ── Nothing transmits ────────────────────────────────────────────────────
 
 
-def test_flush_is_a_no_op_without_consent(install, monkeypatch):
-    """A full session of activity must produce zero outbound requests."""
+def test_usage_activity_never_transmits_without_consent(install, monkeypatch):
+    """A full session of activity must produce zero outbound usage events."""
     calls = []
     monkeypatch.setattr(outbox, "post", lambda env: calls.append(env))
 
@@ -114,12 +112,39 @@ def test_flush_is_a_no_op_without_consent(install, monkeypatch):
     assert not outbox.root().exists()
 
 
-def test_no_endpoint_means_events_only_ever_reach_a_local_file(install):
-    """The shipped state: consent granted, but nowhere to send. Nothing leaves."""
+def test_the_ping_floor_actually_flushes_without_an_answer(install, monkeypatch):
+    """An unanswered install still delivers its adoption events — the count is
+    only worth anything if it leaves the machine."""
+    sent = []
+
+    async def ok_post(envelope):
+        sent.append(envelope)
+        return True
+
+    monkeypatch.setattr(outbox, "endpoint", lambda: "http://collector.invalid")
+    monkeypatch.setattr(outbox, "post", ok_post)
+
+    assert consent.state() == consent.UNKNOWN
+    emitter.emit("install")
+    assert asyncio.run(emitter.flush("test")) == 1
+    assert [e["name"] for env in sent for e in env["events"]] == ["install"]
+    assert sent[0]["level"] == consent.PING
+
+
+def test_the_endpoint_is_fixed_and_not_configurable(install, monkeypatch):
+    """The collector address is compiled in; no env var may redirect it."""
+    monkeypatch.setenv("CONDOR_TELEMETRY_URL", "http://attacker.invalid/v1/events")
+
+    assert outbox.endpoint() == outbox.COLLECTOR_URL
+    assert outbox.COLLECTOR_URL == "https://telemetry.hummingbot.org/v1/events"
+
+
+def test_no_endpoint_means_events_only_ever_reach_a_local_file(install, monkeypatch):
+    """With delivery impossible, events park in the capped outbox instead of leaving."""
     _grant("usage")
+    monkeypatch.setattr(outbox, "endpoint", lambda: None)
     emitter.emit("command", name="portfolio", surface="telegram")
 
-    assert outbox.endpoint() is None
     assert asyncio.run(emitter.flush("test")) == 0
 
     stashed = outbox.take_stashed()
@@ -164,7 +189,7 @@ def test_the_outbox_respects_its_cap(install):
     assert len(outbox.take_stashed()) == outbox.MAX_OUTBOX_EVENTS
 
 
-def test_denying_consent_destroys_what_was_collected(install):
+def test_withdrawing_usage_consent_destroys_what_was_collected(install):
     _grant("usage")
     emitter.emit("command", name="portfolio", surface="telegram")
     outbox.stash(
@@ -178,11 +203,163 @@ def test_denying_consent_destroys_what_was_collected(install):
     )
     assert outbox.outbox_path().exists()
 
-    consent.deny()
+    consent.set_level("ping")
 
+    assert consent.level() == consent.PING
+    assert emitter.buffered() == 0
+    assert not outbox.outbox_path().exists()
+
+
+def test_off_is_not_a_grantable_answer(install):
+    """The consent form has no "off": a stale or unrecognized answer lands on
+    ping, the floor, and set_level rejects "off" outright."""
+    from config_manager import get_config_manager
+
+    get_config_manager()  # materialize config.yml in the tmp cwd
+    assert consent.grant("off") == consent.PING
+    assert consent.state() == consent.GRANTED
+    assert consent.set_level("off") == consent.PING  # rejected, level unchanged
+    assert consent.level() == consent.PING
+
+
+# ── A refusal is honoured ────────────────────────────────────────────────
+
+
+def _refuse_like_an_older_build(tmp_path):
+    """Leave behind the `config.yml` the shipped "No thanks" button wrote, then
+    read it the way a fresh boot of the current build would."""
+    import yaml
+
+    import config_manager as cm_module
+
+    (tmp_path / "config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "telemetry": {
+                    "consent": "denied",
+                    "level": "off",
+                    "decided_at": "2026-01-01T00:00:00Z",
+                }
+            }
+        )
+    )
+    cm_module.ConfigManager.reset_instance()
+    consent.refresh()
+
+
+def test_a_refusal_recorded_by_an_older_build_survives_the_upgrade(install):
+    """The regression this file exists to prevent: an admin said no under the
+    build that had a "No thanks" button, and the upgrade that introduced the
+    ping floor must not read that recorded no as silence."""
+    from condor import telemetry
+
+    _refuse_like_an_older_build(install)
+
+    assert consent.state() == consent.DENIED
+    assert consent.level() == consent.OFF
+    assert telemetry.init(hosted=True) == consent.OFF
+
+    # Nothing materialized on the way through: no identity, no count, no event.
+    assert consent.install_id() == ""
+    emitter.emit("install")
+    emitter.emit("command", name="portfolio", surface="telegram")
+    taps.on_error(RuntimeError("boom"), where="test")
+
+    assert emitter.buffered() == 0
+    assert asyncio.run(emitter.flush("test")) == 0
+    assert not outbox.root().exists()
+    # And it is not asked again — the answer is on file.
+    assert consent.should_prompt("1.2.3") is False
+
+
+def test_the_environment_can_still_opt_a_refusing_install_back_in(install, monkeypatch):
+    """The override is authoritative in both directions, so an operator can
+    re-enable an install that refused without hand-editing `config.yml`."""
+    _refuse_like_an_older_build(install)
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "ping", raising=False)
+    consent.refresh()
+
+    assert consent.level() == consent.PING
+    assert consent.state() == consent.DENIED  # the stored answer is left intact
+
+
+def test_turning_reporting_off_is_a_withdrawal_not_a_pause(install):
+    """`deny()` is the in-product off switch: it destroys what was collected
+    and, unlike the env kill switch, is durable."""
+    _grant("usage")
+    emitter.emit("command", name="portfolio", surface="telegram")
+    outbox.stash(
+        [
+            {
+                "id": "x",
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "name": "command",
+            }
+        ]
+    )
+    assert outbox.outbox_path().exists()
+
+    assert consent.deny() == consent.OFF
+
+    assert consent.state() == consent.DENIED
     assert consent.level() == consent.OFF
     assert emitter.buffered() == 0
     assert not outbox.outbox_path().exists()
+
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert emitter.buffered() == 0
+
+
+class _FakeQuery:
+    def __init__(self, data):
+        self.data = data
+        self.text = None
+
+    async def answer(self):
+        return None
+
+    async def edit_message_text(self, text, **kwargs):
+        self.text = text
+
+
+class _FakeTap:
+    """An update carrying one inline-keyboard tap from the admin."""
+
+    def __init__(self, data):
+        self.callback_query = _FakeQuery(data)
+        self.effective_user = type("U", (), {"id": 7})()
+
+
+def test_a_stale_no_thanks_tap_is_recorded_as_the_refusal_it_is(install, monkeypatch):
+    """An "off" tap is the notice's "Turn off", or "No thanks" on a message an
+    older build sent. Rounding it up to the floor would be the same defect as
+    ignoring a stored refusal."""
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    _grant("usage")
+    # The real ConfigManager, so the refusal genuinely lands on disk; only the
+    # "is this the admin" question is answered for us.
+    monkeypatch.setattr(type(get_config_manager()), "is_admin", lambda self, uid: True)
+
+    tap = _FakeTap("telemetry:off")
+    asyncio.run(prompt.callback_handler(tap, None))
+
+    assert consent.state() == consent.DENIED
+    assert consent.level() == consent.OFF
+    assert "report nothing" in tap.callback_query.text
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert emitter.buffered() == 0
+
+
+def test_a_refusing_install_can_opt_back_in_from_the_dashboard(install):
+    """The way back on is a level, not a `.env` edit — otherwise "no" is a trap."""
+    _refuse_like_an_older_build(install)
+
+    assert consent.set_level(consent.PING) == consent.PING
+    assert consent.state() == consent.GRANTED
+    assert consent.level() == consent.PING
+    assert consent.install_id()  # identity is materialized only now
 
 
 # ── The leak test ────────────────────────────────────────────────────────
@@ -386,6 +563,205 @@ def test_the_install_context_carries_no_identity(install):
             assert identifying not in blob
 
 
+def test_the_envelope_says_which_surface_the_install_runs(install, monkeypatch):
+    """`mode` is one of two fixed names — the adoption signal local mode was
+    built for, and nothing that could point at a host or a chat."""
+    monkeypatch.setattr("utils.config.CONDOR_MODE", "local", raising=False)
+    assert context.config_shape()["mode"] == "local"
+    monkeypatch.setattr("utils.config.CONDOR_MODE", "telegram", raising=False)
+    assert context.config_shape()["mode"] == "telegram"
+
+
+# ── Every install is counted ─────────────────────────────────────────────
+
+
+def test_a_fresh_install_is_counted_without_anyone_answering(install):
+    """The claim that gives this feature its floor. `install` used to be emitted
+    only from the Telegram consent callback, so an install that never answered
+    — every local-mode one — was never counted at all."""
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+
+    assert consent.state() == consent.UNKNOWN  # nobody answered anything
+    assert [e["name"] for e in emitter.drain()[0]] == ["install"]
+
+
+def test_an_install_is_counted_once_however_many_times_it_boots(install):
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+    emitter.drain()
+
+    telemetry.init(hosted=True)
+    telemetry.init(hosted=True)
+    assert emitter.drain()[0] == []
+
+
+def test_answering_the_prompt_does_not_count_the_install_a_second_time(install):
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+    emitter.drain()
+
+    consent.grant("usage")
+    assert consent.mark_install_reported() is False
+
+
+def test_an_install_silenced_by_the_environment_is_never_counted(install, monkeypatch):
+    """`CONDOR_TELEMETRY=off` is the kill switch, and counting is not exempt
+    from it — nothing is recorded and config.yml is left as it was found."""
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "off", raising=False)
+    import condor.telemetry as telemetry
+
+    assert telemetry.init(hosted=True) == consent.OFF
+    assert emitter.drain()[0] == []
+    assert not (install / "config.yml").exists()
+
+
+# ── Asking, on both surfaces ─────────────────────────────────────────────
+
+
+def test_telegram_and_the_dashboard_disclose_exactly_the_same_thing():
+    """Two notices mean two chances to disagree about what is collected. The
+    dashboard strip renders `DISCLOSURE`; the Telegram message is built from it."""
+    from condor.telemetry.prompt import _TEXT, DISCLOSURE
+
+    assert DISCLOSURE["headline"] in _TEXT
+    assert DISCLOSURE["summary"] in _TEXT
+    assert DISCLOSURE["opt_out"] in _TEXT
+    assert DISCLOSURE["doc"] in _TEXT
+    for never in DISCLOSURE["never"]:
+        assert never in _TEXT
+
+
+def test_settings_offers_only_grantable_levels_and_the_notice_a_real_off():
+    """`off` is never a *level* an admin grants — a stray one would be rounded
+    up to the floor. Turning off is a recorded refusal, and the notice offers
+    it as a button of its own."""
+    from condor.telemetry.prompt import DISCLOSURE, OPTIONS, keyboard
+
+    levels = {option["level"] for option in OPTIONS}
+    assert levels == set(consent.ANSWER_LEVELS)
+    assert consent.OFF not in levels
+    assert [o["level"] for o in DISCLOSURE["options"]] == [o["level"] for o in OPTIONS]
+
+    buttons = [b for row in keyboard().inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ["telemetry:usage", "telemetry:off"]
+    assert [b.text for b in buttons] == [
+        DISCLOSURE["acknowledge"],
+        DISCLOSURE["turn_off"],
+    ]
+
+
+# ── Usage is on once the notice has been shown ───────────────────────────
+
+
+def test_usage_starts_only_once_the_notice_is_shown(install):
+    """The opt-out is honest only because nothing beyond a count is recorded
+    before the admin could have read that usage summaries are on."""
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert consent.level() == consent.PING
+    assert emitter.buffered() == 0
+
+    assert consent.mark_notice_shown() is True
+    assert consent.state() == consent.UNKNOWN  # told, not answered
+    assert consent.level() == consent.USAGE
+    assert consent.install_id()
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert emitter.buffered() == 1
+
+    assert consent.mark_notice_shown() is False  # once
+    assert consent.should_prompt("9.9.9") is False  # nothing left to tell
+
+
+@pytest.mark.parametrize("answer", ["ping", "off"])
+def test_the_notice_cannot_overrule_an_answer_already_given(install, answer):
+    """An install that chose install-count-only, or refused, keeps that answer:
+    the notice is for installs that never said anything."""
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    if answer == "off":
+        consent.deny()
+    else:
+        consent.grant(answer)
+    before = consent.level()
+
+    assert consent.mark_notice_shown() is False
+    assert consent.level() == before
+    assert not consent.notice_shown()
+
+
+def test_the_notice_cannot_overrule_the_environment(install, monkeypatch):
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "ping", raising=False)
+    consent.refresh()
+
+    assert consent.mark_notice_shown() is False
+    assert consent.level() == consent.PING
+
+
+class _FakeBot:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.sent = []
+
+    async def send_message(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("telegram is down")
+        self.sent.append(kwargs)
+
+
+def test_a_delivered_telegram_notice_turns_usage_on(install, monkeypatch):
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", "7", raising=False)
+    bot = _FakeBot()
+
+    assert asyncio.run(prompt.maybe_prompt_admin(bot)) is True
+    assert bot.sent and bot.sent[0]["text"] == prompt._TEXT
+    assert consent.notice_shown()
+    assert consent.level() == consent.USAGE
+
+
+def test_a_notice_that_failed_to_send_leaves_the_install_at_the_floor(
+    install, monkeypatch
+):
+    """An attempt is not a delivery. Nobody was told, so nothing turns on."""
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    get_config_manager()
+    monkeypatch.setattr("utils.config.ADMIN_USER_ID", "7", raising=False)
+
+    assert asyncio.run(prompt.maybe_prompt_admin(_FakeBot(fail=True))) is False
+    assert not consent.notice_shown()
+    assert consent.level() == consent.PING
+
+
+def test_got_it_on_the_notice_records_usage(install, monkeypatch):
+    from condor.telemetry import prompt
+    from config_manager import get_config_manager
+
+    monkeypatch.setattr(type(get_config_manager()), "is_admin", lambda self, uid: True)
+    consent.mark_notice_shown()
+
+    tap = _FakeTap("telemetry:usage")
+    asyncio.run(prompt.callback_handler(tap, None))
+
+    assert consent.state() == consent.GRANTED
+    assert consent.level() == consent.USAGE
+    assert "Settings" in tap.callback_query.text
+
+
 # ── Out of process ───────────────────────────────────────────────────────
 
 
@@ -428,8 +804,9 @@ def test_emit_costs_under_50_microseconds_on_the_hot_path(install):
     assert per_call < 50e-6, f"emit() took {per_call * 1e6:.1f}us"
 
 
-def test_emit_is_free_when_off(install):
-    """The gate a trading path actually pays for."""
+def test_emit_is_free_below_usage(install):
+    """The gate a trading path actually pays for: at the ping floor a usage
+    event is rejected by the schema gate before any work happens."""
     iterations = 2000
     started = time.perf_counter()
     for _ in range(iterations):
@@ -491,7 +868,8 @@ def test_a_callback_reports_module_and_verb_only(install):
 
 
 def test_the_telegram_tap_emits_nothing_before_consent(install):
-    """The acceptance criterion, at the seam rather than at the emitter."""
+    """The acceptance criterion, at the seam rather than at the emitter:
+    commands and callbacks are usage events, and the ping floor drops them."""
     assert consent.state() == consent.UNKNOWN
     for update in (
         _FakeUpdate(text="/portfolio"),

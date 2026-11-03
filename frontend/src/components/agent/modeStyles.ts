@@ -1,6 +1,6 @@
 // Single source of truth for the experiment execution-mode encoding
 // (dry_run = blue, run_once = amber). `badge` styles the ModeBadge pill;
-// `text` is shared with compact renderings (e.g. SessionReviewer's sidebar)
+// `text` is shared with compact renderings (e.g. the Lab's run rail)
 // that only need the mode color.
 export const MODE_STYLES: Record<string, { label: string; badge: string; text: string }> = {
   dry_run: { label: "DRY RUN", badge: "border-blue-500/30 bg-blue-500/10 text-blue-400", text: "text-blue-400" },

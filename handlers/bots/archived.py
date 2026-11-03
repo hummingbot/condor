@@ -717,26 +717,42 @@ async def show_timeline_chart(
         # Import chart functions
         from .archived_chart import calculate_pnl_from_trades
 
-        for db_path in databases:
-            summary = summaries.get(db_path) or await fetch_database_summary(
-                client, db_path
+        # Resolve summaries concurrently, preferring the cached ones. Only the
+        # databases missing from the cache are refetched.
+        missing = [db_path for db_path in databases if not summaries.get(db_path)]
+        fetched = dict(
+            zip(
+                missing,
+                await _gather_db_fetches(fetch_database_summary, client, missing),
             )
+        )
+        resolved = [
+            (db_path, summaries.get(db_path) or fetched.get(db_path))
+            for db_path in databases
+        ]
 
-            if summary:
-                # Fetch all trades for this bot to calculate accurate PnL
-                trades = await fetch_all_trades(client, db_path)
+        # Then walk the trade history of every bot that has a summary, again
+        # concurrently and bounded by the same semaphore. A database whose
+        # fetch failed degrades to None and is skipped, exactly as before.
+        with_summary = [(db_path, s) for db_path, s in resolved if s]
+        all_trades = await _gather_db_fetches(
+            fetch_all_trades, client, [db_path for db_path, _ in with_summary]
+        )
 
-                # Calculate PnL from trades
-                pnl_data = calculate_pnl_from_trades(trades)
+        for (db_path, summary), trades in zip(with_summary, all_trades):
+            trades = trades or []
 
-                bots_data.append(
-                    {
-                        "db_path": db_path,
-                        "summary": summary,
-                        "trades": trades,
-                        "pnl_data": pnl_data,
-                    }
-                )
+            # Calculate PnL from trades
+            pnl_data = calculate_pnl_from_trades(trades)
+
+            bots_data.append(
+                {
+                    "db_path": db_path,
+                    "summary": summary,
+                    "trades": trades,
+                    "pnl_data": pnl_data,
+                }
+            )
 
         if not bots_data:
             await loading_msg.edit_text(

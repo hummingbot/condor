@@ -12,18 +12,21 @@ import logging
 from typing import Any, Literal
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
-from mcp_servers.hummingbot_api.formatters import format_portfolio_as_table
+from mcp_servers.hummingbot_api.formatters import (
+    format_lp_positions_table,
+    format_portfolio_as_table,
+)
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
 
-# Upper bound on concurrent real-time CLMM pool reads through Gateway. These are
-# on-chain queries — the slowest calls in the overview — so they are fanned out
-# instead of walked one at a time, but bounded so an LP-heavy account never
+# Upper bound on concurrent real-time CLMM position reads through Gateway. These
+# are on-chain queries — the slowest calls in the overview — so they are fanned
+# out instead of walked one at a time, but bounded so an LP-heavy account never
 # bursts unlimited simultaneous Gateway/RPC requests (same bound the other
 # fan-outs in this repo use).
-MAX_CONCURRENT_POOL_FETCHES = 10
+MAX_CONCURRENT_POSITION_FETCHES = 10
 
 
 async def get_portfolio_overview(
@@ -43,8 +46,8 @@ async def get_portfolio_overview(
     1. Token Balances - Real-time holdings across CEX/DEX exchanges
     2. Perpetual Positions - Active perp futures positions from CEX
     3. LP Positions (CLMM) - Real-time concentrated liquidity positions from blockchain DEXs
-       - Queries database to find all pools user has interacted with
-       - Calls get_positions() for each pool to fetch real-time blockchain data
+       - Queries database to find the connector/network venues the user has used
+       - Calls positions-owned once per venue to fetch real-time blockchain data
        - Includes real-time fees and token amounts
     4. Active Orders - Currently open orders across all exchanges
 
@@ -73,14 +76,37 @@ async def get_portfolio_overview(
 
             async def get_balances():
                 try:
-                    return await client.portfolio.get_state(
+                    # Imported here, not at module scope: condor.fetchers.portfolio
+                    # pulls in condor.fetchers.connectors -> condor.pool_data (and
+                    # its geckoterminal/orca/dotenv chain), and this MCP server is
+                    # also run standalone (see settings.py). Same lazy-import
+                    # precedent as tools/geckoterminal.py.
+                    from condor.fetchers.portfolio import (
+                        UNIFIED_ACCOUNT_NOTE,
+                        dedupe_unified_accounts,
+                    )
+
+                    state = await client.portfolio.get_state(
                         account_names=account_names,
                         connector_names=connector_names,
                         refresh=refresh,
                     )
+                    # Hyperliquid unified accounts report the same collateral on
+                    # both the spot and perp connectors; summing raw double-counts it.
+                    # Dropping the perp copy can leave that connector with no rows
+                    # at all, so carry the note the dedupe hands back and say why —
+                    # the same sentence the dashboard shows (condor/web/routes/
+                    # portfolio.py). Without it a reader sees a perp connector with
+                    # no collateral and concludes there is no margin.
+                    state, unified = dedupe_unified_accounts(state)
+                    notes = [
+                        f"{connector} ({account}): {UNIFIED_ACCOUNT_NOTE}"
+                        for account, connector in sorted(unified)
+                    ]
+                    return state, notes
                 except Exception as e:
                     logger.warning(f"Failed to get balances: {str(e)}")
-                    return None
+                    return None, []
 
             tasks.append(get_balances())
             task_names.append("balances")
@@ -123,48 +149,48 @@ async def get_portfolio_overview(
                     if not db_positions:
                         return []
 
-                    # Step 2: Get unique pool addresses and their networks/connectors
-                    pools_map = {}  # {(connector, network, pool_address): True}
+                    # Step 2: Get the unique connector/network venues to query.
+                    # Gateway's positions-owned takes no pool filter — one call
+                    # per venue returns every position the wallet owns there,
+                    # each row carrying its own pool_address — so querying per
+                    # pool would just repeat the same list N times.
+                    venues = []
                     for pos in db_positions:
                         connector = pos.get("connector")
                         network = pos.get("network")
-                        pool_address = pos.get("pool_address")
-                        if connector and network and pool_address:
-                            pools_map[(connector, network, pool_address)] = True
+                        if connector and network and (connector, network) not in venues:
+                            venues.append((connector, network))
 
-                    # Step 3: Fetch real-time data for each pool, concurrently.
-                    # Total latency is one pool's round-trip (per semaphore slot)
-                    # instead of the sum over every pool. Each call keeps its own
-                    # try/except so one bad pool is logged and skipped exactly as
-                    # in the serial version, and results stay positionally aligned
-                    # with `pools` so every position is stamped with its own pool's
-                    # connector/network.
-                    pools = list(pools_map.keys())
-                    semaphore = asyncio.Semaphore(MAX_CONCURRENT_POOL_FETCHES)
+                    # Step 3: Fetch real-time data for each venue, concurrently.
+                    # Total latency is one venue's round-trip (per semaphore slot)
+                    # instead of the sum over every venue. Each call keeps its own
+                    # try/except so one bad venue is logged and skipped, and
+                    # results stay positionally aligned with `venues` so every
+                    # position is stamped with its own venue's connector/network.
+                    semaphore = asyncio.Semaphore(MAX_CONCURRENT_POSITION_FETCHES)
 
-                    async def fetch_pool(connector, network, pool_address):
+                    async def fetch_venue(connector, network):
                         async with semaphore:
                             try:
                                 return await client.gateway_clmm.get_positions_owned(
                                     connector=connector,
                                     network=network,
-                                    pool_address=pool_address,
                                     wallet_address=None,  # Uses default wallet
                                 )
                             except Exception as e:
                                 logger.warning(
-                                    f"Failed to get positions for pool {pool_address}: {str(e)}"
+                                    f"Failed to get positions for {connector} on "
+                                    f"{network}: {str(e)}"
                                 )
                                 return None
 
-                    pool_results = await asyncio.gather(
-                        *(fetch_pool(*pool) for pool in pools), return_exceptions=True
+                    venue_results = await asyncio.gather(
+                        *(fetch_venue(*venue) for venue in venues),
+                        return_exceptions=True,
                     )
 
                     real_time_positions = []
-                    for (connector, network, _pool_address), positions in zip(
-                        pools, pool_results
-                    ):
+                    for (connector, network), positions in zip(venues, venue_results):
                         if isinstance(positions, BaseException):
                             continue
                         if positions and isinstance(positions, list):
@@ -217,9 +243,8 @@ async def get_portfolio_overview(
         # ============================================
         # SECTION 1: Token Balances
         # ============================================
-        if include_balances and data.get("balances"):
-            balances_data = data["balances"]
-
+        balances_data, unified_notes = data.get("balances") or (None, [])
+        if include_balances and balances_data:
             # Calculate total value from balances
             balance_value = 0.0
             if balances_data and isinstance(balances_data, dict):
@@ -242,6 +267,11 @@ async def get_portfolio_overview(
                 if balances_data
                 else "No balances found"
             )
+            if unified_notes:
+                # One line per connector whose duplicated collateral was dropped,
+                # under the table: the rows it would have shown are gone, and this
+                # is the only place the reader is told where that money went.
+                balances_table = "\n\n".join([balances_table, *unified_notes])
 
             sections.append(
                 {
@@ -251,7 +281,7 @@ async def get_portfolio_overview(
                     "emoji": "💰",
                 }
             )
-        elif include_balances and not data.get("balances"):
+        elif include_balances and not balances_data:
             sections.append(
                 {
                     "title": "Token Balances",
@@ -316,55 +346,7 @@ async def get_portfolio_overview(
                 open_positions = lp_positions
 
                 # Format LP positions - show all open positions with real-time data
-                if open_positions:
-                    lp_table_lines = ["Status: OPEN positions", ""]
-                    lp_table_lines.append(
-                        "connector | trading_pair | lower_price | upper_price | position_address"
-                    )
-                    lp_table_lines.append("-" * 100)
-
-                    for pos in open_positions[:10]:  # Show up to 10 open positions
-                        connector = pos.get("connector", "N/A")
-                        trading_pair = pos.get("trading_pair", "N/A")
-                        lower_price = pos.get("lower_price", "N/A")
-                        upper_price = pos.get("upper_price", "N/A")
-                        position_address = pos.get("position_address", "N/A")
-
-                        # Format prices
-                        if lower_price != "N/A" and isinstance(
-                            lower_price, (int, float, str)
-                        ):
-                            try:
-                                lower_price = f"{float(lower_price):.4f}"
-                            except:
-                                pass
-
-                        if upper_price != "N/A" and isinstance(
-                            upper_price, (int, float, str)
-                        ):
-                            try:
-                                upper_price = f"{float(upper_price):.4f}"
-                            except:
-                                pass
-
-                        # Truncate position address
-                        if position_address != "N/A" and len(position_address) > 20:
-                            position_address = (
-                                f"{position_address[:8]}...{position_address[-6:]}"
-                            )
-
-                        lp_table_lines.append(
-                            f"{connector[:10]:10} | {trading_pair[:15]:15} | {str(lower_price)[:11]:11} | {str(upper_price)[:11]:11} | {position_address}"
-                        )
-
-                    if len(open_positions) > 10:
-                        lp_table_lines.append(
-                            f"... and {len(open_positions) - 10} more open positions"
-                        )
-
-                    lp_table = "\n".join(lp_table_lines)
-                else:
-                    lp_table = "No active LP positions found"
+                lp_table = format_lp_positions_table(open_positions)
 
                 sections.append(
                     {

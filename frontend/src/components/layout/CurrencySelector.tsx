@@ -1,6 +1,7 @@
 import { ChevronDown, DollarSign } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import {
   useDisplayCurrency,
   CURRENCY_OPTIONS,
@@ -11,28 +12,13 @@ import {
 export function CurrencySelector() {
   const { currency, setCurrency } = useDisplayCurrency();
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, []);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={setAnchor}
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-haspopup="listbox"
@@ -46,37 +32,41 @@ export function CurrencySelector() {
         />
       </button>
 
-      {open && (
-        <div className="absolute right-0 top-full z-50 mt-1.5 min-w-[140px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
-          <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            Display Currency
-          </div>
-          {CURRENCY_OPTIONS.map((c: DisplayCurrency) => (
-            <button
-              key={c}
-              onClick={() => {
-                setCurrency(c);
-                setOpen(false);
-              }}
-              className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-sm transition-colors hover:bg-[var(--color-surface-hover)] ${
-                c === currency
-                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                  : ""
-              }`}
-            >
-              <span className="w-5 text-center text-xs text-[var(--color-text-muted)]">
-                {CURRENCY_SYMBOLS[c]}
-              </span>
-              <span>{c}</span>
-              {c === currency && (
-                <span className="ml-auto text-[10px] font-medium text-[var(--color-primary)]">
-                  ✓
-                </span>
-              )}
-            </button>
-          ))}
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={close}
+        align="right"
+        className="min-w-[140px] py-1"
+      >
+        <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+          Display Currency
         </div>
-      )}
-    </div>
+        {CURRENCY_OPTIONS.map((c: DisplayCurrency) => (
+          <button
+            key={c}
+            onClick={() => {
+              setCurrency(c);
+              setOpen(false);
+            }}
+            className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-sm transition-colors hover:bg-[var(--color-surface-hover)] ${
+              c === currency
+                ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                : ""
+            }`}
+          >
+            <span className="w-5 text-center text-xs text-[var(--color-text-muted)]">
+              {CURRENCY_SYMBOLS[c]}
+            </span>
+            <span>{c}</span>
+            {c === currency && (
+              <span className="ml-auto text-[10px] font-medium text-[var(--color-primary)]">
+                ✓
+              </span>
+            )}
+          </button>
+        ))}
+      </AnchoredMenu>
+    </>
   );
 }

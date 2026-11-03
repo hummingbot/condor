@@ -1,4 +1,9 @@
-"""Server list and status tools."""
+"""Server list and status tools.
+
+``list`` also answers "who am I and where am I pointed" — the role/admin flags
+and the active LLM identity that used to live in a separate ``get_user_context``
+tool (FEAT-067). One tool, one question.
+"""
 
 from mcp_servers.condor.settings import settings
 
@@ -24,7 +29,34 @@ def list_servers() -> dict:
                 "is_active": name == active_server,
             }
         )
-    return {"servers": servers, "active_server": active_server}
+    user_role = cm.get_user_role(settings.user_id)
+    result = {
+        "servers": servers,
+        "active_server": active_server,
+        "user_role": user_role.value if user_role else None,
+        "is_admin": cm.is_admin(settings.user_id),
+    }
+
+    # Which model the user is on, and which custom endpoints they've saved.
+    # New Agents inherit active_agent_key by default, so the coordinator should
+    # never invent one — an invented key names a backend that may not exist.
+    try:
+        from condor.preferences import (
+            get_active_agent_key,
+            get_custom_providers,
+            load_user_data_for,
+        )
+
+        result["active_agent_key"] = get_active_agent_key(settings.user_id)
+        result["custom_llm_endpoints"] = [
+            p["name"]
+            for p in get_custom_providers(load_user_data_for(settings.user_id))
+        ]
+    except Exception:
+        result["active_agent_key"] = None
+        result["custom_llm_endpoints"] = []
+
+    return result
 
 
 async def check_status(name: str | None) -> dict:

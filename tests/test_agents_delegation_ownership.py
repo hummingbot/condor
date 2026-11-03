@@ -153,13 +153,32 @@ def test_stop_allows_owner_and_admin():
 
 
 def _on_disk(monkeypatch, *records):
-    """Pretend these delegations are on disk and nothing is in the registry."""
+    """Pretend these delegations are on disk and nothing is in the registry.
+
+    The stub honours the scope the routes now pass, because that scope *is* the
+    guard (FEAT-051): ``user_id=None`` is the admin read, anything else opens
+    one person's directory and can only ever see what is in it.
+    """
     by_id = {r["task_id"]: r for r in records}
+
+    def visible(user_id):
+        if user_id is None:
+            return list(by_id.values())
+        return [r for r in by_id.values() if r.get("user_id") == user_id]
+
     monkeypatch.setattr(
-        history_module, "list_history", lambda **kw: list(by_id.values())
+        history_module, "list_history", lambda *, user_id=None, **kw: visible(user_id)
     )
-    monkeypatch.setattr(history_module, "read_history", lambda tid: by_id.get(tid))
-    monkeypatch.setattr(history_module, "read_history_events", lambda tid: ([], "# md"))
+    monkeypatch.setattr(
+        history_module,
+        "read_history",
+        lambda user_id, tid: next(
+            (r for r in visible(user_id) if r["task_id"] == tid), None
+        ),
+    )
+    monkeypatch.setattr(
+        history_module, "read_history_events", lambda user_id, tid: ([], "# md")
+    )
 
 
 def _record(task_id: str, user_id: int, status: str = "done") -> dict:
@@ -195,9 +214,11 @@ def test_history_hides_unowned_records_from_everyone_but_admin(monkeypatch):
 
     assert _ids(asyncio.run(list_delegation_history(user=OWNER))) == set()
     assert _ids(asyncio.run(list_delegation_history(user=ADMIN))) == {"h-orphan"}
+    # 404, not 403: it is outside every user directory, so a scoped read cannot
+    # name it at all. Unreachable is a stronger answer than refused.
     with pytest.raises(HTTPException) as exc:
         asyncio.run(get_delegation_status("h-orphan", user=OWNER))
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 404
 
 
 def test_history_rows_carry_no_result_body(monkeypatch):

@@ -7,6 +7,10 @@ type ThemeColors = {
   bg: string;
   grid: string;
   text: string;
+  /** `--color-text-muted`: labels and secondary rows inside chart tooltips. */
+  textMuted: string;
+  /** `--color-border`: separator rules and chips inside chart tooltips. */
+  border: string;
 };
 
 // Cached theme colors — computed once and refreshed only when the theme changes.
@@ -25,6 +29,8 @@ function readThemeColors(): ThemeColors {
     bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
     grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
     text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
+    textMuted: style.getPropertyValue("--color-text-muted").trim() || "#6b7994",
+    border: style.getPropertyValue("--color-border").trim() || "#1c2541",
   };
 }
 

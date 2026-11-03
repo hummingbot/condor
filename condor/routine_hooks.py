@@ -47,14 +47,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Any
 
+from condor import paths
 from condor.fsutil import atomic_write_json
 
 logger = logging.getLogger(__name__)
-
-_HOOKS_FILE = Path("data") / "routine_hooks.json"
 
 # Valid trigger conditions.
 _TRIGGERS = ("success", "always", "failure")
@@ -162,20 +160,21 @@ def _normalize(entry: Any, routine_name: str) -> dict[str, dict]:
 
 
 def _read_all() -> dict[str, dict[str, dict]]:
-    if not _HOOKS_FILE.exists():
+    path = paths.routine_hooks_path()
+    if not path.exists():
         return {}
     try:
-        data = json.loads(_HOOKS_FILE.read_text())
+        data = json.loads(path.read_text())
         if not isinstance(data, dict):
             return {}
         return {name: _normalize(entry, name) for name, entry in data.items()}
     except Exception:  # noqa: BLE001
-        logger.warning("Failed to read %s; treating as empty", _HOOKS_FILE)
+        logger.warning("Failed to read %s; treating as empty", path)
         return {}
 
 
 def _write_all(data: dict[str, dict[str, dict]]) -> None:
-    atomic_write_json(_HOOKS_FILE, data, indent=2)
+    atomic_write_json(paths.routine_hooks_path(), data, indent=2)
 
 
 def _default_config() -> dict:
@@ -264,11 +263,14 @@ def _resolve_report_html(report_id: str | None, result) -> tuple[str, str]:
     """
     if report_id:
         try:
-            from condor.reports import get_report_raw_html
+            from condor.reports import get_report_raw_html, hydrate
 
             found = get_report_raw_html(report_id)
             if found:
-                return found
+                # Telegram is off-origin: nothing there resolves the shared
+                # plotly bundle a stored report references, so inline it back
+                # (PERF-267). A report with no reference passes through.
+                return hydrate(found[0]), found[1]
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not load report %s: %s", report_id, e)
 

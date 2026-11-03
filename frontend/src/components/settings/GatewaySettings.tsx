@@ -10,8 +10,9 @@ import {
   RefreshCw,
   Square,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { venuesQueryKey } from "@/components/market/useVenues";
 import { useServer } from "@/hooks/useServer";
 import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { api } from "@/lib/api";
@@ -98,6 +99,32 @@ function NetworkConfigEditor({ server, networkId }: { server: string; networkId:
   const changed = Object.entries(draft).filter(
     ([key, value]) => value !== String(config[key] ?? ""),
   );
+
+  // Non-owners get server-side masked values (SEC-197) and their saves are
+  // refused anyway (SEC-166), so render a read-only view instead of a form
+  // that could only fail — or worse, round-trip a masked value into a save.
+  const readOnly = !isOwner || data.redacted === true;
+
+  if (readOnly) {
+    return (
+      <div className="space-y-2 p-3">
+        {editableEntries.map(([key, value]) => (
+          <div key={key} className="flex items-center gap-2">
+            <label
+              className="w-44 shrink-0 truncate font-mono text-xs text-[var(--color-text-muted)]"
+              title={key}
+            >
+              {key}
+            </label>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--color-text)]">
+              {String(value ?? "")}
+            </span>
+          </div>
+        ))}
+        <p className="pt-1 text-xs text-[var(--color-text-muted)]">{OWNER_ONLY_HINT}</p>
+      </div>
+    );
+  }
 
   const save = () => {
     const updates: Record<string, unknown> = {};
@@ -311,6 +338,20 @@ export function GatewaySettings() {
     enabled: !!server,
     refetchInterval: 10000,
   });
+
+  // The server invalidates its own VENUES cache the moment Gateway is first
+  // observed running again (CORR-614), but this browser's own `["venues",
+  // server]` query (staleTime 5m) is a separate cache that nothing else
+  // refetches — invalidate it on the same false → true transition this
+  // 10s poll already observes, or the Trade/LP panels keep the DEX venues
+  // missing for up to 5 more minutes after Gateway comes back up.
+  const wasRunningRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (status?.running && wasRunningRef.current === false) {
+      qc.invalidateQueries({ queryKey: venuesQueryKey(server) });
+    }
+    wasRunningRef.current = status?.running;
+  }, [status?.running, server, qc]);
 
   const { data: logsData, isFetching: fetchingLogs } = useQuery({
     queryKey: ["gateway-logs", server],

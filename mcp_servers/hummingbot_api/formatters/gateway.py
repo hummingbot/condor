@@ -4,38 +4,8 @@ Gateway formatters for the Hummingbot MCP server.
 
 from typing import Any
 
-
-def format_gateway_container_result(result: dict[str, Any]) -> str:
-    """Format gateway container action results into a human-readable string."""
-    result_action = result.get("action", "")
-
-    if result_action == "get_status":
-        status = result.get("status", {})
-        running = status.get("running", False)
-        container_id = status.get("container_id")
-        created_at = status.get("created_at")
-
-        container_id_display = f"{container_id[:12]}..." if container_id else "None"
-        created_at_display = created_at[:19] if created_at else "None"
-
-        return (
-            f"Gateway Container Status:\n\n"
-            f"Status: {'Running ✓' if running else 'Stopped ✗'}\n"
-            f"Container ID: {container_id_display}\n"
-            f"Image: {status.get('image') or 'None'}\n"
-            f"Port: {status.get('port') or 'None'}\n"
-            f"Created: {created_at_display}"
-        )
-
-    elif result_action == "get_logs":
-        logs = result.get("logs", "No logs available")
-        return f"Gateway Container Logs:\n\n{logs}"
-
-    elif result_action in ["start", "stop", "restart"]:
-        message = result.get("message", "")
-        return f"Gateway Container: {message}"
-
-    return f"Gateway Container Result: {result}"
+from .base import format_number, format_timestamp, truncate_address
+from .table_builder import ColumnDef, TableBuilder
 
 
 def format_gateway_config_result(result: dict[str, Any]) -> str:
@@ -101,7 +71,7 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
                 output += f"- {chain_name}: {address}\n"
             return output
 
-    elif result_action in ["add", "delete", "update"]:
+    elif result_action in ["add", "delete"]:
         message = result.get("result", {}).get("message", "")
         return f"Gateway Config {result_action.title()}: {message}"
 
@@ -111,20 +81,68 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
     return f"Gateway Configuration Result: {result}"
 
 
+def _format_swap_amount(value: Any) -> str:
+    """Format a swap amount or price without K/M compaction."""
+    return format_number(value, decimals=4, compact=False)
+
+
+SWAP_SEARCH_COLUMNS = [
+    ColumnDef(
+        name="time",
+        key=["timestamp", "created_at"],
+        width=11,
+        formatter=format_timestamp,
+    ),
+    ColumnDef(name="connector", key="connector", width=14),
+    ColumnDef(name="network", key="network", width=19),
+    ColumnDef(name="pair", key="trading_pair", width=13),
+    ColumnDef(name="side", key="side", width=4),
+    ColumnDef(
+        name="in",
+        key="input_amount",
+        width=10,
+        align="right",
+        formatter=_format_swap_amount,
+    ),
+    ColumnDef(
+        name="out",
+        key="output_amount",
+        width=10,
+        align="right",
+        formatter=_format_swap_amount,
+    ),
+    ColumnDef(
+        name="price",
+        key="price",
+        width=10,
+        align="right",
+        formatter=_format_swap_amount,
+    ),
+    ColumnDef(name="status", key="status", width=9),
+    ColumnDef(
+        name="tx",
+        key="transaction_hash",
+        width=17,
+        formatter=lambda tx_hash: truncate_address(str(tx_hash)),
+    ),
+]
+
+
 def format_gateway_swap_result(action: str, result: dict[str, Any]) -> str:
     """Format gateway swap action results into a human-readable string."""
     if action == "search" and isinstance(result, dict):
         filters = result.get("filters", {})
         pagination = result.get("pagination", {})
-        swaps = result.get("result", {}).get("data", [])
+        swaps = result.get("result", {}).get("data", []) or []
 
-        return (
+        header = (
             f"Gateway Swaps Search Result:\n"
-            f"Total Swaps Found: {len(swaps)}\n"
+            f"Swaps Returned: {len(swaps)}\n"
             f"Limit: {pagination.get('limit', 'N/A')}, Offset: {pagination.get('offset', 'N/A')}\n"
-            f"Filters: {filters if filters else 'None'}\n\n"
-            f"Swaps: {swaps}"
+            f"Filters: {filters if filters else 'None'}"
         )
+        builder = TableBuilder(SWAP_SEARCH_COLUMNS, empty_message="No swaps found.")
+        return builder.build_with_title(swaps, header)
 
     return f"Gateway Swap Result: {result}"
 
@@ -196,19 +214,184 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
                 )
         return "\n".join(lines)
 
-    if action in ("quote_swap", "quote_liquidity") and isinstance(payload, dict):
+    if action == "quote_liquidity" and isinstance(payload, dict):
         return f"{header}\n{payload}"
 
     if action in (
-        "execute_swap",
         "add_liquidity",
         "remove_liquidity",
         "create_pool",
     ) and isinstance(payload, dict):
-        sig = payload.get("signature")
-        extra = ""
+        # AMM write responses are chain-neutral: the tx identifier is
+        # `signature` (AMMTransactionResponse / AMMCreatePoolResponse), not
+        # `transaction_hash` as on the CLMM surface.
+        lines = [
+            header,
+            f"Tx: {payload.get('signature')}  Status: {payload.get('status')}",
+        ]
         if action == "create_pool":
-            extra = f"\nPool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
-        return f"{header}\nSignature/Tx: {sig}  Status: {payload.get('status')}{extra}"
+            lines.append(
+                f"Pool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
+            )
+            return "\n".join(lines)
+
+        # What the transaction actually moved. hummingbot-api passes Gateway's `data`
+        # through untyped on this surface, so these keys are camelCase — the CLMM
+        # branches read snake_case because those responses are typed models. Printing
+        # neither, which is what this did, told the caller a transaction confirmed and
+        # nothing about the money: a close moving 3188 base and 0.0219 quote reported
+        # both as nothing.
+        added = action == "add_liquidity"
+        data = payload.get("data") or {}
+        # Only when there is one: a fungible-LP pool has no position address, and
+        # "Position: None" reads as a missing value rather than an absent concept.
+        if result.get("position_address"):
+            lines.insert(1, f"Position: {result['position_address']}")
+        base = data.get("baseTokenAmountAdded" if added else "baseTokenAmountRemoved")
+        quote = data.get(
+            "quoteTokenAmountAdded" if added else "quoteTokenAmountRemoved"
+        )
+        if base is not None or quote is not None:
+            lines.append(
+                f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}"
+            )
+        # Rent is a third kind of money, as on the CLMM close: locked when the position
+        # account is created, returned when it closes, never income and never principal.
+        # A partial removal closes nothing, so its absence there is a fact, not a gap.
+        rent = data.get("positionRent" if added else "positionRentRefunded")
+        if rent is not None:
+            lines.append(f"Position rent {'locked' if added else 'refunded'}: {rent}")
+        fee = data.get("fee")
+        if fee is not None:
+            lines.append(f"Gas: {fee}")
+        return "\n".join(lines)
+
+    return f"{header}\n{payload}"
+
+
+def format_clmm_result(action: str, result: dict[str, Any]) -> str:
+    """Format manage_clmm results into a human-readable string."""
+    # Progressive disclosure: the guide is returned directly.
+    if action is None or result.get("action") is None:
+        return result.get("formatted_output", str(result))
+
+    connector = result.get("connector", "")
+    network = result.get("network", "")
+    payload = result.get("result", {})
+    header = f"CLMM {action} [{connector} · {network}]"
+
+    if action == "position_info" and isinstance(payload, list):
+        if not payload:
+            return f"{header}\nNo open positions for this wallet on this connector."
+        # Say which question was answered: one named position, or the whole wallet.
+        asked_for_one = bool(result.get("position_address"))
+        lines = [
+            f"{header}",
+            (
+                "1 position"
+                if asked_for_one
+                else f"{len(payload)} position(s) owned by this wallet"
+            ),
+        ]
+        for p in payload:
+            lines.append(
+                f"  • {p.get('position_address')} — Pool: {p.get('pool_address')}"
+            )
+            # in_range is why a position earns or does not: outside its range it holds
+            # one token and accrues nothing, which is what the fees below will show.
+            in_range = p.get("in_range")
+            lines.append(
+                f"    Base: {p.get('base_token_amount')}  "
+                f"Quote: {p.get('quote_token_amount')}  "
+                f"Range: {p.get('lower_price')}–{p.get('upper_price')}  "
+                f"Price: {p.get('current_price')}"
+                + (
+                    ""
+                    if in_range is None
+                    else f"  [{'in range' if in_range else 'OUT OF RANGE'}]"
+                )
+            )
+            lines.append(
+                f"    Uncollected fees — base: {p.get('base_fee_amount')}  "
+                f"quote: {p.get('quote_fee_amount')}"
+            )
+        return "\n".join(lines)
+
+    if action == "open" and isinstance(payload, dict):
+        # A submitted-not-confirmed open has position_address=None: the address
+        # is unknowable until the tx lands, so say that instead of "None".
+        position = (
+            payload.get("position_address")
+            or "pending — known once the transaction confirms"
+        )
+        return (
+            f"{header}\n"
+            f"Position: {position}\n"
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
+            f"Range: {payload.get('lower_price')}–{payload.get('upper_price')}\n"
+            "This position is NOT tracked by any executor — it will not be range-monitored, "
+            "rebalanced, or auto-closed."
+        )
+
+    if action in ("close", "collect_fees") and isinstance(payload, dict):
+        lines = [
+            header,
+            f"Position: {payload.get('position_address')}",
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}",
+            f"Fees collected — base: {payload.get('base_fee_collected')}  "
+            f"quote: {payload.get('quote_fee_collected')}",
+        ]
+        # A close returns the liquidity and the account's rent as well as the fees, and
+        # the three are different kinds of money: fees are income, the removed amounts
+        # are principal coming back, and the rent was never either — it was locked at
+        # open and is returned when the account closes. Showing only the fees made a
+        # close look like it recovered almost nothing.
+        removed_base = payload.get("base_token_amount_removed")
+        removed_quote = payload.get("quote_token_amount_removed")
+        if removed_base is not None or removed_quote is not None:
+            lines.append(
+                f"Liquidity withdrawn — base: {removed_base}  quote: {removed_quote}"
+            )
+        rent = payload.get("position_rent_refunded")
+        if rent is not None:
+            lines.append(f"Position rent refunded: {rent}")
+        return "\n".join(lines)
+
+    if action in ("add_liquidity", "remove_liquidity") and isinstance(payload, dict):
+        added = action == "add_liquidity"
+        lines = [header]
+        if payload.get("position_address"):
+            lines.append(f"Position: {payload['position_address']}")
+        lines.append(
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}"
+        )
+        # The amounts are the point of the call and were never printed: a removal that
+        # moved thousands of base tokens reported only that a transaction confirmed.
+        # These are flat and snake_case here — /clmm/add and /clmm/remove return a plain
+        # dict, unlike the AMM writes above, which pass Gateway's camelCase `data`
+        # through untouched.
+        base = payload.get(
+            "base_token_amount_added" if added else "base_token_amount_removed"
+        )
+        quote = payload.get(
+            "quote_token_amount_added" if added else "quote_token_amount_removed"
+        )
+        if base is not None or quote is not None:
+            lines.append(
+                f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}"
+            )
+        gas = payload.get("gas_fee")
+        if gas is not None:
+            lines.append(f"Gas: {gas}")
+        return "\n".join(lines)
+
+    if action == "create_pool" and isinstance(payload, dict):
+        return (
+            f"{header}\n"
+            f"Pool: {payload.get('pool_address')}\n"
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
+            "The pool is created empty — add liquidity by opening a position "
+            "(action='open' or create_lp_executor)."
+        )
 
     return f"{header}\n{payload}"

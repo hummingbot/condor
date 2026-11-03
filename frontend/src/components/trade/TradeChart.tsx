@@ -2,22 +2,45 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
+import { useRates } from "@/hooks/useRates";
 import { api, type ConsolidatedPosition } from "@/lib/api";
-import { candleStore } from "@/lib/candle-store";
-import type { ExtraLine, PickSlot } from "@/components/executor/types";
-import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
-import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatCompactUsd } from "@/lib/formatters";
+import { candleChannelKey, candleStore } from "@/lib/candle-store";
+import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
+import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
+import { roundToPricePrecision } from "@/lib/formatters";
+import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
+import { usePriceLineDrag } from "./usePriceLineDrag";
 
 type PickField = PickSlot | null;
 
-/** What each pick slot is called in the hint the chart shows while picking. */
-const PICK_LABELS: Record<PickSlot, string> = {
+/**
+ * What the chart's own three lines are called when a panel names none of them.
+ *
+ * A slot a panel minted for one of its extra lines has no entry here and needs
+ * none: the panel that invented the id is the only thing that knows what the
+ * price means, and says so in `lineLabels`.
+ */
+const PICK_LABELS: Record<ChartLineSlot, string> = {
   start: "start",
   end: "end",
   limit: "limit",
-  limit2: "lower limit",
 };
+
+/** The wording of the pick banner for whichever slot is armed. */
+function pickLabel(slot: PickSlot, lineLabels?: Partial<Record<PickSlot, string>>): string {
+  const named = lineLabels?.[slot] ?? PICK_LABELS[slot as ChartLineSlot];
+  // Last resort: the raw slot id. Reached only by a panel that armed a line it
+  // never labelled, which is a bug in that panel and reads like one.
+  return (named ?? slot).toLowerCase();
+}
+
+/**
+ * How far the pointer may drift between press and release and still count as a
+ * click. Past it the gesture was a pan — the chart scrolls on a pressed move —
+ * and none of the pane's click actions should fire.
+ */
+const CLICK_SLOP_PX = 4;
 
 /**
  * The chart's price mapping, and nothing else.
@@ -31,7 +54,8 @@ const PICK_LABELS: Record<PickSlot, string> = {
 export interface ChartPriceAxis {
   /** Pixel row for a price, from the pane's top. `null` when it is off-scale. */
   priceToCoordinate(price: number): number | null;
-  /** Pane height in CSS pixels, so a sibling canvas can match it. */
+  /** Pane height in CSS pixels, so a sibling canvas can match it. Cached, so
+   * polling it costs no layout. */
   height(): number;
   /** Subscribe to scale changes; returns its own unsubscribe. */
   onScaleChange(cb: () => void): () => void;
@@ -56,17 +80,14 @@ interface TradeChartProps {
   totalAmountQuote?: number;
   minOrderAmountQuote?: number;
   activePickField: PickField;
+  /** Per-slot overrides for the line titles and pick hints (see ChartPriceMapping). */
+  lineLabels?: Partial<Record<PickSlot, string>>;
   onPriceSet: (field: PickSlot, price: number) => void;
   pricePrecision?: number;
   extraLines?: ExtraLine[];
   executorOverlays?: ExecutorOverlay[];
   positions?: ConsolidatedPosition[];
   selectedExecutorId?: string | null;
-  /** Convert a value from the pair's quote currency to display currency */
-  convertValue?: (val: number) => string;
-  convertPnl?: (val: number) => string;
-  /** Callback when user clicks an executor in the list that's outside candle range */
-  onRequestCandleRange?: (startTime: number) => void;
   /** Callback when user clicks chart background to deselect executor */
   onExecutorDeselect?: () => void;
   /** Called once the series exists, with the chart's price mapping. */
@@ -88,14 +109,13 @@ export function TradeChart({
   totalAmountQuote,
   minOrderAmountQuote,
   activePickField,
+  lineLabels,
   onPriceSet,
   pricePrecision,
   extraLines,
   executorOverlays,
   positions,
   selectedExecutorId,
-  convertValue,
-  convertPnl,
   onExecutorDeselect,
   onChartReady,
 }: TradeChartProps) {
@@ -104,9 +124,9 @@ export function TradeChart({
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
-  const initializedRef = useRef(false);
-  const crosshairPriceRef = useRef<number | null>(null);
-  // Exact price under the pointer (not snapped to candle close) — used by the measure tool
+  // Exact price under the pointer, never snapped to the hovered candle's close:
+  // the crosshair is free vertically, so this is the price the axis label shows
+  // and the only one a click or a measurement may report.
   const cursorPriceRef = useRef<number | null>(null);
   const crosshairTimeRef = useRef<number | null>(null);
   // ── Measure tool (Shift+click anchor → live % of range) ──
@@ -116,8 +136,37 @@ export function TradeChart({
   const measureBoxRef = useRef<HTMLDivElement>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const lastZoomedIdRef = useRef<string | null>(null);
-  const convertValueRef = useRef(convertValue);
-  const convertPnlRef = useRef(convertPnl);
+  // Currency conversion for the pair's quote asset, owned here rather than
+  // threaded in as props -- the pane below the chart (TradeBottomPane) derives
+  // it the same way, and a chart that took it optionally rendered raw quote
+  // dollars next to that pane's converted rows. The refs keep the imperative
+  // lightweight-charts callbacks reading the latest formatter without being
+  // re-subscribed on every rate tick -- they are read at call time, so the
+  // crosshair and tooltip always format with the current currency.
+  //
+  // `convertPnl` is memoized rather than only ref-held because the position
+  // price lines bake their label at creation time: that effect depends on this
+  // identity to repaint on a currency switch, and would tear down and redraw
+  // every line on each render if the closure were minted fresh. `useRates`
+  // memoizes `formatPnlValue` on the rates themselves, so this changes only
+  // when the conversion actually does.
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
+  const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  const convertPnl = useMemo(
+    () => (val: number) => formatPnlValue(val, quoteCurrency),
+    [formatPnlValue, quoteCurrency],
+  );
+  // `convertValue` is memoized for the same reason `convertPnl` is, plus one:
+  // the tooltip view below keys its cached card on the formatter identities, so
+  // a closure minted fresh on every render would rebuild the card on every
+  // render for no change in what it says.
+  const convertValue = useMemo(
+    () => (val: number) => formatValue(val, quoteCurrency),
+    [formatValue, quoteCurrency],
+  );
+  const convertValueRef = useRef<(val: number) => string>(() => "");
+  const convertPnlRef = useRef<(val: number) => string>(() => "");
   convertValueRef.current = convertValue;
   convertPnlRef.current = convertPnl;
   const [chartReady, setChartReady] = useState(false);
@@ -132,8 +181,26 @@ export function TradeChart({
   const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
 
+  // ── Drag a price line ──
+  //
+  // The grabbable lines, filled in further down where the prices are known, and
+  // read only at call time — so a price moving under the pointer never restages
+  // the hit test. The gesture is installed here, above the effect that creates
+  // the chart, so that on unmount its cleanup runs *first* and hands panning
+  // back to a chart that still exists.
+  const dragTargetsRef = useRef<DragTarget[]>([]);
+  const drag = usePriceLineDrag({
+    getContainer: () => containerRef.current,
+    getChart: () => chartRef.current,
+    getSeries: () => seriesRef.current,
+    getTargets: () => dragTargetsRef.current,
+    getPricePrecision: () => pricePrecision,
+    onPriceSet,
+    slopPx: CLICK_SLOP_PX,
+  });
+
   // ── Candle data from the singleton store (WS live + cached) ──
-  const { candles, mergeCandles, setDuration } = useCandleStore(
+  const { candles: storedCandles, mergeCandles, setDuration } = useCandleStore(
     server,
     connector,
     pair,
@@ -141,27 +208,43 @@ export function TradeChart({
     poolAddress,
   );
 
+  // ── Only the picked range is drawn ──
+  // The store keeps every candle any chart on this channel has loaded — a
+  // longer range picked earlier, or another chart's — and never trims to one
+  // chart's range. So the chart draws the tail its own picker names, measured
+  // back from the newest candle rather than the clock, which would make render
+  // impure.
+  const candles = useMemo(() => {
+    if (!storedCandles.length) return storedCandles;
+    const cutoff = storedCandles[storedCandles.length - 1].timestamp - lookbackSeconds;
+    const start = storedCandles.findIndex((c) => c.timestamp >= cutoff);
+    return start <= 0 ? storedCandles : storedCandles.slice(start);
+  }, [storedCandles, lookbackSeconds]);
+
   // ── Filter executor overlays to those within candle time range ──
+  // Depend on the earliest candle timestamp (not the candles array, whose reference
+  // changes on every WS tick) so filteredOverlays keeps a stable identity across
+  // live ticks and the overlay rebuild effect below doesn't churn per tick.
+  const minCandleTime = candles.length ? candles[0].timestamp : 0;
   const filteredOverlays = useMemo(() => {
     if (!executorOverlays?.length) return executorOverlays;
-    if (!candles.length) return executorOverlays; // no candles yet → show all
-    const minTime = candles[0].timestamp;
     return executorOverlays.filter((o) => {
       const s = o.status?.toLowerCase();
       if (s === "running" || s === "active") return true;
       if (selectedExecutorId && o.executorId === selectedExecutorId) return true;
       const end = o.timeRange.end > 1e12 ? o.timeRange.end / 1000 : o.timeRange.end;
-      return end >= minTime;
+      return end >= minCandleTime; // minCandleTime === 0 (no candles) → show all
     });
-  }, [executorOverlays, candles, selectedExecutorId]);
+  }, [executorOverlays, minCandleTime, selectedExecutorId]);
 
   // ── REST backfill on pair/interval/lookback change ──
-  const backfillKeyRef = useRef("");
+  // The dependency array below is the whole gate: React re-runs this only when
+  // one of those six changes. A ref remembering the last key would add nothing
+  // in production and would break development, where StrictMode mounts the
+  // effect twice — the first cleanup throws the in-flight fetch away, and a ref
+  // that outlives the remount would make the second pass a no-op, leaving the
+  // chart with no history at all.
   useEffect(() => {
-    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}:${poolAddress ?? ""}`;
-    if (backfillKey === backfillKeyRef.current) return;
-    backfillKeyRef.current = backfillKey;
-
     setDuration(lookbackSeconds);
 
     let cancelled = false;
@@ -221,29 +304,32 @@ export function TradeChart({
       seriesRef.current = series;
       setChartReady(true);
 
-      // Track crosshair price for click-to-set + executor tooltip
+      // Track the pointer's price/time for click-to-set, the measure tool and
+      // the executor tooltip
+      // One cached tooltip card per chart instance, torn down with the chart.
+      const tooltipView = createOverlayTooltipView();
+
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
-          crosshairPriceRef.current = null;
+          cursorPriceRef.current = null;
           crosshairTimeRef.current = null;
-          if (tooltipRef.current) tooltipRef.current.style.display = "none";
+          if (tooltipRef.current) tooltipView.hide(tooltipRef.current);
           // Leave the measure box/badge frozen at their last position — a
           // measurement persists until cleared (click / Esc), so moving off
           // the pane edge doesn't make it vanish.
           return;
         }
-        const data = param.seriesData.get(series);
-        if (data && "close" in data) {
-          crosshairPriceRef.current = (data as { close: number }).close;
-        } else if (param.point.y !== undefined) {
-          const price = series.coordinateToPrice(param.point.y);
-          if (price !== null) {
-            crosshairPriceRef.current = price as number;
-          }
-        }
-        // Exact pointer price (measure tool needs sub-candle precision)
+        // `seriesData` is the bar at the crosshair's *time* and carries no
+        // vertical component, so its close would be the same price for every
+        // height inside one candle's column — it serves only as a last resort
+        // when the pane can't map the pixel back to a price at all.
         const cursorP = param.point.y !== undefined ? series.coordinateToPrice(param.point.y) : null;
-        cursorPriceRef.current = cursorP !== null && cursorP !== undefined ? (cursorP as number) : crosshairPriceRef.current;
+        if (cursorP !== null && cursorP !== undefined) {
+          cursorPriceRef.current = cursorP as number;
+        } else {
+          const data = param.seriesData.get(series);
+          cursorPriceRef.current = data && "close" in data ? (data as { close: number }).close : null;
+        }
         crosshairTimeRef.current = typeof param.time === "number" ? param.time : null;
 
         // ── Measure tool: live % of range from the anchor to the cursor ──
@@ -306,7 +392,7 @@ export function TradeChart({
 
         const crosshairTime = typeof param.time === "number" ? param.time : 0;
         if (!crosshairTime || !param.point || param.point.x < 0 || param.point.y < 0) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
@@ -350,109 +436,20 @@ export function TradeChart({
         }
 
         if (!bestOverlay) {
-          tooltip.style.display = "none";
+          tooltipView.hide(tooltip);
           return;
         }
 
-        const o = bestOverlay;
-        const pnlClr = pnlHexColor(o.pnl);
-        const _cvtPnl = convertPnlRef.current;
-        const _cvtVal = convertValueRef.current;
-        const pnlStr = _cvtPnl ? _cvtPnl(o.pnl) : (Math.abs(o.pnl) >= 1000 ? `${o.pnl >= 0 ? "+" : ""}$${(o.pnl / 1000).toFixed(1)}K` : `${o.pnl >= 0 ? "+" : ""}$${o.pnl.toFixed(2)}`);
-        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
-        const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
-
-        // An LP position has no direction -- it is `RANGE` -- and the buy/sell
-        // normalization files everything that is not a buy under "sell", which
-        // labelled a live two-sided range position `SELL`. Neutral for that type.
-        const isRangeSide = o.type === "lp";
-        const sideLabel = isRangeSide ? "range" : o.side;
-        const sideClr = isRangeSide ? "#9ca3af" : sideColor(o.side);
-        const sideBg = isRangeSide
-          ? "rgba(156,163,175,0.15)"
-          : o.side === "buy"
-            ? "rgba(34,197,94,0.15)"
-            : "rgba(239,68,68,0.15)";
-        const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
-        const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? getThemeColors().green : "#9ca3af";
-
-        // Build config detail rows
-        const cfg = o.config || {};
-        const tripleBarrier: Record<string, unknown> = (() => {
-          const raw = cfg.triple_barrier_config;
-          if (!raw) return {};
-          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
-          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-        })();
-
-        let detailRows = "";
-        const fmtPrice = (p: number) => {
-          if (p === 0) return "—";
-          if (Math.abs(p) >= 1000) return p.toFixed(2);
-          if (Math.abs(p) >= 1) return p.toFixed(4);
-          return p.toPrecision(6);
-        };
-        const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
-        };
-
-        // Range-box details. Any executor drawn as a box describes itself by its
-        // bounds, not by an entry→exit pair; only the labels differ per type.
-        if (o.gridBox) {
-          if (o.type === "lp") {
-            // startPrice is the box's upper edge (see computeLpOverlay).
-            addRow("Upper Price", fmtPrice(o.gridBox.startPrice));
-            addRow("Lower Price", fmtPrice(o.gridBox.endPrice));
-            if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
-          } else {
-            addRow("Start Price", fmtPrice(o.gridBox.startPrice));
-            addRow("End Price", fmtPrice(o.gridBox.endPrice));
-            if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
-          }
-        } else if (o.entryPrice && o.entryPrice > 0) {
-          addRow("Entry", fmtPrice(o.entryPrice));
-          if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {
-            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", fmtPrice(o.exitPrice));
-          }
-        }
-
-        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : formatCompactUsd(Number(cfg.total_amount_quote)));
-        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
-
-        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
-        const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
-        if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
-
-        tooltip.innerHTML = `
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(sideLabel)}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${escapeHtml(o.type.toUpperCase())}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${escapeHtml(o.closeType)}</span>` : ""}
-          </div>
-          <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px">${volStr}</div></div>
-            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px">${feesStr || "—"}</div></div>
-          </div>
-          ${detailRows ? `<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
-        `;
-        tooltip.style.display = "block";
+        // Rebuilds the card only when the hovered overlay or a formatter
+        // changed; otherwise this is the cached height and two style writes.
+        const tooltipH = tooltipView.show(tooltip, bestOverlay, {
+          formatValue: convertValueRef.current,
+          formatPnl: convertPnlRef.current,
+        });
 
         // Position tooltip using viewport-fixed coords (rendered via portal)
         const containerRect = containerRef.current.getBoundingClientRect();
         const tooltipW = 280;
-        const tooltipH = tooltip.offsetHeight || 200;
         const cursorInRightHalf = param.point.x > containerRect.width / 2;
         let left = cursorInRightHalf
           ? containerRect.left + param.point.x - tooltipW - 16
@@ -488,6 +485,25 @@ export function TradeChart({
     };
   }, []);
 
+  // ── Pane height, cached ──
+  // `height()` is handed out and polled by siblings, and a `clientHeight` read
+  // on a page whose layout is being dirtied by streaming data is a forced
+  // reflow every time it is asked. The pane's height only changes when the pane
+  // is resized, so it is taken from the observer that already hears about that
+  // — inside the callback, where layout is clean — and `height()` just hands
+  // the number back.
+  const paneHeightRef = useRef(0);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    paneHeightRef.current = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      paneHeightRef.current = el.clientHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   // ── Lend the price mapping out, once the series exists ──
   // Read before the series is created, priceToCoordinate answers for an empty
   // scale — plausible pixels for the wrong prices — so this waits on chartReady
@@ -504,7 +520,7 @@ export function TradeChart({
         const coord = seriesRef.current?.priceToCoordinate(price);
         return coord == null ? null : (coord as number);
       },
-      height: () => containerRef.current?.clientHeight ?? 0,
+      height: () => paneHeightRef.current || containerRef.current?.clientHeight || 0,
       onScaleChange: (cb) => {
         const chart = chartRef.current;
         if (!chart) return () => {};
@@ -537,20 +553,20 @@ export function TradeChart({
     return () => observer.disconnect();
   }, [chartReady]);
 
-  // Signature of the last full setData() render: channel key + earliest
-  // timestamp + count. Lets us tell a wholesale change (first load, pair/
-  // interval switch, history backfill/prepend) apart from a live tick, where
-  // the listener below already applied a cheap series.update().
+  // Signature of the last full setData() render: channel key + range +
+  // earliest timestamp + count. Lets us tell a wholesale change (first load,
+  // pair/interval/range switch, history backfill/prepend) apart from a live
+  // tick, where the listener below already applied a cheap series.update().
   const lastSetDataSigRef = useRef<string>("");
 
   // ── Push candle data to chart (full setData only on structural changes) ──
   useEffect(() => {
     if (!chartReady || !seriesRef.current || !candles.length) return;
 
-    const key = `${server}:${connector}:${pair}:${interval}`;
+    const key = candleChannelKey(server, connector, pair, interval, poolAddress);
     const first = candles[0].timestamp;
     const prevSig = lastSetDataSigRef.current;
-    const [prevKey, prevFirstStr, prevLenStr] = prevSig.split("|");
+    const [prevKey, prevRangeStr, prevFirstStr, prevLenStr] = prevSig.split("|");
     const prevFirst = Number(prevFirstStr);
     const prevLen = Number(prevLenStr);
 
@@ -558,6 +574,8 @@ export function TradeChart({
     // newer appended bar. So a full setData() is only required when:
     //   • first load for this chart instance (no prior signature), or
     //   • the channel key changed (pair/interval/connector/server switch), or
+    //   • the range changed — a shorter one drops bars from the front, which
+    //     update() can't do any more than it can insert them, or
     //   • the earliest candle moved back in time, i.e. older history was
     //     prepended (REST backfill) — update() can't insert before the data.
     // A plain live tick keeps the same key and earliest timestamp (last-bar
@@ -566,10 +584,11 @@ export function TradeChart({
     // expensive map + setData over the whole array on every tick.
     const isFirstLoad = prevSig === "";
     const keyChanged = prevKey !== key;
+    const rangeChanged = Number(prevRangeStr) !== lookbackSeconds;
     const historyPrepended = candles.length > prevLen && first < prevFirst;
-    const needsFullReset = isFirstLoad || keyChanged || historyPrepended;
+    const needsFullReset = isFirstLoad || keyChanged || rangeChanged || historyPrepended;
 
-    lastSetDataSigRef.current = `${key}|${first}|${candles.length}`;
+    lastSetDataSigRef.current = `${key}|${lookbackSeconds}|${first}|${candles.length}`;
 
     if (!needsFullReset) return;
 
@@ -582,16 +601,15 @@ export function TradeChart({
     }));
     seriesRef.current.setData(mapped);
 
-    if (!initializedRef.current) {
-      chartRef.current?.timeScale().fitContent();
-      initializedRef.current = true;
-    }
-  }, [candles, chartReady, server, connector, pair, interval]);
+    // Every full render is a new picture — a market, a range, or the history a
+    // backfill just brought in — so the view fits it. Live ticks never get here.
+    chartRef.current?.timeScale().fitContent();
+  }, [candles, chartReady, server, connector, pair, interval, poolAddress, lookbackSeconds]);
 
   // ── Real-time last candle update via candle store listener ──
   useEffect(() => {
     if (!chartReady || !seriesRef.current) return;
-    const key = `candles:${server}:${connector}:${pair}:${interval}`;
+    const key = candleChannelKey(server, connector, pair, interval, poolAddress);
 
     const removeListener = candleStore.onUpdate(key, (updated) => {
       if (!seriesRef.current || !updated.length) return;
@@ -606,12 +624,7 @@ export function TradeChart({
     });
 
     return removeListener;
-  }, [chartReady, server, connector, pair, interval]);
-
-  // ── Reset auto-fit on pair/interval/range change ──
-  useEffect(() => {
-    initializedRef.current = false;
-  }, [pair, interval, lookbackSeconds]);
+  }, [chartReady, server, connector, pair, interval, poolAddress]);
 
   // ── Update price precision ──
   useEffect(() => {
@@ -619,7 +632,7 @@ export function TradeChart({
     seriesRef.current.applyOptions({
       priceFormat: { type: "price" as const, precision: pricePrecision, minMove: 1 / 10 ** pricePrecision },
     });
-  }, [pricePrecision]);
+  }, [pricePrecision, chartReady]);
 
   // ── Price lines (start/end/limit/grid levels/extras) ──
   useEffect(() => {
@@ -643,7 +656,7 @@ export function TradeChart({
         lineWidth: 2,
         lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
-        title: "Start",
+        title: lineLabels?.start ?? "Start",
       });
     }
 
@@ -652,9 +665,13 @@ export function TradeChart({
         price: endPrice,
         color: getThemeColors().green,
         lineWidth: 2,
-        lineStyle: mod.LineStyle.Dashed,
+        // Solid, like `start`: the two are the same kind of thing — the bounds of
+        // the range being drawn — and a different style on one of them only ever
+        // read as a difference in kind. Limits stay dotted, which is the real
+        // distinction: a bound the executor works inside vs. a price it stops at.
+        lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
-        title: "End",
+        title: lineLabels?.end ?? "End",
       });
     }
 
@@ -666,7 +683,7 @@ export function TradeChart({
         lineWidth: 2,
         lineStyle: mod.LineStyle.Dotted,
         axisLabelVisible: true,
-        title: "Limit",
+        title: lineLabels?.limit ?? "Limit",
       });
     }
 
@@ -724,7 +741,41 @@ export function TradeChart({
         extraLinesRef.current.push(pl);
       }
     }
-  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, chartReady]);
+  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, lineLabels, chartReady]);
+
+  // ── Which of those lines can be grabbed ──
+  //
+  // The three the chart draws itself, plus every extra line a panel tagged with
+  // a slot (LP's lower limit). Published into the ref the hit test reads, so it
+  // always sees the list the last render produced.
+  const dragTargets = useMemo<DragTarget[]>(() => {
+    const targets: DragTarget[] = [];
+    if (startPrice > 0) targets.push({ slot: "start", price: startPrice });
+    if (endPrice > 0) targets.push({ slot: "end", price: endPrice });
+    if (limitPrice > 0) targets.push({ slot: "limit", price: limitPrice });
+    for (const el of extraLines ?? []) {
+      if (el.slot && el.price > 0) targets.push({ slot: el.slot, price: el.price });
+    }
+    return targets;
+  }, [startPrice, endPrice, limitPrice, extraLines]);
+  dragTargetsRef.current = dragTargets;
+
+  // ── Hover cursor over a draggable line ──
+  //
+  // A primitive that draws nothing: it exists so the library, which calls
+  // `hitTest` on every mouse move, hands the pane an `ns-resize` cursor over a
+  // grabbable line. The lines themselves stay ordinary price lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!chartReady || !series) return;
+    const primitive = createDragHitPrimitive(() => dragTargetsRef.current);
+    series.attachPrimitive(primitive);
+    return () => {
+      // On unmount the chart is disposed by the init effect's cleanup, which
+      // runs first and takes the series with it.
+      try { series.detachPrimitive(primitive); } catch { /* chart already gone */ }
+    };
+  }, [chartReady]);
 
   // ── Executor overlays ──
   // `chartReady` is a dependency, not a guard for its own sake: lightweight-charts
@@ -805,8 +856,9 @@ export function TradeChart({
           ]);
           overlaySeriesRef.current.push(top);
 
+          // Solid, matching the top edge — both are grid bounds.
           const bottom = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: lineW, lineStyle: mod.LineStyle.Dashed,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           bottom.setData([
@@ -948,11 +1000,14 @@ export function TradeChart({
       if (pos.entry_price <= 0) continue;
       const isLong = pos.position_side?.toUpperCase() === "LONG";
       const pnl = pos.unrealized_pnl ?? 0;
-      const _cvtPnl2 = convertPnlRef.current;
-      const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
+      const pnlStr = convertPnl(pnl);
       const amt = Math.abs(pos.amount);
       const color = pnlHexColor(pnl);
-      const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
+      // A hold nothing ties to this pool still belongs on the chart -- the price
+      // is the same market -- but it must not read as this pool's position, so
+      // it says whose it is: the pair's, across whatever pool the router used.
+      const scope = pos.pool_scoped === false ? " · any pool" : "";
+      const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}${scope}`;
       const pl = series.createPriceLine({
         price: pos.entry_price,
         color,
@@ -963,7 +1018,10 @@ export function TradeChart({
       });
       positionLinesRef.current.push(pl);
     }
-  }, [positions, chartReady]);
+    // `convertPnl` is a dependency, not a ref read: the label is a string the
+    // chart owns once created, so a currency switch has to redraw the lines.
+    // The effect already clears every line it drew, so re-running is idempotent.
+  }, [positions, chartReady, convertPnl]);
 
   // ── Measure tool helpers ──
   const clearMeasure = () => {
@@ -980,9 +1038,50 @@ export function TradeChart({
   }, []);
 
   // ── Click-to-set price / deselect executor / measure ──
-  const handleClick = (e: React.MouseEvent) => {
+  //
+  // A press-drag-release inside the pane is a chart pan, and the browser still
+  // reports it as a `click` on the container: the event fires on the common
+  // ancestor of press and release whatever the distance travelled. Bound to
+  // `onClick`, every pan would set a price or drop the executor selection. So
+  // the gesture is tracked by hand — press position recorded, release gated on
+  // having stayed put — and the modifier is read from the press, so releasing
+  // shift mid-gesture cannot switch which branch runs.
+  const pointerDownRef = useRef<{
+    x: number;
+    y: number;
+    button: number;
+    shiftKey: boolean;
+  } | null>(null);
+
+  // A press that lands on a price line arms `drag` (installed above, with the
+  // refs) alongside this gate rather than instead of it. The two split the
+  // gesture on the same slop: past it the press was a drag and the release is
+  // consumed, so the drop cannot re-fire the pick or the executor deselect;
+  // inside it the press was a click and every branch below runs as before.
+  const handlePointerDown = (e: React.PointerEvent) => {
+    drag.onPointerDown(e);
+    pointerDownRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      button: e.button,
+      shiftKey: e.shiftKey,
+    };
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    // A grab that actually travelled owns this release outright; one that never
+    // left the slop was a click after all, and falls through untouched.
+    if (drag.onPointerUp(e)) {
+      pointerDownRef.current = null;
+      return;
+    }
+    const down = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (!down || down.button !== 0) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
+
     // Shift+click drops the measure anchor; move the mouse to see the % of the range
-    if (e.shiftKey) {
+    if (down.shiftKey) {
       if (cursorPriceRef.current != null && crosshairTimeRef.current != null) {
         clearMeasure();
         measureAnchorRef.current = { price: cursorPriceRef.current, time: crosshairTimeRef.current };
@@ -994,8 +1093,8 @@ export function TradeChart({
       clearMeasure();
       return;
     }
-    if (activePickField && crosshairPriceRef.current !== null) {
-      onPriceSet(activePickField, crosshairPriceRef.current);
+    if (activePickField && cursorPriceRef.current !== null) {
+      onPriceSet(activePickField, roundToPricePrecision(cursorPriceRef.current, pricePrecision));
       return;
     }
     // Click on chart background deselects executor
@@ -1009,10 +1108,13 @@ export function TradeChart({
       {activePickField && (
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] text-[var(--color-text-muted)]">
-            Click on chart to set {PICK_LABELS[activePickField]} price
+            Click on chart to set{" "}
+            {pickLabel(activePickField, lineLabels)}{" "}
+            price
           </p>
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
-            Pick mode: {PICK_LABELS[activePickField]}
+            Pick mode:{" "}
+            {pickLabel(activePickField, lineLabels)}
           </span>
         </div>
       )}
@@ -1021,7 +1123,10 @@ export function TradeChart({
           ref={containerRef}
           className="absolute inset-0"
           style={{ cursor: activePickField ? "crosshair" : "default" }}
-          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerMove={drag.onPointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={drag.onPointerCancel}
         />
         {/* Measure box overlay — pure DOM, never touches chart series */}
         <div
@@ -1029,9 +1134,9 @@ export function TradeChart({
           className="pointer-events-none absolute z-10"
           style={{ display: "none", border: "1px dashed", borderRadius: 2 }}
         />
-        {/* Measure-tool discoverability hint */}
+        {/* Measure-tool and drag discoverability hint */}
         <div className="pointer-events-none absolute bottom-1 left-2 z-10 text-[9px] text-[var(--color-text-muted)] opacity-60">
-          ⇧+click: measure range
+          ⇧+click: measure range · drag a price line to move it
         </div>
         {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
         {createPortal(

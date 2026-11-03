@@ -248,7 +248,9 @@ def test_a_failed_switch_does_not_bind_the_chat(monkeypatch):
     monkeypatch.setattr(agents_mod, "_create_tg_session", boom)
     asyncio.run(agents_mod._handle_talk_pick(_Update(rendered, callback=True), ctx, 0))
 
-    assert any("Could not switch" in r for r in rendered)
+    # The verb follows what was actually attempted -- these doubles have no live
+    # session, so the pick raised the agent rather than switching off another.
+    assert any("Could not start Funding Desk" in r for r in rendered)
     assert get_chat_binding(ctx.user_data) == {}
 
 

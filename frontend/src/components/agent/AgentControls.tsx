@@ -1,9 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   Clock,
   MessageSquareText,
   Pause,
   Play,
+  Power,
   Server,
   Square,
   X,
@@ -13,6 +19,25 @@ import { useState } from "react";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
+
+/**
+ * What a start/stop/pause/resume just made stale.
+ *
+ * Two keys, not one. The strategy's own record is the obvious half; the agent
+ * detail is the half that used to be missed, and it is load-bearing because
+ * `strategies[].status` is what the workspace reads for the "Live" badge and
+ * the delete guard — and what re-arms the gated `["agent", slug]` poll
+ * (PERF-343). Invalidating only the strategy left an idle agent's gate closed
+ * over a loop that had just started, with nothing left to reopen it.
+ */
+function invalidateLifecycle(
+  queryClient: QueryClient,
+  slug: string,
+  sslug: string,
+) {
+  queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+  queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+}
 
 // ── Start Session Dialog ──
 
@@ -48,6 +73,9 @@ export function StartSessionDialog({
   const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
   const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
   const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
+  // Seeded from the strategy's stored answer, so a strategy already opted in
+  // does not quietly start opted out every time someone opens this dialog.
+  const [restartOnBoot, setRestartOnBoot] = useState(!!agentConfig.restart_on_boot);
 
   const { data: servers } = useQuery({
     queryKey: ["servers"],
@@ -63,6 +91,10 @@ export function StartSessionDialog({
         frequency_sec: Number(frequencySec) || 60,
         tick_timeout_sec: Number(tickTimeoutSec) || 600,
         execution_mode: executionMode,
+        // Only a loop can be resumed: a dry run and a single tick are finished
+        // by the time a restart could resume them, and recording the opt-in on
+        // one would arm the boot pass for a run that had already ended.
+        restart_on_boot: executionMode === "loop" && restartOnBoot,
         risk_limits: {
           max_position_size_quote: Number(maxPositionSize) || 500,
           max_open_executors: Number(maxOpenExecutors) || 5,
@@ -72,7 +104,7 @@ export function StartSessionDialog({
       return api.startStrategy(slug, sslug, config, context);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      invalidateLifecycle(queryClient, slug, sslug);
       onClose();
     },
   });
@@ -212,6 +244,32 @@ export function StartSessionDialog({
             </div>
           </div>
 
+          {/* Survives a restart? Only a loop can, so the row is only there for
+              one. Phrased as what happens rather than as a flag name: the
+              reader this exists for is the one who restarted Condor and was
+              surprised to find the loop gone. */}
+          {executionMode === "loop" && (
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+              <input
+                type="checkbox"
+                checked={restartOnBoot}
+                onChange={(e) => setRestartOnBoot(e.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--color-primary)]"
+              />
+              <span>
+                <span className="flex items-center gap-1.5 text-xs font-medium text-[var(--color-text)]">
+                  <Power className="h-3.5 w-3.5" />
+                  Resume after Condor restarts
+                </span>
+                <span className="mt-1 block text-[11px] leading-snug text-[var(--color-text-muted)]">
+                  A restart otherwise leaves this loop stopped. On, Condor starts
+                  it again in a <strong>fresh session</strong>, from the config as
+                  it stands then — it never resumes the old session&apos;s journal.
+                </span>
+              </span>
+            </label>
+          )}
+
           {/* Risk Limits */}
           <div>
             <label className={`${labelClass} mb-3`}>
@@ -294,17 +352,17 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
   const stopMut = useMutation({
     mutationFn: () => api.stopStrategy(slug, sslug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      invalidateLifecycle(queryClient, slug, sslug);
       setConfirmStop(false);
     },
   });
   const pauseMut = useMutation({
     mutationFn: () => api.pauseStrategy(slug, sslug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
+    onSuccess: () => invalidateLifecycle(queryClient, slug, sslug),
   });
   const resumeMut = useMutation({
     mutationFn: () => api.resumeStrategy(slug, sslug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
+    onSuccess: () => invalidateLifecycle(queryClient, slug, sslug),
   });
 
   const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;

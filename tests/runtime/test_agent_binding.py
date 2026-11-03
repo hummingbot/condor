@@ -46,15 +46,14 @@ class _FakeClient:
 @pytest.fixture
 def agents_root(tmp_path, monkeypatch):
     """An agents/ tree with one pinned Agent and one serverless Agent."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     store = AgentStore()
     store.create(
         name="Executor Manager",
         description="Manages executors",
         instructions="You manage executors.",
         agent_key="ollama:qwen3:32b",
-        tools=["get_market_data", "manage_executors"],
+        tools=["get_market_data", "create_grid_executor"],
         when_to_consult="When deploying executors",
         server_required=False,
     )
@@ -64,9 +63,13 @@ def agents_root(tmp_path, monkeypatch):
 @pytest.fixture
 def registry(monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _FakeClient)
-    monkeypatch.setattr(session_module, "PydanticAIClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.pydantic_ai_client.PydanticAIClient", _FakeClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "CHAT")
+    # This file asserts the opening turn verbatim, so the conversation's
+    # attribution block is blanked alongside the context builder above — it
+    # is covered on its own in tests/runtime/test_conversation_attribution.py
+    monkeypatch.setattr(session_module, "conversation_attribution", lambda *a, **k: "")
     _FakeClient.last = None
     return session_module
 
@@ -101,7 +104,7 @@ def test_resolve_unbound_session_is_the_default_agent(monkeypatch):
         return [{"name": "condor"}]
 
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", fake_session_servers
+        "condor.runtime.toolsets.build_mcp_servers_for_session", fake_session_servers
     )
 
     bound = binding.resolve(_spec(agent_key="claude-code"))
@@ -160,9 +163,9 @@ def test_ownerless_session_argv_matches_the_env_fallback(monkeypatch):
 
 def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
     """An unreadable agents/condor/AGENT.md degrades; it does not fail closed."""
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
 
     bound = binding.resolve(_spec(agent_key="claude-code"))
@@ -173,7 +176,7 @@ def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
 
 
 def test_a_named_agent_that_does_not_exist_still_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     with pytest.raises(UnknownAgent):
         binding.resolve(_spec(agent_slug="ghost"))
 
@@ -181,7 +184,7 @@ def test_a_named_agent_that_does_not_exist_still_raises(monkeypatch, tmp_path):
 def test_resolve_agent_sets_memory_scope(agents_root, monkeypatch):
     """A bound Agent scopes the MCP subprocess to its own store."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session",
+        "condor.runtime.toolsets.build_mcp_servers_for_session",
         lambda *a, **kw: [{"name": "condor", "agent_slug": kw.get("agent_slug")}],
     )
 
@@ -203,7 +206,7 @@ def test_resolve_agent_sets_memory_scope(agents_root, monkeypatch):
 def test_agent_key_precedence(agents_root, monkeypatch):
     """Explicit spec model > Agent's configured model."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
 
     inherited = binding.resolve(_spec(agent_slug="executor_manager"))
@@ -228,14 +231,14 @@ def test_unknown_agent_slug(agents_root):
 def test_tool_allowlist_enforced(agents_root, registry, monkeypatch):
     """A bound pydantic-ai session is restricted to the Agent's tools."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
 
     info = asyncio.run(runtime.create_session(_spec(agent_slug="executor_manager")))
 
     assert _FakeClient.last.kwargs["allowed_tools"] == [
         "get_market_data",
-        "manage_executors",
+        "create_grid_executor",
     ]
     # The Agent's own model was used, so the pydantic-ai client was selected.
     assert _FakeClient.last.kwargs["model"] == "ollama:qwen3:32b"
@@ -246,7 +249,7 @@ def test_tool_allowlist_enforced(agents_root, registry, monkeypatch):
 def test_bound_session_opens_with_agent_identity(agents_root, registry, monkeypatch):
     """The Agent's own instructions replace the chat assistant's context."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
 
     asyncio.run(
@@ -262,7 +265,7 @@ def test_bound_session_opens_with_agent_identity(agents_root, registry, monkeypa
 def test_unbound_session_keeps_chat_context(registry, monkeypatch):
     """Without a binding, the assistant context is untouched."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
 
     asyncio.run(
@@ -278,7 +281,7 @@ def test_unbound_session_keeps_chat_context(registry, monkeypatch):
 def test_switch_destroys_and_respawns(agents_root, registry, monkeypatch):
     """Rebinding stops the old subprocess exactly once and reuses the key."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
     key = SessionKey.telegram(42)
 
@@ -309,7 +312,7 @@ def test_switch_destroys_and_respawns(agents_root, registry, monkeypatch):
 def test_rebinding_to_same_agent_reuses_session(agents_root, registry, monkeypatch):
     """An empty agent_key must not look like a model change and respawn."""
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
     )
 
     async def scenario():

@@ -33,8 +33,15 @@ class TimeoutPolicy:
     # Wall-clock budget for a single prompt. Kills runaway agent turns.
     prompt_overall: int = 1800
     # How long to wait for an agent to confirm session/cancel before falling
-    # back to cancelling the request locally.
+    # back to cancelling the request locally. Short on purpose: this is what
+    # Stop costs the user, and stopping the *relay* is instant either way.
     prompt_cancel: int = 2
+    # How long the NEXT prompt waits for an abandoned turn to actually end at
+    # the agent. Separate from prompt_cancel because it buys something else:
+    # ACP session/update notifications carry no request id, so a second turn
+    # opened while the first is still generating has the first one's chunks
+    # delivered as its own answer. Paid only when an agent ignored the cancel.
+    prompt_settle: int = 10
     # How long a human has to answer a dangerous-tool confirmation.
     confirmation: int = 120
     # Keepalive cadence on an SSE stream, so proxies and clients see traffic.
@@ -43,9 +50,42 @@ class TimeoutPolicy:
     sse_stream: int = 1800
     # Budget for one MCP tool call.
     mcp_call: float = 15.0
+    # How long to probe a local inference server for the model it serves, when
+    # a bare "ollama:" / "lmstudio:" key leaves the model id to us. Short: it
+    # is a localhost request on the session-start path, and a backend that is
+    # down should fall through to the explicit-key error quickly.
+    local_model_probe: float = 2.0
+    # How long an agent client may take to become usable: the ACP
+    # ``initialize`` + ``session/new`` handshake, and the pydantic-ai wait for
+    # its MCP servers to come up. Generous because a cold start can include an
+    # ``npx`` fetch of the bridge, but bounded: a child that spawns and never
+    # answers used to park the caller forever, holding a per-user session slot
+    # and the session-creation lock behind it (CORR-333).
+    agent_handshake: int = 120
     # Wall-clock budget for one agent session: a strategy tick's LLM turn, and
     # the shutdown cleanup pass that runs under the same ceiling. 10 minutes.
     tick_default: int = 600
+    # How long a live session may sit unprompted before the health monitor
+    # detaches it. Every other deadline here bounds a *turn*; this one bounds a
+    # *session* — an abandoned chat holds an agent subprocess, the MCP tree it
+    # was spawned with, and one of the five per-user session slots, forever.
+    # The conversation is durable (FEAT-015), so this is a detach, not a loss.
+    # 0 disables the sweep. 1 hour.
+    session_idle: int = 3600
+
+    @property
+    def prompt_hard_stop(self) -> int:
+        """The ACP stream's own ceiling: one minute above the turn budget.
+
+        ``prompt_overall`` is the deadline the *session* enforces; this is the
+        backstop under it inside ``ACPClient.prompt_stream``, so a subprocess
+        that stops answering ends even when nobody is watching the session.
+        Derived rather than stored so that raising
+        ``CONDOR_TIMEOUT_PROMPT_OVERALL`` moves both together — a stored copy
+        is exactly how a ``1860`` literal in the ACP client drifted out of
+        reach of this policy in the first place.
+        """
+        return self.prompt_overall + 60
 
     @classmethod
     def load(cls) -> "TimeoutPolicy":

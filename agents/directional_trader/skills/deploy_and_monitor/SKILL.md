@@ -51,7 +51,7 @@ manage_bots(action="status")   # no bot_name — returns all active bots
 and cannot be recovered later.
 
 For a single lightweight controller, an executor may fit better than a bot —
-consult the `executor_manager` agent.
+delegate to the `executor_manager` agent.
 
 ## Step 3 — Early monitoring
 
@@ -61,7 +61,7 @@ every 6–12 hours until the comparison window is reached.
 ```python
 manage_bots(action="status")
 manage_bots(action="logs", bot_name="{strategy_slug}_live_v1", log_type="error")
-manage_executors(action="search", status="RUNNING")
+list_executors(status="RUNNING")
 ```
 
 **What to check:** is it running, is it trading, and does the trade rate match the

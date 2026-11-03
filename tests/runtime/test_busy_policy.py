@@ -72,13 +72,12 @@ class _GatedClient:
 
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _GatedClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _GatedClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     return session_module
 

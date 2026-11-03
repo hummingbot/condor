@@ -1,15 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Check,
   Edit2,
   Loader2,
   Plus,
   Star,
-  Trash2,
-  X,
 } from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
+import { InlineConfirm } from "@/components/ui/InlineConfirm";
+import { useIsAdmin } from "@/hooks/useIsAdmin";
+import { useServer } from "@/hooks/useServer";
 import { type ServerInfo, api } from "@/lib/api";
 
 interface ServerForm {
@@ -22,8 +23,30 @@ interface ServerForm {
 
 const EMPTY_FORM: ServerForm = { name: "", host: "", port: 8000, username: "", password: "" };
 
+/**
+ * The edit form opens with the credential fields blank and both placeholders
+ * promising "(unchanged)", so a blank one means "keep what is stored" — never
+ * "erase it". The backend can only hear that as absence: `modify_server`
+ * applies each field under `if x is not None` (config_manager.py:342), and `""`
+ * is not None, so spreading the whole form wrote empty basic-auth credentials
+ * into config.yml on every host-only edit — silently, for the owner and for
+ * every trader the server is shared with (SEC-229).
+ *
+ * Omitting the key is what makes that safe, rather than round-tripping a
+ * sentinel: nothing about the stored secret has to reach the browser for it to
+ * survive an edit, so "keep what is stored" can never double as a way to read
+ * it back.
+ */
+function buildServerUpdate({ host, port, username, password }: ServerForm) {
+  const patch: Parameters<typeof api.updateServer>[1] = { host, port };
+  if (username) patch.username = username;
+  if (password) patch.password = password;
+  return patch;
+}
+
 export function ServersSettings() {
   const qc = useQueryClient();
+  const { server: activeServer, setServer } = useServer();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState<ServerForm>(EMPTY_FORM);
@@ -45,7 +68,7 @@ export function ServersSettings() {
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ name, ...data }: ServerForm) => api.updateServer(name, data),
+    mutationFn: (data: ServerForm) => api.updateServer(data.name, buildServerUpdate(data)),
     onSuccess: () => { invalidate(); setEditing(null); setForm(EMPTY_FORM); },
   });
 
@@ -54,9 +77,16 @@ export function ServersSettings() {
     onSuccess: () => { invalidate(); setConfirmDelete(null); },
   });
 
+  // Setting the default is two things at once, because the button reads as one:
+  // it writes the `chat_defaults` entry Telegram also uses, and it points this
+  // browser at that server. Without the second half the click had no visible
+  // effect at all — the star was never filled and the header never moved.
   const defaultMut = useMutation({
     mutationFn: (name: string) => api.setDefaultServer(name),
-    onSuccess: invalidate,
+    onSuccess: (_data, name) => {
+      if (name !== activeServer) setServer(name);
+      invalidate();
+    },
   });
 
   const startEdit = (s: ServerInfo) => {
@@ -73,6 +103,11 @@ export function ServersSettings() {
   };
 
   const isOwner = (s: ServerInfo) => s.permission === "owner";
+  // The "Shared with" names deep-link into the Admin tab, which only exists for
+  // an admin — a non-admin owner sees the same names as plain text rather than
+  // a control that navigates nowhere.
+  const isAdmin = useIsAdmin();
+  const [, setParams] = useSearchParams();
 
   if (isLoading) {
     return (
@@ -143,7 +178,7 @@ export function ServersSettings() {
                 value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
                 className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-                placeholder="admin"
+                placeholder={editing ? "(unchanged)" : "admin"}
               />
             </div>
             <div>
@@ -204,20 +239,63 @@ export function ServersSettings() {
                   <span className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
                     {s.permission}
                   </span>
+                  {s.is_default && (
+                    <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-400">
+                      Default
+                    </span>
+                  )}
                 </div>
                 <span className="text-xs text-[var(--color-text-muted)]">
                   {s.host}:{s.port}
                 </span>
+                {/* Who else is on this server. Read-only on purpose: grants are
+                    written in one place (the Admin tab), and a second write path
+                    into `server_access` is a second set of rules to keep in
+                    step. The backend only fills this for the owner. */}
+                {isOwner(s) && (s.shared_with?.length ?? 0) > 0 && (
+                  <span className="mt-0.5 block text-xs text-[var(--color-text-muted)]">
+                    Shared with{" "}
+                    {s.shared_with?.map((m, i) => (
+                      <span key={m.user_id}>
+                        {i > 0 && ", "}
+                        {isAdmin ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setParams({ tab: "admin", user: String(m.user_id) })
+                            }
+                            className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-text)]"
+                          >
+                            {m.display_name}
+                          </button>
+                        ) : (
+                          m.display_name
+                        )}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </div>
             </div>
 
             <div className="flex items-center gap-1">
               <button
                 onClick={() => defaultMut.mutate(s.name)}
-                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-amber-400"
-                title="Set as default"
+                disabled={s.is_default || defaultMut.isPending}
+                aria-pressed={s.is_default}
+                className={`rounded p-1.5 transition-colors disabled:cursor-default ${
+                  s.is_default
+                    ? "text-amber-400"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-amber-400 disabled:opacity-50"
+                }`}
+                title={s.is_default ? "Default server" : "Set as default"}
+                aria-label={s.is_default ? "Default server" : `Set ${s.name} as default`}
               >
-                <Star className="h-3.5 w-3.5" />
+                {defaultMut.isPending && defaultMut.variables === s.name ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Star className={`h-3.5 w-3.5 ${s.is_default ? "fill-current" : ""}`} />
+                )}
               </button>
               {isOwner(s) && (
                 <>
@@ -228,38 +306,14 @@ export function ServersSettings() {
                   >
                     <Edit2 className="h-3.5 w-3.5" />
                   </button>
-                  {confirmDelete === s.name ? (
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => deleteMut.mutate(s.name)}
-                        disabled={deleteMut.isPending}
-                        className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10 disabled:opacity-50"
-                        title="Confirm delete"
-                      >
-                        {deleteMut.isPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Check className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                      <button
-                        onClick={() => setConfirmDelete(null)}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                        title="Cancel delete"
-                        aria-label="Cancel delete"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setConfirmDelete(s.name)}
-                      className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
-                      title="Delete"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                  <InlineConfirm
+                    confirming={confirmDelete === s.name}
+                    onRequest={() => setConfirmDelete(s.name)}
+                    onConfirm={() => deleteMut.mutate(s.name)}
+                    onCancel={() => setConfirmDelete(null)}
+                    pending={deleteMut.isPending}
+                    triggerLabel="Delete"
+                  />
                 </>
               )}
             </div>

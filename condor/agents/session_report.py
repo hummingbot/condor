@@ -28,6 +28,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from condor.reports import store
 from condor.reports.builder import LiveReport
 
 from . import canvas as canvas_mod
@@ -47,9 +48,13 @@ class SessionReport:
         strategy_slug: str,
         session_num: int,
         frequency_sec: int = 60,
+        owner_id: int = 0,
     ) -> None:
         self.run_key = f"{agent_slug}.{strategy_slug}"
         self.session_num = session_num
+        # The engine's authenticated user_id: stamped on the report at save so
+        # the web reports routes can authorize reads against it (SEC-196).
+        self._owner_id = owner_id
         self._live = LiveReport(
             title=f"{agent_slug} · {strategy_slug} · session {session_num}",
             source_name=f"{self.run_key}/session_{session_num}",
@@ -86,7 +91,8 @@ class SessionReport:
         self._decisions(b, journal)
         self._belief_history(b, session_dir)
 
-        return await self._live.update()
+        with store.attribute_owner(self._owner_id):
+            return await self._live.update()
 
     # ------------------------------------------------------------------
     # Blocks

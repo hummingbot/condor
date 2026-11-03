@@ -93,7 +93,7 @@ Call `manage_bots(action="status")`. Look for bot named `ema_trend_loop`.
 - If running → proceed to Step 5.
 
 ### Step 5 — Check positions and performance
-Call `manage_executors(action="positions_summary")`. For each open position:
+Call `list_positions_held()`. For each open position:
 - Note unrealized PnL, side, pair
 - If any single position exceeds -10% unrealized loss → stop that controller:
   ```
@@ -103,7 +103,7 @@ Call `manage_executors(action="positions_summary")`. For each open position:
   Learning: record which config/pair triggered the stop and under what conditions
 
 ### Step 6 — Check global drawdown
-Call `manage_executors(action="performance_report")`.
+Call `get_performance_report()`.
 - If total realized + unrealized PnL < -(total_amount_quote * 0.15) → stop the entire bot:
   ```
   manage_bots(action="stop_bot", bot_name="ema_trend_loop")

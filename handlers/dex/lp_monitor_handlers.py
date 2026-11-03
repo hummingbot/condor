@@ -88,7 +88,7 @@ def format_position_detail_view(
     quote_price = _get_price(quote_sym, token_prices, 1.0)
     base_price = _get_price(base_sym, token_prices, 0)
 
-    pnl_summary = pos.get("pnl_summary", {})
+    pnl_summary = pos.get("pnl_summary") or {}
     pnl_usd = float(pnl_summary.get("total_pnl_quote", 0) or 0) * quote_price
     value_usd = float(pnl_summary.get("current_lp_value_quote", 0) or 0) * quote_price
 
@@ -230,7 +230,7 @@ async def handle_lpm_navigation(
             current_str = f"Current: {current}"
 
     # Format value
-    pnl_summary = pos.get("pnl_summary", {})
+    pnl_summary = pos.get("pnl_summary") or {}
     value = pnl_summary.get("current_lp_value_quote", 0)
     value_str = ""
     if value:
@@ -484,7 +484,7 @@ async def handle_lpm_collect_fees(
         )
 
         if result:
-            tx_hash = (result.get("tx_hash", "") or "N/A")[:16]
+            tx_hash = (result.get("transaction_hash", "") or "N/A")[:16]
             await query.message.reply_text(
                 f"✅ *Fees collected*\nTx: `{escape_markdown_v2(tx_hash)}...`",
                 parse_mode="MarkdownV2",
@@ -609,18 +609,26 @@ async def handle_lpm_rebalance_execute(
 
         logger.info(f"Close position result: {close_result}")
 
-        # Extract tx hash from various possible field names
-        close_tx = None
-        if isinstance(close_result, dict):
-            close_tx = (
-                close_result.get("tx_hash")
-                or close_result.get("txHash")
-                or close_result.get("signature")
-                or close_result.get("txSignature")
-            )
+        close_tx = close_result.get("transaction_hash")
         close_tx_display = (
             f"`{escape_markdown_v2(close_tx[:20])}...`" if close_tx else "_pending_"
         )
+
+        # Re-opening spends the tokens the close returned, so it may only run
+        # once the close is CONFIRMED on-chain. hapi reports the Gateway
+        # transaction status as 'confirmed' | 'submitted' | 'failed'; on the
+        # latter two the tokens are not in the wallet yet (or never will be).
+        close_status = close_result.get("status")
+        if close_status != "confirmed":
+            await query.message.edit_text(
+                f"⚠️ *Rebalance stopped*\n\n"
+                f"The close is `{escape_markdown_v2(str(close_status))}`, not confirmed\\.\n"
+                f"Close Tx: {close_tx_display}\n\n"
+                f"No new position was opened — the withdrawn tokens are not in "
+                f"your wallet yet\\. Check the position and retry\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
 
         # Update progress
         await query.message.edit_text(
@@ -631,19 +639,21 @@ async def handle_lpm_rebalance_execute(
             parse_mode="MarkdownV2",
         )
 
-        # Get the withdrawn amounts from the close result
-        base_withdrawn = close_result.get(
-            "base_amount", close_result.get("amount_base", 0)
-        )
-        quote_withdrawn = close_result.get(
-            "quote_amount", close_result.get("amount_quote", 0)
-        )
+        # What the close actually returned on-chain (hapi's
+        # CLMMClosePositionResponse). Never substitute the pre-close cached
+        # amounts: those are off by fees, rent and slippage.
+        base_withdrawn = close_result.get("base_token_amount_removed")
+        quote_withdrawn = close_result.get("quote_token_amount_removed")
 
-        # Fallback to original position amounts if not in close result
-        if not base_withdrawn:
-            base_withdrawn = pos.get("base_token_amount", pos.get("amount_a", 0))
-        if not quote_withdrawn:
-            quote_withdrawn = pos.get("quote_token_amount", pos.get("amount_b", 0))
+        if not base_withdrawn and not quote_withdrawn:
+            await query.message.edit_text(
+                f"⚠️ *Rebalance stopped*\n\n"
+                f"✅ Position closed \\(Tx: {close_tx_display}\\)\n"
+                f"❌ The close reported no withdrawn amounts\n\n"
+                f"No new position was opened\\. Your funds are in your wallet\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
 
         # Update progress
         await query.message.edit_text(
@@ -654,17 +664,25 @@ async def handle_lpm_rebalance_execute(
             parse_mode="MarkdownV2",
         )
 
-        # Step 3: Open new position with same range using bid-ask strategy (type 2)
-        extra_params = {"strategyType": 2}  # Bid-Ask strategy
+        # Step 3: Open new position with same range using bid-ask strategy (type 2).
+        # strategyType is Meteora-only; hapi rejects it for other connectors.
+        extra_params = {"strategyType": 2} if connector == "meteora" else None
 
+        # Decimal, not float: the SDK str()s whatever it is given, and a float
+        # puts "1e-08" / "0.30000000000000004" on the wire. An empty side is
+        # None (omitted), not 0.
         open_result = await client.gateway_clmm.open_position(
             connector=connector,
             network=network,
             pool_address=pool_address,
             lower_price=Decimal(str(lower_price)),
             upper_price=Decimal(str(upper_price)),
-            base_token_amount=float(base_withdrawn) if base_withdrawn else 0,
-            quote_token_amount=float(quote_withdrawn) if quote_withdrawn else 0,
+            base_token_amount=(
+                Decimal(str(base_withdrawn)) if base_withdrawn else None
+            ),
+            quote_token_amount=(
+                Decimal(str(quote_withdrawn)) if quote_withdrawn else None
+            ),
             extra_params=extra_params,
         )
 
@@ -680,18 +698,14 @@ async def handle_lpm_rebalance_execute(
 
         logger.info(f"Open position result: {open_result}")
 
-        # Extract tx hash
-        open_tx = None
-        if isinstance(open_result, dict):
-            open_tx = (
-                open_result.get("tx_hash")
-                or open_result.get("txHash")
-                or open_result.get("signature")
-                or open_result.get("txSignature")
-            )
+        # hapi returns transaction_hash (None while pending)
+        open_tx = open_result.get("transaction_hash")
         open_tx_display = (
             f"`{escape_markdown_v2(open_tx[:20])}...`" if open_tx else "_pending_"
         )
+        # position_address is null with status 'submitted' when the open tx has
+        # not landed yet — hapi's poller records the address once it does.
+        open_position_address = open_result.get("position_address")
 
         # Get token symbols for display
         _, quote_symbol, pair = _get_position_tokens(pos, token_cache)
@@ -708,13 +722,23 @@ async def handle_lpm_rebalance_execute(
             range_display = f"{escape_markdown_v2(str(lower_price))} \\- {escape_markdown_v2(str(upper_price))}"
 
         # Build success message
+        if open_position_address:
+            opened_line = (
+                f"✅ New position opened: "
+                f"`{escape_markdown_v2(open_position_address[:20])}...`"
+            )
+        else:
+            opened_line = (
+                "⏳ New position submitted — address known once the tx confirms"
+            )
+
         lines = [
             f"✅ *Rebalance Complete*",
             f"━━━━━━━━━━━━━━━━━━━━━",
             f"*{escape_markdown_v2(pair)}*",
             "",
             f"✅ Old position closed",
-            f"✅ New position opened",
+            opened_line,
             "",
             f"Range: {range_display}",
             f"Strategy: Bid\\-Ask",

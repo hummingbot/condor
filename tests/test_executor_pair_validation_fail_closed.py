@@ -52,13 +52,12 @@ class _Panel:
         )
 
         async def show_pair_suggestions(
-            update, context, input_pair, error_msg, suggestions, connector
+            update, context, error_msg, suggestions, **wiring
         ):
             self.shown = {
-                "pair": input_pair,
                 "error_msg": error_msg,
                 "suggestions": suggestions,
-                "connector": connector,
+                **wiring,
             }
 
         async def step_2(update, context):
