@@ -85,6 +85,7 @@ const PLAN: AgentImportPlan = {
   total_bytes: 1220,
   stamps: { created_by: "7", server_name: "" },
   mutes: { routines: ["r"], skills: ["s"] },
+  hub_reviewed: true,
   agent_key: "claude-code",
   agent_key_inherited: false,
   collision: "",
@@ -123,6 +124,7 @@ const UPDATE: AgentUpdatePlan = {
   ],
   counts: { changed: 1, conflict: 1 },
   mutes: { routines: [], skills: [] },
+  hub_reviewed: true,
   blockers: [],
   warnings: [],
 };

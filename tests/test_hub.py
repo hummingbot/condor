@@ -2342,6 +2342,79 @@ def test_a_hub_update_also_lands_a_newly_added_skill_enabled(traveller, fake_hub
     assert "new_skill" in {row["slug"] for row in SkillStore("traveller").catalog()}
 
 
+def test_a_hub_update_grants_execution_consent_for_the_routines_it_writes(
+    traveller, fake_hub
+):
+    """The same trust-boundary exception as a fresh install, threaded through
+    ``plan_update``/``apply_update`` too: a routine this update adopts needs
+    no further per-file allow, keyed to the exact bytes it just wrote."""
+    from condor.agents import code_trust
+
+    ab.build("traveller")  # mints and stamps this agent's agent_uid on disk
+    _write(traveller / "routines" / "r.py", ROUTINE_PY + "\n# v2\n")
+    _write(traveller / "routines" / "added_in_v2.py", ROUTINE_PY)
+    fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+
+    res = _client().post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    assert res.json()["verb"] == "update"
+    assert code_trust.allowed(
+        "traveller", "r", (traveller / "routines" / "r.py").read_text()
+    )
+    assert code_trust.allowed(
+        "traveller",
+        "added_in_v2",
+        (traveller / "routines" / "added_in_v2.py").read_text(),
+    )
+
+
+def test_a_hub_update_conflict_does_not_grant_consent_for_the_kept_local_file(
+    offered, fake_hub
+):
+    """Boundary: consent follows the exact reviewed artifact, never the hub as
+    a source. A routine the operator edited, where the hub's next version also
+    changed it, is a ``conflict`` — the local bytes are kept on disk — and
+    neither the local edit nor the hub's newer bytes (never written here) may
+    come out allowed. Granting the newer bytes anyway would be consent for
+    content that was never installed, let alone read by the operator."""
+    from condor.agents import code_trust
+
+    client = _client()
+    client.post("/hub/agents/traveller/install")
+    home = agent_home("traveller")
+    reviewed_r_py = (home / "routines" / "r.py").read_text()
+    assert code_trust.allowed("traveller", "r", reviewed_r_py)
+
+    local_edit = reviewed_r_py + "\n# the operator's own change\n"
+    (home / "routines" / "r.py").write_text(local_edit)
+    assert not code_trust.allowed("traveller", "r", local_edit)
+
+    # A newer hub version that changed this same file too, independently of
+    # the operator's edit: written to disk just long enough to zip it, then
+    # the operator's edit is put straight back — ``_zip_agent`` only ever
+    # reads the live home, so this is the one way to offer content that
+    # never actually lands here.
+    new_upstream_r_py = reviewed_r_py + "\n# the hub's own v2 change\n"
+    (home / "routines" / "r.py").write_text(new_upstream_r_py)
+    zf_bytes = _zip_agent("traveller")
+    (home / "routines" / "r.py").write_text(local_edit)
+    fake_hub.offer("traveller", zf_bytes, version=2)
+
+    res = _client().post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    assert res.json()["verb"] == "update"
+    files = {f["path"]: f["verdict"] for f in res.json()["plan"]["files"]}
+    assert files["routines/r.py"] == "conflict"
+    # The operator's edit is still on disk, untouched by the update.
+    assert (home / "routines" / "r.py").read_text() == local_edit
+    assert not code_trust.allowed("traveller", "r", local_edit)
+    # The hub's newer bytes were never written here and must not come out
+    # allowed either — that would be consent for content nobody has read.
+    assert not code_trust.allowed("traveller", "r", new_upstream_r_py)
+
+
 def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
     client = _client()
 
@@ -2452,13 +2525,33 @@ def test_a_hub_installed_skill_lands_enabled_with_no_second_approval(offered):
     assert "unmute" not in res.json()["plan"]["next_step"]
 
 
-def test_an_imported_routine_has_no_execution_consent_on_the_hub_path(offered):
-    """FEAT-147, which is a separate gesture from the mute and both are needed."""
+def test_a_hub_installed_routine_has_execution_consent_for_the_reviewed_bytes(
+    offered,
+):
+    """The owner's trust-boundary call: the hub's review stands in for the
+    operator's per-file ``code_trust`` allow, tied to the exact bytes just
+    installed — the one gate FEAT-147 used to hold unconditional."""
     from condor.agents import code_trust
 
     _client().post("/hub/agents/traveller/install")
 
     source = agent_home("traveller") / "routines" / "r.py"
+    assert code_trust.allowed("traveller", "r", source.read_text())
+    # Still armed — a hub install is still a gated agent, just one the hub's
+    # own review already allowed every routine on.
+    assert code_trust.is_armed("traveller")
+
+
+def test_editing_a_hub_installed_routine_does_not_inherit_its_consent(offered):
+    """Consent is keyed to the exact reviewed artifact, never to the hub as a
+    source: change the bytes and the file is pending again, like any other."""
+    from condor.agents import code_trust
+
+    _client().post("/hub/agents/traveller/install")
+
+    source = agent_home("traveller") / "routines" / "r.py"
+    source.write_text(source.read_text() + "\n# a local edit\n")
+
     assert not code_trust.allowed("traveller", "r", source.read_text())
 
 
@@ -2516,7 +2609,7 @@ def test_every_hub_surface_carries_the_one_trust_sentence(offered):
 
     assert "not a security boundary for code" in body["trust"]
     assert "land enabled" in body["trust"]
-    assert "arrives with no execution consent" in body["trust"]
+    assert "grants execution consent" in body["trust"]
 
 
 # ── Hub-listing status for an installed agent (CORR-812) ─────────────────

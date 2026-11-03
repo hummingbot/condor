@@ -152,6 +152,13 @@ export interface AgentImportPlan {
   total_bytes: number;
   stamps: Record<string, string>;
   mutes: { routines: string[]; skills: string[] };
+  /**
+   * Whether this is a hub install: the hub's own review stands in for the
+   * operator's per-file `code_trust` allow, so every routine above lands
+   * with execution consent already granted for these exact bytes. `false`
+   * for a plain file import, which keeps the ordinary per-file gate.
+   */
+  hub_reviewed: boolean;
   agent_key: string;
   agent_key_inherited: boolean;
   /** The taken slug, when the bundle cannot land under the name it asked for. */
@@ -224,6 +231,9 @@ export interface AgentUpdatePlan {
   counts: Record<string, number>;
   /** What arrives switched off — only what is genuinely new. */
   mutes: { routines: string[]; skills: string[] };
+  /** `AgentImportPlan.hub_reviewed`'s twin: a hub update's added or changed
+   *  routines land with execution consent already granted, same reason. */
+  hub_reviewed: boolean;
   blockers: AgentUpdateBlocker[];
   warnings: AgentUpdateWarning[];
   updated?: boolean;

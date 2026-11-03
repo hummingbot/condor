@@ -9,34 +9,41 @@ bytes the operator could have downloaded themselves.
 **The trust model, in three sentences.** It is the decision the rest of this
 module hangs off, and every surface that renders a listing repeats it.
 
-1. *A bundle's code is untrusted wherever it came from, and the execution gate
-   is on the receiving install, never on provenance.* Condor installs any
+1. *A bundle's code is untrusted wherever it came from; by default the
+   execution gate is on the receiving install, never on provenance — and the
+   hub is the one provenance that may stand in for it.* Condor installs any
    well-formed bundle — from a file, from a friend, from the hub — and never
    requires a hub signature. A routine is code: every executable file is
    named before anything is written (FEAT-133), and no imported ``.py`` has
    execution consent (FEAT-147) until the operator allows it file by file
-   after reading it — nothing started, and that gate never varies by
-   provenance. Whether the agent is even *told about* a routine or a skill at
-   all is a separate, cheaper gate — muting — and that one is exactly where
-   provenance is allowed to matter: both are muted on arrival the same
+   after reading it — *unless* this install is the hub's own (point 2 says
+   why that one is different). Whether the agent is even *told about* a
+   routine or a skill at all is a separate, cheaper gate — muting — and the
+   hub takes the same exception there: both are muted on arrival the same
    cautious way when nobody has reviewed the bundle they travelled in — which
-   is every path except the hub's own install (point 2 says why that one is
-   different; :func:`condor.agents.bundle.plan`'s ``mute_skills=False``,
-   ``mute_routines=False`` is where it is decided — FEAT-146 for skills,
-   widened to routines in FEAT-150).
+   is every path except the hub's own install (:func:`condor.agents.bundle.plan`'s
+   ``mute_skills=False``, ``mute_routines=False``, ``hub_reviewed=True`` is
+   where all three are decided together — FEAT-146 for skills, widened to
+   routines in FEAT-150, and to execution consent by the owner's later
+   trust-boundary decision). Either way, nothing is *started*: the review
+   stands in for the per-file allow, never for pressing Start.
 2. *The hub is a discovery and moderation service, not a security boundary for
-   code.* Only an ``APPROVED`` version is ever served at all (PR #111's
-   ``AgentVersionStatus``) — a human or an AI reviewer passed it before
-   :func:`get` can even see it — but that is a gate on what reaches the
-   catalogue, not a claim read by anything in this module that decides
-   whether to write, and it buys a hub-installed *routine* nothing on the
-   execution side: FEAT-147's execution consent still gates it file by file,
-   same as any other bundle. What the review *does* cover, and what point 1's
-   exception trusts it for, is availability — a skill's prose, a routine's
-   declared behaviour before it is ever allowed to run, and the declared
-   ``tools:`` allowlist — because an approved bundle is not the bundle the
+   code — except that its review is exactly what now stands in for the
+   operator's own, for the exact bytes it approved.* Only an ``APPROVED``
+   version is ever served at all (PR #111's ``AgentVersionStatus``) — a human
+   or an AI reviewer passed it before :func:`get` can even see it — but that
+   is a gate on what reaches the catalogue, not a claim read by anything in
+   this module that decides whether to write. What the review covers, and
+   what point 1's exception trusts it for, is both availability — a skill's
+   prose, a routine's declared behaviour, and the declared ``tools:``
+   allowlist — and, now, execution: a hub-installed routine carries execution
+   consent for this exact version and digest from the moment ``apply``/
+   ``apply_update`` write it, because an approved bundle is not the bundle the
    operator will run after editing it here, but it is exactly the bytes a
-   reviewer already read before this install ever asked for them.
+   reviewer already read before this install ever asked for them. Edit that
+   file afterwards, or import the identical bytes from anywhere but the hub,
+   and the ordinary per-file gate is back — :mod:`condor.agents.code_trust` is
+   keyed by content digest, not by where a file once came from.
 3. *Integrity between hub and client is a content digest over HTTPS, not a
    signature.* :func:`fetch` verifies the downloaded bytes against the
    ``X-Agent-Sha256`` header the same response carries, before any caller
@@ -1080,6 +1087,14 @@ def installed_agent_status(slug: str, force: bool = False, *, token: str = "") -
     for a seat that has none. Empty is the anonymous read a free agent's
     status answers fine; a membership/purchase-gated agent's status needs
     the admin's own token passed in, same as every other hub read.
+
+    A confirmed ``"delisted"`` is advisory, read on the next page view that
+    asks — nothing here revokes anything. In particular it does not touch
+    whatever :mod:`condor.agents.code_trust` consent an earlier install or
+    update already granted for this agent's routines: Botcamp withdrawing a
+    listing says nothing new about bytes this install already has on disk
+    and whose digest the operator's own install already trusted. Revoking on
+    delisting would be a different feature, not implied by this one.
     """
     from condor.agents.bundle import agent_home, read_stamp, write_stamp
 

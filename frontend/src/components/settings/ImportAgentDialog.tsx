@@ -89,16 +89,20 @@ const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
  * in FEAT-150): a hub update's skills and routines are not muted, so a
  * plain file's path is checked against what actually got muted instead of
  * being told a blanket story. An unmuted routine still isn't "ready to run"
- * the way an unmuted skill is — it needs its content allowed (FEAT-147)
- * independently of muting.
+ * the way an unmuted skill is on a plain import — it needs its content
+ * allowed (FEAT-147) — except on a hub update (`hubReviewed`), where that
+ * allow already happened: the hub's review covers execution too.
  */
-function addedLabel(path: string, mutes: { routines: string[]; skills: string[] }): string {
+function addedLabel(
+  path: string,
+  mutes: { routines: string[]; skills: string[] },
+  hubReviewed: boolean,
+): string {
   const parts = path.split("/");
   if (parts.length === 2 && parts[0] === "routines" && path.endsWith(".py")) {
     const name = parts[1].slice(0, -".py".length);
-    // Unmuted is not "ready to run" for a routine the way it is for a skill:
-    // it still needs its content allowed (FEAT-147), muted or not.
-    return mutes.routines.includes(name) ? "new — arrives muted" : "new — needs your allow";
+    if (mutes.routines.includes(name)) return "new — arrives muted";
+    return hubReviewed ? "new — ready to run" : "new — needs your allow";
   }
   if (parts.length > 2 && parts[0] === "skills") {
     return mutes.skills.includes(parts[1]) ? "new — arrives muted" : "new — enabled on arrival";
@@ -410,11 +414,13 @@ export function ImportAgentDialog({
                     return "None of this stops the import — everything arrives muted anyway. It is what will not work until you fix it.";
                   }
                   if (!routinesMuted && !skillsMuted) {
-                    return "None of this stops the import. Nothing here is muted — its skills and routines land ready to use, though every routine still needs you to allow it before it runs. This is what will not work until you fix it.";
+                    return plan.hub_reviewed
+                      ? "None of this stops the import. Nothing here is muted — its skills and routines land ready to use, and the hub's own review already covers execution, so nothing further is needed before they run. This is what will not work until you fix it."
+                      : "None of this stops the import. Nothing here is muted — its skills and routines land ready to use, though every routine still needs you to allow it before it runs. This is what will not work until you fix it.";
                   }
                   return routinesMuted
                     ? "None of this stops the import. Its routines arrive muted, but this agent's skills do not — they land ready to use. This is what will not work until you fix it."
-                    : "None of this stops the import. Its routines arrive unmuted (still pending your allow before they run), but its skills are muted. This is what will not work until you fix it.";
+                    : `None of this stops the import. Its routines arrive unmuted (${plan.hub_reviewed ? "and already have the hub's execution consent" : "still pending your allow before they run"}), but its skills are muted. This is what will not work until you fix it.`;
                 })()}
               </p>
               <ul className="space-y-0.5">
@@ -514,9 +520,9 @@ export function ImportAgentDialog({
                 {plan.executables.length !== 1 ? "s" : ""}
               </p>
               <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-                A bundle from someone you do not trust is untrusted code: an imported
-                routine runs inside Condor with no sandbox. These arrive muted — read
-                each one before you switch it on.
+                {plan.hub_reviewed
+                  ? "An imported routine runs inside Condor with no sandbox. The hub already reviewed this exact content, so these arrive with execution consent already granted — read them anyway."
+                  : "A bundle from someone you do not trust is untrusted code: an imported routine runs inside Condor with no sandbox. These arrive muted — read each one before you switch it on."}
               </p>
               <ul className="space-y-0.5">
                 {plan.executables.map((f) => (
@@ -648,8 +654,10 @@ export function ImportAgentDialog({
             </p>
             <p className="text-[11px] text-[var(--color-text-muted)]">
               Its memory, config, mutes, journals and session output are untouched.
-              Nothing is started, and every routine that changes has to be read and
-              allowed again before it can run.
+              Nothing is started
+              {update.hub_reviewed
+                ? ", and the hub's own review already covers every routine this update changes — no further allow needed before it can run."
+                : ", and every routine that changes has to be read and allowed again before it can run."}
             </p>
           </div>
 
@@ -687,7 +695,7 @@ export function ImportAgentDialog({
                   .map((f) => {
                     const copy =
                       f.verdict === "added"
-                        ? { label: addedLabel(f.path, update.mutes) }
+                        ? { label: addedLabel(f.path, update.mutes, update.hub_reviewed) }
                         : VERDICT_COPY[f.verdict];
                     return (
                       <li
