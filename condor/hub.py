@@ -197,11 +197,15 @@ class HubError(RuntimeError):
     this reader could not parse, or a local refusal that never left the box. A
     caller mapping this to its own protocol needs that distinction: a 401 is
     the operator's token, a 0 is the network.
+
+    ``code`` names a refusal the dashboard can act on rather than only print —
+    today only :data:`CLONE_TERMS_REQUIRED` — and is ``""`` otherwise.
     """
 
-    def __init__(self, message: str, status: int = 0):
+    def __init__(self, message: str, status: int = 0, code: str = ""):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class NoTokenError(HubError):
@@ -764,6 +768,23 @@ def _detail(reply: Reply) -> str:
     return ""
 
 
+#: The ``code`` Botcamp puts on the ``403`` a download answers while the
+#: account has not accepted its Clone to Condor disclaimer — the one refusal
+#: the operator can clear from inside Condor (:func:`accept_clone_terms`).
+CLONE_TERMS_REQUIRED = "condor_terms_required"
+
+
+def _body_code(reply: Reply) -> str:
+    """The hub's machine-readable ``code`` for a refusal, or ``""``."""
+    try:
+        body = json.loads(reply.body.decode("utf-8"))
+        if isinstance(body, dict) and isinstance(body.get("code"), str):
+            return body["code"][:64]
+    except Exception:  # noqa: BLE001 - a hub that answers HTML has no code
+        pass
+    return ""
+
+
 def _access_refusal(reply: Reply, what: str) -> HubError:
     """``reply`` as the sentence a gated-agent read deserves.
 
@@ -789,6 +810,15 @@ def _access_refusal(reply: Reply, what: str) -> HubError:
             or f"{what}: sign in to Botcamp to clone this agent — connect a "
             "profile in the Agent Hub (Agents → Hub).",
             status=401,
+        )
+    if reply.status == 403 and _body_code(reply) == CLONE_TERMS_REQUIRED:
+        # Botcamp's own sentence sends the operator to the website; the
+        # dashboard offers the same checkbox in place, so it is not shown.
+        return HubError(
+            "Accept Botcamp's clone disclaimer to install agents from the hub. "
+            "You only do this once.",
+            status=403,
+            code=CLONE_TERMS_REQUIRED,
         )
     if reply.status == 403:
         return HubError(
@@ -1749,6 +1779,17 @@ class MeUser(BaseModel):
     name: str = ""
     slug: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _nulls_as_empty(cls, data):
+        """Botcamp sends ``"slug": null`` for an account that never set a
+        profile slug (and ``name`` can be blank). Read a ``null`` as ``""``
+        instead of refusing the whole account description over it.
+        """
+        if isinstance(data, dict):
+            return {k: ("" if v is None else v) for k, v in data.items()}
+        return data
+
 
 class MeInfo(BaseModel):
     """Who this install's token identifies, and what it may do — read fresh
@@ -1763,6 +1804,10 @@ class MeInfo(BaseModel):
 
     user: MeUser = Field(default_factory=MeUser)
     scopes: list[str] = Field(default_factory=list)
+    #: When this account accepted Botcamp's Clone to Condor disclaimer — on
+    #: the website or through :func:`accept_clone_terms` — or ``None`` while
+    #: it has not. A hub too old to say leaves it ``None`` as well.
+    condor_terms_accepted_at: str | None = None
 
 
 def me(token: str) -> MeInfo:
@@ -1786,6 +1831,24 @@ def me(token: str) -> MeInfo:
     return _model(
         data if isinstance(data, dict) else {}, MeInfo, "the signed-in Botcamp account"
     )
+
+
+def accept_clone_terms(token: str) -> None:
+    """Record, on the linked Botcamp account, that its owner accepted the
+    Clone to Condor disclaimer — the same once-per-account acceptance the
+    checkbox on a strategy's page records (``POST /api/condor/terms``).
+
+    Raises :class:`NoTokenError` without sending anything when no profile is
+    linked: the acceptance belongs to an account, and an anonymous request
+    has none to put it on.
+    """
+    if not (token or "").strip():
+        raise NoTokenError(
+            "No Botcamp profile is linked. Connect one in the Agent Hub (Agents → Hub)."
+        )
+    reply = _send("POST", f"{HUB_URL}/condor/terms", token=token.strip())
+    _clear_token_if_revoked(reply)
+    _json(reply, "the clone disclaimer acceptance")
 
 
 def _clear_token_if_revoked(reply: Reply) -> None:

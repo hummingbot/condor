@@ -111,6 +111,7 @@ export function ImportAgentDialog({
   source,
   provenance,
   stickyAction = false,
+  errorAction,
 }: {
   onImported: () => void;
   /**
@@ -131,6 +132,12 @@ export function ImportAgentDialog({
    * panel keeps it inline, after the review.
    */
   stickyAction?: boolean;
+  /**
+   * A way out of a failure the source knows how to clear in place — the hub's
+   * clone disclaimer. Returns what to show instead of the plain error, or
+   * `null` to show the error as usual. `retry` re-runs the review.
+   */
+  errorAction?: (error: unknown, retry: () => void) => ReactNode | null;
 }) {
   const [picked, setPicked] = useState<BundleSource | null>(null);
   const active = source ?? picked;
@@ -138,6 +145,8 @@ export function ImportAgentDialog({
   const [asSlug, setAsSlug] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The thrown value behind `error`, for `errorAction`. */
+  const [failure, setFailure] = useState<unknown>(null);
   const [landed, setLanded] = useState<AgentImportPlan | null>(null);
   /**
    * The update diff, once the operator has asked to see it.
@@ -206,6 +215,7 @@ export function ImportAgentDialog({
       if (mine !== latest.current) return;
       setPlan(null);
       setError((e as Error).message);
+      setFailure(e);
     } finally {
       if (mine === latest.current) setBusy(false);
     }
@@ -224,6 +234,7 @@ export function ImportAgentDialog({
       if (mine !== latest.current) return;
       setUpdate(null);
       setError((e as Error).message);
+      setFailure(e);
     } finally {
       if (mine === latest.current) setBusy(false);
     }
@@ -244,6 +255,7 @@ export function ImportAgentDialog({
       onImported();
     } catch (e) {
       setError((e as Error).message);
+      setFailure(e);
     } finally {
       setBusy(false);
     }
@@ -267,6 +279,7 @@ export function ImportAgentDialog({
       onImported();
     } catch (e) {
       setError((e as Error).message);
+      setFailure(e);
     } finally {
       setBusy(false);
     }
@@ -299,11 +312,12 @@ export function ImportAgentDialog({
         </p>
       )}
 
-      {error && (
-        <p role="alert" data-import-error className="text-sm text-[var(--color-red)]">
-          {error}
-        </p>
-      )}
+      {error &&
+        ((active && errorAction?.(failure, () => void review(active, asSlug))) || (
+          <p role="alert" data-import-error className="text-sm text-[var(--color-red)]">
+            {error}
+          </p>
+        ))}
 
       {landed && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">

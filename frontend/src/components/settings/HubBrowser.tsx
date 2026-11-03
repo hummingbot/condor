@@ -1,7 +1,12 @@
-import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   BadgeCheck,
   Bot,
+  Check,
   ExternalLink,
   Loader2,
   Lock,
@@ -12,8 +17,10 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import {
   api,
+  errorCode,
   errorStatus,
   HUB_CATALOGUE_PAGE_SIZE,
+  HUB_CLONE_TERMS_REQUIRED,
   type AgentImportPlan,
   type AgentUpdatePlan,
   type HubCatalogueEntry,
@@ -126,6 +133,9 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
   const [looked, setLooked] = useState("");
   const [bySlug, setBySlug] = useState(false);
   const [chosen, setChosen] = useState<Chosen | null>(null);
+  /** The clone disclaimer was just accepted from this review — confirmed on
+   *  screen until the review closes. */
+  const [termsAcceptedNow, setTermsAcceptedNow] = useState(false);
 
   const lookup = useMutation({
     mutationFn: (value: string) => api.getHubListing(value),
@@ -268,12 +278,28 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
           high up in the grid, a dialog rendered under the slug lookup was
           off-screen, and pressing Review looked like it did nothing. */}
       {chosen && source && (
-        <ReviewModal chosen={chosen} onClose={() => setChosen(null)}>
+        <ReviewModal
+          chosen={chosen}
+          onClose={() => {
+            setChosen(null);
+            setTermsAcceptedNow(false);
+          }}
+        >
           <ImportAgentDialog
             key={chosen.slug}
             source={source}
             onImported={onInstalled}
             stickyAction
+            errorAction={(error, retry) =>
+              errorCode(error) === HUB_CLONE_TERMS_REQUIRED ? (
+                <CloneTermsGate
+                  onAccepted={() => {
+                    setTermsAcceptedNow(true);
+                    retry();
+                  }}
+                />
+              ) : null
+            }
             provenance={
               <div
                 data-hub-provenance
@@ -285,6 +311,16 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
                 <p className="text-[11px] text-[var(--color-text-muted)]">
                   {chosen.trust}
                 </p>
+                {termsAcceptedNow && (
+                  <p
+                    data-hub-clone-terms-accepted
+                    className="flex items-center gap-1.5 pt-1 text-[11px] text-[var(--color-text)]"
+                  >
+                    <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-primary)]" />
+                    You accepted Botcamp&apos;s clone disclaimer. It&apos;s saved
+                    on your Botcamp account and covers every agent you clone.
+                  </p>
+                )}
               </div>
             }
           />
@@ -544,6 +580,69 @@ function AgentCard({
         </span>
       </div>
     </li>
+  );
+}
+
+/**
+ * Botcamp's Clone to Condor disclaimer, accepted from here instead of the
+ * website. Botcamp refuses every download until the linked account has
+ * accepted it once; ticking the box records that on the account, the same
+ * as the checkbox on a strategy's page, and re-runs the review.
+ *
+ * The wording is Botcamp's own (`CloneToCondorButton` in botcamp-site) — it
+ * is what the account is recorded as having agreed to, so keep them in step.
+ */
+function CloneTermsGate({ onAccepted }: { onAccepted: () => void }) {
+  const queryClient = useQueryClient();
+  const accept = useMutation({
+    mutationFn: () => api.acceptHubCloneTerms(),
+    onSuccess: () => {
+      // The Botcamp account card reads the acceptance date from here.
+      void queryClient.invalidateQueries({ queryKey: ["hub-me"] });
+      onAccepted();
+    },
+  });
+  return (
+    <div
+      data-hub-clone-terms
+      className="space-y-3 rounded-lg border border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 p-3 text-xs leading-relaxed"
+    >
+      <p className="font-semibold text-[var(--color-text)]">
+        Accept Botcamp&apos;s clone disclaimer to continue
+      </p>
+      <p className="text-[var(--color-text-muted)]">
+        This is someone else&apos;s code. Botcamp reviewed this version once,
+        which is no guarantee it&apos;s safe or profitable. Read the Code tab
+        and each routine before you switch it on, and try it without real funds
+        first. You&apos;re responsible for what it does with your exchange
+        keys.
+      </p>
+      <label className="flex cursor-pointer items-start gap-2 text-[var(--color-text)]">
+        <input
+          type="checkbox"
+          checked={accept.isPending || accept.isSuccess}
+          disabled={accept.isPending || accept.isSuccess}
+          onChange={(e) => e.target.checked && accept.mutate()}
+          className="mt-0.5"
+        />
+        <span>
+          I understand, and I&apos;ll review every agent before running it.
+          <span className="block text-[var(--color-text-muted)]">
+            Saved on your Botcamp account. You only do this once.
+          </span>
+        </span>
+      </label>
+      {accept.isPending && (
+        <p className="flex items-center gap-2 text-[var(--color-text-muted)]">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…
+        </p>
+      )}
+      {accept.error && (
+        <p role="alert" className="text-[var(--color-red)]">
+          {(accept.error as Error).message}
+        </p>
+      )}
+    </div>
   );
 }
 

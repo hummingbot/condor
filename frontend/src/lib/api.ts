@@ -28,10 +28,23 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       // The whole JSON body, for the few answers that carry more than a
       // sentence — a 409 on export/publish lists `possible_keys` (SEC review C2).
       body: err,
+      // A refusal the panel can act on in place names itself here (today the
+      // hub's clone disclaimer), so callers never match on the wording.
+      code: res.headers.get("X-Error-Code") ?? undefined,
     });
   }
   return res.json();
 }
+
+/** The `X-Error-Code` of a failed `apiFetch`, when the server named one. */
+export function errorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code ? code : undefined;
+}
+
+/** `errorCode` of a hub download refused until the linked Botcamp account
+ *  accepts the Clone to Condor disclaimer (`api.acceptHubCloneTerms`). */
+export const HUB_CLONE_TERMS_REQUIRED = "condor_terms_required";
 
 /** The HTTP status of a failed `apiFetch`, when the thrown value carries one. */
 export function errorStatus(error: unknown): number | undefined {
@@ -335,6 +348,9 @@ export interface HubDeviceState {
 export interface HubMe {
   user: { id: string; name: string; slug: string };
   scopes: string[];
+  /** When this account accepted Botcamp's Clone to Condor disclaimer (on the
+   *  website or from the Hub here), or `null` while it has not. */
+  condor_terms_accepted_at?: string | null;
 }
 
 /** Why a submission is `"rejected"` — never a secret value (FEAT-150). */
@@ -4095,6 +4111,14 @@ export const api = {
    *  shared — a private agent is not in `browseHub`'s catalogue. */
   getHubListing: (slug: string) =>
     apiFetch<HubCatalogue>(`/api/v1/hub/agents/${encodeURIComponent(slug)}`),
+
+  /** Accept Botcamp's Clone to Condor disclaimer on the linked account —
+   *  once per account, the same record the checkbox on botcamp.xyz writes.
+   *  Admin-only: the install's Botcamp token is the admin's. */
+  acceptHubCloneTerms: () =>
+    apiFetch<{ accepted: boolean }>("/api/v1/hub/clone-terms", {
+      method: "POST",
+    }),
 
   /** What installing this agent version would do. Writes nothing on the
    *  server. `version` defaults to `"latest"`, which Botcamp resolves. */

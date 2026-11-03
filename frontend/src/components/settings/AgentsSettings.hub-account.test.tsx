@@ -262,3 +262,21 @@ it("tells the operator plainly when the hub could not be told of the disconnect"
     "Botcamp could not be told — revoke it yourself from your Botcamp profile's token list.",
   );
 });
+
+it("shows when the account accepted Botcamp's clone disclaimer", async () => {
+  meState = { ...meState, condor_terms_accepted_at: "2026-11-02T10:00:00.000Z" };
+  await render();
+
+  const line = container.querySelector("[data-botcamp-clone-terms]");
+  expect(line?.getAttribute("data-botcamp-clone-terms")).toBe("accepted");
+  expect(line?.textContent).toContain("Clone disclaimer accepted on");
+});
+
+it("says the clone disclaimer is still to accept, and where it will be asked", async () => {
+  meState = { ...meState, condor_terms_accepted_at: null };
+  await render();
+
+  const line = container.querySelector("[data-botcamp-clone-terms]");
+  expect(line?.getAttribute("data-botcamp-clone-terms")).toBe("pending");
+  expect(line?.textContent).toContain("the Hub asks");
+});

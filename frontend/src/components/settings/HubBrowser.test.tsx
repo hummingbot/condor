@@ -137,6 +137,8 @@ let listingStatus = 200;
 let listingBody: unknown = { listing: LISTING, trust: TRUST };
 /** What the preview and install endpoints answer with. */
 let verb: "install" | "update" = "install";
+/** Whether the linked Botcamp account accepted the clone disclaimer. */
+let termsAccepted = true;
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -147,6 +149,7 @@ beforeEach(() => {
   listingStatus = 200;
   listingBody = { listing: LISTING, trust: TRUST };
   verb = "install";
+  termsAccepted = true;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -161,13 +164,34 @@ beforeEach(() => {
         });
       }
       requests.push({ url, method: init?.method ?? "GET" });
+      if (url === "/api/v1/hub/clone-terms") {
+        termsAccepted = true;
+        return json({ accepted: true });
+      }
+      if (url.includes("/install") && !termsAccepted) {
+        return new Response(
+          JSON.stringify({ detail: "Accept Botcamp's clone disclaimer to install agents from the hub." }),
+          {
+            status: 403,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Error-Code": "condor_terms_required",
+            },
+          },
+        );
+      }
       if (url.includes("/install")) {
         const plan = verb === "update" ? UPDATE : PLAN;
         const body =
           init?.method === "POST" && !url.includes("/preview")
             ? { ...plan, ...(verb === "update" ? { updated: true } : { imported: true }), next_step: "unmute what you trust" }
             : plan;
-        return json({ verb, listing: LISTING, plan: body });
+        return json({
+          verb,
+          listing: LISTING,
+          plan: body,
+          fetched: { version: 3, sha256: "d".repeat(64) },
+        });
       }
       if (listingStatus !== 200) {
         return json(listingBody, listingStatus);
@@ -545,4 +569,38 @@ it("the slug is addressed with what the caller typed, never a path segment escap
   const sent = requests[requests.length - 1].url;
   expect(sent).toBe(`/api/v1/hub/agents/${encodeURIComponent("../../admin")}`);
   expect(sent).not.toContain("/admin");
+});
+
+it("lets the operator accept Botcamp's clone disclaimer in place, then reviews", async () => {
+  termsAccepted = false;
+  cataloguePages = [[entry("river_scalper")]];
+  await render();
+  await waitFor(() => container.querySelector("[data-hub-catalogue-entry]") !== null);
+  await click("Review");
+  await waitFor(() => container.querySelector("[data-hub-clone-terms]") !== null);
+
+  // The checkbox replaces the "go to the website" error, and nothing is
+  // recorded until it is ticked.
+  expect(container.querySelector("[data-import-error]")).toBeNull();
+  expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
+    "POST /api/v1/hub/agents/river_scalper/install/preview",
+  ]);
+
+  const box = container.querySelector(
+    "[data-hub-clone-terms] input[type='checkbox']",
+  ) as HTMLInputElement;
+  await act(async () => {
+    box.click();
+  });
+  await waitFor(() => container.querySelector("[data-hub-clone-terms]") === null);
+
+  expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
+    "POST /api/v1/hub/agents/river_scalper/install/preview",
+    "POST /api/v1/hub/clone-terms",
+    "POST /api/v1/hub/agents/river_scalper/install/preview",
+  ]);
+  expect(container.textContent).toContain("routines/r.py");
+  expect(container.querySelector("[data-hub-clone-terms-accepted]")?.textContent).toContain(
+    "You accepted Botcamp's clone disclaimer",
+  );
 });
