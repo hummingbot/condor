@@ -510,13 +510,26 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
         user_id=settings.user_id,
         available_tools=tools,
         # The hub already reviewed this exact content before ever serving
-        # it: its skills land enabled, never muted a second time (FEAT-146).
+        # it: its skills and routines land enabled, never muted a second
+        # time (FEAT-146, widened to routines in FEAT-150) — the same
+        # exception ``condor/web/routes/agents.py``'s ``_hub_plan`` takes, so
+        # a hub install behaves the same from chat as from the web. And the
+        # owner's later trust-boundary call: every routine it carries also
+        # lands with execution consent already granted for this exact
+        # version and digest (``hub_reviewed``).
         mute_skills=False,
+        mute_routines=False,
+        hub_reviewed=True,
     )
     listing_row = listing.model_dump()
     if plan.is_update:
         update = agent_bundle.plan_update(
-            bundle, plan.collision, available_tools=tools, mute_skills=False
+            bundle,
+            plan.collision,
+            available_tools=tools,
+            mute_skills=False,
+            mute_routines=False,
+            hub_reviewed=True,
         )
         try:
             result = agent_bundle.apply_update(update, user_id=settings.user_id)

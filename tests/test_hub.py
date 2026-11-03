@@ -3111,6 +3111,12 @@ def test_manage_agents_gets_one_hub_agent(fake_hub):
 
 
 def test_manage_agents_installs_from_the_hub(offered, monkeypatch):
+    """The chat door takes the same hub exception the web route does
+    (FEAT-146, widened to routines in FEAT-150, and to execution consent by
+    the owner's later trust-boundary call) — a Greptile finding on this PR
+    caught this door lagging behind with ``mute_routines`` left at its
+    default; both doors must land a hub install identically."""
+    from condor.agents import code_trust
     from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent
 
@@ -3122,10 +3128,12 @@ def test_manage_agents_installs_from_the_hub(offered, monkeypatch):
     assert result["imported"] is True
     assert result["listing"]["slug"] == "traveller"
     muted = load_mutes("traveller")
-    assert muted["routines"] == {"r"}
+    assert muted["routines"] == set()
     # FEAT-146: the hub already reviewed this content, so a skill — unlike a
     # routine, which is code — needs no second approval on this door either.
     assert muted["skills"] == set()
+    source = agent_home("traveller") / "routines" / "r.py"
+    assert code_trust.allowed("traveller", "r", source.read_text())
 
 
 def test_manage_agents_hub_install_records_provenance(offered, fake_hub, monkeypatch):
