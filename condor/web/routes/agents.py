@@ -5226,8 +5226,13 @@ def _hub_refusal(exc: Exception) -> HTTPException:
     if isinstance(exc, NoTokenError):
         return HTTPException(status_code=400, detail=str(exc))
     status = getattr(exc, "status", 0) if isinstance(exc, HubError) else 0
+    code = getattr(exc, "code", "") if isinstance(exc, HubError) else ""
     return HTTPException(
-        status_code=status if 400 <= status < 500 else 502, detail=str(exc)
+        status_code=status if 400 <= status < 500 else 502,
+        detail=str(exc),
+        # A refusal the dashboard can act on in place (the clone disclaimer)
+        # names itself here, so the panel never has to match on wording.
+        headers={"X-Error-Code": code} if code else None,
     )
 
 
@@ -5319,6 +5324,40 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
             ),
         )
     return listing, fetched, "install", plan
+
+
+@hub_router.get("/clone-terms")
+async def get_hub_clone_terms(user: WebUser = Depends(get_current_user)):
+    """Botcamp's Clone to Condor disclaimer, in Botcamp's current wording —
+    what the review shows above the checkbox."""
+    from condor import hub
+    from condor.hub import HubError
+
+    try:
+        terms = await asyncio.to_thread(hub.clone_terms)
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return terms.model_dump()
+
+
+@hub_router.post("/clone-terms")
+async def accept_hub_clone_terms(user: WebUser = Depends(get_current_user)):
+    """Accept Botcamp's Clone to Condor disclaimer for the linked account.
+
+    Admin-only: the token is the admin's, so the acceptance lands on their
+    Botcamp account — the only account a download from this install is ever
+    checked against (:func:`_hub_read_token`). Once per account, the same
+    record the checkbox on a strategy's page writes.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    require_admin(user)
+    try:
+        await asyncio.to_thread(hub.accept_clone_terms, hub.token())
+    except HubError as exc:
+        raise _hub_refusal(exc) from exc
+    return {"accepted": True}
 
 
 @hub_router.get("/catalogue")

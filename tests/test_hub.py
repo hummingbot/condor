@@ -3198,3 +3198,186 @@ def test_the_publish_route_answers_409_with_the_list_then_takes_it(
     sent = client.post("/agents/traveller/publish", json={"acknowledge": [keyish]})
     assert sent.status_code == 200
     assert fake_hub.calls[-1].body["acknowledged_secrets"] == [keyish]
+
+
+# ── The Clone to Condor disclaimer, accepted from Condor ──────────────────
+
+
+def test_a_download_refused_for_the_clone_disclaimer_says_so_by_code(fake_hub):
+    """Botcamp's 403 carries ``code``; the error keeps it so the dashboard can
+    offer the checkbox in place, and drops the "go to the website" sentence."""
+    fake_hub.overrides[("GET", "/agents/listed/versions/latest")] = hub.Reply(
+        403,
+        json.dumps(
+            {
+                "error": "Accept Botcamp's clone disclaimer first: open "
+                "https://www.botcamp.xyz/strategies/listed, press Clone to "
+                "Condor and tick the box.",
+                "code": hub.CLONE_TERMS_REQUIRED,
+            }
+        ).encode(),
+    )
+
+    with pytest.raises(hub.HubError) as exc:
+        hub.fetch("listed", token="bc_live_x")
+
+    assert exc.value.status == 403
+    assert exc.value.code == hub.CLONE_TERMS_REQUIRED
+    assert "strategies/listed" not in str(exc.value)
+
+
+def test_a_plain_403_carries_no_code(fake_hub):
+    fake_hub.overrides[("GET", "/agents/listed/versions/latest")] = hub.Reply(
+        403, b'{"error": "This agent is private"}'
+    )
+
+    with pytest.raises(hub.HubError) as exc:
+        hub.fetch("listed", token="bc_live_x")
+
+    assert exc.value.code == ""
+    assert "private" in str(exc.value)
+
+
+def test_accepting_the_clone_disclaimer_posts_with_the_linked_token(fake_hub):
+    fake_hub.overrides[("POST", "/condor/terms")] = hub.Reply(
+        200, b'{"data": {"accepted": true}}'
+    )
+
+    hub.accept_clone_terms("bc_live_x")
+
+    (call,) = fake_hub.calls
+    assert (call.method, call.url, call.token) == (
+        "POST",
+        f"{HUB_BASE}/condor/terms",
+        "bc_live_x",
+    )
+    assert call.body == {"acknowledged": True}
+
+
+def test_accepting_the_clone_disclaimer_without_a_profile_sends_nothing(fake_hub):
+    with pytest.raises(hub.NoTokenError):
+        hub.accept_clone_terms("")
+
+    assert fake_hub.calls == []
+
+
+def test_accepting_the_clone_disclaimer_with_a_revoked_token_clears_it(fake_hub, cm):
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+    fake_hub.overrides[("POST", "/condor/terms")] = hub.Reply(401, b"{}")
+
+    with pytest.raises(hub.HubError):
+        hub.accept_clone_terms("bc_live_x")
+
+    assert hub.token() == ""
+
+
+def test_a_preview_refused_for_the_clone_disclaimer_names_its_code(
+    offered, fake_hub, cm
+):
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+    fake_hub.overrides[("GET", "/agents/traveller/versions/latest")] = hub.Reply(
+        403, json.dumps({"error": "x", "code": hub.CLONE_TERMS_REQUIRED}).encode()
+    )
+
+    res = _client().post("/hub/agents/traveller/install/preview")
+
+    assert res.status_code == 403
+    assert res.headers["X-Error-Code"] == hub.CLONE_TERMS_REQUIRED
+
+
+def test_the_clone_disclaimer_is_accepted_with_the_admins_token(fake_hub, cm):
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+    fake_hub.overrides[("POST", "/condor/terms")] = hub.Reply(
+        200, b'{"data": {"accepted": true}}'
+    )
+
+    res = _client().post("/hub/clone-terms")
+
+    assert res.status_code == 200
+    assert fake_hub.calls[-1].url == f"{HUB_BASE}/condor/terms"
+    assert fake_hub.calls[-1].token == "bc_live_x"
+
+
+def test_a_seat_cannot_accept_the_clone_disclaimer_for_the_admin(fake_hub, cm):
+    cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
+
+    res = _client(admin=False).post("/hub/clone-terms")
+
+    assert res.status_code == 403
+    assert fake_hub.calls == []
+
+
+def test_an_account_without_a_profile_slug_still_reads(fake_hub):
+    """Botcamp answers ``"slug": null`` for an account with no profile slug;
+    that must not turn "Connected as …" into a validation error."""
+    fake_hub.overrides[("GET", "/condor/me")] = _ok(
+        {
+            "data": {
+                "user": {"id": "u_2", "name": "Ada", "slug": None},
+                "scopes": ["agents:read"],
+                "condor_terms_accepted_at": None,
+            }
+        }
+    )
+
+    info = hub.me("bc_live_x")
+
+    assert info.user.slug == ""
+    assert info.user.name == "Ada"
+    assert info.condor_terms_accepted_at is None
+
+
+def test_the_clone_disclaimer_wording_is_read_from_the_hub_without_a_token(fake_hub):
+    fake_hub.overrides[("GET", "/condor/terms")] = _ok(
+        {
+            "data": {
+                "text": "  Someone else's code.  ",
+                "acknowledgement": "I understand.",
+            }
+        }
+    )
+
+    terms = hub.clone_terms()
+
+    assert (terms.text, terms.acknowledgement) == (
+        "Someone else's code.",
+        "I understand.",
+    )
+    (call,) = fake_hub.calls
+    assert (call.method, call.url, call.token) == (
+        "GET",
+        f"{HUB_BASE}/condor/terms",
+        "",
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"text": "", "acknowledgement": "I understand."},
+        {"text": "Someone else's code.", "acknowledgement": ""},
+        {"text": "x" * (hub.MAX_CLONE_TERMS_TEXT + 1), "acknowledgement": "ok"},
+        {"text": "ok", "acknowledgement": "x" * (hub.MAX_CLONE_TERMS_ACK + 1)},
+    ],
+)
+def test_clone_disclaimer_wording_that_is_missing_or_oversized_is_refused(
+    fake_hub, data
+):
+    fake_hub.overrides[("GET", "/condor/terms")] = _ok({"data": data})
+
+    with pytest.raises(hub.HubError):
+        hub.clone_terms()
+
+
+def test_the_review_reads_the_clone_disclaimer_through_condor(fake_hub, cm):
+    fake_hub.overrides[("GET", "/condor/terms")] = _ok(
+        {"data": {"text": "Someone else's code.", "acknowledgement": "I understand."}}
+    )
+
+    res = _client(admin=False).get("/hub/clone-terms")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "text": "Someone else's code.",
+        "acknowledgement": "I understand.",
+    }

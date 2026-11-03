@@ -219,6 +219,23 @@ function BotcampAccountCard() {
           </p>
         )}
 
+        {me.data && (
+          <p
+            data-botcamp-clone-terms={me.data.condor_terms_accepted_at ? "accepted" : "pending"}
+            className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]"
+          >
+            {me.data.condor_terms_accepted_at ? (
+              <>
+                <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-primary)]" />
+                Clone disclaimer accepted on{" "}
+                {new Date(me.data.condor_terms_accepted_at).toLocaleDateString()}
+              </>
+            ) : (
+              <>Clone disclaimer not accepted yet — the Hub asks the first time you install an agent.</>
+            )}
+          </p>
+        )}
+
         {scopes.length > 0 && (
           <p className="text-[11px] text-[var(--color-text-muted)]">
             Scopes: <span className="font-mono">{scopes.join(", ")}</span>
