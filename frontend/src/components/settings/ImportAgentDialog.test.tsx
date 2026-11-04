@@ -568,8 +568,9 @@ it("only posts to the update endpoint when the operator confirms", async () => {
     "/api/v1/agents/traveller/update",
   ]);
   expect(imported).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain("Updated traveller to version 3");
   expect(container.querySelector("[data-update-done]")?.textContent).toContain(
-    "Updated traveller to version 3",
+    "Nothing is running yet",
   );
 });
 

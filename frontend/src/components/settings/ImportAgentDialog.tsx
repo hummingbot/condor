@@ -138,6 +138,7 @@ const VERDICT_ORDER = [
  */
 export function ImportAgentDialog({
   onImported,
+  onResult,
   source,
   provenance,
   stickyAction = false,
@@ -145,6 +146,14 @@ export function ImportAgentDialog({
   onDismiss,
 }: {
   onImported: () => void;
+  /**
+   * Reports what the success screen's heading would say, for a host that
+   * renders its own modal chrome around this dialog (the Hub's review
+   * modal, titled "Review before installing" until something lands).
+   * Fires with `null` whenever the dialog is back to reviewing — a fresh
+   * pick, a re-preview under another name — so the host's heading reverts.
+   */
+  onResult?: (result: { verb: "imported" | "updated"; slug: string } | null) => void;
   /**
    * Where the bundle comes from. Omitted means "ask the operator for a file",
    * which is the panel's own case; the hub passes a listing-backed source and
@@ -166,10 +175,13 @@ export function ImportAgentDialog({
    */
   stickyAction?: boolean;
   /**
-   * Offered as a next action once the agent has landed — "Open <slug>".
-   * Omitted (the file panel's case) leaves the success screen with no such
-   * button; a host with somewhere to send the operator passes this instead
-   * of reaching into the dialog's own `landed`/`applied` state for the slug.
+   * Offered as a next action once the agent has landed — "Start chatting",
+   * dropping the operator straight into a chat with the agent that just
+   * landed, which is what the moment calls for rather than its settings
+   * page. Omitted (the file panel's case) leaves the success screen with no
+   * such button; a host with somewhere to send the operator passes this
+   * instead of reaching into the dialog's own `landed`/`applied` state for
+   * the slug.
    */
   onOpenAgent?: (slug: string) => void;
   /**
@@ -213,6 +225,7 @@ export function ImportAgentDialog({
     setApplied(null);
     setError(null);
     setAsSlug("");
+    onResult?.(null);
   }
 
   async function pick(chosen: File | null) {
@@ -288,6 +301,7 @@ export function ImportAgentDialog({
       setPicked(null);
       setPlan(null);
       setUpdate(null);
+      onResult?.({ verb: "updated", slug: result.slug });
       onImported();
     } catch (e) {
       setError((e as Error).message);
@@ -311,6 +325,7 @@ export function ImportAgentDialog({
       setLanded(result);
       setPicked(null);
       setPlan(null);
+      onResult?.({ verb: "imported", slug: result.slug });
       onImported();
     } catch (e) {
       setError((e as Error).message);
@@ -827,19 +842,15 @@ function SuccessScreen({
             {landed ? "Imported" : "Updated"} <span className="font-mono">{slug}</span>
             {applied && <> to version {applied.version}</>}
           </p>
+          {/* One line, not the server's full `next_step` sentence: that text
+              names the same facts the chips below lay out one at a time
+              (nothing running, consent, mutes, findings), and printing both
+              had the operator read the same four things twice. The heading
+              above already names what happened and to what, so this names
+              only the one fact the chips don't: nothing has run. */}
           <p className="text-xs text-[var(--color-text-muted)]">
-            {landed && (
-              <span data-import-done>
-                Imported <span className="font-mono">{landed.slug}</span>.{" "}
-                {landed.next_step}
-              </span>
-            )}
-            {applied && (
-              <span data-update-done>
-                Updated <span className="font-mono">{applied.slug}</span> to version{" "}
-                {applied.version}. {applied.next_step}
-              </span>
-            )}
+            {landed && <span data-import-done>Nothing is running yet.</span>}
+            {applied && <span data-update-done>Nothing is running yet.</span>}
           </p>
         </div>
       </div>
@@ -865,7 +876,7 @@ function SuccessScreen({
           <SuccessFact>
             {findings.length === 0
               ? "The review found nothing to flag."
-              : `${findings.length} thing${findings.length !== 1 ? "s" : ""} the review found, worth a look.`}
+              : `The review found ${findings.length} thing${findings.length !== 1 ? "s" : ""}.`}
           </SuccessFact>
         </ul>
       </div>
@@ -928,7 +939,7 @@ function SuccessScreen({
               onClick={() => onOpenAgent(slug)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20"
             >
-              Open {slug}
+              Start chatting
             </button>
           )}
           {onDismiss && (

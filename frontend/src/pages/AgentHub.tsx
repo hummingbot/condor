@@ -145,7 +145,7 @@ export function AgentHub() {
               onInstalled={() =>
                 queryClient.invalidateQueries({ queryKey: ["agents"] })
               }
-              onOpenAgent={(slug) => navigate(`/agents/${encodeURIComponent(slug)}`)}
+              onOpenAgent={(slug) => navigate(`/?agent=${encodeURIComponent(slug)}`)}
             />
           ) : (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-10 text-center">

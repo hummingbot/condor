@@ -169,7 +169,12 @@ beforeEach(() => {
           init?.method === "POST" && !url.includes("/preview")
             ? { ...plan, ...(verb === "update" ? { updated: true } : { imported: true }), next_step: "unmute what you trust" }
             : plan;
-        return json({ verb, listing: LISTING, plan: body });
+        return json({
+          verb,
+          listing: LISTING,
+          plan: body,
+          fetched: { version: plan.version, sha256: LISTING.versions[0].sha256 },
+        });
       }
       if (listingStatus !== 200) {
         return json(listingBody, listingStatus);
@@ -440,6 +445,7 @@ it("reuses the import review, so every executable is named before the write", as
   await render();
   await lookUp("river_scalper");
   await click("Review");
+  await waitFor(() => container.querySelector("[data-executable]") !== null);
 
   const listed = [...container.querySelectorAll("[data-executable]")].map((n) =>
     n.textContent?.trim(),
@@ -457,6 +463,7 @@ it("installs only when the operator confirms, through the install endpoint", asy
   await render(() => seen.push(1));
   await lookUp("river_scalper");
   await click("Review");
+  await waitFor(() => container.querySelector("[data-executable]") !== null);
   // The dialog's own label, because the dialog is reused rather than wrapped:
   // the hub path and the file path offer the operator one verb, spelled once.
   // In the Hub's modal it stays in view while the review scrolls.
@@ -470,7 +477,7 @@ it("installs only when the operator confirms, through the install endpoint", asy
   ]);
   expect(seen).toEqual([1]);
   expect(container.querySelector("[data-import-done]")?.textContent).toContain(
-    "unmute what you trust",
+    "Nothing is running yet",
   );
 });
 
@@ -479,6 +486,7 @@ it("shows the update diff when the agent is already installed", async () => {
   await render();
   await lookUp("river_scalper");
   await click("Review");
+  await waitFor(() => container.querySelector("[data-update-plan]") !== null);
 
   expect(container.querySelector("[data-update-plan]")).not.toBeNull();
   const kept = [...container.querySelectorAll("[data-update-file='conflict']")].map(
@@ -496,6 +504,7 @@ it("applies an update through the same install endpoint the server routes", asyn
   await render();
   await lookUp("river_scalper");
   await click("Review");
+  await waitFor(() => container.querySelector("[data-update-plan]") !== null);
   await click("Update river_scalper");
 
   expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([

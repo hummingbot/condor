@@ -127,15 +127,30 @@ export function HubBrowser({
   onOpenAgent,
 }: {
   onInstalled: () => void;
-  /** "Open <slug>" on the success screen navigates by calling this, rather
-   *  than HubBrowser reaching for a router itself — it stays mountable on
-   *  its own, the way its tests already mount it. */
+  /** "Start chatting" on the success screen opens a chat with the agent by
+   *  calling this, rather than HubBrowser reaching for a router itself — it
+   *  stays mountable on its own, the way its tests already mount it. */
   onOpenAgent?: (slug: string) => void;
 }) {
   const [slug, setSlug] = useState("");
   const [looked, setLooked] = useState("");
   const [bySlug, setBySlug] = useState(false);
   const [chosen, setChosen] = useState<Chosen | null>(null);
+  // What the modal's own heading says once the import has landed — unset
+  // while reviewing, so the heading falls back to "Review before
+  // installing". Cleared whenever a different agent is opened or the modal
+  // closes, so a second review never opens on the previous one's result.
+  const [resultTitle, setResultTitle] = useState<string | null>(null);
+
+  function openReview(c: Chosen) {
+    setResultTitle(null);
+    setChosen(c);
+  }
+
+  function closeReview() {
+    setResultTitle(null);
+    setChosen(null);
+  }
 
   const lookup = useMutation({
     mutationFn: (value: string) => api.getHubListing(value),
@@ -152,7 +167,7 @@ export function HubBrowser({
 
   return (
     <div className="space-y-5">
-      <Catalogue onReview={setChosen} />
+      <Catalogue onReview={openReview} />
 
       <div className="border-t border-[var(--color-border)] pt-4">
         {bySlug ? (
@@ -188,7 +203,7 @@ export function HubBrowser({
                 const value = slug.trim();
                 if (!value) return;
                 setLooked(value);
-                setChosen(null);
+                closeReview();
                 lookup.mutate(value);
               }}
               className="flex items-center gap-2"
@@ -250,7 +265,7 @@ export function HubBrowser({
                     pageUrl: "",
                   }}
                   onReview={() =>
-                    setChosen({
+                    openReview({
                       slug: lookup.data.listing.slug,
                       name: lookup.data.listing.name,
                       trust: lookup.data.trust,
@@ -278,14 +293,17 @@ export function HubBrowser({
           high up in the grid, a dialog rendered under the slug lookup was
           off-screen, and pressing Review looked like it did nothing. */}
       {chosen && source && (
-        <ReviewModal chosen={chosen} onClose={() => setChosen(null)}>
+        <ReviewModal chosen={chosen} title={resultTitle} onClose={closeReview}>
           <ImportAgentDialog
             key={chosen.slug}
             source={source}
             onImported={onInstalled}
+            onResult={(r) =>
+              setResultTitle(r ? `${r.verb === "imported" ? "Imported" : "Updated"} ${r.slug}` : null)
+            }
             stickyAction
             onOpenAgent={onOpenAgent}
-            onDismiss={() => setChosen(null)}
+            onDismiss={closeReview}
             provenance={
               // A slim banner rather than a tall block: the name, an icon
               // marking it as provenance rather than a finding, and the
@@ -566,10 +584,14 @@ function AgentCard({
 
 function ReviewModal({
   chosen,
+  title,
   onClose,
   children,
 }: {
   chosen: Chosen;
+  /** The import's own result ("Imported foo"), once it has landed. Unset
+   *  while still reviewing, when the heading is the pre-install one. */
+  title: string | null;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -593,7 +615,7 @@ function ReviewModal({
       >
         <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] px-5 py-3">
           <h2 className="min-w-0 truncate text-sm font-semibold text-[var(--color-text)]">
-            Review before installing
+            {title ?? "Review before installing"}
           </h2>
           <button
             onClick={onClose}
