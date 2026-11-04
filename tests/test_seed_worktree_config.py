@@ -157,7 +157,8 @@ def test_seed_config_writes_full_shape_with_fallback_credentials(
     }
     assert data["default_server"] == "local"
     assert data["admin_id"] == 1
-    assert data["users"] == {}
+    assert data["users"].keys() == {1}
+    assert data["users"][1]["role"] == "admin"
     assert data["server_access"]["local"] == {
         "owner_id": 1,
         "created_at": None,
@@ -183,7 +184,32 @@ def test_seed_config_uses_env_admin_id_and_never_prints_password(
     data = yaml.safe_load((tmp_path / "config.yml").read_text())
     assert data["admin_id"] == 999
     assert data["chat_defaults"] == {999: "local"}
+    assert data["users"][999]["role"] == "admin"
 
     captured = capsys.readouterr()
     assert "admin_id=999" in captured.out
     assert "password" not in captured.out.lower()
+
+
+def test_seed_config_lets_a_fresh_preview_boot_with_admin_user_id_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Greptile P1 on PR #314: ``ADMIN_USER_ID`` unset picks id ``1`` for
+    ``admin_id`` but used to write ``users: {}``. ``ConfigManager`` only
+    materialises an admin user record from the *environment*
+    (``_get_admin_from_env``), so with no ``ADMIN_USER_ID`` set that record
+    never appears and ``check_local_user`` rejected user ``1`` at boot.
+    """
+    from config_manager import ConfigManager, UserRole
+    from utils import config as app_config
+    from utils.config import check_local_user
+
+    monkeypatch.setattr(app_config, "ADMIN_USER_ID", None)
+
+    exit_code = swc.seed_config(tmp_path)
+    assert exit_code == 0
+
+    cm = ConfigManager(config_path=str(tmp_path / "config.yml"))
+    assert cm.get_user_role(1) == UserRole.ADMIN
+
+    check_local_user({"CONDOR_MODE": "local"}, get_role=cm.get_user_role)

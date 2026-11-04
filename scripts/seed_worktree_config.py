@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -136,7 +137,18 @@ def seed_config(worktree_root: Path) -> int:
         },
         "default_server": "local",
         "admin_id": admin_id,
-        "users": {},
+        # Mirrors ConfigManager._ensure_admin_user's own shape: without this
+        # record, check_local_user() rejects the id this script just picked
+        # as admin_id and a fresh preview refuses to boot (ConfigManager only
+        # materialises it when ADMIN_USER_ID is set in the environment).
+        "users": {
+            admin_id: {
+                "user_id": admin_id,
+                "role": "admin",
+                "created_at": time.time(),
+                "notes": "Primary admin from ADMIN_USER_ID",
+            },
+        },
         "server_access": {
             "local": {
                 "owner_id": admin_id,
