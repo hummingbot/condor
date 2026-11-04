@@ -45,6 +45,24 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 
+def _money_components(
+    usd_total: float,
+    by_quote: Dict[str, float],
+    *,
+    signed: bool = False,
+    usd_decimals: int = 2,
+) -> str:
+    """A total that never adds unlike units: USD first, then one part per quote."""
+    parts: List[str] = []
+    if usd_total or not by_quote:
+        sign = ("+" if usd_total >= 0 else "-") if signed else ""
+        parts.append(f"{sign}${abs(usd_total):,.{usd_decimals}f}")
+    for quote in sorted(by_quote):
+        value = by_quote[quote]
+        parts.append(f"{value:+,.4f} {quote}" if signed else f"{value:,.4f} {quote}")
+    return " · ".join(parts)
+
+
 async def show_executors_menu(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -88,22 +106,32 @@ async def show_executors_menu(
         # adding them up, the same way the dashboard does.
         rates = await resolve_executor_usd_rates(client, executors)
         # A DEX executor's pair is a mint ("2j5SaS7x...-SOL"); show the ticker.
-        labels = await resolve_executor_pair_labels(client, executors)
+        labels = await resolve_executor_pair_labels(client, executors, server_name)
 
-        # Calculate totals
+        # An unpriced quote is totalled in its own bucket. Adding a raw SOL
+        # amount to a dollar total yields a figure in neither unit, and a ⚠
+        # does not repair the arithmetic.
         total_pnl = 0.0
         total_volume = 0.0
-        all_converted = True
+        pnl_rows = 0  # order executors carry no position and no PnL
+        pnl_unpriced: Dict[str, float] = {}
+        volume_unpriced: Dict[str, float] = {}
         for ex in executors:
             quote = executor_quote_of(ex)
-            pnl_usd = executor_usd_value(get_executor_pnl(ex), quote, rates)
-            vol_usd = executor_usd_value(get_executor_volume(ex), quote, rates)
-            # Judge on the quote, not on the figure: a zero PnL on a quote
-            # with no USD path is still a mixed-unit total.
-            if quote and executor_usd_value(0.0, quote, rates) is None:
-                all_converted = False
-            total_pnl += pnl_usd if pnl_usd is not None else get_executor_pnl(ex)
-            total_volume += vol_usd if vol_usd is not None else get_executor_volume(ex)
+            pnl = get_executor_pnl(ex)
+            volume = get_executor_volume(ex)
+            pnl_usd = executor_usd_value(pnl, quote, rates)
+            vol_usd = executor_usd_value(volume, quote, rates)
+            if get_executor_type(ex) not in ("order", "unknown"):
+                pnl_rows += 1
+                if pnl_usd is None:
+                    pnl_unpriced[quote] = pnl_unpriced.get(quote, 0.0) + pnl
+                else:
+                    total_pnl += pnl_usd
+            if vol_usd is None:
+                volume_unpriced[quote] = volume_unpriced.get(quote, 0.0) + volume
+            else:
+                total_volume += vol_usd
 
         # Store for later use
         context.user_data["running_executors"] = executors
@@ -147,17 +175,22 @@ async def show_executors_menu(
                 pair_col = pair[:12].ljust(12)
                 type_display = type_col.ljust(4)
                 side_col = side_display.ljust(4)
-                pnl_col = (
-                    f"{pnl_usd:+.2f}"
-                    if pnl_usd is not None
-                    else f"{pnl:+.4f} {quote}".strip()
-                ).rjust(8)
-                shown_vol = vol_usd if vol_usd is not None else vol
-                vol_col = (
-                    f"{shown_vol/1000:.1f}k".rjust(7)
-                    if shown_vol >= 1000
-                    else f"{shown_vol:.0f}".rjust(7)
-                )
+                # An order executor has no position to be up or down on; its
+                # PnL fields are zero, and a $0.00 row reads as break-even.
+                if ex_type in ("order", "unknown"):
+                    pnl_col = "—".rjust(8)
+                elif pnl_usd is not None:
+                    pnl_col = f"{pnl_usd:+.2f}".rjust(8)
+                else:
+                    pnl_col = f"{pnl:+.4f} {quote}".strip().rjust(8)
+
+                if vol_usd is None:
+                    # Keep the ticker: 1500 SOL is not 1500.
+                    vol_col = f"{vol:,.4f} {quote}".strip().rjust(7)
+                elif vol_usd >= 1000:
+                    vol_col = f"{vol_usd/1000:.1f}k".rjust(7)
+                else:
+                    vol_col = f"{vol_usd:.0f}".rjust(7)
 
                 lines.append(
                     f"{pair_col} {type_display} {side_col} {pnl_col} {vol_col}"
@@ -167,33 +200,37 @@ async def show_executors_menu(
             if len(executors) > max_shown:
                 lines.append(f"  ...and {len(executors) - max_shown} more")
 
+            pnl_total_str = (
+                _money_components(total_pnl, pnl_unpriced, signed=True)
+                if pnl_rows
+                else "—"
+            )
+            vol_total_str = (
+                _money_components(total_volume, volume_unpriced, usd_decimals=0)
+                if total_volume or volume_unpriced
+                else ""
+            )
+
             if len(executors) > 1:
                 lines.append("──────────── ──── ──── ──────── ───────")
                 total_label = "TOTAL".ljust(22)
-                pnl_col = f"{total_pnl:+.2f}".rjust(8)
-                vol_col = (
-                    f"{total_volume/1000:.1f}k".rjust(7)
-                    if total_volume >= 1000
-                    else f"{total_volume:.0f}".rjust(7)
+                lines.append(
+                    f"{total_label} {pnl_total_str.rjust(8)} {vol_total_str.rjust(7)}"
                 )
-                lines.append(f"{total_label} {pnl_col} {vol_col}")
 
             lines.append("```")
 
             # Summary line below table
-            pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-            # A quote with no path to USD is totalled at face value; say so
-            # instead of passing a mixed-unit sum off as dollars.
-            usd_suffix = "" if all_converted else " ⚠"
-            total_pnl_str = (
-                f"{'+' if total_pnl >= 0 else '-'}${abs(total_pnl):,.2f}{usd_suffix}"
-            )
-            summary_parts = [f"{pnl_emoji} PnL: `{escape_markdown_v2(total_pnl_str)}`"]
-            if total_volume:
+            summary_parts = []
+            if pnl_rows:
+                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
                 summary_parts.append(
-                    f"📊 Vol: `{escape_markdown_v2(f'${total_volume:,.0f}{usd_suffix}')}`"
+                    f"{pnl_emoji} PnL: `{escape_markdown_v2(pnl_total_str)}`"
                 )
-            lines.append(" \\| ".join(summary_parts))
+            if vol_total_str:
+                summary_parts.append(f"📊 Vol: `{escape_markdown_v2(vol_total_str)}`")
+            if summary_parts:
+                lines.append(" \\| ".join(summary_parts))
         else:
             lines.append("")
             lines.append("_No running executors\\._")
@@ -325,7 +362,7 @@ async def show_history(
         history.sort(key=lambda ex: ex.get("timestamp") or 0, reverse=True)
 
         rates = await resolve_executor_usd_rates(client, history)
-        labels = await resolve_executor_pair_labels(client, history)
+        labels = await resolve_executor_pair_labels(client, history, server_name)
 
         # Cache for detail view
         context.user_data["history_executors"] = history
@@ -640,11 +677,13 @@ async def _render_executor_detail(
     # behind a ``$`` understates it by the whole SOL/USD rate.
     quote = executor_quote_of(executor)
     try:
-        rates_client, _ = await get_executors_client(
+        rates_client, detail_server = await get_executors_client(
             update.effective_chat.id, context.user_data
         )
         rates = await resolve_executor_usd_rates(rates_client, [executor])
-        labels = await resolve_executor_pair_labels(rates_client, [executor])
+        labels = await resolve_executor_pair_labels(
+            rates_client, [executor], detail_server
+        )
         pair = labels.get(pair_raw, pair_raw)
     except Exception as e:
         logger.debug(f"Executor rates unavailable: {e}")
@@ -785,11 +824,15 @@ async def _render_executor_detail(
     lines.append("")
     lines.append(f"📊 *Performance*")
 
-    # PnL with percentage
-    pnl_str = format_executor_money(pnl, quote, rates, signed=True)
-    if net_pnl_pct:
-        pnl_str += f" ({net_pnl_pct:+.2f}%)"
-    lines.append(f"  {pnl_emoji} PnL: `{escape_markdown_v2(pnl_str)}`")
+    # An order executor carries no position accounting: its net_pnl_quote is
+    # structurally zero, and "+$0.00" reads as break-even.
+    if ex_type in ("order", "unknown"):
+        lines.append("  ⚪ PnL: `—`")
+    else:
+        pnl_str = format_executor_money(pnl, quote, rates, signed=True)
+        if net_pnl_pct:
+            pnl_str += f" ({net_pnl_pct:+.2f}%)"
+        lines.append(f"  {pnl_emoji} PnL: `{escape_markdown_v2(pnl_str)}`")
 
     # Realized / Unrealized breakdown (only if there's data)
     if realized_pnl or unrealized_pnl:

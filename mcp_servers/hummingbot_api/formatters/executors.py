@@ -18,11 +18,23 @@ from .base import (
 )
 
 
+def _pnl_applicable(executor: dict[str, Any]) -> bool:
+    """Whether a PnL figure means anything for this executor.
+
+    An ``order_executor`` has no position accounting: its ``net_pnl_quote`` is
+    structurally zero, and printing ``+$0.00`` states break-even where the
+    truth is "not applicable".
+    """
+    from condor.fetchers.executors import get_executor_type
+
+    return get_executor_type(executor) not in ("order", "unknown")
+
+
 def _executor_quote(executor: dict[str, Any]) -> str:
     """Quote asset the executor's money fields are denominated in."""
-    from condor.fetchers.executors import executor_quote
+    from condor.fetchers.executors import executor_quote, executor_trading_pair
 
-    return executor_quote(str(get_field(executor, "trading_pair", default="") or ""))
+    return executor_quote(executor_trading_pair(executor))
 
 
 def _money(value: Any, quote: str, rates: Any, *, signed: bool = False) -> str:
@@ -145,11 +157,17 @@ def format_executors_table(executors: list[dict[str, Any]], rates: Any = None) -
         volume = _money(
             get_field(executor, "filled_amount_quote", default=None), quote, rates
         )
-        pnl = _money(
-            get_field(executor, "net_pnl_quote", "pnl", default=None),
-            quote,
-            rates,
-            signed=True,
+        # An order executor has no position to be up or down on; its PnL
+        # fields are zero, and a $0.00 row reads as break-even.
+        pnl = (
+            _money(
+                get_field(executor, "net_pnl_quote", "pnl", default=None),
+                quote,
+                rates,
+                signed=True,
+            )
+            if _pnl_applicable(executor)
+            else "—"
         )
 
         created = format_timestamp(
@@ -232,11 +250,14 @@ def format_executor_detail(executor: dict[str, Any], rates: Any = None) -> str:
 
     # PnL info
     net_pnl = get_field(executor, "net_pnl_quote", default=None)
-    if net_pnl is not None and net_pnl != "N/A":
-        output += f"Net PnL: {_money(net_pnl, quote, rates, signed=True)}\n"
+    if _pnl_applicable(executor):
+        if net_pnl is not None and net_pnl != "N/A":
+            output += f"Net PnL: {_money(net_pnl, quote, rates, signed=True)}\n"
+    else:
+        output += "Net PnL: — (order executors carry no position)\n"
 
     net_pnl_pct = get_field(executor, "net_pnl_pct", default=None)
-    if net_pnl_pct is not None and net_pnl_pct != "N/A":
+    if net_pnl_pct is not None and net_pnl_pct != "N/A" and _pnl_applicable(executor):
         output += f"Net PnL (%): {format_percentage(net_pnl_pct)}\n"
 
     # Realized/Unrealized breakdown from custom_info

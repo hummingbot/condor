@@ -246,19 +246,16 @@ def executor_quote_of(executor: Dict[str, Any]) -> str:
     A pair with no quote segment falls back to USDT, the same default the
     dashboard's row builder uses.
     """
-    from condor.fetchers.executors import executor_quote
+    from condor.fetchers.executors import executor_quote, executor_trading_pair
 
-    config = executor.get("config")
-    cfg = config if isinstance(config, dict) else executor
-    pair = cfg.get("trading_pair") or executor.get("trading_pair") or ""
-    return executor_quote(str(pair))
+    return executor_quote(executor_trading_pair(executor))
 
 
 def executor_raw_pair(executor: Dict[str, Any]) -> str:
     """The pair exactly as the API recorded it, mint address and all."""
-    config = executor.get("config")
-    cfg = config if isinstance(config, dict) else executor
-    return str(cfg.get("trading_pair") or executor.get("trading_pair") or "")
+    from condor.fetchers.executors import executor_trading_pair
+
+    return executor_trading_pair(executor)
 
 
 def _executor_network(executor: Dict[str, Any]) -> str:
@@ -277,24 +274,26 @@ def _executor_network(executor: Dict[str, Any]) -> str:
 
 
 # A screen refresh should not re-read the token list; it only changes when a
-# new pool is listed. Keyed per network, bounded by the TTL.
+# new pool is listed. Keyed per server *and* network: the list is per-server
+# state, so a shared key would hand one server's tickers to another.
 _PAIR_LABELS_TTL = 300.0
-_pair_labels_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
+_pair_labels_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, str]]] = {}
 
 
-async def _mint_symbols(client: Any, network: str) -> Dict[str, str]:
-    cached = _pair_labels_cache.get(network)
+async def _mint_symbols(client: Any, server: str, network: str) -> Dict[str, str]:
+    key = (server, network)
+    cached = _pair_labels_cache.get(key)
     if cached and time.monotonic() - cached[0] < _PAIR_LABELS_TTL:
         return cached[1]
     from condor.fetchers.gateway_tokens import network_token_symbols
 
     symbols = await network_token_symbols(client, network)
-    _pair_labels_cache[network] = (time.monotonic(), symbols)
+    _pair_labels_cache[key] = (time.monotonic(), symbols)
     return symbols
 
 
 async def resolve_executor_pair_labels(
-    client: Any, executors: List[Dict[str, Any]]
+    client: Any, executors: List[Dict[str, Any]], server: str = ""
 ) -> Dict[str, str]:
     """Raw-mint pairs mapped to ``SYMBOL-QUOTE``, keyed by the raw pair.
 
@@ -303,8 +302,9 @@ async def resolve_executor_pair_labels(
     but unreadable in a list. Gateway's token list already maps those mints to
     tickers, and must, because a balance only reads for a listed token.
 
-    Callers render ``labels.get(raw_pair, raw_pair)``: a mint the list does not
-    know keeps today's display rather than vanishing from the screen.
+    ``server`` scopes the TTL cache: two servers can list different tokens on
+    the same network. Callers render ``labels.get(raw_pair, raw_pair)``: a mint
+    the list does not know keeps today's display rather than vanishing.
     """
     from condor.dex_candles import ADDRESS_RE
 
@@ -319,7 +319,7 @@ async def resolve_executor_pair_labels(
     labels: Dict[str, str] = {}
     for network, raws in pairs_by_network.items():
         try:
-            symbols = await _mint_symbols(client, network)
+            symbols = await _mint_symbols(client, server, network)
         except Exception as e:
             logger.warning("Token symbols unavailable for %s: %s", network, e)
             continue

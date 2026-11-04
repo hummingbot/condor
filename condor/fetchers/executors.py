@@ -477,6 +477,18 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def executor_trading_pair(executor: Dict[str, Any]) -> str:
+    """The pair exactly as the API recorded it, from the top level or ``config``.
+
+    Responses put ``trading_pair`` in either place, and the create path writes
+    it into ``config``. Reading only the top level defaults such a row to USDT
+    and prints a SOL amount behind a dollar sign.
+    """
+    config = executor.get("config")
+    cfg = config if isinstance(config, dict) else executor
+    return str(cfg.get("trading_pair") or executor.get("trading_pair") or "")
+
+
 def executor_quote(pair: str) -> str:
     """Quote asset an executor's PnL and volume are denominated in.
 

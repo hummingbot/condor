@@ -137,10 +137,23 @@ def test_the_token_list_is_cached_across_renders():
     client = FakeClient(FakeGateway([{"address": MINT, "symbol": "PEPE"}]))
     ex = [{"connector_name": NETWORK, "trading_pair": f"{MINT}-SOL"}]
 
-    asyncio.run(resolve_executor_pair_labels(client, ex))
-    asyncio.run(resolve_executor_pair_labels(client, ex))
+    asyncio.run(resolve_executor_pair_labels(client, ex, "srv-a"))
+    asyncio.run(resolve_executor_pair_labels(client, ex, "srv-a"))
 
     assert client.gateway.calls == 1
+
+
+def test_the_cache_does_not_leak_one_servers_tickers_to_another():
+    """Two servers can list different tokens on the same network."""
+    ex = [{"connector_name": NETWORK, "trading_pair": f"{MINT}-SOL"}]
+    first = FakeClient(FakeGateway([{"address": MINT, "symbol": "PEPE"}]))
+    second = FakeClient(FakeGateway([{"address": MINT, "symbol": "OTHER"}]))
+
+    asyncio.run(resolve_executor_pair_labels(first, ex, "srv-a"))
+    labels = asyncio.run(resolve_executor_pair_labels(second, ex, "srv-b"))
+
+    assert labels == {f"{MINT}-SOL": "OTHER-SOL"}
+    assert second.gateway.calls == 1
 
 
 # ── Rates for a batch ──
@@ -163,6 +176,23 @@ def test_usd_rates_resolve_every_quote_in_the_batch(monkeypatch):
 
     assert seen["quotes"] == {"SOL", "USDC"}
     assert rates.rates == {"SOL": 150.0}
+
+
+def test_usd_rates_read_the_pair_out_of_a_nested_config(monkeypatch):
+    """The create path writes ``trading_pair`` into ``config``, not the top level."""
+    seen = {}
+
+    async def _fake(client, quotes):
+        seen["quotes"] = quotes
+        return SOL_RATES
+
+    monkeypatch.setattr("condor.quote_conversion.resolve_client_usd_rates", _fake)
+
+    asyncio.run(
+        resolve_executor_usd_rates(None, [{"config": {"trading_pair": "A-SOL"}}])
+    )
+
+    assert seen["quotes"] == {"SOL"}
 
 
 def test_usd_rates_degrade_to_face_value_instead_of_raising(monkeypatch):
@@ -212,3 +242,45 @@ def test_executor_detail_restates_net_pnl():
     detail = format_executor_detail(_executor(), SOL_RATES)
 
     assert "Net PnL: +$150.00" in detail
+
+
+def test_an_order_executor_shows_no_pnl_rather_than_zero():
+    order = {
+        "id": "o1",
+        "type": "order_executor",
+        "connector_name": "binance",
+        "trading_pair": "TOKEN-SOL",
+        "status": "RUNNING",
+        "side": "BUY",
+        "filled_amount_quote": 2.0,
+        "net_pnl_quote": 0.0,
+        "net_pnl_pct": 0.0,
+        "timestamp": 1_700_000_000,
+    }
+
+    table = format_executors_table([order], SOL_RATES)
+    assert "—" in table
+    assert "+$0.00" not in table
+
+    detail = format_executor_detail(order, SOL_RATES)
+    assert "Net PnL: —" in detail
+    assert "Net PnL (%):" not in detail
+
+
+# ── Totals never add unlike units ──
+
+
+def test_a_total_keeps_unpriced_quotes_in_their_own_bucket():
+    from handlers.executors.menu import _money_components
+
+    total = _money_components(12.5, {"SOL": 0.4, "BONK": 9.0}, signed=True)
+
+    assert total == "+$12.50 · +9.0000 BONK · +0.4000 SOL"
+    assert "$12.90" not in total  # the SOL figure was never folded in
+
+
+def test_a_total_with_nothing_priced_still_states_its_unit():
+    from handlers.executors.menu import _money_components
+
+    assert _money_components(0.0, {"SOL": 0.4}, signed=True) == "+0.4000 SOL"
+    assert _money_components(0.0, {}, signed=True) == "+$0.00"

@@ -33,11 +33,10 @@ async def _executor_rates(client: Any, executors: list[dict[str, Any]]) -> Any:
     Executor money fields are quote-denominated; without a rate the formatter
     keeps them under their own ticker rather than printing a dollar sign.
     """
+    from condor.fetchers.executors import executor_trading_pair
     from condor.quote_conversion import quotes_in, resolve_client_usd_rates
 
-    pairs = [
-        str(ex.get("trading_pair") or "") for ex in executors if isinstance(ex, dict)
-    ]
+    pairs = [executor_trading_pair(ex) for ex in executors if isinstance(ex, dict)]
     try:
         return await resolve_client_usd_rates(client, quotes_in(pairs))
     except Exception as e:
