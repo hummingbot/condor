@@ -357,7 +357,15 @@ export function AgentChatTab() {
   const agentParam = searchParams.get("agent");
   const askParam = searchParams.get("ask");
   useEffect(() => {
-    if (!agentParam || consumedAgentParam.current) return;
+    // Reset on every clearing of the param, not just once on mount: this
+    // effect deletes `agent` itself right after consuming it, so a *second*
+    // "Start chatting" (Hub -> `/?agent=A` -> Hub -> `/?agent=B`) must find
+    // the guard open again rather than stuck true from the first agent.
+    if (!agentParam) {
+      consumedAgentParam.current = false;
+      return;
+    }
+    if (consumedAgentParam.current) return;
     consumedAgentParam.current = true;
     if (askParam) talkTo(agentParam, { intent: "fresh", text: askParam });
     else talkTo(agentParam);
