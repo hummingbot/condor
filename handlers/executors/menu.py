@@ -63,6 +63,21 @@ def _money_components(
     return " · ".join(parts)
 
 
+def _pnl_indicator(usd_total: float, by_quote: Dict[str, float]) -> str:
+    """Green or red only when every component agrees on the sign.
+
+    The parts of a mixed-currency total cannot be summed, so a breakdown that
+    is up in USD and down in SOL has no honest colour; a green dot beside a
+    negative figure (or the reverse) is worse than none.
+    """
+    values = [usd_total, *by_quote.values()]
+    if all(v >= 0 for v in values):
+        return "🟢"
+    if all(v <= 0 for v in values):
+        return "🔴"
+    return "⚪"
+
+
 async def show_executors_menu(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -223,7 +238,7 @@ async def show_executors_menu(
             # Summary line below table
             summary_parts = []
             if pnl_rows:
-                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+                pnl_emoji = _pnl_indicator(total_pnl, pnl_unpriced)
                 summary_parts.append(
                     f"{pnl_emoji} PnL: `{escape_markdown_v2(pnl_total_str)}`"
                 )

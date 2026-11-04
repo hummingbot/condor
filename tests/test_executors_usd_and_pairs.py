@@ -284,3 +284,18 @@ def test_a_total_with_nothing_priced_still_states_its_unit():
 
     assert _money_components(0.0, {"SOL": 0.4}, signed=True) == "+0.4000 SOL"
     assert _money_components(0.0, {}, signed=True) == "+$0.00"
+
+
+def test_a_loss_held_only_in_an_unpriced_quote_is_not_green():
+    """``total_pnl`` stays 0 when nothing can be priced; the loss is in a bucket."""
+    from handlers.executors.menu import _pnl_indicator
+
+    assert _pnl_indicator(0.0, {"SOL": -0.4}) == "🔴"
+    assert _pnl_indicator(0.0, {"SOL": -0.4, "BONK": -2.0}) == "🔴"
+
+
+def test_a_mixed_sign_breakdown_gets_no_colour():
+    from handlers.executors.menu import _pnl_indicator
+
+    assert _pnl_indicator(12.5, {"SOL": -0.4}) == "⚪"
+    assert _pnl_indicator(0.0, {"SOL": 0.4}) == "🟢"
