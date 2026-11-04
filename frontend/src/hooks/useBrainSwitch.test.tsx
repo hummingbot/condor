@@ -132,6 +132,28 @@ describe("useBrainSwitch", () => {
     expect(latest().switchError).toBe("Model not configured");
   });
 
+  it("names the slot and the message id when the switch retries a start_error note", async () => {
+    chat.switchBrain.mockResolvedValue(undefined);
+
+    act(() => latest().switchBrain({ agentKey: "claude-code" } as never, "msg_1"));
+    await settle();
+
+    expect(chat.switchBrain).toHaveBeenCalledWith(
+      "slot-1",
+      { agentKey: "claude-code" },
+      "msg_1",
+    );
+  });
+
+  it("does not raise the generic banner for a start_error retry — the note reports its own failure", async () => {
+    chat.switchBrain.mockRejectedValue(new Error("claude-code is also not configured"));
+
+    act(() => latest().switchBrain({ agentKey: "claude-code" } as never, "msg_1"));
+    await settle();
+
+    expect(latest().switchError).toBeNull();
+  });
+
   it("does not try to switch the brain when there is no session on screen", () => {
     chat.activeSlotId = null;
 

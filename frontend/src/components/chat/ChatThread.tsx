@@ -115,11 +115,12 @@ export function ChatThread({
   /**
    * A spawn that died before any model answered (`start_error`) can be
    * retried with a different one right from the note that reported it —
-   * this is what the picker there calls. Absent on a surface that cannot
-   * respawn the slot (none today; kept optional so a future read-only
-   * transcript view is not forced to wire it).
+   * this is what the picker there calls, naming the note's own message id so
+   * the retry's outcome updates that note instead of a generic banner.
+   * Absent on a surface that cannot respawn the slot (none today; kept
+   * optional so a future read-only transcript view is not forced to wire it).
    */
-  onRetryModel?: (agentKey: string) => void;
+  onRetryModel?: (agentKey: string, messageId: string) => void;
   /** Condor's own default model, for `start_error`'s one-click fallback —
    *  the same field `useSessionOptions` already exposes. */
   defaultAgentKey?: string;

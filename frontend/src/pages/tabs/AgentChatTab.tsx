@@ -681,7 +681,9 @@ export function AgentChatTab() {
               onResolvePermission={chat.resolvePermission}
               switchError={switchError}
               onDismissSwitchError={dismissSwitchError}
-              onRetryModel={(agentKey) => switchBrain({ agentKey })}
+              onRetryModel={(agentKey, messageId) =>
+                switchBrain({ agentKey }, messageId)
+              }
               defaultAgentKey={defaultAgent}
               agentBindings={agentBindings}
               onSend={(text, files) =>

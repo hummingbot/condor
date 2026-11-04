@@ -349,9 +349,16 @@ function StartErrorNote({
    *  chevron. */
   attemptedAgentSlug?: string;
   defaultAgentKey?: string;
-  onRetryModel?: (agentKey: string) => void;
+  onRetryModel?: (agentKey: string, messageId: string) => void;
 }) {
   const agents = brainOptions ?? [];
+  // The note stamps its own attempt the moment it is created, and a retry
+  // keeps that current — read it in preference to the thread's live prop,
+  // which is the *slot's* current attempt and has already moved on by the
+  // time a later retry on this same note fails.
+  const effectiveAttemptedKey = message.attemptedAgentKey ?? attemptedAgentKey;
+  const effectiveAttemptedSlug = message.attemptedAgentSlug ?? attemptedAgentSlug;
+
   const { short: defaultLabel } = useBrainLabel({
     agents,
     selectedAgentKey: defaultAgentKey || "",
@@ -361,8 +368,25 @@ function StartErrorNote({
   const { effectiveKey: attemptedEffectiveKey } = useBrainLabel({
     agents,
     agentBindings,
-    selectedAgentKey: attemptedAgentKey || "",
-    selectedAgentSlug: attemptedAgentSlug || "",
+    selectedAgentKey: effectiveAttemptedKey || "",
+    selectedAgentSlug: effectiveAttemptedSlug || "",
+  });
+  // What a retry in flight is trying, and what a retry that already landed
+  // is now running on — both named through the one resolution so either
+  // reads exactly like the picker's own trigger would, a bound Agent
+  // included. Harmless to compute when neither applies: an empty key still
+  // resolves to *something* (the default agent), it is just never rendered.
+  const { label: retryTargetLabel } = useBrainLabel({
+    agents,
+    agentBindings,
+    selectedAgentKey: message.retryTargetKey || "",
+    selectedAgentSlug: effectiveAttemptedSlug || "",
+  });
+  const { label: resolvedLabel } = useBrainLabel({
+    agents,
+    agentBindings,
+    selectedAgentKey: message.resolvedAgentKey || "",
+    selectedAgentSlug: message.resolvedAgentSlug || "",
   });
   // Offering "use the default" when the default is exactly what just failed
   // would read as a fix and repeat the same error.
@@ -370,6 +394,50 @@ function StartErrorNote({
     !!onRetryModel &&
     !!defaultAgentKey &&
     defaultAgentKey !== attemptedEffectiveKey;
+
+  // The retry this note offered landed: the failure is no longer live, so it
+  // folds away behind one quiet line instead of sitting in the transcript
+  // looking exactly as alarming as it did before anyone touched it.
+  if (message.resolved) {
+    return (
+      <div className="group mb-4 border-l-2 border-[var(--chat-rule)] pl-3">
+        <div className="flex items-center gap-1.5 text-sm text-[var(--color-text-muted)]">
+          <Check className="h-3.5 w-3.5 shrink-0" />
+          <span>Switched to {resolvedLabel} · ready</span>
+          <div className="ml-auto">
+            <TurnActions ts={message.ts} text={message.text} />
+          </div>
+        </div>
+        <details className="mt-1 text-xs text-[var(--color-text-muted)]">
+          <summary className="cursor-pointer select-none">
+            Show the failed attempt
+          </summary>
+          <div className="chat-markdown mt-1">
+            <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
+              {message.text}
+            </ReactMarkdown>
+          </div>
+        </details>
+      </div>
+    );
+  }
+
+  // A retry is on the way — the stale failure stays off screen rather than
+  // sitting there unchanged while the respawn is answered.
+  if (message.retrying) {
+    return (
+      <div className="group mb-4 border-l-2 border-[var(--chat-rule)] pl-3">
+        <div className="flex items-center gap-1.5 text-sm text-[var(--color-text-muted)]">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+          <span>
+            {message.retryTargetKey !== undefined
+              ? `Switching to ${retryTargetLabel}…`
+              : "Switching…"}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="group mb-4 border-l-2 border-[var(--chat-rule)] pl-3">
@@ -389,7 +457,7 @@ function StartErrorNote({
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
           {canFallBackToDefault && (
             <button
-              onClick={() => onRetryModel(defaultAgentKey)}
+              onClick={() => onRetryModel(defaultAgentKey, message.id)}
               className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--on-primary)] hover:bg-[var(--color-primary-hover)]"
             >
               Use {defaultLabel}
@@ -401,10 +469,10 @@ function StartErrorNote({
           <BrainPicker
             agents={agents}
             agentBindings={agentBindings}
-            selectedAgentKey={attemptedAgentKey || ""}
-            selectedAgentSlug={attemptedAgentSlug || ""}
+            selectedAgentKey={effectiveAttemptedKey || ""}
+            selectedAgentSlug={effectiveAttemptedSlug || ""}
             onSelect={(sel) => {
-              if (sel.agentKey) onRetryModel(sel.agentKey);
+              if (sel.agentKey) onRetryModel(sel.agentKey, message.id);
             }}
           />
         </div>
@@ -456,9 +524,10 @@ export const ChatMessageView = memo(function ChatMessageView({
   attemptedAgentSlug?: string;
   /** Condor's own default model, for `start_error`'s one-click fallback. */
   defaultAgentKey?: string;
-  /** Respawns the slot this message belongs to on a different model. Only
-   *  `start_error` reads it. */
-  onRetryModel?: (agentKey: string) => void;
+  /** Respawns the slot this message belongs to on a different model, naming
+   *  this message's own id so the outcome updates this note rather than a
+   *  generic banner. Only `start_error` reads it. */
+  onRetryModel?: (agentKey: string, messageId: string) => void;
 }) {
   // Key material in what was just sent (FEAT-056). It gets the warning
   // treatment rather than the quiet note: half of these say text the user can
