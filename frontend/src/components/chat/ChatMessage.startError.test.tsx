@@ -4,10 +4,10 @@
  * `StartErrorNote` used to have one shape: the backend's raw failure text
  * plus a picker, forever — a retry that worked underneath it left the same
  * alarming block on screen, as if nothing had happened. It now has three: the
- * plain failure (unchanged), a quiet one-line resolution with the failure
- * folded away behind a disclosure, and an in-flight line while the retry is
- * still being answered. A retry that fails again drops straight back to the
- * plain failure shape, with the new error and the picker both live again.
+ * plain failure (unchanged), a quiet one-line resolution with no trace of the
+ * failure left on screen, and an in-flight line while the retry is still
+ * being answered. A retry that fails again drops straight back to the plain
+ * failure shape, with the new error and the picker both live again.
  *
  * Needs a DOM, so this file overrides vitest's default `node` environment.
  *
@@ -115,6 +115,34 @@ describe("the plain failure", () => {
   });
 });
 
+describe("a bound Agent's failure, with no concrete attempted key", () => {
+  it("still offers the one-click default, even when the guessed label matches it", () => {
+    // `attemptedAgentKey` empty is the real shape for a bound Agent (the
+    // backend resolves "" to "whatever is bound" at spawn time and never
+    // reports back which model that turned out to be) — chat_ws.py's
+    // start-failure frame carries no `agent_key` to check this against. Here
+    // the binding's own cached `agent_key` happens to read as the same model
+    // the install falls back to by default — the resolution used to treat
+    // that coincidence as proof the two are the same spawn, and hid the only
+    // working fix.
+    const bindingsMatchingDefault: AgentBindingOption[] = [
+      { ...BINDINGS[0], agent_key: "claude-sonnet-5" },
+    ];
+    act(() => {
+      root.render(
+        <ChatMessageView
+          message={note({ attemptedAgentKey: "", attemptedAgentSlug: "backpack_mm" })}
+          brainOptions={AGENTS}
+          agentBindings={bindingsMatchingDefault}
+          defaultAgentKey="claude-sonnet-5"
+          onRetryModel={vi.fn()}
+        />,
+      );
+    });
+    expect(container.textContent).toContain("Use Sonnet");
+  });
+});
+
 describe("a retry in flight", () => {
   it("says so instead of leaving the old failure sitting there", () => {
     render(note({ retrying: true, retryTargetKey: "claude-sonnet-5" }));
@@ -144,11 +172,11 @@ describe("a retry that resolved", () => {
     expect(container.textContent).toContain("Sonnet");
     expect(container.textContent).toContain("ready");
     expect(container.querySelector('button[aria-haspopup="listbox"]')).toBeNull();
-    // The failure is folded behind a disclosure — present, but collapsed —
-    // not gone and not shown open by default.
-    const details = container.querySelector("details");
-    expect(details).not.toBeNull();
-    expect(details!.hasAttribute("open")).toBe(false);
+    // Nothing of the failure survives the switch: no error heading, no
+    // original failure text, no disclosure to reopen it from.
+    expect(container.textContent).not.toContain("Error");
+    expect(container.textContent).not.toContain("OPENROUTER_API_KEY");
+    expect(container.querySelector("details")).toBeNull();
   });
 
   it("names a bound Agent's own label, the same resolution the trigger uses", () => {
@@ -160,19 +188,6 @@ describe("a retry that resolved", () => {
       }),
     );
     expect(container.textContent).toContain("Backpack MM");
-  });
-
-  it("reveals the original failure on request, and nothing before that", () => {
-    render(note({ resolved: true, resolvedAgentKey: "claude-sonnet-5" }));
-    const details = container.querySelector("details")!;
-    expect(details.hasAttribute("open")).toBe(false);
-    act(() => {
-      details.open = true;
-      details.dispatchEvent(new Event("toggle", { bubbles: true }));
-    });
-    expect(container.querySelector(".chat-markdown")?.textContent).toContain(
-      "OPENROUTER_API_KEY is not set.",
-    );
   });
 });
 

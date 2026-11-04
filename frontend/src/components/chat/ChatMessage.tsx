@@ -389,15 +389,26 @@ function StartErrorNote({
     selectedAgentSlug: message.resolvedAgentSlug || "",
   });
   // Offering "use the default" when the default is exactly what just failed
-  // would read as a fix and repeat the same error.
+  // would read as a fix and repeat the same error — but that is only known
+  // for a concrete attempted key. A bound Agent that failed with no key of
+  // its own (`effectiveAttemptedKey` empty) has nothing but a *guess* behind
+  // `attemptedEffectiveKey` (its own declared default, read off a cached
+  // binding) — good enough to label the picker's trigger, never good enough
+  // to prove "this is the same as the install's default" and hide the one
+  // fix that might actually work. The backend's own start-failure frame
+  // carries no resolved `agent_key` to check this against (chat_ws.py's
+  // `except` only sends `message`/`phase`), so an unknown attempt is treated
+  // as different from the default rather than silently the same.
   const canFallBackToDefault =
     !!onRetryModel &&
     !!defaultAgentKey &&
-    defaultAgentKey !== attemptedEffectiveKey;
+    (!effectiveAttemptedKey || defaultAgentKey !== attemptedEffectiveKey);
 
   // The retry this note offered landed: the failure is no longer live, so it
-  // folds away behind one quiet line instead of sitting in the transcript
-  // looking exactly as alarming as it did before anyone touched it.
+  // folds away into one quiet line — no error heading, no original failure
+  // text, no trace of the model that was attempted — instead of sitting in
+  // the transcript looking exactly as alarming as it did before anyone
+  // touched it.
   if (message.resolved) {
     return (
       <div className="group mb-4 border-l-2 border-[var(--chat-rule)] pl-3">
@@ -405,19 +416,9 @@ function StartErrorNote({
           <Check className="h-3.5 w-3.5 shrink-0" />
           <span>Switched to {resolvedLabel} · ready</span>
           <div className="ml-auto">
-            <TurnActions ts={message.ts} text={message.text} />
+            <TurnActions ts={message.ts} text={`Switched to ${resolvedLabel}`} />
           </div>
         </div>
-        <details className="mt-1 text-xs text-[var(--color-text-muted)]">
-          <summary className="cursor-pointer select-none">
-            Show the failed attempt
-          </summary>
-          <div className="chat-markdown mt-1">
-            <ReactMarkdown remarkPlugins={GFM} components={STATIC_COMPONENTS}>
-              {message.text}
-            </ReactMarkdown>
-          </div>
-        </details>
       </div>
     );
   }
