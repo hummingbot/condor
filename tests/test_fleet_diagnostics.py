@@ -44,17 +44,17 @@ def _row(executor_id, status, controller_id, **over):
 
 
 def test_the_host_reading_divides_load_by_the_cores_it_has(monkeypatch):
-    # Pinned rather than read off the real host: the ratio is taken from the
-    # unrounded load and each field is rounded on its own, so re-deriving one
-    # from the other misses by a rounding step on an unlucky load (1.1847 on 4
-    # vCPUs reads 1.18 and 0.296, not 1.18 / 4 = 0.295).
+    # Pinned rather than read off the real host, and on a load whose ratio
+    # moves by a rounding step: ``load_per_vcpu`` divides the published
+    # ``load_1m``, already rounded to 2dp, so 1.1847 on 4 vCPUs reads 1.18 and
+    # 0.295 — deriving it from the raw average would read 0.296.
     monkeypatch.setattr("os.getloadavg", lambda: (1.1847, 1.0, 1.0))
     monkeypatch.setattr("os.cpu_count", lambda: 4)
     assert host_load() == {
         "available": True,
         "load_1m": 1.18,
         "vcpus": 4,
-        "load_per_vcpu": 0.296,
+        "load_per_vcpu": 0.295,
     }
 
 
@@ -64,22 +64,13 @@ def test_the_real_host_has_a_reading():
     assert reading["available"] is True
     assert reading["vcpus"] > 0
 
-    # The two fields are rounded differently, and the tolerance has to allow for
-    # it: ``load_1m`` is the raw average to 2dp, while ``load_per_vcpu`` divides
-    # the RAW average and rounds to 3dp. So recomputing from the published
-    # ``load_1m`` carries up to 0.005/vcpus of error from that first rounding,
-    # plus 0.0005 from the second.
-    #
-    # A flat 1e-3 therefore failed on any host with fewer than five cores —
-    # 0.005/4 = 0.00125 — which is every standard CI runner, while passing on a
-    # developer box with 8+. It read as flaky and was arithmetic.
-    tolerance = 0.005 / reading["vcpus"] + 0.0005
-    assert reading["load_per_vcpu"] == pytest.approx(
-        reading["load_1m"] / reading["vcpus"], abs=tolerance
-    )
+    # ``load_per_vcpu`` divides the published ``load_1m`` — rounded first, then
+    # reused — so recomputing it from that field is exact rather than
+    # approximate, on any number of cores.
+    assert reading["load_per_vcpu"] == round(reading["load_1m"] / reading["vcpus"], 3)
 
     # The relationship the rounding cannot blur: a reading is still a quotient.
-    assert 0 <= reading["load_per_vcpu"] <= reading["load_1m"] + tolerance
+    assert 0 <= reading["load_per_vcpu"] <= reading["load_1m"]
 
 
 def test_a_platform_with_no_load_average_reports_unavailable(monkeypatch):
