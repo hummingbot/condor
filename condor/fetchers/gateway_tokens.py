@@ -98,6 +98,22 @@ async def _network_tokens(client: Any, network_id: str) -> list[dict]:
     return [token for token in (tokens or []) if isinstance(token, dict)]
 
 
+async def network_token_symbols(client: Any, network_id: str) -> dict[str, str]:
+    """The network's listed tokens as ``mint address (lowercased) -> ticker``.
+
+    Gateway's list is where a Solana executor's pair stops being a mint and
+    becomes readable: an executor records the address it was opened on, while
+    the list already holds the ticker Gateway needs to show a balance. Callers
+    own whatever caching is right for their screen; this is one read.
+    """
+    tokens = await _network_tokens(client, network_id)
+    return {
+        str(token.get("address") or "").lower(): str(token.get("symbol") or "")
+        for token in tokens
+        if token.get("address") and token.get("symbol")
+    }
+
+
 class TokenListSnapshot:
     """One read of a network's token list, shared for the length of one operation.
 

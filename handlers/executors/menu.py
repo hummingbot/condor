@@ -20,7 +20,10 @@ from ._shared import (
     SIDE_LONG,
     clear_executors_state,
     describe_executor_error,
-    format_executor_pnl,
+    executor_quote_of,
+    executor_raw_pair,
+    executor_usd_value,
+    format_executor_money,
     get_executor_fees,
     get_executor_pnl,
     get_executor_type,
@@ -28,6 +31,8 @@ from ._shared import (
     get_executors_client,
     invalidate_cache,
     normalize_side,
+    resolve_executor_pair_labels,
+    resolve_executor_usd_rates,
     search_running_executors,
     stop_executor,
 )
@@ -79,12 +84,26 @@ async def show_executors_menu(
                 client, status="RUNNING", limit=50
             )
 
+        # PnL/fees/volume are quote-denominated: restate each in USD before
+        # adding them up, the same way the dashboard does.
+        rates = await resolve_executor_usd_rates(client, executors)
+        # A DEX executor's pair is a mint ("2j5SaS7x...-SOL"); show the ticker.
+        labels = await resolve_executor_pair_labels(client, executors)
+
         # Calculate totals
         total_pnl = 0.0
         total_volume = 0.0
+        all_converted = True
         for ex in executors:
-            total_pnl += get_executor_pnl(ex)
-            total_volume += get_executor_volume(ex)
+            quote = executor_quote_of(ex)
+            pnl_usd = executor_usd_value(get_executor_pnl(ex), quote, rates)
+            vol_usd = executor_usd_value(get_executor_volume(ex), quote, rates)
+            # Judge on the quote, not on the figure: a zero PnL on a quote
+            # with no USD path is still a mixed-unit total.
+            if quote and executor_usd_value(0.0, quote, rates) is None:
+                all_converted = False
+            total_pnl += pnl_usd if pnl_usd is not None else get_executor_pnl(ex)
+            total_volume += vol_usd if vol_usd is not None else get_executor_volume(ex)
 
         # Store for later use
         context.user_data["running_executors"] = executors
@@ -110,23 +129,34 @@ async def show_executors_menu(
             for ex in executors[:max_shown]:
                 ex_type = get_executor_type(ex)
                 config = ex.get("config", ex)
-                pair = config.get("trading_pair", "???")
+                pair_raw = executor_raw_pair(ex) or "???"
+                pair = labels.get(pair_raw, pair_raw)
                 side_val = normalize_side(config.get("side", SIDE_LONG))
                 leverage = config.get("leverage", 1)
                 side_display = f"{'L' if side_val == SIDE_LONG else 'S'} {leverage}x"
-                type_col = {"grid": "Grid", "position": "Pos"}.get(ex_type, "Ord")
+                type_col = {"grid": "Grid", "position": "Pos", "lp": "LP"}.get(
+                    ex_type, "Ord"
+                )
 
+                quote = executor_quote_of(ex)
                 pnl = get_executor_pnl(ex)
                 vol = get_executor_volume(ex)
+                pnl_usd = executor_usd_value(pnl, quote, rates)
+                vol_usd = executor_usd_value(vol, quote, rates)
 
                 pair_col = pair[:12].ljust(12)
                 type_display = type_col.ljust(4)
                 side_col = side_display.ljust(4)
-                pnl_col = f"{pnl:+.2f}".rjust(8)
+                pnl_col = (
+                    f"{pnl_usd:+.2f}"
+                    if pnl_usd is not None
+                    else f"{pnl:+.4f} {quote}".strip()
+                ).rjust(8)
+                shown_vol = vol_usd if vol_usd is not None else vol
                 vol_col = (
-                    f"{vol/1000:.1f}k".rjust(7)
-                    if vol >= 1000
-                    else f"{vol:.0f}".rjust(7)
+                    f"{shown_vol/1000:.1f}k".rjust(7)
+                    if shown_vol >= 1000
+                    else f"{shown_vol:.0f}".rjust(7)
                 )
 
                 lines.append(
@@ -152,12 +182,16 @@ async def show_executors_menu(
 
             # Summary line below table
             pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-            summary_parts = [
-                f"{pnl_emoji} PnL: `{escape_markdown_v2(f'${total_pnl:+,.2f}')}`"
-            ]
+            # A quote with no path to USD is totalled at face value; say so
+            # instead of passing a mixed-unit sum off as dollars.
+            usd_suffix = "" if all_converted else " ⚠"
+            total_pnl_str = (
+                f"{'+' if total_pnl >= 0 else '-'}${abs(total_pnl):,.2f}{usd_suffix}"
+            )
+            summary_parts = [f"{pnl_emoji} PnL: `{escape_markdown_v2(total_pnl_str)}`"]
             if total_volume:
                 summary_parts.append(
-                    f"📊 Vol: `{escape_markdown_v2(f'${total_volume:,.0f}')}`"
+                    f"📊 Vol: `{escape_markdown_v2(f'${total_volume:,.0f}{usd_suffix}')}`"
                 )
             lines.append(" \\| ".join(summary_parts))
         else:
@@ -173,7 +207,8 @@ async def show_executors_menu(
             for ex, ex_type in displayed:
                 executor_id = ex.get("id", ex.get("executor_id", ""))
                 config = ex.get("config", ex)
-                pair = config.get("trading_pair", "???")[:10]
+                pair_raw = executor_raw_pair(ex) or "???"
+                pair = labels.get(pair_raw, pair_raw)[:10]
                 side_val = normalize_side(config.get("side", SIDE_LONG))
                 side_label = "L" if side_val == SIDE_LONG else "S"
                 type_icon = "📐" if ex_type == "grid" else "🎯"
@@ -289,6 +324,9 @@ async def show_history(
         # Sort by timestamp descending (most recent first)
         history.sort(key=lambda ex: ex.get("timestamp") or 0, reverse=True)
 
+        rates = await resolve_executor_usd_rates(client, history)
+        labels = await resolve_executor_pair_labels(client, history)
+
         # Cache for detail view
         context.user_data["history_executors"] = history
 
@@ -310,19 +348,32 @@ async def show_history(
             for ex in page_items:
                 ex_type = get_executor_type(ex)
                 config = ex.get("config", ex)
-                pair = config.get("trading_pair", "???")
+                pair_raw = executor_raw_pair(ex) or "???"
+                pair = labels.get(pair_raw, pair_raw)
                 side_val = normalize_side(config.get("side", SIDE_LONG))
                 leverage = config.get("leverage", 1)
                 side_display = f"{'L' if side_val == SIDE_LONG else 'S'} {leverage}x"
-                type_col = {"grid": "Grid", "position": "Pos"}.get(ex_type, "Ord")
+                type_col = {"grid": "Grid", "position": "Pos", "lp": "LP"}.get(
+                    ex_type, "Ord"
+                )
+                # order_executor carries no position accounting: net_pnl_quote is
+                # structurally 0.0, so rendering it as "+0.00" reads as breakeven.
+                pnl_applicable = ex_type not in ("order", "unknown")
 
+                quote = executor_quote_of(ex)
                 pnl = get_executor_pnl(ex)
+                pnl_usd = executor_usd_value(pnl, quote, rates)
                 status = str(ex.get("status", "?"))[:6]
 
                 pair_col = pair[:12].ljust(12)
                 type_display = type_col.ljust(4)
                 side_col = side_display.ljust(4)
-                pnl_col = f"{pnl:+.2f}".rjust(8)
+                if not pnl_applicable:
+                    pnl_col = "—".rjust(8)
+                elif pnl_usd is not None:
+                    pnl_col = f"{pnl_usd:+.2f}".rjust(8)
+                else:
+                    pnl_col = f"{pnl:+.4f} {quote}".strip().rjust(8)
                 status_col = status.ljust(6)
 
                 lines.append(
@@ -350,12 +401,21 @@ async def show_history(
             for ex, ex_type in displayed:
                 executor_id = ex.get("id", ex.get("executor_id", ""))
                 config = ex.get("config", ex)
-                pair = config.get("trading_pair", "???")[:10]
+                pair_raw = executor_raw_pair(ex) or "???"
+                pair = labels.get(pair_raw, pair_raw)[:10]
                 side_val = normalize_side(config.get("side", SIDE_LONG))
                 side_label = "L" if side_val == SIDE_LONG else "S"
-                type_icon = "📐" if ex_type == "grid" else "🎯"
+                type_icon = {"grid": "📐", "lp": "💧"}.get(ex_type, "🎯")
+                quote = executor_quote_of(ex)
                 pnl = get_executor_pnl(ex)
-                pnl_label = f"+{pnl:.0f}" if pnl >= 0 else f"{pnl:.0f}"
+                pnl_usd = executor_usd_value(pnl, quote, rates)
+                shown_pnl = pnl_usd if pnl_usd is not None else pnl
+                if ex_type in ("order", "unknown"):
+                    pnl_label = "—"
+                else:
+                    pnl_label = (
+                        f"+{shown_pnl:.0f}" if shown_pnl >= 0 else f"{shown_pnl:.0f}"
+                    )
 
                 row.append(
                     InlineKeyboardButton(
@@ -561,7 +621,8 @@ async def _render_executor_detail(
 
     config = executor.get("config", executor)
     ex_type = get_executor_type(executor)
-    pair = config.get("trading_pair", "UNKNOWN")
+    pair_raw = executor_raw_pair(executor) or "UNKNOWN"
+    pair = pair_raw
     connector = config.get("connector_name", "unknown")
     side = normalize_side(config.get("side", SIDE_LONG))
     leverage = config.get("leverage", 1)
@@ -573,6 +634,23 @@ async def _render_executor_detail(
     volume = get_executor_volume(executor)
     fees = get_executor_fees(executor)
     status = executor.get("status", "unknown")
+
+    # PnL, fees and volume are denominated in the pool's quote asset. Restate
+    # them in USD, or fall back to the quote's own ticker -- a SOL figure
+    # behind a ``$`` understates it by the whole SOL/USD rate.
+    quote = executor_quote_of(executor)
+    try:
+        rates_client, _ = await get_executors_client(
+            update.effective_chat.id, context.user_data
+        )
+        rates = await resolve_executor_usd_rates(rates_client, [executor])
+        labels = await resolve_executor_pair_labels(rates_client, [executor])
+        pair = labels.get(pair_raw, pair_raw)
+    except Exception as e:
+        logger.debug(f"Executor rates unavailable: {e}")
+        from condor.quote_conversion import QuoteRates
+
+        rates = QuoteRates({}, False)
 
     # Additional performance fields from API
     net_pnl_pct = executor.get("net_pnl_pct", 0) or 0
@@ -708,26 +786,33 @@ async def _render_executor_detail(
     lines.append(f"📊 *Performance*")
 
     # PnL with percentage
-    pnl_str = f"${pnl:+,.2f}"
+    pnl_str = format_executor_money(pnl, quote, rates, signed=True)
     if net_pnl_pct:
         pnl_str += f" ({net_pnl_pct:+.2f}%)"
     lines.append(f"  {pnl_emoji} PnL: `{escape_markdown_v2(pnl_str)}`")
 
     # Realized / Unrealized breakdown (only if there's data)
     if realized_pnl or unrealized_pnl:
+        realized_str = format_executor_money(realized_pnl, quote, rates, signed=True)
+        unrealized_str = format_executor_money(
+            unrealized_pnl, quote, rates, signed=True
+        )
         lines.append(
-            f"  Real: `{escape_markdown_v2(f'${realized_pnl:+,.2f}')}` \\| Unreal: `{escape_markdown_v2(f'${unrealized_pnl:+,.2f}')}`"
+            f"  Real: `{escape_markdown_v2(realized_str)}` \\| Unreal: `{escape_markdown_v2(unrealized_str)}`"
         )
 
     if break_even:
         lines.append(f"  BE: `{escape_markdown_v2(f'{break_even:,.2f}')}`")
 
     if position_size:
-        lines.append(f"  📈 Size: `${escape_markdown_v2(f'{position_size:,.2f}')}`")
+        size_str = format_executor_money(position_size, quote, rates)
+        lines.append(f"  📈 Size: `{escape_markdown_v2(size_str)}`")
     if volume:
-        lines.append(f"  📈 Volume: `${escape_markdown_v2(f'{volume:,.2f}')}`")
+        volume_str = format_executor_money(volume, quote, rates)
+        lines.append(f"  📈 Volume: `{escape_markdown_v2(volume_str)}`")
     if fees:
-        lines.append(f"  💸 Fees: `${escape_markdown_v2(f'{fees:,.2f}')}`")
+        fees_str = format_executor_money(fees, quote, rates)
+        lines.append(f"  💸 Fees: `{escape_markdown_v2(fees_str)}`")
 
     lines.append("")
     status_emoji = "▶️" if status.upper() == "RUNNING" else "⏹"
@@ -745,6 +830,10 @@ async def _render_executor_detail(
             pass
 
     lines.append(f"🆔 `{escape_markdown_v2(full_id[:30])}`")
+
+    # The stop confirmation is rendered from cached state, without a fresh
+    # token-list read; carry the resolved label with it.
+    context.user_data["current_executor_label"] = pair
 
     # Build keyboard — only show Stop for running executors
     keyboard = []
@@ -815,7 +904,9 @@ async def handle_stop_executor(
     # Get executor info for display
     executor = context.user_data.get("current_executor", {})
     config = executor.get("config", executor)
-    pair = config.get("trading_pair", "UNKNOWN")
+    pair = context.user_data.get("current_executor_label") or (
+        executor_raw_pair(executor) or "UNKNOWN"
+    )
 
     side = normalize_side(config.get("side", SIDE_LONG))
     side_emoji = "🟢" if side == SIDE_LONG else "🔴"

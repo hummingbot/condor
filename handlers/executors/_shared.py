@@ -9,6 +9,7 @@ Contains:
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -237,6 +238,149 @@ async def search_running_executors(
 from condor.fetchers.executors import get_executor_fees  # noqa: F811
 from condor.fetchers.executors import get_executor_pnl  # noqa: F811
 from condor.fetchers.executors import get_executor_volume  # noqa: F811
+
+
+def executor_quote_of(executor: Dict[str, Any]) -> str:
+    """Quote asset an executor's PnL, fees and volume are denominated in.
+
+    A pair with no quote segment falls back to USDT, the same default the
+    dashboard's row builder uses.
+    """
+    from condor.fetchers.executors import executor_quote
+
+    config = executor.get("config")
+    cfg = config if isinstance(config, dict) else executor
+    pair = cfg.get("trading_pair") or executor.get("trading_pair") or ""
+    return executor_quote(str(pair))
+
+
+def executor_raw_pair(executor: Dict[str, Any]) -> str:
+    """The pair exactly as the API recorded it, mint address and all."""
+    config = executor.get("config")
+    cfg = config if isinstance(config, dict) else executor
+    return str(cfg.get("trading_pair") or executor.get("trading_pair") or "")
+
+
+def _executor_network(executor: Dict[str, Any]) -> str:
+    """Gateway network id behind the executor's connector, or ``""``.
+
+    DEX connectors *are* network ids (``solana-mainnet-beta``); a CEX connector
+    ("binance") maps to no chain and drops out, so it is never sent to the
+    token list.
+    """
+    from condor.pool_data import GECKO_TO_GATEWAY_NETWORK, NETWORK_TO_GECKO
+
+    config = executor.get("config")
+    cfg = config if isinstance(config, dict) else executor
+    connector = str(cfg.get("connector_name") or executor.get("connector_name") or "")
+    return GECKO_TO_GATEWAY_NETWORK.get(NETWORK_TO_GECKO.get(connector, ""), "")
+
+
+# A screen refresh should not re-read the token list; it only changes when a
+# new pool is listed. Keyed per network, bounded by the TTL.
+_PAIR_LABELS_TTL = 300.0
+_pair_labels_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
+
+
+async def _mint_symbols(client: Any, network: str) -> Dict[str, str]:
+    cached = _pair_labels_cache.get(network)
+    if cached and time.monotonic() - cached[0] < _PAIR_LABELS_TTL:
+        return cached[1]
+    from condor.fetchers.gateway_tokens import network_token_symbols
+
+    symbols = await network_token_symbols(client, network)
+    _pair_labels_cache[network] = (time.monotonic(), symbols)
+    return symbols
+
+
+async def resolve_executor_pair_labels(
+    client: Any, executors: List[Dict[str, Any]]
+) -> Dict[str, str]:
+    """Raw-mint pairs mapped to ``SYMBOL-QUOTE``, keyed by the raw pair.
+
+    An LP executor's ``trading_pair`` is the mint it was opened on
+    (``2j5SaS7x...-SOL``) — correct, since that is what the API resolves by,
+    but unreadable in a list. Gateway's token list already maps those mints to
+    tickers, and must, because a balance only reads for a listed token.
+
+    Callers render ``labels.get(raw_pair, raw_pair)``: a mint the list does not
+    know keeps today's display rather than vanishing from the screen.
+    """
+    from condor.dex_candles import ADDRESS_RE
+
+    pairs_by_network: Dict[str, List[str]] = {}
+    for executor in executors:
+        raw = executor_raw_pair(executor)
+        base = raw.split("-", 1)[0] if "-" in raw else ""
+        network = _executor_network(executor)
+        if network and base and ADDRESS_RE.match(base):
+            pairs_by_network.setdefault(network, []).append(raw)
+
+    labels: Dict[str, str] = {}
+    for network, raws in pairs_by_network.items():
+        try:
+            symbols = await _mint_symbols(client, network)
+        except Exception as e:
+            logger.warning("Token symbols unavailable for %s: %s", network, e)
+            continue
+        for raw in raws:
+            base, quote = raw.split("-", 1)
+            symbol = symbols.get(base.lower())
+            if symbol:
+                labels[raw] = f"{symbol}-{quote}"
+    return labels
+
+
+async def resolve_executor_usd_rates(
+    client: Any, executors: List[Dict[str, Any]]
+) -> "QuoteRates":
+    """USD multiplier per quote asset across a batch of executors.
+
+    PnL, fees and volume come out of the API in their market's *quote*
+    currency, so executors on different quotes cannot be added -- and a
+    SOL-denominated figure stamped with ``$`` is off by the whole SOL/USD
+    rate (0.0115 SOL read as $0.0115 is really about $2). The dashboard
+    already converts through :func:`~condor.quote_conversion.resolve_usd_rates`;
+    this is the same resolution for the chat surfaces.
+
+    Degrades to face value (``converted=False``) rather than raising: the
+    caller then labels the amount with its own quote ticker instead of a
+    dollar sign.
+    """
+    from condor.quote_conversion import (
+        QuoteRates,
+        quotes_in,
+        resolve_client_usd_rates,
+    )
+
+    pairs = []
+    for ex in executors:
+        config = ex.get("config")
+        cfg = config if isinstance(config, dict) else ex
+        pairs.append(cfg.get("trading_pair") or ex.get("trading_pair") or "")
+    try:
+        return await resolve_client_usd_rates(client, quotes_in(pairs))
+    except Exception as e:
+        logger.warning("Executor USD rates unavailable: %s", e)
+        return QuoteRates({}, False)
+
+
+def executor_usd_value(
+    value: float, quote: str, rates: "QuoteRates"
+) -> Optional[float]:
+    """``value`` restated in USD, or ``None`` when the quote has no USD path."""
+    from condor.quote_conversion import usd_value
+
+    return usd_value(value, quote, rates)
+
+
+def format_executor_money(
+    value: float, quote: str, rates: "QuoteRates", *, signed: bool = False
+) -> str:
+    """A quote-denominated executor figure, in USD when a rate exists."""
+    from condor.quote_conversion import format_quote_money
+
+    return format_quote_money(value, quote, rates, signed=signed)
 
 
 def format_executor_status_line(executor: Dict[str, Any]) -> str:

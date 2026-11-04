@@ -577,3 +577,15 @@ def test_a_replacement_is_logged_with_who_did_it(make_client, caplog):
     line = next(m for m in caplog.messages if "replaced the holder" in m)
     assert str(USER.id) in line and USDC in line and MINT in line
     assert NETWORK in line and "PUMP" in line
+
+
+# ── A mint on the list has a ticker worth showing ──
+
+
+def test_network_token_symbols_maps_mints_to_tickers():
+    """Lowercased mint -> ticker, so a pair can drop the address form."""
+    gw = FakeGateway(listed=[USDC])
+
+    symbols = asyncio.run(gateway_tokens.network_token_symbols(FakeClient(gw), NETWORK))
+
+    assert symbols == {USDC.lower(): USDC[:4]}
