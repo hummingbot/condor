@@ -142,11 +142,12 @@ Only applies to perpetuals. Always use `ONEWAY` for PMM Mister — fills from bu
 ### Portfolio Allocation & Capacity
 
 **`portfolio_allocation`** (float, default: 0.1)
-Fraction of `total_amount_quote` placed around the mid price at each iteration. This is what the bot actively quotes per cycle.
+Fraction of `total_amount_quote` placed around the mid price at each iteration across **all buy and sell levels combined**. This is what the bot actively quotes per cycle.
 
-Formula: `order_size = total_amount_quote × portfolio_allocation ÷ number_of_levels`
+Formula: `order_quote(level) = total_amount_quote × portfolio_allocation × w_level ÷ (sum(buy_amounts_pct) + sum(sell_amounts_pct))`
+(for equal weights, `order_size = total_amount_quote × portfolio_allocation ÷ (len(buy_spreads) + len(sell_spreads))`, counting **both** buy and sell levels).
 
-Keep this small. Example: with `total_amount_quote=1000`, `portfolio_allocation=0.10`, and 2 buy levels, each buy order is ~$50.
+Keep this small. Example: with `total_amount_quote=1000`, `portfolio_allocation=0.10`, and 2 buy + 2 sell levels (4 total levels, equal weights), each order is ~$25 (`$1000 × 0.10 ÷ 4`). With `total_amount_quote=120`, `portfolio_allocation=0.20`, and 2 buy + 2 sell levels (4 total levels), each order is `$6` (`$120 × 0.20 ÷ 4`), not `$12`.
 
 **`max_active_executors_by_level`** (int, default: 4)
 Maximum number of open (unfilled) executors per level at any time. After a fill, once the cooldown expires, the controller can open a new executor on that level — up to this cap.
@@ -154,12 +155,12 @@ Maximum number of open (unfilled) executors per level at any time. After a fill,
 This cap is how you control maximum directional exposure. Think of it as: if all buys fill at similar prices, how many times can the bot re-enter before it stops quoting buys on that level?
 
 **Portfolio exposure example:**
-- `portfolio_allocation = 10%`, 2 buy levels → each level puts 5% of capital per fill
-- `max_active_executors_by_level = 5` → total possible buy exposure = 5 × 5% = 25% of portfolio
+- `portfolio_allocation = 10%`, 2 buy + 2 sell levels (4 total levels, equal weights) → each level puts 2.5% of capital per fill (`10% ÷ 4`), so the 2 buy levels together put 5% per cycle
+- `max_active_executors_by_level = 5` → total possible buy exposure across both buy levels = 2 levels × 5 fills × 2.5% = 25% of portfolio
 - So if all buy levels keep filling without reversals, the base position can grow to 25%
 
 **Trading rules check — minimum order size:**
-Before finalizing a config, verify that `total_amount_quote × portfolio_allocation ÷ levels` meets the exchange's minimum order size. Configs that produce orders below the minimum will fail silently or error on placement. Always check the exchange's min notional (e.g. Binance spot = $5–10 minimum per order).
+Before finalizing a config, verify that the smallest per-level order `total_amount_quote × portfolio_allocation × w_level ÷ (sum(buy_amounts_pct) + sum(sell_amounts_pct)) × min_skew` (with equal weights, `total_amount_quote × portfolio_allocation ÷ (len(buy_spreads) + len(sell_spreads)) × min_skew`, counting **both** buy and sell levels) meets the exchange's minimum order size after base-amount step rounding. Configs that produce orders below the minimum (for example, `$120 × 0.20 ÷ (2 + 2) = $6` against a `$10` minimum) will fail silently or error on placement (`Order notional ... is lower than minimum notional size`). Always check the exchange's min notional (e.g. Binance spot = $5–10, Hyperliquid / XYZ HIP-3 perps = $10, Binance perps = $20 minimum per order).
 
 ---
 

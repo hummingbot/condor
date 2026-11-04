@@ -86,7 +86,11 @@ Take the JSON block from the template and substitute the actual values:
 - `leverage` — from task context; if not specified use the template default; always 1 for spot
 
 Also validate:
-- **Min order size**: `total_amount_quote × portfolio_allocation ÷ number_of_levels` must exceed the exchange's minimum notional (typically $5–10 on Binance spot, $20 on perps). If not, increase `total_amount_quote` or reduce levels.
+- **Min order size (count BOTH buy and sell sides)**: The controller normalizes weights across **all buy and sell levels combined**:
+  `order_quote(level) = total_amount_quote × portfolio_allocation × w_level ÷ (sum(buy_amounts_pct) + sum(sell_amounts_pct))`
+  (with equal weights, `total_amount_quote × portfolio_allocation ÷ (len(buy_spreads) + len(sell_spreads))`), and the smallest skewed order is `order_quote(level) × min_skew` after quantizing to the pair's base-amount step.
+  - **Example (`#282`):** `total_amount_quote = 120`, `portfolio_allocation = 0.2`, and 2 buy + 2 sell levels (`total_levels = 4`, equal weights) gives `$120 × 0.2 ÷ 4 = $6` per order — **not** `$12` (`÷ 2` one side) — which fails a `$10` minimum notional.
+  - This smallest post-rounding order notional must exceed the exchange's minimum notional (typically $5–10 on Binance spot, $10 on Hyperliquid / XYZ HIP-3 perps, $20 on Binance perps). If not, increase `total_amount_quote`, raise `portfolio_allocation`, or reduce the total number of buy + sell levels (widening spreads does not change order size).
 - **Spreads vs fees**: `take_profit` must exceed round-trip maker fee (e.g. if fee is 0.02%, take_profit ≥ 0.04%).
 
 ### Key parameter notes

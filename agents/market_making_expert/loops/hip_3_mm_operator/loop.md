@@ -118,6 +118,8 @@ your wider levels.
 `target_base_pct=0.4, min_base_pct=0.3, max_base_pct=0.5`** (caps the one-sided position near
 half of total_amount_quote — loosen ONLY in confirmed calm). `max_active_executors_by_level=2`.
 `open_order_type=3`, `take_profit_order_type=3`, `global_sl_enabled=true`,
-**`global_stop_loss=0.02`** (tight deterministic backstop). On error: journal →
-`manage_controllers(action="describe", controller_name="pmm_mister")` → fix → retry once → else
-HOLD + notify.
+**`global_stop_loss=0.02`** (tight deterministic backstop).
+- **Minimum order notional gate (count BOTH buy + sell levels):** `pmm_mister` splits `total_amount_quote × portfolio_allocation` across **all buy and sell weights combined**:
+  `order_quote(level) = total_amount_quote × portfolio_allocation × w_level ÷ (sum(buy_amounts_pct) + sum(sell_amounts_pct)) × min_skew` (with equal weights, `total_amount_quote × portfolio_allocation ÷ (len(buy_spreads) + len(sell_spreads)) × min_skew`). Before upserting/deploying, verify the post-rounding order notional exceeds the market's `$10` minimum. Example: `$120 × 0.2` with 2 buy + 2 sell levels (`total_levels = 4`) is `$6` per order (`< $10` → rejected), so use 1 buy + 1 sell level (`total_levels = 2` → `$12`/order) or raise `portfolio_allocation` / `total_amount_quote`. Widening spreads does NOT change order size.
+- **Diagnosing `Open order failed` / zero fills:** always inspect the saved controller config's real per-order notional (`total_amount_quote × portfolio_allocation ÷ (len(buy_spreads) + len(sell_spreads)) × min_skew` after base-step rounding) before suspecting a connector issue.
+On error: journal → `manage_controllers(action="describe", controller_name="pmm_mister")` → fix → retry once → else HOLD + notify.

@@ -268,3 +268,48 @@ def test_the_documented_options_are_the_routines_real_fields():
 
     assert "recent_closes" not in documented
     assert documented <= fields, f"documented but not in Config: {documented - fields}"
+
+
+# ── #282: order sizing counts both buy and sell levels ───────────────────────
+
+
+def test_controller_splits_allocation_across_buy_and_sell_weights_combined():
+    """PMMisterConfig.get_spreads_and_amounts_in_quote divides by
+    sum(buy_amounts_pct) + sum(sell_amounts_pct), so $120 at 20% allocation across
+    2 buy + 2 sell equal-weight levels produces $6 per order, not $12 (#282)."""
+    src = CONTROLLER.read_text(encoding="utf-8")
+    assert "total_pct = sum(buy_amounts_pct) + sum(sell_amounts_pct)" in src
+
+    total_amount_quote = 120.0
+    portfolio_allocation = 0.2
+    buy_amounts_pct = [1, 1]
+    sell_amounts_pct = [1, 1]
+    total_pct = sum(buy_amounts_pct) + sum(sell_amounts_pct)
+    per_level_quote = [
+        (amt / total_pct) * total_amount_quote * portfolio_allocation
+        for amt in buy_amounts_pct
+    ]
+    assert per_level_quote == [6.0, 6.0]
+
+
+def test_docs_count_both_buy_and_sell_levels_in_minimum_order_sizing():
+    """SKILL.md, AGENT.md, and hip_3_mm_operator/loop.md must state the both-sides
+    denominator and never claim 2 buy levels at $1000 x 10% is $50/order (#282)."""
+    skill_text = (MM / "skills/pmm_mister_deploy/SKILL.md").read_text(encoding="utf-8")
+    agent_text = (MM / "AGENT.md").read_text(encoding="utf-8")
+    hip3_text = (MM / "loops/hip_3_mm_operator/loop.md").read_text(encoding="utf-8")
+
+    # Old one-side example in AGENT.md is gone
+    assert "2 buy levels, each buy order is ~$50" not in agent_text
+    assert "total_amount_quote × portfolio_allocation ÷ number_of_levels` must exceed" not in skill_text
+
+    # All three explicitly divide by combined buy + sell weights/levels and document the $6 (#282) case
+    for doc_name, text in [
+        ("pmm_mister_deploy/SKILL.md", skill_text),
+        ("AGENT.md", agent_text),
+        ("hip_3_mm_operator/loop.md", hip3_text),
+    ]:
+        assert "sum(buy_amounts_pct) + sum(sell_amounts_pct)" in text, doc_name
+        assert "len(buy_spreads) + len(sell_spreads)" in text, doc_name
+        assert "$6" in text, doc_name
+
