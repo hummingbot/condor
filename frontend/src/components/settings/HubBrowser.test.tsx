@@ -174,6 +174,7 @@ beforeEach(() => {
           listing: LISTING,
           plan: body,
           fetched: { version: plan.version, sha256: LISTING.versions[0].sha256 },
+          consent: { accepted: false, terms_version: "" },
         });
       }
       if (listingStatus !== 200) {
@@ -234,6 +235,16 @@ async function click(label: string) {
   const target = button(label);
   await act(async () => {
     target.click();
+  });
+}
+
+/** Ticks the reused dialog's "I have reviewed…" box Install is gated on. */
+async function tickConsent() {
+  const box = container.querySelector(
+    "[data-import-consent]",
+  ) as HTMLInputElement;
+  await act(async () => {
+    box.click();
   });
 }
 
@@ -464,10 +475,12 @@ it("installs only when the operator confirms, through the install endpoint", asy
   await lookUp("river_scalper");
   await click("Review");
   await waitFor(() => container.querySelector("[data-executable]") !== null);
+  await click("Continue");
   // The dialog's own label, because the dialog is reused rather than wrapped:
   // the hub path and the file path offer the operator one verb, spelled once.
   // In the Hub's modal it stays in view while the review scrolls.
   expect(button("Import river_scalper").parentElement?.className).toContain("sticky");
+  await tickConsent();
   await click("Import river_scalper");
 
   expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([

@@ -21,6 +21,7 @@ import {
 } from "@/lib/api";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
+import { stripMarkdown } from "@/lib/formatters";
 
 import { type BundleSource } from "./bundleSource";
 import { ImportAgentDialog } from "./ImportAgentDialog";
@@ -63,7 +64,17 @@ function hubSource(slug: string, version: string): BundleSource {
       pinned = { version: String(res.fetched.version), sha256: res.fetched.sha256 };
       return res.verb === "update"
         ? { verb: "update", plan: res.plan as AgentUpdatePlan }
-        : { verb: "install", plan: res.plan as AgentImportPlan };
+        : {
+            verb: "install",
+            plan: res.plan as AgentImportPlan,
+            // The catalogue's own long-form text, carried from this same
+            // preview call rather than dropped — `res.plan.description` is
+            // the AGENT.md's short routing blurb, a different field (BUG-2).
+            fullDescription: res.listing.description,
+            // Already accepted with Botcamp for this exact version — the
+            // dialog pre-ticks step 2's box instead of re-asking.
+            alreadyConsented: res.consent.accepted,
+          };
     },
     install: async (asSlug) =>
       (await api.installFromHub(slug, asSlug, pinned.version, pinned.sha256))
@@ -314,12 +325,31 @@ export function HubBrowser({
                 className="flex items-start gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"
               >
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
-                <p className="text-[11px] leading-relaxed text-[var(--color-text-muted)]">
-                  <span className="font-semibold text-[var(--color-text)]">
-                    {chosen.name || chosen.slug}
-                  </span>{" "}
-                  — {chosen.trust}
-                </p>
+                <div className="min-w-0 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                  {/* One sentence, not the whole trust paragraph: deciding
+                      whether to install should not start with a read. The
+                      rest of the server's own sentence is one click away,
+                      not rewritten here — a second copy of what it claims is
+                      exactly what `HUB_TRUST` living on the server alone is
+                      meant to avoid. */}
+                  <p>
+                    <span className="font-semibold text-[var(--color-text)]">
+                      {chosen.name || chosen.slug}
+                    </span>{" "}
+                    — {chosen.trust.split(". ")[0]}
+                    {chosen.trust.includes(". ") ? "." : ""}
+                  </p>
+                  {chosen.trust.includes(". ") && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
+                        Read the rest
+                      </summary>
+                      <p className="mt-1">
+                        {chosen.trust.split(". ").slice(1).join(". ")}
+                      </p>
+                    </details>
+                  )}
+                </div>
               </div>
             }
           />
@@ -550,7 +580,7 @@ function AgentCard({
       </div>
 
       <p className="line-clamp-3 flex-1 text-xs leading-relaxed text-[var(--color-text-muted)]">
-        {agent.description || "No description."}
+        {stripMarkdown(agent.description) || "No description."}
       </p>
 
       <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2.5">

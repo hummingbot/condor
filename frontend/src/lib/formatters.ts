@@ -125,6 +125,22 @@ export function escapeHtml(val: string): string {
 }
 
 /**
+ * Drop the handful of markdown marks a one-line agent description shows up
+ * with (`**bold**`, `_italic_`, `` `code` ``), rather than rendering them.
+ *
+ * Every other agent description in the app (the chat header, the catalogue
+ * card's subtitle, `EntityCard`) is shown as plain text, never through a
+ * markdown renderer — so a hub agent's description should read the same way
+ * instead of leaving literal asterisks on screen.
+ */
+export function stripMarkdown(val: string): string {
+  return val
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(\*|_)(.+?)\1/g, "$2")
+    .replace(/`([^`]+)`/g, "$1");
+}
+
+/**
  * Render a magnitude under a currency symbol and put the minus sign, if any,
  * *before* the symbol: `-$1.2K`, not `$-1.2K`.
  *

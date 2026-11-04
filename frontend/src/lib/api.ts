@@ -408,6 +408,10 @@ export interface HubInstallResponse {
   /** The version and digest the server actually reviewed (BUG-2) — pin
    *  install to this rather than re-resolving "latest" a second time. */
   fetched: { version: number; sha256: string };
+  /** Whether this account already consented to this exact version
+   *  (botcamp-site PR #137) — so the dialog can pre-tick step 2's box
+   *  instead of re-asking. */
+  consent: { accepted: boolean; terms_version: string };
 }
 
 /**

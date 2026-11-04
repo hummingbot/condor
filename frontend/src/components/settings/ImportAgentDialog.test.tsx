@@ -219,6 +219,24 @@ function button(label: string): HTMLButtonElement {
   return found as HTMLButtonElement;
 }
 
+/** Ticks the "I have reviewed…" / "I understand…" box Install is gated on. */
+async function tickConsent() {
+  const box = container.querySelector(
+    "[data-import-consent]",
+  ) as HTMLInputElement;
+  await act(async () => {
+    box.click();
+  });
+}
+
+/** Moves the review wizard from step 1 (what you're installing) to step 2
+ *  (confirm), where the consent box and the Import/Update button live. */
+async function continueToConfirm() {
+  await act(async () => {
+    button("Continue").click();
+  });
+}
+
 it("previews before it writes, and names every executable", async () => {
   await render();
   await choose();
@@ -235,26 +253,28 @@ it("previews before it writes, and names every executable", async () => {
   expect(container.textContent).toContain("no sandbox");
 });
 
-it("shows the review grouped by category, in the server's order", async () => {
+it("shows the review grouped by category, in the server's order — the two named sections pulled out of the rest", async () => {
   reply = { ...PLAN, findings: FINDINGS };
   await render();
   await choose();
 
+  // `endpoint` and `risk_limits` get their own named section; the other
+  // three (secret, code_run, tool_steer) stay grouped together.
   const groups = [...container.querySelectorAll("[data-finding-group]")].map((n) =>
     n.getAttribute("data-finding-group"),
   );
-  expect(groups).toEqual([
-    "secret",
-    "endpoint",
-    "code_run",
-    "tool_steer",
-    "risk_limits",
-  ]);
-  expect(container.querySelector("[data-findings]")?.textContent).toContain(
-    "5 things to look at",
-  );
+  expect(groups).toEqual(["secret", "code_run", "tool_steer"]);
+  expect(
+    container.querySelector("[data-findings]")?.closest("details")?.textContent,
+  ).toContain("Other things the scan found — 3 findings");
   // Best-effort, and the copy says so rather than implying a guarantee.
   expect(container.textContent).toContain("It warns; it does not prevent.");
+  expect(container.querySelector("[data-hosts]")?.textContent).toContain(
+    "Hosts it reaches — 1 host, 1 public",
+  );
+  expect(container.querySelector("[data-guardrails]")?.textContent).toContain(
+    "Guardrails it brings with it — 1 limit",
+  );
 });
 
 it("locates each finding and shows the context for the two that carry it", async () => {
@@ -265,21 +285,76 @@ it("locates each finding and shows the context for the two that carry it", async
   const rows = [...container.querySelectorAll("[data-finding]")].map((n) =>
     n.textContent?.trim(),
   );
-  expect(rows[0]).toContain("mnemonic (certain)");
-  expect(rows[0]).toContain("skills/s/SKILL.md:9");
+  // Document order: Hosts it reaches (endpoint), then Guardrails
+  // (risk_limits), then the grouped leftovers (secret, code_run, tool_steer).
+  expect(rows[0]).toContain("public");
+  expect(rows[0]).toContain("routines/r.py:4");
+  // A limit is a judgement the operator makes: the figure, and no verdict.
+  expect(rows[1]).toContain("max_position_size_quote");
+  expect(rows[1]).toContain("999999");
+  expect(rows[2]).toContain("mnemonic (certain)");
+  expect(rows[2]).toContain("skills/s/SKILL.md:9");
   // `tool_steer` is context, not an accusation, so the sentence is on screen.
-  expect(rows[3]).toContain(
+  expect(rows[4]).toContain(
     "When the band is breached, then call `create_grid_executor`.",
   );
-  // A limit is a judgement the operator makes: the figure, and no verdict.
-  expect(rows[4]).toContain("max_position_size_quote");
-  expect(rows[4]).toContain("999999");
+});
+
+it("keeps Import disabled until the consent box is ticked, even with a clean plan", async () => {
+  await render();
+  await choose();
+  await continueToConfirm();
+
+  expect(button("Import traveller").disabled).toBe(true);
+
+  await tickConsent();
+  expect(button("Import traveller").disabled).toBe(false);
+
+  // Unticking it again disables the button — it isn't a one-way latch.
+  await tickConsent();
+  expect(button("Import traveller").disabled).toBe(true);
+});
+
+it("always opens on step 1, and reopening resets both the step and the consent tick", async () => {
+  await render();
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+  expect(button("Import traveller").disabled).toBe(false);
+
+  // A fresh pick re-previews from scratch — step and consent both reset.
+  await choose();
+  expect(() => button("Import traveller")).toThrow();
+  expect(button("Continue")).toBeTruthy();
+});
+
+it("asks for consent again after a rename re-previews the plan", async () => {
+  reply = { ...PLAN, collision: "traveller", suggested_slug: "traveller_2" };
+  await render();
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+
+  // Renaming lives on step 1 (the identity review), so giving up the tick
+  // means going back to it — a rename is a fresh preview either way.
+  await act(async () => {
+    button("Back").click();
+  });
+  reply = { ...PLAN, slug: "traveller_2", collision: "", suggested_slug: "" };
+  await act(async () => {
+    button("Check name").click();
+  });
+  await continueToConfirm();
+
+  expect(button("Import traveller_2").disabled).toBe(true);
 });
 
 it("never blocks the import on a finding, not even a certain secret", async () => {
   reply = { ...PLAN, findings: FINDINGS };
   await render();
   await choose();
+  await continueToConfirm();
+  await tickConsent();
 
   expect(button("Import traveller").disabled).toBe(false);
 
@@ -301,6 +376,8 @@ it("only posts to the apply endpoint when the operator confirms", async () => {
   const imported = vi.fn();
   await render(imported);
   await choose();
+  await continueToConfirm();
+  await tickConsent();
 
   await act(async () => {
     button("Import traveller").click();
@@ -324,6 +401,7 @@ it("refuses to apply a plan the server already refused", async () => {
   expect(container.querySelector("[data-refusal]")?.textContent).toContain(
     "sha256",
   );
+  await continueToConfirm();
   expect(button("Import traveller").disabled).toBe(true);
 });
 
@@ -331,9 +409,14 @@ it("offers a free name for a collision and re-previews under it", async () => {
   reply = { ...PLAN, collision: "traveller", suggested_slug: "traveller_2" };
   await render();
   await choose();
+  await continueToConfirm();
 
   expect(button("Import traveller").disabled).toBe(true);
 
+  // Renaming lives on step 1, the identity review.
+  await act(async () => {
+    button("Back").click();
+  });
   await act(async () => {
     button("Check name").click();
   });
@@ -357,6 +440,8 @@ it("imports under the name that was reviewed, not the empty box", async () => {
   await act(async () => {
     button("Check name").click();
   });
+  await continueToConfirm();
+  await tickConsent();
   expect(button("Import traveller_2").disabled).toBe(false);
 
   await act(async () => {
@@ -411,6 +496,7 @@ it("shows the newest bundle's plan when an older preview answers late", async ()
   await act(async () => {
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  await continueToConfirm();
   expect(button("Import second")).toBeTruthy();
 
   gate.release?.();
@@ -480,6 +566,9 @@ it("lists what this install cannot give the agent, without blocking import", asy
   expect(container.querySelector("[data-bundle-notes]")?.textContent).toContain(
     "Widened the grid.",
   );
+
+  await continueToConfirm();
+  await tickConsent();
   expect(button("Import traveller").disabled).toBe(false);
 });
 
@@ -718,6 +807,8 @@ it("says everything comes in enabled on a fresh install with nothing muted", asy
   const imported = vi.fn();
   await render(imported);
   await choose();
+  await continueToConfirm();
+  await tickConsent();
 
   await act(async () => {
     button("Import traveller").click();

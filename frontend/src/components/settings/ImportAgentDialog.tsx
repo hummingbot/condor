@@ -7,13 +7,21 @@ import {
   RefreshCw,
   Upload,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from "react";
 
 import {
   type AgentBundleFinding,
   type AgentImportPlan,
   type AgentUpdatePlan,
 } from "@/lib/api";
+
+import { stripMarkdown } from "@/lib/formatters";
 
 import { fileSource, type BundleSource } from "./bundleSource";
 import { ScreenFade } from "./ScreenFade";
@@ -150,6 +158,125 @@ function updateConsentNote(hubReviewed: boolean, keptLocalRoutines: string[]): s
   );
 }
 
+/**
+ * The one primary and one secondary button shape, used everywhere this
+ * dialog and its success screen need a button — so the review's Import, the
+ * wizard's Continue and the success screen's Start chatting are never three
+ * different-looking "do the main thing" buttons.
+ */
+function PrimaryButton({
+  className = "",
+  children,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      {...rest}
+      className={`flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-sm font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-hover)] disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SecondaryButton({
+  className = "",
+  children,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      {...rest}
+      className={`rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** "Step 1 of 2" / "Step 2 of 2" — enough to tell the wizard has two screens. */
+function StepIndicator({ step }: { step: 1 | 2 }) {
+  return (
+    <p className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-text-muted)]">
+      <span className="flex gap-1">
+        {([1, 2] as const).map((n) => (
+          <span
+            key={n}
+            className={`h-1.5 w-1.5 rounded-full ${
+              n === step ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
+            }`}
+          />
+        ))}
+      </span>
+      Step {step} of 2
+    </p>
+  );
+}
+
+/**
+ * The plain-language risk the operator is actually agreeing to, on step 2
+ * (FEAT-15x). Amber only when there is something to warn about — a bundle
+ * with no executable file writes config and skill text, nothing that runs.
+ */
+function ConsentDisclaimer({ plan }: { plan: AgentImportPlan }) {
+  const n = plan.executables.length;
+  if (n === 0) {
+    return (
+      <p className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 text-xs leading-relaxed text-[var(--color-text)]">
+        This install writes {plan.files.length} file{plan.files.length !== 1 ? "s" : ""} and
+        runs no code of its own.
+        {plan.hub_reviewed && " The hub has already reviewed this exact bundle."}
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs leading-relaxed text-[var(--color-text)]">
+      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+      <span>
+        This agent brings {n} executable file{n !== 1 ? "s" : ""}, and Condor runs them on
+        this machine with no sandbox.{" "}
+        {plan.hub_reviewed
+          ? "The hub's own review is the only check that has happened on them — read them anyway."
+          : "Nobody but you will have reviewed them before they run."}
+      </span>
+    </p>
+  );
+}
+
+/** The consent checkbox's wording — explicit about code execution once there
+ *  is code to execute, so the box is never a euphemism for what it grants. */
+function consentLabel(plan: AgentImportPlan): string {
+  return plan.executables.length > 0
+    ? "I understand this agent can run code on my machine, and I want to install it."
+    : "I have reviewed what this agent brings in and I want to install it.";
+}
+
+/**
+ * One collapsed-by-default review section (FEAT-151): closed on open, its
+ * one-line summary already stating the count and the headline fact so the
+ * owner can decide whether to open it without being made to first.
+ */
+function ReviewSection({
+  summary,
+  children,
+  ...rest
+}: {
+  summary: ReactNode;
+  children: ReactNode;
+} & Record<`data-${string}`, boolean | string>) {
+  return (
+    <details
+      {...rest}
+      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
+    >
+      <summary className="cursor-pointer text-xs font-semibold text-[var(--color-text)]">
+        {summary}
+      </summary>
+      <div className="mt-2 space-y-2">{children}</div>
+    </details>
+  );
+}
+
 /** The verdicts worth showing first: everything that is not `unchanged`. */
 const VERDICT_ORDER = [
   "conflict",
@@ -233,6 +360,13 @@ export function ImportAgentDialog({
   const [picked, setPicked] = useState<BundleSource | null>(null);
   const active = source ?? picked;
   const [plan, setPlan] = useState<AgentImportPlan | null>(null);
+  /**
+   * The hub catalogue's own long-form text, when this source has one — a
+   * different field from `plan.description`, which is the AGENT.md's short
+   * routing blurb, not a shortened version of the same sentence. Unset for a
+   * plain file import, which has no catalogue entry to carry one from.
+   */
+  const [fullDescription, setFullDescription] = useState("");
   const [asSlug, setAsSlug] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -247,6 +381,20 @@ export function ImportAgentDialog({
   const [update, setUpdate] = useState<AgentUpdatePlan | null>(null);
   const [applied, setApplied] = useState<AgentUpdatePlan | null>(null);
   /**
+   * The explicit consent the operator has to tick before Install is enabled —
+   * ticked for exactly one plan, so a rename (`review()` again, under
+   * "Check name") or a fresh pick asks for it again rather than carrying a
+   * tick from a plan that is no longer the one on screen.
+   */
+  const [consented, setConsented] = useState(false);
+  /**
+   * Which screen of the review wizard is on top — set back to 1 by `reset()`
+   * and by every fresh `review()` call, so a rename or a reopened dialog
+   * never leaves the operator stranded on the confirm screen of a plan that
+   * is no longer the one on top.
+   */
+  const [step, setStep] = useState<1 | 2>(1);
+  /**
    * Which preview the screen belongs to.
    *
    * Two bundles chosen in a row are two requests, and the first one can answer
@@ -259,12 +407,23 @@ export function ImportAgentDialog({
 
   function reset() {
     setPlan(null);
+    setFullDescription("");
     setLanded(null);
     setUpdate(null);
     setApplied(null);
     setError(null);
     setAsSlug("");
+    setConsented(false);
+    setStep(1);
     onResult?.(null);
+  }
+
+  /** Abandon the review: the file panel goes back to its picker, the hub's
+   *  modal closes — whichever this host actually offers. */
+  function cancel() {
+    reset();
+    setPicked(null);
+    onDismiss?.();
   }
 
   async function pick(chosen: File | null) {
@@ -290,6 +449,8 @@ export function ImportAgentDialog({
     setBusy(true);
     setError(null);
     setUpdate(null);
+    setConsented(false);
+    setStep(1);
     try {
       const previewed = await from.preview(slug);
       if (mine !== latest.current) return;
@@ -300,6 +461,11 @@ export function ImportAgentDialog({
         setUpdate(previewed.plan);
       } else {
         setPlan(previewed.plan);
+        setFullDescription(previewed.fullDescription ?? "");
+        // A hub source whose account already consented to this exact
+        // version: pre-tick step 2's box rather than asking the owner to
+        // read the same terms a second time.
+        setConsented(Boolean(previewed.alreadyConsented));
       }
     } catch (e) {
       if (mine !== latest.current) return;
@@ -375,6 +541,36 @@ export function ImportAgentDialog({
 
   const blocked = plan ? plan.refusals.length > 0 || plan.collision !== "" : false;
 
+  // Everything this bundle carries under `routines/` — shared by the summary
+  // counts line, the unmet reassurance below, and the files section.
+  const carriedRoutines = plan
+    ? plan.executables
+        .filter((f) => f.path.startsWith("routines/") && f.path.endsWith(".py"))
+        .map((f) => f.path.split("/")[1].slice(0, -".py".length))
+    : [];
+  // `loops/<name>/loop.md` is the one non-`.py` path shape that names a loop.
+  const carriedLoops = plan
+    ? plan.files
+        .filter((f) => {
+          const parts = f.path.split("/");
+          return parts.length === 3 && parts[0] === "loops" && parts[2] === "loop.md";
+        })
+        .map((f) => f.path.split("/")[1])
+    : [];
+  const declaredSkills = plan
+    ? [...plan.requires.skills.carried, ...plan.requires.skills.inherited]
+    : [];
+  const planFileCount = plan ? plan.files.length + plan.executables.length : 0;
+  // The two categories the owner reads as their own section rather than a
+  // panel in the catch-all grid (FEAT-151); everything else stays grouped.
+  const hostFindings = plan ? plan.findings.filter((f) => f.category === "endpoint") : [];
+  const guardrailFindings = plan
+    ? plan.findings.filter((f) => f.category === "risk_limits")
+    : [];
+  const otherFindings = plan
+    ? plan.findings.filter((f) => f.category !== "endpoint" && f.category !== "risk_limits")
+    : [];
+
   // Nothing this update would do: the pinned version matches what's
   // installed and every file already carries the bundle's own bytes, so
   // there is no file to write and nothing to mute. `files.every` on `[]`
@@ -402,7 +598,7 @@ export function ImportAgentDialog({
     : update
       ? "update"
       : plan
-        ? "review"
+        ? `review-${step}`
         : busy
           ? "busy"
           : "idle";
@@ -453,43 +649,44 @@ export function ImportAgentDialog({
 
       {plan && (
         <div className="space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-          {/* Identity as a compact header rather than a tall paragraph stack:
-              the width is there now, so the name and description run across
-              the top and the bookkeeping (version, size, id, author) sits in
-              a dense row underneath instead of one line each. */}
+          <StepIndicator step={step} />
+
+          {/* Step 1 — what you're installing: the identity and every
+              collapsible fact about it, nothing to decide yet. Step 2 is
+              below, once this whole block is skipped. */}
+          {step === 1 && (
+            <>
+          {/* The short, plain summary first: what the owner gets, stated as
+              counts rather than prose about the hub. Everything else below
+              is detail, collapsed until asked for. */}
           <div className="space-y-1">
             <p className="text-sm font-semibold text-[var(--color-text)]">{plan.name}</p>
-            <p className="text-xs text-[var(--color-text-muted)]">
-              {plan.description || plan.when_to_consult || "No description."}
+            {/* The tagline first — the AGENT.md's own short routing blurb —
+                then the hub's full write-up below it, when this source has
+                one. Two different fields (BUG-2), so neither is dropped for
+                the other. */}
+            <p className="text-xs font-medium text-[var(--color-text-muted)]">
+              {stripMarkdown(plan.description || plan.when_to_consult) || "No description."}
             </p>
+            {fullDescription &&
+              stripMarkdown(fullDescription) !==
+                stripMarkdown(plan.description || plan.when_to_consult) && (
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  {stripMarkdown(fullDescription)}
+                </p>
+              )}
             {plan.notes && (
               <p data-bundle-notes className="text-[11px] text-[var(--color-text)]">
                 “{plan.notes}”
               </p>
             )}
             <p className="pt-0.5 text-[11px] text-[var(--color-text-muted)]">
-              Version {plan.version} · exported {plan.exported_at || "at an unknown time"}{" "}
-              as <span className="font-mono">{plan.source_slug}</span> ·{" "}
-              {plan.files.length + plan.executables.length} files · {plan.total_bytes} bytes
+              {plan.requires.tools.length} tool{plan.requires.tools.length !== 1 ? "s" : ""} ·{" "}
+              {declaredSkills.length} skill{declaredSkills.length !== 1 ? "s" : ""} ·{" "}
+              {carriedRoutines.length} routine{carriedRoutines.length !== 1 ? "s" : ""} ·{" "}
+              {carriedLoops.length} loop{carriedLoops.length !== 1 ? "s" : ""} ·{" "}
+              {planFileCount} file{planFileCount !== 1 ? "s" : ""} · {plan.total_bytes} bytes
             </p>
-            <p data-agent-uid className="text-[11px] text-[var(--color-text-muted)]">
-              Agent id <span className="font-mono">{plan.agent_uid}</span> — the same
-              agent on every install that imported this bundle, whatever it is named
-              there.
-            </p>
-            {/* The label is not decoration: a handle rendered next to a
-                download without one reads as provenance, and Condor
-                verifies nothing here — it signs no bundle and has no keys
-                to check one with. */}
-            {(plan.author.name || plan.author.handle) && (
-              <p data-bundle-author className="text-[11px] text-[var(--color-text-muted)]">
-                Author (unverified claim):{" "}
-                <span className="text-[var(--color-text)]">
-                  {plan.author.name || plan.author.handle}
-                </span>
-                {plan.author.name && plan.author.handle && ` (${plan.author.handle})`}
-              </p>
-            )}
           </div>
 
           {plan.unmet.length > 0 && (
@@ -504,9 +701,6 @@ export function ImportAgentDialog({
                     `plan.mutes` for both rather than assuming routines are
                     always the muted half. */}
                 {(() => {
-                  const carriedRoutines = plan.executables
-                    .filter((f) => f.path.startsWith("routines/") && f.path.endsWith(".py"))
-                    .map((f) => f.path.split("/")[1].slice(0, -".py".length));
                   const routinesMuted = carriedRoutines.every((r) =>
                     plan.mutes.routines.includes(r),
                   );
@@ -542,141 +736,291 @@ export function ImportAgentDialog({
             </div>
           )}
 
-          {/* The review of what the files themselves carry, beside the file
-              list rather than behind a disclosure: it is the thing the operator
-              is here to read. Grouped by category, each finding with its path
-              and line, and no verdict anywhere — the server reports and refuses
-              nothing on this side. */}
-          {plan.findings.length > 0 && (
-            <div
-              data-findings
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
-            >
-              <p className="mb-1 text-xs font-semibold text-[var(--color-text)]">
-                The review found {plan.findings.length} thing
-                {plan.findings.length !== 1 ? "s" : ""} to look at
-              </p>
-              <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-                A bundle from someone you do not trust is untrusted code, and there is
-                no sandbox here. Every file it would write is named on this screen
-                before anything is written, and this is what a scan of their contents
-                found. It warns; it does not prevent.
-              </p>
-              {/* A grid of self-contained panels rather than one tall column:
-                  the width is there to show several groups side by side, and
-                  each panel scrolls on its own so a long group never pushes
-                  the sticky Import button off-screen. */}
-              <div className="@container">
-                <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
-                {categoriesOf(plan.findings).map((category) => {
-                  const rows = plan.findings.filter((f) => f.category === category);
-                  const copy = FINDING_COPY[category];
-                  return (
-                    <div
-                      key={category}
-                      data-finding-group={category}
-                      className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+          {/* Everything else, collapsed by default: a one-line header that
+              already states the count and the headline fact, so deciding
+              whether to open a section needs no click first. */}
+          <ReviewSection
+            summary={`What it can do — ${plan.requires.tools.length} tool${plan.requires.tools.length !== 1 ? "s" : ""}, ${declaredSkills.length} skill${declaredSkills.length !== 1 ? "s" : ""}, all enabled on arrival`}
+          >
+            {plan.requires.tools.length > 0 && (
+              <div>
+                <p className="text-[11px] font-semibold text-[var(--color-text)]">Tools</p>
+                <ul className="mt-0.5 flex flex-wrap gap-1">
+                  {plan.requires.tools.map((t) => (
+                    <li
+                      key={t}
+                      className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 font-mono text-[11px] text-[var(--color-text)]"
                     >
-                      <p className="text-[11px] font-semibold text-[var(--color-text)]">
-                        {copy?.title ?? category}{" "}
-                        <span className="font-normal text-[var(--color-text-muted)]">
-                          ({rows.length})
-                        </span>
-                      </p>
-                      {copy && (
-                        <p className="text-[10px] text-[var(--color-text-muted)]">
-                          {copy.blurb}
-                        </p>
-                      )}
-                      <ul className="mt-0.5 max-h-48 space-y-0.5 overflow-y-auto pr-0.5">
-                        {rows.map((f) => (
-                          <li
-                            key={`${f.path}:${f.start}:${f.label}`}
-                            data-finding={f.category}
-                            className="text-[11px] text-[var(--color-text-muted)]"
-                          >
-                            <span
-                              className={
-                                f.certain
-                                  ? "font-semibold text-[var(--color-red)]"
-                                  : "text-amber-400"
-                              }
-                            >
-                              {f.label}
-                              {f.certain && " (certain)"}
-                            </span>{" "}
-                            <span className="font-mono text-[var(--color-text)]">
-                              {f.path}:{f.line}
-                            </span>
-                            {f.context && (
-                              <>
-                                {" — "}
-                                <span className="font-mono text-[10px]">{f.context}</span>
-                              </>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  );
-                })}
-                </div>
+                      {t}
+                    </li>
+                  ))}
+                </ul>
               </div>
-            </div>
-          )}
-
-          {plan.executables.length > 0 && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5">
-              <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-amber-400">
-                <AlertTriangle className="h-3.5 w-3.5" />
-                {plan.executables.length} executable file
-                {plan.executables.length !== 1 ? "s" : ""}
+            )}
+            {declaredSkills.length > 0 && (
+              <div>
+                <p className="text-[11px] font-semibold text-[var(--color-text)]">Skills</p>
+                <ul className="mt-0.5 flex flex-wrap gap-1">
+                  {plan.requires.skills.carried.map((s) => (
+                    <li
+                      key={`carried:${s}`}
+                      data-skill="carried"
+                      className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 font-mono text-[11px] text-[var(--color-text)]"
+                    >
+                      {s}
+                    </li>
+                  ))}
+                  {plan.requires.skills.inherited.map((s) => (
+                    <li
+                      key={`inherited:${s}`}
+                      data-skill="inherited"
+                      className="rounded-full border border-dashed border-[var(--color-border)] px-2 py-0.5 font-mono text-[11px] text-[var(--color-text-muted)]"
+                    >
+                      {s} (shared)
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {plan.requires.tools.length === 0 && declaredSkills.length === 0 && (
+              <p className="text-[11px] text-[var(--color-text-muted)]">
+                Declares no tools or skills of its own.
               </p>
-              <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
-                {plan.hub_reviewed
-                  ? "An imported routine runs inside Condor with no sandbox. The hub already reviewed this exact content, so these arrive with execution consent already granted — read them anyway."
-                  : "A bundle from someone you do not trust is untrusted code: an imported routine runs inside Condor with no sandbox. These arrive muted — read each one before you switch it on."}
+            )}
+          </ReviewSection>
+
+          <ReviewSection
+            summary={`Files it writes — ${plan.executables.length} executable, ${plan.files.length} other`}
+          >
+            {plan.executables.length > 0 && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2.5">
+                <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-amber-400">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  {plan.executables.length} executable file
+                  {plan.executables.length !== 1 ? "s" : ""}
+                </p>
+                <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
+                  {plan.hub_reviewed
+                    ? "An imported routine runs inside Condor with no sandbox. The hub already reviewed this exact content, so these arrive with execution consent already granted — read them anyway."
+                    : "A bundle from someone you do not trust is untrusted code: an imported routine runs inside Condor with no sandbox. These arrive muted — read each one before you switch it on."}
+                </p>
+                <ul className="space-y-0.5">
+                  {plan.executables.map((f) => (
+                    <li
+                      key={f.path}
+                      data-executable
+                      className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--color-text)]"
+                    >
+                      <FileCode2 className="h-3 w-3 shrink-0 text-amber-400" />
+                      {f.path}
+                      <span className="text-[var(--color-text-muted)]">{f.bytes} B</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div>
+              <p className="mb-1 text-[11px] font-semibold text-[var(--color-text)]">
+                {plan.files.length} other file{plan.files.length !== 1 ? "s" : ""}
               </p>
               <ul className="space-y-0.5">
-                {plan.executables.map((f) => (
+                {plan.files.map((f) => (
                   <li
                     key={f.path}
-                    data-executable
-                    className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--color-text)]"
+                    className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--color-text-muted)]"
                   >
-                    <FileCode2 className="h-3 w-3 shrink-0 text-amber-400" />
+                    <FileText className="h-3 w-3 shrink-0" />
                     {f.path}
-                    <span className="text-[var(--color-text-muted)]">{f.bytes} B</span>
                   </li>
                 ))}
               </ul>
             </div>
+          </ReviewSection>
+
+          {hostFindings.length > 0 && (
+            <ReviewSection
+              data-hosts
+              summary={`Hosts it reaches — ${hostFindings.length} host${hostFindings.length !== 1 ? "s" : ""}${
+                hostFindings.filter((f) => f.label === "public").length > 0
+                  ? `, ${hostFindings.filter((f) => f.label === "public").length} public`
+                  : ""
+              }`}
+            >
+              <p className="text-[11px] text-[var(--color-text-muted)]">
+                {FINDING_COPY.endpoint.blurb}
+              </p>
+              <ul className="space-y-0.5">
+                {hostFindings.map((f) => (
+                  <li
+                    key={`${f.path}:${f.start}:${f.label}`}
+                    data-finding={f.category}
+                    className="text-[11px] text-[var(--color-text-muted)]"
+                  >
+                    <span
+                      className={
+                        f.label === "public"
+                          ? "font-semibold text-[var(--color-red)]"
+                          : "text-[var(--color-text-muted)]"
+                      }
+                    >
+                      {f.label}
+                    </span>{" "}
+                    <span className="font-mono text-[var(--color-text)]">
+                      {f.path}:{f.line}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </ReviewSection>
           )}
 
-          <details>
-            <summary className="cursor-pointer text-xs text-[var(--color-text-muted)]">
-              {plan.files.length} other file{plan.files.length !== 1 ? "s" : ""}
-            </summary>
-            <ul className="mt-1 space-y-0.5">
-              {plan.files.map((f) => (
-                <li
-                  key={f.path}
-                  className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--color-text-muted)]"
-                >
-                  <FileText className="h-3 w-3 shrink-0" />
-                  {f.path}
-                </li>
-              ))}
-            </ul>
-          </details>
+          {guardrailFindings.length > 0 && (
+            <ReviewSection
+              data-guardrails
+              summary={`Guardrails it brings with it — ${guardrailFindings.length} limit${guardrailFindings.length !== 1 ? "s" : ""}`}
+            >
+              <p className="text-[11px] text-[var(--color-text-muted)]">
+                {FINDING_COPY.risk_limits.blurb}
+              </p>
+              <ul className="space-y-0.5">
+                {guardrailFindings.map((f) => (
+                  <li
+                    key={`${f.path}:${f.start}:${f.label}`}
+                    data-finding={f.category}
+                    className="text-[11px] text-[var(--color-text-muted)]"
+                  >
+                    <span
+                      className={
+                        f.certain
+                          ? "font-semibold text-[var(--color-red)]"
+                          : "text-amber-400"
+                      }
+                    >
+                      {f.label}
+                    </span>{" "}
+                    <span className="font-mono text-[var(--color-text)]">
+                      {f.path}:{f.line}
+                    </span>
+                    {f.context && (
+                      <>
+                        {" — "}
+                        <span className="font-mono text-[10px]">{f.context}</span>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </ReviewSection>
+          )}
 
-          <p className="text-[11px] text-[var(--color-text-muted)]">
-            Lands as <span className="font-mono">{plan.slug}</span>, owned by you, with no
-            server pin. Muted on arrival:{" "}
-            {[...plan.mutes.routines, ...plan.mutes.skills].join(", ") || "nothing"}.
-            {plan.agent_key_inherited &&
-              ` Its model is not configured here, so it will use yours (${plan.agent_key}).`}
-          </p>
+          {/* The remaining categories, grouped as before: each one a panel
+              with its path and line, and no verdict anywhere — the server
+              reports and refuses nothing on this side. */}
+          {otherFindings.length > 0 && (
+            <ReviewSection
+              summary={`Other things the scan found — ${otherFindings.length} finding${otherFindings.length !== 1 ? "s" : ""}`}
+            >
+              <div data-findings>
+                <p className="mb-2 text-[11px] text-[var(--color-text-muted)]">
+                  A bundle from someone you do not trust is untrusted code, and there is
+                  no sandbox here. Every file it would write is named on this screen
+                  before anything is written, and this is what a scan of their contents
+                  found. It warns; it does not prevent.
+                </p>
+                {/* A grid of self-contained panels rather than one tall column:
+                    the width is there to show several groups side by side, and
+                    each panel scrolls on its own. */}
+                <div className="@container">
+                  <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
+                  {categoriesOf(otherFindings).map((category) => {
+                    const rows = otherFindings.filter((f) => f.category === category);
+                    const copy = FINDING_COPY[category];
+                    return (
+                      <div
+                        key={category}
+                        data-finding-group={category}
+                        className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+                      >
+                        <p className="text-[11px] font-semibold text-[var(--color-text)]">
+                          {copy?.title ?? category}{" "}
+                          <span className="font-normal text-[var(--color-text-muted)]">
+                            ({rows.length})
+                          </span>
+                        </p>
+                        {copy && (
+                          <p className="text-[10px] text-[var(--color-text-muted)]">
+                            {copy.blurb}
+                          </p>
+                        )}
+                        <ul className="mt-0.5 max-h-48 space-y-0.5 overflow-y-auto pr-0.5">
+                          {rows.map((f) => (
+                            <li
+                              key={`${f.path}:${f.start}:${f.label}`}
+                              data-finding={f.category}
+                              className="text-[11px] text-[var(--color-text-muted)]"
+                            >
+                              <span
+                                className={
+                                  f.certain
+                                    ? "font-semibold text-[var(--color-red)]"
+                                    : "text-amber-400"
+                                }
+                              >
+                                {f.label}
+                                {f.certain && " (certain)"}
+                              </span>{" "}
+                              <span className="font-mono text-[var(--color-text)]">
+                                {f.path}:{f.line}
+                              </span>
+                              {f.context && (
+                                <>
+                                  {" — "}
+                                  <span className="font-mono text-[10px]">{f.context}</span>
+                                </>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  })}
+                  </div>
+                </div>
+              </div>
+            </ReviewSection>
+          )}
+
+          <ReviewSection summary={`Where it lands — lands as ${plan.slug}`}>
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              Lands as <span className="font-mono">{plan.slug}</span>, owned by you, with no
+              server pin. Muted on arrival:{" "}
+              {[...plan.mutes.routines, ...plan.mutes.skills].join(", ") || "nothing"}.
+              {plan.agent_key_inherited &&
+                ` Its model is not configured here, so it will use yours (${plan.agent_key}).`}
+            </p>
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              Version {plan.version} · exported {plan.exported_at || "at an unknown time"}{" "}
+              as <span className="font-mono">{plan.source_slug}</span>
+            </p>
+            <p data-agent-uid className="text-[11px] text-[var(--color-text-muted)]">
+              Agent id <span className="font-mono">{plan.agent_uid}</span> — the same
+              agent on every install that imported this bundle, whatever it is named
+              there.
+            </p>
+            {/* The label is not decoration: a handle rendered next to a
+                download without one reads as provenance, and Condor
+                verifies nothing here — it signs no bundle and has no keys
+                to check one with. */}
+            {(plan.author.name || plan.author.handle) && (
+              <p data-bundle-author className="text-[11px] text-[var(--color-text-muted)]">
+                Author (unverified claim):{" "}
+                <span className="text-[var(--color-text)]">
+                  {plan.author.name || plan.author.handle}
+                </span>
+                {plan.author.name && plan.author.handle && ` (${plan.author.handle})`}
+              </p>
+            )}
+          </ReviewSection>
 
           {plan.refusals.map((r) => (
             <p key={r} role="alert" data-refusal className="text-xs text-[var(--color-red)]">
@@ -736,22 +1080,66 @@ export function ImportAgentDialog({
             </div>
           )}
 
-          <div
-            className={
-              stickyAction
-                ? "sticky bottom-0 flex justify-end border-t border-[var(--color-border)] bg-[var(--color-surface)] py-3"
-                : undefined
-            }
-          >
-            <button
-              onClick={confirm}
-              disabled={busy || blocked}
-              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Upload className="h-4 w-4" />
-              Import {plan.slug}
-            </button>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <SecondaryButton onClick={cancel}>Cancel</SecondaryButton>
+            <PrimaryButton onClick={() => setStep(2)} disabled={busy}>
+              Continue
+            </PrimaryButton>
           </div>
+            </>
+          )}
+
+          {/* Step 2 — confirm: the one decision this screen exists for, read
+              in the owner's terms rather than the file list again. */}
+          {step === 2 && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <SecondaryButton onClick={() => setStep(1)}>Back</SecondaryButton>
+              </div>
+
+              <ConsentDisclaimer plan={plan} />
+
+              <div
+                className={
+                  stickyAction
+                    ? "sticky bottom-0 flex items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] py-3"
+                    : "flex items-center justify-between gap-3"
+                }
+              >
+                {/* The explicit consent the owner has to give before Install
+                    is enabled. */}
+                <label className="flex items-start gap-2 text-[11px] text-[var(--color-text)]">
+                  <input
+                    type="checkbox"
+                    data-import-consent
+                    aria-label={consentLabel(plan)}
+                    aria-describedby={!blocked && !consented ? "import-consent-hint" : undefined}
+                    checked={consented}
+                    onChange={(e) => setConsented(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                  />
+                  {consentLabel(plan)}
+                </label>
+                <PrimaryButton
+                  onClick={confirm}
+                  disabled={busy || blocked || !consented}
+                  title={!blocked && !consented ? "Tick the box above to enable Import" : undefined}
+                  aria-describedby={!blocked && !consented ? "import-consent-hint" : undefined}
+                >
+                  <Upload className="h-4 w-4" />
+                  Import {plan.slug}
+                </PrimaryButton>
+              </div>
+              {!blocked && !consented && (
+                <p
+                  id="import-consent-hint"
+                  className="text-[11px] text-[var(--color-text-muted)]"
+                >
+                  Tick the box above to enable Import.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -929,56 +1317,34 @@ function SuccessScreen({
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary)]/15 text-[var(--color-primary)]">
           <Check className="h-4 w-4" />
         </span>
-        <div className="min-w-0 space-y-1 text-sm text-[var(--color-text)]">
-          <p className="font-semibold">
-            {landed ? "Imported" : "Updated"} <span className="font-mono">{slug}</span>
-            {applied && <> to version {applied.version}</>}
-          </p>
-          {/* One line, not the server's full `next_step` sentence: that text
-              names the same facts the chips below lay out one at a time
-              (nothing running, consent, mutes, findings), and printing both
-              had the operator read the same four things twice. The heading
-              above already names what happened and to what, so this names
-              only the one fact the chips don't: nothing has run. */}
-          <p className="text-xs text-[var(--color-text-muted)]">
-            {landed && <span data-import-done>Nothing is running yet.</span>}
-            {applied && <span data-update-done>Nothing is running yet.</span>}
-          </p>
-        </div>
+        <p className="min-w-0 text-sm font-semibold text-[var(--color-text)]">
+          {landed ? "Imported" : "Updated"} <span className="font-mono">{slug}</span>
+          {applied && <> to version {applied.version}</>}
+        </p>
       </div>
 
-      {/* Scannable facts rather than one paragraph: what actually happened,
-          each a claim this same response already carries. */}
-      <div className="@container">
-        <ul data-import-facts className="grid grid-cols-1 gap-2 @md:grid-cols-2">
-          <SuccessFact>
-            {isUpdate
-              ? "Nothing is running. An update only writes files — nothing in them has executed yet."
-              : "Nothing is running. An import only writes files — nothing in them has executed yet."}
-          </SuccessFact>
-          <SuccessFact>
-            {isUpdate
-              ? `Nothing has run yet${updateConsentNote(hubReviewed, keptLocalRoutines)}`
-              : hubReviewed
-                ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
-                : "Its routines still need your allow, one at a time, before any of them runs."}
-          </SuccessFact>
-          <SuccessFact>
-            {isUpdate
-              ? mutedNames.length === 0
-                ? "Nothing new muted — every mute it already had stays as it was."
-                : `Newly muted: ${mutedNames.join(", ")}. Every mute it already had stays as it was.`
-              : mutedNames.length === 0
-                ? "Everything it declares — every tool and skill — comes in enabled."
-                : `Muted on arrival: ${mutedNames.join(", ")}.`}
-          </SuccessFact>
-          <SuccessFact>
-            {findings.length === 0
-              ? "The review found nothing to flag."
-              : `The review found ${findings.length} thing${findings.length !== 1 ? "s" : ""}.`}
-          </SuccessFact>
-        </ul>
-      </div>
+      {/* One paragraph of what actually happened and what to do next, not
+          four cards repeating the same reassurance — the three facts worth
+          keeping, read as prose instead of scanned as tiles. */}
+      <p data-import-facts className="text-sm leading-relaxed text-[var(--color-text-muted)]">
+        {landed && <span data-import-done>Nothing is running yet</span>}
+        {applied && <span data-update-done>Nothing is running yet</span>} — {isUpdate
+          ? "an update"
+          : "an import"}{" "}
+        only writes files, so nothing in it has executed.{" "}
+        {isUpdate
+          ? mutedNames.length === 0
+            ? "Nothing new muted — every mute it already had stays as it was."
+            : `Newly muted: ${mutedNames.join(", ")}. Every mute it already had stays as it was.`
+          : mutedNames.length === 0
+            ? "Everything it declares — every tool and skill — comes in enabled."
+            : `Muted on arrival: ${mutedNames.join(", ")}.`}{" "}
+        {isUpdate
+          ? `Nothing has run yet${updateConsentNote(hubReviewed, keptLocalRoutines)}`
+          : hubReviewed
+            ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
+            : "Its routines still need your allow, one at a time, before any of them runs."}
+      </p>
 
       {/* The same per-file diff the pre-confirm update screen showed, kept
           here rather than dropped once it lands: a kept-local verdict is the
@@ -1035,11 +1401,10 @@ function SuccessScreen({
       )}
 
       {findings.length > 0 && (
-        <details className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5">
-          <summary className="cursor-pointer text-xs font-semibold text-[var(--color-text)]">
-            View the {findings.length} finding{findings.length !== 1 ? "s" : ""}
-          </summary>
-          <div className="@container mt-2">
+        <ReviewSection
+          summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
+        >
+          <div className="@container">
             <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
               {categoriesOf(findings).map((category) => {
                 const rows = findings.filter((f) => f.category === category);
@@ -1082,38 +1447,17 @@ function SuccessScreen({
               })}
             </div>
           </div>
-        </details>
+        </ReviewSection>
       )}
 
       {(onOpenAgent || onDismiss) && (
         <div className="flex items-center gap-2 border-t border-[var(--color-border)] pt-3">
           {onOpenAgent && (
-            <button
-              onClick={() => onOpenAgent(slug)}
-              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20"
-            >
-              Start chatting
-            </button>
+            <PrimaryButton onClick={() => onOpenAgent(slug)}>Start chatting</PrimaryButton>
           )}
-          {onDismiss && (
-            <button
-              onClick={onDismiss}
-              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-            >
-              Close
-            </button>
-          )}
+          {onDismiss && <SecondaryButton onClick={onDismiss}>Close</SecondaryButton>}
         </div>
       )}
     </div>
-  );
-}
-
-function SuccessFact({ children }: { children: ReactNode }) {
-  return (
-    <li className="flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 text-[11px] text-[var(--color-text-muted)]">
-      <Check className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-primary)]" />
-      <span>{children}</span>
-    </li>
   );
 }

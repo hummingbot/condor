@@ -1,5 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, Globe, Loader2, Lock, Store, Upload } from "lucide-react";
+import {
+  Brain,
+  Globe,
+  Loader2,
+  Lock,
+  PanelLeftOpen,
+  Store,
+  Upload,
+} from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -59,7 +67,17 @@ import { api } from "@/lib/api";
  * seat is allowed to see, and `HubDeviceSignIn` mounts the admin-only state
  * machine inside the gate's own `isAdmin` branch.
  */
-export function AgentHub() {
+export function AgentHub({
+  onOpenRail,
+}: {
+  /**
+   * Opens the conversation rail, below `md` only — the Hub owns the whole
+   * column there (FEAT-153) and carries no tab strip of its own above it,
+   * so this is the one door back to another conversation a narrow screen
+   * has while the Hub is open.
+   */
+  onOpenRail?: () => void;
+}) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
@@ -86,6 +104,15 @@ export function AgentHub() {
       <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div className="min-w-0">
           <h1 className="flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
+            {onOpenRail && (
+              <button
+                onClick={onOpenRail}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
+                title="Show agents and conversations"
+              >
+                <PanelLeftOpen className="h-4 w-4" />
+              </button>
+            )}
             <Globe className="h-5 w-5" />
             Agent Hub
           </h1>

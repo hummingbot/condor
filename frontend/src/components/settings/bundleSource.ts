@@ -21,8 +21,22 @@ import {
  * FEAT-133's import plan and an `update` FEAT-145's diff, and the dialog puts
  * each into the state that renders it.
  */
+/**
+ * `fullDescription` is the hub catalogue's own long-form text — a different
+ * field from `plan.description`, which is the AGENT.md's short routing blurb
+ * (what decides whether another agent consults this one). A file import has
+ * no catalogue entry to carry one from, so it stays unset there.
+ */
 export type BundlePreview =
-  | { verb: "install"; plan: AgentImportPlan }
+  | {
+      verb: "install";
+      plan: AgentImportPlan;
+      fullDescription?: string;
+      /** Set only by a hub source: whether this account already consented
+       *  to this exact version with Botcamp, so the dialog can pre-tick
+       *  step 2's box instead of re-asking. */
+      alreadyConsented?: boolean;
+    }
   | { verb: "update"; plan: AgentUpdatePlan };
 
 /**
