@@ -2431,14 +2431,22 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
     and flagged rather than hidden, so the switch that muted one is still there
     to switch it back.
 
-    A routine still awaiting execution consent is listed too, from metadata
-    read without importing it (FEAT-147) — this panel is where the operator
-    reads imported code and decides, so it is the one surface that must never
-    be the thing that runs it.
+    This panel is where the operator reads imported code and decides, so it
+    is the one surface that must never be the thing that runs it (FEAT-147) —
+    for a routine still awaiting execution consent *and* for one a hub
+    install already granted it. Only the shared library, which never came
+    from an import and is never gated, is read through normal discovery; the
+    agent's own library is read statically, via :func:`agent_routine_overview`,
+    regardless of its consent state.
     """
     from condor.memory.mutes import load_mutes
-    from routines.base import assistant_routines, pending_routines
+    from routines.base import (
+        _merged_from,
+        agent_routine_overview,
+        shared_routines_roots,
+    )
 
+    own = {row.name: row for row in agent_routine_overview(slug)}
     muted = load_mutes(slug)["routines"]
     cards = [
         RoutineCard(
@@ -2449,20 +2457,21 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
             category=info.category,
             muted=name in muted,
         )
-        for name, info in sorted(assistant_routines(slug, include_muted=True).items())
+        for name, info in sorted(_merged_from(shared_routines_roots()).items())
+        if name not in own
     ]
     cards.extend(
         RoutineCard(
             name=row.name,
             description=row.description,
             continuous=row.continuous,
-            source=row.source,
+            source=f"agent:{slug}",
             category=row.category,
             muted=row.muted,
-            pending=True,
-            pending_reason=row.reason,
+            pending=not row.allowed,
+            pending_reason=row.pending_reason,
         )
-        for row in pending_routines(slug)
+        for row in own.values()
     )
     return cards
 

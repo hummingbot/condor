@@ -85,6 +85,19 @@ const VERDICT_COPY: Record<string, { label: string; kept?: boolean }> = {
 };
 
 /**
+ * `routines/<name>.py`'s name, or `null` when the path is not a routine —
+ * mirroring the server's `_routine_name` exactly, so `addedLabel` and the
+ * kept-local check below can't disagree with it about what counts as one.
+ */
+function routineNameOf(path: string): string | null {
+  const parts = path.split("/");
+  if (parts.length === 2 && parts[0] === "routines" && path.endsWith(".py")) {
+    return parts[1].slice(0, -".py".length);
+  }
+  return null;
+}
+
+/**
  * What an `added` row should say, per the plan's own mute lists rather than
  * assuming every new file lands switched off (FEAT-146, widened to routines
  * in FEAT-150): a hub update's skills and routines are not muted, so a
@@ -99,16 +112,42 @@ function addedLabel(
   mutes: { routines: string[]; skills: string[] },
   hubReviewed: boolean,
 ): string {
-  const parts = path.split("/");
-  if (parts.length === 2 && parts[0] === "routines" && path.endsWith(".py")) {
-    const name = parts[1].slice(0, -".py".length);
-    if (mutes.routines.includes(name)) return "new — arrives muted";
+  const routineName = routineNameOf(path);
+  if (routineName !== null) {
+    if (mutes.routines.includes(routineName)) return "new — arrives muted";
     return hubReviewed ? "new — ready to run" : "new — needs your allow";
   }
+  const parts = path.split("/");
   if (parts.length > 2 && parts[0] === "skills") {
     return mutes.skills.includes(parts[1]) ? "new — arrives muted" : "new — enabled on arrival";
   }
   return "new";
+}
+
+/**
+ * The sentence that follows "Nothing is started" on an update screen.
+ *
+ * A hub update's auto-allow only ever covers the bytes it just wrote —
+ * `apply_update` on the server excludes exactly the kept-local verdicts
+ * (`local_only`/`conflict`/`conflict_removed`) from granting consent,
+ * because those bytes are the operator's own edit, never the hub's
+ * reviewed text (Policy 3). So `hubReviewed` alone is not enough to say "no
+ * further allow needed" — a routine kept local still needs the ordinary
+ * per-file gate, and the copy has to say so instead of promising otherwise.
+ */
+function updateConsentNote(hubReviewed: boolean, keptLocalRoutines: string[]): string {
+  if (!hubReviewed) {
+    return ", and every routine that changes has to be read and allowed again before it can run.";
+  }
+  if (keptLocalRoutines.length === 0) {
+    return ", and the hub's own review already covers every routine this update changes — no further allow needed before it can run.";
+  }
+  const n = keptLocalRoutines.length;
+  return (
+    ", and the hub's own review covers every routine this update replaces" +
+    ` — but ${n} file${n === 1 ? "" : "s"} you edited kept your own copy and still` +
+    ` ${n === 1 ? "needs" : "need"} your allow before ${n === 1 ? "it" : "they"} can run.`
+  );
 }
 
 /** The verdicts worth showing first: everything that is not `unchanged`. */
@@ -335,6 +374,25 @@ export function ImportAgentDialog({
   }
 
   const blocked = plan ? plan.refusals.length > 0 || plan.collision !== "" : false;
+
+  // Nothing this update would do: the pinned version matches what's
+  // installed and every file already carries the bundle's own bytes, so
+  // there is no file to write and nothing to mute. `files.every` on `[]`
+  // is vacuously true, but an update plan always carries at least AGENT.md.
+  const noChanges = update
+    ? update.blockers.length === 0 &&
+      update.version === update.installed_version &&
+      update.files.every((f) => f.verdict === "unchanged")
+    : false;
+
+  // Routines this update left as the operator's own edit rather than
+  // replacing with the bundle's reviewed bytes — see `updateConsentNote`.
+  const keptLocalRoutines = update
+    ? update.files
+        .filter((f) => VERDICT_COPY[f.verdict]?.kept)
+        .map((f) => routineNameOf(f.path))
+        .filter((name): name is string => name !== null)
+    : [];
 
   // Coarse enough to animate only an actual screen change: re-previewing
   // under a new name stays "review" throughout, so it swaps instantly.
@@ -704,15 +762,28 @@ export function ImportAgentDialog({
         >
           <div>
             <p className="text-sm font-semibold text-[var(--color-text)]">
-              Updating <span className="font-mono">{update.slug}</span> — version{" "}
-              {update.installed_version || "?"} → {update.version}
+              {noChanges ? (
+                <>
+                  <span className="font-mono">{update.slug}</span> is already up to
+                  date at version {update.version}
+                </>
+              ) : (
+                <>
+                  Updating <span className="font-mono">{update.slug}</span> — version{" "}
+                  {update.installed_version || "?"} → {update.version}
+                </>
+              )}
             </p>
             <p className="text-[11px] text-[var(--color-text-muted)]">
-              Its memory, config, mutes, journals and session output are untouched.
-              Nothing is started
-              {update.hub_reviewed
-                ? ", and the hub's own review already covers every routine this update changes — no further allow needed before it can run."
-                : ", and every routine that changes has to be read and allowed again before it can run."}
+              {noChanges ? (
+                "Every file here already matches this agent's library. There is nothing to install."
+              ) : (
+                <>
+                  Its memory, config, mutes, journals and session output are untouched.
+                  Nothing is started
+                  {updateConsentNote(update.hub_reviewed, keptLocalRoutines)}
+                </>
+              )}
             </p>
           </div>
 
@@ -788,14 +859,25 @@ export function ImportAgentDialog({
                 beside the agent, out of its library.
               </p>
 
-              <button
-                onClick={confirmUpdate}
-                disabled={busy}
-                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <RefreshCw className="h-4 w-4" />
-                Update {update.slug}
-              </button>
+              {noChanges ? (
+                onDismiss && (
+                  <button
+                    onClick={onDismiss}
+                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  >
+                    Close
+                  </button>
+                )
+              ) : (
+                <button
+                  onClick={confirmUpdate}
+                  disabled={busy}
+                  className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  Update {update.slug}
+                </button>
+              )}
             </>
           )}
         </div>

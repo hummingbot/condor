@@ -899,6 +899,74 @@ def pending_routines(agent_slug: str | None = None) -> list[PendingRoutine]:
     return [found[name] for name in sorted(found)]
 
 
+@dataclass(frozen=True)
+class AgentRoutineRow:
+    """One file in an agent's own routine library, described without importing it.
+
+    The display counterpart of :class:`PendingRoutine`, covering the allowed
+    files too. A hub install can grant every one of its routines execution
+    consent in a single write (FEAT-147's hub exception in
+    :func:`condor.agents.bundle.apply`), and consent is what lets
+    :func:`discover_routines_from_path` call ``exec_module`` the next time the
+    routine is actually resolved to run. It is not permission for the one
+    surface whose own contract is that merely opening it must never be what
+    runs a routine (``_routine_cards``) — so that surface reads every file
+    here, statically, the same way it already had to for a pending one.
+    """
+
+    name: str
+    category: str = ""
+    description: str = ""
+    continuous: bool = False
+    muted: bool = False
+    allowed: bool = True
+    #: "" when allowed; otherwise ``code_trust.PENDING`` or ``code_trust.CHANGED``.
+    pending_reason: str = ""
+    last_modified: float | None = None
+
+
+def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
+    """Every routine in ``agent_slug``'s own library, read without ``exec_module``.
+
+    Unlike :func:`assistant_routines`, this never imports a single file — not
+    even one :mod:`condor.agents.code_trust` already allows — because the one
+    caller of this function is the brain panel, and browsing an agent's page
+    must never be the reason its code runs, whether that code is still
+    pending or was allowed, by a click or by a hub review, before the page was
+    ever opened.
+    """
+    if not agent_slug or agent_slug == CHAT_SLUG:
+        return []
+    code_trust = _code_trust()
+    trust = code_trust.load(agent_slug)
+    muted = load_mutes(agent_slug)["routines"]
+    default_category = agent_slug.replace("_", " ").replace("-", " ").title()
+    found: dict[str, AgentRoutineRow] = {}
+    # Reversed so the first root in read order overwrites the later ones —
+    # the same shadowing ``pending_routines`` and ``_merged_from`` apply.
+    for root in reversed(assistant_routines_dirs(agent_slug)):
+        if not root.exists():
+            continue
+        for file_path in sorted(root.glob("*.py")):
+            stem = file_path.stem
+            if stem.startswith("_"):
+                continue
+            text = _read_text(file_path)
+            state = trust.state(stem, text) if trust is not None else code_trust.ALLOWED
+            meta = meta_from_source(text, name=stem)
+            found[stem] = AgentRoutineRow(
+                name=stem,
+                category=meta.category or default_category,
+                description=meta.description or stem,
+                continuous=meta.continuous,
+                muted=stem in muted,
+                allowed=state == code_trust.ALLOWED,
+                pending_reason="" if state == code_trust.ALLOWED else state,
+                last_modified=_safe_mtime(file_path),
+            )
+    return [found[name] for name in sorted(found)]
+
+
 def pending_routine(agent_slug: str | None, name: str) -> PendingRoutine | None:
     """The pending row for one routine of one agent, if it is pending."""
     for row in pending_routines(agent_slug):

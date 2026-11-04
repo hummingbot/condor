@@ -180,6 +180,29 @@ def test_the_panel_lists_it_pending_and_its_mute_toggle_still_works(
     assert not sentinel.exists()
 
 
+def test_the_panel_lists_a_hub_allowed_routine_runnable_but_does_not_run_it(
+    imported_agent, agents_client
+):
+    """Round 7: a hub install grants ``code_trust.allow`` for every routine at
+    install time, which is what makes it *loadable*; it must never be what
+    makes the brain panel the thing that loads it. Allowing it the way a hub
+    install does — no human review of this exact call — must leave the
+    sentinel untouched, same as the pending case above.
+    """
+    slug, source, sentinel = imported_agent
+    code_trust.allow(slug, "lp_scanner", source.read_text())
+
+    rows = {
+        r["name"]: r
+        for r in agents_client.get(f"/agents/{slug}/brain").json()["routines"]
+    }
+
+    assert rows["lp_scanner"]["pending"] is False
+    assert rows["lp_scanner"]["description"] == "Scan the pools."
+    assert rows["lp_scanner"]["category"] == "Probe"
+    assert not sentinel.exists()
+
+
 # ── PUT /agents/{slug}/code-trust ──
 
 

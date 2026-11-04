@@ -596,6 +596,97 @@ it("shows a blocker instead of an Update button", async () => {
   expect(() => button("Update traveller")).toThrow();
 });
 
+it("reads as already up to date when every file is unchanged at the same version", async () => {
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    installed_version: 1,
+    version: 1,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "routines/r.py",
+        verdict: "unchanged",
+        bytes: 120,
+        executable: true,
+        incoming: "",
+      },
+    ],
+    counts: { unchanged: 2 },
+    mutes: { routines: [], skills: [] },
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(container.querySelector("[data-update-plan]")?.textContent).toContain(
+    "already up to date",
+  );
+  expect(container.textContent).toContain("nothing to install");
+  expect(() => button("Update traveller")).toThrow();
+});
+
+it("says no further allow is needed on a hub update with nothing kept local", async () => {
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      { path: "routines/r.py", verdict: "changed", bytes: 130, executable: true, incoming: "" },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(container.querySelector("[data-update-plan]")?.textContent).toContain(
+    "no further allow needed",
+  );
+});
+
+it("still asks for an allow on a hub update that kept a locally-edited routine", async () => {
+  // Policy 3: the hub's review covers only the bytes it just wrote. A
+  // routine the operator edited after install — `conflict` here — is never
+  // reviewed, so it keeps the ordinary per-file consent gate even though
+  // the rest of this update is hub-reviewed.
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "routines/r.py",
+        verdict: "conflict",
+        bytes: 130,
+        executable: true,
+        incoming: "upstream's new text",
+      },
+    ],
+    counts: { unchanged: 1, conflict: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  const text = container.querySelector("[data-update-plan]")?.textContent ?? "";
+  expect(text).toContain("still needs your allow");
+  expect(text).not.toContain("no further allow needed");
+});
+
 it("shows a different build of the same version as a warning, with the diff", async () => {
   reply = SAME_AGENT;
   updateReply = {
