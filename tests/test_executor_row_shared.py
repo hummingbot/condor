@@ -222,17 +222,17 @@ def test_the_creators_tag_outranks_the_configs_default():
     ex = {
         "id": "e1",
         "status": "RUNNING",
-        "controller_id": "adaptive_grid_trader.sol_usdt_adaptive_grid_7",
+        "controller_id": "market_making_expert.pmm_mister_operator_7",
         "config": {"controller_id": "main"},
     }
 
     assert (
         build_executor_row(ex)["controller_id"]
-        == "adaptive_grid_trader.sol_usdt_adaptive_grid_7"
+        == "market_making_expert.pmm_mister_operator_7"
     )
     assert (
         _executor_row(ex)["controller_id"]
-        == "adaptive_grid_trader.sol_usdt_adaptive_grid_7"
+        == "market_making_expert.pmm_mister_operator_7"
     )
 
 

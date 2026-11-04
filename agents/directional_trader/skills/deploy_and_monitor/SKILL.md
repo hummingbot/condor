@@ -65,11 +65,9 @@ manage_bots(action="status")   # no bot_name — returns all active bots
 and cannot be recovered later.
 
 For a single lightweight controller, an executor may fit better than a bot.
-Deploy it yourself with the `create_*_executor` tools — do **not** hand it to
-`adaptive_grid_trader`, whose AGENT.md excludes "position executors without
-grid structure" in as many words. (`executor_manager`, which this used to
-name, does not exist — CO-3.) `adaptive_grid_trader` is the right target for
-GRID work specifically.
+Deploy it yourself with the `create_*_executor` tools — grid and DCA have no
+specialist agent to hand them to. (`executor_manager`, which this used to
+name, does not exist — CO-3.)
 
 ## Step 3 — Early monitoring
 

@@ -30,7 +30,7 @@ from condor.agents.risk import (
     auto_approve_with_risk_check,
 )
 
-AGENT_ID = "adaptive_grid_trader.sol_usdt_adaptive_grid_7"
+AGENT_ID = "market_making_expert.pmm_mister_operator_7"
 OPTIONS = [{"optionId": "allow", "kind": "allow_once"}, {"optionId": "deny"}]
 
 #: The pre-tick snapshot: one executor of ours under the session's own tag, one

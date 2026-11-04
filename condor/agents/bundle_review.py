@@ -128,8 +128,8 @@ RISK_LIMITS = "risk_limits"
 #:
 #: Noisy in a trading library by construction — every strategy skill names its
 #: own executor tool, and
-#: ``agents/adaptive_grid_trader/skills/liquidation_guard/SKILL.md`` legitimately
-#: says "before calling ``create_grid_executor()``". The only thing that
+#: ``agents/_shared/skills/run_a_grid/SKILL.md`` legitimately documents
+#: ``create_grid_executor``'s parameters. The only thing that
 #: distinguishes that from an instruction to open a position for somebody else
 #: is the surrounding sentence, which is why each finding carries its line and
 #: why the category is ordered second-to-last and never refuses anything. If the
