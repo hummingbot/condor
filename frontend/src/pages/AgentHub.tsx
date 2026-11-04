@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Brain, Globe, Loader2, Lock, Store, Upload } from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   HubDeviceField,
@@ -60,6 +61,7 @@ import { api } from "@/lib/api";
  */
 export function AgentHub() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const [tab, setTab] = useState<"pull" | "publish">("pull");
   const { data: hubDevice } = useQuery({
@@ -143,6 +145,7 @@ export function AgentHub() {
               onInstalled={() =>
                 queryClient.invalidateQueries({ queryKey: ["agents"] })
               }
+              onOpenAgent={(slug) => navigate(`/agents/${encodeURIComponent(slug)}`)}
             />
           ) : (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-10 text-center">

@@ -16,6 +16,7 @@ import {
 } from "@/lib/api";
 
 import { fileSource, type BundleSource } from "./bundleSource";
+import { ScreenFade } from "./ScreenFade";
 
 /**
  * How each review category is introduced, most-decisive first (FEAT-144).
@@ -140,6 +141,8 @@ export function ImportAgentDialog({
   source,
   provenance,
   stickyAction = false,
+  onOpenAgent,
+  onDismiss,
 }: {
   onImported: () => void;
   /**
@@ -149,9 +152,11 @@ export function ImportAgentDialog({
    */
   source?: BundleSource;
   /**
-   * Rendered above the plan. The hub puts its badge, its author attestation
-   * and the trust sentence here — facts about where this came from, which is
-   * exactly the part a file on disk cannot have.
+   * Rendered above the plan, and nowhere once it lands: the trust sentence is
+   * about the decision, not the outcome, so it never follows the screen past
+   * the review. The hub puts its badge, its author attestation and the trust
+   * sentence here — facts about where this came from, which is exactly the
+   * part a file on disk cannot have.
    */
   provenance?: ReactNode;
   /**
@@ -160,6 +165,19 @@ export function ImportAgentDialog({
    * panel keeps it inline, after the review.
    */
   stickyAction?: boolean;
+  /**
+   * Offered as a next action once the agent has landed — "Open <slug>".
+   * Omitted (the file panel's case) leaves the success screen with no such
+   * button; a host with somewhere to send the operator passes this instead
+   * of reaching into the dialog's own `landed`/`applied` state for the slug.
+   */
+  onOpenAgent?: (slug: string) => void;
+  /**
+   * Offered as "Close" on the success screen, for a host that renders this
+   * dialog inside a dismissable shell (the Hub's review modal). Omitted
+   * where there is nothing to dismiss.
+   */
+  onDismiss?: () => void;
 }) {
   const [picked, setPicked] = useState<BundleSource | null>(null);
   const active = source ?? picked;
@@ -303,6 +321,19 @@ export function ImportAgentDialog({
 
   const blocked = plan ? plan.refusals.length > 0 || plan.collision !== "" : false;
 
+  // Coarse enough to animate only an actual screen change: re-previewing
+  // under a new name stays "review" throughout, so it swaps instantly.
+  const landedOrApplied = landed ?? applied;
+  const phase = landedOrApplied
+    ? "success"
+    : update
+      ? "update"
+      : plan
+        ? "review"
+        : busy
+          ? "busy"
+          : "idle";
+
   return (
     <div className="space-y-4">
       {!source && (
@@ -318,49 +349,52 @@ export function ImportAgentDialog({
         </label>
       )}
 
-      {/* Above the plan, not inside it: where this came from is the first
-          question, and the answer is the same whichever verb follows. */}
-      {provenance}
+      <ScreenFade phaseKey={phase}>
+        <div className="space-y-4">
+          {/* Above the plan, not inside it: where this came from is the first
+              question, and the answer is the same whichever verb follows.
+              Gone once it lands — the trust note is about the decision, not
+              the outcome it led to. */}
+          {!landedOrApplied && provenance}
 
-      {busy && (
-        <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-          <Loader2 className="h-4 w-4 animate-spin" /> Reading the bundle…
-        </p>
-      )}
+          {busy && (
+            <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+              <Loader2 className="h-4 w-4 animate-spin" /> Reading the bundle…
+            </p>
+          )}
 
-      {error && (
-        <p role="alert" data-import-error className="text-sm text-[var(--color-red)]">
-          {error}
-        </p>
-      )}
+          {error && (
+            <p role="alert" data-import-error className="text-sm text-[var(--color-red)]">
+              {error}
+            </p>
+          )}
 
-      {landed && (
-        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
-          <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-          <span data-import-done>
-            Imported <span className="font-mono">{landed.slug}</span>. {landed.next_step}
-          </span>
-        </div>
-      )}
-
-      {applied && (
-        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
-          <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-          <span data-update-done>
-            Updated <span className="font-mono">{applied.slug}</span> to version{" "}
-            {applied.version}. {applied.next_step}
-          </span>
-        </div>
-      )}
+          {landedOrApplied && (
+            <SuccessScreen
+              landed={landed}
+              applied={applied}
+              onOpenAgent={onOpenAgent}
+              onDismiss={onDismiss}
+            />
+          )}
 
       {plan && (
         <div className="space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-          <div>
+          {/* Identity as a compact header rather than a tall paragraph stack:
+              the width is there now, so the name and description run across
+              the top and the bookkeeping (version, size, id, author) sits in
+              a dense row underneath instead of one line each. */}
+          <div className="space-y-1">
             <p className="text-sm font-semibold text-[var(--color-text)]">{plan.name}</p>
             <p className="text-xs text-[var(--color-text-muted)]">
               {plan.description || plan.when_to_consult || "No description."}
             </p>
-            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+            {plan.notes && (
+              <p data-bundle-notes className="text-[11px] text-[var(--color-text)]">
+                “{plan.notes}”
+              </p>
+            )}
+            <p className="pt-0.5 text-[11px] text-[var(--color-text-muted)]">
               Version {plan.version} · exported {plan.exported_at || "at an unknown time"}{" "}
               as <span className="font-mono">{plan.source_slug}</span> ·{" "}
               {plan.files.length + plan.executables.length} files · {plan.total_bytes} bytes
@@ -370,16 +404,12 @@ export function ImportAgentDialog({
               agent on every install that imported this bundle, whatever it is named
               there.
             </p>
-            {plan.notes && (
-              <p data-bundle-notes className="mt-1 text-[11px] text-[var(--color-text)]">
-                “{plan.notes}”
-              </p>
-            )}
-            {/* The label is not decoration: a handle rendered next to a download
-                without one reads as provenance, and Condor verifies nothing
-                here — it signs no bundle and has no keys to check one with. */}
+            {/* The label is not decoration: a handle rendered next to a
+                download without one reads as provenance, and Condor
+                verifies nothing here — it signs no bundle and has no keys
+                to check one with. */}
             {(plan.author.name || plan.author.handle) && (
-              <p data-bundle-author className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              <p data-bundle-author className="text-[11px] text-[var(--color-text-muted)]">
                 Author (unverified claim):{" "}
                 <span className="text-[var(--color-text)]">
                   {plan.author.name || plan.author.handle}
@@ -459,12 +489,21 @@ export function ImportAgentDialog({
                 before anything is written, and this is what a scan of their contents
                 found. It warns; it does not prevent.
               </p>
-              <div className="space-y-2">
+              {/* A grid of self-contained panels rather than one tall column:
+                  the width is there to show several groups side by side, and
+                  each panel scrolls on its own so a long group never pushes
+                  the sticky Import button off-screen. */}
+              <div className="@container">
+                <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
                 {categoriesOf(plan.findings).map((category) => {
                   const rows = plan.findings.filter((f) => f.category === category);
                   const copy = FINDING_COPY[category];
                   return (
-                    <div key={category} data-finding-group={category}>
+                    <div
+                      key={category}
+                      data-finding-group={category}
+                      className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+                    >
                       <p className="text-[11px] font-semibold text-[var(--color-text)]">
                         {copy?.title ?? category}{" "}
                         <span className="font-normal text-[var(--color-text-muted)]">
@@ -476,7 +515,7 @@ export function ImportAgentDialog({
                           {copy.blurb}
                         </p>
                       )}
-                      <ul className="mt-0.5 space-y-0.5">
+                      <ul className="mt-0.5 max-h-48 space-y-0.5 overflow-y-auto pr-0.5">
                         {rows.map((f) => (
                           <li
                             key={`${f.path}:${f.start}:${f.label}`}
@@ -508,6 +547,7 @@ export function ImportAgentDialog({
                     </div>
                   );
                 })}
+                </div>
               </div>
             </div>
           )}
@@ -745,6 +785,171 @@ export function ImportAgentDialog({
           )}
         </div>
       )}
+        </div>
+      </ScreenFade>
     </div>
+  );
+}
+
+/**
+ * The outcome, once an import or update has landed — a success state of its
+ * own rather than the review screen with one more paragraph bolted on.
+ *
+ * Every fact here is read off the server's own response (the same
+ * plan/update shape the review itself rendered), never asserted independently
+ * — exactly one of `landed`/`applied` is ever set, by the two confirm
+ * handlers above, so there is nothing to reconcile between them.
+ */
+function SuccessScreen({
+  landed,
+  applied,
+  onOpenAgent,
+  onDismiss,
+}: {
+  landed: AgentImportPlan | null;
+  applied: AgentUpdatePlan | null;
+  onOpenAgent?: (slug: string) => void;
+  onDismiss?: () => void;
+}) {
+  const result = landed ?? applied;
+  if (!result) return null;
+  const { slug, hub_reviewed: hubReviewed, findings, mutes } = result;
+  const mutedNames = [...mutes.routines, ...mutes.skills];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-3 rounded-xl border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3.5">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary)]/15 text-[var(--color-primary)]">
+          <Check className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 space-y-1 text-sm text-[var(--color-text)]">
+          <p className="font-semibold">
+            {landed ? "Imported" : "Updated"} <span className="font-mono">{slug}</span>
+            {applied && <> to version {applied.version}</>}
+          </p>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            {landed && (
+              <span data-import-done>
+                Imported <span className="font-mono">{landed.slug}</span>.{" "}
+                {landed.next_step}
+              </span>
+            )}
+            {applied && (
+              <span data-update-done>
+                Updated <span className="font-mono">{applied.slug}</span> to version{" "}
+                {applied.version}. {applied.next_step}
+              </span>
+            )}
+          </p>
+        </div>
+      </div>
+
+      {/* Scannable facts rather than one paragraph: what actually happened,
+          each a claim this same response already carries. */}
+      <div className="@container">
+        <ul data-import-facts className="grid grid-cols-1 gap-2 @md:grid-cols-2">
+          <SuccessFact>
+            Nothing is running. An import only writes files — nothing in them
+            has executed yet.
+          </SuccessFact>
+          <SuccessFact>
+            {hubReviewed
+              ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
+              : "Its routines still need your allow, one at a time, before any of them runs."}
+          </SuccessFact>
+          <SuccessFact>
+            {mutedNames.length === 0
+              ? "Everything it declares — every tool and skill — comes in enabled."
+              : `Muted on arrival: ${mutedNames.join(", ")}.`}
+          </SuccessFact>
+          <SuccessFact>
+            {findings.length === 0
+              ? "The review found nothing to flag."
+              : `${findings.length} thing${findings.length !== 1 ? "s" : ""} the review found, worth a look.`}
+          </SuccessFact>
+        </ul>
+      </div>
+
+      {findings.length > 0 && (
+        <details className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5">
+          <summary className="cursor-pointer text-xs font-semibold text-[var(--color-text)]">
+            View the {findings.length} finding{findings.length !== 1 ? "s" : ""}
+          </summary>
+          <div className="@container mt-2">
+            <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
+              {categoriesOf(findings).map((category) => {
+                const rows = findings.filter((f) => f.category === category);
+                const copy = FINDING_COPY[category];
+                return (
+                  <div
+                    key={category}
+                    className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+                  >
+                    <p className="text-[11px] font-semibold text-[var(--color-text)]">
+                      {copy?.title ?? category}{" "}
+                      <span className="font-normal text-[var(--color-text-muted)]">
+                        ({rows.length})
+                      </span>
+                    </p>
+                    <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
+                      {rows.map((f) => (
+                        <li
+                          key={`${f.path}:${f.start}:${f.label}`}
+                          className="text-[11px] text-[var(--color-text-muted)]"
+                        >
+                          <span
+                            className={
+                              f.certain
+                                ? "font-semibold text-[var(--color-red)]"
+                                : "text-amber-400"
+                            }
+                          >
+                            {f.label}
+                            {f.certain && " (certain)"}
+                          </span>{" "}
+                          <span className="font-mono text-[var(--color-text)]">
+                            {f.path}:{f.line}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </details>
+      )}
+
+      {(onOpenAgent || onDismiss) && (
+        <div className="flex items-center gap-2 border-t border-[var(--color-border)] pt-3">
+          {onOpenAgent && (
+            <button
+              onClick={() => onOpenAgent(slug)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20"
+            >
+              Open {slug}
+            </button>
+          )}
+          {onDismiss && (
+            <button
+              onClick={onDismiss}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            >
+              Close
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SuccessFact({ children }: { children: ReactNode }) {
+  return (
+    <li className="flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 text-[11px] text-[var(--color-text-muted)]">
+      <Check className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-primary)]" />
+      <span>{children}</span>
+    </li>
   );
 }

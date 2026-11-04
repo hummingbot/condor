@@ -6,6 +6,7 @@ import {
   Loader2,
   Lock,
   Search,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
@@ -121,7 +122,16 @@ interface CardAgent {
  * kind of bundle, it is the same kind with a provenance label attached, and a
  * second review screen would imply otherwise.
  */
-export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
+export function HubBrowser({
+  onInstalled,
+  onOpenAgent,
+}: {
+  onInstalled: () => void;
+  /** "Open <slug>" on the success screen navigates by calling this, rather
+   *  than HubBrowser reaching for a router itself — it stays mountable on
+   *  its own, the way its tests already mount it. */
+  onOpenAgent?: (slug: string) => void;
+}) {
   const [slug, setSlug] = useState("");
   const [looked, setLooked] = useState("");
   const [bySlug, setBySlug] = useState(false);
@@ -274,16 +284,23 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
             source={source}
             onImported={onInstalled}
             stickyAction
+            onOpenAgent={onOpenAgent}
+            onDismiss={() => setChosen(null)}
             provenance={
+              // A slim banner rather than a tall block: the name, an icon
+              // marking it as provenance rather than a finding, and the
+              // trust sentence on one line that wraps if it must — the
+              // width this modal now has rarely makes it.
               <div
                 data-hub-provenance
-                className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
+                className="flex items-start gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"
               >
-                <span className="text-sm font-semibold text-[var(--color-text)]">
-                  {chosen.name || chosen.slug}
-                </span>
-                <p className="text-[11px] text-[var(--color-text-muted)]">
-                  {chosen.trust}
+                <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+                <p className="text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                  <span className="font-semibold text-[var(--color-text)]">
+                    {chosen.name || chosen.slug}
+                  </span>{" "}
+                  — {chosen.trust}
                 </p>
               </div>
             }
@@ -566,8 +583,12 @@ function ReviewModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
+      {/* Wide and viewport-capped rather than a narrow centred card: the
+          findings a review has to show — several groups, each a list of
+          `kind path:line` rows — read badly in a column barely wider than
+          one of those rows. */}
       <div
-        className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
+        className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] px-5 py-3">
