@@ -71,7 +71,7 @@ export function ScreenFade({
     <div
       ref={outerRef}
       style={{ height }}
-      className="overflow-hidden transition-[height] duration-300 ease-out"
+      className="overflow-clip transition-[height] duration-300 ease-out"
     >
       <div
         ref={innerRef}

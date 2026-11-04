@@ -32,7 +32,7 @@ vi.mock(import("@/lib/api"), async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    api: new Proxy({}, { get: () => () => Promise.resolve(undefined) }),
+    api: new Proxy({}, { get: () => () => Promise.resolve(undefined) }) as typeof actual.api,
   };
 });
 
