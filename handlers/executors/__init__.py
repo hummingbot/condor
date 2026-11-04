@@ -138,6 +138,11 @@ async def executors_callback_handler(
         page = int(parts[2]) if len(parts) >= 3 else 0
         await show_history(update, context, page)
 
+    elif action == "hist_filter" and len(parts) >= 3:
+        mode = parts[2] if parts[2] in ("all", "lp") else "all"
+        context.user_data["executor_history_filter"] = mode
+        await show_history(update, context, 0)
+
     elif action == "hist_detail" and len(parts) >= 3:
         executor_id = parts[2]
         await show_history_detail(update, context, executor_id)
