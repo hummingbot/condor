@@ -964,6 +964,131 @@ def fetch(slug: str, version: str = "latest", *, token: str = "") -> FetchedVers
     return FetchedVersion(data=reply.body, version=resolved_version, sha256=digest)
 
 
+# ── Consent to run a hub version (botcamp-site PR #137) ────────────────────
+#
+# Condor shows its own terms before an install or an update lands, and the
+# hub's job is only to receive and store the acceptance — ``GET``/``POST
+# /agents/{slug}/versions/{version}/consent``. Keyed by (user, exact
+# version), never by a digest Condor supplies: the hub's own record already
+# ties one ``APPROVED`` version to one ``sha256``, and :data:`AgentConsentState.sha256`
+# is that stored value, carried back for display — never what :func:`fetch`
+# verifies a download against (that stays the response's own
+# ``X-Agent-Sha256`` header, as it always has).
+#
+# ``version`` must be the **exact** number :func:`fetch` resolved, not
+# ``"latest"`` — a consent for "whatever is newest" would silently cover a
+# future version nobody read the terms for. Both callers in
+# ``condor/web/routes/agents.py`` pass ``str(fetched.version)`` for this
+# reason, mirroring the ``expected_sha256`` pin install already carries
+# (BUG-2).
+
+
+class AgentConsentState(BaseModel):
+    """What ``GET``/``POST .../consent`` answered, read faithfully.
+
+    ``accepted`` is whether *this* caller's Botcamp account has already
+    consented to *this* slug and version — the field the install flow reads
+    to skip re-asking. ``terms_version`` is whichever of Condor's own texts
+    the acceptance (if any) was recorded against, Botcamp's own words and
+    never re-derived here.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    slug: str = ""
+    version: int = 1
+    sha256: str = ""
+    accepted: bool = False
+    accepted_at: str = Field("", alias="acceptedAt")
+    terms_version: str = Field("", alias="termsVersion")
+
+
+def _consent_refusal(reply: Reply, what: str) -> HubError:
+    """``reply`` as the sentence a consent read or write deserves.
+
+    Not :func:`_access_refusal`'s wording (that is for a clone a membership
+    or privacy gate refused) and not :func:`_refusal`'s (that is the
+    publish-credential wording) — a 401 here means "no Botcamp connection to
+    consent with", and a 404 means the version is not the one that was
+    reviewed, neither of which either existing sentence says correctly.
+    """
+    detail = _detail(reply)
+    if reply.status == 401:
+        return HubError(
+            detail
+            or f"{what}: sign in to Botcamp to consent — connect a profile in "
+            "the Agent Hub (Agents → Hub).",
+            status=401,
+        )
+    if reply.status == 404:
+        return HubError(
+            detail or f"{what}: not found, or not an approved version.",
+            status=404,
+        )
+    return HubError(_refusal(reply, what), status=reply.status)
+
+
+def get_consent(slug: str, version: str, *, token: str) -> AgentConsentState:
+    """Whether ``token``'s account already consented to ``slug``/``version``.
+
+    ``token`` is required, unlike every read above it: Botcamp's own route
+    refuses a session and requires the Condor connection's Bearer token
+    (``user.tokenId``), because consent is something *this install* gave, not
+    something the signed-in person's browser session can answer for it.
+    """
+    slug = _agent_slug(slug)
+    version = _version_segment(version)
+    what = f"consent for '{slug}' version {version}"
+    if not (token or "").strip():
+        raise NoTokenError(
+            "Checking consent needs a linked Botcamp profile. Connect one in "
+            "the Agent Hub (Agents → Hub)."
+        )
+    reply = _send(
+        "GET",
+        f"{HUB_URL}/agents/{slug}/versions/{version}/consent",
+        token=token.strip(),
+    )
+    if reply.status < 200 or reply.status >= 300:
+        raise _consent_refusal(reply, what)
+    return _model(_enveloped(_decode(reply, what)), AgentConsentState, what)
+
+
+def post_consent(
+    slug: str, version: str, terms_version: str, *, token: str
+) -> AgentConsentState:
+    """Record that ``token``'s account accepted Condor's terms for ``slug``/``version``.
+
+    Idempotent on the hub's side (its own first-acceptance-wins upsert) — a
+    second call for the same version is harmless and answers with what was
+    already recorded, never a second row. ``terms_version`` identifies which
+    of Condor's own texts was shown; truncated to what the hub's column
+    holds (64 characters) rather than refused, since this is Condor's own
+    constant and never a value someone typed.
+    """
+    slug = _agent_slug(slug)
+    version = _version_segment(version)
+    what = f"consent for '{slug}' version {version}"
+    if not (token or "").strip():
+        raise NoTokenError(
+            "Recording consent needs a linked Botcamp profile. Connect one in "
+            "the Agent Hub (Agents → Hub)."
+        )
+    body = json.dumps(
+        {"accepted": True, "termsVersion": (terms_version or "")[:64]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    reply = _send(
+        "POST",
+        f"{HUB_URL}/agents/{slug}/versions/{version}/consent",
+        token=token.strip(),
+        payload=body,
+    )
+    if reply.status < 200 or reply.status >= 300:
+        raise _consent_refusal(reply, what)
+    return _model(_enveloped(_decode(reply, what)), AgentConsentState, what)
+
+
 # ── Status of an already-installed agent (CORR-812) ────────────────────────
 #
 # An install that downloaded an agent's version has no way to learn Botcamp

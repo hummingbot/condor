@@ -196,6 +196,10 @@ class FakeHub:
         self.calls: list[Call] = []
         self.listings: dict[str, dict] = {}
         self.bundles: dict[str, bytes] = {}
+        #: ``(slug, version)`` -> ``{"acceptedAt": ..., "termsVersion": ...}``,
+        #: once accepted. Botcamp-site PR #137's own keying and idempotency:
+        #: first acceptance wins, a second POST answers the same row.
+        self.consents: dict[tuple[str, int], dict] = {}
         #: ``(method, path)`` -> ``Reply`` or an exception to raise instead.
         self.overrides: dict[tuple[str, str], object] = {}
         #: The default ``POST /agents`` answer: ``202`` accepted-for-processing,
@@ -256,9 +260,57 @@ class FakeHub:
             raise hub.HubError(f"Could not reach the agent hub: {override}", status=0)
         if isinstance(override, hub.Reply):
             return override
-        return self._route(method, path.split("?")[0])
+        return self._route(method, path.split("?")[0], payload)
 
-    def _route(self, method: str, path: str) -> hub.Reply:
+    def _route(self, method: str, path: str, payload: bytes = b"") -> hub.Reply:
+        # Consent (botcamp-site PR #137) — checked before the plain
+        # bundle-download branch below, since both start with "/agents/"
+        # and contain "/versions/" and this one has a "/consent" suffix the
+        # other branch would otherwise misparse as part of the version.
+        if (
+            method in ("GET", "POST")
+            and path.startswith("/agents/")
+            and path.endswith("/consent")
+        ):
+            rest = path[len("/agents/") : -len("/consent")]
+            slug, _, version_seg = rest.partition("/versions/")
+            listing = self.listings.get(slug)
+            if not listing:
+                return _missing()
+            resolved = (
+                listing["latest"] if version_seg == "latest" else int(version_seg)
+            )
+            row = next(
+                (v for v in listing["versions"] if v["version"] == resolved), None
+            )
+            if row is None:
+                return _missing()
+            key = (slug, resolved)
+            first_acceptance = method == "POST" and key not in self.consents
+            if first_acceptance:
+                body = json.loads(payload.decode()) if payload else {}
+                self.consents[key] = {
+                    "acceptedAt": "2026-10-21T12:03:00Z",
+                    "termsVersion": body.get("termsVersion"),
+                }
+            consent = self.consents.get(key)
+            return hub.Reply(
+                201 if first_acceptance else 200,
+                json.dumps(
+                    {
+                        "data": {
+                            "slug": slug,
+                            "version": resolved,
+                            "sha256": row["sha256"],
+                            "accepted": consent is not None,
+                            "acceptedAt": consent["acceptedAt"] if consent else None,
+                            "termsVersion": (
+                                consent["termsVersion"] if consent else None
+                            ),
+                        }
+                    }
+                ).encode("utf-8"),
+            )
         if method == "GET" and path.startswith("/agents/") and "/versions/" in path:
             slug, _, version_seg = path[len("/agents/") :].partition("/versions/")
             listing = self.listings.get(slug)
@@ -2284,12 +2336,20 @@ def offered(traveller, fake_hub):
 
     Removed so the install is a *create*: the test that wants the update verb
     leaves it in place instead.
+
+    Sets a token, the same precondition the real admin-only Pull tab already
+    enforces (``AgentHub.tsx`` mounts ``HubBrowser`` only once ``linked`` is
+    true): install now records consent for the exact version it fetches
+    (botcamp-site PR #137), and consent needs the Condor connection's Bearer
+    token — the hub refuses a browser session (403) and refuses no token at
+    all (401) the same as any other read that needs one.
     """
     import shutil
 
     data = _zip_agent("traveller")
     listing = fake_hub.offer("traveller", data, name="Traveller")
     shutil.rmtree(traveller)
+    hub.set_token("botcamp-tok")
     return listing
 
 
@@ -2333,6 +2393,7 @@ def test_a_hub_update_also_lands_a_newly_added_skill_enabled(traveller, fake_hub
         "source: builtin\n---\n\nLook again.\n",
     )
     fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+    hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
     res = _client().post("/hub/agents/traveller/install")
 
@@ -2354,6 +2415,7 @@ def test_a_hub_update_grants_execution_consent_for_the_routines_it_writes(
     _write(traveller / "routines" / "r.py", ROUTINE_PY + "\n# v2\n")
     _write(traveller / "routines" / "added_in_v2.py", ROUTINE_PY)
     fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+    hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
     res = _client().post("/hub/agents/traveller/install")
 
@@ -2385,6 +2447,7 @@ def test_a_hub_update_grants_execution_consent_for_a_crlf_routine_too(
         (ROUTINE_PY + "\n# v2\n").replace("\n", "\r\n"),
     )
     fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
+    hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
     res = _client().post("/hub/agents/traveller/install")
 
@@ -2455,8 +2518,16 @@ def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
         assert installed["plan"][field] == value, field
     assert installed["plan"]["imported"] is True
     # Two fetches, not one cached preview: the digest check is what makes that
-    # safe, and it ran on both.
-    assert sum(1 for call in fake_hub.calls if "/versions/" in call.url) == 2
+    # safe, and it ran on both. Excludes the consent calls (PR #137), which
+    # also carry "/versions/" in their path but are not a bundle download.
+    assert (
+        sum(
+            1
+            for call in fake_hub.calls
+            if "/versions/" in call.url and not call.url.endswith("/consent")
+        )
+        == 2
+    )
     # And one listing GET apiece, not two: both the preview and the install
     # ask the hub fresh for the catalogue entry.
     assert (
@@ -2595,6 +2666,7 @@ def test_a_hub_installed_routine_with_crlf_line_endings_still_has_execution_cons
     _write(traveller / "routines" / "r.py", ROUTINE_PY.replace("\n", "\r\n"))
     fake_hub.offer("traveller", _zip_agent("traveller"), name="Traveller")
     shutil.rmtree(traveller)
+    hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
     res = _client().post("/hub/agents/traveller/install")
 

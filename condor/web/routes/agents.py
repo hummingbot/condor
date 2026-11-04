@@ -958,6 +958,14 @@ HUB_TRUST = (
     "yourself."
 )
 
+#: Which of Condor's own texts the import dialog's step-2 checkbox shows
+#: (``consentLabel``/``ConsentDisclaimer`` in ``ImportAgentDialog.tsx``) —
+#: sent as ``termsVersion`` on every ``hub.post_consent`` call so Botcamp's
+#: stored row says which wording the owner actually read. Bump this string
+#: whenever that screen's wording changes meaningfully; a cosmetic fix does
+#: not need a bump, a changed claim about what the owner is agreeing to does.
+HUB_CONSENT_TERMS_VERSION = "condor-import-consent-v1"
+
 
 class HubInstallRequest(BaseModel):
     """What to call a hub agent on the way in, and which version to clone.
@@ -5265,6 +5273,32 @@ def _hub_read_token(user: WebUser) -> str:
     return hub.token() if get_config_manager().is_admin(user.id) else ""
 
 
+async def _hub_consent_state(slug: str, version: int, user: WebUser) -> dict:
+    """``{"accepted": ..., "terms_version": ...}`` for ``slug``/``version``,
+    never raising.
+
+    Read-only and best-effort, for the preview response's own sake
+    (:func:`preview_hub_install`): a missing Botcamp connection or a hub
+    hiccup here must read as "not yet accepted", the ordinary starting
+    state, rather than failing a preview that has nothing else wrong with
+    it. :func:`install_from_hub`'s own consent call is the one that must not
+    swallow a failure — see there.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    token = _hub_read_token(user)
+    if not token:
+        return {"accepted": False, "terms_version": ""}
+    try:
+        state = await asyncio.to_thread(
+            hub.get_consent, slug, str(version), token=token
+        )
+    except HubError:
+        return {"accepted": False, "terms_version": ""}
+    return {"accepted": state.accepted, "terms_version": state.terms_version}
+
+
 async def _hub_bundle(slug: str, version: str, user: WebUser):
     """``(listing, fetched, bundle)`` for one agent version, digest-verified
     before anything parses it.
@@ -5436,6 +5470,13 @@ async def preview_hub_install(
         # exact version and digest rather than re-asking for "latest" and
         # risking Botcamp having approved a newer one in between (BUG-2).
         "fetched": {"version": fetched.version, "sha256": fetched.sha256},
+        # Whether this account already consented to this exact version, so
+        # the dialog can pre-tick step 2's box instead of re-asking
+        # (botcamp-site PR #137). Best-effort: a consent read that fails —
+        # no Botcamp connection, a transport error — must not block the
+        # review the owner came here for, so it reads as "not yet accepted"
+        # rather than failing the whole preview.
+        "consent": await _hub_consent_state(slug, fetched.version, user),
     }
 
 
@@ -5462,6 +5503,7 @@ async def install_from_hub(
     Nothing is started either way: the hub's review stands in for the
     operator's per-file allow, not for pressing Start.
     """
+    from condor import hub
     from condor.agents import bundle as agent_bundle
 
     listing, fetched, verb, plan = await _hub_plan(
@@ -5479,6 +5521,23 @@ async def install_from_hub(
                 "again before installing."
             ),
         )
+    # Record consent for this exact version *before* anything is written —
+    # the owner's step-2 checkbox is Condor's own text, and botcamp-site PR
+    # #137 is where that acceptance is kept. Unlike ``expected_sha256``
+    # above, a failure here must stop the install outright rather than
+    # degrade: no Botcamp connection, a revoked token, or the hub refusing
+    # all read the same as any other blocker, with a readable reason, and
+    # nothing has been applied yet for either to leave half-done.
+    try:
+        await asyncio.to_thread(
+            hub.post_consent,
+            slug,
+            str(fetched.version),
+            HUB_CONSENT_TERMS_VERSION,
+            token=_hub_read_token(user),
+        )
+    except hub.HubError as exc:
+        raise _hub_refusal(exc) from exc
     try:
         if verb == "update":
             result = agent_bundle.apply_update(plan, user_id=user.id)
