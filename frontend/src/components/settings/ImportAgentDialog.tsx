@@ -912,6 +912,16 @@ function SuccessScreen({
   if (!result) return null;
   const { slug, hub_reviewed: hubReviewed, findings, mutes } = result;
   const mutedNames = [...mutes.routines, ...mutes.skills];
+  const isUpdate = applied !== null;
+  // Same rule as the pre-confirm update screen (`keptLocalRoutines` above):
+  // these are the routines the hub's auto-allow never covered, because the
+  // bytes it wrote are the operator's own edit, not the hub's reviewed text.
+  const keptLocalRoutines = applied
+    ? applied.files
+        .filter((f) => VERDICT_COPY[f.verdict]?.kept)
+        .map((f) => routineNameOf(f.path))
+        .filter((name): name is string => name !== null)
+    : [];
 
   return (
     <div className="space-y-4">
@@ -942,18 +952,25 @@ function SuccessScreen({
       <div className="@container">
         <ul data-import-facts className="grid grid-cols-1 gap-2 @md:grid-cols-2">
           <SuccessFact>
-            Nothing is running. An import only writes files — nothing in them
-            has executed yet.
+            {isUpdate
+              ? "Nothing is running. An update only writes files — nothing in them has executed yet."
+              : "Nothing is running. An import only writes files — nothing in them has executed yet."}
           </SuccessFact>
           <SuccessFact>
-            {hubReviewed
-              ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
-              : "Its routines still need your allow, one at a time, before any of them runs."}
+            {isUpdate
+              ? `Nothing has run yet${updateConsentNote(hubReviewed, keptLocalRoutines)}`
+              : hubReviewed
+                ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
+                : "Its routines still need your allow, one at a time, before any of them runs."}
           </SuccessFact>
           <SuccessFact>
-            {mutedNames.length === 0
-              ? "Everything it declares — every tool and skill — comes in enabled."
-              : `Muted on arrival: ${mutedNames.join(", ")}.`}
+            {isUpdate
+              ? mutedNames.length === 0
+                ? "Nothing new muted — every mute it already had stays as it was."
+                : `Newly muted: ${mutedNames.join(", ")}. Every mute it already had stays as it was.`
+              : mutedNames.length === 0
+                ? "Everything it declares — every tool and skill — comes in enabled."
+                : `Muted on arrival: ${mutedNames.join(", ")}.`}
           </SuccessFact>
           <SuccessFact>
             {findings.length === 0
@@ -962,6 +979,60 @@ function SuccessScreen({
           </SuccessFact>
         </ul>
       </div>
+
+      {/* The same per-file diff the pre-confirm update screen showed, kept
+          here rather than dropped once it lands: a kept-local verdict is the
+          one the operator most needs after the fact, since the fact above
+          already names it only in aggregate. */}
+      {applied && (
+        <div
+          data-update-files
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
+        >
+          <p className="mb-1 text-xs font-semibold text-[var(--color-text)]">
+            {applied.files.length} file{applied.files.length !== 1 ? "s" : ""}
+          </p>
+          <ul className="max-h-48 space-y-0.5 overflow-y-auto pr-0.5">
+            {[...applied.files]
+              .sort(
+                (a, b) =>
+                  VERDICT_ORDER.indexOf(a.verdict) - VERDICT_ORDER.indexOf(b.verdict) ||
+                  a.path.localeCompare(b.path),
+              )
+              .map((f) => {
+                const copy =
+                  f.verdict === "added"
+                    ? { label: addedLabel(f.path, applied.mutes, applied.hub_reviewed) }
+                    : VERDICT_COPY[f.verdict];
+                return (
+                  <li
+                    key={f.path}
+                    data-update-file={f.verdict}
+                    className="flex items-center gap-1.5 text-[11px]"
+                  >
+                    {f.executable ? (
+                      <FileCode2 className="h-3 w-3 shrink-0 text-amber-400" />
+                    ) : (
+                      <FileText className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+                    )}
+                    <span className="font-mono text-[var(--color-text)]">{f.path}</span>
+                    <span
+                      className={
+                        copy?.kept ? "text-amber-400" : "text-[var(--color-text-muted)]"
+                      }
+                    >
+                      {copy?.label ?? f.verdict}
+                    </span>
+                  </li>
+                );
+              })}
+          </ul>
+          <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">
+            The previous bytes of every replaced or deleted file are kept beside the
+            agent, out of its library.
+          </p>
+        </div>
+      )}
 
       {findings.length > 0 && (
         <details className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5">

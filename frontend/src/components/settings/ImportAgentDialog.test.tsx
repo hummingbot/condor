@@ -712,3 +712,142 @@ it("shows a different build of the same version as a warning, with the diff", as
   expect(container.querySelectorAll("[data-update-file]").length).toBe(5);
   expect(button("Update traveller").disabled).toBe(false);
 });
+
+it("says everything comes in enabled on a fresh install with nothing muted", async () => {
+  reply = { ...PLAN, mutes: { routines: [], skills: [] } };
+  const imported = vi.fn();
+  await render(imported);
+  await choose();
+
+  await act(async () => {
+    button("Import traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("Everything it declares — every tool and skill — comes in enabled");
+  // A fresh install carries no diff — there is nothing to restore here.
+  expect(container.querySelector("[data-update-files]")).toBeNull();
+});
+
+it("says nothing new muted on an update with an empty mute list, not that everything is enabled", async () => {
+  // The server's `mutes` on an update lists only what just got muted — an
+  // existing mute from before this update is not re-listed, so an empty
+  // list here must not read as "everything is unmuted".
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    mutes: { routines: [], skills: [] },
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("Nothing new muted");
+  expect(text).not.toContain("comes in enabled");
+});
+
+it("says no further allow is needed on an update's success screen for a hub update with nothing kept local", async () => {
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      { path: "routines/r.py", verdict: "changed", bytes: 130, executable: true, incoming: "" },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("no further allow needed");
+});
+
+it("still asks for an allow on an update's success screen when it kept a locally-edited routine", async () => {
+  // Policy 3: the hub's auto-allow covers only the bytes the update wrote.
+  // A `conflict` row kept the operator's own edit, so the success screen
+  // must not claim the usual "no further allow needed" for this update.
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "routines/r.py",
+        verdict: "conflict",
+        bytes: 130,
+        executable: true,
+        incoming: "upstream's new text",
+      },
+    ],
+    counts: { unchanged: 1, conflict: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("still needs your allow");
+  expect(text).not.toContain("no further allow needed");
+});
+
+it("restores the file list and the kept-file notice on the update's success screen", async () => {
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = { ...UPDATE, updated: true };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const rows = [...container.querySelectorAll("[data-update-file]")].map((n) => ({
+    verdict: n.getAttribute("data-update-file"),
+    text: n.textContent ?? "",
+  }));
+  expect(rows.map((r) => r.verdict)).toEqual([
+    "conflict",
+    "changed",
+    "added",
+    "removed",
+    "unchanged",
+  ]);
+  expect(rows[0].text).toContain("your copy kept");
+  expect(container.querySelector("[data-update-files]")?.textContent).toContain(
+    "The previous bytes of every replaced or deleted file are kept",
+  );
+});
