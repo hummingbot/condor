@@ -1392,36 +1392,42 @@ function SuccessScreen({
         </p>
       </div>
 
-      {/* One paragraph of what actually happened and what to do next, not
-          four cards repeating the same reassurance — the three facts worth
-          keeping, read as prose instead of scanned as tiles. */}
-      <p data-import-facts className="text-sm leading-relaxed text-[var(--color-text-muted)]">
-        {landed && <span data-import-done>Nothing is running yet</span>}
-        {applied && <span data-update-done>Nothing is running yet</span>} — {isUpdate
-          ? "an update"
-          : "an import"}{" "}
-        only writes files, so nothing in it has executed.{" "}
-        {isUpdate
-          ? mutedNames.length === 0
-            ? "Nothing new muted — every mute it already had stays as it was."
-            : `Newly muted: ${mutedNames.join(", ")}. Every mute it already had stays as it was.`
-          : mutedNames.length === 0
-            ? "Everything it declares — every tool and skill — comes in enabled."
-            : `Muted on arrival: ${mutedNames.join(", ")}.`}{" "}
-        {isUpdate
-          ? // `updateConsentNote` is written as a continuation ("<subject>,
-            // and ...") for the pre-confirm screen's "Nothing is started"
-            // lead-in. "Nothing is running yet" already opened this
-            // paragraph above, so this turns the same clause into its own
-            // sentence instead of restating that nothing has run a second
-            // time.
-            updateConsentNote(hubReviewed, keptLocalRoutines)
-              .replace(/^, and /, "")
-              .replace(/^./, (c) => c.toUpperCase())
-          : hubReviewed
-            ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
-            : "Its routines still need your allow, one at a time, before any of them runs."}
-      </p>
+      {/* Three facts worth keeping, read as prose instead of scanned as
+          tiles — but each its own sentence/line rather than one paragraph
+          stitching all three together. */}
+      <div
+        data-import-facts
+        className="space-y-1.5 text-sm leading-relaxed text-[var(--color-text-muted)]"
+      >
+        <p>
+          {landed && <span data-import-done>Nothing is running yet.</span>}
+          {applied && <span data-update-done>Nothing is running yet.</span>}{" "}
+          {isUpdate ? "An update" : "An import"} only writes files, so nothing in it has
+          executed.
+        </p>
+        <p>
+          {isUpdate
+            ? mutedNames.length === 0
+              ? "Nothing new muted — every mute it already had stays as it was."
+              : `Newly muted: ${mutedNames.join(", ")}. Every mute it already had stays as it was.`
+            : mutedNames.length === 0
+              ? "Everything it declares — every tool and skill — comes in enabled."
+              : `Muted on arrival: ${mutedNames.join(", ")}.`}
+        </p>
+        <p>
+          {isUpdate
+            ? // `updateConsentNote` is written as a continuation ("<subject>,
+              // and ...") for the pre-confirm screen's "Nothing is started"
+              // lead-in; here it stands on its own, so this turns it into
+              // its own capitalized sentence instead.
+              updateConsentNote(hubReviewed, keptLocalRoutines)
+                .replace(/^, and /, "")
+                .replace(/^./, (c) => c.toUpperCase())
+            : hubReviewed
+              ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
+              : "Its routines still need your allow, one at a time, before any of them runs."}
+        </p>
+      </div>
 
       {/* The same per-file diff the pre-confirm update screen showed, kept
           here rather than dropped once it lands: a kept-local verdict is the
