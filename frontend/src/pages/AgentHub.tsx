@@ -165,8 +165,8 @@ export function AgentHub({
           <p className="mb-4 max-w-2xl text-xs leading-relaxed text-[var(--color-text-muted)]">
             Agents other people published on Botcamp. Installing one goes
             through the same review as a file: every executable is named before
-            anything is written, the routines and skills arrive switched off,
-            and nothing is started.
+            anything is written, everything the agent declares arrives enabled
+            and ready, and nothing is started until you start it.
           </p>
           {linked ? (
             <HubBrowser

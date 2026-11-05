@@ -520,8 +520,10 @@ export function ImportAgentDialog({
     setError(null);
     try {
       // `update.slug`, which is the agent the diff on screen was computed
-      // against — never a name typed since.
-      const result = await active.applyUpdate(update.slug);
+      // against — never a name typed since. `consented` is this screen's
+      // own tick of the consent checkbox, so a hub source never records an
+      // acceptance the operator was not shown here.
+      const result = await active.applyUpdate(update.slug, consented);
       setApplied(result);
       setPicked(null);
       setPlan(null);
@@ -545,8 +547,10 @@ export function ImportAgentDialog({
       // placeholder. Submitting `asSlug` there sent "" — so the server planned
       // the colliding name again and answered 409 while this button read
       // "Import <the free name>". The plan is what was reviewed, so the plan's
-      // name is what lands.
-      const result = await active.install(plan.slug);
+      // name is what lands. `consented` is this screen's own tick of the
+      // consent checkbox, so a hub source never records an acceptance the
+      // operator was not shown here.
+      const result = await active.install(plan.slug, consented);
       setLanded(result);
       setPicked(null);
       setPlan(null);
@@ -742,12 +746,12 @@ export function ImportAgentDialog({
                     `plan.mutes` for both rather than assuming routines are
                     always the muted half. */}
                 {(() => {
-                  const routinesMuted = carriedRoutines.every((r) =>
-                    plan.mutes.routines.includes(r),
-                  );
-                  const skillsMuted = plan.requires.skills.carried.every((s) =>
-                    plan.mutes.skills.includes(s),
-                  );
+                  const routinesMuted =
+                    carriedRoutines.length > 0 &&
+                    carriedRoutines.every((r) => plan.mutes.routines.includes(r));
+                  const skillsMuted =
+                    plan.requires.skills.carried.length > 0 &&
+                    plan.requires.skills.carried.every((s) => plan.mutes.skills.includes(s));
                   if (routinesMuted && skillsMuted) {
                     return "None of this stops the import — everything arrives muted anyway. It is what will not work until you fix it.";
                   }
@@ -1379,6 +1383,9 @@ function SuccessScreen({
         .map((f) => routineNameOf(f.path))
         .filter((name): name is string => name !== null)
     : [];
+  // A fresh install with zero routines gets no sentence about routines at
+  // all, rather than a reassurance about something it does not carry.
+  const landedHasRoutines = landed ? landed.executables.some((f) => routineNameOf(f.path) !== null) : false;
 
   return (
     <div className="space-y-4">
@@ -1414,19 +1421,21 @@ function SuccessScreen({
               ? "Everything it declares — every tool and skill — comes in enabled."
               : `Muted on arrival: ${mutedNames.join(", ")}.`}
         </p>
-        <p>
-          {isUpdate
-            ? // `updateConsentNote` is written as a continuation ("<subject>,
-              // and ...") for the pre-confirm screen's "Nothing is started"
-              // lead-in; here it stands on its own, so this turns it into
-              // its own capitalized sentence instead.
-              updateConsentNote(hubReviewed, keptLocalRoutines)
-                .replace(/^, and /, "")
-                .replace(/^./, (c) => c.toUpperCase())
-            : hubReviewed
-              ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
-              : "Its routines still need your allow, one at a time, before any of them runs."}
-        </p>
+        {(isUpdate || landedHasRoutines) && (
+          <p>
+            {isUpdate
+              ? // `updateConsentNote` is written as a continuation ("<subject>,
+                // and ...") for the pre-confirm screen's "Nothing is started"
+                // lead-in; here it stands on its own, so this turns it into
+                // its own capitalized sentence instead.
+                updateConsentNote(hubReviewed, keptLocalRoutines)
+                  .replace(/^, and /, "")
+                  .replace(/^./, (c) => c.toUpperCase())
+              : hubReviewed
+                ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
+                : "Its routines still need your allow, one at a time, before any of them runs."}
+          </p>
+        )}
       </div>
 
       {/* The same per-file diff the pre-confirm update screen showed, kept
