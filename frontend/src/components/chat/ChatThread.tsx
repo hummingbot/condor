@@ -197,7 +197,8 @@ export function ChatThread({
         const distanceFromBottom = area.scrollHeight - area.scrollTop - area.clientHeight;
         if (distanceFromBottom > NEAR_BOTTOM_PX) return;
       }
-      messagesEndRef.current?.scrollIntoView({ behavior });
+      const end = messagesEndRef.current;
+      if (typeof end?.scrollIntoView === "function") end.scrollIntoView({ behavior });
     });
   }, []);
 
