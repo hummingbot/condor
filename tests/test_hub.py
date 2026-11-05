@@ -1612,6 +1612,33 @@ def test_redeeming_sends_no_credential_and_links_on_success(fake_hub, cm):
     assert hub.token() == "bc_live_test_default"
 
 
+def test_a_disconnect_mid_flight_is_not_undone_by_the_redeem_it_raced(
+    fake_hub, cm, monkeypatch
+):
+    """Greptile, PR #314 ("Disconnect can be undone"): a disconnect that runs
+    while a redeem is still waiting on the hub must stick — the redeem's
+    token, once it arrives, is revoked rather than saved, and the caller
+    sees the attempt fail rather than a silent, unexpected re-link.
+    """
+    original_send = hub._send
+
+    def racing_send(method, url, *, token="", payload=b""):
+        reply = original_send(method, url, token=token, payload=payload)
+        if method == "POST" and url == f"{hub.HUB_URL}/condor/connect-code/redeem":
+            hub.disconnect()
+        return reply
+
+    monkeypatch.setattr(hub, "_send", racing_send)
+
+    with pytest.raises(hub.HubError, match="Disconnected while"):
+        hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
+
+    assert hub.token() == ""
+    revokes = [c for c in fake_hub.calls if c.method == "DELETE"]
+    assert len(revokes) == 1
+    assert revokes[0].token == "bc_live_test_default"
+
+
 def test_the_code_is_stripped_but_otherwise_sent_as_typed(fake_hub):
     hub.redeem_connect_code("  wxyz-wxyz-wxyz  ")
 

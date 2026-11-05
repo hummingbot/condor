@@ -90,6 +90,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -1530,6 +1531,22 @@ def connection_state() -> ConnectionState:
     return ConnectionState(status="none", connect_url=approval_url())
 
 
+_connect_lock = threading.Lock()
+_connect_generation = 0
+
+
+def _bump_connect_generation() -> None:
+    """Invalidate every in-flight :func:`redeem_connect_code` attempt.
+
+    Called from :func:`disconnect` so a redeem response that is still
+    waiting on the hub cannot undo a disconnect that happened while it
+    waited (Greptile, PR #314: "Disconnect can be undone").
+    """
+    global _connect_generation
+    with _connect_lock:
+        _connect_generation += 1
+
+
 def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionState:
     """Trade a code pasted from Botcamp's ``/connect`` page for this install's
     token (botcamp-site PR #137's ``POST /api/condor/connect-code/redeem``).
@@ -1543,11 +1560,20 @@ def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionSta
     What *can* be told apart — rate-limiting (``429``) and "too many
     connections" (``400 too_many_connections``) — gets its own sentence
     instead of the hub's.
+
+    This call and :func:`disconnect` run on independent requests, so a slow
+    redeem here can still be in flight when a disconnect runs and completes
+    elsewhere. The generation captured before the hub round-trip and
+    re-checked after it catches exactly that: if a disconnect ran while this
+    call was waiting, the token the hub just issued is revoked instead of
+    saved, so a disconnect can never be undone by a redeem that was already
+    on the wire.
     """
     cleaned = (code or "").strip()
     if not cleaned:
         raise HubError("Paste the code Botcamp's /connect page showed you.")
 
+    generation = _connect_generation
     body = json.dumps(
         {"code": cleaned, "client_name": (client_name or "Condor")[:100]},
         separators=(",", ":"),
@@ -1569,6 +1595,23 @@ def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionSta
         if not access_token:
             raise HubError(
                 "The hub answered a successful redeem with no token to store."
+            )
+
+        with _connect_lock:
+            still_current = generation == _connect_generation
+
+        if not still_current:
+            try:
+                _send("DELETE", f"{HUB_URL}/condor/me", token=access_token)
+            except HubError:
+                log.warning(
+                    "hub: could not revoke a connect-code token issued after "
+                    "a disconnect ran while the redeem was in flight",
+                    exc_info=True,
+                )
+            raise HubError(
+                "Disconnected while this code was being redeemed — generate "
+                "a new code and reconnect."
             )
 
         # The one write of the credential, as soon as it exists — never
@@ -1642,9 +1685,14 @@ def disconnect() -> DisconnectResult:
     be connected. What changes is that the caller learns whether the hub's
     own copy was actually revoked, via the returned :class:`DisconnectResult`,
     instead of this function silently assuming it.
+
+    Bumps the connect generation first, unconditionally — even with no
+    token stored yet — so a :func:`redeem_connect_code` call already on the
+    wire cannot land its token after this disconnect and undo it.
     """
     from config_manager import get_config_manager
 
+    _bump_connect_generation()
     current_token = token()
     result = DisconnectResult(revoked=None)
     if current_token:
