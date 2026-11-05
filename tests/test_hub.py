@@ -2395,6 +2395,28 @@ def test_the_admins_reads_still_carry_the_token(offered, fake_hub, cm):
     assert {call.token for call in fake_hub.calls[before:]} == {"botcamp-tok"}
 
 
+def test_can_install_reflects_whether_the_viewer_holds_a_hub_token(
+    offered, fake_hub, cm
+):
+    """CORR-980: every per-agent read 401s with no token, free agent or not —
+    there is no anonymous tier below the catalogue. ``can_install`` tells the
+    dashboard which viewer that holds for, so it can skip offering a Review
+    or Install that is certain to fail instead of discovering the 401 per
+    click (SEC review C4 is why a seat's own token is empty in the first
+    place — see ``test_a_seat_reads_the_hub_without_the_admins_token``)."""
+    fake_hub.overrides[("GET", "/agents")] = _catalogue(_entry("traveller"))
+
+    admin_catalogue = _client(admin=True).get("/hub/catalogue").json()
+    seat_catalogue = _client(admin=False).get("/hub/catalogue").json()
+    admin_listing = _client(admin=True).get("/hub/agents/traveller").json()
+    seat_listing = _client(admin=False).get("/hub/agents/traveller").json()
+
+    assert admin_catalogue["can_install"] is True
+    assert seat_catalogue["can_install"] is False
+    assert admin_listing["can_install"] is True
+    assert seat_listing["can_install"] is False
+
+
 def test_a_seat_can_still_install_a_public_agent(offered, fake_hub, cm):
     """``post_consent`` needs a token (botcamp-site PR #137) and a seat's is
     always withheld (SEC review C4, the test above) — so a seat installing a

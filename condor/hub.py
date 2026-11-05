@@ -759,13 +759,16 @@ def get(slug: str, token: str = "") -> AgentListing:
     reason a ``../``, a ``?``, a ``#`` or a space is an ``IdentifierError``
     here rather than a request to somewhere else.
 
-    ``token`` is optional — PR #111's own contract for this endpoint:
-    omitted, this is the anonymous read a free agent answers; a linked
-    profile's own token is what turns a membership/purchase gate into a 200
-    for an account that actually has access. Raises :class:`HubError`
-    through :func:`_access_refusal` — 404 not found, 403 private, 402 needs a
-    membership or purchase, 401 sign in — never the publish-token wording a
-    revoked *publish* credential gets.
+    ``token`` is optional on this call's own signature, but not on what the
+    hub actually answers: a tokenless ``GET`` of one slug comes back 401
+    "sign in", free agent or not — measured against both deployments
+    (CORR-980). Only :func:`browse`'s catalogue read is anonymous; here, a
+    linked profile's own token is what turns that 401 into a 200, and also
+    turns a membership/purchase gate into one for an account that actually
+    has access. Raises :class:`HubError` through :func:`_access_refusal` —
+    404 not found, 403 private, 402 needs a membership or purchase, 401 sign
+    in — never the publish-token wording a revoked *publish* credential
+    gets.
     """
     slug = _agent_slug(slug)
     what = f"agent '{slug}'"
@@ -1157,9 +1160,12 @@ def installed_agent_status(slug: str, force: bool = False, *, token: str = "") -
     ``token`` is the caller's to supply (SEC review C4, BUG-5): this read
     has no caller identity of its own, so without it every check used
     :func:`token` unconditionally and sent the admin's account to Botcamp
-    for a seat that has none. Empty is the anonymous read a free agent's
-    status answers fine; a membership/purchase-gated agent's status needs
-    the admin's own token passed in, same as every other hub read.
+    for a seat that has none. Empty is not an anonymous read that still
+    works — the hub 401s a tokenless agent lookup regardless of whether the
+    agent is free (CORR-980) — but :func:`listing_status` already reads a
+    401 as ``"unknown"`` rather than a failure, so a seat with no token of
+    its own gets a harmless "unknown" here, not a crash; a confirmed answer,
+    free or gated, needs the admin's own token passed in.
 
     A confirmed ``"delisted"`` is advisory, read on the next page view that
     asks — nothing here revokes anything. In particular it does not touch

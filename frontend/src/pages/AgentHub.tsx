@@ -32,12 +32,13 @@ import { api } from "@/lib/api";
  * and publish lived only on each agent's own workspace page — three doors to
  * one subject, one of them (withdraw) with no dashboard control at all. This
  * is the one page: Pull agents requires this install to already be linked to
- * Botcamp — the backend's own read endpoints accept an anonymous lookup, but
- * this dashboard asks for a signed-in install before it will use them, so
- * "connect to Botcamp" is the one gate every visitor meets before anything
- * else on this page works; publishing is admin-only, by `useIsAdmin`
- * (cosmetic — the server's own `require_admin` on each route is what actually
- * gates publish/withdraw).
+ * Botcamp — only the catalogue read itself is anonymous on the backend, a
+ * per-agent listing or bundle is not (CORR-980), so this dashboard asks for a
+ * signed-in install before it shows Pull agents at all, and "connect to
+ * Botcamp" is the one gate every visitor meets before anything else on this
+ * page works; publishing is admin-only, by `useIsAdmin` (cosmetic — the
+ * server's own `require_admin` on each route is what actually gates
+ * publish/withdraw).
  *
  * **Two jobs, two tabs.** Pulling somebody else's agent and publishing one of
  * yours are different errands that happen to share a hub, and the first cut

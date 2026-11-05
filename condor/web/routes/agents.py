@@ -5264,8 +5264,12 @@ def _hub_read_token(user: WebUser) -> str:
     There is one token per install: the admin's, and whatever their account
     has bought or joined comes with it. Sending it on a non-admin's read would
     hand every seat on the install the admin's paid and members-only agents
-    (SEC review C4). Without it a seat still sees and installs everything
-    public; the gated ones answer as they would to anyone signed out.
+    (SEC review C4). Without it a seat still sees the anonymous catalogue
+    (``hub.browse``), but every per-agent read — a listing, a bundle, an
+    install's consent — answers 401 regardless of whether the agent is free
+    (CORR-980): there is no anonymous tier below the catalogue to fall back
+    to. A surface that offers a view or install action should check this
+    being non-empty before offering one, not discover the 401 per click.
     """
     from condor import hub
     from config_manager import get_config_manager
@@ -5404,15 +5408,20 @@ async def browse_hub_catalogue(
 
     A short or empty page is the last. Pulling one of them is the same lookup
     and review as a slug typed by hand — this only says which slugs exist.
+
+    ``can_install`` says whether *this* read's own token is non-empty: the
+    catalogue itself is anonymous, but a per-agent read is not (CORR-980), so
+    a viewer this is ``False`` for would 401 on every row's Review/Install —
+    the dashboard reads it to not offer one rather than discover that per
+    click.
     """
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
+    hub_token = _hub_read_token(user)
     try:
-        entries = await asyncio.to_thread(
-            hub.browse, query, page, _hub_read_token(user)
-        )
+        entries = await asyncio.to_thread(hub.browse, query, page, hub_token)
     except IdentifierError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HubError as exc:
@@ -5431,6 +5440,7 @@ async def browse_hub_catalogue(
         "page": page,
         "trust": HUB_TRUST,
         "botcamp_url": hub.site_url("/strategies?type=AGENT"),
+        "can_install": bool(hub_token),
     }
 
 
@@ -5442,19 +5452,26 @@ async def get_hub_listing(slug: str, user: WebUser = Depends(get_current_user)):
     shared is not in the catalogue (:func:`browse_hub_catalogue`), so this is
     the only way to it. This install's own Botcamp token rides along for an
     admin, so a membership- or purchase-gated agent the account actually has
-    access to still resolves (:func:`_hub_read_token`).
+    access to still resolves (:func:`_hub_read_token`) — and, for an admin,
+    is also what keeps this call from 401ing at all, since there is no
+    anonymous tier below the catalogue (CORR-980, ``can_install`` below).
     """
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
+    hub_token = _hub_read_token(user)
     try:
-        listing = await asyncio.to_thread(hub.get, slug, _hub_read_token(user))
+        listing = await asyncio.to_thread(hub.get, slug, hub_token)
     except IdentifierError as exc:
         raise _listing_refusal(exc) from exc
     except HubError as exc:
         raise _hub_refusal(exc) from exc
-    return {"listing": listing.model_dump(), "trust": HUB_TRUST}
+    return {
+        "listing": listing.model_dump(),
+        "trust": HUB_TRUST,
+        "can_install": bool(hub_token),
+    }
 
 
 @hub_router.post("/agents/{slug}/install/preview")

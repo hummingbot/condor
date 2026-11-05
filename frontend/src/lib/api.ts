@@ -295,6 +295,11 @@ export interface HubListing {
 export interface HubCatalogue {
   listing: HubListing;
   trust: string;
+  /** Whether *this* viewer's own hub token is non-empty (CORR-980). Only the
+   *  catalogue read is anonymous — a per-agent listing or bundle 401s with
+   *  no token, free agent or not — so `false` means Review/Install on this
+   *  listing is certain to fail and should not be offered. */
+  can_install: boolean;
 }
 
 /** One published agent in Botcamp's catalogue, in Botcamp's own words.
@@ -323,6 +328,10 @@ export interface HubCataloguePage {
   trust: string;
   /** Botcamp's own list of agents, built the same way as `page_url`. */
   botcamp_url: string;
+  /** Whether *this* viewer's own hub token is non-empty (CORR-980). The
+   *  catalogue itself is anonymous, but a per-agent listing or bundle is
+   *  not, so `false` means every row's Review/Install would 401. */
+  can_install: boolean;
 }
 
 /** Botcamp pages its catalogue this many at a time. */

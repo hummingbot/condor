@@ -139,7 +139,9 @@ let requests: { url: string; method: string }[] = [];
 let catalogueRequests: string[] = [];
 let cataloguePages: HubCatalogueEntry[][] = [[]];
 let listingStatus = 200;
-let listingBody: unknown = { listing: LISTING, trust: TRUST };
+let listingBody: unknown = { listing: LISTING, trust: TRUST, can_install: true };
+/** Whether the mocked viewer's own hub token is non-empty (CORR-980). */
+let canInstall = true;
 /** What the preview and install endpoints answer with. */
 let verb: "install" | "update" = "install";
 
@@ -150,7 +152,8 @@ beforeEach(() => {
   catalogueRequests = [];
   cataloguePages = [[]];
   listingStatus = 200;
-  listingBody = { listing: LISTING, trust: TRUST };
+  listingBody = { listing: LISTING, trust: TRUST, can_install: true };
+  canInstall = true;
   verb = "install";
   vi.stubGlobal(
     "fetch",
@@ -163,6 +166,7 @@ beforeEach(() => {
           page,
           trust: TRUST,
           botcamp_url: "http://hub.test/strategies?type=AGENT",
+          can_install: canInstall,
         });
       }
       requests.push({ url, method: init?.method ?? "GET" });
@@ -320,6 +324,25 @@ it("lists Botcamp's published agents, with who made them and whether they're fre
   expect(container.querySelector("[data-hub-catalogue-entry='paid_bot']")?.textContent).toContain(
     "Members",
   );
+});
+
+it("replaces Review with a locked state when the viewer holds no hub token", async () => {
+  // CORR-980: only the catalogue read is anonymous — a per-agent listing or
+  // bundle 401s with no token, free agent or not — so a viewer the server
+  // says can_install=false for must never be offered a Review that is
+  // certain to fail.
+  canInstall = false;
+  cataloguePages = [[entry("river_scalper", { name: "River Scalper" })]];
+  await render();
+  await waitFor(() => container.querySelector("[data-hub-catalogue-entry]") !== null);
+
+  const card = container.querySelector("[data-hub-catalogue-entry='river_scalper']");
+  expect(card?.querySelector("[data-hub-needs-connection]")).not.toBeNull();
+  expect(
+    [...(card?.querySelectorAll("button") ?? [])].some((b) =>
+      b.textContent?.includes("Review"),
+    ),
+  ).toBe(false);
 });
 
 it("links to Botcamp's agents and to each agent's own page, in a new tab", async () => {

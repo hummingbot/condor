@@ -275,6 +275,7 @@ export function HubBrowser({
                     members: false,
                     pageUrl: "",
                   }}
+                  installable={lookup.data.can_install}
                   onReview={() =>
                     openReview({
                       slug: lookup.data.listing.slug,
@@ -380,6 +381,10 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
   const entries = catalogue.data?.pages.flatMap((page) => page.listings) ?? [];
   const trust = catalogue.data?.pages[0]?.trust ?? "";
   const botcampUrl = catalogue.data?.pages[0]?.botcamp_url ?? "";
+  // CORR-980: only the catalogue read itself is anonymous — a per-agent
+  // listing or bundle 401s with no token, free agent or not — so this is
+  // what the dashboard reads to not offer a Review that is certain to fail.
+  const canInstall = catalogue.data?.pages[0]?.can_install ?? false;
 
   return (
     <div className="space-y-3">
@@ -494,6 +499,7 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
                 key={entry.slug}
                 marker={{ "data-hub-catalogue-entry": entry.slug }}
                 agent={catalogueAgent(entry)}
+                installable={canInstall}
                 onReview={() =>
                   onReview({ slug: entry.slug, name: entry.name, trust })
                 }
@@ -533,11 +539,16 @@ function catalogueAgent(entry: HubCatalogueEntry): CardAgent {
 function AgentCard({
   agent,
   marker,
+  installable,
   onReview,
 }: {
   agent: CardAgent;
   /** The one `data-` hook callers address this card by. */
   marker: Record<string, string>;
+  /** Whether *this* viewer's own hub token is non-empty (CORR-980): the
+   *  catalogue is anonymous but a per-agent read is not, so `false` means
+   *  Review would 401 on this exact card and must not be offered. */
+  installable: boolean;
   onReview: () => void;
 }) {
   return (
@@ -600,12 +611,22 @@ function AgentCard({
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
-          <button
-            onClick={onReview}
-            className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-          >
-            Review
-          </button>
+          {installable ? (
+            <button
+              onClick={onReview}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            >
+              Review
+            </button>
+          ) : (
+            <span
+              data-hub-needs-connection
+              title="Ask an admin to connect this install to Botcamp — a seat's own reads have no token, and the hub refuses an agent lookup without one"
+              className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] opacity-60"
+            >
+              <Lock className="h-3.5 w-3.5" /> Needs connection
+            </span>
+          )}
         </span>
       </div>
     </li>
