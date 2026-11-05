@@ -500,6 +500,39 @@ def test_mute_skills_false_grants_no_tool_the_bundle_did_not_declare(traveller):
     assert "unrelated_tool" not in agent.tools
 
 
+def test_a_hub_installs_version_is_the_hubs_own_not_the_bundles(traveller):
+    """CORR-1019: PR #314 QA found a hub install's dialog reading the
+    exporting install's own internal export counter (``bundle.version``)
+    instead of the number the operator actually picked on Botcamp — two
+    different numbering systems that only coincide by luck. ``_hub_plan``
+    passes the fetched listing's version in as ``hub_version``; ``version``
+    must keep meaning the bundle's own counter for whatever already compares
+    bundles by it.
+    """
+    plan = ab.plan(
+        _bundle_for(traveller),
+        as_slug="arrival",
+        user_id=7,
+        hub_reviewed=True,
+        hub_version=4,
+    )
+    assert plan.version == 1
+    assert plan.hub_version == 4
+
+    result = ab.apply(plan, user_id=7)
+    assert result["version"] == 1
+    assert result["hub_version"] == 4
+
+
+def test_a_plain_file_imports_hub_version_is_zero(traveller):
+    """No hub number exists for a plain file import — it keeps showing
+    ``version`` exactly as it always has (CORR-1019's second criterion)."""
+    plan = ab.plan(_bundle_for(traveller), as_slug="arrival", user_id=7)
+    assert plan.hub_reviewed is False
+    assert plan.hub_version == 0
+    assert plan.version == 1
+
+
 def test_a_muted_import_is_offered_to_nobody_until_it_is_unmuted(traveller):
     """Both gestures are needed for a routine, and they are separate (FEAT-147).
 

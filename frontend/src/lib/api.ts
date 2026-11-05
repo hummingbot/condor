@@ -139,6 +139,13 @@ export interface AgentImportPlan {
   agent_uid: string;
   /** Advisory, and only within one `agent_uid`'s lineage. */
   version: number;
+  /**
+   * The Botcamp listing version this bundle was fetched as — `0` for a plain
+   * file import. Show this instead of `version` whenever `hub_reviewed` is
+   * true: `version` is the exporting install's own internal counter, a
+   * different number from the one the operator picked on Botcamp.
+   */
+  hub_version: number;
   notes: string;
   author: AgentBundleAuthor;
   requires: AgentBundleRequires;
@@ -219,6 +226,14 @@ export interface AgentUpdatePlan {
   installed_agent_uid: string;
   version: number;
   installed_version: number;
+  /**
+   * `version`/`installed_version`'s Botcamp listing numbers, for a hub
+   * update only — `0` for a plain file update. See
+   * `AgentImportPlan.hub_version`; show these instead whenever
+   * `hub_reviewed` is true.
+   */
+  hub_version: number;
+  installed_hub_version: number;
   exported_at: string;
   notes: string;
   author: AgentBundleAuthor;

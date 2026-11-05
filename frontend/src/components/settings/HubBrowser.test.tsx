@@ -70,6 +70,7 @@ const PLAN: AgentImportPlan = {
   schema_version: 1,
   agent_uid: "a".repeat(32),
   version: 3,
+  hub_version: 3,
   notes: "Widened the grid",
   author: { name: "", handle: "" },
   requires: {
@@ -101,6 +102,8 @@ const UPDATE: AgentUpdatePlan = {
   installed_agent_uid: "a".repeat(32),
   version: 3,
   installed_version: 2,
+  hub_version: 3,
+  installed_hub_version: 2,
   exported_at: "2026-10-18T09:00:00Z",
   notes: "Widened the grid",
   author: { name: "", handle: "" },

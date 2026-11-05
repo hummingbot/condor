@@ -414,6 +414,14 @@ class ImportPlan(BaseModel):
     #: minted from the bundle's own content when it does not.
     agent_uid: str = ""
     version: int = 1
+    #: The Botcamp listing version this exact bundle was fetched as — set only
+    #: by ``_hub_plan`` (CORR-1019), ``0`` for a plain file import. ``version``
+    #: above is the exporting install's own counter and keeps meaning that for
+    #: whatever already compares bundles by it (:func:`plan_update`'s
+    #: ``older_bundle``/``same_version_new_build`` checks); this is the
+    #: separate number the operator actually picked on Botcamp, and a surface
+    #: shows it instead of ``version`` whenever ``hub_reviewed`` is true.
+    hub_version: int = 0
     notes: str = ""
     author: BundleAuthor = Field(default_factory=BundleAuthor)
     #: Derived here from the bundle's files, never read off its manifest.
@@ -935,6 +943,7 @@ def plan(
     mute_skills: bool = True,
     mute_routines: bool = True,
     hub_reviewed: bool = False,
+    hub_version: int = 0,
 ) -> ImportPlan:
     """Everything a human needs to decide, computed without writing anything.
 
@@ -972,6 +981,12 @@ def plan(
     :class:`ImportPlan` rather than only threaded straight to ``apply``, so a
     preview can render the true state instead of a surface guessing it from
     empty mute lists.
+
+    ``hub_version`` (CORR-1019) is the Botcamp listing version this bundle
+    was fetched as, passed in by ``_hub_plan`` because this function only
+    ever sees the bundle itself, never the hub response it came from. Left
+    ``0`` for a plain file import, which has no such number and keeps
+    showing ``bundle.version``.
 
     Every refusal is collected rather than raised, so a reviewer sees all of
     them at once; :func:`apply` is the one that turns them into an error. An
@@ -1039,6 +1054,7 @@ def plan(
         schema_version=bundle.schema_version,
         agent_uid=agent_uid,
         version=bundle.version,
+        hub_version=hub_version,
         notes=bundle.notes,
         author=bundle.author,
         requires=requires,
@@ -1691,6 +1707,15 @@ class UpdatePlan(BaseModel):
     installed_agent_uid: str = ""
     version: int = 1
     installed_version: int = 0
+    #: The Botcamp listing versions this update's ``version``/``installed_version``
+    #: mirror, for a hub update only (``0`` for a plain file update) — see
+    #: :data:`ImportPlan.hub_version`. ``installed_hub_version`` comes from
+    #: the stamp already on disk (:data:`BundleStamp.hub_version`, written by
+    #: :func:`record_hub_install` the last time this agent was installed or
+    #: updated from the hub), so it is correct even when *this* update is a
+    #: plain file one and only the agent's *origin* was the hub.
+    hub_version: int = 0
+    installed_hub_version: int = 0
     exported_at: str = ""
     notes: str = ""
     author: BundleAuthor = Field(default_factory=BundleAuthor)
@@ -1967,6 +1992,7 @@ def plan_update(
     mute_skills: bool = True,
     mute_routines: bool = True,
     hub_reviewed: bool = False,
+    hub_version: int = 0,
 ) -> UpdatePlan:
     """What updating ``slug`` from ``bundle`` would do. Writes nothing.
 
@@ -1996,6 +2022,14 @@ def plan_update(
     finds already matching the bundle (unchanged), keyed to the exact bytes
     just written — never for a path the operator kept local (``local_only``,
     ``conflict``) or removed, since that is not the content the hub reviewed.
+
+    ``hub_version`` (CORR-1019) mirrors :func:`plan`'s own parameter: the
+    Botcamp listing version this bundle was fetched as, passed in by
+    ``_hub_plan`` and left ``0`` for a plain file update. The matching
+    ``installed_hub_version`` on the returned plan needs no parameter — it
+    is read straight off the installed agent's own stamp
+    (:data:`BundleStamp.hub_version`), which already carries the hub number
+    from the last time this agent was installed or updated from the hub.
     """
     from condor.agents.agent import AgentStore
 
@@ -2052,6 +2086,7 @@ def plan_update(
             slug="",
             agent_uid=incoming_uid,
             version=bundle.version,
+            hub_version=hub_version,
             exported_at=bundle.exported_at,
             notes=bundle.notes,
             author=bundle.author,
@@ -2091,6 +2126,7 @@ def plan_update(
     installed_version = (
         stamp.version if stamp else (agent.bundle_version if agent else 0)
     )
+    installed_hub_version = stamp.hub_version if stamp else 0
 
     if installed:
         if not installed_uid and stamp is None:
@@ -2200,7 +2236,9 @@ def plan_update(
         agent_uid=incoming_uid,
         installed_agent_uid=installed_uid,
         version=bundle.version,
+        hub_version=hub_version,
         installed_version=installed_version,
+        installed_hub_version=installed_hub_version,
         exported_at=bundle.exported_at,
         notes=bundle.notes,
         author=bundle.author,

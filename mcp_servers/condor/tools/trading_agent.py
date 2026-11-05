@@ -530,6 +530,10 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
         mute_skills=False,
         mute_routines=False,
         hub_reviewed=True,
+        # The Botcamp listing version actually fetched (CORR-1019) — the
+        # number the operator picked, not the exporting install's own
+        # internal counter. Mirrors the web path's ``_hub_plan``.
+        hub_version=fetched.version,
     )
     listing_row = listing.model_dump()
     if plan.is_update:
@@ -540,6 +544,7 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
             mute_skills=False,
             mute_routines=False,
             hub_reviewed=True,
+            hub_version=fetched.version,
         )
         try:
             result = agent_bundle.apply_update(update, user_id=settings.user_id)

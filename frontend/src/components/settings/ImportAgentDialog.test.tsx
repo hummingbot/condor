@@ -54,6 +54,7 @@ const PLAN: AgentImportPlan = {
   refusals: [],
   agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
   version: 3,
+  hub_version: 0,
   notes: "",
   author: { name: "", handle: "" },
   requires: {
@@ -127,6 +128,8 @@ const UPDATE: AgentUpdatePlan = {
   installed_agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
   version: 3,
   installed_version: 2,
+  hub_version: 0,
+  installed_hub_version: 0,
   exported_at: "2026-10-15T09:00:00Z",
   notes: "",
   author: { name: "", handle: "" },

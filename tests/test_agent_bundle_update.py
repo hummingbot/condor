@@ -102,6 +102,18 @@ def installed():
     return agent_home("drifter")
 
 
+@pytest.fixture
+def hub_installed():
+    """A hub-installed agent, with the hub's own version already recorded on
+    its stamp (CORR-812's ``hub_version``) — a different number from the
+    bundle's own internal counter, exactly as a real hub install leaves it.
+    """
+    plan = ab.plan(_bundle(version=1), user_id=7, hub_reviewed=True, hub_version=4)
+    ab.apply(plan, user_id=7)
+    ab.record_hub_install("drifter", hub_slug="drifter", hub_version=4, digest="d" * 64)
+    return agent_home("drifter")
+
+
 # ── The stamp ──
 
 
@@ -124,6 +136,35 @@ def test_an_unreadable_stamp_is_no_basis(installed):
     """``None``, not an empty stamp — the two mean opposite things."""
     ab.stamp_path(installed).write_text("{not json", "utf-8")
     assert ab.read_stamp(installed) is None
+
+
+def test_a_hub_updates_version_is_the_hubs_own_not_the_bundles(hub_installed):
+    """CORR-1019: a hub update's ``version``/``installed_version`` stay the
+    bundle's own internal counters — ``older_bundle`` and
+    ``same_version_new_build`` above compare bundles by exactly those — but
+    ``hub_version``/``installed_hub_version`` are the separate number the
+    operator actually sees on Botcamp, which can move independently of the
+    bundle's own lineage.
+    """
+    plan = ab.plan_update(_newer(), "drifter", hub_reviewed=True, hub_version=9)
+    assert plan.version == 2
+    assert plan.installed_version == 1
+    assert plan.hub_version == 9
+    # Read straight off the stamp `record_hub_install` left behind — no
+    # route-layer plumbing needed for what was already installed.
+    assert plan.installed_hub_version == 4
+
+    result = ab.apply_update(plan, user_id=7)
+    assert result["hub_version"] == 9
+    assert result["installed_hub_version"] == 4
+
+
+def test_a_plain_file_updates_hub_version_is_zero(installed):
+    """No hub number exists for a plain file update (CORR-1019)."""
+    plan = ab.plan_update(_newer(), "drifter")
+    assert plan.hub_reviewed is False
+    assert plan.hub_version == 0
+    assert plan.installed_hub_version == 0
 
 
 # ── Blockers ──

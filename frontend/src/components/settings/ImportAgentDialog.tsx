@@ -561,6 +561,20 @@ export function ImportAgentDialog({
 
   const blocked = plan ? plan.refusals.length > 0 || plan.collision !== "" : false;
 
+  // The version every hub-flow surface shows (CORR-1019): the Botcamp
+  // listing number the operator actually picked, never the exporting
+  // install's own internal counter (`version`/`installed_version`) — those
+  // two are different numbering systems and only line up by coincidence.
+  // A plain file import/update has no hub number at all, so it keeps
+  // showing `version` exactly as it always has.
+  const planDisplayVersion = plan && plan.hub_reviewed ? plan.hub_version : plan?.version;
+  const updateDisplayVersion =
+    update && update.hub_reviewed ? update.hub_version : update?.version;
+  const updateDisplayInstalledVersion =
+    update && update.hub_reviewed
+      ? update.installed_hub_version
+      : update?.installed_version;
+
   // Everything this bundle carries under `routines/` — shared by the summary
   // counts line, the unmet reassurance below, and the files section.
   const carriedRoutines = plan
@@ -1026,7 +1040,7 @@ export function ImportAgentDialog({
                 ` Its model is not configured here, so it will use yours (${plan.agent_key}).`}
             </p>
             <p className="text-[11px] text-[var(--color-text-muted)]">
-              Version {plan.version} · exported {plan.exported_at || "at an unknown time"}{" "}
+              Version {planDisplayVersion} · exported {plan.exported_at || "at an unknown time"}{" "}
               as <span className="font-mono">{plan.source_slug}</span>
             </p>
             <p data-agent-uid className="text-[11px] text-[var(--color-text-muted)]">
@@ -1066,7 +1080,7 @@ export function ImportAgentDialog({
                   <p className="text-xs text-[var(--color-text)]">
                     This is a newer version of{" "}
                     <span className="font-mono">{plan.collision}</span>, the agent you
-                    already have — version {plan.version} against the one installed.
+                    already have — version {planDisplayVersion} against the one installed.
                     Updating keeps its memory, its config, its mutes and anything you
                     edited here.
                   </p>
@@ -1180,12 +1194,12 @@ export function ImportAgentDialog({
               {noChanges ? (
                 <>
                   <span className="font-mono">{update.slug}</span> is already up to
-                  date at version {update.version}
+                  date at version {updateDisplayVersion}
                 </>
               ) : (
                 <>
                   Updating <span className="font-mono">{update.slug}</span> — version{" "}
-                  {update.installed_version || "?"} → {update.version}
+                  {updateDisplayInstalledVersion || "?"} → {updateDisplayVersion}
                 </>
               )}
             </p>
@@ -1352,6 +1366,10 @@ function SuccessScreen({
   const { slug, hub_reviewed: hubReviewed, findings, mutes } = result;
   const mutedNames = [...mutes.routines, ...mutes.skills];
   const isUpdate = applied !== null;
+  // The Botcamp listing number, not the exporting install's own internal
+  // counter — see `planDisplayVersion`/`updateDisplayVersion` above
+  // (CORR-1019). `landed` and `applied` carry the same two fields.
+  const displayVersion = hubReviewed ? result.hub_version : result.version;
   // Same rule as the pre-confirm update screen (`keptLocalRoutines` above):
   // these are the routines the hub's auto-allow never covered, because the
   // bytes it wrote are the operator's own edit, not the hub's reviewed text.
@@ -1370,7 +1388,7 @@ function SuccessScreen({
         </span>
         <p className="min-w-0 text-sm font-semibold text-[var(--color-text)]">
           {landed ? "Imported" : "Updated"} <span className="font-mono">{slug}</span>
-          {applied && <> to version {applied.version}</>}
+          {applied && <> to version {displayVersion}</>}
         </p>
       </div>
 

@@ -5371,6 +5371,11 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
         mute_skills=False,
         mute_routines=False,
         hub_reviewed=True,
+        # The Botcamp listing version actually fetched (CORR-1019) — the
+        # number the operator picked, not the exporting install's own
+        # internal counter. Every hub-flow surface shows this instead of
+        # ``plan.version`` once ``hub_reviewed`` is true.
+        hub_version=fetched.version,
     )
     if plan.is_update:
         return (
@@ -5385,6 +5390,7 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
                 mute_skills=False,
                 mute_routines=False,
                 hub_reviewed=True,
+                hub_version=fetched.version,
             ),
         )
     return listing, fetched, "install", plan
