@@ -494,6 +494,13 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
     Connectors are left unasked here for the same reason the file import leaves
     them: resolving them needs an async Hummingbot client and this is a
     synchronous tool.
+
+    Also records this install's own acceptance of the hub's terms with
+    Botcamp, for this exact version and digest — the same stamp the web
+    install path takes. The human already confirmed running this call before
+    it reached this function (``hub_install`` is dangerous, see
+    :mod:`condor.runtime.danger`), which is this surface's own form of the
+    web dialog's consent checkbox.
     """
     from condor import botcamp_import, hub
     from condor.agents import bundle as agent_bundle
@@ -536,6 +543,33 @@ def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
         hub_version=fetched.version,
     )
     listing_row = listing.model_dump()
+    # Record consent for this exact version *before* anything is written —
+    # the same stamp the web install path takes
+    # (``condor/web/routes/agents.py``'s ``install_from_hub``), which this
+    # tool path skipped entirely until now. There is no second checkbox to
+    # tick here: ``hub_install`` is one of ``condor.runtime.danger``'s
+    # ``DANGEROUS_AGENT_ACTIONS``, so a human already confirmed running this
+    # exact call before it ever reached this line — that confirmation is
+    # this surface's own form of the owner's affirmation, same as the
+    # import dialog's checkbox.
+    #
+    # Skipped when there is no admin token to record consent as (SEC review
+    # C4 — a non-admin call never had one here either, see ``hub_token``
+    # above). There being nothing to record consent *as* is not a Botcamp
+    # refusal, and must not block installing a public agent the way every
+    # other read in this flow already tolerates going without a token.
+    if hub_token:
+        try:
+            hub.post_consent(
+                slug,
+                str(fetched.version),
+                hub.HUB_CONSENT_TERMS_VERSION,
+                agent_id=listing.agent_id,
+                sha256=fetched.sha256,
+                token=hub_token,
+            )
+        except hub.HubError as exc:
+            return {"error": str(exc)}
     if plan.is_update:
         update = agent_bundle.plan_update(
             bundle,

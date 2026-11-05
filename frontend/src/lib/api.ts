@@ -4142,12 +4142,15 @@ export const api = {
    *  and `expectedSha256` should be the preview's own `fetched` fields
    *  (BUG-2) — pinning install to what was actually reviewed, rather than
    *  re-resolving `"latest"` and risking a newer approval landing between
-   *  the two calls. The server refuses when the digest no longer matches. */
+   *  the two calls. The server refuses when the digest no longer matches.
+   *  `accepted` is the operator's own tick of the review dialog's consent
+   *  checkbox — the server refuses to record a hub acceptance without it. */
   installFromHub: (
     slug: string,
     asSlug = "",
     version = "latest",
     expectedSha256 = "",
+    accepted = false,
   ) =>
     apiFetch<HubInstallResponse>(
       `/api/v1/hub/agents/${encodeURIComponent(slug)}/install`,
@@ -4157,6 +4160,7 @@ export const api = {
           as_slug: asSlug,
           version,
           expected_sha256: expectedSha256,
+          accepted,
         }),
       },
     ),

@@ -76,17 +76,25 @@ function hubSource(slug: string, version: string): BundleSource {
             alreadyConsented: res.consent.accepted,
           };
     },
-    install: async (asSlug) =>
-      (await api.installFromHub(slug, asSlug, pinned.version, pinned.sha256))
-        .plan as AgentImportPlan,
+    install: async (asSlug, accepted) =>
+      (
+        await api.installFromHub(
+          slug,
+          asSlug,
+          pinned.version,
+          pinned.sha256,
+          accepted,
+        )
+      ).plan as AgentImportPlan,
     previewUpdate: async () => {
       const res = await api.previewHubInstall(slug, "", version);
       pinned = { version: String(res.fetched.version), sha256: res.fetched.sha256 };
       return res.plan as AgentUpdatePlan;
     },
-    applyUpdate: async () =>
-      (await api.installFromHub(slug, "", pinned.version, pinned.sha256))
-        .plan as AgentUpdatePlan,
+    applyUpdate: async (_slug, accepted) =>
+      (
+        await api.installFromHub(slug, "", pinned.version, pinned.sha256, accepted)
+      ).plan as AgentUpdatePlan,
   };
 }
 

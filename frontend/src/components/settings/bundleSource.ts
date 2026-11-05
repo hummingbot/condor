@@ -54,9 +54,13 @@ export interface BundleSource {
   /** Identity of this source. A change re-previews from scratch. */
   key: string;
   preview(asSlug: string): Promise<BundlePreview>;
-  install(asSlug: string): Promise<AgentImportPlan>;
+  /** `accepted` is the operator's own tick of the review dialog's consent
+   *  checkbox. A file source has no hub acceptance to send and ignores it;
+   *  a hub source sends it on so the server never records an affirmation
+   *  nobody showed the caller. */
+  install(asSlug: string, accepted: boolean): Promise<AgentImportPlan>;
   previewUpdate(slug: string): Promise<AgentUpdatePlan>;
-  applyUpdate(slug: string): Promise<AgentUpdatePlan>;
+  applyUpdate(slug: string, accepted: boolean): Promise<AgentUpdatePlan>;
 }
 
 /** A bundle the operator picked off their own disk (FEAT-133). */

@@ -958,14 +958,6 @@ HUB_TRUST = (
     "yourself."
 )
 
-#: Which of Condor's own texts the import dialog's step-2 checkbox shows
-#: (``consentLabel``/``ConsentDisclaimer`` in ``ImportAgentDialog.tsx``) —
-#: sent as ``termsVersion`` on every ``hub.post_consent`` call so Botcamp's
-#: stored row says which wording the owner actually read. Bump this string
-#: whenever that screen's wording changes meaningfully; a cosmetic fix does
-#: not need a bump, a changed claim about what the owner is agreeing to does.
-HUB_CONSENT_TERMS_VERSION = "condor-import-consent-v1"
-
 
 class HubInstallRequest(BaseModel):
     """What to call a hub agent on the way in, and which version to clone.
@@ -981,11 +973,18 @@ class HubInstallRequest(BaseModel):
     the preview and the install is then a refusal, not a silent upgrade —
     ``fetch``'s own digest check only proves install's bytes match install's
     header, never that they match what preview showed.
+
+    ``accepted`` is the owner's own tick of the import dialog's step-2
+    checkbox — the only thing that may stand between the owner and a hub
+    acceptance recorded with Botcamp (:func:`install_from_hub`). Defaulting
+    to ``False`` means a request that omits it, or a client that never asks,
+    is refused rather than silently affirming terms nobody showed.
     """
 
     as_slug: str = ""
     version: str = "latest"
     expected_sha256: str = ""
+    accepted: bool = False
 
 
 class PublishAgentRequest(BaseModel):
@@ -5570,12 +5569,25 @@ async def install_from_hub(
     # tolerates going without a token.
     hub_token = _hub_read_token(user)
     if hub_token:
+        # Consent is about to be recorded with Botcamp under this account —
+        # which must never happen for an affirmation nobody showed the
+        # caller. ``req`` is optional on this route (``None`` is a request
+        # with no body at all), so the absence of a body refuses exactly
+        # like an explicit ``accepted: false`` would.
+        if not (req and req.accepted):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Accept the hub's terms before installing — tick the "
+                    "consent checkbox and try again."
+                ),
+            )
         try:
             await asyncio.to_thread(
                 hub.post_consent,
                 slug,
                 str(fetched.version),
-                HUB_CONSENT_TERMS_VERSION,
+                hub.HUB_CONSENT_TERMS_VERSION,
                 agent_id=listing.agent_id,
                 sha256=fetched.sha256,
                 token=hub_token,
