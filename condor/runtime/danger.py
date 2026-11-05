@@ -1013,7 +1013,8 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             slug = input_data.get("path") or "?"
             return (
                 f"Install '{slug}' from the Botcamp hub "
-                "(its instructions and tool allowlist go live at once)"
+                "(its instructions and tool allowlist go live, and any code "
+                "it ships can run on this machine, all at once)"
             )
         return f"Agents: {action}"
 

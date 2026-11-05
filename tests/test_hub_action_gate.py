@@ -59,6 +59,10 @@ def test_the_prompt_says_which_way_the_agent_crosses_the_edge():
 
     assert "Publish agent 'traveller' to the Botcamp hub" in publish
     assert "Install 'grid-bot' from the Botcamp hub" in install
+    # Greptile, PR #314: this was the one of three consent surfaces
+    # recording `termsVersion: condor-import-consent-v1` that never said a
+    # word about code execution, unlike the install/update checkboxes.
+    assert "code" in install
 
 
 @pytest.mark.parametrize("mode", ["loop", "dry_run", "shutdown"])
