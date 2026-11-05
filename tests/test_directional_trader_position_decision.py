@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import aiohttp
 
+from condor.agents import drex_gate
+
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "agents" / "directional_trader" / "routines" / "position_decision.py"
 
@@ -72,7 +74,7 @@ def _drex(monkeypatch, status=200, body=None):
             calls.append({"url": url, "json": json, "headers": headers})
             return _Response(status, body)
 
-    monkeypatch.setattr(decision.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(drex_gate.aiohttp, "ClientSession", _Session)
     return calls
 
 
@@ -113,7 +115,7 @@ def test_without_key_returns_the_snapshot_and_sends_nothing(monkeypatch):
     assert calls == []
     assert "Drex" not in output
     assert "Decide from the snapshot:" in output
-    assert f"- start: {decision.START_WHEN['LONG']}" in output
+    assert f"- start: {drex_gate.START_WHEN['LONG']}" in output
     assert "position: flat" in output
     assert "ema_50: " in output
 
@@ -136,8 +138,10 @@ def test_flat_loop_gets_drex_choice_between_hold_and_start(monkeypatch):
     question = call["json"]["questions"]["action"]
     assert question["type"] == "choice"
     assert set(question["criteria"]) == {"start", "hold"}
-    assert question["criteria"]["start"] == decision.START_WHEN["LONG"]
+    assert question["criteria"]["start"] == drex_gate.START_WHEN["LONG"]
     assert call["json"]["state"]["position"] == "flat"
+    # The uptrend's EMA order is stated, not left for Drex to work out.
+    assert call["json"]["state"]["ema_20_minus_ema_50_in_atr"] > 0
 
 
 def test_open_short_asks_hold_or_stop_with_loss_in_atr(monkeypatch):
@@ -150,7 +154,7 @@ def test_open_short_asks_hold_or_stop_with_loss_in_atr(monkeypatch):
     state = calls[0]["json"]["state"]
     criteria = calls[0]["json"]["questions"]["action"]["criteria"]
     assert set(criteria) == {"stop", "hold"}
-    assert criteria["stop"] == decision.STOP_WHEN["SHORT"]
+    assert criteria["stop"] == drex_gate.STOP_WHEN["SHORT"]
     assert state["side"] == "SHORT"
     assert state["entry_price"] == 100.0
     # Price rose from the entry, so the short is under water.
@@ -164,7 +168,7 @@ def test_drex_error_leaves_the_decision_to_the_tick(monkeypatch, caplog):
     output = _run(monkeypatch)
 
     assert "Drex request failed (HTTP 503). Decide from the snapshot:" in output
-    assert f"- start: {decision.START_WHEN['LONG']}" in output
+    assert f"- start: {drex_gate.START_WHEN['LONG']}" in output
     assert "Drex request failed" in caplog.text
     assert "nace_sk_test" not in output + caplog.text
 
@@ -176,3 +180,17 @@ def test_answer_outside_the_asked_labels_is_not_trusted(monkeypatch):
     output = _run(monkeypatch)
 
     assert "Drex request failed (answer outside the asked labels" in output
+
+
+def test_a_sub_cent_coin_keeps_its_numbers():
+    tiny = [
+        {k: v * 1e-7 if k != "timestamp" else v for k, v in row.items()}
+        for row in _candles()
+    ]
+
+    big = drex_gate.build_snapshot(_candles(), "LONG", 0.0)
+    small = drex_gate.build_snapshot(tiny, "LONG", 0.0)
+
+    assert small["atr_14"] > 0
+    assert small["ema_20"] > small["ema_50"]
+    assert small["ema_20_minus_ema_50_in_atr"] == big["ema_20_minus_ema_50_in_atr"]

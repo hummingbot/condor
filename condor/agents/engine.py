@@ -887,8 +887,8 @@ class TickEngine:
 
         Each phase is its own method so it can be read and tested on its own.
         The tick ends early only when the gather phase returns ``None`` (a hard
-        shutdown or a risk block); past that, the model always runs and its
-        outcome is always persisted.
+        shutdown, a risk block, or a Drex hold on a ``drex_gate`` loop); past
+        that, the model always runs and its outcome is always persisted.
 
         No API client is a *failure*, not an early return: a trading loop with
         nothing to trade through can do nothing at all, and journalling it and
@@ -936,7 +936,7 @@ class TickEngine:
         computes the risk state, and builds the prompt. Returns ``None`` when
         the tick must end here: the hard kill-switch escalated to a shutdown,
         or the risk gate blocked the tick (journalled, and announced once per
-        reason).
+        reason), or Drex answered hold on a ``drex_gate`` loop (journalled).
         """
         # Adopt any bot of ours already running (first tick only). A crash
         # restart always mints a NEW session (see condor/runtime/loops.py), so the
@@ -1106,12 +1106,79 @@ class TickEngine:
             return None
         self._last_block_reason = ""
 
+        # A loop that sets ``drex_gate`` asks Drex first and runs the model only
+        # when the answer is to act, or when there is no answer to go on. A dry
+        # run is never skipped: it is there to show what the model would do.
+        if self.config.get("drex_gate"):
+            from . import drex_gate  # pandas_ta: loaded only by loops that gate
+
+            answer, gate_text = await self._ask_drex_gate(client, executors_result)
+            if answer and answer["choice"] == "hold" and not self.is_experiment:
+                line = f"model skipped: {drex_gate.describe(answer)}"
+                with self.journal.batch():
+                    self.journal.append_action(
+                        self.journal.tick_count + 1, "model_skipped", line
+                    )
+                    self.journal.record_tick(line)
+                    self._record_reading_snapshot()
+                return None
+            core_data_summaries["drex_gate"] = gate_text
+
         prompt = self._build_prompt(core_data_summaries, risk_state, live_open_count)
         return _TickContext(
             risk_state=risk_state,
             core_data_summaries=core_data_summaries,
             prompt=prompt,
         )
+
+    async def _ask_drex_gate(self, client, executors_result) -> tuple[dict | None, str]:
+        """Drex's answer for this tick, or ``None``, and the text the model gets.
+
+        Drex is asked only when the book is exactly what its question describes:
+        no bot, and at most one running executor, on the loop's pair and side,
+        with a known entry. Anything else, and any failure, is left to the model.
+        The loop's ``start_when`` / ``stop_when`` text replaces the default rule.
+        """
+        from . import drex_gate
+
+        gate = self.config["drex_gate"]
+        pair = self.config.get("trading_pair", "")
+        side = str(gate.get("side", "")).upper()
+        data = executors_result.data if executors_result else {}
+        running = data.get("executors")
+        want = {"LONG": "BUY", "SHORT": "SELL"}.get(side)
+        one_position = (
+            want is not None
+            and running is not None
+            and len(running) <= 1
+            and all(
+                r.get("pair") == pair and r.get("side") == want and r.get("entry_price")
+                for r in running
+            )
+            and not data.get("orphaned_executors")
+            and not self._adopted_executors
+            and not self.ledger.enforced
+            and not self.ledger.confirmed_bases()
+        )
+        if not one_position:
+            return None, (
+                f"Drex was not asked: the book is not one {side} position on "
+                f"{pair}, or none. You decide this tick."
+            )
+        try:
+            return await drex_gate.decide(
+                client,
+                connector_name=self.config.get("connector_name", ""),
+                trading_pair=pair,
+                interval=gate.get("interval", "1h"),
+                side=side,
+                entry_price=float(running[0]["entry_price"]) if running else 0.0,
+                start_when=str(gate.get("start_when") or ""),
+                stop_when=str(gate.get("stop_when") or ""),
+            )
+        except Exception as e:
+            log.exception("TickEngine %s: Drex gate failed", self.agent_id)
+            return None, f"Drex gate failed ({e}). You decide this tick."
 
     def _build_prompt(
         self,
