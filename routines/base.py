@@ -975,6 +975,71 @@ def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
     return [found[name] for name in sorted(found)]
 
 
+@dataclass(frozen=True)
+class RoutineCatalogEntry:
+    """One allowed routine's listing row, read the way :func:`agent_routine_overview`
+    already reads the brain panel's — never imported.
+
+    The allowed-only, ``RoutineInfo``-shaped sibling of :class:`AgentRoutineRow`:
+    a caller that only lists or catalogs routines (never runs one) takes this
+    instead of a real :class:`RoutineInfo`, so a hub-allowed routine's module
+    executes only when something actually resolves it to run (:func:`get_routine`,
+    reached only from an actual Start). No ``config_class`` and no ``run_fn``
+    here, for the same reason :class:`PendingRoutine` has none.
+    """
+
+    name: str
+    description: str
+    category: str
+    source: str
+    is_continuous: bool = False
+    last_modified: float | None = None
+
+    def get_fields(self) -> dict[str, dict]:
+        """Always empty: a ``Config``'s fields need the class, which needs ``exec_module``."""
+        return {}
+
+
+def catalog_agent_routines(agent_slug: str) -> dict[str, RoutineCatalogEntry]:
+    """Every routine ``agent_slug`` may run, listed without importing any of them.
+
+    The listing counterpart of ``_merged_from(assistant_routines_dirs(agent_slug),
+    agent_slug=agent_slug)`` — same routines, same consent gate, built from
+    :func:`agent_routine_overview`'s static read instead of ``exec_module``. A
+    pending or changed file is left out here exactly as the real discovery would
+    skip it; :func:`pending_routines` is still what describes those.
+    """
+    return {
+        row.name: RoutineCatalogEntry(
+            name=row.name,
+            description=row.description,
+            category=row.category,
+            source=f"agent:{agent_slug}",
+            is_continuous=row.continuous,
+            last_modified=row.last_modified,
+        )
+        for row in agent_routine_overview(agent_slug)
+        if row.allowed
+    }
+
+
+def catalog_routine_names(agent_slug: str | None = None) -> set[str]:
+    """Every name :func:`assistant_routines` would return, without importing a file.
+
+    The existence-check counterpart: a caller that only asks "is this a routine
+    the assistant could run" — never one about to run it — takes this instead,
+    so the lookup itself can never be why a hub-allowed routine's module runs.
+    The chat's own library is read the normal way: it is never gated, so there
+    is nothing this would save it from.
+    """
+    if not agent_slug or agent_slug == CHAT_SLUG:
+        return set(discover_routines())
+    shared = set(_merged_from(shared_routines_roots()))
+    own = set(catalog_agent_routines(agent_slug))
+    muted = load_mutes(agent_slug)["routines"]
+    return (shared | own) - muted
+
+
 def pending_routine(agent_slug: str | None, name: str) -> PendingRoutine | None:
     """The pending row for one routine of one agent, if it is pending."""
     for row in pending_routines(agent_slug):

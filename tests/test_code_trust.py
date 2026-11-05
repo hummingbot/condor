@@ -27,6 +27,8 @@ from condor.memory.paths import agent_home
 from routines.base import (
     assistant_routines,
     assistant_routines_dir,
+    catalog_agent_routines,
+    catalog_routine_names,
     pending_routines,
 )
 
@@ -337,6 +339,53 @@ def test_an_unparseable_record_leaves_every_routine_pending(imported_agent):
     assert not any(path.exists() for path in sentinels.values())
 
 
+# ── 2b. the same gate, for the read paths that used to bypass it ──
+#
+# `catalog_agent_routines`/`catalog_routine_names` are the listing-only twins
+# `_discover_all` and `_routine_exists` now read through instead of the
+# exec'ing `_merged_from`/`assistant_routines` — before this, an allowed
+# routine's module ran on the very next ``GET /routines`` or skill validation,
+# which is exactly the surprise FEAT-147 closed for a *pending* one.
+
+
+def test_catalog_agent_routines_never_imports_pending_or_allowed(imported_agent):
+    slug, sentinels = imported_agent
+    assert catalog_agent_routines(slug) == {}  # both pending: nothing listed yet
+
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+    catalog = catalog_agent_routines(slug)
+
+    assert set(catalog) == {"lp_scanner"}
+    assert catalog["lp_scanner"].category == "Probe"
+    assert catalog["lp_scanner"].description == "lp_scanner description"
+    assert catalog["lp_scanner"].get_fields() == {}
+    assert not any(path.exists() for path in sentinels.values())
+
+
+def test_catalog_routine_names_sees_an_allowed_routine_without_importing_it(
+    imported_agent,
+):
+    slug, sentinels = imported_agent
+    assert "lp_scanner" not in catalog_routine_names(slug)  # still pending
+
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+    assert "lp_scanner" in catalog_routine_names(slug)
+    assert "funding_watch" not in catalog_routine_names(slug)  # still pending
+    assert not any(path.exists() for path in sentinels.values())
+
+
+def test_skill_routine_validation_does_not_import_an_allowed_routine(imported_agent):
+    """``_routine_exists`` is what a skill's ``references_routine`` check calls."""
+    from condor.memory.skills import _routine_exists
+
+    slug, sentinels = imported_agent
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+
+    assert _routine_exists("lp_scanner", slug) is True
+    assert _routine_exists("funding_watch", slug) is False  # still pending
+    assert not any(path.exists() for path in sentinels.values())
+
+
 @pytest.mark.asyncio
 async def test_every_run_path_refuses(imported_agent):
     """``execute``, ``start_continuous`` and ``schedule`` share one resolver."""
@@ -369,16 +418,25 @@ def test_the_store_lists_a_pending_routine_without_a_schema(imported_agent):
     assert not any(path.exists() for path in sentinels.values())
 
 
-def test_a_loaded_routine_is_flagged_not_pending(imported_agent):
-    slug, _ = imported_agent
+def test_an_allowed_routine_is_flagged_not_pending_and_still_not_imported(
+    imported_agent,
+):
+    """Allowed-but-never-started is listable, and listing it still imports nothing.
+
+    A hub install grants this exact state to every routine it carries in one
+    write (FEAT-147's hub exception) — so the very next ``GET /routines`` must
+    not be the reason all of them execute. ``fields`` stays empty for the same
+    reason a pending row's does: no pydantic model has been built, because
+    nothing here calls ``exec_module``. Only an actual Start does that.
+    """
+    slug, sentinels = imported_agent
     code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
 
     rows = {r["name"]: r for r in routine_store_mod.RoutineStore().list_routines()}
     assert rows[f"{slug}/lp_scanner"]["pending"] is False
-    assert rows[f"{slug}/lp_scanner"]["fields"] == {
-        "value": {"type": "int", "default": 1, "description": "value"}
-    }
+    assert rows[f"{slug}/lp_scanner"]["fields"] == {}
     assert f"{slug}/funding_watch" in rows  # still listed, still pending
+    assert not any(path.exists() for path in sentinels.values())
 
 
 # ── 4. the import ──

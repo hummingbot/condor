@@ -103,6 +103,56 @@ def test_the_list_page_shows_it_and_does_not_run_it(imported_agent, routines_cli
     assert not sentinel.exists()
 
 
+def test_the_list_page_shows_a_hub_allowed_routine_runnable_but_does_not_run_it(
+    imported_agent, routines_client
+):
+    """The same Round 7 the brain panel test below pins, for ``GET /routines``.
+
+    A hub install grants ``code_trust.allow`` for every routine in one write,
+    with no per-file human review of this exact call — so the very next list
+    page, which polls or loads on its own, must not be what makes any of them
+    execute. Only an actual Start does that.
+    """
+    slug, source, sentinel = imported_agent
+    code_trust.allow(slug, "lp_scanner", source.read_text())
+
+    rows = {r["name"]: r for r in routines_client.get("/routines").json()}
+
+    row = rows[f"{slug}/lp_scanner"]
+    assert row["pending"] is False
+    assert row["category"] == "Probe"
+    assert row["description"] == "Scan the pools."
+    assert row["fields"] == {}
+    assert not sentinel.exists()
+
+
+def test_the_strategy_routines_page_does_not_run_an_allowed_one_either(
+    imported_agent, tmp_path, monkeypatch
+):
+    """``GET /{slug}/strategies/{sslug}/routines`` is a thin, prefix-filtered
+    wrapper over the same ``RoutineStore.list_routines()`` — fixing that one
+    store method closes this route too.
+    """
+    import condor.web.routes.agents as agents_module
+
+    slug, source, sentinel = imported_agent
+    code_trust.allow(slug, "lp_scanner", source.read_text())
+
+    strategy = agents_module._strategy_store().create(
+        slug, name="Main", description="d"
+    )
+    client = _client(agents_module)
+
+    resp = client.get(f"/agents/{slug}/strategies/{strategy.slug}/routines")
+
+    assert resp.status_code == 200, resp.text
+    rows = {r["name"]: r for r in resp.json()}
+    row = rows[f"{slug}/lp_scanner"]
+    assert row["pending"] is False
+    assert row["fields"] == {}
+    assert not sentinel.exists()
+
+
 # ── GET /routines/{name}/source ──
 
 
