@@ -263,6 +263,8 @@ def test_a_tampered_file_is_refused_naming_its_path(traveller):
         "owned_bots.json",
         "store/user_7/note.md",
         "state/anything.json",  # a root folder the layout never defined
+        "docs/learnings.md",  # a runtime name, markdown or not, docs included
+        "docs/diagram.png",  # docs admits markdown only, nothing else (CORR-962)
     ],
 )
 def test_a_runtime_path_is_refused_whole(traveller, runtime):
@@ -281,6 +283,28 @@ def test_a_runtime_path_is_refused_whole(traveller, runtime):
     with pytest.raises(ab.BundleError):
         ab.apply(import_plan, user_id=7)
     assert not agent_home("arrival").exists()
+
+
+def test_a_docs_markdown_file_installs_and_is_readable(traveller):
+    """CORR-962: a hub package's ``docs/README.md`` is not this install's own
+    export layout, but it matches botcamp-site's ``docs/**/*.md`` allowlist
+    and must land exactly like any other library file.
+    """
+    payload = _bundle_for(traveller, as_dict=True)
+    payload["files"].append(
+        {
+            "path": "docs/README.md",
+            "sha256": ab._digest("Read me first.\n"),
+            "text": "Read me first.\n",
+        }
+    )
+    import_plan = ab.plan(ab.parse(json.dumps(payload)), as_slug="arrival", user_id=7)
+
+    assert import_plan.refusals == []
+    ab.apply(import_plan, user_id=7)
+    assert (agent_home("arrival") / "docs" / "README.md").read_text(
+        "utf-8"
+    ) == "Read me first.\n"
 
 
 def test_every_path_a_real_export_produces_still_lands(traveller):

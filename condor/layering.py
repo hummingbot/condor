@@ -597,6 +597,16 @@ def _root_library_dirs() -> frozenset[str]:
     )
 
 
+#: The one root directory that is library content only in part: a markdown
+#: file under it, nothing else. Not folded into :func:`_root_library_dirs`,
+#: which answers "library" for every file under a directory it names — admitting
+#: ``docs`` there would carry any file an agent package put under it, widening
+#: both the import check and :func:`publishable_files` past what botcamp-site's
+#: own allowlist (``docs/**/*.md``) publishes, and reopening the hole CORR-720
+#: and CORR-734 measured ([[CORR-962]]).
+_DOCS_DIRNAME = "docs"
+
+
 def _is_library_path(rel: Path, root_dirs: frozenset[str]) -> bool:
     """The layout rule of :func:`publishable_files`, in one place.
 
@@ -616,7 +626,7 @@ def _is_library_path(rel: Path, root_dirs: frozenset[str]) -> bool:
     if any(part in _RUNTIME_NAMES for part in rel.parts):
         return False
     if len(rel.parts) > 1 and rel.parts[0] not in root_dirs:
-        return False
+        return rel.parts[0] == _DOCS_DIRNAME and rel.suffix == ".md"
     return True
 
 

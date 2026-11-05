@@ -676,6 +676,31 @@ def test_the_root_rule_excludes_invented_folders_not_the_name_state(stock):
     }
 
 
+def test_docs_markdown_is_library_content_but_nothing_else_under_docs_is(stock):
+    """``docs/**/*.md`` is the one narrow exception to the root rule above.
+
+    It admits a starter kit's ``docs/README.md`` (CORR-962, matching
+    botcamp-site's own publication allowlist) without admitting ``docs`` the
+    way ``skills`` or ``routines`` are admitted: a non-markdown file under it
+    is still refused, and a runtime name is refused at any depth, docs
+    included.
+    """
+    from condor.layering import publishable_files
+
+    home = agent_home("perps")
+    _write(home / "AGENT.md", AGENT_MD.format(name="Perps", desc="mine", body="F."))
+    _write(home / "docs" / "README.md", "Read me.\n")
+    _write(home / "docs" / "guides" / "setup.md", "Nested too.\n")
+    _write(home / "docs" / "diagram.png", "not markdown\n")
+    _write(home / "docs" / "learnings.md", "learned\n")
+
+    assert {str(p) for p in publishable_files(home)} == {
+        "AGENT.md",
+        "docs/README.md",
+        "docs/guides/setup.md",
+    }
+
+
 def test_naming_a_file_cannot_smuggle_runtime_output_out(stock):
     """A named path narrows what is considered, never whether it is filtered.
 
