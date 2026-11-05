@@ -2195,7 +2195,7 @@ def test_a_hub_update_also_lands_a_newly_added_skill_enabled(traveller, fake_hub
     fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
     hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     assert res.json()["verb"] == "update"
@@ -2217,7 +2217,7 @@ def test_a_hub_update_grants_execution_consent_for_the_routines_it_writes(
     fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
     hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     assert res.json()["verb"] == "update"
@@ -2249,7 +2249,7 @@ def test_a_hub_update_grants_execution_consent_for_a_crlf_routine_too(
     fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
     hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     assert res.json()["verb"] == "update"
@@ -2274,7 +2274,7 @@ def test_a_hub_update_conflict_does_not_grant_consent_for_the_kept_local_file(
     from condor.agents import code_trust
 
     client = _client()
-    client.post("/hub/agents/traveller/install")
+    client.post("/hub/agents/traveller/install", json={"accepted": True})
     home = agent_home("traveller")
     reviewed_r_py = (home / "routines" / "r.py").read_text()
     assert code_trust.allowed("traveller", "r", reviewed_r_py)
@@ -2294,7 +2294,7 @@ def test_a_hub_update_conflict_does_not_grant_consent_for_the_kept_local_file(
     (home / "routines" / "r.py").write_text(local_edit)
     fake_hub.offer("traveller", zf_bytes, version=2)
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     assert res.json()["verb"] == "update"
@@ -2312,7 +2312,9 @@ def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
     client = _client()
 
     preview = client.post("/hub/agents/traveller/install/preview").json()
-    installed = client.post("/hub/agents/traveller/install").json()
+    installed = client.post(
+        "/hub/agents/traveller/install", json={"accepted": True}
+    ).json()
 
     for field, value in preview["plan"].items():
         assert installed["plan"][field] == value, field
@@ -2388,7 +2390,11 @@ def test_install_succeeds_when_the_pinned_digest_still_matches(offered, fake_hub
 
     res = client.post(
         "/hub/agents/traveller/install",
-        json={"version": str(reviewed_version), "expected_sha256": reviewed_sha256},
+        json={
+            "version": str(reviewed_version),
+            "expected_sha256": reviewed_sha256,
+            "accepted": True,
+        },
     )
 
     assert res.status_code == 200
@@ -2401,7 +2407,7 @@ def test_an_installed_hub_agent_arrives_unmuted_with_nothing_running(offered):
     started regardless: muting is a visibility gate, not an execution one."""
     from condor.agents.engine import get_all_engines
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     assert AgentStore().get("traveller") is not None
@@ -2419,7 +2425,7 @@ def test_a_hub_installed_skill_lands_enabled_with_no_second_approval(offered):
     agent_is_registered`` in ``tests/test_agent_bundle.py``)."""
     from condor.memory.skills import SkillStore
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     muted = load_mutes("traveller")
@@ -2437,7 +2443,7 @@ def test_a_hub_installed_routine_has_execution_consent_for_the_reviewed_bytes(
     installed — the one gate FEAT-147 used to hold unconditional."""
     from condor.agents import code_trust
 
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     source = agent_home("traveller") / "routines" / "r.py"
     assert code_trust.allowed("traveller", "r", source.read_text())
@@ -2471,7 +2477,7 @@ def test_a_hub_installed_routine_with_crlf_line_endings_still_has_execution_cons
     shutil.rmtree(traveller)
     hub.set_token("botcamp-tok")  # install now records consent (PR #137)
 
-    res = _client().post("/hub/agents/traveller/install")
+    res = _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     assert res.status_code == 200
     source = agent_home("traveller") / "routines" / "r.py"
@@ -2484,7 +2490,7 @@ def test_editing_a_hub_installed_routine_does_not_inherit_its_consent(offered):
     source: change the bytes and the file is pending again, like any other."""
     from condor.agents import code_trust
 
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     source = agent_home("traveller") / "routines" / "r.py"
     source.write_text(source.read_text() + "\n# a local edit\n")
@@ -2579,6 +2585,43 @@ def test_a_seat_installs_from_chat_without_the_admins_token(
     assert sent and {call.token for call in sent} == {""}
 
 
+def test_install_from_hub_refuses_an_acceptance_nobody_showed(offered, fake_hub, cm):
+    """The counterpart to the seat test above: whenever there *is* a token
+    to record consent with, a request that never says the owner accepted
+    the hub's terms must be refused rather than have the server record an
+    affirmation nobody showed the caller — whether the field is omitted
+    (no body at all, the frontend's old shape) or sent as ``false``."""
+    for body in (None, {"accepted": False}):
+        res = _client(admin=True).post("/hub/agents/traveller/install", json=body)
+
+        assert res.status_code == 400
+        assert "accept" in res.json()["detail"].lower()
+    assert not agent_home("traveller").exists()
+    assert fake_hub.consents == {}
+
+
+def test_a_hub_install_from_chat_records_consent_with_the_admins_token(
+    offered, fake_hub, cm, monkeypatch
+):
+    """Blocker: the chat tool built the plan with ``hub_reviewed=True`` and
+    installed it, but never told Botcamp this account accepted its terms —
+    unlike ``install_from_hub`` (the web route), which does. The human
+    already confirmed running this exact call before it reached
+    ``_hub_install`` (``hub_install`` is one of
+    ``condor.runtime.danger.DANGEROUS_AGENT_ACTIONS``), so that confirmation
+    is this surface's own stand-in for the import dialog's checkbox."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent
+
+    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
+    hub.set_token("botcamp-tok")
+
+    result = trading_agent.manage_agents(action="hub_install", path="traveller")
+
+    assert result.get("verb") == "install"
+    assert ("traveller", 1) in fake_hub.consents
+
+
 def test_every_hub_surface_carries_the_one_trust_sentence(offered):
     body = _client().get("/hub/agents/traveller").json()
 
@@ -2599,7 +2642,7 @@ def test_every_hub_surface_carries_the_one_trust_sentence(offered):
 def test_installing_from_the_hub_records_its_provenance_outside_the_bundle(
     offered, fake_hub
 ):
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     home = agent_home("traveller")
     stamp = ab.read_stamp(home)
@@ -2707,7 +2750,7 @@ def test_installed_agent_status_is_untracked_without_hub_provenance(traveller):
 
 
 def test_installed_agent_status_confirms_and_persists_delisted(offered, fake_hub):
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
     fake_hub.overrides[("GET", "/agents/traveller")] = hub.Reply(
         404, b'{"detail": "gone"}'
     )
@@ -2728,7 +2771,7 @@ def test_installed_agent_status_does_not_overwrite_on_an_unknown_check(
 ):
     """A transient failure must not erase the last confirmed answer, and must
     not touch any installed file or execution state."""
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
     confirmed_at = ab.read_stamp(agent_home("traveller")).hub_checked_at
     fake_hub.overrides[("GET", "/agents/traveller")] = ConnectionError("down")
 
@@ -2745,7 +2788,7 @@ def test_installed_agent_status_does_not_overwrite_on_an_unknown_check(
 def test_installed_agent_status_does_not_recheck_within_the_cache_window(
     offered, fake_hub
 ):
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
     calls_before = len(fake_hub.calls)
 
     hub.installed_agent_status("traveller")
@@ -2770,7 +2813,7 @@ def test_the_hub_status_route_is_open_to_any_authenticated_user(offered, fake_hu
     from condor.web.models import WebUser
     from condor.web.routes import agents as routes
 
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
 
     app = FastAPI()
     app.include_router(routes.router)
@@ -2797,7 +2840,7 @@ def test_the_hub_status_route_never_sends_a_non_admins_check_with_the_admins_tok
     from condor.web.models import WebUser
     from condor.web.routes import agents as routes
 
-    _client().post("/hub/agents/traveller/install")
+    _client().post("/hub/agents/traveller/install", json={"accepted": True})
     hub.set_token("botcamp-tok")
 
     # Force a live re-check rather than the cached confirmed answer.
