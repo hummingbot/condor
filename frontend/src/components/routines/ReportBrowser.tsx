@@ -190,6 +190,26 @@ export function ReportBrowser({
   const activeSource = activeRoutine?.name ?? pickedSource;
 
   /**
+   * An allowed agent routine lists with `fields: {}` — `GET /routines` never
+   * imports one — so the Config form fetches them itself, once there is a
+   * routine on screen to configure. A pending one stays unresolved; it has
+   * no fields to fetch until the operator allows it.
+   */
+  const needsFields =
+    !!activeRoutine &&
+    !activeRoutine.pending &&
+    Object.keys(activeRoutine.fields).length === 0;
+  const { data: fetchedFields } = useQuery({
+    queryKey: ["routine-fields", activeRoutine?.name],
+    queryFn: () => api.getRoutineFields(activeRoutine!.name),
+    enabled: needsFields,
+  });
+  const effectiveRoutine = useMemo(() => {
+    if (!activeRoutine || !needsFields || !fetchedFields) return activeRoutine;
+    return { ...activeRoutine, fields: fetchedFields.fields };
+  }, [activeRoutine, needsFields, fetchedFields]);
+
+  /**
    * The scope the list actually shows.
    *
    * A row opened from a conversation may point at a shared or general-library
@@ -386,6 +406,14 @@ export function ReportBrowser({
     setConfigValues(buildConfigValues(activeRoutine));
     setShowConfigPanel(false);
   }, [activeSource, activeRoutine]);
+
+  // Fields fetched after the panel may already be open (the operator clicked
+  // Config before the lookup resolved) — fill in their defaults without
+  // closing what they just opened.
+  useEffect(() => {
+    if (!effectiveRoutine || !needsFields || !fetchedFields) return;
+    setConfigValues(buildConfigValues(effectiveRoutine));
+  }, [effectiveRoutine, needsFields, fetchedFields]);
 
   // Track running instance to poll for completion
   const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
@@ -882,9 +910,9 @@ export function ReportBrowser({
                 <X className="h-3 w-3" />
               </button>
             </div>
-            {Object.keys(activeRoutine.fields).length > 0 ? (
+            {Object.keys(effectiveRoutine?.fields ?? {}).length > 0 ? (
               <RoutineConfigForm
-                fields={activeRoutine.fields}
+                fields={effectiveRoutine!.fields}
                 values={configValues}
                 onChange={(key, value) => {
                   setConfigValues((prev) => {
@@ -1037,13 +1065,13 @@ export function ReportBrowser({
                   <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                     {activeRoutine?.description ?? "Run this routine to generate your first report."}
                   </p>
-                  {activeRoutine && Object.keys(activeRoutine.fields).length > 0 && (
+                  {effectiveRoutine && Object.keys(effectiveRoutine.fields).length > 0 && (
                     <div className="mt-4 w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
                       <h3 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
                         Configuration
                       </h3>
                       <RoutineConfigForm
-                        fields={activeRoutine.fields}
+                        fields={effectiveRoutine.fields}
                         values={configValues}
                         onChange={(key, value) => {
                           setConfigValues((prev) => {

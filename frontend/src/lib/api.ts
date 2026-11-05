@@ -2174,6 +2174,10 @@ export interface RoutineInfo {
    * Such a row is listed and its source is readable, but `fields` is empty —
    * a pydantic model's fields only exist once the module has been imported,
    * which is exactly what has not happened.
+   *
+   * An *allowed* agent routine also lists with `fields: {}` here, because
+   * `GET /routines` never imports one either — call `getRoutineFields` for
+   * those once the operator opens the Config form.
    */
   pending?: boolean;
   /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
@@ -4711,6 +4715,18 @@ export const api = {
   getRoutineSource: (name: string) =>
     apiFetch<{ filename: string; source: string }>(
       `/api/v1/routines/${encodeURIComponent(name)}/source`,
+    ),
+
+  /**
+   * An allowed agent routine's `Config` fields, resolved on demand.
+   *
+   * `getRoutines()` reads an agent's own routines without importing them, so
+   * its `fields` come back empty for anything the operator has not yet
+   * opened the Config panel for. This is that panel's own lookup.
+   */
+  getRoutineFields: (name: string) =>
+    apiFetch<{ fields: Record<string, RoutineFieldInfo> }>(
+      `/api/v1/routines/${encodeURIComponent(name)}/fields`,
     ),
 
   getRoutineReports: (name: string) =>
