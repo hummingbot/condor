@@ -11,7 +11,7 @@ from typing import Any
 
 from hummingbot_api_client import HummingbotAPIClient
 
-from mcp_servers.hummingbot_api.exceptions import MaxConnectionsAttemptError
+from mcp_servers.hummingbot_api.exceptions import ConfigurationError, MaxConnectionsAttemptError
 from mcp_servers.hummingbot_api.settings import settings
 
 logger = logging.getLogger("hummingbot-mcp")
@@ -34,6 +34,15 @@ class HummingbotClient:
         """
         if self._client is not None and self._initialized:
             return self._client
+
+        if not settings.api_username.strip() or not settings.api_password.strip():
+            if settings.config_error:
+                raise ConfigurationError(settings.config_error)
+            raise ConfigurationError(
+                "Hummingbot API credentials are not configured. "
+                "Set HUMMINGBOT_USERNAME and HUMMINGBOT_PASSWORD, configure "
+                "~/.hummingbot_mcp/server.yml, or use 'configure_server' with username and password."
+            )
 
         # If we've already failed for this URL, don't retry unless forced or URL changed
         if not force and self._failed_url == settings.api_url and self._last_error:
