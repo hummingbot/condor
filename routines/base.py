@@ -915,6 +915,7 @@ class AgentRoutineRow:
     """
 
     name: str
+    source_path: Path
     category: str = ""
     description: str = ""
     continuous: bool = False
@@ -964,6 +965,7 @@ def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
             meta = meta_from_source(text, name=stem)
             found[stem] = AgentRoutineRow(
                 name=stem,
+                source_path=file_path,
                 category=meta.category or default_category,
                 description=meta.description or stem,
                 continuous=meta.continuous,
@@ -992,6 +994,7 @@ class RoutineCatalogEntry:
     description: str
     category: str
     source: str
+    source_path: Path
     is_continuous: bool = False
     last_modified: float | None = None
 
@@ -1015,6 +1018,7 @@ def catalog_agent_routines(agent_slug: str) -> dict[str, RoutineCatalogEntry]:
             description=row.description,
             category=row.category,
             source=f"agent:{agent_slug}",
+            source_path=row.source_path,
             is_continuous=row.continuous,
             last_modified=row.last_modified,
         )

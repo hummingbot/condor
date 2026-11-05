@@ -51,6 +51,21 @@ def _routine_at(path: Path):
     return _Routine(namespace["run"])
 
 
+class _CatalogEntry:
+    """The shape ``catalog_agent_routines`` actually returns: a ``source_path``
+    and no ``run_fn`` at all, because listing an agent routine never imports
+    it (CORR on top of FEAT-147)."""
+
+    def __init__(self, source_path: Path):
+        self.source_path = source_path
+
+
+def _catalog_entry_at(path: Path) -> _CatalogEntry:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(SOURCE)
+    return _CatalogEntry(path)
+
+
 class FakeStore:
     def __init__(self, routines):
         self._routines = routines
@@ -95,6 +110,20 @@ def test_a_locally_authored_agent_routine_serves_its_source(client_for):
     assert client.get("/routines/mine/scratch/source").status_code == 200
 
 
+def test_a_catalog_entry_with_no_run_fn_still_serves_its_source(client_for):
+    # Greptile, PR #314: `_discover_all` returns a `RoutineCatalogEntry` for
+    # every agent routine now, which has a `source_path` but no `run_fn` at
+    # all — `inspect.getfile(routine.run_fn)` used to 500 on this with an
+    # unhandled AttributeError.
+    path = local_agents_root() / "mine" / "routines" / "catalog_only.py"
+    client = client_for({"mine/catalog_only": _catalog_entry_at(path)})
+
+    resp = client.get("/routines/mine/catalog_only/source")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"filename": "catalog_only.py", "source": SOURCE}
+
+
 def test_a_shared_library_routine_serves_its_source(client_for):
     # ``_shared`` is skipped by iter_agent_slugs, so it has to be allowlisted
     # by name rather than inherited from the agents root.
@@ -131,6 +160,16 @@ def _fn_named(path: Path):
 def test_a_file_outside_every_root_is_refused(client_for, tmp_path):
     path = tmp_path / "elsewhere" / "secrets.py"
     client = client_for({"sneaky": _routine_at(path)})
+
+    resp = client.get("/routines/sneaky/source")
+
+    assert resp.status_code == 403
+    assert "secret" not in resp.text.lower()
+
+
+def test_a_catalog_entry_outside_every_root_is_refused(client_for, tmp_path):
+    path = tmp_path / "elsewhere" / "secrets.py"
+    client = client_for({"sneaky": _catalog_entry_at(path)})
 
     resp = client.get("/routines/sneaky/source")
 

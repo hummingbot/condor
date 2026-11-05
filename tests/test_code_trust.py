@@ -439,6 +439,33 @@ def test_an_allowed_routine_is_flagged_not_pending_and_still_not_imported(
     assert not any(path.exists() for path in sentinels.values())
 
 
+def test_get_routine_fields_resolves_an_allowed_routine(imported_agent):
+    """The Config form's own lookup: resolves, unlike the listing above.
+
+    Crossing this trust boundary is exactly what ``execute``/``start_continuous``
+    already do for an *allowed* routine, so it is no new exposure for this
+    method to do the same — but it does mean the module actually imports here,
+    where the listing's ``fields: {}`` did not.
+    """
+    slug, sentinels = imported_agent
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+
+    fields = routine_store_mod.RoutineStore().get_routine_fields(f"{slug}/lp_scanner")
+
+    assert "value" in fields
+    assert sentinels["lp_scanner"].exists()
+    assert not sentinels["funding_watch"].exists()
+
+
+def test_get_routine_fields_still_refuses_a_pending_routine(imported_agent):
+    slug, sentinels = imported_agent
+
+    with pytest.raises(code_trust.PendingConsentError):
+        routine_store_mod.RoutineStore().get_routine_fields(f"{slug}/funding_watch")
+
+    assert not sentinels["funding_watch"].exists()
+
+
 # ── 4. the import ──
 
 

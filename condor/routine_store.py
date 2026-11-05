@@ -902,6 +902,22 @@ class RoutineStore:
             raise_if_pending(slug, rname)
         return None
 
+    def get_routine_fields(self, routine_name: str) -> dict[str, dict]:
+        """Resolve ``routine_name`` and return its ``Config`` fields.
+
+        ``list_routines`` reads an agent's own routines through
+        :func:`catalog_agent_routines`, which never imports the module, so an
+        allowed-but-not-yet-imported routine lists with ``fields: {}`` there.
+        This is the Config form's own lookup, used only once the operator
+        opens it: resolving to read the fields crosses the same trust
+        boundary ``execute``/``start_continuous`` already cross for an
+        *allowed* routine, so doing it here is no new exposure — a pending
+        one still raises :class:`~condor.agents.code_trust.PendingConsentError`
+        through :meth:`_resolve_routine` and gets no fields either.
+        """
+        routine = self._resolve_routine(routine_name)
+        return routine.get_fields() if routine else {}
+
     async def execute(
         self,
         routine_name: str,
