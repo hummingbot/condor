@@ -779,6 +779,40 @@ it("still asks for an allow on a hub update that kept a locally-edited routine",
   expect(text).not.toContain("no further allow needed");
 });
 
+it("says nothing about allowing routines on an update that carries none", async () => {
+  // Greptile, PR #314 (minor): an update of an agent with no routines (e.g.
+  // `churn`) still said "the hub's own review already covers every routine
+  // this update changes" regardless of whether it changed any.
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "skills/s/SKILL.md",
+        verdict: "changed",
+        bytes: 70,
+        executable: false,
+        incoming: "",
+      },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  const text = container.querySelector("[data-update-plan]")?.textContent ?? "";
+  expect(text).not.toContain("no further allow needed");
+  expect(text).not.toContain("needs your allow");
+  expect(text).toContain("Nothing is started.");
+});
+
 it("shows a different build of the same version as a warning, with the diff", async () => {
   reply = SAME_AGENT;
   updateReply = {
@@ -913,6 +947,44 @@ it("still asks for an allow on an update's success screen when it kept a locally
   const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
   expect(text).toContain("still needs your allow");
   expect(text).not.toContain("no further allow needed");
+});
+
+it("says nothing about allowing routines on the success screen of an update with none", async () => {
+  // Greptile, PR #314 (minor), the success-screen half: `landedHasRoutines`
+  // already had this rule for a fresh install; an update carrying no routine
+  // file needs the same "no sentence about something it does not carry".
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "skills/s/SKILL.md",
+        verdict: "changed",
+        bytes: 70,
+        executable: false,
+        incoming: "",
+      },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).not.toContain("no further allow needed");
+  expect(text).not.toContain("needs your allow");
 });
 
 it("restores the file list and the kept-file notice on the update's success screen", async () => {

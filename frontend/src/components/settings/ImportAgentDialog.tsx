@@ -634,6 +634,12 @@ export function ImportAgentDialog({
         .map((f) => routineNameOf(f.path))
         .filter((name): name is string => name !== null)
     : [];
+  // Whether this update touches any routine file at all — an update with
+  // none gets no sentence about allowing routines, the same rule the landed
+  // install screen already follows for `landedHasRoutines` below.
+  const updateHasRoutines = update
+    ? update.files.some((f) => routineNameOf(f.path) !== null)
+    : false;
 
   // Coarse enough to animate only an actual screen change: re-previewing
   // under a new name stays "review" throughout, so it swaps instantly.
@@ -1214,7 +1220,9 @@ export function ImportAgentDialog({
                 <>
                   Its memory, config, mutes, journals and session output are untouched.
                   Nothing is started
-                  {updateConsentNote(update.hub_reviewed, keptLocalRoutines)}
+                  {updateHasRoutines
+                    ? updateConsentNote(update.hub_reviewed, keptLocalRoutines)
+                    : "."}
                 </>
               )}
             </p>
@@ -1386,6 +1394,10 @@ function SuccessScreen({
   // A fresh install with zero routines gets no sentence about routines at
   // all, rather than a reassurance about something it does not carry.
   const landedHasRoutines = landed ? landed.executables.some((f) => routineNameOf(f.path) !== null) : false;
+  // Same rule for an update: one with no routine files gets no sentence
+  // about allowing them (Greptile, PR #314) — `churn`-style updates that
+  // touch no routine were saying "no further allow needed" regardless.
+  const appliedHasRoutines = applied ? applied.files.some((f) => routineNameOf(f.path) !== null) : false;
 
   return (
     <div className="space-y-4">
@@ -1421,7 +1433,7 @@ function SuccessScreen({
               ? "Everything it declares — every tool and skill — comes in enabled."
               : `Muted on arrival: ${mutedNames.join(", ")}.`}
         </p>
-        {(isUpdate || landedHasRoutines) && (
+        {((isUpdate && appliedHasRoutines) || landedHasRoutines) && (
           <p>
             {isUpdate
               ? // `updateConsentNote` is written as a continuation ("<subject>,
