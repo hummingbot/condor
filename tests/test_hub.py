@@ -2395,6 +2395,22 @@ def test_the_admins_reads_still_carry_the_token(offered, fake_hub, cm):
     assert {call.token for call in fake_hub.calls[before:]} == {"botcamp-tok"}
 
 
+def test_a_seat_can_still_install_a_public_agent(offered, fake_hub, cm):
+    """``post_consent`` needs a token (botcamp-site PR #137) and a seat's is
+    always withheld (SEC review C4, the test above) — so a seat installing a
+    public agent must not be refused for having none to record consent
+    with, the way every other hub read here already tolerates going
+    without one rather than borrowing the admin's."""
+    res = _client(admin=False).post("/hub/agents/traveller/install")
+
+    assert res.status_code == 200
+    assert res.json()["verb"] == "install"
+    assert agent_home("traveller").exists()
+    assert all(
+        not call.url.split("?")[0].endswith("/consent") for call in fake_hub.calls
+    )
+
+
 def test_a_seat_installs_from_chat_without_the_admins_token(
     offered, fake_hub, cm, monkeypatch
 ):

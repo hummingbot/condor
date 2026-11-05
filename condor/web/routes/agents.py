@@ -5537,18 +5537,28 @@ async def install_from_hub(
     # degrade: no Botcamp connection, a revoked token, or the hub refusing
     # all read the same as any other blocker, with a readable reason, and
     # nothing has been applied yet for either to leave half-done.
-    try:
-        await asyncio.to_thread(
-            hub.post_consent,
-            slug,
-            str(fetched.version),
-            HUB_CONSENT_TERMS_VERSION,
-            agent_id=listing.agent_id,
-            sha256=fetched.sha256,
-            token=_hub_read_token(user),
-        )
-    except hub.HubError as exc:
-        raise _hub_refusal(exc) from exc
+    #
+    # ``NoTokenError`` is the one exception to "stop outright": a seat has no
+    # token at all (SEC review C4 — only the admin's own reads ever carry the
+    # admin's Botcamp account, and that line holds for this write too, so a
+    # seat's install must never borrow it). There being nothing to record
+    # consent *as* is not a Botcamp refusal, and must not block a seat from
+    # installing a public agent the way every other read in this flow already
+    # tolerates going without a token.
+    hub_token = _hub_read_token(user)
+    if hub_token:
+        try:
+            await asyncio.to_thread(
+                hub.post_consent,
+                slug,
+                str(fetched.version),
+                HUB_CONSENT_TERMS_VERSION,
+                agent_id=listing.agent_id,
+                sha256=fetched.sha256,
+                token=hub_token,
+            )
+        except hub.HubError as exc:
+            raise _hub_refusal(exc) from exc
     try:
         if verb == "update":
             result = agent_bundle.apply_update(plan, user_id=user.id)
