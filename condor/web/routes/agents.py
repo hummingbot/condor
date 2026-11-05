@@ -468,6 +468,9 @@ class RoutineCard(BaseModel):
     # ``"pending"`` (never allowed) or ``"changed"`` (allowed, then edited).
     pending: bool = False
     pending_reason: str = ""
+    # True when a local routine file exists in this Agent's writable folder and
+    # can be deleted (#313); False for shared and shipped-only routines.
+    deletable: bool = False
 
 
 class ControllerCard(BaseModel):
@@ -2432,8 +2435,13 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
     be the thing that runs it.
     """
     from condor.memory.mutes import load_mutes
-    from routines.base import assistant_routines, pending_routines
+    from routines.base import (
+        assistant_routines,
+        assistant_routines_dir,
+        pending_routines,
+    )
 
+    local_dir = assistant_routines_dir(slug)
     muted = load_mutes(slug)["routines"]
     cards = [
         RoutineCard(
@@ -2443,6 +2451,8 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
             source=info.source,
             category=info.category,
             muted=name in muted,
+            deletable=info.source.startswith("agent:")
+            and (local_dir / f"{name}.py").is_file(),
         )
         for name, info in sorted(assistant_routines(slug, include_muted=True).items())
     ]
@@ -2456,6 +2466,7 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
             muted=row.muted,
             pending=True,
             pending_reason=row.reason,
+            deletable=(local_dir / f"{row.name}.py").is_file(),
         )
         for row in pending_routines(slug)
     )
@@ -2717,6 +2728,23 @@ async def delete_agent_skill(
         )
     if not result:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return {"deleted": True}
+
+
+@router.delete("/{slug}/routines/{name}")
+async def delete_agent_routine(
+    slug: str, name: str, user: WebUser = Depends(get_current_user)
+):
+    """Delete one of the Agent's own routines, its consent record, and its mute."""
+    from mcp_servers.condor.tools.routines import delete_routine
+
+    agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
+    result = delete_routine(name, target=agent.slug)
+    if isinstance(result, dict) and result.get("error"):
+        err = result["error"]
+        status = 404 if err == f"Agent routine '{name}' not found" else 400
+        raise HTTPException(status_code=status, detail=err)
     return {"deleted": True}
 
 

@@ -152,7 +152,9 @@ export const AgentKnowledge = memo(function AgentKnowledge({
   const [reading, setReading] = useState<Reading | null>(null);
   const [creating, setCreating] = useState<"skill" | "memory" | null>(null);
   const [editing, setEditing] = useState(false);
-  const [deleting, setDeleting] = useState<Reading | null>(null);
+  const [deleting, setDeleting] = useState<
+    Reading | { kind: "routine"; name: string } | null
+  >(null);
 
   const queryClient = useQueryClient();
 
@@ -212,12 +214,17 @@ export const AgentKnowledge = memo(function AgentKnowledge({
   }, [queryClient, slug]);
 
   const deleteMut = useMutation({
-    mutationFn: (target: Reading) =>
+    mutationFn: (target: NonNullable<typeof deleting>) =>
       target.kind === "skill"
         ? api.deleteAgentSkill(slug, target.card.slug)
-        : api.deleteAgentMemory(slug, target.card.name),
-    onSuccess: () => {
+        : target.kind === "routine"
+          ? api.deleteAgentRoutine(slug, target.name)
+          : api.deleteAgentMemory(slug, target.card.name),
+    onSuccess: (_res, target) => {
       refresh();
+      if (target.kind === "routine") {
+        queryClient.invalidateQueries({ queryKey: ["routines"] });
+      }
       setDeleting(null);
       setReading(null);
       leaveEditor();
@@ -606,6 +613,7 @@ export const AgentKnowledge = memo(function AgentKnowledge({
                 onAllow={(name) =>
                   allowMut.mutate({ kind: "routine", name, allowed: true })
                 }
+                onDelete={(name) => setDeleting({ kind: "routine", name })}
                 allowing={allowMut.isPending}
                 onAskAgent={onAskAgent}
               />
@@ -622,7 +630,13 @@ export const AgentKnowledge = memo(function AgentKnowledge({
 
       <ConfirmDialog
         open={!!deleting}
-        title={deleting?.kind === "memory" ? "Forget this" : "Delete Playbook"}
+        title={
+          deleting?.kind === "memory"
+            ? "Forget this"
+            : deleting?.kind === "routine"
+              ? "Delete Routine"
+              : "Delete Playbook"
+        }
         isPending={deleteMut.isPending}
         isError={deleteMut.isError}
         errorText={
@@ -640,6 +654,14 @@ export const AgentKnowledge = memo(function AgentKnowledge({
               {deleting.card.name}
             </strong>
             ? It drops out of every future conversation.
+          </>
+        ) : deleting?.kind === "routine" ? (
+          <>
+            Delete{" "}
+            <strong className="text-[var(--color-text)]">
+              {formatRoutineName(deleting.name)}
+            </strong>
+            ? This removes the routine file from this agent. This cannot be undone.
           </>
         ) : (
           <>
@@ -1196,6 +1218,7 @@ function RoutinesTab({
   onOpen,
   onMute,
   onAllow,
+  onDelete,
   allowing,
   onAskAgent,
 }: {
@@ -1207,6 +1230,8 @@ function RoutinesTab({
   onMute?: (name: string, muted: boolean) => void;
   /** Let an imported routine's file execute in this process (FEAT-147). */
   onAllow?: (name: string) => void;
+  /** Delete one of this agent's own routines (#313). */
+  onDelete?: (name: string) => void;
   /** An allow is in flight — the chips stop inviting a second click. */
   allowing?: boolean;
   /** Put the improvement to the agent that runs it (FEAT-092). */
@@ -1278,6 +1303,8 @@ function RoutinesTab({
             }
             subtitle={r.description}
             onClick={onOpen && (() => onOpen(r.name))}
+            onDelete={r.deletable && onDelete ? () => onDelete(r.name) : undefined}
+            deleteTitle="Delete this routine"
             dimmed={r.muted}
             // The routine's real name, not the title-cased one the row shows:
             // this sentence is read by the agent, which addresses it by the
