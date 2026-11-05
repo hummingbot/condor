@@ -676,8 +676,6 @@ def test_get_sends_the_linked_token_so_a_gated_agent_can_resolve(fake_hub):
     assert fake_hub.calls[0].token == "a-token"
 
 
-
-
 def test_get_reads_botcamps_data_envelope(fake_hub):
     """Botcamp wraps every answer in ``{"data": ...}`` — the bare §3.2 shape
     above and the enveloped one Botcamp actually sends both read the same."""
@@ -1700,9 +1698,7 @@ def test_a_successful_redeem_with_no_token_raises(fake_hub):
         ("too_many_connections", "too many Condor"),
     ],
 )
-def test_the_known_400_errors_get_their_own_sentence(
-    fake_hub, error, message_fragment
-):
+def test_the_known_400_errors_get_their_own_sentence(fake_hub, error, message_fragment):
     """The hub's error bodies are deliberately uniform (a wrong, expired or
     already-used code all answer ``invalid_grant``), so Condor writes its own
     sentence per *distinguishable* case rather than passing the hub's text
@@ -1741,9 +1737,7 @@ def test_rate_limiting_raises_429_with_a_specific_sentence(fake_hub):
 
 
 def test_a_server_error_raises_with_its_own_status(fake_hub):
-    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
-        500, b"{}"
-    )
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(500, b"{}")
 
     with pytest.raises(hub.HubError) as excinfo:
         hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
@@ -1910,9 +1904,7 @@ def test_the_dashboard_reports_a_wrong_or_expired_code_with_a_specific_sentence(
     )
     client = _settings_client(admin=True)
 
-    res = client.post(
-        "/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"}
-    )
+    res = client.post("/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"})
 
     assert res.status_code == 400
     assert "wrong, expired or already used" in res.json()["detail"]
@@ -1925,9 +1917,7 @@ def test_the_dashboard_reports_rate_limiting_as_429(cm, fake_hub):
     )
     client = _settings_client(admin=True)
 
-    res = client.post(
-        "/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"}
-    )
+    res = client.post("/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"})
 
     assert res.status_code == 429
 

@@ -1613,9 +1613,7 @@ def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionSta
             )
         raise HubError(_refusal(reply, "redeeming the connect code"), status=400)
 
-    raise HubError(
-        _refusal(reply, "redeeming the connect code"), status=reply.status
-    )
+    raise HubError(_refusal(reply, "redeeming the connect code"), status=reply.status)
 
 
 class DisconnectResult(BaseModel):

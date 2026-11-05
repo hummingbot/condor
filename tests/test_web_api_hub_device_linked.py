@@ -78,7 +78,9 @@ def test_a_non_admin_seat_never_reaches_the_admin_only_connection_state(monkeypa
     route, not this one."""
     calls = []
     monkeypatch.setattr(
-        hub, "connection_state", lambda: calls.append(1) or ConnectionState(status="none")
+        hub,
+        "connection_state",
+        lambda: calls.append(1) or ConnectionState(status="none"),
     )
     app = build(monkeypatch, linked=False)
     as_user(app, TRADER).get("/settings/hub-device/linked")
