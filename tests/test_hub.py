@@ -28,6 +28,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1639,6 +1640,80 @@ def test_a_disconnect_mid_flight_is_not_undone_by_the_redeem_it_raced(
     assert revokes[0].token == "bc_live_test_default"
 
 
+def test_a_disconnect_racing_the_credential_write_itself_cannot_undo_it(
+    fake_hub, cm, monkeypatch
+):
+    """The window the test above does not reach: 320e5d66 only closed the
+    gap *before* the generation check (``hub.py:1607`` at the time). The
+    check and the write were still two separate critical sections, so a
+    disconnect landing in between them — after the check had already read
+    "still current" but before the write had happened — got overwritten by
+    that stale write. Greptile flagged this at ``hub.py:1633`` and the
+    thread was resolved on the strength of 320e5d66 alone, which never
+    closed this gap.
+
+    This test forces a disconnect into that exact gap with two real
+    threads, rather than asserting the lock exists: it pauses the redeem
+    thread *inside* ``get_config_manager()``, which the fix now calls while
+    still holding ``_connect_lock``, then starts a concurrent disconnect and
+    shows it cannot even complete its own generation bump — which needs the
+    same lock — until the write's critical section has released it.
+    """
+    import config_manager as cm_module
+
+    reached_write = threading.Event()
+    release_write = threading.Event()
+    real_get_config_manager = cm_module.get_config_manager
+    calls = {"n": 0}
+
+    def paused_get_config_manager():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            reached_write.set()
+            assert release_write.wait(timeout=5), "test never released the write"
+        return real_get_config_manager()
+
+    monkeypatch.setattr(cm_module, "get_config_manager", paused_get_config_manager)
+
+    redeem_result = {}
+
+    def run_redeem():
+        redeem_result["state"] = hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
+
+    redeem_thread = threading.Thread(target=run_redeem)
+    redeem_thread.start()
+    assert reached_write.wait(timeout=5), "redeem never reached its write"
+
+    disconnect_thread = threading.Thread(target=hub.disconnect)
+    disconnect_thread.start()
+
+    # Still paused inside the write's own critical section: a disconnect
+    # racing it cannot get in, not even far enough to bump the generation —
+    # that needs the very lock the write is holding. If this is alive, the
+    # check and the write are atomic with respect to disconnect(); if the
+    # old code were in effect, disconnect would already be finished here,
+    # having cleared the credential that the paused write is about to
+    # clobber.
+    disconnect_thread.join(timeout=0.3)
+    assert disconnect_thread.is_alive(), (
+        "disconnect() completed while this install's write to the "
+        "credential was still pending — the generation check and the "
+        "write are not atomic"
+    )
+
+    release_write.set()
+    redeem_thread.join(timeout=5)
+    disconnect_thread.join(timeout=5)
+
+    assert not redeem_thread.is_alive()
+    assert not disconnect_thread.is_alive()
+    # The redeem itself succeeded (it ran before any disconnect could land),
+    # but disconnect's own unconditional clear, which runs after its
+    # generation bump, has the last word.
+    assert redeem_result["state"].status == "linked"
+    assert hub.token() == ""
+
+
 def test_the_code_is_stripped_but_otherwise_sent_as_typed(fake_hub):
     hub.redeem_connect_code("  wxyz-wxyz-wxyz  ")
 
@@ -1646,9 +1721,25 @@ def test_the_code_is_stripped_but_otherwise_sent_as_typed(fake_hub):
 
 
 def test_an_empty_code_is_refused_without_a_request(fake_hub):
-    with pytest.raises(hub.HubError):
+    """The refusal needs a 4xx status, not the ``HubError`` default of 0 —
+    ``_hub_device_refusal`` (``condor/web/routes/settings.py``) maps anything
+    outside 400-500 to a 502, which would turn a missing paste into a
+    gateway error instead of showing the owner their own message.
+    """
+    with pytest.raises(hub.HubError) as excinfo:
         hub.redeem_connect_code("   ")
 
+    assert excinfo.value.status == 400
+    assert fake_hub.calls == []
+
+
+def test_the_dashboard_reports_an_empty_code_as_400_not_a_gateway_error(cm, fake_hub):
+    client = _settings_client(admin=True)
+
+    res = client.post("/settings/hub-device/connect", json={"code": "   "})
+
+    assert res.status_code == 400
+    assert "Paste the code" in res.json()["detail"]
     assert fake_hub.calls == []
 
 
@@ -1997,6 +2088,45 @@ def test_the_dashboard_reports_when_the_hub_could_not_be_told(cm, fake_hub):
     assert body["revoked"] is False
     assert body["error"]
     assert hub.token() == ""
+
+
+# ── Consent for a hub agent version (botcamp-site PR #137) ───────────────
+
+
+def test_a_not_yet_accepted_consent_reply_parses(fake_hub, cm):
+    """Botcamp sends ``acceptedAt``/``termsVersion`` as ``null`` before the
+    first acceptance — the fake hub's own consent route answers exactly this
+    shape when nothing has been accepted yet (see ``FakeHub._route``,
+    ``consent["acceptedAt"] if consent else None``). ``AgentConsentState``
+    must read that as "absent", not explode, the same as every other
+    hub-read model in this module tolerates a ``null`` column.
+    """
+    state = hub.AgentConsentState.model_validate(
+        {"accepted": False, "acceptedAt": None, "termsVersion": None}
+    )
+
+    assert state.accepted is False
+    assert state.accepted_at == ""
+    assert state.terms_version == ""
+
+
+def test_get_consent_reads_the_not_yet_accepted_reply_without_a_hub_error(
+    traveller, fake_hub
+):
+    listing = fake_hub.offer("traveller", _zip_agent("traveller"))
+    hub.set_token("botcamp-tok")
+    version = listing["versions"][0]
+
+    state = hub.get_consent(
+        "traveller",
+        "1",
+        agent_id=listing["agentId"],
+        sha256=version["sha256"],
+        token=hub.token(),
+    )
+
+    assert state.accepted is False
+    assert state.terms_version == ""
 
 
 @pytest.fixture
