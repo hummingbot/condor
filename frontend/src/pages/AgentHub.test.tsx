@@ -1,8 +1,9 @@
 /**
  * Botcamp Hub as one destination (FEAT-153): Pull agents is gated on this
- * install being signed in to Botcamp (PR #111's device flow) for every seat,
- * admin or not, and the Botcamp section itself (the connected profile +
- * upload) is admin-only, with withdraw finally having a dashboard control.
+ * install being signed in to Botcamp (botcamp-site PR #137's connect-code
+ * flow) for every seat, admin or not, and the Botcamp section itself (the
+ * connected profile + upload) is admin-only, with withdraw finally having a
+ * dashboard control.
  *
  * The thing worth testing is not that the sections render — it is that the
  * admin-only section mounts no admin-only query for a non-admin seat, that
@@ -39,11 +40,9 @@ let hubDeviceState: HubDeviceState;
 
 const NONE_DEVICE: HubDeviceState = {
   status: "none",
-  user_code: "",
-  approval_url: "",
-  expires_at: 0,
   profile_handle: "",
   scope: [],
+  connect_url: "https://botcamp.xyz/connect",
 };
 
 function agent(over: Partial<AgentSummary>): AgentSummary {
@@ -110,13 +109,17 @@ function router(url: string, init?: RequestInit): Response | Promise<Response> {
   if (method === "GET" && url === "/api/v1/settings/hub-device/linked") {
     return json({ linked: hubDeviceState.status === "linked" });
   }
-  if (method === "POST" && url === "/api/v1/settings/hub-device/start") {
-    return json({
-      user_code: "ABC-123",
-      approval_url: "https://botcamp.xyz/connect",
-      expires_in: 600,
-      interval: 5,
-    });
+  if (method === "POST" && url === "/api/v1/settings/hub-device/connect") {
+    // The real backend stores the token the moment the redeem succeeds, so
+    // the next `GET /hub-device` already reads back "linked" — simulate
+    // that server-side sequencing here rather than tracking it separately.
+    hubDeviceState = {
+      ...hubDeviceState,
+      status: "linked",
+      profile_handle: "@fede",
+      scope: ["agents:read", "agents:publish"],
+    };
+    return json(hubDeviceState);
   }
   if (method === "GET" && url.startsWith("/api/v1/hub/catalogue")) {
     return json({ listings: [], page: 1, trust: "" });
@@ -293,10 +296,10 @@ it("offers an admin exactly one Sign in to Botcamp control, in the Pull gate", a
   await render();
 
   // The regression this page shipped with: the Pull gate's modal trigger and
-  // the Botcamp section's inline flow were two buttons for one install-wide
+  // the Botcamp section's inline flow were two controls for one install-wide
   // link. The Botcamp section does not exist until this install is linked.
-  const signIns = [...container.querySelectorAll("button")].filter((b) =>
-    b.textContent?.includes("Sign in to Botcamp"),
+  const signIns = [...container.querySelectorAll("a, button")].filter((el) =>
+    el.textContent?.includes("Sign in to Botcamp"),
   );
   expect(signIns).toHaveLength(1);
   expect(tab("Publish yours").disabled).toBe(true);
@@ -306,32 +309,18 @@ it("offers an admin exactly one Sign in to Botcamp control, in the Pull gate", a
   expect(container.querySelector(".fixed.inset-0")).toBeNull();
 });
 
-it("rebuilds the pending link from the poll alone, after a page refresh", async () => {
-  // A refresh mid-login: nothing of the start response survives in memory,
-  // so the "Open Botcamp" link can only come from GET /settings/hub-device.
-  // The hub's own verification_uri is not in that payload at all (SEC-819);
-  // this asserts the one URL the dashboard can reach for is the safe one,
-  // and that a hostile field smuggled alongside it is never read.
+it("shows the sign-in link GET /hub-device builds, never anything from the hub", async () => {
+  // `connect_url` is always set on the read, linked or not (SEC-819): the
+  // link renders straight off it, with no "start" call and no local state
+  // to rebuild after a page refresh.
   isAdmin = true;
-  hubDeviceState = {
-    ...NONE_DEVICE,
-    status: "pending",
-    user_code: "ABC-123",
-    approval_url: "https://botcamp.xyz/connect",
-    ...({ verification_uri_complete: "https://evil.example/phish" } as object),
-  };
+  hubDeviceState = { ...NONE_DEVICE, connect_url: "https://botcamp.xyz/connect" };
   await render();
 
-  const pending = container.querySelector("[data-hub-device-status='pending']");
-  expect(pending?.textContent).toContain("ABC-123");
-
   const link = [...container.querySelectorAll("a")].find((a) =>
-    a.textContent?.includes("Open Botcamp"),
+    a.textContent?.includes("Sign in to Botcamp"),
   ) as HTMLAnchorElement;
   expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect");
-  expect(container.innerHTML).not.toContain("evil.example");
-  // No tab is opened on a refresh — only starting a login does that.
-  expect(window.open).not.toHaveBeenCalled();
 });
 
 it("a non-admin sees the lookup form in Pull agents once this install is linked", async () => {
@@ -390,30 +379,36 @@ it("an unreachable hub reads differently from a not-found slug, for every seat",
   expect(error?.textContent).toContain("maintenance");
 });
 
-it("runs the device flow inline in the gate, with Upload yours hidden until linked", async () => {
+it("connects inline in the gate by pasting a code, with Upload yours hidden until linked", async () => {
   isAdmin = true;
   await render();
 
-  await click(buttonInPanel("pull", "Sign in to Botcamp"));
-  await waitFor(() => container.querySelector("[data-hub-device-status='pending']") !== null);
-
-  const pending = container.querySelectorAll("[data-hub-device-status='pending']");
-  // Still one, now that the code is up: the pending code and its Cancel are
-  // not repeated further down the page either.
-  expect(pending).toHaveLength(1);
-  expect(pending[0].textContent).toContain("ABC-123");
-  // The safe link, built by the backend from the configured hub base — the
-  // only URL the start response carries (SEC-819).
-  expect(window.open).toHaveBeenCalledWith(
-    "https://botcamp.xyz/connect",
-    "_blank",
-    "noopener,noreferrer",
-  );
-  const link = [...container.querySelectorAll("a")].find((a) =>
-    a.textContent?.includes("Open Botcamp"),
-  ) as HTMLAnchorElement;
-  expect(link.getAttribute("href")).toBe("https://botcamp.xyz/connect");
   expect(heading("Upload yours")).toBeNull();
+
+  const open = panel("pull");
+  const input = open!.querySelector(
+    "input[aria-label='Botcamp connect code']",
+  ) as HTMLInputElement;
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  await act(async () => {
+    setter.call(input, "WXYZ-WXYZ-WXYZ");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await click(buttonInPanel("pull", "Connect"));
+
+  await waitFor(() =>
+    requests.some(
+      (r) => r.method === "POST" && r.url === "/api/v1/settings/hub-device/connect",
+    ),
+  );
+  await settle();
+
+  expect(heading("Upload yours")).toBeNull(); // still the Pull tab, not Publish
+  const chip = container.querySelector("[data-hub-device-status='linked']");
+  expect(chip?.textContent).toContain("@fede");
 });
 
 it("reveals Upload yours once linked, with the profile handle shown", async () => {
@@ -435,22 +430,6 @@ it("reveals Upload yours once linked, with the profile handle shown", async () =
   expect(tab("Publish yours").disabled).toBe(false);
   await click(tab("Publish yours"));
   expect(heading("Upload yours")).not.toBeNull();
-});
-
-it("shows a denied device login", async () => {
-  isAdmin = true;
-  hubDeviceState = { ...NONE_DEVICE, status: "denied" };
-  await render();
-  expect(container.querySelector("[data-hub-device-status='denied']")).not.toBeNull();
-  expect(container.textContent).toContain("denied on Botcamp");
-});
-
-it("shows an expired device login", async () => {
-  isAdmin = true;
-  hubDeviceState = { ...NONE_DEVICE, status: "expired" };
-  await render();
-  expect(container.querySelector("[data-hub-device-status='expired']")).not.toBeNull();
-  expect(container.textContent).toContain("expired before it was approved");
 });
 
 it("an admin can choose a local agent and publish it, once linked", async () => {

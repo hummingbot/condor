@@ -5273,9 +5273,11 @@ def _hub_read_token(user: WebUser) -> str:
     return hub.token() if get_config_manager().is_admin(user.id) else ""
 
 
-async def _hub_consent_state(slug: str, version: int, user: WebUser) -> dict:
+async def _hub_consent_state(
+    slug: str, agent_id: str, version: int, sha256: str, user: WebUser
+) -> dict:
     """``{"accepted": ..., "terms_version": ...}`` for ``slug``/``version``,
-    never raising.
+    pinned to ``agent_id`` and ``sha256``, never raising.
 
     Read-only and best-effort, for the preview response's own sake
     (:func:`preview_hub_install`): a missing Botcamp connection or a hub
@@ -5292,7 +5294,12 @@ async def _hub_consent_state(slug: str, version: int, user: WebUser) -> dict:
         return {"accepted": False, "terms_version": ""}
     try:
         state = await asyncio.to_thread(
-            hub.get_consent, slug, str(version), token=token
+            hub.get_consent,
+            slug,
+            str(version),
+            agent_id=agent_id,
+            sha256=sha256,
+            token=token,
         )
     except HubError:
         return {"accepted": False, "terms_version": ""}
@@ -5476,7 +5483,9 @@ async def preview_hub_install(
         # no Botcamp connection, a transport error — must not block the
         # review the owner came here for, so it reads as "not yet accepted"
         # rather than failing the whole preview.
-        "consent": await _hub_consent_state(slug, fetched.version, user),
+        "consent": await _hub_consent_state(
+            slug, listing.agent_id, fetched.version, fetched.sha256, user
+        ),
     }
 
 
@@ -5534,6 +5543,8 @@ async def install_from_hub(
             slug,
             str(fetched.version),
             HUB_CONSENT_TERMS_VERSION,
+            agent_id=listing.agent_id,
+            sha256=fetched.sha256,
             token=_hub_read_token(user),
         )
     except hub.HubError as exc:

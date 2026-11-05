@@ -247,34 +247,32 @@ function BotcampAccountCard() {
 }
 
 /**
- * Connect this install to a Botcamp profile with a device login (PR #111),
- * gating `children` on being linked rather than showing them unconditionally.
+ * Connect this install to a Botcamp profile by pasting a code (botcamp-site
+ * PR #137's connect-code flow), gating `children` on being linked rather
+ * than showing them unconditionally.
  *
- * Replaces FEAT-148's pairing-code flow, itself a replacement for the pasted
- * token: starting a device login shows a user code and opens Botcamp's
- * `/connect` page in a new tab, where the signed-in admin enters that code
- * before approving. This component only ever polls Condor's own
- * `/hub-device` — the credential itself is stored server-side the moment the
- * hub hands it over and never reaches this component or any other response
- * this dashboard reads.
+ * Replaces PR #111's device-login flow, deleted outright when #137 dropped
+ * `/api/condor/device/*`: the admin signs in to Botcamp's own `/connect`
+ * page, which shows a code, and pastes it here. Redeeming it is one call —
+ * there is nothing to poll, unlike the device flow's pending state.
  *
  * Composed on the admin-only part of `/hub` (FEAT-153).
  */
 /**
- * The device-login state machine, shared by `HubDeviceSignIn` (the not-yet-
+ * The connect state machine, shared by `HubDeviceSignIn` (the not-yet-
  * linked half, rendered in `/hub`'s Pull agents gate) and `HubDeviceField`
  * (the linked half — connected status, Disconnect and Upload yours, in
- * `/hub`'s Botcamp section) — one place that owns the `start`/`disconnect`
- * mutations and the `["hub-device"]` poll. The two never render at once:
+ * `/hub`'s Botcamp section) — one place that owns the `connect`/`disconnect`
+ * mutations and the `["hub-device"]` read. The two never render at once:
  * `/hub` shows the gate until this install is linked and the Botcamp section
  * only once it is, so there is one "Sign in to Botcamp" control on the page,
  * never two (FEAT-153).
  *
- * It also invalidates `["hub-device-linked"]` the moment this poll observes
+ * It also invalidates `["hub-device-linked"]` the moment this read observes
  * `"linked"` flip, either way — `/hub`'s Pull gate reads that separate,
  * non-admin-safe query (`AgentHub`'s own docstring explains why it cannot
  * share this one), and without this it would keep its stale answer until
- * some other refetch happened to come along after a sign-in or a disconnect
+ * some other refetch happened to come along after a connect or a disconnect
  * that just happened here.
  */
 function useHubDevice() {
@@ -282,8 +280,6 @@ function useHubDevice() {
   const { data } = useQuery({
     queryKey: ["hub-device"],
     queryFn: api.getHubDevice,
-    refetchInterval: (query) =>
-      query.state.data?.status === "pending" ? 2000 : false,
   });
 
   const wasLinked = useRef<boolean | null>(null);
@@ -295,23 +291,12 @@ function useHubDevice() {
     wasLinked.current = isLinked;
   }, [data?.status, queryClient]);
 
-  const start = useMutation({
-    mutationFn: api.startHubDevice,
-    onSuccess: (started) => {
-      queryClient.setQueryData(["hub-device"], {
-        status: "pending",
-        user_code: started.user_code,
-        approval_url: started.approval_url,
-        expires_at: 0,
-        profile_handle: "",
-        scope: [],
-      });
-      // `approval_url` is the backend's own, built from the configured hub
-      // base — the hub's echoed `verification_uri` never reaches this far,
-      // so this navigation cannot be aimed off-site by a reply (SEC-819).
-      // The same string comes back on every later pending poll, so a page
-      // refresh mid-login opens the identical link.
-      window.open(started.approval_url, "_blank", "noopener,noreferrer");
+  const [code, setCode] = useState("");
+  const connect = useMutation({
+    mutationFn: () => api.connectHubDevice(code),
+    onSuccess: (state) => {
+      setCode("");
+      queryClient.setQueryData(["hub-device"], state);
     },
   });
 
@@ -342,9 +327,11 @@ function useHubDevice() {
   return {
     data,
     status: data?.status ?? "none",
-    start,
+    code,
+    setCode,
+    connect,
     disconnect,
-    busy: start.isPending || disconnect.isPending,
+    busy: connect.isPending || disconnect.isPending,
     revokeNotice: revokeNotice ?? null,
   };
 }
@@ -396,83 +383,59 @@ export function HubDeviceField({ children }: { children?: ReactNode }) {
 }
 
 /**
- * The not-yet-linked half of the state machine on its own: the sign-in
- * button, the pending user code, and the denied/expired/invalid/error
- * messages — everything short of "connected". Split out from
- * `HubDeviceField` because `/hub` renders the two halves in different places:
- * this one in the Pull agents gate (through `HubDeviceSignIn`), the linked
- * half in the Botcamp section below it.
+ * The not-yet-linked half of the state machine on its own: the "Sign in to
+ * Botcamp" link, the pasted-code form, and the error message — everything
+ * short of "connected". Split out from `HubDeviceField` because `/hub`
+ * renders the two halves in different places: this one in the Pull agents
+ * gate (through `HubDeviceSignIn`), the linked half in the Botcamp section
+ * below it.
  */
 function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
-  const { data, status, start, disconnect, busy, revokeNotice } = device;
+  const { data, status, code, setCode, connect, disconnect, busy, revokeNotice } =
+    device;
+
+  if (status !== "none") return null;
 
   return (
-    <div className="space-y-1.5">
-      {status === "pending" && (
-        <div className="space-y-1.5" data-hub-device-status="pending">
-          <p className="text-xs text-[var(--color-text)]">
-            Enter this code on Botcamp to connect this install:
-          </p>
-          <div className="flex items-center gap-2">
-            <span className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)]">
-              {data?.user_code}
-            </span>
-            <a
-              href={data?.approval_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs font-semibold text-[var(--color-primary)] hover:underline"
-            >
-              Open Botcamp <ExternalLink className="h-3 w-3" />
-            </a>
-            <button
-              onClick={() => disconnect.mutate()}
-              disabled={busy}
-              className="text-xs text-[var(--color-text-muted)] underline hover:text-[var(--color-red)] disabled:opacity-50"
-            >
-              Cancel
-            </button>
-          </div>
-          <p className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
-            <Loader2 className="h-3 w-3 animate-spin" /> Waiting for approval on
-            Botcamp…
-          </p>
-        </div>
-      )}
+    <div className="space-y-1.5" data-hub-device-status={status}>
+      <p className="text-xs text-[var(--color-text)]">
+        <a
+          href={data?.connect_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 font-semibold text-[var(--color-primary)] hover:underline"
+        >
+          Sign in to Botcamp <ExternalLink className="h-3 w-3" />
+        </a>{" "}
+        and paste the code it shows you:
+      </p>
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (code.trim()) connect.mutate();
+        }}
+      >
+        <input
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+          placeholder="XXXX-XXXX-XXXX"
+          aria-label="Botcamp connect code"
+          disabled={busy}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)] disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={busy || !code.trim()}
+          className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
+        >
+          {connect.isPending ? "Connecting…" : "Connect"}
+        </button>
+      </form>
 
-      {(status === "none" ||
-        status === "denied" ||
-        status === "expired" ||
-        status === "invalid") && (
-        <div className="space-y-1" data-hub-device-status={status}>
-          <button
-            onClick={() => start.mutate()}
-            disabled={busy}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
-          >
-            {start.isPending ? "Starting…" : "Sign in to Botcamp"}
-          </button>
-          {status === "denied" && (
-            <p className="text-[11px] text-[var(--color-red)]">
-              The device login was denied on Botcamp.
-            </p>
-          )}
-          {status === "expired" && (
-            <p className="text-[11px] text-[var(--color-text-muted)]">
-              That code expired before it was approved.
-            </p>
-          )}
-          {status === "invalid" && (
-            <p className="text-[11px] text-[var(--color-red)]">
-              Botcamp did not recognize that device code. Try again.
-            </p>
-          )}
-        </div>
-      )}
-
-      {(start.isError || disconnect.isError) && (
+      {(connect.isError || disconnect.isError) && (
         <p role="alert" data-hub-device-error className="text-xs text-[var(--color-red)]">
-          {(start.error ?? disconnect.error)?.message}
+          {(connect.error ?? disconnect.error)?.message}
         </p>
       )}
 
@@ -487,14 +450,14 @@ function HubDeviceSignInPanel({ device }: { device: HubDevice }) {
 
 /**
  * "Sign in to Botcamp" where the gate is, rather than behind a modal that
- * repeated the Botcamp section's own control (FEAT-153). Mounts the device
+ * repeated the Botcamp section's own control (FEAT-153). Mounts the connect
  * state machine itself, so `/hub` can place it inside the `isAdmin` branch of
  * the Pull gate without firing the admin-only `["hub-device"]` query for a
  * non-admin seat.
  *
- * Admin-only to render, same as the state machine underneath it: starting a
- * device login is a 403 for a non-admin seat (`_require_hub_admin`), so a
- * non-admin is told to ask an admin instead of being given a button that
+ * Admin-only to render, same as the state machine underneath it: redeeming a
+ * connect code is a 403 for a non-admin seat (`_require_hub_admin`), so a
+ * non-admin is told to ask an admin instead of being given a form that
  * cannot work.
  */
 export function HubDeviceSignIn() {

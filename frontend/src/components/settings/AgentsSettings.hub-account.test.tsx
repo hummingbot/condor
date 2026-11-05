@@ -1,7 +1,7 @@
 /**
  * The Botcamp *account* surface in Settings (PR #111): who is signed in,
  * read live from `GET /hub-me` rather than the `profile_handle` the
- * device-login poll cached once; which scopes the token carries, with a
+ * connect-code redeem cached once; which scopes the token carries, with a
  * plain warning when `agents:publish` is missing; and Disconnect, honest
  * about whether the hub's own copy was actually revoked.
  *
@@ -38,20 +38,16 @@ let hubDeviceSequence: HubDeviceState[] | null;
 
 const LINKED: HubDeviceState = {
   status: "linked",
-  user_code: "",
-  approval_url: "",
-  expires_at: 0,
   profile_handle: "cardosofede",
   scope: ["agents:read", "agents:publish"],
+  connect_url: "https://www.botcamp.xyz/connect",
 };
 
 const NONE: HubDeviceState = {
   status: "none",
-  user_code: "",
-  approval_url: "",
-  expires_at: 0,
   profile_handle: "",
   scope: [],
+  connect_url: "https://www.botcamp.xyz/connect",
 };
 
 function json(payload: unknown, status = 200) {

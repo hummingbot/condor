@@ -314,26 +314,22 @@ export interface HubCataloguePage {
 export const HUB_CATALOGUE_PAGE_SIZE = 20;
 
 /**
- * This install's Botcamp device-login/link state, as `condor.hub.device_state`
+ * This install's Botcamp connection state, as `condor.hub.connection_state`
  * reports it — never the credential, which no route ever answers with
- * (PR #111's device flow, replacing FEAT-148's pairing code).
+ * (botcamp-site PR #137's connect-code flow, replacing PR #111's device
+ * flow).
  *
- * `"pending"` carries `user_code`/`approval_url`/`expires_at` to show again;
- * `"denied"`/`"expired"`/`"invalid"` are reported for the one poll that
- * observed them; `"linked"` carries `profile_handle` and `scope`.
- *
- * `approval_url` is built by the backend from this install's configured hub
- * base, never echoed from the hub's own reply — so it is safe to navigate to
- * (SEC-819). The hub's `verification_uri`/`verification_uri_complete` are
- * deliberately not part of this type: they never leave `condor.hub`.
+ * `"linked"` carries `profile_handle` and `scope`. `connect_url` is always
+ * set, linked or not — it is Botcamp's `/connect` page, built by the backend
+ * from this install's configured hub base, never echoed from a hub reply
+ * (SEC-819) — so the "Sign in to Botcamp" link renders with no extra round
+ * trip.
  */
 export interface HubDeviceState {
-  status: "none" | "pending" | "denied" | "expired" | "invalid" | "linked";
-  user_code: string;
-  approval_url: string;
-  expires_at: number;
+  status: "none" | "linked";
   profile_handle: string;
   scope: string[];
+  connect_url: string;
 }
 
 /**
@@ -4188,20 +4184,16 @@ export const api = {
       body: JSON.stringify({ token }),
     }),
 
-  /** Begin a device login: the user code to show, and the link to open so
-   *  the admin can approve it on Botcamp (PR #111's device flow).
-   *  `approval_url` is derived server-side from the configured hub base —
-   *  see `HubDeviceState`. */
-  startHubDevice: () =>
-    apiFetch<{
-      user_code: string;
-      approval_url: string;
-      expires_in: number;
-      interval: number;
-    }>("/api/v1/settings/hub-device/start", { method: "POST" }),
+  /** Redeem a code pasted from Botcamp's `/connect` page (botcamp-site
+   *  PR #137's connect-code flow) for this install's token. */
+  connectHubDevice: (code: string) =>
+    apiFetch<HubDeviceState>("/api/v1/settings/hub-device/connect", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
 
-  /** Where the device login/link stands right now. Polled while `"pending"`.
-   *  Admin-only — see `getHubDeviceLinked` for the non-admin-safe version. */
+  /** Where the Botcamp connection stands right now. Admin-only — see
+   *  `getHubDeviceLinked` for the non-admin-safe version. */
   getHubDevice: () => apiFetch<HubDeviceState>("/api/v1/settings/hub-device"),
 
   /** Whether this install is linked to Botcamp. Nothing else — every
@@ -4210,7 +4202,7 @@ export const api = {
   getHubDeviceLinked: () =>
     apiFetch<{ linked: boolean }>("/api/v1/settings/hub-device/linked"),
 
-  /** Cancel a device login in flight, or disconnect a linked profile.
+  /** Disconnect this install's linked Botcamp profile.
    *
    *  `revoked` is `true` only once Botcamp itself confirmed the token was
    *  revoked (`DELETE /api/condor/me`, PR #111), `false` with `error` set

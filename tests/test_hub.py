@@ -28,8 +28,7 @@ import json
 import logging
 import subprocess
 import sys
-import threading
-import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -131,20 +130,6 @@ def cm(tmp_path, monkeypatch):
     return manager
 
 
-@pytest.fixture(autouse=True)
-def _no_leaked_pairing(monkeypatch):
-    """Isolate ``hub._pending_device`` (device login, PR #111) between tests.
-
-    It is module-level, in-memory state by design (a device login is a
-    short-lived interactive act, not something ``config.yml`` should ever
-    hold) — but that means two tests sharing one process would otherwise
-    share one install's login attempt. ``monkeypatch.setattr`` restores the
-    prior value after the test, same shape as ``no_sockets`` above guarding
-    the real module state.
-    """
-    monkeypatch.setattr(hub, "_pending_device", None)
-
-
 @pytest.fixture
 def traveller():
     """A library agent with one of everything the layout defines."""
@@ -231,6 +216,11 @@ class FakeHub:
         }
         listing = {
             "slug": slug,
+            # The strategy id Condor now pins consent to (botcamp-site PR
+            # #137, commit 2333769262) — stable across a slug rename, unlike
+            # the slug itself. A caller wanting a specific one passes
+            # ``agentId=...``.
+            "agentId": fields.pop("agentId", f"id-{slug}"),
             "title": fields.pop("name", slug),
             "summary": fields.pop("description", ""),
             "latest": version,
@@ -255,14 +245,17 @@ class FakeHub:
         self.calls.append(Call(method, url, token, payload))
         assert url.startswith(hub.HUB_URL), f"dialled something else: {url}"
         path = url[len(hub.HUB_URL) :]
-        override = self.overrides.get((method, path.split("?")[0]))
+        route_path, _, query = path.partition("?")
+        override = self.overrides.get((method, route_path))
         if isinstance(override, BaseException):
             raise hub.HubError(f"Could not reach the agent hub: {override}", status=0)
         if isinstance(override, hub.Reply):
             return override
-        return self._route(method, path.split("?")[0], payload)
+        return self._route(method, route_path, payload, query)
 
-    def _route(self, method: str, path: str, payload: bytes = b"") -> hub.Reply:
+    def _route(
+        self, method: str, path: str, payload: bytes = b"", query: str = ""
+    ) -> hub.Reply:
         # Consent (botcamp-site PR #137) — checked before the plain
         # bundle-download branch below, since both start with "/agents/"
         # and contain "/versions/" and this one has a "/consent" suffix the
@@ -285,13 +278,42 @@ class FakeHub:
             )
             if row is None:
                 return _missing()
+            # Pinned to the agent id and sha256 Condor sends (botcamp-site PR
+            # #137, commit 2333769262): a GET carries them as query params, a
+            # POST in its JSON body — both required, and checked against what
+            # this slug/version resolve to *now*, same as the real route.
+            sent = (
+                dict(urllib.parse.parse_qsl(query))
+                if method == "GET"
+                else (json.loads(payload.decode()) if payload else {})
+            )
+            sent_agent_id = sent.get("agentId")
+            sent_sha256 = sent.get("sha256")
+            if not sent_agent_id or not sent_sha256:
+                return hub.Reply(
+                    400,
+                    json.dumps(
+                        {"error": "`agentId` and `sha256` are required"}
+                    ).encode(),
+                )
+            if sent_agent_id != listing["agentId"] or (
+                sent_sha256.lower() != row["sha256"].lower()
+            ):
+                return hub.Reply(
+                    409,
+                    json.dumps(
+                        {
+                            "error": "This version's content isn't the one "
+                            "you reviewed — review it again"
+                        }
+                    ).encode(),
+                )
             key = (slug, resolved)
             first_acceptance = method == "POST" and key not in self.consents
             if first_acceptance:
-                body = json.loads(payload.decode()) if payload else {}
                 self.consents[key] = {
                     "acceptedAt": "2026-10-21T12:03:00Z",
-                    "termsVersion": body.get("termsVersion"),
+                    "termsVersion": sent.get("termsVersion"),
                 }
             consent = self.consents.get(key)
             return hub.Reply(
@@ -299,6 +321,7 @@ class FakeHub:
                 json.dumps(
                     {
                         "data": {
+                            "agentId": listing["agentId"],
                             "slug": slug,
                             "version": resolved,
                             "sha256": row["sha256"],
@@ -346,24 +369,19 @@ class FakeHub:
                     "submitted_at": "2026-10-21T12:03:00Z",
                 }
             )
-        # ── Device login (PR #111) — sane defaults; a test wanting a specific
-        # transition (200/authorization_pending/slow_down/access_denied/
-        # expired_token/invalid_grant) sets an ``overrides`` entry for the
-        # exact path instead.
-        if method == "POST" and path == "/condor/device/code":
+        # ── Connect Botcamp: redeem a pasted code (botcamp-site PR #137) —
+        # a sane default that succeeds; a test wanting a specific error
+        # (slow_down/too_many_connections/invalid_grant) sets an
+        # ``overrides`` entry for the exact path instead.
+        if method == "POST" and path == "/condor/connect-code/redeem":
             return _ok(
                 {
-                    "device_code": "dev_test",
-                    "user_code": "WXYZ-4821",
-                    "verification_uri": "https://www.botcamp.xyz/connect",
-                    "verification_uri_complete": "https://www.botcamp.xyz/connect?code=WXYZ-4821",
-                    "expires_in": 600,
-                    "interval": 5,
+                    "access_token": "bc_live_test_default",
+                    "token_type": "bearer",
+                    "scope": "agents:read agents:publish",
+                    "expires_in": 7776000,
+                    "user": {"id": "u_1", "name": "cardosofede"},
                 }
-            )
-        if method == "POST" and path == "/condor/device/token":
-            return hub.Reply(
-                400, json.dumps({"error": "authorization_pending"}).encode()
             )
         # ── `GET`/`DELETE /condor/me` (PR #111) — sane defaults; a test
         # wanting a 401 (revoked token) or a refusal sets an ``overrides``
@@ -658,26 +676,6 @@ def test_get_sends_the_linked_token_so_a_gated_agent_can_resolve(fake_hub):
     assert fake_hub.calls[0].token == "a-token"
 
 
-@pytest.mark.parametrize(
-    "user_code",
-    ["", "AB", "CALL +1 555 0100 TO VERIFY", "WXYZ-4821\nvisit evil.example"],
-)
-def test_a_user_code_that_is_not_a_code_is_refused(fake_hub, user_code):
-    """The code is shown to the admin and put in the approval link, so a hub
-    cannot use it to write its own words on Condor's screen (SEC-819)."""
-    fake_hub.overrides[("POST", "/condor/device/code")] = hub.Reply(
-        200,
-        json.dumps(
-            {
-                "device_code": "dev_1",
-                "user_code": user_code,
-                "verification_uri": f"{hub.HUB_URL}/connect",
-            }
-        ).encode(),
-    )
-
-    with pytest.raises(hub.HubError):
-        hub.device_start()
 
 
 def test_get_reads_botcamps_data_envelope(fake_hub):
@@ -1439,7 +1437,7 @@ def test_a_token_is_only_sent_to_the_hub_that_issued_it(cm, monkeypatch):
 
     monkeypatch.setattr(hub, "HUB_URL", "http://masiva.local:3000/api")
     assert hub.token() == ""
-    assert hub.device_state().status != "linked"
+    assert hub.connection_state().status != "linked"
 
     hub.set_token("bc_dev_token")  # connecting again, to the dev hub
     assert hub.token() == "bc_dev_token"
@@ -1578,201 +1576,40 @@ def _settings_client(admin: bool):
     return TestClient(app)
 
 
-# ── Device login: connect to a Botcamp profile, no pasted token (PR #111) ──
+# ── Connect Botcamp: redeem a pasted code (botcamp-site PR #137) ─────────
 
 
-def _force_poll():
-    """Make the next ``hub.device_state()`` hit the hub rather than the
-    locally cached ``pending`` answer, regardless of ``interval``."""
-    hub._pending_device["last_polled"] = 0.0
-
-
-def test_device_start_sends_no_credential_and_tracks_the_attempt(fake_hub):
-    code = hub.device_start()
+def test_redeeming_sends_no_credential_and_links_on_success(fake_hub, cm):
+    state = hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
     assert fake_hub.calls[-1].method == "POST"
-    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/condor/device/code"
+    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/condor/connect-code/redeem"
     assert fake_hub.calls[-1].token == ""
-    assert fake_hub.calls[-1].body == {}
-    assert code.user_code == "WXYZ-4821"
-    assert code.approval_url == "https://www.botcamp.xyz/connect"
-    assert hub._pending_device["device_code"] == "dev_test"
+    assert fake_hub.calls[-1].body == {
+        "code": "WXYZ-WXYZ-WXYZ",
+        "client_name": "Condor",
+    }
+    assert state.status == "linked"
+    assert state.profile_handle == "cardosofede"
+    assert state.scope == ["agents:read", "agents:publish"]
+    assert hub.token() == "bc_live_test_default"
 
 
-def _hostile_code(**over) -> object:
-    """A ``/condor/device/code`` reply aimed at somebody else's site.
+def test_the_code_is_stripped_but_otherwise_sent_as_typed(fake_hub):
+    hub.redeem_connect_code("  wxyz-wxyz-wxyz  ")
 
-    The default fake reply is same-origin, so nothing in the suite before
-    SEC-819 ever exercised the branch where the hub asks Condor to open a
-    URL it did not choose. ``over`` replaces individual fields so a test can
-    poison one of the two URLs, or both.
-    """
-    return _ok(
-        {
-            "device_code": "dev_test",
-            "user_code": "WXYZ-4821",
-            "verification_uri": "https://evil.example/phish",
-            "verification_uri_complete": "https://evil.example/phish?code=WXYZ-4821",
-            "expires_in": 600,
-            "interval": 5,
-            **over,
-        }
-    )
+    assert fake_hub.calls[-1].body["code"] == "wxyz-wxyz-wxyz"
 
 
-@pytest.mark.parametrize(
-    "override",
-    [
-        pytest.param({}, id="both-hostile"),
-        pytest.param(
-            {"verification_uri": "https://www.botcamp.xyz/connect"},
-            id="only-complete-hostile",
-        ),
-        pytest.param(
-            {"verification_uri_complete": ""},
-            id="complete-absent-uri-hostile",
-        ),
-    ],
-)
-def test_a_hostile_device_code_reply_never_reaches_the_browser(
-    fake_hub, caplog, override
-):
-    """SEC-819: the link Condor hands out is its own, whichever of the two
-    URLs the hub poisoned — and the hostile one is not merely deprioritized,
-    it is absent from every response."""
-    fake_hub.overrides[("POST", "/condor/device/code")] = _hostile_code(**override)
+def test_an_empty_code_is_refused_without_a_request(fake_hub):
+    with pytest.raises(hub.HubError):
+        hub.redeem_connect_code("   ")
 
-    with caplog.at_level(logging.WARNING, logger="condor.hub"):
-        started = hub.device_start()
-
-    safe = "https://www.botcamp.xyz/connect"
-    assert started.approval_url == safe
-    assert "evil.example" not in started.model_dump_json()
-
-    pending = hub.device_state()
-    assert pending.status == "pending"
-    assert pending.approval_url == safe
-    assert "evil.example" not in pending.model_dump_json()
-
-    # Exactly one warning, naming the destination without its `?code=` query
-    # and never the polling secret.
-    mismatches = [r for r in caplog.records if "not this install's hub" in r.message]
-    assert len(mismatches) == 1
-    assert "https://evil.example/phish" in mismatches[0].getMessage()
-    assert "WXYZ-4821" not in mismatches[0].getMessage()
-    assert "dev_test" not in mismatches[0].getMessage()
+    assert fake_hub.calls == []
 
 
-def test_an_ordinary_same_origin_reply_logs_no_mismatch(fake_hub, caplog):
-    with caplog.at_level(logging.WARNING, logger="condor.hub"):
-        started = hub.device_start()
-
-    assert started.approval_url == "https://www.botcamp.xyz/connect"
-    assert not [r for r in caplog.records if "not this install's hub" in r.message]
-
-
-@pytest.mark.parametrize(
-    "hub_url, expected",
-    [
-        ("https://www.botcamp.xyz/api", "https://www.botcamp.xyz/connect"),
-        # A dev hub: scheme, host *and port* survive; `/api` does not.
-        ("http://masiva.local:3000/api", "http://masiva.local:3000/connect"),
-    ],
-)
-def test_approval_url_is_built_from_the_configured_origin(
-    monkeypatch, hub_url, expected
-):
-    monkeypatch.setattr(hub, "HUB_URL", hub_url)
-
-    assert hub.approval_url() == expected
-
-
-def test_the_approval_link_never_carries_the_code(fake_hub):
-    """Botcamp has the person type the code (RFC 8628 §5.4) and ignores a
-    ``?code=``: a prefilled link is what a phishing message would send."""
-    started = hub.device_start()
-
-    assert "WXYZ-4821" not in started.approval_url
-    assert "?" not in started.approval_url
-    assert started.user_code == "WXYZ-4821"  # still shown, to be typed
-
-
-def test_device_state_is_none_with_nothing_pending_or_linked(cm):
-    assert hub.device_state() == hub.DeviceLinkState(status="none")
-
-
-def test_is_linked_never_polls_and_agrees_with_device_state(fake_hub, cm):
-    """``is_linked()`` is the config-only read `/settings/hub-device/linked`
-    uses so a non-admin seat can never drive the pending poll (BUG-3 case
-    A). It must track whatever ``device_state`` would call "linked", off
-    local config alone.
-    """
-    assert hub.is_linked() is False
-
-    hub.device_start()
-    calls_before = len(fake_hub.calls)
-    assert hub.is_linked() is False
-    assert len(fake_hub.calls) == calls_before  # no poll spent
-
-    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
-        {"access_token": "bc_live_x", "user": {"name": "cardosofede"}}
-    )
-    _force_poll()
-    hub.device_state()
-
-    assert hub.is_linked() is True
-
-
-def test_device_state_reports_pending_with_the_user_code_and_link(fake_hub):
-    hub.device_start()
-
-    state = hub.device_state()
-
-    assert state.status == "pending"
-    assert state.user_code == "WXYZ-4821"
-    assert state.approval_url == "https://www.botcamp.xyz/connect"
-
-
-def test_device_state_does_not_poll_the_hub_again_within_the_interval(fake_hub):
-    hub.device_start()
-    hub.device_state()
-    calls_before = len(fake_hub.calls)
-
-    hub.device_state()
-
-    assert len(fake_hub.calls) == calls_before
-
-
-def test_authorization_pending_keeps_polling(fake_hub):
-    """The fake hub's default ``/condor/device/token`` answer — a plain 400
-    ``authorization_pending`` — must read as still-``pending``, not an error."""
-    hub.device_start()
-    _force_poll()
-
-    state = hub.device_state()
-
-    assert state.status == "pending"
-    assert fake_hub.calls[-1].url == f"{hub.HUB_URL}/condor/device/token"
-    assert fake_hub.calls[-1].body == {"device_code": "dev_test"}
-
-
-def test_slow_down_increases_the_poll_interval(fake_hub):
-    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
-        400, json.dumps({"error": "slow_down"}).encode()
-    )
-    hub.device_start()
-    interval_before = hub._pending_device["interval"]
-    _force_poll()
-
-    state = hub.device_state()
-
-    assert state.status == "pending"
-    assert hub._pending_device["interval"] > interval_before
-
-
-def test_a_successful_poll_stores_the_credential_scope_and_user(fake_hub, cm):
-    hub.device_start()
-    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+def test_a_successful_redeem_stores_the_credential_scope_and_user(fake_hub, cm):
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = _ok(
         {
             "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
             "token_type": "bearer",
@@ -1780,9 +1617,8 @@ def test_a_successful_poll_stores_the_credential_scope_and_user(fake_hub, cm):
             "user": {"id": "u_1", "name": "cardosofede"},
         }
     )
-    _force_poll()
 
-    state = hub.device_state()
+    state = hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
     assert state.status == "linked"
     assert state.profile_handle == "cardosofede"
@@ -1792,67 +1628,47 @@ def test_a_successful_poll_stores_the_credential_scope_and_user(fake_hub, cm):
     assert cm.get_hub()["profile_handle"] == "cardosofede"
     assert cm.get_hub()["scope"] == ["agents:read", "agents:publish"]
     assert cm.get_hub()["user"] == {"id": "u_1", "name": "cardosofede"}
-    # The attempt is forgotten: a later read comes straight off config, with
-    # no second poll for the now-consumed device_code.
-    assert hub._pending_device is None
-    calls_before = len(fake_hub.calls)
-    assert hub.device_state() == hub.DeviceLinkState(
-        status="linked",
-        profile_handle="cardosofede",
-        scope=["agents:read", "agents:publish"],
-    )
-    assert len(fake_hub.calls) == calls_before
 
 
-def test_a_sign_in_with_no_user_identity_still_reads_as_linked(fake_hub, cm):
-    """BUG-6: a reply whose ``user`` carries neither ``name`` nor ``id`` still
-    stores a real, usable token — judging "linked" on a non-empty
-    ``profile_handle`` read that install back as signed out forever even
-    though every later call still sent the stored token.
+def test_a_sign_in_with_no_user_identity_still_links(fake_hub, cm):
+    """BUG-6, carried over from the device flow: a reply whose ``user``
+    carries neither ``name`` nor ``id`` still stores a real, usable token,
+    and ``is_linked()`` must not judge "linked" on a non-empty
+    ``profile_handle``.
     """
-    hub.device_start()
-    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = _ok(
         {
             "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
             "scope": "agents:read agents:publish",
             "user": {},
         }
     )
-    _force_poll()
 
-    state = hub.device_state()
+    state = hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
     assert state.status == "linked"
     assert state.profile_handle == ""
     assert hub.token() == "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60"
     assert hub.is_linked() is True
-    # A later read, straight off config, must agree — not fall back to
-    # "none" because the stored handle is empty.
-    calls_before = len(fake_hub.calls)
-    assert hub.device_state().status == "linked"
-    assert len(fake_hub.calls) == calls_before
 
 
 def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, cm):
-    """ARCH-738's own criterion, now for the keys the device-login flow adds.
-
+    """ARCH-738's own criterion, now for the keys this flow adds.
     ``CONFIG_SECTIONS["hub"]`` merges whatever keys ``update_hub`` is given,
-    so this is really asserting that ``device_state`` wrote all of them
-    (rather than only ``token``) and that an unrelated save does not drop
-    any.
+    so this is really asserting that ``redeem_connect_code`` wrote all of
+    them (rather than only ``token``) and that an unrelated save does not
+    drop any.
     """
     import config_manager as cm_module
 
-    hub.device_start()
-    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = _ok(
         {
             "access_token": "bc_live_8f2e9c1a3b7d4f605e8a9c2b1d3f7e60",
             "scope": "agents:read agents:publish",
             "user": {"id": "u_1", "name": "cardosofede"},
         }
     )
-    _force_poll()
-    hub.device_state()
+    hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
     cm.update_hub(**cm.get_hub())  # an unrelated save of the same section
 
@@ -1866,178 +1682,108 @@ def test_a_linked_profile_survives_an_unrelated_save_and_a_fresh_load(fake_hub, 
     }
 
 
-def test_access_denied_is_reported_once_then_forgotten(fake_hub):
-    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
-        400, json.dumps({"error": "access_denied"}).encode()
-    )
-    hub.device_start()
-    _force_poll()
-
-    assert hub.device_state().status == "denied"
-    assert hub.device_state().status == "none"
-
-
-def test_expired_token_is_reported_once_then_forgotten(fake_hub):
-    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
-        400, json.dumps({"error": "expired_token"}).encode()
-    )
-    hub.device_start()
-    _force_poll()
-
-    assert hub.device_state().status == "expired"
-    assert hub.device_state().status == "none"
-
-
-def test_invalid_grant_is_reported_as_its_own_distinct_status(fake_hub):
-    """``invalid_grant`` is a device code the hub does not recognize — a
-    different, actionable state from a denial or a plain expiry, so it gets
-    its own status rather than being folded into one of those."""
-    fake_hub.overrides[("POST", "/condor/device/token")] = hub.Reply(
-        400, json.dumps({"error": "invalid_grant"}).encode()
-    )
-    hub.device_start()
-    _force_poll()
-
-    assert hub.device_state().status == "invalid"
-    assert hub.device_state().status == "none"
-
-
-def test_overlapping_polls_claim_the_slot_before_dialling_out(fake_hub, monkeypatch):
-    """BUG-3 case B: two ``device_state()`` calls landing close together must
-    never both reach the hub with the same one-time ``device_code`` — the
-    loser would see ``invalid_grant`` and misreport a working sign-in as
-    failed. The second call here starts while the first is still inside its
-    (slowed-down) exchange, and must answer "pending" from the cache rather
-    than dialling out a second time.
-    """
-    hub.device_start()
-    _force_poll()
-
-    entered = []
-    original_send = hub._send
-
-    def _slow_send(method, url, **kwargs):
-        if method == "POST" and url.endswith("/condor/device/token"):
-            entered.append(1)
-            time.sleep(0.1)
-        return original_send(method, url, **kwargs)
-
-    monkeypatch.setattr(hub, "_send", _slow_send)
-
-    results: list[hub.DeviceLinkState] = []
-
-    def _poll():
-        results.append(hub.device_state())
-
-    first = threading.Thread(target=_poll)
-    first.start()
-    time.sleep(0.02)  # let the first call claim the slot and start dialling
-    second = threading.Thread(target=_poll)
-    second.start()
-    first.join()
-    second.join()
-
-    assert len(entered) == 1
-    assert [r.status for r in results] == ["pending", "pending"]
-
-
-def test_the_600s_deadline_expires_locally_without_a_further_hub_call(fake_hub):
-    """Stop polling at the device-code deadline rather than forever: once the
-    deadline has passed, reading the state must not spend a request on an
-    attempt the hub has already retired on its own side."""
-    hub.device_start()
-    hub._pending_device["deadline"] = time.monotonic() - 1
-    calls_before = len(fake_hub.calls)
-
-    state = hub.device_state()
-
-    assert state.status == "expired"
-    assert hub._pending_device is None
-    assert len(fake_hub.calls) == calls_before
-
-
-def test_restarting_a_device_login_forgets_the_previous_attempt(fake_hub):
-    hub.device_start()
-    first_device_code = hub._pending_device["device_code"]
-    fake_hub.overrides[("POST", "/condor/device/code")] = _ok(
-        {
-            "device_code": "dev_second",
-            "user_code": "ABCD-1234",
-            "verification_uri": "https://www.botcamp.xyz/connect",
-            "verification_uri_complete": "https://www.botcamp.xyz/connect?code=ABCD-1234",
-            "expires_in": 600,
-            "interval": 5,
-        }
+def test_a_successful_redeem_with_no_token_raises(fake_hub):
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = _ok(
+        {"scope": "agents:read", "user": {"id": "u_1"}}
     )
 
-    second = hub.device_start()
+    with pytest.raises(hub.HubError):
+        hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
-    # `device_start` hands back a `DeviceStart`, which carries no
-    # `device_code` at all — the polling secret stays inside this module
-    # (SEC-819), so the swap is read off the tracked attempt.
-    assert second.user_code == "ABCD-1234"
-    assert second.approval_url == "https://www.botcamp.xyz/connect"
-    assert hub._pending_device["device_code"] == "dev_second" != first_device_code
+    assert hub.token() == ""
 
 
-def test_cancelling_a_pending_device_login_forgets_it_with_no_hub_call(fake_hub):
-    """The device-flow contract has no cancel endpoint: an unpolled device
-    code just expires at the hub on its own, so cancelling is purely local."""
-    hub.device_start()
-    calls_before = len(fake_hub.calls)
-
-    hub.device_cancel()
-
-    assert len(fake_hub.calls) == calls_before
-    assert hub._pending_device is None
-    assert hub.device_state().status == "none"
-
-
-def test_a_cancel_during_the_exchange_revokes_rather_than_links(
-    fake_hub, cm, monkeypatch
+@pytest.mark.parametrize(
+    "error, message_fragment",
+    [
+        ("invalid_grant", "wrong, expired or already used"),
+        ("too_many_connections", "too many Condor"),
+    ],
+)
+def test_the_known_400_errors_get_their_own_sentence(
+    fake_hub, error, message_fragment
 ):
-    """A device login cancelled while its token exchange is already in
-    flight must not end up linked: the exchange runs outside `_device_lock`
-    (a network call has no business holding it), so `device_cancel()` can
-    land before the 200 comes back. `device_state()` must notice its tracked
-    attempt is gone by the time the exchange answers, and revoke the token
-    it was just handed rather than storing it (Greptile's review of PR
-    #111's integration)."""
-    hub.device_start()
-    _force_poll()
-    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
-        {
-            "access_token": "bc_live_cancelled",
-            "scope": "agents:read agents:publish",
-            "user": {"id": "u_1", "name": "cardosofede"},
-        }
+    """The hub's error bodies are deliberately uniform (a wrong, expired or
+    already-used code all answer ``invalid_grant``), so Condor writes its own
+    sentence per *distinguishable* case rather than passing the hub's text
+    through.
+    """
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
+        400, json.dumps({"error": error, "error_description": "..."}).encode()
     )
 
-    original_send = hub._send
-    released = threading.Event()
+    with pytest.raises(hub.HubError, match=message_fragment):
+        hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
-    def _slow_send(method, url, **kwargs):
-        if method == "POST" and url.endswith("/condor/device/token"):
-            released.wait(timeout=2)
-        return original_send(method, url, **kwargs)
+    assert hub.token() == ""
 
-    monkeypatch.setattr(hub, "_send", _slow_send)
 
-    results: list[hub.DeviceLinkState] = []
-    poller = threading.Thread(target=lambda: results.append(hub.device_state()))
-    poller.start()
-    time.sleep(0.02)  # let the poll claim its slot and start dialling out
+def test_an_unrecognized_400_falls_back_to_the_hubs_own_refusal(fake_hub):
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
+        400, json.dumps({"error": "invalid_request"}).encode()
+    )
 
-    hub.device_cancel()
-    released.set()
-    poller.join()
+    with pytest.raises(hub.HubError) as excinfo:
+        hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
 
-    assert hub.token() == "", "a token for a cancelled attempt must not link"
-    assert cm.get_hub().get("profile_handle", "") == ""
-    assert ("DELETE", f"{hub.HUB_URL}/condor/me", "bc_live_cancelled", b"") in [
-        (c.method, c.url, c.token, c.payload) for c in fake_hub.calls
-    ]
-    assert results[0].status == "none"
+    assert excinfo.value.status == 400
+
+
+def test_rate_limiting_raises_429_with_a_specific_sentence(fake_hub):
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
+        429, json.dumps({"error": "slow_down"}).encode()
+    )
+
+    with pytest.raises(hub.HubError, match="Too many attempts") as excinfo:
+        hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
+
+    assert excinfo.value.status == 429
+
+
+def test_a_server_error_raises_with_its_own_status(fake_hub):
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
+        500, b"{}"
+    )
+
+    with pytest.raises(hub.HubError) as excinfo:
+        hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
+
+    assert excinfo.value.status == 500
+    assert hub.token() == ""
+
+
+def test_connection_state_is_none_with_nothing_linked(cm):
+    state = hub.connection_state()
+
+    assert state.status == "none"
+    assert state.connect_url == "https://www.botcamp.xyz/connect"
+
+
+def test_connection_state_agrees_with_is_linked_once_connected(fake_hub, cm):
+    assert hub.is_linked() is False
+    assert hub.connection_state().status == "none"
+
+    hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
+
+    assert hub.is_linked() is True
+    assert hub.connection_state().status == "linked"
+
+
+def test_connection_state_makes_no_hub_call(fake_hub, cm):
+    hub.redeem_connect_code("WXYZ-WXYZ-WXYZ")
+    calls_before = len(fake_hub.calls)
+
+    hub.connection_state()
+
+    assert len(fake_hub.calls) == calls_before
+
+
+def test_connect_url_is_built_from_the_configured_origin_whether_linked_or_not(
+    monkeypatch, cm
+):
+    monkeypatch.setattr(hub, "HUB_URL", "http://masiva.local:3000/api")
+
+    assert hub.connection_state().connect_url == "http://masiva.local:3000/connect"
 
 
 def test_disconnecting_a_linked_profile_revokes_the_token_then_clears_it_locally(
@@ -2052,7 +1798,7 @@ def test_disconnecting_a_linked_profile_revokes_the_token_then_clears_it_locally
         user={"id": "u_1", "name": "cardosofede"},
     )
 
-    result = hub.device_cancel()
+    result = hub.disconnect()
 
     assert fake_hub.calls[-1] == (
         "DELETE",
@@ -2070,7 +1816,7 @@ def test_disconnecting_a_linked_profile_revokes_the_token_then_clears_it_locally
 def test_disconnecting_with_nothing_linked_makes_no_hub_call(cm):
     """No token means nothing to revoke — the honest answer is ``None``, not
     a claimed success, and nothing is sent."""
-    result = hub.device_cancel()
+    result = hub.disconnect()
 
     assert result == hub.DisconnectResult(revoked=None)
     assert hub.token() == ""
@@ -2083,7 +1829,7 @@ def test_disconnecting_survives_an_unreachable_hub(cm):
     than claiming a revoke that did not happen."""
     cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
 
-    result = hub.device_cancel()  # must not raise
+    result = hub.disconnect()  # must not raise
 
     assert result.revoked is False
     assert result.error
@@ -2096,206 +1842,94 @@ def test_disconnecting_when_the_hub_refuses_the_revoke_still_clears_locally(
     cm.update_hub(token="bc_live_x", profile_handle="cardosofede")
     fake_hub.overrides[("DELETE", "/condor/me")] = hub.Reply(500, b"{}")
 
-    result = hub.device_cancel()
+    result = hub.disconnect()
 
     assert result.revoked is False
     assert result.error
     assert hub.token() == ""
 
 
-def test_a_device_login_start_that_the_hub_refuses_raises_and_tracks_nothing(fake_hub):
-    fake_hub.overrides[("POST", "/condor/device/code")] = hub.Reply(500, b"{}")
-
-    with pytest.raises(hub.HubError):
-        hub.device_start()
-
-    assert hub._pending_device is None
-
-
-def test_starting_a_hub_device_login_is_admin_only(cm, fake_hub):
-    res = _settings_client(admin=False).post("/settings/hub-device/start")
+def test_connecting_a_hub_device_is_admin_only(cm, fake_hub):
+    res = _settings_client(admin=False).post(
+        "/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"}
+    )
 
     assert res.status_code == 403
-    assert hub._pending_device is None
+    assert hub.token() == ""
 
 
-def test_polling_the_hub_device_login_is_admin_only(cm, fake_hub):
+def test_reading_the_full_hub_device_state_is_admin_only(cm, fake_hub):
     res = _settings_client(admin=False).get("/settings/hub-device")
 
     assert res.status_code == 403
 
 
-def test_disconnecting_the_hub_device_login_is_admin_only(cm):
+def test_disconnecting_the_hub_device_is_admin_only(cm):
     res = _settings_client(admin=False).delete("/settings/hub-device")
 
     assert res.status_code == 403
 
 
-# ── Revocation: a 401 from any token-bearing call clears it locally ──────
-
-
-def test_a_401_during_publish_clears_the_stored_token(traveller, fake_hub, cm):
-    hub.set_token("bc_live_revoked")
-    fake_hub.overrides[("POST", "/agents")] = hub.Reply(401, b"{}")
-
-    with pytest.raises(hub.HubError):
-        hub.publish("traveller", hub.token())
-
-    assert hub.token() == ""
-
-
-def test_a_401_during_unpublish_clears_the_stored_token(fake_hub, cm):
-    hub.set_token("bc_live_revoked")
-    fake_hub.overrides[("DELETE", "/agents/listed")] = hub.Reply(401, b"{}")
-
-    with pytest.raises(hub.HubError):
-        hub.unpublish("listed", hub.token())
-
-    assert hub.token() == ""
-
-
-# ── Who the linked token identifies, read live (PR #111's `GET /me`) ─────
-
-
-def test_me_reads_the_signed_in_account(fake_hub, cm):
-    hub.set_token("bc_live_x")
-
-    info = hub.me(hub.token())
-
-    assert fake_hub.calls[-1] == ("GET", f"{hub.HUB_URL}/condor/me", "bc_live_x", b"")
-    assert info.user.name == "cardosofede"
-    assert info.scopes == ["agents:read", "agents:publish"]
-
-
-def test_me_without_a_token_raises_without_a_request(fake_hub, cm):
-    with pytest.raises(hub.NoTokenError):
-        hub.me("")
-
-    assert fake_hub.calls == []
-
-
-def test_a_401_from_me_clears_the_stored_token(fake_hub, cm):
-    hub.set_token("bc_live_revoked")
-    fake_hub.overrides[("GET", "/condor/me")] = hub.Reply(401, b"{}")
-
-    with pytest.raises(hub.HubError):
-        hub.me(hub.token())
-
-    assert hub.token() == ""
-
-
-def test_the_hub_me_route_answers_the_live_account(cm, fake_hub):
-    hub.set_token("bc_live_x")
-
-    res = _settings_client(admin=True).get("/settings/hub-me")
-
-    assert res.status_code == 200
-    body = res.json()
-    assert body["user"]["name"] == "cardosofede"
-    assert body["scopes"] == ["agents:read", "agents:publish"]
-    assert "bc_live_x" not in res.text
-
-
-def test_the_hub_me_route_says_400_with_no_token(cm, fake_hub):
-    res = _settings_client(admin=True).get("/settings/hub-me")
-
-    assert res.status_code == 400
-    assert fake_hub.calls == []
-
-
-def test_the_hub_me_route_propagates_a_401_and_clears_the_token(cm, fake_hub):
-    hub.set_token("bc_live_revoked")
-    fake_hub.overrides[("GET", "/condor/me")] = hub.Reply(401, b"{}")
-
-    res = _settings_client(admin=True).get("/settings/hub-me")
-
-    assert res.status_code == 401
-    assert hub.token() == ""
-
-
-def test_the_hub_me_route_is_admin_only(cm, fake_hub):
-    res = _settings_client(admin=False).get("/settings/hub-me")
-
-    assert res.status_code == 403
-    assert fake_hub.calls == []
-
-
-def test_a_401_during_submission_status_clears_the_stored_token(fake_hub, cm):
-    hub.set_token("bc_live_revoked")
-    hub._store_submission(
-        "traveller", hub.Receipt(submission_id="sub_test", status="pending")
-    )
-    fake_hub.overrides[("GET", "/submissions/sub_test")] = hub.Reply(401, b"{}")
-
-    with pytest.raises(hub.HubError):
-        hub.submission_status("traveller", hub.token())
-
-    assert hub.token() == ""
-
-
-def test_the_dashboard_can_start_and_poll_a_device_login_through_to_linked(
-    cm, fake_hub
-):
+def test_the_dashboard_can_connect_through_to_linked(cm, fake_hub):
     client = _settings_client(admin=True)
 
-    started = client.post("/settings/hub-device/start")
-    assert started.status_code == 200
-    body = started.json()
-    assert body["user_code"] == "WXYZ-4821"
-    assert body["approval_url"] == "https://www.botcamp.xyz/connect"
-    assert "access_token" not in body
+    none = client.get("/settings/hub-device")
+    assert none.json()["status"] == "none"
+    assert none.json()["connect_url"] == "https://www.botcamp.xyz/connect"
 
-    pending = client.get("/settings/hub-device")
-    assert pending.json()["status"] == "pending"
-
-    fake_hub.overrides[("POST", "/condor/device/token")] = _ok(
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = _ok(
         {
             "access_token": "bc_live_super_secret",
             "scope": "agents:read agents:publish",
             "user": {"id": "u_1", "name": "cardosofede"},
         }
     )
-    _force_poll()
 
-    linked = client.get("/settings/hub-device")
-    assert linked.json() == {
+    connected = client.post(
+        "/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"}
+    )
+    assert connected.status_code == 200
+    assert connected.json() == {
         "status": "linked",
-        "user_code": "",
-        "approval_url": "",
-        "expires_at": 0.0,
         "profile_handle": "cardosofede",
         "scope": ["agents:read", "agents:publish"],
+        "connect_url": "https://www.botcamp.xyz/connect",
     }
-    assert "bc_live_super_secret" not in linked.text
+    assert "bc_live_super_secret" not in connected.text
+
+    linked = client.get("/settings/hub-device")
+    assert linked.json()["status"] == "linked"
+    assert linked.json()["profile_handle"] == "cardosofede"
 
 
-def test_the_dashboard_routes_never_hand_back_a_hostile_approval_url(
-    cm, fake_hub, caplog
+def test_the_dashboard_reports_a_wrong_or_expired_code_with_a_specific_sentence(
+    cm, fake_hub
 ):
-    """SEC-819 at the wire, not just in the module: neither the start route
-    nor a subsequent pending poll may carry a URL the hub chose."""
-    fake_hub.overrides[("POST", "/condor/device/code")] = _hostile_code()
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
+        400, json.dumps({"error": "invalid_grant"}).encode()
+    )
     client = _settings_client(admin=True)
 
-    with caplog.at_level(logging.WARNING, logger="condor.hub"):
-        started = client.post("/settings/hub-device/start")
-    assert started.status_code == 200
-    assert started.json() == {
-        "user_code": "WXYZ-4821",
-        "approval_url": "https://www.botcamp.xyz/connect",
-        "expires_in": 600,
-        "interval": 5,
-    }
-    assert "evil.example" not in started.text
-
-    pending = client.get("/settings/hub-device")
-    assert pending.json()["status"] == "pending"
-    assert pending.json()["approval_url"] == ("https://www.botcamp.xyz/connect")
-    assert "evil.example" not in pending.text
-
-    assert (
-        len([r for r in caplog.records if "not this install's hub" in r.message]) == 1
+    res = client.post(
+        "/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"}
     )
+
+    assert res.status_code == 400
+    assert "wrong, expired or already used" in res.json()["detail"]
+    assert hub.token() == ""
+
+
+def test_the_dashboard_reports_rate_limiting_as_429(cm, fake_hub):
+    fake_hub.overrides[("POST", "/condor/connect-code/redeem")] = hub.Reply(
+        429, json.dumps({"error": "slow_down"}).encode()
+    )
+    client = _settings_client(admin=True)
+
+    res = client.post(
+        "/settings/hub-device/connect", json={"code": "WXYZ-WXYZ-WXYZ"}
+    )
+
+    assert res.status_code == 429
 
 
 def test_the_dashboard_can_disconnect_a_linked_profile(cm, fake_hub):
@@ -2519,12 +2153,15 @@ def test_the_preview_and_the_install_carry_the_same_plan(offered, fake_hub):
     assert installed["plan"]["imported"] is True
     # Two fetches, not one cached preview: the digest check is what makes that
     # safe, and it ran on both. Excludes the consent calls (PR #137), which
-    # also carry "/versions/" in their path but are not a bundle download.
+    # also carry "/versions/" in their path but are not a bundle download —
+    # the GET carries its agentId/sha256 pin as a query string, so the path
+    # is compared without it.
     assert (
         sum(
             1
             for call in fake_hub.calls
-            if "/versions/" in call.url and not call.url.endswith("/consent")
+            if "/versions/" in call.url
+            and not call.url.split("?")[0].endswith("/consent")
         )
         == 2
     )
