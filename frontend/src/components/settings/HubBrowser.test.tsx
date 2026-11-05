@@ -248,6 +248,17 @@ async function tickConsent() {
   });
 }
 
+/** Its Update twin — a hub update records the same Botcamp terms acceptance
+ *  a fresh install does, so it is gated behind the same explicit tick. */
+async function tickUpdateConsent() {
+  const box = container.querySelector(
+    "[data-update-consent]",
+  ) as HTMLInputElement;
+  await act(async () => {
+    box.click();
+  });
+}
+
 async function openSlugLookup() {
   if (container.querySelector("[data-hub-by-slug]")) return;
   await click("Look up a private agent by slug");
@@ -518,6 +529,7 @@ it("applies an update through the same install endpoint the server routes", asyn
   await lookUp("river_scalper");
   await click("Review");
   await waitFor(() => container.querySelector("[data-update-plan]") !== null);
+  await tickUpdateConsent();
   await click("Update river_scalper");
 
   expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
@@ -526,6 +538,23 @@ it("applies an update through the same install endpoint the server routes", asyn
     "POST /api/v1/hub/agents/river_scalper/install",
   ]);
   expect(container.querySelector("[data-update-done]")).not.toBeNull();
+});
+
+it("only applies the update once the operator ticks the same consent a fresh install needs", async () => {
+  verb = "update";
+  await render();
+  await lookUp("river_scalper");
+  await click("Review");
+  await waitFor(() => container.querySelector("[data-update-plan]") !== null);
+
+  expect(button("Update river_scalper").hasAttribute("disabled")).toBe(true);
+  await click("Update river_scalper");
+  expect(
+    requests.some((r) => r.url.endsWith("/river_scalper/install")),
+  ).toBe(false);
+
+  await tickUpdateConsent();
+  expect(button("Update river_scalper").hasAttribute("disabled")).toBe(false);
 });
 
 it("says the hub is down rather than showing an empty result", async () => {

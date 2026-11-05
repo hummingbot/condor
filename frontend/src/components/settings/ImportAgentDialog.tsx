@@ -153,8 +153,8 @@ function updateConsentNote(hubReviewed: boolean, keptLocalRoutines: string[]): s
   const n = keptLocalRoutines.length;
   return (
     ", and the hub's own review covers every routine this update replaces" +
-    ` — but ${n} file${n === 1 ? "" : "s"} you edited kept your own copy and still` +
-    ` ${n === 1 ? "needs" : "need"} your allow before ${n === 1 ? "it" : "they"} can run.`
+    ` — but ${keptLocalRoutines.join(", ")} kept ${n === 1 ? "its" : "their"} own copy` +
+    ` and still ${n === 1 ? "needs" : "need"} your allow before ${n === 1 ? "it" : "they"} can run.`
   );
 }
 
@@ -249,6 +249,25 @@ function consentLabel(plan: AgentImportPlan): string {
   return plan.executables.length > 0
     ? "I understand this agent can run code on my machine, and I want to install it."
     : "I have reviewed what this agent brings in and I want to install it.";
+}
+
+/**
+ * The update screen's twin of `consentLabel`.
+ *
+ * Only a hub update reaches this: `apply_update` records Botcamp's terms
+ * acceptance for every hub update, the same write a fresh install only
+ * performs after this same checkbox is ticked (`install_from_hub`'s
+ * `post_consent` call does not distinguish the two verbs). Without this gate
+ * an update recorded that acceptance while the screen never showed the terms
+ * or asked for agreement.
+ */
+function updateConsentLabel(update: AgentUpdatePlan): string {
+  const runsCode = update.files.some(
+    (f) => f.executable && f.verdict !== "unchanged" && f.verdict !== "removed",
+  );
+  return runsCode
+    ? "I understand this update can run code on my machine, and I want to apply it."
+    : "I have reviewed what this update brings in and I want to apply it.";
 }
 
 /**
@@ -481,6 +500,7 @@ export function ImportAgentDialog({
     const mine = ++latest.current;
     setBusy(true);
     setError(null);
+    setConsented(false);
     try {
       const previewed = await from.previewUpdate(slug);
       if (mine !== latest.current) return;
@@ -575,8 +595,15 @@ export function ImportAgentDialog({
   // installed and every file already carries the bundle's own bytes, so
   // there is no file to write and nothing to mute. `files.every` on `[]`
   // is vacuously true, but an update plan always carries at least AGENT.md.
+  //
+  // Never true for a hub update (`hub_reviewed`): `apply_update` grants
+  // execution consent for every `unchanged` routine too, and `install_from_hub`
+  // stamps the hub source afterwards either way — both run even when no file
+  // differs. A file import that matches the hub's bytes exactly would
+  // otherwise see only "Close" here and have no way to pick up that consent.
   const noChanges = update
-    ? update.blockers.length === 0 &&
+    ? !update.hub_reviewed &&
+      update.blockers.length === 0 &&
       update.version === update.installed_version &&
       update.files.every((f) => f.verdict === "unchanged")
     : false;
@@ -1257,14 +1284,38 @@ export function ImportAgentDialog({
                   </button>
                 )
               ) : (
-                <button
-                  onClick={confirmUpdate}
-                  disabled={busy}
-                  className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  Update {update.slug}
-                </button>
+                <>
+                  {update.hub_reviewed && (
+                    // The same explicit tick a fresh hub install requires
+                    // before Botcamp's terms acceptance is recorded — an
+                    // update records that same acceptance, so it asks the
+                    // same way.
+                    <label className="flex items-start gap-2 text-[11px] text-[var(--color-text)]">
+                      <input
+                        type="checkbox"
+                        data-update-consent
+                        aria-label={updateConsentLabel(update)}
+                        checked={consented}
+                        onChange={(e) => setConsented(e.target.checked)}
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                      />
+                      {updateConsentLabel(update)}
+                    </label>
+                  )}
+                  <button
+                    onClick={confirmUpdate}
+                    disabled={busy || (update.hub_reviewed && !consented)}
+                    title={
+                      update.hub_reviewed && !consented
+                        ? "Tick the box above to enable Update"
+                        : undefined
+                    }
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                    Update {update.slug}
+                  </button>
+                </>
               )}
             </>
           )}
@@ -1340,7 +1391,15 @@ function SuccessScreen({
             ? "Everything it declares — every tool and skill — comes in enabled."
             : `Muted on arrival: ${mutedNames.join(", ")}.`}{" "}
         {isUpdate
-          ? `Nothing has run yet${updateConsentNote(hubReviewed, keptLocalRoutines)}`
+          ? // `updateConsentNote` is written as a continuation ("<subject>,
+            // and ...") for the pre-confirm screen's "Nothing is started"
+            // lead-in. "Nothing is running yet" already opened this
+            // paragraph above, so this turns the same clause into its own
+            // sentence instead of restating that nothing has run a second
+            // time.
+            updateConsentNote(hubReviewed, keptLocalRoutines)
+              .replace(/^, and /, "")
+              .replace(/^./, (c) => c.toUpperCase())
           : hubReviewed
             ? "Every routine arrives with the hub's own review already covering its execution — no further allow is needed."
             : "Its routines still need your allow, one at a time, before any of them runs."}
