@@ -1849,6 +1849,8 @@ export interface RoutineCard {
   pending?: boolean;
   /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
   pending_reason?: string;
+  /** True when a local routine file exists in this Agent's writable folder (#313). */
+  deletable?: boolean;
 }
 
 /** One controller an agent can sync to a server (FEAT-127). */
@@ -3949,6 +3951,11 @@ export const api = {
   deleteAgentSkill: (slug: string, name: string) =>
     apiFetch<{ deleted: boolean }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+  deleteAgentRoutine: (slug: string, name: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/routines/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
 

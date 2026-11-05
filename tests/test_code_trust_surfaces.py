@@ -291,3 +291,104 @@ def test_running_a_pending_routine_is_a_403_naming_the_allow_action(
     assert resp.status_code == 403, resp.text
     assert "has not been allowed to run" in resp.json()["detail"]
     assert not sentinel.exists()
+
+
+# ── Deleting an imported agent's routine (#313) ──
+
+
+def test_delete_routine_removes_file_consent_record_and_mute(imported_agent):
+    from condor.memory.mutes import is_muted, load_mutes, set_muted
+    from mcp_servers.condor.tools.routines import delete_routine
+
+    slug, source, _ = imported_agent
+    code_trust.allow(slug, "lp_scanner", source.read_text("utf-8"))
+    set_muted(slug, "routine", "lp_scanner", True)
+
+    assert source.is_file()
+    assert code_trust.load(slug).allowed == {
+        "lp_scanner": code_trust.digest_of(source.read_text("utf-8"))
+    }
+    assert is_muted(slug, "routine", "lp_scanner")
+
+    res = delete_routine("lp_scanner", target=slug)
+    assert res == {"deleted": True, "name": "lp_scanner"}
+
+    assert not source.exists()
+    assert code_trust.load(slug).allowed == {}
+    assert not is_muted(slug, "routine", "lp_scanner")
+    assert load_mutes(slug)["routines"] == set()
+    assert "lp_scanner" not in base.assistant_routines(slug, include_muted=True)
+    assert base.pending_routines(slug) == []
+
+
+def test_delete_local_override_preserves_mute_when_shared_routine_exists(
+    imported_agent, monkeypatch, tmp_path
+):
+    from condor.memory.mutes import is_muted, set_muted
+    from condor.paths import stock_agents_root
+    from mcp_servers.condor.tools.routines import delete_routine
+
+    slug, source, _ = imported_agent
+    shared_dir = stock_agents_root() / "_shared" / "routines"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    (shared_dir / "backtest_chart.py").write_text(
+        PROBE.format(sentinel=str(tmp_path / "shared.ran"))
+    )
+
+    local_override = source.parent / "backtest_chart.py"
+    local_override.write_text(PROBE.format(sentinel=str(tmp_path / "local.ran")))
+    code_trust.allow(slug, "backtest_chart", local_override.read_text("utf-8"))
+    set_muted(slug, "routine", "backtest_chart", True)
+
+    res = delete_routine("backtest_chart", target=slug)
+    assert res == {"deleted": True, "name": "backtest_chart"}
+    assert not local_override.exists()
+    assert "backtest_chart" not in code_trust.load(slug).allowed
+    assert is_muted(slug, "routine", "backtest_chart")
+
+
+def test_web_delete_agent_routine_and_deletable_flag(
+    imported_agent, agents_client, tmp_path
+):
+    from condor.memory.mutes import is_muted, set_muted
+    from condor.paths import stock_agents_root
+
+    slug, source, _ = imported_agent
+    stock_dir = stock_agents_root() / slug / "routines"
+    stock_dir.mkdir(parents=True, exist_ok=True)
+    (stock_dir / "shipped_only.py").write_text(
+        PROBE.format(sentinel=str(tmp_path / "shipped.ran"))
+    )
+
+    set_muted(slug, "routine", "lp_scanner", True)
+    rows = {
+        r["name"]: r
+        for r in agents_client.get(f"/agents/{slug}/brain").json()["routines"]
+    }
+    assert rows["lp_scanner"]["deletable"] is True
+    assert rows["shipped_only"]["deletable"] is False
+
+    assert (
+        agents_client.put(
+            f"/agents/{slug}/code-trust",
+            json={"kind": "routine", "name": "lp_scanner", "allowed": True},
+        ).status_code
+        == 200
+    )
+    rows = {
+        r["name"]: r
+        for r in agents_client.get(f"/agents/{slug}/brain").json()["routines"]
+    }
+    assert rows["lp_scanner"]["deletable"] is True
+
+    res = agents_client.delete(f"/agents/{slug}/routines/lp_scanner")
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": True}
+
+    assert not source.exists()
+    assert code_trust.load(slug).allowed == {}
+    assert not is_muted(slug, "routine", "lp_scanner")
+    assert agents_client.delete(f"/agents/{slug}/routines/lp_scanner").status_code == 404
+    assert (
+        agents_client.delete(f"/agents/{slug}/routines/shipped_only").status_code == 400
+    )

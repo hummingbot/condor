@@ -904,7 +904,29 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
             return {"error": stock_delete_error(name, mute_kind="routine")}
         return {"error": f"Agent routine '{name}' not found"}
 
+    has_fallback = _stock_twin(routines_dir, name) is not None or any(
+        (shared_dir / f"{name}.py").is_file() for shared_dir in _shared_roots()
+    )
     file_path.unlink()
+    try:
+        if not any(routines_dir.iterdir()):
+            routines_dir.rmdir()
+    except OSError:
+        pass
+
+    from condor.paths import local_agents_root
+
+    if routines_dir != _shared_root() and routines_dir.is_relative_to(
+        local_agents_root()
+    ):
+        owner = routines_dir.parent.name
+        from condor.agents import code_trust
+        from condor.memory.mutes import set_muted
+
+        code_trust.revoke(owner, name)
+        if not has_fallback:
+            set_muted(owner, "routine", name, False)
+
     return {"deleted": True, "name": name}
 
 
