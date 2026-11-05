@@ -22,7 +22,11 @@ import pytest
 
 from condor import migrations, paths
 from condor.memory.paths import CHAT_SLUG
-from routines.base import assistant_routines_dir, assistant_routines_dirs
+from routines.base import (
+    agent_routine_overview,
+    assistant_routines_dir,
+    assistant_routines_dirs,
+)
 
 # ── where writes land ──
 
@@ -62,6 +66,21 @@ def test_the_shipped_library_is_still_read(slug):
 def test_local_shadows_shipped_not_the_other_way_round():
     dirs = assistant_routines_dirs(None)
     assert dirs.index(paths.local_agents_root() / CHAT_SLUG / "routines") == 0
+
+
+def test_the_brain_panel_still_lists_the_chats_own_routines():
+    """Regression for the panel that fed on ``agent_routine_overview``.
+
+    That function used to return ``[]`` outright for ``CHAT_SLUG``, on the
+    (correct) basis that the chat's own code is never gated by
+    ``code_trust`` the way an imported agent's is. But its one caller
+    (``_routine_cards``, the brain panel) does not care about gating — it
+    just needs the chat's own rows, the same way it gets every other
+    assistant's. An empty list there emptied the panel instead.
+    """
+    rows = agent_routine_overview(CHAT_SLUG)
+    assert rows, "the chat's own routine library read as empty"
+    assert all(row.allowed for row in rows), "the chat's own code is never gated"
 
 
 # ── existing chat-authored routines come along ──

@@ -934,8 +934,16 @@ def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
     must never be the reason its code runs, whether that code is still
     pending or was allowed, by a click or by a hub review, before the page was
     ever opened.
+
+    The chat (``CHAT_SLUG``) is not excluded here the way it is in
+    :func:`pending_routines`: this function's whole point is listing what the
+    panel shows, and the chat's own panel still needs its rows — its own
+    local library (:func:`assistant_routines_dir`) plus the shipped root. It
+    is simply never gated (:func:`condor.agents.code_trust.load` has nothing
+    to read for it), the same ungated path every other never-imported agent
+    already takes below.
     """
-    if not agent_slug or agent_slug == CHAT_SLUG:
+    if not agent_slug:
         return []
     code_trust = _code_trust()
     trust = code_trust.load(agent_slug)
