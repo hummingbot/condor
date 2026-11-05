@@ -924,7 +924,7 @@ def fetch(slug: str, version: str = "latest", *, token: str = "") -> FetchedVers
 HUB_CONSENT_TERMS_VERSION = "condor-import-consent-v1"
 
 
-class AgentConsentState(BaseModel):
+class AgentConsentState(_HubRead):
     """What ``GET``/``POST .../consent`` answered, read faithfully.
 
     ``accepted`` is whether *this* caller's Botcamp account has already
@@ -932,6 +932,11 @@ class AgentConsentState(BaseModel):
     install flow reads to skip re-asking. ``terms_version`` is whichever of
     Condor's own texts the acceptance (if any) was recorded against,
     Botcamp's own words and never re-derived here.
+
+    Subclasses ``_HubRead`` rather than ``BaseModel`` because a not-yet-
+    accepted reply sends ``acceptedAt``/``termsVersion`` as ``null`` (PR
+    #314's ``get_consent`` fix) — the same "``null`` means not sent" shape
+    every other hub-read model here already tolerates.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -1589,7 +1594,7 @@ def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionSta
     """
     cleaned = (code or "").strip()
     if not cleaned:
-        raise HubError("Paste the code Botcamp's /connect page showed you.")
+        raise HubError("Paste the code Botcamp's /connect page showed you.", status=400)
 
     generation = _connect_generation
     body = json.dumps(
@@ -1615,8 +1620,26 @@ def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionSta
                 "The hub answered a successful redeem with no token to store."
             )
 
+        # The generation check and the credential write happen under the
+        # *same* lock hold, so a disconnect() cannot land in between: its own
+        # generation bump (_bump_connect_generation) takes this same lock,
+        # so it either lands before this check (caught below) or waits until
+        # this write has already happened — in which case disconnect's own
+        # unconditional clear, which runs after its bump, is what has the
+        # last word. There is no window left where the check passes but a
+        # disconnect still undoes the write (Greptile, PR #314).
+        from config_manager import get_config_manager
+
         with _connect_lock:
             still_current = generation == _connect_generation
+            if still_current:
+                get_config_manager().update_hub(
+                    token=access_token,
+                    token_origin=_origin(HUB_URL),
+                    profile_handle=profile_handle,
+                    scope=scope_list,
+                    user=user,
+                )
 
         if not still_current:
             try:
@@ -1632,17 +1655,6 @@ def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionSta
                 "a new code and reconnect."
             )
 
-        # The one write of the credential, as soon as it exists — never
-        # handed back past this function.
-        from config_manager import get_config_manager
-
-        get_config_manager().update_hub(
-            token=access_token,
-            token_origin=_origin(HUB_URL),
-            profile_handle=profile_handle,
-            scope=scope_list,
-            user=user,
-        )
         log.info("hub: linked to Botcamp profile '%s'", profile_handle)
         return ConnectionState(
             status="linked",
@@ -1733,7 +1745,11 @@ def disconnect() -> DisconnectResult:
                     reply.status,
                 )
 
-    get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
+    # Under the same lock a racing redeem checks its generation against, so
+    # this clear can never land strictly between that check and its write —
+    # see redeem_connect_code.
+    with _connect_lock:
+        get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
     log.info("hub: disconnected from Botcamp")
     return result
 
