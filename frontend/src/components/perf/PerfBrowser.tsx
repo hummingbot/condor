@@ -1911,7 +1911,7 @@ export function PerfBrowser({
   // Scroll active into view
   useEffect(() => {
     const el = sidebarRef.current?.querySelector("[data-active-scope]");
-    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (typeof el?.scrollIntoView === "function") el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [effectiveScopeId]);
 
   // ── What the scope adds up to, in display currency ──

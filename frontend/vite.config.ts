@@ -21,6 +21,7 @@ export default defineConfig({
     // components/ui/AnchoredMenu.test.tsx).
     environment: "node",
     include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["./src/test/setup.ts"],
     // `lightweight-charts` is resolved dynamically by every chart component, so
     // two mounts in one `act()` request it concurrently and Vitest's mocker
     // answers a per-file `vi.mock` to one of them and raw-imports the real

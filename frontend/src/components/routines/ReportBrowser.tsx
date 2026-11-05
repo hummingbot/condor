@@ -562,7 +562,7 @@ export function ReportBrowser({
   // Scroll active source into view
   useEffect(() => {
     const el = sidebarRef.current?.querySelector("[data-active-source]");
-    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (typeof el?.scrollIntoView === "function") el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeSource]);
 
   // Tell the chat what report is open, for as long as the reader is (FEAT-059).

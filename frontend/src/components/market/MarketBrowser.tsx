@@ -210,7 +210,8 @@ export function MarketBrowser({
 
   useEffect(() => {
     const items = listRef.current?.querySelectorAll("[data-market-row]");
-    items?.[cursor]?.scrollIntoView({ block: "nearest" });
+    const el = items?.[cursor];
+    if (typeof el?.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" });
   }, [cursor]);
 
   // The venue and the pair leave together, in one call: that is what spares the
