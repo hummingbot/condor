@@ -130,6 +130,25 @@ def cm(tmp_path, monkeypatch):
     return manager
 
 
+@pytest.fixture(autouse=True)
+def _real_hub_url(monkeypatch):
+    """Pin :data:`hub.HUB_URL` back to the compiled-in origin for this file.
+
+    ``hub._dev_override()`` runs once, at ``condor.hub``'s first import, off
+    whatever ``os.environ`` holds at that moment. In a full-suite run some
+    earlier-collected module can import ``utils.config`` — which calls
+    ``load_dotenv()`` unconditionally at import time — before ``condor.hub``
+    is first imported, so a developer's local ``.env`` (``CONDOR_HUB_DEV_MODE=1``,
+    set exactly as CORR-929's own notes instruct, to test against
+    ``dev.botcamp.xyz``) silently redirects ``HUB_URL`` for the rest of the
+    process, regardless of this test file's own environment. Resetting it
+    here, rather than only in ``fake_hub``, protects every assertion in this
+    file that compares against the production origin without going through
+    that fixture.
+    """
+    monkeypatch.setattr(hub, "HUB_URL", hub.COMPILED_HUB_URL)
+
+
 @pytest.fixture
 def traveller():
     """A library agent with one of everything the layout defines."""
