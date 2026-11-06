@@ -15,7 +15,21 @@ import pytest
 from condor.agents import drex_gate
 from condor.agents.providers.base import ProviderResult
 
-GATE = {"trading_pair": "BTC-USDT", "drex_gate": {"side": "LONG", "interval": "1h"}}
+GATE = {
+    "connector_name": "binance_perpetual",
+    "trading_pair": "BTC-USDT",
+    "drex_gate": {"side": "LONG", "interval": "1h"},
+}
+# One filled LONG position executor on the loop's market, as build_executor_row
+# shapes it; the cases below change one field at a time.
+POSITION = {
+    "type": "position_executor",
+    "connector": "binance_perpetual",
+    "pair": "BTC-USDT",
+    "side": "BUY",
+    "entry_price": 140.0,
+    "volume": 100.0,
+}
 
 
 def _engine(tmp_path, monkeypatch, executors, **config):
@@ -132,8 +146,15 @@ def test_hold_ends_the_tick_without_the_model(tmp_path, monkeypatch):
     async def model(*_args):
         raise AssertionError("the model ran on a Drex hold")
 
+    class Report:
+        updates = 0
+
+        async def update(self, **_kwargs):
+            Report.updates += 1
+
     monkeypatch.setattr(engine, "_get_client", get_client)
     monkeypatch.setattr(engine, "_run_model", model)
+    engine._session_report = Report()
 
     asyncio.run(engine._tick())
 
@@ -144,7 +165,9 @@ def test_hold_ends_the_tick_without_the_model(tmp_path, monkeypatch):
     journal = engine.journal._path.read_text()
     assert "model_skipped" in journal
     assert "model skipped: Drex (drex-max-finance): HOLD — hold 0.900" in journal
+    assert "Last tick: #1" in journal
     assert engine.journal.tick_count == 1
+    assert Report.updates == 1
 
 
 def test_start_runs_the_model_with_the_answer_in_its_prompt(tmp_path, monkeypatch):
@@ -163,8 +186,7 @@ def test_start_runs_the_model_with_the_answer_in_its_prompt(tmp_path, monkeypatc
 def test_open_position_asks_hold_or_stop_from_its_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("NACE_API_KEY", "nace_sk_test")
     calls = _drex(monkeypatch, "stop", {"stop": 0.8, "hold": 0.2})
-    position = {"pair": "BTC-USDT", "side": "BUY", "entry_price": 140.0}
-    engine = _engine(tmp_path, monkeypatch, [position], **GATE)
+    engine = _engine(tmp_path, monkeypatch, [POSITION], **GATE)
 
     ctx = asyncio.run(engine._gather_tick_context(_client()))
 
@@ -191,13 +213,25 @@ def test_the_loop_s_own_rule_is_what_drex_and_the_model_get(tmp_path, monkeypatc
 @pytest.mark.parametrize(
     "executors",
     [
-        [{"pair": "ETH-USDT", "side": "BUY", "entry_price": 3000.0}],
-        [{"pair": "BTC-USDT", "side": "SELL", "entry_price": 140.0}],
-        [{"pair": "BTC-USDT", "side": "BUY", "entry_price": 0.0}],
-        [{"pair": "BTC-USDT", "side": "BUY", "entry_price": 140.0}] * 2,
+        [{**POSITION, "pair": "ETH-USDT"}],
+        [{**POSITION, "connector": "bybit_perpetual"}],
+        [{**POSITION, "side": "SELL"}],
+        [{**POSITION, "type": "grid_executor"}],
+        [{**POSITION, "volume": 0.0}],
+        [{**POSITION, "volume": 0.0, "entry_price": 0.0}],
+        [POSITION] * 2,
         {"error": "backend unreachable"},
     ],
-    ids=["other pair", "other side", "unfilled", "two positions", "no reading"],
+    ids=[
+        "other pair",
+        "other connector",
+        "other side",
+        "not a position executor",
+        "resting limit order",
+        "pending market order",
+        "two positions",
+        "no reading",
+    ],
 )
 def test_a_book_the_question_does_not_describe_is_left_to_the_model(
     tmp_path, monkeypatch, executors
