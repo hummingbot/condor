@@ -444,7 +444,11 @@ export function ReportBrowser({
       // it, so a saved custom value is never silently dropped just because
       // the owner pressed Run directly (Greptile, PR #314). No new trust
       // boundary: Run already executes this exact routine a moment later.
-      const cfg = await resolveConfigValues(activeRoutine!);
+      // `configValues` — the displayed form state — wins over that result:
+      // `saveConfig` can fail silently (storage full/blocked) while the form
+      // still shows the edit, and what Run sends must match what the owner
+      // can see, not whatever last made it to localStorage (Greptile, PR #314).
+      const cfg = { ...(await resolveConfigValues(activeRoutine!)), ...configValues };
       return api.runRoutine(runServer!, activeSource, cfg, {
         sessionKey: runContext?.sessionKey,
         attributeTo: runContext?.agentSlug,
@@ -459,7 +463,7 @@ export function ReportBrowser({
 
   const scheduleMutation = useMutation({
     mutationFn: async (intervalSec: number) => {
-      const cfg = await resolveConfigValues(activeRoutine!);
+      const cfg = { ...(await resolveConfigValues(activeRoutine!)), ...configValues };
       return api.scheduleRoutine(runServer!, activeSource, cfg, intervalSec);
     },
     onSuccess: () => {
@@ -494,20 +498,26 @@ export function ReportBrowser({
     if (!runServer || filteredRoutines.length === 0) return;
     const toRun = filteredRoutines;
     setRunAllProgress({ current: 0, total: toRun.length });
-    for (let i = 0; i < toRun.length; i++) {
-      setRunAllProgress({ current: i + 1, total: toRun.length });
-      const routine = toRun[i];
-      const cfg = await resolveConfigValues(routine);
-      try {
-        await api.runRoutine(runServer, routine.name, cfg, {
-          sessionKey: runContext?.sessionKey,
-          attributeTo: runContext?.agentSlug,
-        });
-      } catch {
-        // continue with remaining routines
+    try {
+      for (let i = 0; i < toRun.length; i++) {
+        setRunAllProgress({ current: i + 1, total: toRun.length });
+        const routine = toRun[i];
+        try {
+          // Resolving fields is inside this per-routine try too: one routine
+          // newly needing consent must not abort the batch or leave
+          // `runAllProgress` stuck disabled until reload (Greptile, PR #314).
+          const cfg = await resolveConfigValues(routine);
+          await api.runRoutine(runServer, routine.name, cfg, {
+            sessionKey: runContext?.sessionKey,
+            attributeTo: runContext?.agentSlug,
+          });
+        } catch {
+          // continue with remaining routines
+        }
       }
+    } finally {
+      setRunAllProgress(null);
     }
-    setRunAllProgress(null);
     invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
   }, [runServer, runContext, filteredRoutines, qc]);

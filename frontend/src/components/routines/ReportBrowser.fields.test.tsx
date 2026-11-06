@@ -215,3 +215,103 @@ describe("running an agent routine without ever opening Config", () => {
     );
   });
 });
+
+describe("Run sends what is displayed, even when storage can't keep up", () => {
+  it("still sends a live-edited value when saveConfig's localStorage write fails", async () => {
+    // Greptile, PR #314: Run and Schedule rebuild their inputs through
+    // `resolveConfigValues`, which re-reads localStorage from scratch. If
+    // `saveConfig` fails silently (storage full/blocked) while the Config
+    // form still shows the edit on screen, that rebuild must not throw the
+    // edit away — the displayed state is the one that has to win.
+    await render({ initialSource: "scout/beta_check" });
+    await openConfig();
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    const setItemSpy = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="number"]')!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(input, "0.9");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    setItemSpy.mockRestore();
+    expect(localStorage.getItem("routine_config:scout/beta_check")).toBeNull();
+
+    const runButton = container.querySelector<HTMLButtonElement>(
+      'button[title="Run with current config"]',
+    )!;
+    await act(async () => {
+      runButton.click();
+    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(runRoutine).toHaveBeenCalledWith(
+      "dashboard-server",
+      "scout/beta_check",
+      { margin_quote: 0.9 },
+      expect.anything(),
+    );
+  });
+});
+
+describe("Run All survives one routine's fields rejecting mid-batch", () => {
+  it("clears runAllProgress and keeps running the rest of the batch", async () => {
+    // Greptile, PR #314: the old code resolved fields outside the
+    // per-routine `try`, so a routine that newly needs consent (its fields
+    // request rejects) threw out of the loop entirely — the remaining
+    // routines never ran and `runAllProgress` stayed stuck, wedging the
+    // button until the page reloaded.
+    getRoutineFields.mockImplementation((name: string) =>
+      name === "scout/beta_check"
+        ? Promise.reject(new Error("consent required"))
+        : Promise.resolve({ fields: {} }),
+    );
+    await render({ initialSource: "alpha_check" });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    const runAllButton = container.querySelector<HTMLButtonElement>(
+      'button[title="Run all filtered routines with default configs"]',
+    )!;
+    await act(async () => {
+      runAllButton.click();
+    });
+    for (let i = 0; i < 8; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(runRoutine).toHaveBeenCalledWith(
+      "dashboard-server",
+      "alpha_check",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(runAllButton.disabled).toBe(false);
+    expect(runAllButton.textContent).toContain("Run All");
+  });
+});
