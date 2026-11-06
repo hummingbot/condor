@@ -249,6 +249,25 @@ def test_an_allowed_routine_edited_on_disk_is_pending_again(imported_agent):
     assert "changed on disk" in row.refusal()
 
 
+def test_windows_line_endings_do_not_strand_a_grant(imported_agent):
+    """A grant made against a bundle's CRLF text must still match on disk.
+
+    ``bundle.apply`` grants consent with ``entry.text`` exactly as the bundle
+    carried it; a file exported on Windows carries CRLF. The file on disk is
+    read back through ``_read_text``, whose universal newlines collapses
+    that to LF before hashing. Without normalizing in ``digest_of`` the two
+    digests disagree and the routine is rejected as changed the moment it
+    is allowed (Greptile, PR #314).
+    """
+    slug, _ = imported_agent
+    crlf_source = _source_of(slug, "lp_scanner").replace("\n", "\r\n")
+    assert "\r\n" in crlf_source
+
+    code_trust.allow(slug, "lp_scanner", crlf_source)
+
+    assert set(assistant_routines(slug)) == {"lp_scanner"}
+
+
 def test_muting_a_pending_routine_works_and_executes_nothing(imported_agent):
     slug, sentinels = imported_agent
 
