@@ -274,7 +274,14 @@ def _check_placeholder_credentials(data: object) -> list[Check]:
         name
         for name, server in servers.items()
         if isinstance(server, dict)
-        and str(server.get("password", "")).strip().lower() in _PLACEHOLDER_CREDENTIALS
+        and (
+            str(server.get("password", "")).strip().lower() in _PLACEHOLDER_CREDENTIALS
+            or (
+                "username" in server
+                and str(server.get("username", "")).strip().lower()
+                in _PLACEHOLDER_CREDENTIALS
+            )
+        )
     ]
     if not stale:
         return []
@@ -282,7 +289,7 @@ def _check_placeholder_credentials(data: object) -> list[Check]:
         Check(
             "API credentials",
             WARN,
-            f"{', '.join(sorted(stale))} still uses a placeholder password — set "
+            f"{', '.join(sorted(stale))} still uses placeholder credentials — set "
             "the real hummingbot-api username/password via /servers (or in "
             "config.yml) or the API will answer 401",
         )
