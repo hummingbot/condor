@@ -22,14 +22,23 @@ worktree_setup: uv sync --dev && make build-frontend && make setup-worktree
 workstream_ports: 8090-8099
 
 services:
+  # The live Condor: `make run` owns it (tmux session `condor`, :8088). The
+  # project card's Deploy row shows it as running while 8088 answers, and its
+  # Start / Stop buttons ask the Makefile — metabrain never launches it.
+  - name: condor
+    port: 8088
+    start: make run
+    stop: make stop
+
   - name: web
     # Rebuilds frontend/dist from the worktree's own source (npm ci only when
     # package-lock.json moved), then runs Condor as a dashboard alone.
     command: bash -c 'make build-frontend && exec uv run python main.py'
-    # Main's instance, if started from /services. It is refused while the
-    # live Condor holds 8088, which is the normal case.
+    # Previews only: main's own Condor is the `condor` service above, so a
+    # second main instance here would only collide with it on 8088.
     port: 8088
     per_workstream: true
+    main_instance: false
     env:
       # Local mode: no Telegram polling (a second poller on the live token
       # would fight the live bot for updates), dashboard bound to loopback.
