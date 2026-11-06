@@ -2569,22 +2569,6 @@ def test_a_seat_can_still_install_a_public_agent(offered, fake_hub, cm):
     )
 
 
-def test_a_seat_installs_from_chat_without_the_admins_token(
-    offered, fake_hub, cm, monkeypatch
-):
-    from mcp_servers.condor.settings import settings
-    from mcp_servers.condor.tools import trading_agent
-
-    monkeypatch.setattr(settings, "user_id", SEAT_ID, raising=False)
-    hub.set_token("botcamp-tok")
-    before = len(fake_hub.calls)
-
-    trading_agent.manage_agents(action="hub_install", path="traveller")
-
-    sent = fake_hub.calls[before:]
-    assert sent and {call.token for call in sent} == {""}
-
-
 def test_install_from_hub_refuses_an_acceptance_nobody_showed(offered, fake_hub, cm):
     """The counterpart to the seat test above: whenever there *is* a token
     to record consent with, a request that never says the owner accepted
@@ -2600,26 +2584,26 @@ def test_install_from_hub_refuses_an_acceptance_nobody_showed(offered, fake_hub,
     assert fake_hub.consents == {}
 
 
-def test_a_hub_install_from_chat_records_consent_with_the_admins_token(
-    offered, fake_hub, cm, monkeypatch
-):
-    """Blocker: the chat tool built the plan with ``hub_reviewed=True`` and
-    installed it, but never told Botcamp this account accepted its terms —
-    unlike ``install_from_hub`` (the web route), which does. The human
-    already confirmed running this exact call before it reached
-    ``_hub_install`` (``hub_install`` is one of
-    ``condor.runtime.danger.DANGEROUS_AGENT_ACTIONS``), so that confirmation
-    is this surface's own stand-in for the import dialog's checkbox."""
+def test_a_hub_install_from_chat_is_always_refused(offered, fake_hub, cm, monkeypatch):
+    """Only the Hub page's own consent checkbox (``ImportAgentDialog``) may
+    install a hub agent — a human confirming a chat tool call is not the
+    owner reading that checkbox, so chat's door was recording consent
+    nobody actually gave. The fix is removing the door: this always
+    refuses, touches nothing on Botcamp, and tells the user where to go."""
     from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent
 
     monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
     hub.set_token("botcamp-tok")
+    before = len(fake_hub.calls)
 
     result = trading_agent.manage_agents(action="hub_install", path="traveller")
 
-    assert result.get("verb") == "install"
-    assert ("traveller", 1) in fake_hub.consents
+    assert "error" in result
+    assert "Hub" in result["error"]
+    assert fake_hub.calls[before:] == []
+    assert fake_hub.consents == {}
+    assert not agent_home("traveller").exists()
 
 
 def test_every_hub_surface_carries_the_one_trust_sentence(offered):
@@ -3128,70 +3112,18 @@ def test_manage_agents_gets_one_hub_agent(fake_hub):
     assert "not a security boundary" in result["trust"]
 
 
-def test_manage_agents_installs_from_the_hub(offered, monkeypatch):
-    """The chat door takes the same hub exception the web route does
-    (FEAT-146, widened to routines in FEAT-150, and to execution consent by
-    the owner's later trust-boundary call) — a Greptile finding on this PR
-    caught this door lagging behind with ``mute_routines`` left at its
-    default; both doors must land a hub install identically."""
-    from condor.agents import code_trust
-    from mcp_servers.condor.settings import settings
+def test_manage_agents_hub_install_refuses_with_or_without_a_slug(fake_hub):
+    """The chat door never reaches the hub at all, slug or no slug — only
+    the Hub page's own consent checkbox may install (see
+    ``test_a_hub_install_from_chat_is_always_refused`` for the full case
+    with an admin token and a real listing)."""
     from mcp_servers.condor.tools import trading_agent
 
-    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
+    with_slug = trading_agent.manage_agents(action="hub_install", path="traveller")
+    without_slug = trading_agent.manage_agents(action="hub_install")
 
-    result = trading_agent.manage_agents(action="hub_install", path="traveller")
-
-    assert result["verb"] == "install"
-    assert result["imported"] is True
-    assert result["listing"]["slug"] == "traveller"
-    muted = load_mutes("traveller")
-    assert muted["routines"] == set()
-    # FEAT-146: the hub already reviewed this content, so a skill — unlike a
-    # routine, which is code — needs no second approval on this door either.
-    assert muted["skills"] == set()
-    source = agent_home("traveller") / "routines" / "r.py"
-    assert code_trust.allowed("traveller", "r", source.read_text())
-
-
-def test_manage_agents_hub_install_records_provenance(offered, fake_hub, monkeypatch):
-    """BUG-4: the chat door's install must stamp the same provenance the web
-    route does, or ``installed_agent_status`` never learns to watch this
-    agent for delisting."""
-    from mcp_servers.condor.settings import settings
-    from mcp_servers.condor.tools import trading_agent
-
-    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
-
-    trading_agent.manage_agents(action="hub_install", path="traveller")
-
-    stamp = ab.read_stamp(agent_home("traveller"))
-    assert stamp.hub_slug == "traveller"
-    assert stamp.hub_version == 1
-    assert stamp.hub_status == "ok"
-
-
-def test_manage_agents_hub_update_records_provenance(traveller, fake_hub, monkeypatch):
-    """Same stamp, taken on the update verb (the agent already installed)."""
-    from mcp_servers.condor.settings import settings
-    from mcp_servers.condor.tools import trading_agent
-
-    ab.build("traveller")  # mints and stamps this agent's agent_uid on disk
-    fake_hub.offer("traveller", _zip_agent("traveller"), version=2)
-    monkeypatch.setattr(settings, "user_id", ADMIN_ID, raising=False)
-
-    result = trading_agent.manage_agents(action="hub_install", path="traveller")
-
-    assert result["verb"] == "update"
-    stamp = ab.read_stamp(agent_home("traveller"))
-    assert stamp.hub_slug == "traveller"
-    assert stamp.hub_version == 2
-
-
-def test_manage_agents_hub_install_needs_a_slug(fake_hub):
-    from mcp_servers.condor.tools import trading_agent
-
-    assert "required" in trading_agent.manage_agents(action="hub_install")["error"]
+    assert "Hub" in with_slug["error"]
+    assert "Hub" in without_slug["error"]
     assert fake_hub.calls == []
 
 

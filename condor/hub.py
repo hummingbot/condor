@@ -914,12 +914,14 @@ def fetch(slug: str, version: str = "latest", *, token: str = "") -> FetchedVers
 #: Which of Condor's own notices stands behind a recorded acceptance —
 #: sent as ``termsVersion`` on every :func:`post_consent` call so Botcamp's
 #: stored row says which wording the owner actually read, whichever surface
-#: showed it: the import dialog's step-2 checkbox
-#: (``ImportAgentDialog.tsx``), the install API's own ``accepted`` field, or
-#: the chat tool's dangerous-action confirmation prompt
-#: (``condor.runtime.danger``) for ``manage_agents(action="hub_install")``.
-#: One notion of "the caller affirmed the hub's terms", not three. Bump this
-#: string whenever any of those surfaces changes what the owner is actually
+#: showed it: the import dialog's step-2 checkbox (``ImportAgentDialog.tsx``)
+#: or the install API's own ``accepted`` field. There used to be a third
+#: surface, the chat tool's dangerous-action confirmation prompt for
+#: ``manage_agents(action="hub_install")`` — removed because a human
+#: confirming that tool call is not the owner reading this sentence, so a
+#: chat install was recording consent nobody actually gave. ``hub_install``
+#: now refuses unconditionally; only the Hub page can install. Bump this
+#: string whenever a remaining surface changes what the owner is actually
 #: agreeing to; a cosmetic wording fix does not need a bump.
 HUB_CONSENT_TERMS_VERSION = "condor-import-consent-v1"
 
