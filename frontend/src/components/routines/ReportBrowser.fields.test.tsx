@@ -163,4 +163,19 @@ describe("an agent routine's Config form", () => {
     expect(getRoutineFields).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Order size");
   });
+
+  it("never fetches merely from a routine being selected, Config still closed", async () => {
+    // Greptile, PR #314: resolving a routine to read its fields is importing
+    // it (FEAT-147) — browsing to one to look at its reports must never do
+    // that on its own. Only `showConfigPanel` is the explicit action that
+    // already means code is about to run.
+    await render({ initialSource: "scout/beta_check" });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(getRoutineFields).not.toHaveBeenCalled();
+  });
 });

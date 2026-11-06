@@ -191,11 +191,15 @@ export function ReportBrowser({
 
   /**
    * An allowed agent routine lists with `fields: {}` — `GET /routines` never
-   * imports one — so the Config form fetches them itself, once there is a
-   * routine on screen to configure. A pending one stays unresolved; it has
-   * no fields to fetch until the operator allows it.
+   * imports one — so the Config form fetches them itself, once the operator
+   * actually opens that panel. Resolving a routine is importing it (FEAT-147),
+   * so this must never fire merely from selecting a routine to browse its
+   * reports — only `showConfigPanel` is the explicit action that already
+   * means code is about to run (Greptile, PR #314). A pending one stays
+   * unresolved either way; it has no fields to fetch until allowed.
    */
   const needsFields =
+    showConfigPanel &&
     !!activeRoutine &&
     !activeRoutine.pending &&
     Object.keys(activeRoutine.fields).length === 0;
