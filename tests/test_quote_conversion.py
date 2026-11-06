@@ -203,3 +203,34 @@ def test_chart_series_without_rates_stays_native():
 
     assert series["volume_buckets"][0]["buy_vol"] == pytest.approx(500.0)
     assert series["pnl_evolution"][-1]["net_pnl"] == pytest.approx(10.0)
+
+
+# ── A quote never wears a dollar sign without a rate ──
+
+
+def test_usd_value_needs_an_explicit_rate():
+    """``None`` is the signal that keeps a SOL amount out of dollars."""
+    rates = qc.QuoteRates({"USDT": 1.0}, False)
+
+    assert qc.usd_value(2.5, "USDT", rates) == 2.5
+    assert qc.usd_value(2.5, "SOL", rates) is None
+    assert qc.usd_value(2.5, "", rates) is None
+
+
+def test_format_quote_money_converts_and_signs_before_the_symbol():
+    rates = qc.QuoteRates({"SOL": 150.0}, True)
+
+    assert qc.format_quote_money(2.0, "SOL", rates) == "$300.00"
+    assert qc.format_quote_money(2.0, "SOL", rates, signed=True) == "+$300.00"
+    # "$-300.00" reads as a positive amount with a stray dash; the sign leads.
+    assert qc.format_quote_money(-2.0, "SOL", rates, signed=True) == "-$300.00"
+
+
+def test_format_quote_money_keeps_the_ticker_when_unpriced():
+    """0.0115 SOL is not $0.0115 -- it is roughly $2."""
+    rates = qc.QuoteRates({}, False)
+
+    assert qc.format_quote_money(0.0115, "SOL", rates) == "0.0115 SOL"
+    assert qc.format_quote_money(0.0115, "SOL", rates, signed=True) == "+0.0115 SOL"
+    # ``rates=None`` is "could not resolve any", not "assume parity".
+    assert qc.format_quote_money(0.0115, "SOL", None) == "0.0115 SOL"
