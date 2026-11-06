@@ -215,8 +215,8 @@ async function choose() {
 }
 
 function button(label: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll("button")].find((b) =>
-    b.textContent?.includes(label),
+  const found = [...container.querySelectorAll("button")].find(
+    (b) => b.textContent?.includes(label) || b.getAttribute("aria-label") === label,
   );
   if (!found) throw new Error(`no button matching ${label}`);
   return found as HTMLButtonElement;

@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Check,
+  ChevronLeft,
   FileCode2,
   FileText,
   Loader2,
@@ -194,21 +195,26 @@ function SecondaryButton({
   );
 }
 
-/** "Step 1 of 2" / "Step 2 of 2" — enough to tell the wizard has two screens. */
-function StepIndicator({ step }: { step: 1 | 2 }) {
+/**
+ * "‹ 1 of 2" / "‹ 2 of 2" — the back control and the step count in one
+ * borderless line. The chevron IS the back button; on step 1 there is
+ * nothing to go back to, so it renders disabled rather than disappearing,
+ * keeping the row's height constant across steps.
+ */
+function StepIndicator({ step, onBack }: { step: 1 | 2; onBack: () => void }) {
   return (
-    <p className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-text-muted)]">
-      <span className="flex gap-1">
-        {([1, 2] as const).map((n) => (
-          <span
-            key={n}
-            className={`h-1.5 w-1.5 rounded-full ${
-              n === step ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
-            }`}
-          />
-        ))}
-      </span>
-      Step {step} of 2
+    <p className="flex items-center gap-1 text-[11px] font-semibold text-[var(--color-text-muted)]">
+      <button
+        type="button"
+        onClick={onBack}
+        disabled={step === 1}
+        aria-label="Back"
+        className="flex items-center justify-center rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-[var(--color-text-muted)]"
+      >
+        <ChevronLeft className="h-3.5 w-3.5" />
+      </button>
+      <span className="text-[var(--color-primary)]">{step}</span>
+      <span>of 2</span>
     </p>
   );
 }
@@ -700,7 +706,7 @@ export function ImportAgentDialog({
 
       {plan && (
         <div className="space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-          <StepIndicator step={step} />
+          <StepIndicator step={step} onBack={() => setStep(1)} />
 
           {/* Step 1 — what you're installing: the identity and every
               collapsible fact about it, nothing to decide yet. Step 2 is
@@ -1144,10 +1150,6 @@ export function ImportAgentDialog({
               in the owner's terms rather than the file list again. */}
           {step === 2 && (
             <div className="space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <SecondaryButton onClick={() => setStep(1)}>Back</SecondaryButton>
-              </div>
-
               <ConsentDisclaimer plan={plan} />
 
               <div
