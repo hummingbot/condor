@@ -20,6 +20,7 @@ import type { RoutineInfo } from "@/lib/api";
 
 const getRoutineReports = vi.fn();
 const getRoutineFields = vi.fn();
+const runRoutine = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -34,7 +35,7 @@ vi.mock("@/lib/api", () => ({
     getRoutineReports: (...a: unknown[]) => getRoutineReports(...a),
     getRoutineInstance: () => Promise.resolve(null),
     getRoutineSource: () => Promise.resolve({ filename: "x.py", source: "" }),
-    runRoutine: () => Promise.resolve({ instance_id: "i9" }),
+    runRoutine: (...a: unknown[]) => runRoutine(...a),
     scheduleRoutine: () => Promise.resolve({ instance_id: "i9" }),
     deleteReport: () => Promise.resolve({ deleted: true }),
     getReportHtml: () => Promise.resolve(""),
@@ -122,6 +123,7 @@ beforeEach(() => {
   getRoutineFields.mockResolvedValue({
     fields: { margin_quote: { type: "float", default: 0.5, description: "Margin quote" } },
   });
+  runRoutine.mockResolvedValue({ instance_id: "i9" });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -177,5 +179,39 @@ describe("an agent routine's Config form", () => {
     }
 
     expect(getRoutineFields).not.toHaveBeenCalled();
+  });
+});
+
+describe("running an agent routine without ever opening Config", () => {
+  it("still resolves its fields, so a saved custom value is not dropped", async () => {
+    // Greptile, PR #314: `buildConfigValues` only copies a saved localStorage
+    // value for a key that is also in `routine.fields` — so once that stayed
+    // `{}` until Config opened, pressing Run directly silently sent `{}`
+    // instead of a value the owner had saved in an earlier session.
+    localStorage.setItem(
+      "routine_config:scout/beta_check",
+      JSON.stringify({ margin_quote: 0.75 }),
+    );
+    await render({ initialSource: "scout/beta_check" });
+
+    const runButton = container.querySelector<HTMLButtonElement>(
+      'button[title="Run with current config"]',
+    )!;
+    await act(async () => {
+      runButton.click();
+    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(getRoutineFields).toHaveBeenCalledWith("scout/beta_check");
+    expect(runRoutine).toHaveBeenCalledWith(
+      "dashboard-server",
+      "scout/beta_check",
+      { margin_quote: 0.75 },
+      expect.anything(),
+    );
   });
 });

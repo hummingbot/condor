@@ -29,6 +29,7 @@ import {
   formatRoutineName,
   inScope,
   invalidateRoutineQueries,
+  resolveConfigValues,
   resolveRoutine,
   saveConfig,
 } from "@/lib/routineUtils";
@@ -438,11 +439,17 @@ export function ReportBrowser({
   }, [polledInstance, activeSource, qc]);
 
   const runMutation = useMutation({
-    mutationFn: () =>
-      api.runRoutine(runServer!, activeSource, configValues, {
+    mutationFn: async () => {
+      // Resolves the routine's fields first if Config was never opened for
+      // it, so a saved custom value is never silently dropped just because
+      // the owner pressed Run directly (Greptile, PR #314). No new trust
+      // boundary: Run already executes this exact routine a moment later.
+      const cfg = await resolveConfigValues(activeRoutine!);
+      return api.runRoutine(runServer!, activeSource, cfg, {
         sessionKey: runContext?.sessionKey,
         attributeTo: runContext?.agentSlug,
-      }),
+      });
+    },
     onSuccess: (data) => {
       setPollingInstanceId(data.instance_id);
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
@@ -451,8 +458,10 @@ export function ReportBrowser({
   });
 
   const scheduleMutation = useMutation({
-    mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(runServer!, activeSource, configValues, intervalSec),
+    mutationFn: async (intervalSec: number) => {
+      const cfg = await resolveConfigValues(activeRoutine!);
+      return api.scheduleRoutine(runServer!, activeSource, cfg, intervalSec);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
@@ -488,7 +497,7 @@ export function ReportBrowser({
     for (let i = 0; i < toRun.length; i++) {
       setRunAllProgress({ current: i + 1, total: toRun.length });
       const routine = toRun[i];
-      const cfg = buildConfigValues(routine);
+      const cfg = await resolveConfigValues(routine);
       try {
         await api.runRoutine(runServer, routine.name, cfg, {
           sessionKey: runContext?.sessionKey,
