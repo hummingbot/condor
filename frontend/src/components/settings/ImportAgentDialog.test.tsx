@@ -44,6 +44,7 @@ const PLAN: AgentImportPlan = {
   total_bytes: 420,
   stamps: { created_by: "7", server_name: "" },
   mutes: { routines: ["r"], skills: ["s"] },
+  hub_reviewed: false,
   agent_key: "claude-code",
   agent_key_inherited: false,
   collision: "",
@@ -53,6 +54,7 @@ const PLAN: AgentImportPlan = {
   refusals: [],
   agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
   version: 3,
+  hub_version: 0,
   notes: "",
   author: { name: "", handle: "" },
   requires: {
@@ -126,6 +128,8 @@ const UPDATE: AgentUpdatePlan = {
   installed_agent_uid: "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f",
   version: 3,
   installed_version: 2,
+  hub_version: 0,
+  installed_hub_version: 0,
   exported_at: "2026-10-15T09:00:00Z",
   notes: "",
   author: { name: "", handle: "" },
@@ -152,6 +156,7 @@ const UPDATE: AgentUpdatePlan = {
   ],
   counts: { unchanged: 1, changed: 1, added: 1, conflict: 1, removed: 1 },
   mutes: { routines: ["new"], skills: [] },
+  hub_reviewed: false,
   blockers: [],
   warnings: [],
 };
@@ -210,11 +215,29 @@ async function choose() {
 }
 
 function button(label: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll("button")].find((b) =>
-    b.textContent?.includes(label),
+  const found = [...container.querySelectorAll("button")].find(
+    (b) => b.textContent?.includes(label) || b.getAttribute("aria-label") === label,
   );
   if (!found) throw new Error(`no button matching ${label}`);
   return found as HTMLButtonElement;
+}
+
+/** Ticks the "I have reviewed…" / "I understand…" box Install is gated on. */
+async function tickConsent() {
+  const box = container.querySelector(
+    "[data-import-consent]",
+  ) as HTMLInputElement;
+  await act(async () => {
+    box.click();
+  });
+}
+
+/** Moves the review wizard from step 1 (what you're installing) to step 2
+ *  (confirm), where the consent box and the Import/Update button live. */
+async function continueToConfirm() {
+  await act(async () => {
+    button("Continue").click();
+  });
 }
 
 it("previews before it writes, and names every executable", async () => {
@@ -233,26 +256,28 @@ it("previews before it writes, and names every executable", async () => {
   expect(container.textContent).toContain("no sandbox");
 });
 
-it("shows the review grouped by category, in the server's order", async () => {
+it("shows the review grouped by category, in the server's order — the two named sections pulled out of the rest", async () => {
   reply = { ...PLAN, findings: FINDINGS };
   await render();
   await choose();
 
+  // `endpoint` and `risk_limits` get their own named section; the other
+  // three (secret, code_run, tool_steer) stay grouped together.
   const groups = [...container.querySelectorAll("[data-finding-group]")].map((n) =>
     n.getAttribute("data-finding-group"),
   );
-  expect(groups).toEqual([
-    "secret",
-    "endpoint",
-    "code_run",
-    "tool_steer",
-    "risk_limits",
-  ]);
-  expect(container.querySelector("[data-findings]")?.textContent).toContain(
-    "5 things to look at",
-  );
+  expect(groups).toEqual(["secret", "code_run", "tool_steer"]);
+  expect(
+    container.querySelector("[data-findings]")?.closest("details")?.textContent,
+  ).toContain("Other things the scan found — 3 findings");
   // Best-effort, and the copy says so rather than implying a guarantee.
   expect(container.textContent).toContain("It warns; it does not prevent.");
+  expect(container.querySelector("[data-hosts]")?.textContent).toContain(
+    "Hosts it reaches — 1 host, 1 public",
+  );
+  expect(container.querySelector("[data-guardrails]")?.textContent).toContain(
+    "Guardrails it brings with it — 1 limit",
+  );
 });
 
 it("locates each finding and shows the context for the two that carry it", async () => {
@@ -263,21 +288,76 @@ it("locates each finding and shows the context for the two that carry it", async
   const rows = [...container.querySelectorAll("[data-finding]")].map((n) =>
     n.textContent?.trim(),
   );
-  expect(rows[0]).toContain("mnemonic (certain)");
-  expect(rows[0]).toContain("skills/s/SKILL.md:9");
+  // Document order: Hosts it reaches (endpoint), then Guardrails
+  // (risk_limits), then the grouped leftovers (secret, code_run, tool_steer).
+  expect(rows[0]).toContain("public");
+  expect(rows[0]).toContain("routines/r.py:4");
+  // A limit is a judgement the operator makes: the figure, and no verdict.
+  expect(rows[1]).toContain("max_position_size_quote");
+  expect(rows[1]).toContain("999999");
+  expect(rows[2]).toContain("mnemonic (certain)");
+  expect(rows[2]).toContain("skills/s/SKILL.md:9");
   // `tool_steer` is context, not an accusation, so the sentence is on screen.
-  expect(rows[3]).toContain(
+  expect(rows[4]).toContain(
     "When the band is breached, then call `create_grid_executor`.",
   );
-  // A limit is a judgement the operator makes: the figure, and no verdict.
-  expect(rows[4]).toContain("max_position_size_quote");
-  expect(rows[4]).toContain("999999");
+});
+
+it("keeps Import disabled until the consent box is ticked, even with a clean plan", async () => {
+  await render();
+  await choose();
+  await continueToConfirm();
+
+  expect(button("Import traveller").disabled).toBe(true);
+
+  await tickConsent();
+  expect(button("Import traveller").disabled).toBe(false);
+
+  // Unticking it again disables the button — it isn't a one-way latch.
+  await tickConsent();
+  expect(button("Import traveller").disabled).toBe(true);
+});
+
+it("always opens on step 1, and reopening resets both the step and the consent tick", async () => {
+  await render();
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+  expect(button("Import traveller").disabled).toBe(false);
+
+  // A fresh pick re-previews from scratch — step and consent both reset.
+  await choose();
+  expect(() => button("Import traveller")).toThrow();
+  expect(button("Continue")).toBeTruthy();
+});
+
+it("asks for consent again after a rename re-previews the plan", async () => {
+  reply = { ...PLAN, collision: "traveller", suggested_slug: "traveller_2" };
+  await render();
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+
+  // Renaming lives on step 1 (the identity review), so giving up the tick
+  // means going back to it — a rename is a fresh preview either way.
+  await act(async () => {
+    button("Back").click();
+  });
+  reply = { ...PLAN, slug: "traveller_2", collision: "", suggested_slug: "" };
+  await act(async () => {
+    button("Check name").click();
+  });
+  await continueToConfirm();
+
+  expect(button("Import traveller_2").disabled).toBe(true);
 });
 
 it("never blocks the import on a finding, not even a certain secret", async () => {
   reply = { ...PLAN, findings: FINDINGS };
   await render();
   await choose();
+  await continueToConfirm();
+  await tickConsent();
 
   expect(button("Import traveller").disabled).toBe(false);
 
@@ -299,6 +379,8 @@ it("only posts to the apply endpoint when the operator confirms", async () => {
   const imported = vi.fn();
   await render(imported);
   await choose();
+  await continueToConfirm();
+  await tickConsent();
 
   await act(async () => {
     button("Import traveller").click();
@@ -322,6 +404,7 @@ it("refuses to apply a plan the server already refused", async () => {
   expect(container.querySelector("[data-refusal]")?.textContent).toContain(
     "sha256",
   );
+  await continueToConfirm();
   expect(button("Import traveller").disabled).toBe(true);
 });
 
@@ -329,9 +412,14 @@ it("offers a free name for a collision and re-previews under it", async () => {
   reply = { ...PLAN, collision: "traveller", suggested_slug: "traveller_2" };
   await render();
   await choose();
+  await continueToConfirm();
 
   expect(button("Import traveller").disabled).toBe(true);
 
+  // Renaming lives on step 1, the identity review.
+  await act(async () => {
+    button("Back").click();
+  });
   await act(async () => {
     button("Check name").click();
   });
@@ -355,6 +443,8 @@ it("imports under the name that was reviewed, not the empty box", async () => {
   await act(async () => {
     button("Check name").click();
   });
+  await continueToConfirm();
+  await tickConsent();
   expect(button("Import traveller_2").disabled).toBe(false);
 
   await act(async () => {
@@ -409,6 +499,7 @@ it("shows the newest bundle's plan when an older preview answers late", async ()
   await act(async () => {
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  await continueToConfirm();
   expect(button("Import second")).toBeTruthy();
 
   gate.release?.();
@@ -478,6 +569,9 @@ it("lists what this install cannot give the agent, without blocking import", asy
   expect(container.querySelector("[data-bundle-notes]")?.textContent).toContain(
     "Widened the grid.",
   );
+
+  await continueToConfirm();
+  await tickConsent();
   expect(button("Import traveller").disabled).toBe(false);
 });
 
@@ -566,8 +660,9 @@ it("only posts to the update endpoint when the operator confirms", async () => {
     "/api/v1/agents/traveller/update",
   ]);
   expect(imported).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain("Updated traveller to version 3");
   expect(container.querySelector("[data-update-done]")?.textContent).toContain(
-    "Updated traveller to version 3",
+    "Nothing is running yet",
   );
 });
 
@@ -591,6 +686,131 @@ it("shows a blocker instead of an Update button", async () => {
   ).toContain("loop running right now");
   expect(container.querySelector("[data-update-file]")).toBeNull();
   expect(() => button("Update traveller")).toThrow();
+});
+
+it("reads as already up to date when every file is unchanged at the same version", async () => {
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    installed_version: 1,
+    version: 1,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "routines/r.py",
+        verdict: "unchanged",
+        bytes: 120,
+        executable: true,
+        incoming: "",
+      },
+    ],
+    counts: { unchanged: 2 },
+    mutes: { routines: [], skills: [] },
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(container.querySelector("[data-update-plan]")?.textContent).toContain(
+    "already up to date",
+  );
+  expect(container.textContent).toContain("nothing to install");
+  expect(() => button("Update traveller")).toThrow();
+});
+
+it("says no further allow is needed on a hub update with nothing kept local", async () => {
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      { path: "routines/r.py", verdict: "changed", bytes: 130, executable: true, incoming: "" },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  expect(container.querySelector("[data-update-plan]")?.textContent).toContain(
+    "no further allow needed",
+  );
+});
+
+it("still asks for an allow on a hub update that kept a locally-edited routine", async () => {
+  // Policy 3: the hub's review covers only the bytes it just wrote. A
+  // routine the operator edited after install — `conflict` here — is never
+  // reviewed, so it keeps the ordinary per-file consent gate even though
+  // the rest of this update is hub-reviewed.
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "routines/r.py",
+        verdict: "conflict",
+        bytes: 130,
+        executable: true,
+        incoming: "upstream's new text",
+      },
+    ],
+    counts: { unchanged: 1, conflict: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  const text = container.querySelector("[data-update-plan]")?.textContent ?? "";
+  expect(text).toContain("still needs your allow");
+  expect(text).not.toContain("no further allow needed");
+});
+
+it("says nothing about allowing routines on an update that carries none", async () => {
+  // Greptile, PR #314 (minor): an update of an agent with no routines (e.g.
+  // `churn`) still said "the hub's own review already covers every routine
+  // this update changes" regardless of whether it changed any.
+  reply = SAME_AGENT;
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "skills/s/SKILL.md",
+        verdict: "changed",
+        bytes: 70,
+        executable: false,
+        incoming: "",
+      },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+  };
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  const text = container.querySelector("[data-update-plan]")?.textContent ?? "";
+  expect(text).not.toContain("no further allow needed");
+  expect(text).not.toContain("needs your allow");
+  expect(text).toContain("Nothing is started.");
 });
 
 it("shows a different build of the same version as a warning, with the diff", async () => {
@@ -617,4 +837,183 @@ it("shows a different build of the same version as a warning, with the diff", as
   ).toContain("same as the one installed");
   expect(container.querySelectorAll("[data-update-file]").length).toBe(5);
   expect(button("Update traveller").disabled).toBe(false);
+});
+
+it("says everything comes in enabled on a fresh install with nothing muted", async () => {
+  reply = { ...PLAN, mutes: { routines: [], skills: [] } };
+  const imported = vi.fn();
+  await render(imported);
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+
+  await act(async () => {
+    button("Import traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("Everything it declares — every tool and skill — comes in enabled");
+  // A fresh install carries no diff — there is nothing to restore here.
+  expect(container.querySelector("[data-update-files]")).toBeNull();
+});
+
+it("says nothing new muted on an update with an empty mute list, not that everything is enabled", async () => {
+  // The server's `mutes` on an update lists only what just got muted — an
+  // existing mute from before this update is not re-listed, so an empty
+  // list here must not read as "everything is unmuted".
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    mutes: { routines: [], skills: [] },
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("Nothing new muted");
+  expect(text).not.toContain("comes in enabled");
+});
+
+it("says no further allow is needed on an update's success screen for a hub update with nothing kept local", async () => {
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      { path: "routines/r.py", verdict: "changed", bytes: 130, executable: true, incoming: "" },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("no further allow needed");
+});
+
+it("still asks for an allow on an update's success screen when it kept a locally-edited routine", async () => {
+  // Policy 3: the hub's auto-allow covers only the bytes the update wrote.
+  // A `conflict` row kept the operator's own edit, so the success screen
+  // must not claim the usual "no further allow needed" for this update.
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "routines/r.py",
+        verdict: "conflict",
+        bytes: 130,
+        executable: true,
+        incoming: "upstream's new text",
+      },
+    ],
+    counts: { unchanged: 1, conflict: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).toContain("still needs your allow");
+  expect(text).not.toContain("no further allow needed");
+});
+
+it("says nothing about allowing routines on the success screen of an update with none", async () => {
+  // Greptile, PR #314 (minor), the success-screen half: `landedHasRoutines`
+  // already had this rule for a fresh install; an update carrying no routine
+  // file needs the same "no sentence about something it does not carry".
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = {
+    ...UPDATE,
+    files: [
+      { path: "AGENT.md", verdict: "unchanged", bytes: 240, executable: false, incoming: "" },
+      {
+        path: "skills/s/SKILL.md",
+        verdict: "changed",
+        bytes: 70,
+        executable: false,
+        incoming: "",
+      },
+    ],
+    counts: { unchanged: 1, changed: 1 },
+    mutes: { routines: [], skills: [] },
+    hub_reviewed: true,
+    updated: true,
+  };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const text = container.querySelector("[data-import-facts]")?.textContent ?? "";
+  expect(text).not.toContain("no further allow needed");
+  expect(text).not.toContain("needs your allow");
+});
+
+it("restores the file list and the kept-file notice on the update's success screen", async () => {
+  reply = SAME_AGENT;
+  await render();
+  await choose();
+
+  await act(async () => {
+    button("Review the changes").click();
+  });
+
+  updateReply = { ...UPDATE, updated: true };
+  await act(async () => {
+    button("Update traveller").click();
+  });
+
+  const rows = [...container.querySelectorAll("[data-update-file]")].map((n) => ({
+    verdict: n.getAttribute("data-update-file"),
+    text: n.textContent ?? "",
+  }));
+  expect(rows.map((r) => r.verdict)).toEqual([
+    "conflict",
+    "changed",
+    "added",
+    "removed",
+    "unchanged",
+  ]);
+  expect(rows[0].text).toContain("your copy kept");
+  expect(container.querySelector("[data-update-files]")?.textContent).toContain(
+    "The previous bytes of every replaced or deleted file are kept",
+  );
 });

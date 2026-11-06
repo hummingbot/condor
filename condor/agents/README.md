@@ -515,16 +515,20 @@ Everything above stops at the file, so handing an agent to a stranger still
 meant emailing one. `condor/hub.py` is the distribution half (FEAT-146):
 
 ```
-manage_agents(action="hub_browse")                       # no account needed
-manage_agents(action="hub_install", path="<listing_id>")  # path is the listing id
+manage_agents(action="hub_browse")                        # no account needed
+manage_agents(action="hub_get", path="<listing_id>")       # one listing's details
 manage_agents(action="publish_hub", agent_slug="river_scalper",
-              notes="Widened the grid")                   # admin only
+              notes="Widened the grid")                    # admin only
 ```
 
-The dashboard has the same three doors in Settings → Condor → **Agents**:
-a browse-and-install panel (`HubBrowser.tsx`), the token field, and **Publish**
-beside Export on the agent's own workspace header. The service itself lives in
-a codebase that is not this one; standing it up is TASK-004.
+There is no `hub_install` from chat: it always refuses. Installing from the
+hub records the owner's consent that this exact version's code may run on
+this machine, and that consent can only come from the owner reading the Hub
+page's own checkbox — a human confirming a chat tool call is not that. Open
+Agent Hub (the card at the bottom of the chat sidebar, `HubBrowser.tsx`,
+`/hub`) to browse and install from there, or **Publish** beside Export on
+the agent's own workspace header. The service itself lives in a codebase
+that is not this one; standing it up is TASK-004.
 
 **The trust model is three sentences, and the rest hangs off them.**
 

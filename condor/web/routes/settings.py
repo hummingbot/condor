@@ -1313,21 +1313,27 @@ async def update_hub_token(
     return {"set": hub.set_token(req.token)}
 
 
-# ── Connecting to a Botcamp profile with a device login (PR #111) ──
+# ── Connecting to a Botcamp profile with a pasted code (botcamp-site PR #137) ──
 #
-# Replaces the pasted-token UX above, and FEAT-148's pairing-code flow before
-# it (wire-incompatible with what Botcamp actually built), with the standard
-# OAuth2 device flow: an admin starts a device login, Condor opens Botcamp's
-# approval page with the user code to enter, and Condor's own backend polls
-# until the operator approves, denies, or lets it expire. See
-# ``condor/hub.py``'s ``device_start``/``device_state``/``device_cancel`` for
-# the protocol and the one place the resulting credential is ever read.
+# Replaces the OAuth2 device flow (PR #111), deleted outright by #137's own
+# `/api/condor/device/*` removal, with the paste-a-code flow #137 built
+# instead: the admin generates a code signed in on Botcamp's `/connect` page —
+# Condor is not involved in minting it — and pastes it here. See
+# ``condor/hub.py``'s ``redeem_connect_code``/``connection_state``/
+# ``disconnect`` for the protocol and the one place the resulting credential
+# is ever read.
+
+
+class ConnectCodeRequest(BaseModel):
+    """The code pasted from Botcamp's ``/connect`` page."""
+
+    code: str = ""
 
 
 def _hub_device_refusal(exc: Exception) -> HTTPException:
-    """A hub failure during a device login as HTTP — the same mapping
-    ``agents.py``'s hub router uses, kept local here since the two routers do
-    not import from each other.
+    """A hub failure while connecting or disconnecting Botcamp, as HTTP — the
+    same mapping ``agents.py``'s hub router uses, kept local here since the
+    two routers do not import from each other.
     """
     from condor.hub import HubError, NoTokenError
 
@@ -1350,51 +1356,39 @@ def _require_hub_admin(user: WebUser) -> None:
         )
 
 
-@router.post("/hub-device/start")
-async def start_hub_device(user: WebUser = Depends(get_current_user)):
-    """Begin a device login. Returns the user code and the link to show.
-
-    Admin-only, like every other write in this section: the resulting
-    credential acts for the whole install under one Botcamp account.
+@router.post("/hub-device/connect")
+async def connect_hub_device(
+    req: ConnectCodeRequest, user: WebUser = Depends(get_current_user)
+):
+    """Redeem a code pasted from Botcamp's ``/connect`` page for this
+    install's token. Admin-only, like every other write in this section: the
+    resulting credential acts for the whole install under one Botcamp
+    account.
     """
     from condor import hub
     from condor.hub import HubError
 
     _require_hub_admin(user)
     try:
-        code = await asyncio.to_thread(hub.device_start)
+        state = await asyncio.to_thread(hub.redeem_connect_code, req.code)
     except HubError as exc:
         raise _hub_device_refusal(exc) from exc
-    # `approval_url` is Condor's own, built from the configured hub base —
-    # the hub's `verification_uri`/`verification_uri_complete` never leave
-    # `condor.hub`, so this response cannot aim a browser off-site (SEC-819).
-    return {
-        "user_code": code.user_code,
-        "approval_url": code.approval_url,
-        "expires_in": code.expires_in,
-        "interval": code.interval,
-    }
+    return state.model_dump()
 
 
 @router.get("/hub-device")
 async def get_hub_device(user: WebUser = Depends(get_current_user)):
-    """Where this install's device login/link stands right now.
+    """Where this install's Botcamp link stands right now.
 
-    ``"none"``, ``"pending"`` (with the user code and link to show again),
-    ``"denied"``/``"expired"``/``"invalid"`` (reported once, for the poll
-    that observed it), or ``"linked"`` (with the profile handle and scope —
-    never the credential, which this route can never answer with; see
-    ``condor.hub.device_state``).
+    ``"none"`` or ``"linked"`` (with the profile handle and scope — never the
+    credential, which this route can never answer with; see
+    ``condor.hub.connection_state``). ``connect_url`` is always set, so the
+    "Sign in to Botcamp" link renders with no extra round trip.
     """
     from condor import hub
-    from condor.hub import HubError
 
     _require_hub_admin(user)
-    try:
-        state = await asyncio.to_thread(hub.device_state)
-    except HubError as exc:
-        raise _hub_device_refusal(exc) from exc
-    return state.model_dump()
+    return hub.connection_state().model_dump()
 
 
 @router.get("/hub-device/linked")
@@ -1404,15 +1398,10 @@ async def get_hub_device_linked(user: WebUser = Depends(get_current_user)):
     `/hub`'s Pull agents gate (FEAT-153) needs this for every signed-in seat,
     not just the admin who can act on it — Pull is unlocked install-wide once
     someone connects a profile. The full state above stays admin-only on
-    purpose (profile handle, a pending user code); this route answers with
-    neither, so a non-admin learns only the one bit that unlocks their own
-    Pull section.
+    purpose (profile handle); this route answers with neither, so a
+    non-admin learns only the one bit that unlocks their own Pull section.
 
-    Reads local config only, through :func:`condor.hub.is_linked` — never
-    ``device_state``, which also drives a pending poll forward. A non-admin
-    seat calling this while the admin's own device login was mid-flight used
-    to steal the one-time code exchange and report the admin's next poll as
-    ``invalid`` (BUG-3).
+    Reads local config only, through :func:`condor.hub.is_linked`.
     """
     from condor import hub
 
@@ -1421,10 +1410,9 @@ async def get_hub_device_linked(user: WebUser = Depends(get_current_user)):
 
 @router.delete("/hub-device")
 async def disconnect_hub_device(user: WebUser = Depends(get_current_user)):
-    """Cancel a device login in flight, or disconnect a linked profile.
+    """Disconnect this install's linked Botcamp profile.
 
-    Whichever this install is currently holding — ``condor.hub.device_cancel``
-    decides which, and now also asks the hub to revoke the presented token
+    ``condor.hub.disconnect`` asks the hub to revoke the presented token
     (``DELETE /api/condor/me``, PR #111) before clearing it locally. The
     local credential is cleared either way; ``revoked`` says whether the hub
     actually confirmed the revoke (``true``), refused or could not be reached
@@ -1436,7 +1424,7 @@ async def disconnect_hub_device(user: WebUser = Depends(get_current_user)):
 
     _require_hub_admin(user)
     try:
-        result = await asyncio.to_thread(hub.device_cancel)
+        result = await asyncio.to_thread(hub.disconnect)
     except HubError as exc:
         raise _hub_device_refusal(exc) from exc
     return {"status": "none", "revoked": result.revoked, "error": result.error}

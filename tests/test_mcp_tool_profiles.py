@@ -323,10 +323,10 @@ def test_the_module_singleton_is_registered_at_import(module):
 @pytest.mark.parametrize(
     "agent_slug,tick,expected",
     [
-        ("adaptive_grid_trader", True, "tick"),
+        ("market_making_expert", True, "tick"),
         (CHAT_SLUG, True, "tick"),
         (None, True, "tick"),
-        ("adaptive_grid_trader", False, "agent"),
+        ("market_making_expert", False, "agent"),
         (CHAT_SLUG, False, "full"),
         (None, False, "full"),
         ("", False, "full"),
@@ -366,7 +366,7 @@ def test_a_tick_session_mounts_the_narrow_surface_on_both_servers(monkeypatch):
     )
 
     servers = toolsets.build_mcp_servers_for_session(
-        42, 42, agent_slug="adaptive_grid_trader", tick=True
+        42, 42, agent_slug="market_making_expert", tick=True
     )
     by_name = {s["name"]: s["args"] for s in servers}
     for args in by_name.values():
@@ -446,11 +446,11 @@ def test_a_bound_specialist_and_a_tick_are_unaffected(monkeypatch):
 
     for permission in (ServerPermission.OWNER, ServerPermission.TRADER):
         bound = _session_profiles(
-            monkeypatch, permission, agent_slug="adaptive_grid_trader"
+            monkeypatch, permission, agent_slug="market_making_expert"
         )
         assert set(bound.values()) == {"agent"}
         tick = _session_profiles(
-            monkeypatch, permission, agent_slug="adaptive_grid_trader", tick=True
+            monkeypatch, permission, agent_slug="market_making_expert", tick=True
         )
         assert set(tick.values()) == {"tick"}
 

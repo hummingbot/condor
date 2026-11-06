@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { RoutineInfo } from "@/lib/api";
+import { api, type RoutineInfo } from "@/lib/api";
 import { ROUTINE_CONFIG_KEY_PREFIX } from "@/lib/sessionState";
 
 // ── Config persistence ──
@@ -42,6 +42,27 @@ export function buildConfigValues(
     }
   }
   return values;
+}
+
+/**
+ * `buildConfigValues`, resolving an agent routine's fields first if its
+ * listing never imported it (`fields: {}` — see `getRoutineFields`). Run and
+ * Schedule already execute the routine a moment later, so resolving it here
+ * crosses no trust boundary beyond the one that action already crosses —
+ * unlike reading fields merely to populate the Config form, which waits for
+ * that panel to open (Greptile, PR #314). Without this, a saved custom value
+ * from a previous session is silently dropped by `buildConfigValues` the
+ * moment Run is pressed without opening Config first, since it only copies a
+ * saved value for a key that is also in `routine.fields`.
+ */
+export async function resolveConfigValues(
+  routine: RoutineInfo,
+): Promise<Record<string, unknown>> {
+  if (routine.pending || Object.keys(routine.fields).length > 0) {
+    return buildConfigValues(routine);
+  }
+  const { fields } = await api.getRoutineFields(routine.name);
+  return buildConfigValues({ ...routine, fields });
 }
 
 // ── Scope: whose routines a list is showing ──

@@ -32,14 +32,39 @@ un-second-guessed — it is the one answer to "what is this agent, as opposed to
 what this install accumulated", and a second filter here would leave two
 selectors disagreeing.
 
-**What arrives switched off.** Every imported routine and skill is muted
-(:mod:`condor.memory.mutes`), and every imported routine *file* arrives
-without execution consent (:mod:`condor.agents.code_trust`, FEAT-147). The two
-are separate on purpose and both are needed: a mute says what the agent is
-told about, and is subtracted *after* discovery has already imported the file,
-so on its own it left the review surfaces — the ``/routines`` list and the
-source viewer — running the very code they were opened to review. Consent says
-what may execute at all, per file and by content digest. Import creates; it
+**What arrives switched off, and what used to never vary by provenance.**
+Two gates. A mute is whether the agent is even told about something, and it
+is the one a review has always been allowed to stand in for: both a routine
+and a skill are muted on arrival by default (``mute_routines=True``,
+``mute_skills=True``), because nobody has reviewed a bundle "from a friend".
+The hub install passes both ``False`` (FEAT-146, widened to routines in
+FEAT-150), since the hub already reviewed this exact content before ever
+serving it — its declared skills and routines land enabled, exactly as a
+locally created agent's would, and the operator reads only the review
+findings, not a second "now unmute it" pass. A mute says what the agent is
+told about, and is subtracted *after* discovery has already imported the
+file, so on its own it left the review surfaces — the ``/routines`` list and
+the source viewer — running the very code they were opened to review; that
+is what the execution-consent gate below is for.
+
+Execution consent (:mod:`condor.agents.code_trust`, FEAT-147) used to be the
+one gate provenance could never shorten: no imported ``.py`` could execute,
+per file and by content digest, until the operator allowed it, whether it
+came from a file, a friend or the hub's own install. The owner's later
+decision widens the same hub exception to this gate too: a hub install or
+update (``hub_reviewed=True``, threaded alongside ``mute_skills=False``/
+``mute_routines=False``) grants consent for every routine it carries,
+keyed by the exact digest of the bytes the hub review covered — the same
+pinning :func:`condor.hub.fetch`'s ``X-Agent-Sha256`` check and the route's
+``expected_sha256`` already give the *files*, now extended to *what may run
+them*. A plain file import or a bundle "from a friend" takes none of this:
+``hub_reviewed`` defaults ``False`` and is never set anywhere but
+``condor/web/routes/agents.py``'s ``_hub_plan``, so an operator-typed bundle
+still needs the file read and allowed, one at a time, exactly as before. A
+routine the operator edits after a hub install stops being the reviewed
+artifact the moment its bytes change — :mod:`condor.agents.code_trust` is
+keyed by content digest, so a changed file is pending again regardless of
+how it arrived, with no separate revocation needed. Import creates; it
 never overwrites, never starts anything, and never writes into the shipped
 tree.
 
@@ -65,9 +90,9 @@ no schema-1 bundle without them ever reached ``main``:
   hand-edited ``requires`` block in a bundle changes nothing.
 
 An unmet requirement never refuses an import. "I will add that exchange's API
-key once I have read the agent" is the honest case, and everything that lands
-is muted and unstarted anyway: the preview says what will not work here, and
-the operator decides.
+key once I have read the agent" is the honest case, and nothing is started
+either way: the preview says what will not work here, and the operator
+decides.
 
 **What the content itself carries** (FEAT-144). The scrub above rewrites three
 front-matter fields and looks at no file *content*, so a bundle could carry an
@@ -85,9 +110,11 @@ new version lands beside the old under ``<slug>_2``, the memory forks, and the
 dashboard lists two agents one of which is stale. :func:`plan_update` shows
 what would change file by file and writes nothing; :func:`apply_update` writes
 exactly that. Library files are replaced, runtime output is untouched, a file
-the operator edited keeps its bytes, whatever arrives new is muted, and nothing
-is started. Its bookkeeping is :data:`STAMP_FILENAME` — a dotfile in the home,
-so the export cannot see it.
+the operator edited keeps its bytes, whatever arrives new is muted (skills and
+routines too, unless this is a hub update — the same ``mute_skills=False``,
+``mute_routines=False`` exception :func:`plan` takes), and nothing is
+started. Its bookkeeping is
+:data:`STAMP_FILENAME` — a dotfile in the home, so the export cannot see it.
 """
 
 from __future__ import annotations
@@ -387,6 +414,14 @@ class ImportPlan(BaseModel):
     #: minted from the bundle's own content when it does not.
     agent_uid: str = ""
     version: int = 1
+    #: The Botcamp listing version this exact bundle was fetched as — set only
+    #: by ``_hub_plan`` (CORR-1019), ``0`` for a plain file import. ``version``
+    #: above is the exporting install's own counter and keeps meaning that for
+    #: whatever already compares bundles by it (:func:`plan_update`'s
+    #: ``older_bundle``/``same_version_new_build`` checks); this is the
+    #: separate number the operator actually picked on Botcamp, and a surface
+    #: shows it instead of ``version`` whenever ``hub_reviewed`` is true.
+    hub_version: int = 0
     notes: str = ""
     author: BundleAuthor = Field(default_factory=BundleAuthor)
     #: Derived here from the bundle's files, never read off its manifest.
@@ -408,6 +443,12 @@ class ImportPlan(BaseModel):
     stamps: dict[str, str] = Field(default_factory=dict)
     #: ``{"routines": [...], "skills": [...]}`` — what arrives switched off.
     mutes: dict[str, list[str]] = Field(default_factory=dict)
+    #: Whether this is a hub install, whose review stands in for per-file
+    #: execution consent (see the module docstring). Carried on the wire so a
+    #: surface renders the true state rather than inferring it from empty
+    #: mute lists — a plain file import that happened to mute neither kind
+    #: would otherwise read the same as a hub install.
+    hub_reviewed: bool = False
     agent_key: str = ""
     agent_key_inherited: bool = False
     #: The taken slug, when this bundle cannot land under the name it asked for.
@@ -899,6 +940,10 @@ def plan(
     user_id: int = 0,
     available_connectors: Sequence[str] | None = None,
     available_tools: Sequence[str] | None = None,
+    mute_skills: bool = True,
+    mute_routines: bool = True,
+    hub_reviewed: bool = False,
+    hub_version: int = 0,
 ) -> ImportPlan:
     """Everything a human needs to decide, computed without writing anything.
 
@@ -911,6 +956,37 @@ def plan(
     supply, passed in rather than fetched so the module stays headless — the
     connector list needs an async Hummingbot client. Leaving either ``None``
     means "not asked", and nothing of that kind is then reported unmet.
+
+    ``mute_skills=False`` and ``mute_routines=False`` are the hub install's own
+    call (FEAT-146, widened to routines in FEAT-150): the hub already reviewed
+    this exact content before ever serving it, so its declared skills — prose,
+    never executed — and its declared routines, plus its declared ``tools:``
+    allowlist (never muted by this function at all; see
+    :data:`BundleRequires.tools`), land enabled, exactly as the reviewed
+    version declared them and exactly as a locally created agent's would, with
+    no second approval invented on top of the hub's own. A plain file import
+    keeps the cautious default for both — nobody reviewed a bundle "from a
+    friend" before it reached this call. Neither mute flag touches
+    :mod:`condor.agents.code_trust` on its own: :func:`apply` always arms it
+    on every routine the bundle carries, and unmuted only means the agent may
+    be told about the routine, not that it may run yet.
+
+    ``hub_reviewed`` is the separate flag that *does* touch it: passed
+    ``True`` only from the same ``_hub_plan`` that sets ``mute_skills=False``/
+    ``mute_routines=False``, it tells :func:`apply` that this install's own
+    per-file execution consent is already covered by the hub's review of this
+    exact version and digest (see the module docstring). A plain file import
+    leaves it ``False``, so its routines still arrive pending, read and
+    allowed one at a time, exactly as before this flag existed. Carried on
+    :class:`ImportPlan` rather than only threaded straight to ``apply``, so a
+    preview can render the true state instead of a surface guessing it from
+    empty mute lists.
+
+    ``hub_version`` (CORR-1019) is the Botcamp listing version this bundle
+    was fetched as, passed in by ``_hub_plan`` because this function only
+    ever sees the bundle itself, never the hub response it came from. Left
+    ``0`` for a plain file import, which has no such number and keeps
+    showing ``bundle.version``.
 
     Every refusal is collected rather than raised, so a reviewer sees all of
     them at once; :func:`apply` is the one that turns them into an error. An
@@ -978,6 +1054,7 @@ def plan(
         schema_version=bundle.schema_version,
         agent_uid=agent_uid,
         version=bundle.version,
+        hub_version=hub_version,
         notes=bundle.notes,
         author=bundle.author,
         requires=requires,
@@ -987,7 +1064,10 @@ def plan(
         executables=executables,
         total_bytes=sum(row.bytes for row in planned + executables),
         stamps={CREATED_BY_KEY: str(user_id), SERVER_NAME_KEY: ""},
-        mutes=_mutes_for(sorted(seen)),
+        mutes=_mutes_for(
+            sorted(seen), mute_skills=mute_skills, mute_routines=mute_routines
+        ),
+        hub_reviewed=hub_reviewed,
         agent_key=agent_key,
         agent_key_inherited=inherited,
         collision=collision,
@@ -1037,6 +1117,16 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
         # says what runs, and it is what makes "nothing is running" below
         # true of the review surfaces as well as of the agent.
         code_trust.arm(slug)
+        # Unless the hub's own review already covers that gate for this exact
+        # version and digest (the owner's trust-boundary decision): grant
+        # consent for every routine the bundle carries, keyed by the content
+        # the hub reviewed. A plain file import leaves ``hub_reviewed`` false
+        # and every routine stays pending, same as always.
+        if import_plan.hub_reviewed:
+            for entry in import_plan.bundle.files:
+                name = _routine_name(entry.path)
+                if name is not None:
+                    code_trust.allow(slug, name, entry.text)
         # And last, the record of what this bundle said, so the newer bundle
         # that arrives next month can be told apart from a local edit
         # (FEAT-145). A dotfile, so ``publishable_files`` cannot see it and a
@@ -1066,19 +1156,64 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
     )
     result = import_plan.summary()
     result["imported"] = True
-    found = len(import_plan.findings)
-    result["next_step"] = (
-        "Nothing is running, and nothing it brought has been executed. Read "
-        "each imported routine and skill, then allow the routines you want to "
-        "run here and unmute the ones you want this agent to use."
-        + (
-            f" The review found {found} thing{'' if found == 1 else 's'} to look "
-            "at first."
-            if found
-            else ""
-        )
-    )
+    result["next_step"] = _next_step(import_plan)
     return result
+
+
+def _next_step(import_plan: ImportPlan) -> str:
+    """What the operator has to do now, naming only what actually arrived muted.
+
+    Muting and :mod:`condor.agents.code_trust` consent are two different
+    gates (see the module docstring), and this says so: the "allow" sentence
+    fires for a plain import's executables, muted or not — the content still
+    needs reading and allowing before it can run. A hub install
+    (``hub_reviewed``) is the one case that sentence does not apply to: its
+    review already granted consent for every routine it carries, keyed to the
+    exact bytes reviewed (``apply`` just did that), so there is nothing left
+    for the operator to allow. The "unmute" sentence that follows only names
+    what this particular import actually muted. A hub install's ``mutes``
+    carries no skill or routine names at all (``mute_skills=False``,
+    ``mute_routines=False`` in :func:`plan`), so this says so rather than
+    repeating the file import's "unmute the ones you want" sentence over an
+    empty list.
+    """
+    parts = ["Nothing is running, and nothing it brought has been executed."]
+    if import_plan.executables and not import_plan.hub_reviewed:
+        parts.append(
+            "Every routine still needs you to allow it, by content, before "
+            "it can run."
+        )
+    elif import_plan.executables:
+        parts.append(
+            "The hub's own review already covers its routines, so they need "
+            "no further allow before they can run."
+        )
+    muted_routines = bool(import_plan.mutes.get("routines"))
+    muted_skills = bool(import_plan.mutes.get("skills"))
+    if muted_routines and muted_skills:
+        parts.append(
+            "Read each imported routine and skill, then unmute the ones you "
+            "want this agent to use."
+        )
+    elif muted_routines:
+        parts.append(
+            "Read each imported routine, then unmute the ones you want this "
+            "agent to use."
+        )
+    elif muted_skills:
+        parts.append(
+            "Read each imported skill, then unmute the ones you want this "
+            "agent to use."
+        )
+    else:
+        parts.append("Everything it declares is already enabled.")
+    found = len(import_plan.findings)
+    if found:
+        parts.append(
+            f"The review found {found} thing{'' if found == 1 else 's'} to "
+            "look at first."
+        )
+    return " ".join(parts)
 
 
 def _undo_partial_import(home: Path, pre_existing: set[Path]) -> None:
@@ -1234,31 +1369,63 @@ def _collision_message(import_plan: ImportPlan) -> str:
     return f"Agent '{import_plan.collision}' already exists{tail}"
 
 
-def _mutes_for(paths: list[str]) -> dict[str, list[str]]:
+def _routine_name(path: str) -> str | None:
+    """``path``'s routine name, or ``None`` when it is not a routine file.
+
+    ``routines/<name>.py`` and the name is the file stem, exactly as
+    ``discover_routines_from_path`` reads it — the one test both
+    :func:`_mutes_for`'s muting and ``apply``/``apply_update``'s hub consent
+    grant apply, so the two can never disagree about what counts as a
+    routine.
+    """
+    parts = path.split("/")
+    if (
+        path.startswith("routines/")
+        and path.endswith(".py")
+        and len(parts) == 2
+        and not parts[1].startswith("_")
+    ):
+        return parts[1][: -len(".py")]
+    return None
+
+
+def _mutes_for(
+    paths: list[str], *, mute_skills: bool = True, mute_routines: bool = True
+) -> dict[str, list[str]]:
     """The routine names and skill slugs an import would switch off.
 
-    A routine is ``routines/<name>.py`` and its name is the file stem, exactly
-    as ``discover_routines_from_path`` reads it; a skill is the directory under
-    ``skills/``, which is how ``SkillStore`` slugs it. Nothing else is muted —
-    a controller only runs after a deliberate sync to a Hummingbot server,
-    which is already its own separate act.
+    A routine is ``routines/<name>.py``, per :func:`_routine_name`; a skill is
+    the directory under ``skills/``, which is how ``SkillStore`` slugs it.
+    Nothing else is muted — a controller only runs after a deliberate sync to
+    a Hummingbot server, which is already its own separate act.
+
+    ``mute_skills=False`` and ``mute_routines=False`` are the hub install's
+    own exception (FEAT-146, widened to routines in FEAT-150): a skill is
+    prose, never executed, and is told to the agent outright once unmuted. A
+    routine is code; whether it may also *run* is the separate
+    ``hub_reviewed`` flag :func:`plan`/:func:`plan_update` carry alongside
+    these two (see the module docstring) — a hub install sets all three
+    together, but muting and execution consent remain two gates, not one.
+    Muting is deliberately two independent flags rather than one, even though
+    every caller today sets them together: the two land enabled for the same
+    reason (the hub's review), not because one is a special case of the
+    other.
     """
-    routines = sorted(
-        {
-            path.split("/")[1][: -len(".py")]
-            for path in paths
-            if path.startswith("routines/")
-            and path.endswith(".py")
-            and len(path.split("/")) == 2
-            and not path.split("/")[1].startswith("_")
-        }
+    routines = (
+        sorted(name for path in paths if (name := _routine_name(path)) is not None)
+        if mute_routines
+        else []
     )
-    skills = sorted(
-        {
-            path.split("/")[1]
-            for path in paths
-            if path.startswith("skills/") and len(path.split("/")) > 2
-        }
+    skills = (
+        sorted(
+            {
+                path.split("/")[1]
+                for path in paths
+                if path.startswith("skills/") and len(path.split("/")) > 2
+            }
+        )
+        if mute_skills
+        else []
     )
     return {"routines": routines, "skills": skills}
 
@@ -1540,6 +1707,15 @@ class UpdatePlan(BaseModel):
     installed_agent_uid: str = ""
     version: int = 1
     installed_version: int = 0
+    #: The Botcamp listing versions this update's ``version``/``installed_version``
+    #: mirror, for a hub update only (``0`` for a plain file update) — see
+    #: :data:`ImportPlan.hub_version`. ``installed_hub_version`` comes from
+    #: the stamp already on disk (:data:`BundleStamp.hub_version`, written by
+    #: :func:`record_hub_install` the last time this agent was installed or
+    #: updated from the hub), so it is correct even when *this* update is a
+    #: plain file one and only the agent's *origin* was the hub.
+    hub_version: int = 0
+    installed_hub_version: int = 0
     exported_at: str = ""
     notes: str = ""
     author: BundleAuthor = Field(default_factory=BundleAuthor)
@@ -1556,6 +1732,10 @@ class UpdatePlan(BaseModel):
     #: Only what is genuinely new: an item the operator unmuted after reading
     #: it stays unmuted, and a changed one is not re-muted.
     mutes: dict[str, list[str]] = Field(default_factory=dict)
+    #: Whether this is a hub update — see :data:`ImportPlan.hub_reviewed`,
+    #: which this mirrors. :func:`apply_update` reads it to decide whether an
+    #: added or changed routine needs the operator's per-file allow.
+    hub_reviewed: bool = False
     blockers: list[UpdateBlocker] = Field(default_factory=list)
     warnings: list[UpdateWarning] = Field(default_factory=list)
 
@@ -1772,7 +1952,13 @@ def _classify(
     return verdicts
 
 
-def _added_mutes(added: Sequence[str], known: Sequence[str]) -> dict[str, list[str]]:
+def _added_mutes(
+    added: Sequence[str],
+    known: Sequence[str],
+    *,
+    mute_skills: bool = True,
+    mute_routines: bool = True,
+) -> dict[str, list[str]]:
     """The routines and skills an update switches off: the genuinely new ones.
 
     A ``changed`` item is **not** re-muted, and a name already in ``mutes.yml``
@@ -1780,9 +1966,18 @@ def _added_mutes(added: Sequence[str], known: Sequence[str]) -> dict[str, list[s
     update would make updating an agent cost the whole curation pass again, and
     the diff already told the operator which instructions changed. An item the
     operator unmuted after reading it stays unmuted.
+
+    ``mute_skills``/``mute_routines`` are :func:`_mutes_for`'s own flags,
+    threaded through so a hub update never mutes a newly-added skill or
+    routine either — the same exception :func:`plan_update` takes for a fresh
+    hub install.
     """
-    fresh = _mutes_for(sorted(added))
-    had = _mutes_for(sorted(known))
+    fresh = _mutes_for(
+        sorted(added), mute_skills=mute_skills, mute_routines=mute_routines
+    )
+    had = _mutes_for(
+        sorted(known), mute_skills=mute_skills, mute_routines=mute_routines
+    )
     return {
         kind: [name for name in names if name not in set(had[kind])]
         for kind, names in fresh.items()
@@ -1794,6 +1989,10 @@ def plan_update(
     slug: str,
     available_connectors: Sequence[str] | None = None,
     available_tools: Sequence[str] | None = None,
+    mute_skills: bool = True,
+    mute_routines: bool = True,
+    hub_reviewed: bool = False,
+    hub_version: int = 0,
 ) -> UpdatePlan:
     """What updating ``slug`` from ``bundle`` would do. Writes nothing.
 
@@ -1807,6 +2006,30 @@ def plan_update(
     ``available_connectors`` and ``available_tools`` are what *this* install
     can supply, passed in rather than fetched so the module stays headless.
     ``None`` means "not asked", exactly as in :func:`unmet_of`.
+
+    ``mute_skills``/``mute_routines`` are :func:`plan`'s own flags, passed
+    through to :func:`_added_mutes` so a hub update never mutes a newly-added
+    skill or routine either — the same exception a fresh hub install takes,
+    for the same reason (the hub already reviewed this content). They touch
+    only muting: :func:`apply_update` always re-arms
+    :mod:`condor.agents.code_trust`, and a changed or added routine's content
+    is pending again regardless of either flag.
+
+    ``hub_reviewed`` is the separate flag that does reach execution consent —
+    :data:`ImportPlan.hub_reviewed`'s twin, set ``True`` only by the same
+    ``_hub_plan`` that sets the mute flags above. ``apply_update`` reads it to
+    grant consent for every routine this update adopts (added or changed) or
+    finds already matching the bundle (unchanged), keyed to the exact bytes
+    just written — never for a path the operator kept local (``local_only``,
+    ``conflict``) or removed, since that is not the content the hub reviewed.
+
+    ``hub_version`` (CORR-1019) mirrors :func:`plan`'s own parameter: the
+    Botcamp listing version this bundle was fetched as, passed in by
+    ``_hub_plan`` and left ``0`` for a plain file update. The matching
+    ``installed_hub_version`` on the returned plan needs no parameter — it
+    is read straight off the installed agent's own stamp
+    (:data:`BundleStamp.hub_version`), which already carries the hub number
+    from the last time this agent was installed or updated from the hub.
     """
     from condor.agents.agent import AgentStore
 
@@ -1863,6 +2086,7 @@ def plan_update(
             slug="",
             agent_uid=incoming_uid,
             version=bundle.version,
+            hub_version=hub_version,
             exported_at=bundle.exported_at,
             notes=bundle.notes,
             author=bundle.author,
@@ -1902,6 +2126,7 @@ def plan_update(
     installed_version = (
         stamp.version if stamp else (agent.bundle_version if agent else 0)
     )
+    installed_hub_version = stamp.hub_version if stamp else 0
 
     if installed:
         if not installed_uid and stamp is None:
@@ -2011,7 +2236,9 @@ def plan_update(
         agent_uid=incoming_uid,
         installed_agent_uid=installed_uid,
         version=bundle.version,
+        hub_version=hub_version,
         installed_version=installed_version,
+        installed_hub_version=installed_hub_version,
         exported_at=bundle.exported_at,
         notes=bundle.notes,
         author=bundle.author,
@@ -2031,7 +2258,10 @@ def plan_update(
                 (set(stamp.digests if stamp else {}) | set(disk))
                 - {row.path for row in rows if row.verdict == ADDED}
             ),
+            mute_skills=mute_skills,
+            mute_routines=mute_routines,
         ),
+        hub_reviewed=hub_reviewed,
         blockers=blockers,
         warnings=warnings,
     )
@@ -2109,6 +2339,21 @@ def apply_update(update_plan: UpdatePlan, user_id: int = 0) -> dict:
     # idempotent in the only direction that matters — an agent already gated
     # keeps whatever has been allowed.
     code_trust.arm(slug)
+    # Unless the hub's own review covers this update (the owner's
+    # trust-boundary decision, mirroring ``apply``'s): grant consent for every
+    # routine this update just wrote or confirmed unchanged, keyed to the
+    # exact bytes now on disk. A path the operator kept local — ``local_only``
+    # or ``conflict`` — is deliberately excluded: those bytes are the
+    # operator's edit, not the content the hub reviewed, and granting consent
+    # for the bundle's text there would record a digest that does not match
+    # what is actually on disk, which is simply inert, not a shortcut.
+    if update_plan.hub_reviewed:
+        for row in update_plan.files:
+            if row.verdict not in (ADDED, CHANGED, UNCHANGED):
+                continue
+            name = _routine_name(row.path)
+            if name is not None:
+                code_trust.allow(slug, name, texts[row.path])
     if _verdict_of(update_plan, AGENT_MD) == UNCHANGED:
         _carry_bookkeeping(home / AGENT_MD, update_plan)
     write_stamp(
@@ -2158,10 +2403,16 @@ def _update_next_step(update_plan: UpdatePlan) -> str:
         for row in update_plan.files
         if row.verdict in _ADOPTED and row.executable
     ]
-    if replaced:
+    if replaced and not update_plan.hub_reviewed:
         parts.append(
             f"{len(replaced)} routine file{'' if len(replaced) == 1 else 's'} "
             "changed, so each needs reading and allowing again before it can run."
+        )
+    elif replaced:
+        parts.append(
+            f"{len(replaced)} routine file{'' if len(replaced) == 1 else 's'} "
+            "changed; the hub's own review already covers them, so no further "
+            "allow is needed before they can run."
         )
     muted = sum(len(names) for names in update_plan.mutes.values())
     if muted:

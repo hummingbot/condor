@@ -28,11 +28,11 @@ retrofit here.
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import logging
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,7 @@ from routines.base import (
     PendingRoutine,
     RoutineResult,
     _merged_from,
+    catalog_agent_routines,
     discover_routines,
     get_routine,
     library_dir,
@@ -331,9 +332,12 @@ class RoutineStore:
         The chat ``condor`` sees the general library plus every agent's routines
         (prefixed). Each agent's own routines stay isolated under its slug.
 
-        Discovery is mtime-cached in routines.base: only new/changed files are
-        (re)imported, so this stays cheap on every list call while edits are
-        still picked up without a restart.
+        An agent's own routines are read through :func:`catalog_agent_routines`
+        — never ``exec_module`` — so a listing call can never be why a
+        hub-allowed routine's module runs; only an actual resolve-to-run
+        (:meth:`_resolve_routine`) does that. The general library is the
+        chat's own shipped code, never gated, and keeps discovering the normal
+        way.
         """
         all_routines = dict(discover_routines())
 
@@ -342,13 +346,9 @@ class RoutineStore:
         # can never surface here as a routine owner named `_shared/...`, and a
         # local routine shadows the shipped one of the same name.
         for slug in iter_agent_slugs():
-            agent_routines = _merged_from(_agent_routine_dirs(slug), agent_slug=slug)
-            for rname, rinfo in agent_routines.items():
-                # Shallow-copy before prefixing: the RoutineInfo is shared
-                # with the discovery cache and must keep its bare name.
-                prefixed_info = copy.copy(rinfo)
-                prefixed_info.name = f"{slug}/{rname}"
-                all_routines[prefixed_info.name] = prefixed_info
+            for rname, entry in catalog_agent_routines(slug).items():
+                prefixed_name = f"{slug}/{rname}"
+                all_routines[prefixed_name] = replace(entry, name=prefixed_name)
 
         return all_routines
 
@@ -914,6 +914,22 @@ class RoutineStore:
                 return found
             raise_if_pending(slug, rname)
         return None
+
+    def get_routine_fields(self, routine_name: str) -> dict[str, dict]:
+        """Resolve ``routine_name`` and return its ``Config`` fields.
+
+        ``list_routines`` reads an agent's own routines through
+        :func:`catalog_agent_routines`, which never imports the module, so an
+        allowed-but-not-yet-imported routine lists with ``fields: {}`` there.
+        This is the Config form's own lookup, used only once the operator
+        opens it: resolving to read the fields crosses the same trust
+        boundary ``execute``/``start_continuous`` already cross for an
+        *allowed* routine, so doing it here is no new exposure — a pending
+        one still raises :class:`~condor.agents.code_trust.PendingConsentError`
+        through :meth:`_resolve_routine` and gets no fields either.
+        """
+        routine = self._resolve_routine(routine_name)
+        return routine.get_fields() if routine else {}
 
     async def execute(
         self,

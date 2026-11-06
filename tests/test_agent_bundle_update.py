@@ -102,6 +102,18 @@ def installed():
     return agent_home("drifter")
 
 
+@pytest.fixture
+def hub_installed():
+    """A hub-installed agent, with the hub's own version already recorded on
+    its stamp (CORR-812's ``hub_version``) — a different number from the
+    bundle's own internal counter, exactly as a real hub install leaves it.
+    """
+    plan = ab.plan(_bundle(version=1), user_id=7, hub_reviewed=True, hub_version=4)
+    ab.apply(plan, user_id=7)
+    ab.record_hub_install("drifter", hub_slug="drifter", hub_version=4, digest="d" * 64)
+    return agent_home("drifter")
+
+
 # ── The stamp ──
 
 
@@ -124,6 +136,35 @@ def test_an_unreadable_stamp_is_no_basis(installed):
     """``None``, not an empty stamp — the two mean opposite things."""
     ab.stamp_path(installed).write_text("{not json", "utf-8")
     assert ab.read_stamp(installed) is None
+
+
+def test_a_hub_updates_version_is_the_hubs_own_not_the_bundles(hub_installed):
+    """CORR-1019: a hub update's ``version``/``installed_version`` stay the
+    bundle's own internal counters — ``older_bundle`` and
+    ``same_version_new_build`` above compare bundles by exactly those — but
+    ``hub_version``/``installed_hub_version`` are the separate number the
+    operator actually sees on Botcamp, which can move independently of the
+    bundle's own lineage.
+    """
+    plan = ab.plan_update(_newer(), "drifter", hub_reviewed=True, hub_version=9)
+    assert plan.version == 2
+    assert plan.installed_version == 1
+    assert plan.hub_version == 9
+    # Read straight off the stamp `record_hub_install` left behind — no
+    # route-layer plumbing needed for what was already installed.
+    assert plan.installed_hub_version == 4
+
+    result = ab.apply_update(plan, user_id=7)
+    assert result["hub_version"] == 9
+    assert result["installed_hub_version"] == 4
+
+
+def test_a_plain_file_updates_hub_version_is_zero(installed):
+    """No hub number exists for a plain file update (CORR-1019)."""
+    plan = ab.plan_update(_newer(), "drifter")
+    assert plan.hub_reviewed is False
+    assert plan.hub_version == 0
+    assert plan.installed_hub_version == 0
 
 
 # ── Blockers ──
@@ -416,6 +457,31 @@ def test_new_items_arrive_muted_and_curation_survives(installed):
     assert "probe" in mutes["routines"]
     assert "scan" not in mutes["routines"]
     assert mutes["skills"] == {"recon"}
+
+
+def test_mute_routines_false_lands_a_newly_added_routine_enabled_on_update():
+    """FEAT-150: a hub update, like a hub install, passes ``mute_routines=False``
+    — a newly added routine lands available rather than muted, but it still
+    needs the operator's allow before it can run (FEAT-147): that gate does
+    not move for any mute flag here."""
+    from condor.agents import code_trust
+
+    ab.apply(ab.plan(_bundle(), user_id=7, mute_routines=False), user_id=7)
+    assert load_mutes("drifter")["routines"] == set()
+
+    result = ab.apply_update(
+        ab.plan_update(_newer(), "drifter", mute_routines=False), user_id=7
+    )
+
+    # `probe` is genuinely new and lands unmuted; `recon` was already known
+    # (unchanged) so the update does not touch its mute state at all.
+    assert result["mutes"] == {"routines": [], "skills": []}
+    mutes = load_mutes("drifter")
+    assert mutes["routines"] == set()
+    assert mutes["skills"] == {"recon"}
+
+    source = (agent_home("drifter") / "routines" / "probe.py").read_text("utf-8")
+    assert not code_trust.allowed("drifter", "probe", source)
 
 
 def test_a_replaced_routine_needs_consent_again(installed):

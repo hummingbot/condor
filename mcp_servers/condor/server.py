@@ -903,7 +903,7 @@ async def manage_agents(
       read `files` back — a conflict is content nobody else can reproduce.
     - "hub_browse": One page of Botcamp's published agents, newest first
       (`query` narrows it, `page` pages through — both optional). This only
-      says which slugs exist; pull one with "hub_get"/"hub_install" by slug.
+      says which slugs exist; look one up with "hub_get" by slug.
     - "hub_get": Look up one Botcamp agent by slug (requires `path` = the
       agent's slug on Botcamp). No account needed for a free agent; a linked
       Botcamp profile's token is what resolves one gated behind a membership
@@ -911,14 +911,12 @@ async def manage_agents(
       the catalogue, not a security boundary; it is not a signature, Condor
       verifies nothing against it, and it never shortens the review on
       install.
-    - "hub_install": Install a Botcamp agent (requires `path` = the agent's
-      slug; `agent_slug` renames it if the name is taken). The bytes are
-      verified against the download's own integrity header before anything
-      parses them, and then this is exactly the import door: an agent already
-      installed here becomes an UPGRADE automatically (`verb` says which
-      happened), everything arrives MUTED, no imported routine may execute
-      until the user allows it, and nothing is started. Report `findings` and
-      `unmet`; neither blocks it.
+    - "hub_install": Always refused. Installing from the hub records the
+      owner's consent that this exact version's code may run on their
+      machine, and that consent can only come from the owner reading the Hub
+      page's own checkbox — a human confirming a chat tool call is not that.
+      Tell the user to open Agent Hub (the card at the bottom of the
+      conversation sidebar) and install it there.
     - "publish_hub": ADMIN ONLY, and not the same thing as "publish" — that
       one copies an agent into this repo's tracked library, this one uploads it
       to the hub for strangers (requires agent_slug; `notes` and `author_name`
@@ -963,8 +961,9 @@ async def manage_agents(
             its directory ("skills/lp_rebalance", "loops/grid", "AGENT.md").
             Empty publishes the whole agent's library half; its store, journals,
             mutes and session output are never published. For "import" and
-            "upgrade" — the bundle file to read. For "hub_get" and
-            "hub_install" — the agent's slug on Botcamp, not a path at all.
+            "upgrade" — the bundle file to read. For "hub_get" — the agent's
+            slug on Botcamp, not a path at all. Ignored for "hub_install",
+            which always refuses.
         notes: For "export" and "publish_hub" — the changelog for this version,
             carried verbatim in the bundle. What changed since the last bundle
             of this agent.

@@ -23,12 +23,19 @@ export function useBrainSwitch() {
   const chat = useChat();
   const [switchError, setSwitchError] = useState<string | null>(null);
 
-  const switchBrain = (selection: BrainSelection) => {
+  const switchBrain = (selection: BrainSelection, startErrorMessageId?: string) => {
     if (!chat.activeSlotId) return;
     setSwitchError(null);
     chat
-      .switchBrain(chat.activeSlotId, selection)
-      .catch((e: Error) => setSwitchError(e.message || "Could not switch"));
+      .switchBrain(chat.activeSlotId, selection, startErrorMessageId)
+      .catch((e: Error) => {
+        // A retry named by `startErrorMessageId` already reports its own
+        // failure inline, on the note it came from — the dismissible banner
+        // below is for every other picker, which has no note of its own to
+        // report into, and would otherwise just repeat the same words twice.
+        if (startErrorMessageId) return;
+        setSwitchError(e.message || "Could not switch");
+      });
   };
 
   const switchServer = (slotId: string, serverName: string) => {

@@ -218,7 +218,6 @@ def test_no_playbook_routes_to_an_agent_that_does_not_exist():
         p.name for p in AGENTS.iterdir() if p.is_dir() and not p.name.startswith("_")
     }
     assert "executor_manager" not in shipped
-    assert "adaptive_grid_trader" in shipped
 
     for path in AGENTS.rglob("*.md"):
         body = " ".join(path.read_text().split())

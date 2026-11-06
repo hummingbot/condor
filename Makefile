@@ -6,7 +6,7 @@ export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 # "Entering/Leaving directory" line around every sub-invocation.
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor live-backend refresh-codex
+.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome setup-worktree pick-model doctor live-backend refresh-codex
 
 # tmux session Condor runs in
 SESSION := condor
@@ -79,6 +79,12 @@ install: setup
 setup-chrome:
 	@echo "Setting up Chrome for chart rendering..."
 	@uv run python -m condor.setup_chrome || true
+
+# Writes config.yml for a worktree that has none, so a preview boots without
+# the owner filling in localhost / admin / admin by hand. No-ops when
+# config.yml already exists (never overwrites one, e.g. the main checkout's).
+setup-worktree:
+	@uv run python scripts/seed_worktree_config.py
 
 # AGENT=slug[.loop] also runs that agent's trading preflight (FEAT-139).
 doctor:

@@ -29,6 +29,7 @@ import {
   formatRoutineName,
   inScope,
   invalidateRoutineQueries,
+  resolveConfigValues,
   resolveRoutine,
   saveConfig,
 } from "@/lib/routineUtils";
@@ -188,6 +189,30 @@ export function ReportBrowser({
     [routines, pickedSource],
   );
   const activeSource = activeRoutine?.name ?? pickedSource;
+
+  /**
+   * An allowed agent routine lists with `fields: {}` — `GET /routines` never
+   * imports one — so the Config form fetches them itself, once the operator
+   * actually opens that panel. Resolving a routine is importing it (FEAT-147),
+   * so this must never fire merely from selecting a routine to browse its
+   * reports — only `showConfigPanel` is the explicit action that already
+   * means code is about to run (Greptile, PR #314). A pending one stays
+   * unresolved either way; it has no fields to fetch until allowed.
+   */
+  const needsFields =
+    showConfigPanel &&
+    !!activeRoutine &&
+    !activeRoutine.pending &&
+    Object.keys(activeRoutine.fields).length === 0;
+  const { data: fetchedFields } = useQuery({
+    queryKey: ["routine-fields", activeRoutine?.name],
+    queryFn: () => api.getRoutineFields(activeRoutine!.name),
+    enabled: needsFields,
+  });
+  const effectiveRoutine = useMemo(() => {
+    if (!activeRoutine || !needsFields || !fetchedFields) return activeRoutine;
+    return { ...activeRoutine, fields: fetchedFields.fields };
+  }, [activeRoutine, needsFields, fetchedFields]);
 
   /**
    * The scope the list actually shows.
@@ -387,6 +412,14 @@ export function ReportBrowser({
     setShowConfigPanel(false);
   }, [activeSource, activeRoutine]);
 
+  // Fields fetched after the panel may already be open (the operator clicked
+  // Config before the lookup resolved) — fill in their defaults without
+  // closing what they just opened.
+  useEffect(() => {
+    if (!effectiveRoutine || !needsFields || !fetchedFields) return;
+    setConfigValues(buildConfigValues(effectiveRoutine));
+  }, [effectiveRoutine, needsFields, fetchedFields]);
+
   // Track running instance to poll for completion
   const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
 
@@ -406,11 +439,21 @@ export function ReportBrowser({
   }, [polledInstance, activeSource, qc]);
 
   const runMutation = useMutation({
-    mutationFn: () =>
-      api.runRoutine(runServer!, activeSource, configValues, {
+    mutationFn: async () => {
+      // Resolves the routine's fields first if Config was never opened for
+      // it, so a saved custom value is never silently dropped just because
+      // the owner pressed Run directly (Greptile, PR #314). No new trust
+      // boundary: Run already executes this exact routine a moment later.
+      // `configValues` — the displayed form state — wins over that result:
+      // `saveConfig` can fail silently (storage full/blocked) while the form
+      // still shows the edit, and what Run sends must match what the owner
+      // can see, not whatever last made it to localStorage (Greptile, PR #314).
+      const cfg = { ...(await resolveConfigValues(activeRoutine!)), ...configValues };
+      return api.runRoutine(runServer!, activeSource, cfg, {
         sessionKey: runContext?.sessionKey,
         attributeTo: runContext?.agentSlug,
-      }),
+      });
+    },
     onSuccess: (data) => {
       setPollingInstanceId(data.instance_id);
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
@@ -419,8 +462,10 @@ export function ReportBrowser({
   });
 
   const scheduleMutation = useMutation({
-    mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(runServer!, activeSource, configValues, intervalSec),
+    mutationFn: async (intervalSec: number) => {
+      const cfg = { ...(await resolveConfigValues(activeRoutine!)), ...configValues };
+      return api.scheduleRoutine(runServer!, activeSource, cfg, intervalSec);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
@@ -453,20 +498,26 @@ export function ReportBrowser({
     if (!runServer || filteredRoutines.length === 0) return;
     const toRun = filteredRoutines;
     setRunAllProgress({ current: 0, total: toRun.length });
-    for (let i = 0; i < toRun.length; i++) {
-      setRunAllProgress({ current: i + 1, total: toRun.length });
-      const routine = toRun[i];
-      const cfg = buildConfigValues(routine);
-      try {
-        await api.runRoutine(runServer, routine.name, cfg, {
-          sessionKey: runContext?.sessionKey,
-          attributeTo: runContext?.agentSlug,
-        });
-      } catch {
-        // continue with remaining routines
+    try {
+      for (let i = 0; i < toRun.length; i++) {
+        setRunAllProgress({ current: i + 1, total: toRun.length });
+        const routine = toRun[i];
+        try {
+          // Resolving fields is inside this per-routine try too: one routine
+          // newly needing consent must not abort the batch or leave
+          // `runAllProgress` stuck disabled until reload (Greptile, PR #314).
+          const cfg = await resolveConfigValues(routine);
+          await api.runRoutine(runServer, routine.name, cfg, {
+            sessionKey: runContext?.sessionKey,
+            attributeTo: runContext?.agentSlug,
+          });
+        } catch {
+          // continue with remaining routines
+        }
       }
+    } finally {
+      setRunAllProgress(null);
     }
-    setRunAllProgress(null);
     invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
   }, [runServer, runContext, filteredRoutines, qc]);
@@ -562,7 +613,7 @@ export function ReportBrowser({
   // Scroll active source into view
   useEffect(() => {
     const el = sidebarRef.current?.querySelector("[data-active-source]");
-    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (typeof el?.scrollIntoView === "function") el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeSource]);
 
   // Tell the chat what report is open, for as long as the reader is (FEAT-059).
@@ -882,9 +933,9 @@ export function ReportBrowser({
                 <X className="h-3 w-3" />
               </button>
             </div>
-            {Object.keys(activeRoutine.fields).length > 0 ? (
+            {Object.keys(effectiveRoutine?.fields ?? {}).length > 0 ? (
               <RoutineConfigForm
-                fields={activeRoutine.fields}
+                fields={effectiveRoutine!.fields}
                 values={configValues}
                 onChange={(key, value) => {
                   setConfigValues((prev) => {
@@ -1037,13 +1088,13 @@ export function ReportBrowser({
                   <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                     {activeRoutine?.description ?? "Run this routine to generate your first report."}
                   </p>
-                  {activeRoutine && Object.keys(activeRoutine.fields).length > 0 && (
+                  {effectiveRoutine && Object.keys(effectiveRoutine.fields).length > 0 && (
                     <div className="mt-4 w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
                       <h3 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
                         Configuration
                       </h3>
                       <RoutineConfigForm
-                        fields={activeRoutine.fields}
+                        fields={effectiveRoutine.fields}
                         values={configValues}
                         onChange={(key, value) => {
                           setConfigValues((prev) => {

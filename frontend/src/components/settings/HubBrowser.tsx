@@ -6,6 +6,7 @@ import {
   Loader2,
   Lock,
   Search,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/api";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
+import { stripMarkdown } from "@/lib/formatters";
 
 import { type BundleSource } from "./bundleSource";
 import { ImportAgentDialog } from "./ImportAgentDialog";
@@ -62,19 +64,37 @@ function hubSource(slug: string, version: string): BundleSource {
       pinned = { version: String(res.fetched.version), sha256: res.fetched.sha256 };
       return res.verb === "update"
         ? { verb: "update", plan: res.plan as AgentUpdatePlan }
-        : { verb: "install", plan: res.plan as AgentImportPlan };
+        : {
+            verb: "install",
+            plan: res.plan as AgentImportPlan,
+            // The catalogue's own long-form text, carried from this same
+            // preview call rather than dropped — `res.plan.description` is
+            // the AGENT.md's short routing blurb, a different field (BUG-2).
+            fullDescription: res.listing.description,
+            // Already accepted with Botcamp for this exact version — the
+            // dialog pre-ticks step 2's box instead of re-asking.
+            alreadyConsented: res.consent.accepted,
+          };
     },
-    install: async (asSlug) =>
-      (await api.installFromHub(slug, asSlug, pinned.version, pinned.sha256))
-        .plan as AgentImportPlan,
+    install: async (asSlug, accepted) =>
+      (
+        await api.installFromHub(
+          slug,
+          asSlug,
+          pinned.version,
+          pinned.sha256,
+          accepted,
+        )
+      ).plan as AgentImportPlan,
     previewUpdate: async () => {
       const res = await api.previewHubInstall(slug, "", version);
       pinned = { version: String(res.fetched.version), sha256: res.fetched.sha256 };
       return res.plan as AgentUpdatePlan;
     },
-    applyUpdate: async () =>
-      (await api.installFromHub(slug, "", pinned.version, pinned.sha256))
-        .plan as AgentUpdatePlan,
+    applyUpdate: async (_slug, accepted) =>
+      (
+        await api.installFromHub(slug, "", pinned.version, pinned.sha256, accepted)
+      ).plan as AgentUpdatePlan,
   };
 }
 
@@ -121,11 +141,35 @@ interface CardAgent {
  * kind of bundle, it is the same kind with a provenance label attached, and a
  * second review screen would imply otherwise.
  */
-export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
+export function HubBrowser({
+  onInstalled,
+  onOpenAgent,
+}: {
+  onInstalled: () => void;
+  /** "Start chatting" on the success screen opens a chat with the agent by
+   *  calling this, rather than HubBrowser reaching for a router itself — it
+   *  stays mountable on its own, the way its tests already mount it. */
+  onOpenAgent?: (slug: string) => void;
+}) {
   const [slug, setSlug] = useState("");
   const [looked, setLooked] = useState("");
   const [bySlug, setBySlug] = useState(false);
   const [chosen, setChosen] = useState<Chosen | null>(null);
+  // What the modal's own heading says once the import has landed — unset
+  // while reviewing, so the heading falls back to "Review before
+  // installing". Cleared whenever a different agent is opened or the modal
+  // closes, so a second review never opens on the previous one's result.
+  const [resultTitle, setResultTitle] = useState<string | null>(null);
+
+  function openReview(c: Chosen) {
+    setResultTitle(null);
+    setChosen(c);
+  }
+
+  function closeReview() {
+    setResultTitle(null);
+    setChosen(null);
+  }
 
   const lookup = useMutation({
     mutationFn: (value: string) => api.getHubListing(value),
@@ -142,7 +186,7 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
 
   return (
     <div className="space-y-5">
-      <Catalogue onReview={setChosen} />
+      <Catalogue onReview={openReview} />
 
       <div className="border-t border-[var(--color-border)] pt-4">
         {bySlug ? (
@@ -178,7 +222,7 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
                 const value = slug.trim();
                 if (!value) return;
                 setLooked(value);
-                setChosen(null);
+                closeReview();
                 lookup.mutate(value);
               }}
               className="flex items-center gap-2"
@@ -239,8 +283,9 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
                     members: false,
                     pageUrl: "",
                   }}
+                  installable={lookup.data.can_install}
                   onReview={() =>
-                    setChosen({
+                    openReview({
                       slug: lookup.data.listing.slug,
                       name: lookup.data.listing.name,
                       trust: lookup.data.trust,
@@ -268,23 +313,52 @@ export function HubBrowser({ onInstalled }: { onInstalled: () => void }) {
           high up in the grid, a dialog rendered under the slug lookup was
           off-screen, and pressing Review looked like it did nothing. */}
       {chosen && source && (
-        <ReviewModal chosen={chosen} onClose={() => setChosen(null)}>
+        <ReviewModal chosen={chosen} title={resultTitle} onClose={closeReview}>
           <ImportAgentDialog
             key={chosen.slug}
             source={source}
             onImported={onInstalled}
+            onResult={(r) =>
+              setResultTitle(r ? `${r.verb === "imported" ? "Imported" : "Updated"} ${r.slug}` : null)
+            }
             stickyAction
+            onOpenAgent={onOpenAgent}
+            onDismiss={closeReview}
             provenance={
+              // A slim banner rather than a tall block: the name, an icon
+              // marking it as provenance rather than a finding, and the
+              // trust sentence on one line that wraps if it must — the
+              // width this modal now has rarely makes it.
               <div
                 data-hub-provenance
-                className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
+                className="flex items-start gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"
               >
-                <span className="text-sm font-semibold text-[var(--color-text)]">
-                  {chosen.name || chosen.slug}
-                </span>
-                <p className="text-[11px] text-[var(--color-text-muted)]">
-                  {chosen.trust}
-                </p>
+                <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+                <div className="min-w-0 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                  {/* One sentence, not the whole trust paragraph: deciding
+                      whether to install should not start with a read. The
+                      rest of the server's own sentence is one click away,
+                      not rewritten here — a second copy of what it claims is
+                      exactly what `HUB_TRUST` living on the server alone is
+                      meant to avoid. */}
+                  <p>
+                    <span className="font-semibold text-[var(--color-text)]">
+                      {chosen.name || chosen.slug}
+                    </span>{" "}
+                    — {chosen.trust.split(". ")[0]}
+                    {chosen.trust.includes(". ") ? "." : ""}
+                  </p>
+                  {chosen.trust.includes(". ") && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
+                        Read the rest
+                      </summary>
+                      <p className="mt-1">
+                        {chosen.trust.split(". ").slice(1).join(". ")}
+                      </p>
+                    </details>
+                  )}
+                </div>
               </div>
             }
           />
@@ -315,6 +389,10 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
   const entries = catalogue.data?.pages.flatMap((page) => page.listings) ?? [];
   const trust = catalogue.data?.pages[0]?.trust ?? "";
   const botcampUrl = catalogue.data?.pages[0]?.botcamp_url ?? "";
+  // CORR-980: only the catalogue read itself is anonymous — a per-agent
+  // listing or bundle 401s with no token, free agent or not — so this is
+  // what the dashboard reads to not offer a Review that is certain to fail.
+  const canInstall = catalogue.data?.pages[0]?.can_install ?? false;
 
   return (
     <div className="space-y-3">
@@ -429,6 +507,7 @@ function Catalogue({ onReview }: { onReview: (chosen: Chosen) => void }) {
                 key={entry.slug}
                 marker={{ "data-hub-catalogue-entry": entry.slug }}
                 agent={catalogueAgent(entry)}
+                installable={canInstall}
                 onReview={() =>
                   onReview({ slug: entry.slug, name: entry.name, trust })
                 }
@@ -468,11 +547,16 @@ function catalogueAgent(entry: HubCatalogueEntry): CardAgent {
 function AgentCard({
   agent,
   marker,
+  installable,
   onReview,
 }: {
   agent: CardAgent;
   /** The one `data-` hook callers address this card by. */
   marker: Record<string, string>;
+  /** Whether *this* viewer's own hub token is non-empty (CORR-980): the
+   *  catalogue is anonymous but a per-agent read is not, so `false` means
+   *  Review would 401 on this exact card and must not be offered. */
+  installable: boolean;
   onReview: () => void;
 }) {
   return (
@@ -515,7 +599,7 @@ function AgentCard({
       </div>
 
       <p className="line-clamp-3 flex-1 text-xs leading-relaxed text-[var(--color-text-muted)]">
-        {agent.description || "No description."}
+        {stripMarkdown(agent.description) || "No description."}
       </p>
 
       <div className="flex items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2.5">
@@ -535,12 +619,22 @@ function AgentCard({
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
-          <button
-            onClick={onReview}
-            className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-          >
-            Review
-          </button>
+          {installable ? (
+            <button
+              onClick={onReview}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+            >
+              Review
+            </button>
+          ) : (
+            <span
+              data-hub-needs-connection
+              title="Ask an admin to connect this install to Botcamp — a seat's own reads have no token, and the hub refuses an agent lookup without one"
+              className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] opacity-60"
+            >
+              <Lock className="h-3.5 w-3.5" /> Needs connection
+            </span>
+          )}
         </span>
       </div>
     </li>
@@ -549,10 +643,14 @@ function AgentCard({
 
 function ReviewModal({
   chosen,
+  title,
   onClose,
   children,
 }: {
   chosen: Chosen;
+  /** The import's own result ("Imported foo"), once it has landed. Unset
+   *  while still reviewing, when the heading is the pre-install one. */
+  title: string | null;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -566,13 +664,17 @@ function ReviewModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
+      {/* Wide and viewport-capped rather than a narrow centred card: the
+          findings a review has to show — several groups, each a list of
+          `kind path:line` rows — read badly in a column barely wider than
+          one of those rows. */}
       <div
-        className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
+        className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] px-5 py-3">
           <h2 className="min-w-0 truncate text-sm font-semibold text-[var(--color-text)]">
-            Review before installing
+            {title ?? "Review before installing"}
           </h2>
           <button
             onClick={onClose}

@@ -139,6 +139,13 @@ export interface AgentImportPlan {
   agent_uid: string;
   /** Advisory, and only within one `agent_uid`'s lineage. */
   version: number;
+  /**
+   * The Botcamp listing version this bundle was fetched as — `0` for a plain
+   * file import. Show this instead of `version` whenever `hub_reviewed` is
+   * true: `version` is the exporting install's own internal counter, a
+   * different number from the one the operator picked on Botcamp.
+   */
+  hub_version: number;
   notes: string;
   author: AgentBundleAuthor;
   requires: AgentBundleRequires;
@@ -152,6 +159,13 @@ export interface AgentImportPlan {
   total_bytes: number;
   stamps: Record<string, string>;
   mutes: { routines: string[]; skills: string[] };
+  /**
+   * Whether this is a hub install: the hub's own review stands in for the
+   * operator's per-file `code_trust` allow, so every routine above lands
+   * with execution consent already granted for these exact bytes. `false`
+   * for a plain file import, which keeps the ordinary per-file gate.
+   */
+  hub_reviewed: boolean;
   agent_key: string;
   agent_key_inherited: boolean;
   /** The taken slug, when the bundle cannot land under the name it asked for. */
@@ -212,6 +226,14 @@ export interface AgentUpdatePlan {
   installed_agent_uid: string;
   version: number;
   installed_version: number;
+  /**
+   * `version`/`installed_version`'s Botcamp listing numbers, for a hub
+   * update only — `0` for a plain file update. See
+   * `AgentImportPlan.hub_version`; show these instead whenever
+   * `hub_reviewed` is true.
+   */
+  hub_version: number;
+  installed_hub_version: number;
   exported_at: string;
   notes: string;
   author: AgentBundleAuthor;
@@ -224,6 +246,9 @@ export interface AgentUpdatePlan {
   counts: Record<string, number>;
   /** What arrives switched off — only what is genuinely new. */
   mutes: { routines: string[]; skills: string[] };
+  /** `AgentImportPlan.hub_reviewed`'s twin: a hub update's added or changed
+   *  routines land with execution consent already granted, same reason. */
+  hub_reviewed: boolean;
   blockers: AgentUpdateBlocker[];
   warnings: AgentUpdateWarning[];
   updated?: boolean;
@@ -270,6 +295,11 @@ export interface HubListing {
 export interface HubCatalogue {
   listing: HubListing;
   trust: string;
+  /** Whether *this* viewer's own hub token is non-empty (CORR-980). Only the
+   *  catalogue read is anonymous — a per-agent listing or bundle 401s with
+   *  no token, free agent or not — so `false` means Review/Install on this
+   *  listing is certain to fail and should not be offered. */
+  can_install: boolean;
 }
 
 /** One published agent in Botcamp's catalogue, in Botcamp's own words.
@@ -298,32 +328,32 @@ export interface HubCataloguePage {
   trust: string;
   /** Botcamp's own list of agents, built the same way as `page_url`. */
   botcamp_url: string;
+  /** Whether *this* viewer's own hub token is non-empty (CORR-980). The
+   *  catalogue itself is anonymous, but a per-agent listing or bundle is
+   *  not, so `false` means every row's Review/Install would 401. */
+  can_install: boolean;
 }
 
 /** Botcamp pages its catalogue this many at a time. */
 export const HUB_CATALOGUE_PAGE_SIZE = 20;
 
 /**
- * This install's Botcamp device-login/link state, as `condor.hub.device_state`
+ * This install's Botcamp connection state, as `condor.hub.connection_state`
  * reports it — never the credential, which no route ever answers with
- * (PR #111's device flow, replacing FEAT-148's pairing code).
+ * (botcamp-site PR #137's connect-code flow, replacing PR #111's device
+ * flow).
  *
- * `"pending"` carries `user_code`/`approval_url`/`expires_at` to show again;
- * `"denied"`/`"expired"`/`"invalid"` are reported for the one poll that
- * observed them; `"linked"` carries `profile_handle` and `scope`.
- *
- * `approval_url` is built by the backend from this install's configured hub
- * base, never echoed from the hub's own reply — so it is safe to navigate to
- * (SEC-819). The hub's `verification_uri`/`verification_uri_complete` are
- * deliberately not part of this type: they never leave `condor.hub`.
+ * `"linked"` carries `profile_handle` and `scope`. `connect_url` is always
+ * set, linked or not — it is Botcamp's `/connect` page, built by the backend
+ * from this install's configured hub base, never echoed from a hub reply
+ * (SEC-819) — so the "Sign in to Botcamp" link renders with no extra round
+ * trip.
  */
 export interface HubDeviceState {
-  status: "none" | "pending" | "denied" | "expired" | "invalid" | "linked";
-  user_code: string;
-  approval_url: string;
-  expires_at: number;
+  status: "none" | "linked";
   profile_handle: string;
   scope: string[];
+  connect_url: string;
 }
 
 /**
@@ -398,6 +428,10 @@ export interface HubInstallResponse {
   /** The version and digest the server actually reviewed (BUG-2) — pin
    *  install to this rather than re-resolving "latest" a second time. */
   fetched: { version: number; sha256: string };
+  /** Whether this account already consented to this exact version
+   *  (botcamp-site PR #137) — so the dialog can pre-tick step 2's box
+   *  instead of re-asking. */
+  consent: { accepted: boolean; terms_version: string };
 }
 
 /**
@@ -2140,6 +2174,10 @@ export interface RoutineInfo {
    * Such a row is listed and its source is readable, but `fields` is empty —
    * a pydantic model's fields only exist once the module has been imported,
    * which is exactly what has not happened.
+   *
+   * An *allowed* agent routine also lists with `fields: {}` here, because
+   * `GET /routines` never imports one either — call `getRoutineFields` for
+   * those once the operator opens the Config form.
    */
   pending?: boolean;
   /** `"pending"` (never allowed) or `"changed"` (allowed, then edited). */
@@ -4108,12 +4146,15 @@ export const api = {
    *  and `expectedSha256` should be the preview's own `fetched` fields
    *  (BUG-2) — pinning install to what was actually reviewed, rather than
    *  re-resolving `"latest"` and risking a newer approval landing between
-   *  the two calls. The server refuses when the digest no longer matches. */
+   *  the two calls. The server refuses when the digest no longer matches.
+   *  `accepted` is the operator's own tick of the review dialog's consent
+   *  checkbox — the server refuses to record a hub acceptance without it. */
   installFromHub: (
     slug: string,
     asSlug = "",
     version = "latest",
     expectedSha256 = "",
+    accepted = false,
   ) =>
     apiFetch<HubInstallResponse>(
       `/api/v1/hub/agents/${encodeURIComponent(slug)}/install`,
@@ -4123,6 +4164,7 @@ export const api = {
           as_slug: asSlug,
           version,
           expected_sha256: expectedSha256,
+          accepted,
         }),
       },
     ),
@@ -4174,20 +4216,16 @@ export const api = {
       body: JSON.stringify({ token }),
     }),
 
-  /** Begin a device login: the user code to show, and the link to open so
-   *  the admin can approve it on Botcamp (PR #111's device flow).
-   *  `approval_url` is derived server-side from the configured hub base —
-   *  see `HubDeviceState`. */
-  startHubDevice: () =>
-    apiFetch<{
-      user_code: string;
-      approval_url: string;
-      expires_in: number;
-      interval: number;
-    }>("/api/v1/settings/hub-device/start", { method: "POST" }),
+  /** Redeem a code pasted from Botcamp's `/connect` page (botcamp-site
+   *  PR #137's connect-code flow) for this install's token. */
+  connectHubDevice: (code: string) =>
+    apiFetch<HubDeviceState>("/api/v1/settings/hub-device/connect", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
 
-  /** Where the device login/link stands right now. Polled while `"pending"`.
-   *  Admin-only — see `getHubDeviceLinked` for the non-admin-safe version. */
+  /** Where the Botcamp connection stands right now. Admin-only — see
+   *  `getHubDeviceLinked` for the non-admin-safe version. */
   getHubDevice: () => apiFetch<HubDeviceState>("/api/v1/settings/hub-device"),
 
   /** Whether this install is linked to Botcamp. Nothing else — every
@@ -4196,7 +4234,7 @@ export const api = {
   getHubDeviceLinked: () =>
     apiFetch<{ linked: boolean }>("/api/v1/settings/hub-device/linked"),
 
-  /** Cancel a device login in flight, or disconnect a linked profile.
+  /** Disconnect this install's linked Botcamp profile.
    *
    *  `revoked` is `true` only once Botcamp itself confirmed the token was
    *  revoked (`DELETE /api/condor/me`, PR #111), `false` with `error` set
@@ -4677,6 +4715,18 @@ export const api = {
   getRoutineSource: (name: string) =>
     apiFetch<{ filename: string; source: string }>(
       `/api/v1/routines/${encodeURIComponent(name)}/source`,
+    ),
+
+  /**
+   * An allowed agent routine's `Config` fields, resolved on demand.
+   *
+   * `getRoutines()` reads an agent's own routines without importing them, so
+   * its `fields` come back empty for anything the operator has not yet
+   * opened the Config panel for. This is that panel's own lookup.
+   */
+  getRoutineFields: (name: string) =>
+    apiFetch<{ fields: Record<string, RoutineFieldInfo> }>(
+      `/api/v1/routines/${encodeURIComponent(name)}/fields`,
     ),
 
   getRoutineReports: (name: string) =>

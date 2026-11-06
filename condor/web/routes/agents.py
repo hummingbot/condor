@@ -946,11 +946,16 @@ class UpdateAgentMdRequest(BaseModel):
 #: means, and a copy of it in a component is a second claim nobody audits. See
 #: ``condor/hub.py``'s trust model for the long form.
 HUB_TRUST = (
-    "The hub is a discovery service, not a security boundary. Only a version "
-    "a reviewer already approved is ever served, but that is a gate on what "
-    "reaches the catalogue, not a signature — Condor verifies no bundle "
-    "against it, and it does not shorten this review. Whatever you install "
-    "arrives muted and unstarted, and what protects you is reading it."
+    "The hub is a discovery service, not a security boundary for code. Only a "
+    "version a reviewer already approved is ever served, but that is a gate "
+    "on what reaches the catalogue, not a signature. Its declared skills, "
+    "tools and routines land enabled, exactly as the reviewed version "
+    "declared them — that review is why. A routine is still code, but here "
+    "the review is the control: installing from the hub grants execution "
+    "consent for that exact version and digest, so nothing further is asked "
+    "before it can run. Editing a hub routine's file afterwards, or importing "
+    "one from anywhere else, keeps the ordinary gate — read it, then allow it "
+    "yourself."
 )
 
 
@@ -968,11 +973,18 @@ class HubInstallRequest(BaseModel):
     the preview and the install is then a refusal, not a silent upgrade —
     ``fetch``'s own digest check only proves install's bytes match install's
     header, never that they match what preview showed.
+
+    ``accepted`` is the owner's own tick of the import dialog's step-2
+    checkbox — the only thing that may stand between the owner and a hub
+    acceptance recorded with Botcamp (:func:`install_from_hub`). Defaulting
+    to ``False`` means a request that omits it, or a client that never asks,
+    is refused rather than silently affirming terms nobody showed.
     """
 
     as_slug: str = ""
     version: str = "latest"
     expected_sha256: str = ""
+    accepted: bool = False
 
 
 class PublishAgentRequest(BaseModel):
@@ -2426,14 +2438,22 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
     and flagged rather than hidden, so the switch that muted one is still there
     to switch it back.
 
-    A routine still awaiting execution consent is listed too, from metadata
-    read without importing it (FEAT-147) — this panel is where the operator
-    reads imported code and decides, so it is the one surface that must never
-    be the thing that runs it.
+    This panel is where the operator reads imported code and decides, so it
+    is the one surface that must never be the thing that runs it (FEAT-147) —
+    for a routine still awaiting execution consent *and* for one a hub
+    install already granted it. Only the shared library, which never came
+    from an import and is never gated, is read through normal discovery; the
+    agent's own library is read statically, via :func:`agent_routine_overview`,
+    regardless of its consent state.
     """
     from condor.memory.mutes import load_mutes
-    from routines.base import assistant_routines, pending_routines
+    from routines.base import (
+        _merged_from,
+        agent_routine_overview,
+        shared_routines_roots,
+    )
 
+    own = {row.name: row for row in agent_routine_overview(slug)}
     muted = load_mutes(slug)["routines"]
     cards = [
         RoutineCard(
@@ -2444,20 +2464,21 @@ def _routine_cards(slug: str) -> list[RoutineCard]:
             category=info.category,
             muted=name in muted,
         )
-        for name, info in sorted(assistant_routines(slug, include_muted=True).items())
+        for name, info in sorted(_merged_from(shared_routines_roots()).items())
+        if name not in own
     ]
     cards.extend(
         RoutineCard(
             name=row.name,
             description=row.description,
             continuous=row.continuous,
-            source=row.source,
+            source=f"agent:{slug}",
             category=row.category,
             muted=row.muted,
-            pending=True,
-            pending_reason=row.reason,
+            pending=not row.allowed,
+            pending_reason=row.pending_reason,
         )
-        for row in pending_routines(slug)
+        for row in own.values()
     )
     return cards
 
@@ -5242,13 +5263,50 @@ def _hub_read_token(user: WebUser) -> str:
     There is one token per install: the admin's, and whatever their account
     has bought or joined comes with it. Sending it on a non-admin's read would
     hand every seat on the install the admin's paid and members-only agents
-    (SEC review C4). Without it a seat still sees and installs everything
-    public; the gated ones answer as they would to anyone signed out.
+    (SEC review C4). Without it a seat still sees the anonymous catalogue
+    (``hub.browse``), but every per-agent read — a listing, a bundle, an
+    install's consent — answers 401 regardless of whether the agent is free
+    (CORR-980): there is no anonymous tier below the catalogue to fall back
+    to. A surface that offers a view or install action should check this
+    being non-empty before offering one, not discover the 401 per click.
     """
     from condor import hub
     from config_manager import get_config_manager
 
     return hub.token() if get_config_manager().is_admin(user.id) else ""
+
+
+async def _hub_consent_state(
+    slug: str, agent_id: str, version: int, sha256: str, user: WebUser
+) -> dict:
+    """``{"accepted": ..., "terms_version": ...}`` for ``slug``/``version``,
+    pinned to ``agent_id`` and ``sha256``, never raising.
+
+    Read-only and best-effort, for the preview response's own sake
+    (:func:`preview_hub_install`): a missing Botcamp connection or a hub
+    hiccup here must read as "not yet accepted", the ordinary starting
+    state, rather than failing a preview that has nothing else wrong with
+    it. :func:`install_from_hub`'s own consent call is the one that must not
+    swallow a failure — see there.
+    """
+    from condor import hub
+    from condor.hub import HubError
+
+    token = _hub_read_token(user)
+    if not token:
+        return {"accepted": False, "terms_version": ""}
+    try:
+        state = await asyncio.to_thread(
+            hub.get_consent,
+            slug,
+            str(version),
+            agent_id=agent_id,
+            sha256=sha256,
+            token=token,
+        )
+    except HubError:
+        return {"accepted": False, "terms_version": ""}
+    return {"accepted": state.accepted, "terms_version": state.terms_version}
 
 
 async def _hub_bundle(slug: str, version: str, user: WebUser):
@@ -5305,6 +5363,22 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
         user_id=user.id,
         available_connectors=connectors,
         available_tools=tools,
+        # The hub already reviewed this exact content before ever serving
+        # it: its skills and routines land enabled, never muted a second
+        # time (FEAT-146, widened to routines in FEAT-150). ``hub_reviewed``
+        # is the trust-boundary decision that widens the same review to
+        # execution consent (condor.agents.code_trust): a routine from here
+        # needs no further per-file allow, tied to the exact version and
+        # digest this install just fetched and will pin install against
+        # (``expected_sha256`` below).
+        mute_skills=False,
+        mute_routines=False,
+        hub_reviewed=True,
+        # The Botcamp listing version actually fetched (CORR-1019) — the
+        # number the operator picked, not the exporting install's own
+        # internal counter. Every hub-flow surface shows this instead of
+        # ``plan.version`` once ``hub_reviewed`` is true.
+        hub_version=fetched.version,
     )
     if plan.is_update:
         return (
@@ -5316,6 +5390,10 @@ async def _hub_plan(slug: str, version: str, as_slug: str, user: WebUser):
                 plan.collision,
                 available_connectors=connectors,
                 available_tools=tools,
+                mute_skills=False,
+                mute_routines=False,
+                hub_reviewed=True,
+                hub_version=fetched.version,
             ),
         )
     return listing, fetched, "install", plan
@@ -5329,15 +5407,20 @@ async def browse_hub_catalogue(
 
     A short or empty page is the last. Pulling one of them is the same lookup
     and review as a slug typed by hand — this only says which slugs exist.
+
+    ``can_install`` says whether *this* read's own token is non-empty: the
+    catalogue itself is anonymous, but a per-agent read is not (CORR-980), so
+    a viewer this is ``False`` for would 401 on every row's Review/Install —
+    the dashboard reads it to not offer one rather than discover that per
+    click.
     """
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
+    hub_token = _hub_read_token(user)
     try:
-        entries = await asyncio.to_thread(
-            hub.browse, query, page, _hub_read_token(user)
-        )
+        entries = await asyncio.to_thread(hub.browse, query, page, hub_token)
     except IdentifierError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HubError as exc:
@@ -5356,6 +5439,7 @@ async def browse_hub_catalogue(
         "page": page,
         "trust": HUB_TRUST,
         "botcamp_url": hub.site_url("/strategies?type=AGENT"),
+        "can_install": bool(hub_token),
     }
 
 
@@ -5367,19 +5451,26 @@ async def get_hub_listing(slug: str, user: WebUser = Depends(get_current_user)):
     shared is not in the catalogue (:func:`browse_hub_catalogue`), so this is
     the only way to it. This install's own Botcamp token rides along for an
     admin, so a membership- or purchase-gated agent the account actually has
-    access to still resolves (:func:`_hub_read_token`).
+    access to still resolves (:func:`_hub_read_token`) — and, for an admin,
+    is also what keeps this call from 401ing at all, since there is no
+    anonymous tier below the catalogue (CORR-980, ``can_install`` below).
     """
     from condor import hub
     from condor.fetchers._identifiers import IdentifierError
     from condor.hub import HubError
 
+    hub_token = _hub_read_token(user)
     try:
-        listing = await asyncio.to_thread(hub.get, slug, _hub_read_token(user))
+        listing = await asyncio.to_thread(hub.get, slug, hub_token)
     except IdentifierError as exc:
         raise _listing_refusal(exc) from exc
     except HubError as exc:
         raise _hub_refusal(exc) from exc
-    return {"listing": listing.model_dump(), "trust": HUB_TRUST}
+    return {
+        "listing": listing.model_dump(),
+        "trust": HUB_TRUST,
+        "can_install": bool(hub_token),
+    }
 
 
 @hub_router.post("/agents/{slug}/install/preview")
@@ -5408,6 +5499,15 @@ async def preview_hub_install(
         # exact version and digest rather than re-asking for "latest" and
         # risking Botcamp having approved a newer one in between (BUG-2).
         "fetched": {"version": fetched.version, "sha256": fetched.sha256},
+        # Whether this account already consented to this exact version, so
+        # the dialog can pre-tick step 2's box instead of re-asking
+        # (botcamp-site PR #137). Best-effort: a consent read that fails —
+        # no Botcamp connection, a transport error — must not block the
+        # review the owner came here for, so it reads as "not yet accepted"
+        # rather than failing the whole preview.
+        "consent": await _hub_consent_state(
+            slug, listing.agent_id, fetched.version, fetched.sha256, user
+        ),
     }
 
 
@@ -5417,7 +5517,7 @@ async def install_from_hub(
     req: HubInstallRequest | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Install this agent version, with its code switched off.
+    """Install this agent version, ready to use like a locally created agent.
 
     Re-fetches and re-plans rather than trusting anything the client carried
     back — the same rule ``/import`` and ``/{slug}/update`` follow, and it
@@ -5425,10 +5525,16 @@ async def install_from_hub(
     running *right now*.
 
     It lands through FEAT-133's ``apply`` or FEAT-145's ``apply_update``, which
-    is to say through exactly the gate the file path uses. Nothing about
-    where this came from shortens that: routines and skills arrive muted, no
-    imported ``.py`` has execution consent, and nothing is started.
+    is to say through exactly the gate the file path uses — with the
+    exceptions the hub earns and a plain file never does: its declared
+    skills, tools and routines land enabled (FEAT-146, widened to routines in
+    FEAT-150), and — the owner's later trust-boundary call — every routine it
+    carries lands with execution consent already granted for this exact
+    version and digest, so nothing further is asked before it can run.
+    Nothing is started either way: the hub's review stands in for the
+    operator's per-file allow, not for pressing Start.
     """
+    from condor import hub
     from condor.agents import bundle as agent_bundle
 
     listing, fetched, verb, plan = await _hub_plan(
@@ -5446,6 +5552,48 @@ async def install_from_hub(
                 "again before installing."
             ),
         )
+    # Record consent for this exact version *before* anything is written —
+    # the owner's step-2 checkbox is Condor's own text, and botcamp-site PR
+    # #137 is where that acceptance is kept. Unlike ``expected_sha256``
+    # above, a failure here must stop the install outright rather than
+    # degrade: no Botcamp connection, a revoked token, or the hub refusing
+    # all read the same as any other blocker, with a readable reason, and
+    # nothing has been applied yet for either to leave half-done.
+    #
+    # ``NoTokenError`` is the one exception to "stop outright": a seat has no
+    # token at all (SEC review C4 — only the admin's own reads ever carry the
+    # admin's Botcamp account, and that line holds for this write too, so a
+    # seat's install must never borrow it). There being nothing to record
+    # consent *as* is not a Botcamp refusal, and must not block a seat from
+    # installing a public agent the way every other read in this flow already
+    # tolerates going without a token.
+    hub_token = _hub_read_token(user)
+    if hub_token:
+        # Consent is about to be recorded with Botcamp under this account —
+        # which must never happen for an affirmation nobody showed the
+        # caller. ``req`` is optional on this route (``None`` is a request
+        # with no body at all), so the absence of a body refuses exactly
+        # like an explicit ``accepted: false`` would.
+        if not (req and req.accepted):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Accept the hub's terms before installing — tick the "
+                    "consent checkbox and try again."
+                ),
+            )
+        try:
+            await asyncio.to_thread(
+                hub.post_consent,
+                slug,
+                str(fetched.version),
+                hub.HUB_CONSENT_TERMS_VERSION,
+                agent_id=listing.agent_id,
+                sha256=fetched.sha256,
+                token=hub_token,
+            )
+        except hub.HubError as exc:
+            raise _hub_refusal(exc) from exc
     try:
         if verb == "update":
             result = agent_bundle.apply_update(plan, user_id=user.id)

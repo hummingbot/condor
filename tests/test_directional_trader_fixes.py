@@ -311,16 +311,14 @@ def test_leverage_is_set_where_it_is_actually_read():
     assert "has no `leverage` argument" in body
 
 
-def test_non_grid_work_is_not_routed_to_the_grid_agent():
-    """``adaptive_grid_trader`` excludes "position executors without grid
-    structure" and DCA in as many words."""
-    excluded = " ".join(
-        Path("agents/adaptive_grid_trader/AGENT.md").read_text().split()
-    )
-    assert "Non-grid strategies" in excluded
+def test_grid_and_dca_have_no_specialist_to_route_to():
+    """Grid and DCA have no specialist agent; `directional_trader` says so in
+    as many words instead of handing the work to one."""
+    body = " ".join((DT / "AGENT.md").read_text().split())
+    assert "Grid and DCA have no specialist" in body
 
     deploy = " ".join((DT / "skills/deploy_and_monitor/SKILL.md").read_text().split())
-    assert "do **not** hand it to `adaptive_grid_trader`" in deploy
+    assert "grid and DCA have no specialist agent to hand them to" in deploy
 
 
 def test_the_handoff_template_requires_the_interval_not_merely_no_finer():

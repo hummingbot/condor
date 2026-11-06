@@ -367,6 +367,27 @@ async def get_field_options(
     return {"options": []}
 
 
+@router.get("/{routine_name:path}/fields")
+async def get_routine_fields_route(
+    routine_name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Return the ``Config`` fields of an allowed routine, for the Config form.
+
+    ``GET /routines`` lists an agent's own routines through
+    :func:`catalog_agent_routines`, which never imports the module and so
+    always reports ``fields: {}`` for them. The dashboard calls this one
+    instead, once the operator actually opens the Config panel, so importing
+    to read the fields happens on that explicit action rather than on the
+    page load that lists every routine.
+    """
+    store = get_routine_store()
+    try:
+        return {"fields": store.get_routine_fields(routine_name)}
+    except PendingConsentError as e:
+        raise HTTPException(403, str(e))
+
+
 @router.get("/{routine_name:path}/source")
 async def get_routine_source(
     routine_name: str,
@@ -383,10 +404,12 @@ async def get_routine_source(
     reads, never an authorization check. Agent homes stay out of those roots,
     so a journal or memory store next door is not in scope either way.
 
-    A routine awaiting execution consent is served from its ``source_path``
-    rather than through ``inspect.getfile(run_fn)`` (FEAT-147): resolving the
-    file through the imported object would mean importing it, and reading the
-    code is the one thing the operator must be able to do *before* that.
+    A routine awaiting execution consent, or one whose listing never imports
+    it (:class:`~routines.base.RoutineCatalogEntry`), is served from its own
+    ``source_path`` rather than through ``inspect.getfile(run_fn)``
+    (FEAT-147): resolving the file through the imported object would mean
+    importing it, and reading the code is the one thing the operator must be
+    able to do *before* that.
     """
     store = get_routine_store()
     all_routines = store._discover_all()
@@ -395,9 +418,12 @@ async def get_routine_source(
     if not routine and not pending:
         raise HTTPException(404, "Routine not found")
     try:
-        source_file = (
-            pending.source_path if pending else inspect.getfile(routine.run_fn)
-        )
+        if pending is not None:
+            source_file = pending.source_path
+        elif hasattr(routine, "source_path"):
+            source_file = routine.source_path
+        else:
+            source_file = inspect.getfile(routine.run_fn)
         source_path = Path(source_file).resolve()
         # CORR-585: confine to the roots discovery actually reads — the general
         # library, the shared one and each agent's own routines/ — not just a
@@ -406,7 +432,7 @@ async def get_routine_source(
             raise HTTPException(403, "Source not available")
         source = source_path.read_text()
         return {"filename": source_path.name, "source": source}
-    except (TypeError, OSError) as e:
+    except (TypeError, OSError, AttributeError) as e:
         raise HTTPException(404, f"Source not available: {e}")
 
 

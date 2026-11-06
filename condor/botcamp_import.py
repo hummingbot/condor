@@ -22,11 +22,15 @@ travels unchanged.
 Every defense here runs independently of whatever the hub already checked
 at upload (``agent-package.ts``'s ``validateAgentPackage``, which caps file
 count, per-file size, total size, rejects symlinks and unsafe paths before
-ever storing the zip). ``condor/hub.py``'s trust model — "a bundle is
-untrusted code wherever it came from, and the gate is on the receiving
-install" — draws no exception for bytes a service already claims to have
-validated, because the one byte stream this install actually reads is the
-one that arrived in this process, not the one that left Botcamp's.
+ever storing the zip). ``condor/hub.py``'s trust model — "a bundle's code is
+untrusted wherever it came from, and the gate is on the receiving install" —
+draws no exception for bytes a service already claims to have validated,
+because the one byte stream this install actually reads is the one that
+arrived in this process, not the one that left Botcamp's. That trust model's
+one exception (a hub bundle's declared skills and tools, never its code)
+is decided later, in :func:`condor.agents.bundle.plan`, not here: this
+module only turns bytes into a :class:`~condor.agents.bundle.Bundle` and
+never writes anything.
 """
 
 from __future__ import annotations
@@ -186,6 +190,15 @@ def from_zip(data: bytes, *, agent_slug: str = "") -> Bundle:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise BundleError(f"'{path}' is not UTF-8 text ({exc})") from exc
+        # CRLF (or bare CR) survives a zip entry untouched, but
+        # ``Path.read_text()`` — the runtime's own read, in
+        # ``routines.base._read_text`` and in this module's disk-side
+        # digests — always translates it to ``\n`` (Python's universal
+        # newlines). Normalising here keeps the digest ``code_trust.allow``
+        # stores equal to the one the runtime recomputes off disk; otherwise
+        # a CRLF routine is "changed" forever and the hub's consent never
+        # takes (Greptile, PR #314 round 2).
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         files.append(BundleFile(path=path, sha256=_digest(text), text=text))
 
     paths = {entry.path for entry in files}

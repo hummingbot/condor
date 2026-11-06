@@ -401,8 +401,9 @@ def _hub_browse(query: str, page: int) -> dict:
     came after ``_hub_get``'s docstring was written, which is why that one
     still says "there is no browse or search" — this is the missing other
     half, the same ``GET /hub/catalogue`` the web dashboard's Hub tab reads.
-    Pulling one of the results is still ``hub_get``/``hub_install`` by slug;
-    this only says which slugs exist.
+    Pulling one of the results up is still ``hub_get`` by slug; this only
+    says which slugs exist. Installing one is the Hub page's job, not
+    chat's — tell the user to open Agent Hub and install it there.
     """
     from condor import hub
 
@@ -417,8 +418,14 @@ def _hub_browse(query: str, page: int) -> dict:
         "page": page,
         "trust": (
             "Only an approved version is ever listed here, but that is a gate "
-            "on the catalogue, not a security boundary. Whatever you install "
-            "arrives muted and unstarted, and the review on install is the gate."
+            "on the catalogue, not a security boundary for code. Its declared "
+            "skills, tools and routines install enabled, exactly as reviewed; "
+            "a routine is still code, but here the review is the control — "
+            "installing from the hub grants execution consent for that exact "
+            "version and digest, so nothing further is asked before it can "
+            "run. Editing the routine's file afterwards, or importing it from "
+            "anywhere else, keeps the ordinary per-file gate. Installing is "
+            "only available from the Hub page, not from chat."
         ),
     }
 
@@ -450,85 +457,42 @@ def _hub_get(slug: str) -> dict:
         "listing": listing.model_dump(),
         "trust": (
             "Only an approved version is ever listed here, but that is a gate "
-            "on the catalogue, not a security boundary. Whatever you install "
-            "arrives muted and unstarted, and the review on install is the gate."
+            "on the catalogue, not a security boundary for code. Its declared "
+            "skills, tools and routines install enabled, exactly as reviewed; "
+            "a routine is still code, but here the review is the control — "
+            "installing from the hub grants execution consent for that exact "
+            "version and digest, so nothing further is asked before it can "
+            "run. Editing the routine's file afterwards, or importing it from "
+            "anywhere else, keeps the ordinary per-file gate. Installing is "
+            "only available from the Hub page, not from chat."
         ),
     }
 
 
 def _hub_install(slug: str, as_slug: str = "", version: str = "latest") -> dict:
-    """Install a Botcamp agent version, through exactly the gate the file
-    path uses.
+    """Refuse — installing from the hub is the Hub page's job, not chat's.
 
-    The bytes are verified against the response's own ``X-Agent-Sha256``
-    header before anything parses them (``hub.fetch``), then converted from
-    Botcamp's zip layout into a bundle
-    (``condor.botcamp_import.from_zip``), and then this is FEAT-133's
-    ``plan``/``apply`` — or FEAT-145's ``plan_update``/``apply_update`` when
-    this agent is already installed here, which the plan decides, not this
-    function and not the caller. ``as_slug`` is only ever a rename for a
-    collision that is a *different* agent.
-
-    Everything the import door promises holds unchanged: every executable file
-    is named in the result, routines and skills arrive muted, no imported
-    ``.py`` may execute until the operator allows it, and nothing is started.
-    Report the ``findings`` and the ``unmet`` list; neither blocks the install.
-
-    Connectors are left unasked here for the same reason the file import leaves
-    them: resolving them needs an async Hummingbot client and this is a
-    synchronous tool.
+    The web install route (``condor/web/routes/agents.py``'s
+    ``install_from_hub``) only ever runs after the owner ticks the Hub
+    page's own consent checkbox — "I understand this agent can run code on
+    my machine, and I want to install it." This chat door had no such
+    checkpoint: a human confirming the tool call (``hub_install`` was one of
+    ``condor.runtime.danger.DANGEROUS_AGENT_ACTIONS``) is not the owner
+    reading that sentence, so the install's own code-execution consent was
+    being recorded for a pinned version and digest the owner never actually
+    agreed to. The fix is to remove the door, not to re-add the checkbox
+    here: this always refuses, unconditionally, and ``as_slug``/``version``
+    are accepted and ignored so the call stays valid.
     """
-    from condor import botcamp_import, hub
-    from condor.agents import bundle as agent_bundle
-    from condor.runtime.toolsets import every_tool_name
-
-    # The admin's token only for the admin (SEC review C4): it carries
-    # whatever their Botcamp account bought or joined.
-    hub_token = hub.token() if _caller_is_admin() else ""
-    try:
-        listing = hub.get(slug, hub_token)
-        fetched = hub.fetch(slug, version or "latest", token=hub_token)
-    except (RuntimeError, ValueError) as exc:
-        return {"error": str(exc)}
-
-    try:
-        bundle = botcamp_import.from_zip(fetched.data, agent_slug=slug)
-    except ValueError as exc:
-        return {"error": str(exc)}
-
-    tools = sorted(every_tool_name())
-    plan = agent_bundle.plan(
-        bundle,
-        as_slug=as_slug or "",
-        user_id=settings.user_id,
-        available_tools=tools,
-    )
-    listing_row = listing.model_dump()
-    if plan.is_update:
-        update = agent_bundle.plan_update(bundle, plan.collision, available_tools=tools)
-        try:
-            result = agent_bundle.apply_update(update, user_id=settings.user_id)
-        except ValueError as exc:
-            return {"error": str(exc), "verb": "update", "preview": update.summary()}
-        # So a later visit can learn Botcamp stopped serving this version
-        # (CORR-812) — the same stamp the web install path writes
-        # (``condor/web/routes/agents.py``'s ``install_from_hub``), which this
-        # tool path skipped entirely until now.
-        agent_bundle.record_hub_install(
-            update.slug,
-            hub_slug=slug,
-            hub_version=fetched.version,
-            digest=fetched.sha256,
+    del as_slug, version
+    named = f"'{slug}'" if slug else "an agent"
+    return {
+        "error": (
+            f"Installing {named} from the Botcamp hub is not available from "
+            "chat. Open Agent Hub from the bottom of the conversation "
+            "sidebar and install it there."
         )
-        return {"verb": "update", "listing": listing_row, **result}
-    try:
-        result = agent_bundle.apply(plan, user_id=settings.user_id)
-    except ValueError as exc:
-        return {"error": str(exc), "verb": "install", "preview": plan.summary()}
-    agent_bundle.record_hub_install(
-        plan.slug, hub_slug=slug, hub_version=fetched.version, digest=fetched.sha256
-    )
-    return {"verb": "install", "listing": listing_row, **result}
+    }
 
 
 def _publish_hub(
@@ -770,18 +734,7 @@ def _manage_agent(
         return _hub_get(path)
 
     if action == "hub_install":
-        if not path:
-            return {
-                "error": (
-                    "path (the Botcamp agent slug to install) is required — "
-                    'look one up first with manage_agents(action="hub_get")'
-                )
-            }
-        # ``path`` carries the agent's Botcamp slug and ``agent_slug`` the
-        # name to land under, which is the same split ``import`` already
-        # uses: the bundle names itself, and ``agent_slug`` is how a
-        # collision is answered.
-        return _hub_install(path, agent_slug or "")
+        return _hub_install(path or "", agent_slug or "")
 
     if action == "publish_hub":
         if not agent_slug:

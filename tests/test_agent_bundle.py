@@ -263,6 +263,8 @@ def test_a_tampered_file_is_refused_naming_its_path(traveller):
         "owned_bots.json",
         "store/user_7/note.md",
         "state/anything.json",  # a root folder the layout never defined
+        "docs/learnings.md",  # a runtime name, markdown or not, docs included
+        "docs/diagram.png",  # docs admits markdown only, nothing else (CORR-962)
     ],
 )
 def test_a_runtime_path_is_refused_whole(traveller, runtime):
@@ -281,6 +283,28 @@ def test_a_runtime_path_is_refused_whole(traveller, runtime):
     with pytest.raises(ab.BundleError):
         ab.apply(import_plan, user_id=7)
     assert not agent_home("arrival").exists()
+
+
+def test_a_docs_markdown_file_installs_and_is_readable(traveller):
+    """CORR-962: a hub package's ``docs/README.md`` is not this install's own
+    export layout, but it matches botcamp-site's ``docs/**/*.md`` allowlist
+    and must land exactly like any other library file.
+    """
+    payload = _bundle_for(traveller, as_dict=True)
+    payload["files"].append(
+        {
+            "path": "docs/README.md",
+            "sha256": ab._digest("Read me first.\n"),
+            "text": "Read me first.\n",
+        }
+    )
+    import_plan = ab.plan(ab.parse(json.dumps(payload)), as_slug="arrival", user_id=7)
+
+    assert import_plan.refusals == []
+    ab.apply(import_plan, user_id=7)
+    assert (agent_home("arrival") / "docs" / "README.md").read_text(
+        "utf-8"
+    ) == "Read me first.\n"
 
 
 def test_every_path_a_real_export_produces_still_lands(traveller):
@@ -418,6 +442,119 @@ def test_imported_code_arrives_muted_and_the_agent_is_registered(traveller):
     assert muted["routines"] == {"r"}
     assert muted["skills"] == {"s"}
     assert AgentStore().get("arrival") is not None
+
+
+def test_mute_skills_false_alone_lands_every_declared_skill_enabled_but_not_a_routine(
+    traveller,
+):
+    """``mute_skills`` and ``mute_routines`` are independent flags. A skill —
+    prose, never executed — lands enabled when only ``mute_skills=False`` is
+    passed; a routine stays muted under its own, separate default, and stays
+    execution-gated either way, since it is code and provenance never
+    shortens *that* gate (FEAT-147)."""
+    from condor.agents import code_trust
+    from routines.base import assistant_routines
+
+    _write(
+        traveller / "skills" / "second" / "SKILL.md",
+        SKILL_MD.format(slug="second", body="Look twice."),
+    )
+
+    plan = ab.plan(
+        _bundle_for(traveller), as_slug="arrival", user_id=7, mute_skills=False
+    )
+    ab.apply(plan, user_id=7)
+
+    muted = load_mutes("arrival")
+    assert muted["skills"] == set()
+    assert muted["routines"] == {"r"}
+    assert {row["slug"] for row in SkillStore("arrival").catalog()} == {"s", "second"}
+    assert "r" not in assistant_routines("arrival", force_reload=True)
+    source = agent_home("arrival") / "routines" / "r.py"
+    assert not code_trust.allowed("arrival", "r", source.read_text())
+
+
+def test_mute_routines_false_lands_the_routine_enabled_but_still_pending_consent(
+    traveller,
+):
+    """FEAT-150: the hub install path passes ``mute_routines=False`` too, so
+    an imported routine is available to the agent exactly like a locally
+    created one's — but "available" is not "armed to execute" (FEAT-147):
+    ``code_trust`` still requires the operator to allow its exact content
+    before it can run, and that gate does not move for any flag here."""
+    from condor.agents import code_trust
+    from routines.base import assistant_routines, pending_routines
+
+    plan = ab.plan(
+        _bundle_for(traveller), as_slug="arrival", user_id=7, mute_routines=False
+    )
+    ab.apply(plan, user_id=7)
+
+    muted = load_mutes("arrival")
+    assert muted["routines"] == set()
+    assert muted["skills"] == {"s"}
+    # Unmuted, so the operator sees it as pending rather than as something
+    # that first needs unmuting before it is even listed.
+    assert [row.name for row in pending_routines("arrival")] == ["r"]
+    # And "available" never means "running": no execution consent yet.
+    assert "r" not in assistant_routines("arrival", force_reload=True)
+    source = agent_home("arrival") / "routines" / "r.py"
+    assert not code_trust.allowed("arrival", "r", source.read_text())
+
+    code_trust.allow("arrival", "r", source.read_text())
+    assert "r" in assistant_routines("arrival", force_reload=True)
+
+
+def test_mute_skills_false_grants_no_tool_the_bundle_did_not_declare(traveller):
+    """``tools:`` was never gated by a mute at all (``_mutes_for`` only ever
+    names routines and skills) — a hub import does not change that, it only
+    confirms the declared allowlist still travels verbatim."""
+    _write(
+        traveller / "AGENT.md",
+        _agent_md(extra="").replace("tools: []\n", "tools: [manage_skill, delegate]\n"),
+    )
+
+    plan = ab.plan(
+        _bundle_for(traveller), as_slug="arrival", user_id=7, mute_skills=False
+    )
+    ab.apply(plan, user_id=7)
+
+    agent = AgentStore().get("arrival")
+    assert "manage_skill" in agent.tools and "delegate" in agent.tools
+    assert "unrelated_tool" not in agent.tools
+
+
+def test_a_hub_installs_version_is_the_hubs_own_not_the_bundles(traveller):
+    """CORR-1019: PR #314 QA found a hub install's dialog reading the
+    exporting install's own internal export counter (``bundle.version``)
+    instead of the number the operator actually picked on Botcamp — two
+    different numbering systems that only coincide by luck. ``_hub_plan``
+    passes the fetched listing's version in as ``hub_version``; ``version``
+    must keep meaning the bundle's own counter for whatever already compares
+    bundles by it.
+    """
+    plan = ab.plan(
+        _bundle_for(traveller),
+        as_slug="arrival",
+        user_id=7,
+        hub_reviewed=True,
+        hub_version=4,
+    )
+    assert plan.version == 1
+    assert plan.hub_version == 4
+
+    result = ab.apply(plan, user_id=7)
+    assert result["version"] == 1
+    assert result["hub_version"] == 4
+
+
+def test_a_plain_file_imports_hub_version_is_zero(traveller):
+    """No hub number exists for a plain file import — it keeps showing
+    ``version`` exactly as it always has (CORR-1019's second criterion)."""
+    plan = ab.plan(_bundle_for(traveller), as_slug="arrival", user_id=7)
+    assert plan.hub_reviewed is False
+    assert plan.hub_version == 0
+    assert plan.version == 1
 
 
 def test_a_muted_import_is_offered_to_nobody_until_it_is_unmuted(traveller):

@@ -13,7 +13,10 @@ name: condor-dev
 # Runs once in each new workstream's worktree. A workstream that existed
 # before this file never runs it; the `web` command below builds the
 # frontend itself, so its first preview start just takes longer.
-worktree_setup: uv sync --dev && make build-frontend
+# `make setup-worktree` seeds config.yml (servers.local, admin_id, etc.) so
+# the preview boots without the owner filling in localhost / admin / admin
+# by hand; it no-ops if config.yml already exists.
+worktree_setup: uv sync --dev && make build-frontend && make setup-worktree
 
 # Next to Condor's own 8088; nothing listens in this range today.
 workstream_ports: 8090-8099

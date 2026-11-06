@@ -27,6 +27,8 @@ from condor.memory.paths import agent_home
 from routines.base import (
     assistant_routines,
     assistant_routines_dir,
+    catalog_agent_routines,
+    catalog_routine_names,
     pending_routines,
 )
 
@@ -247,6 +249,25 @@ def test_an_allowed_routine_edited_on_disk_is_pending_again(imported_agent):
     assert "changed on disk" in row.refusal()
 
 
+def test_windows_line_endings_do_not_strand_a_grant(imported_agent):
+    """A grant made against a bundle's CRLF text must still match on disk.
+
+    ``bundle.apply`` grants consent with ``entry.text`` exactly as the bundle
+    carried it; a file exported on Windows carries CRLF. The file on disk is
+    read back through ``_read_text``, whose universal newlines collapses
+    that to LF before hashing. Without normalizing in ``digest_of`` the two
+    digests disagree and the routine is rejected as changed the moment it
+    is allowed (Greptile, PR #314).
+    """
+    slug, _ = imported_agent
+    crlf_source = _source_of(slug, "lp_scanner").replace("\n", "\r\n")
+    assert "\r\n" in crlf_source
+
+    code_trust.allow(slug, "lp_scanner", crlf_source)
+
+    assert set(assistant_routines(slug)) == {"lp_scanner"}
+
+
 def test_muting_a_pending_routine_works_and_executes_nothing(imported_agent):
     slug, sentinels = imported_agent
 
@@ -337,6 +358,53 @@ def test_an_unparseable_record_leaves_every_routine_pending(imported_agent):
     assert not any(path.exists() for path in sentinels.values())
 
 
+# ── 2b. the same gate, for the read paths that used to bypass it ──
+#
+# `catalog_agent_routines`/`catalog_routine_names` are the listing-only twins
+# `_discover_all` and `_routine_exists` now read through instead of the
+# exec'ing `_merged_from`/`assistant_routines` — before this, an allowed
+# routine's module ran on the very next ``GET /routines`` or skill validation,
+# which is exactly the surprise FEAT-147 closed for a *pending* one.
+
+
+def test_catalog_agent_routines_never_imports_pending_or_allowed(imported_agent):
+    slug, sentinels = imported_agent
+    assert catalog_agent_routines(slug) == {}  # both pending: nothing listed yet
+
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+    catalog = catalog_agent_routines(slug)
+
+    assert set(catalog) == {"lp_scanner"}
+    assert catalog["lp_scanner"].category == "Probe"
+    assert catalog["lp_scanner"].description == "lp_scanner description"
+    assert catalog["lp_scanner"].get_fields() == {}
+    assert not any(path.exists() for path in sentinels.values())
+
+
+def test_catalog_routine_names_sees_an_allowed_routine_without_importing_it(
+    imported_agent,
+):
+    slug, sentinels = imported_agent
+    assert "lp_scanner" not in catalog_routine_names(slug)  # still pending
+
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+    assert "lp_scanner" in catalog_routine_names(slug)
+    assert "funding_watch" not in catalog_routine_names(slug)  # still pending
+    assert not any(path.exists() for path in sentinels.values())
+
+
+def test_skill_routine_validation_does_not_import_an_allowed_routine(imported_agent):
+    """``_routine_exists`` is what a skill's ``references_routine`` check calls."""
+    from condor.memory.skills import _routine_exists
+
+    slug, sentinels = imported_agent
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+
+    assert _routine_exists("lp_scanner", slug) is True
+    assert _routine_exists("funding_watch", slug) is False  # still pending
+    assert not any(path.exists() for path in sentinels.values())
+
+
 @pytest.mark.asyncio
 async def test_every_run_path_refuses(imported_agent):
     """``execute``, ``start_continuous`` and ``schedule`` share one resolver."""
@@ -369,16 +437,52 @@ def test_the_store_lists_a_pending_routine_without_a_schema(imported_agent):
     assert not any(path.exists() for path in sentinels.values())
 
 
-def test_a_loaded_routine_is_flagged_not_pending(imported_agent):
-    slug, _ = imported_agent
+def test_an_allowed_routine_is_flagged_not_pending_and_still_not_imported(
+    imported_agent,
+):
+    """Allowed-but-never-started is listable, and listing it still imports nothing.
+
+    A hub install grants this exact state to every routine it carries in one
+    write (FEAT-147's hub exception) — so the very next ``GET /routines`` must
+    not be the reason all of them execute. ``fields`` stays empty for the same
+    reason a pending row's does: no pydantic model has been built, because
+    nothing here calls ``exec_module``. Only an actual Start does that.
+    """
+    slug, sentinels = imported_agent
     code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
 
     rows = {r["name"]: r for r in routine_store_mod.RoutineStore().list_routines()}
     assert rows[f"{slug}/lp_scanner"]["pending"] is False
-    assert rows[f"{slug}/lp_scanner"]["fields"] == {
-        "value": {"type": "int", "default": 1, "description": "value"}
-    }
+    assert rows[f"{slug}/lp_scanner"]["fields"] == {}
     assert f"{slug}/funding_watch" in rows  # still listed, still pending
+    assert not any(path.exists() for path in sentinels.values())
+
+
+def test_get_routine_fields_resolves_an_allowed_routine(imported_agent):
+    """The Config form's own lookup: resolves, unlike the listing above.
+
+    Crossing this trust boundary is exactly what ``execute``/``start_continuous``
+    already do for an *allowed* routine, so it is no new exposure for this
+    method to do the same — but it does mean the module actually imports here,
+    where the listing's ``fields: {}`` did not.
+    """
+    slug, sentinels = imported_agent
+    code_trust.allow(slug, "lp_scanner", _source_of(slug, "lp_scanner"))
+
+    fields = routine_store_mod.RoutineStore().get_routine_fields(f"{slug}/lp_scanner")
+
+    assert "value" in fields
+    assert sentinels["lp_scanner"].exists()
+    assert not sentinels["funding_watch"].exists()
+
+
+def test_get_routine_fields_still_refuses_a_pending_routine(imported_agent):
+    slug, sentinels = imported_agent
+
+    with pytest.raises(code_trust.PendingConsentError):
+        routine_store_mod.RoutineStore().get_routine_fields(f"{slug}/funding_watch")
+
+    assert not sentinels["funding_watch"].exists()
 
 
 # ── 4. the import ──

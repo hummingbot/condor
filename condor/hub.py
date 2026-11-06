@@ -9,21 +9,41 @@ bytes the operator could have downloaded themselves.
 **The trust model, in three sentences.** It is the decision the rest of this
 module hangs off, and every surface that renders a listing repeats it.
 
-1. *A bundle is untrusted code wherever it came from, and the gate is on the
-   receiving install.* Condor installs any well-formed bundle — from a file,
-   from a friend, from the hub — and never requires a hub signature. The gate
-   is what already exists: every executable file named before anything is
-   written (FEAT-133), the review's findings shown beside that list
-   (FEAT-144), routines and skills muted on arrival, no execution consent for
-   any imported ``.py`` (FEAT-147), nothing started, and the operator unmuting
-   item by item after reading each one.
-2. *The hub is a discovery and moderation service, not a security boundary.*
-   Only an ``APPROVED`` version is ever served at all (PR #111's
-   ``AgentVersionStatus``) — a human or an AI reviewer passed it before
-   :func:`get` can even see it — but that is a gate on what reaches the
-   catalogue, not a claim read by anything in this module that decides
-   whether to write. An approved bundle is not the bundle the operator will
-   run after editing it here.
+1. *A bundle's code is untrusted wherever it came from; by default the
+   execution gate is on the receiving install, never on provenance — and the
+   hub is the one provenance that may stand in for it.* Condor installs any
+   well-formed bundle — from a file, from a friend, from the hub — and never
+   requires a hub signature. A routine is code: every executable file is
+   named before anything is written (FEAT-133), and no imported ``.py`` has
+   execution consent (FEAT-147) until the operator allows it file by file
+   after reading it — *unless* this install is the hub's own (point 2 says
+   why that one is different). Whether the agent is even *told about* a
+   routine or a skill at all is a separate, cheaper gate — muting — and the
+   hub takes the same exception there: both are muted on arrival the same
+   cautious way when nobody has reviewed the bundle they travelled in — which
+   is every path except the hub's own install (:func:`condor.agents.bundle.plan`'s
+   ``mute_skills=False``, ``mute_routines=False``, ``hub_reviewed=True`` is
+   where all three are decided together — FEAT-146 for skills, widened to
+   routines in FEAT-150, and to execution consent by the owner's later
+   trust-boundary decision). Either way, nothing is *started*: the review
+   stands in for the per-file allow, never for pressing Start.
+2. *The hub is a discovery and moderation service, not a security boundary for
+   code — except that its review is exactly what now stands in for the
+   operator's own, for the exact bytes it approved.* Only an ``APPROVED``
+   version is ever served at all (PR #111's ``AgentVersionStatus``) — a human
+   or an AI reviewer passed it before :func:`get` can even see it — but that
+   is a gate on what reaches the catalogue, not a claim read by anything in
+   this module that decides whether to write. What the review covers, and
+   what point 1's exception trusts it for, is both availability — a skill's
+   prose, a routine's declared behaviour, and the declared ``tools:``
+   allowlist — and, now, execution: a hub-installed routine carries execution
+   consent for this exact version and digest from the moment ``apply``/
+   ``apply_update`` write it, because an approved bundle is not the bundle the
+   operator will run after editing it here, but it is exactly the bytes a
+   reviewer already read before this install ever asked for them. Edit that
+   file afterwards, or import the identical bytes from anywhere but the hub,
+   and the ordinary per-file gate is back — :mod:`condor.agents.code_trust` is
+   keyed by content digest, not by where a file once came from.
 3. *Integrity between hub and client is a content digest over HTTPS, not a
    signature.* :func:`fetch` verifies the downloaded bytes against the
    ``X-Agent-Sha256`` header the same response carries, before any caller
@@ -111,7 +131,7 @@ log = logging.getLogger(__name__)
 #: bare one. The path prefix is unchanged: ``/api``, verified on prod for
 #: ``GET /api/agents``, ``GET /api/agents/{slug}``,
 #: ``GET /api/agents/{slug}/versions/{version}``, ``GET /api/submissions/{id}``
-#: and ``POST /api/condor/device/code``.
+#: and ``POST /api/condor/connect-code/redeem``.
 HUB_URL = "https://www.botcamp.xyz/api"
 
 #: The compiled-in address, kept apart from :data:`HUB_URL` (which the dev
@@ -274,6 +294,10 @@ class AgentListing(_HubRead):
     model_config = ConfigDict(populate_by_name=True)
 
     slug: str
+    # The strategy id, stable across a slug rename — what a consent is pinned
+    # to (botcamp-site PR #137, commit 2333769262). Carried through
+    # ``get_consent``/``post_consent`` below rather than the slug.
+    agent_id: str = Field("", alias="agentId")
     name: str = Field("", alias="title")
     description: str = Field("", alias="summary")
     latest: int = 1
@@ -366,78 +390,21 @@ class Receipt(BaseModel):
     published_at: str = ""
 
 
-class DeviceCode(BaseModel):
-    """What ``POST /api/condor/device/code`` handed back (PR #111's contract).
-
-    The faithful parse of an **untrusted** reply, and internal to this module
-    on purpose. ``verification_uri``/``verification_uri_complete`` are the
-    hub's suggestion of where to send the admin's browser, and nothing before
-    this point vetted them — :func:`device_start` derives the link it actually
-    hands out from :data:`HUB_URL` instead and returns a :class:`DeviceStart`,
-    so neither field ever reaches a response, a template or a browser
-    (SEC-819). ``device_code`` is used only to poll — it is never rendered,
-    logged, or returned past :func:`device_start`'s own caller.
-    """
-
-    device_code: str
-    #: Shown to the admin as-is and put in the approval link, so it is held to
-    #: the shape a code has (Botcamp's are ``XXXX-XXXX``) — a hub cannot use
-    #: it to put a sentence of its own on Condor's screen.
-    user_code: str = Field(pattern=r"^[A-Za-z0-9-]{4,16}$")
-    verification_uri: str
-    verification_uri_complete: str = ""
-    expires_in: int = 600
-    interval: int = 5
-
-
-class DeviceStart(BaseModel):
-    """A device login, as everything outside this module may see it.
-
-    :class:`DeviceCode` minus the two fields that came from the hub's mouth:
-    ``approval_url`` is built here from :data:`HUB_URL`, so a caller that
-    opens it is going to the address this install was configured with and
-    nowhere else.
-    """
-
-    user_code: str
-    approval_url: str
-    expires_in: int = 600
-    interval: int = 5
-
-
-class DeviceLinkState(BaseModel):
+class ConnectionState(BaseModel):
     """What a caller may learn about this install's Botcamp link.
 
-    Never the credential — see :func:`device_state`. ``status`` is one of
-    ``"none"`` (nothing pending, nothing linked), ``"pending"`` (a device
-    login is in flight; ``user_code``/``approval_url``/``expires_at`` are
-    set), ``"denied"``, ``"expired"``, or ``"invalid"`` (a device login just
-    ended that way — reported once, to the poll that observed it), or
-    ``"linked"`` (``profile_handle`` and ``scope`` are set).
-
-    ``approval_url`` is derived from :data:`HUB_URL`, never echoed from the
-    hub's reply — see :func:`approval_url`.
+    Never the credential — see :func:`redeem_connect_code`. ``status`` is
+    ``"none"`` or ``"linked"`` (``profile_handle`` and ``scope`` set).
+    ``connect_url`` is always set, linked or not, so the "Sign in to
+    Botcamp" link renders with no extra round trip: it is :func:`approval_url`
+    (built from :data:`HUB_URL`, never echoed from a hub reply — SEC-819),
+    not anything the connect-code redeem answered with.
     """
 
     status: str = "none"
-    user_code: str = ""
-    approval_url: str = ""
-    expires_at: float = 0.0
     profile_handle: str = ""
     scope: list[str] = Field(default_factory=list)
-
-
-#: The one device-login attempt this install is tracking, or ``None``.
-#: Deliberately in-memory and not in ``config.yml``: a device login is a
-#: short-lived, interactive act with an admin watching the result, the same
-#: reasoning the module docstring gives for there being no durable publish
-#: outbox. A restart mid-login simply loses the attempt — the hub's own
-#: ``expires_in`` deadline is what ends it either way. Guarded by
-#: :data:`_device_lock` because the web routes dispatch these calls through
-#: ``asyncio.to_thread``, i.e. a worker thread pool rather than the event
-#: loop.
-_pending_device: dict | None = None
-_device_lock = threading.Lock()
+    connect_url: str = ""
 
 
 class Reply(NamedTuple):
@@ -642,30 +609,6 @@ def site_url(path: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{path}"
 
 
-def _warn_if_offsite(code: DeviceCode) -> None:
-    """Log once when the hub asked for a browser somewhere else.
-
-    Not an error: :func:`approval_url` has already decided where the admin
-    goes, so a mismatch changes nothing this process does. It is logged
-    because a hub that starts answering with a third-party host is either
-    misconfigured or hostile, and neither should pass silently. One line per
-    attempt, through :func:`_log_safe` so the ``?code=`` query — the only
-    part of either URL that is a secret-shaped value — stays out of a shared
-    log, and never the ``device_code``.
-    """
-    origin = urllib.parse.urlsplit(HUB_URL).netloc
-    for candidate in (code.verification_uri_complete, code.verification_uri):
-        if candidate and urllib.parse.urlsplit(candidate).netloc != origin:
-            log.warning(
-                "hub: the device-code reply pointed at %s, which is not this "
-                "install's hub (%s) — ignoring it and using the locally built "
-                "approval link",
-                _log_safe(candidate),
-                origin,
-            )
-            return
-
-
 def _decode(reply: Reply, what: str) -> dict:
     """``reply.body`` as a JSON object, regardless of its status.
 
@@ -816,13 +759,16 @@ def get(slug: str, token: str = "") -> AgentListing:
     reason a ``../``, a ``?``, a ``#`` or a space is an ``IdentifierError``
     here rather than a request to somewhere else.
 
-    ``token`` is optional — PR #111's own contract for this endpoint:
-    omitted, this is the anonymous read a free agent answers; a linked
-    profile's own token is what turns a membership/purchase gate into a 200
-    for an account that actually has access. Raises :class:`HubError`
-    through :func:`_access_refusal` — 404 not found, 403 private, 402 needs a
-    membership or purchase, 401 sign in — never the publish-token wording a
-    revoked *publish* credential gets.
+    ``token`` is optional on this call's own signature, but not on what the
+    hub actually answers: a tokenless ``GET`` of one slug comes back 401
+    "sign in", free agent or not — measured against both deployments
+    (CORR-980). Only :func:`browse`'s catalogue read is anonymous; here, a
+    linked profile's own token is what turns that 401 into a 200, and also
+    turns a membership/purchase gate into one for an account that actually
+    has access. Raises :class:`HubError` through :func:`_access_refusal` —
+    404 not found, 403 private, 402 needs a membership or purchase, 401 sign
+    in — never the publish-token wording a revoked *publish* credential
+    gets.
     """
     slug = _agent_slug(slug)
     what = f"agent '{slug}'"
@@ -942,6 +888,175 @@ def fetch(slug: str, version: str = "latest", *, token: str = "") -> FetchedVers
         len(reply.body),
     )
     return FetchedVersion(data=reply.body, version=resolved_version, sha256=digest)
+
+
+# ── Consent to run a hub version (botcamp-site PR #137) ────────────────────
+#
+# Condor shows its own terms before an install or an update lands, and the
+# hub's job is only to receive and store the acceptance — ``GET``/``POST
+# /agents/{slug}/versions/{version}/consent``. As of commit 2333769262 the
+# hub pins consent to (user, agent id, exact version, sha256) rather than
+# just (user, exact version): the row is keyed on the strategy id — stable
+# across a slug rename, unlike the slug in the URL — and both the agent id
+# and the digest must be sent and are checked against what the slug/version
+# in the path resolve to *now*, with a 409 on a mismatch (a slug re-pointed
+# to another agent, or re-approved bytes). ``agent_id`` and ``sha256`` are
+# therefore required on every call below, never optional display-only
+# fields.
+#
+# ``version`` must be the **exact** number :func:`fetch` resolved, not
+# ``"latest"`` — a consent for "whatever is newest" would silently cover a
+# future version nobody read the terms for. Both callers in
+# ``condor/web/routes/agents.py`` pass ``str(fetched.version)`` for this
+# reason, mirroring the ``expected_sha256`` pin install already carries
+# (BUG-2).
+
+#: Which of Condor's own notices stands behind a recorded acceptance —
+#: sent as ``termsVersion`` on every :func:`post_consent` call so Botcamp's
+#: stored row says which wording the owner actually read, whichever surface
+#: showed it: the import dialog's step-2 checkbox (``ImportAgentDialog.tsx``)
+#: or the install API's own ``accepted`` field. There used to be a third
+#: surface, the chat tool's dangerous-action confirmation prompt for
+#: ``manage_agents(action="hub_install")`` — removed because a human
+#: confirming that tool call is not the owner reading this sentence, so a
+#: chat install was recording consent nobody actually gave. ``hub_install``
+#: now refuses unconditionally; only the Hub page can install. Bump this
+#: string whenever a remaining surface changes what the owner is actually
+#: agreeing to; a cosmetic wording fix does not need a bump.
+HUB_CONSENT_TERMS_VERSION = "condor-import-consent-v1"
+
+
+class AgentConsentState(_HubRead):
+    """What ``GET``/``POST .../consent`` answered, read faithfully.
+
+    ``accepted`` is whether *this* caller's Botcamp account has already
+    consented to *this* slug, version, agent id and digest — the field the
+    install flow reads to skip re-asking. ``terms_version`` is whichever of
+    Condor's own texts the acceptance (if any) was recorded against,
+    Botcamp's own words and never re-derived here.
+
+    Subclasses ``_HubRead`` rather than ``BaseModel`` because a not-yet-
+    accepted reply sends ``acceptedAt``/``termsVersion`` as ``null`` (PR
+    #314's ``get_consent`` fix) — the same "``null`` means not sent" shape
+    every other hub-read model here already tolerates.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    slug: str = ""
+    agent_id: str = Field("", alias="agentId")
+    version: int = 1
+    sha256: str = ""
+    accepted: bool = False
+    accepted_at: str = Field("", alias="acceptedAt")
+    terms_version: str = Field("", alias="termsVersion")
+
+
+def _consent_refusal(reply: Reply, what: str) -> HubError:
+    """``reply`` as the sentence a consent read or write deserves.
+
+    Not :func:`_access_refusal`'s wording (that is for a clone a membership
+    or privacy gate refused) and not :func:`_refusal`'s (that is the
+    publish-credential wording) — a 401 here means "no Botcamp connection to
+    consent with", and a 404 means the version is not the one that was
+    reviewed, neither of which either existing sentence says correctly.
+    """
+    detail = _detail(reply)
+    if reply.status == 401:
+        return HubError(
+            detail
+            or f"{what}: sign in to Botcamp to consent — connect a profile in "
+            "the Agent Hub (Agents → Hub).",
+            status=401,
+        )
+    if reply.status == 404:
+        return HubError(
+            detail or f"{what}: not found, or not an approved version.",
+            status=404,
+        )
+    return HubError(_refusal(reply, what), status=reply.status)
+
+
+def get_consent(
+    slug: str, version: str, *, agent_id: str, sha256: str, token: str
+) -> AgentConsentState:
+    """Whether ``token``'s account already consented to ``slug``/``version``,
+    pinned to ``agent_id`` and ``sha256``.
+
+    ``token`` is required, unlike every read above it: Botcamp's own route
+    refuses a session and requires the Condor connection's Bearer token
+    (``user.tokenId``), because consent is something *this install* gave, not
+    something the signed-in person's browser session can answer for it.
+    ``agent_id`` and ``sha256`` are required too — Botcamp answers 400
+    without them and 409 when they name a different agent or content than
+    what the slug/version resolve to now.
+    """
+    slug = _agent_slug(slug)
+    version = _version_segment(version)
+    what = f"consent for '{slug}' version {version}"
+    if not (token or "").strip():
+        raise NoTokenError(
+            "Checking consent needs a linked Botcamp profile. Connect one in "
+            "the Agent Hub (Agents → Hub)."
+        )
+    params = urllib.parse.urlencode({"agentId": agent_id, "sha256": sha256})
+    reply = _send(
+        "GET",
+        f"{HUB_URL}/agents/{slug}/versions/{version}/consent?{params}",
+        token=token.strip(),
+    )
+    if reply.status < 200 or reply.status >= 300:
+        raise _consent_refusal(reply, what)
+    return _model(_enveloped(_decode(reply, what)), AgentConsentState, what)
+
+
+def post_consent(
+    slug: str,
+    version: str,
+    terms_version: str,
+    *,
+    agent_id: str,
+    sha256: str,
+    token: str,
+) -> AgentConsentState:
+    """Record that ``token``'s account accepted Condor's terms for
+    ``slug``/``version``, pinned to ``agent_id`` and ``sha256``.
+
+    Idempotent on the hub's side (its own first-acceptance-wins upsert) — a
+    second call for the same version is harmless and answers with what was
+    already recorded, never a second row. ``terms_version`` identifies which
+    of Condor's own texts was shown; truncated to what the hub's column
+    holds (64 characters) rather than refused, since this is Condor's own
+    constant and never a value someone typed. ``agent_id`` and ``sha256`` are
+    required — Botcamp answers 400 without them and 409 when they name a
+    different agent or content than what the slug/version resolve to now.
+    """
+    slug = _agent_slug(slug)
+    version = _version_segment(version)
+    what = f"consent for '{slug}' version {version}"
+    if not (token or "").strip():
+        raise NoTokenError(
+            "Recording consent needs a linked Botcamp profile. Connect one in "
+            "the Agent Hub (Agents → Hub)."
+        )
+    body = json.dumps(
+        {
+            "accepted": True,
+            "agentId": agent_id,
+            "sha256": sha256,
+            "termsVersion": (terms_version or "")[:64],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    reply = _send(
+        "POST",
+        f"{HUB_URL}/agents/{slug}/versions/{version}/consent",
+        token=token.strip(),
+        payload=body,
+    )
+    if reply.status < 200 or reply.status >= 300:
+        raise _consent_refusal(reply, what)
+    return _model(_enveloped(_decode(reply, what)), AgentConsentState, what)
 
 
 # ── Status of an already-installed agent (CORR-812) ────────────────────────
@@ -1064,9 +1179,20 @@ def installed_agent_status(slug: str, force: bool = False, *, token: str = "") -
     ``token`` is the caller's to supply (SEC review C4, BUG-5): this read
     has no caller identity of its own, so without it every check used
     :func:`token` unconditionally and sent the admin's account to Botcamp
-    for a seat that has none. Empty is the anonymous read a free agent's
-    status answers fine; a membership/purchase-gated agent's status needs
-    the admin's own token passed in, same as every other hub read.
+    for a seat that has none. Empty is not an anonymous read that still
+    works — the hub 401s a tokenless agent lookup regardless of whether the
+    agent is free (CORR-980) — but :func:`listing_status` already reads a
+    401 as ``"unknown"`` rather than a failure, so a seat with no token of
+    its own gets a harmless "unknown" here, not a crash; a confirmed answer,
+    free or gated, needs the admin's own token passed in.
+
+    A confirmed ``"delisted"`` is advisory, read on the next page view that
+    asks — nothing here revokes anything. In particular it does not touch
+    whatever :mod:`condor.agents.code_trust` consent an earlier install or
+    update already granted for this agent's routines: Botcamp withdrawing a
+    listing says nothing new about bytes this install already has on disk
+    and whose digest the operator's own install already trusted. Revoking on
+    delisting would be a different feature, not implied by this one.
     """
     from condor.agents.bundle import agent_home, read_stamp, write_stamp
 
@@ -1389,67 +1515,22 @@ def submission_status(slug: str, token: str) -> Receipt:
     return merged
 
 
-# ── Device login (PR #111): link to a Botcamp profile, no pasted token ───
-
-
-def device_start() -> DeviceStart:
-    """Begin a device-login attempt, replacing any one this install was tracking.
-
-    No ``client_name``/``scope`` in the body: omitting ``scope`` grants both
-    ``agents:read`` and ``agents:publish``, the same all-or-nothing install-wide
-    grant the pasted-token flow it replaces always had. A second call while an
-    earlier attempt is still ``pending`` simply forgets that earlier
-    ``device_code`` — this install only ever tracks the most recent attempt it
-    started, and the hub's own ``expires_in`` deadline retires the old one on
-    its side regardless.
-
-    Returns a :class:`DeviceStart`, not the :class:`DeviceCode` that was
-    parsed: the reply's own ``verification_uri``/``verification_uri_complete``
-    stop here, and the ``approval_url`` handed on is built from
-    :data:`HUB_URL` (SEC-819). The two are compared only to log a mismatch.
-    """
-    global _pending_device
-
-    reply = _send("POST", f"{HUB_URL}/condor/device/code", payload=b"{}")
-    code = _model(_json(reply, "starting a device login"), DeviceCode, "a device code")
-    _warn_if_offsite(code)
-    link = approval_url()
-    now = time.monotonic()
-    with _device_lock:
-        _pending_device = {
-            "device_code": code.device_code,
-            "user_code": code.user_code,
-            # The locally built link, cached so every later pending poll
-            # answers with the same string the first one did.
-            "approval_url": link,
-            "interval": max(1, code.interval or 5),
-            # Two clocks for two audiences: `deadline` (monotonic) is what this
-            # process gates polling on, immune to a wall-clock step; `wall_expires_at`
-            # (time.time()) is what a caller renders as a countdown.
-            "deadline": now + max(1, code.expires_in or 600),
-            "wall_expires_at": time.time() + max(1, code.expires_in or 600),
-            "last_polled": 0.0,
-        }
-    log.info("hub: device login started (user code %s)", code.user_code)
-    return DeviceStart(
-        user_code=code.user_code,
-        approval_url=link,
-        expires_in=code.expires_in,
-        interval=code.interval,
-    )
+# ── Connect Botcamp (connect-code, botcamp-site PR #137) ──────────────────
+#
+# Replaces the OAuth2 device flow (PR #111: device_start/device_state,
+# pasted-token-free but Condor-driven) with the paste-a-code flow #137 built
+# instead, after #137 deleted `/api/condor/device/*` outright. The person
+# generates a code signed in on Botcamp's own `/connect` page — Condor is not
+# involved in minting it at all — and pastes it here. There is therefore no
+# "start" step on this side and nothing to poll: one call either links the
+# install or it does not.
 
 
 def is_linked() -> bool:
-    """Whether this install holds a Botcamp token right now. Never polls.
+    """Whether this install holds a Botcamp token right now.
 
-    Local ``config.yml`` only — safe for every signed-in seat to call, not
-    just the admin driving a device-login poll. :func:`device_state` answers
-    the same question but, when nothing is linked yet, also drives the
-    pending poll forward; a non-admin seat calling it for this one bit was
-    BUG-3's case A, stealing the admin's one-time code exchange and reporting
-    the admin's own next poll as ``invalid``.
-
-    ``token()`` alone, never gated on ``profile_handle`` (BUG-6): a reply
+    Local ``config.yml`` only, safe for every signed-in seat to call — never
+    gated on ``profile_handle`` (BUG-6, from the old device flow): a reply
     whose ``user`` carries neither ``name`` nor ``id`` still linked a real
     token, and judging "linked" by the handle read that install back as
     signed out forever while every call still carried the stored token.
@@ -1457,108 +1538,75 @@ def is_linked() -> bool:
     return bool(token())
 
 
-def device_state() -> DeviceLinkState:
-    """This install's current device-login/link state. **Never the credential.**
+def connection_state() -> ConnectionState:
+    """This install's current Botcamp link. **Never the credential.**
 
-    Three cases, in the order checked:
-
-    1. Already linked (``config.yml`` carries a token and a profile handle) —
-       answered from local config, no hub call at all.
-    2. A device login is in flight — polled from the hub at most once per
-       ``interval`` seconds (the device-flow contract's own rate limit; a
-       caller that asks more often than that gets the locally cached answer
-       rather than a second request). On a 200, **this is the one call that
-       ever sees the credential**: it is stored via
-       :func:`config_manager.ConfigManager.update_hub` immediately and never
-       put in the :class:`DeviceLinkState` this function returns. Past the
-       600s deadline the attempt reads as ``"expired"`` without a further
-       hub call at all — this install stops polling rather than polling
-       forever.
-    3. Nothing pending and nothing linked — ``"none"``.
-
-    A transition to ``denied``/``expired``/``invalid``/linked is reported for
-    exactly the one poll that observed it and then forgotten (the pending
-    attempt is cleared).
-
-    The read-check-claim for case 2 all happens under :data:`_device_lock` in
-    one critical section, with an ``in_flight`` flag held until the exchange
-    comes back: two ``device_state()`` calls that land close together — the
-    admin's own cadence, or an overlapping call from another seat before
-    PR #111's read endpoints existed — must never both reach the hub with the
-    same ``device_code``, because that code is single-use and the loser would
-    see ``invalid_grant`` and misreport a working sign-in as failed (BUG-3
-    case B). Rate-limiting on ``last_polled`` alone cannot provide that: two
-    callers can both read it as stale before either writes it back, which is
-    exactly the race this closes.
-
-    The exchange call itself still runs *outside* the lock (a network call
-    has no business holding it), so a ``device_cancel()`` — or a fresh
-    ``device_start()`` replacing this attempt — can land while it is in
-    flight. A 200 is therefore not stored on sight: this re-checks under the
-    lock that ``_pending_device`` is still the same ``device_code`` it sent,
-    and revokes the token instead of saving it when it is not.
+    Local config only, no hub call — unlike the device flow's
+    ``device_state()``, there is nothing to poll: either a token is stored
+    or it is not.
     """
-    section = _section()
     if token():
-        # token() alone, never gated on profile_handle (BUG-6): see
-        # is_linked's docstring for why a non-empty handle is not required.
-        return DeviceLinkState(
+        section = _section()
+        return ConnectionState(
             status="linked",
             profile_handle=str(section.get("profile_handle") or ""),
             scope=list(section.get("scope") or []),
+            connect_url=approval_url(),
         )
+    return ConnectionState(status="none", connect_url=approval_url())
 
-    global _pending_device
-    with _device_lock:
-        pending = _pending_device
-        if pending is None:
-            return DeviceLinkState(status="none")
 
-        now = time.monotonic()
-        if now >= pending["deadline"]:
-            # The 600s device-code deadline: stop polling rather than forever,
-            # and without spending a request on an attempt the hub has already
-            # retired on its own side.
-            _pending_device = None
-            return DeviceLinkState(status="expired")
+_connect_lock = threading.Lock()
+_connect_generation = 0
 
-        if (
-            pending.get("in_flight")
-            or now - pending["last_polled"] < pending["interval"]
-        ):
-            return DeviceLinkState(
-                status="pending",
-                user_code=pending["user_code"],
-                approval_url=pending["approval_url"],
-                expires_at=pending["wall_expires_at"],
-            )
 
-        # Claim this poll slot before releasing the lock and dialling out:
-        # an overlapping caller that arrives before this exchange comes back
-        # must see the claim and answer from the cache, never also spend the
-        # device_code's one-time exchange.
-        pending["last_polled"] = now
-        pending["in_flight"] = True
-        snapshot = dict(pending)
+def _bump_connect_generation() -> None:
+    """Invalidate every in-flight :func:`redeem_connect_code` attempt.
 
-    try:
-        reply = _send(
-            "POST",
-            f"{HUB_URL}/condor/device/token",
-            payload=json.dumps(
-                {"device_code": snapshot["device_code"]}, separators=(",", ":")
-            ).encode("utf-8"),
-        )
-    finally:
-        with _device_lock:
-            if (
-                _pending_device is not None
-                and _pending_device.get("device_code") == snapshot["device_code"]
-            ):
-                _pending_device["in_flight"] = False
+    Called from :func:`disconnect` so a redeem response that is still
+    waiting on the hub cannot undo a disconnect that happened while it
+    waited (Greptile, PR #314: "Disconnect can be undone").
+    """
+    global _connect_generation
+    with _connect_lock:
+        _connect_generation += 1
+
+
+def redeem_connect_code(code: str, client_name: str = "Condor") -> ConnectionState:
+    """Trade a code pasted from Botcamp's ``/connect`` page for this install's
+    token (botcamp-site PR #137's ``POST /api/condor/connect-code/redeem``).
+
+    ``code`` is sent as typed, apart from surrounding whitespace — Botcamp's
+    own ``normalizeConnectCode`` accepts letters and dashes in any case.
+
+    Redeeming is IP rate-limited on the hub's side, and its error bodies are
+    deliberately uniform: a wrong, expired or already-used code all answer
+    ``400 invalid_grant``, so those three cannot be told apart here either.
+    What *can* be told apart — rate-limiting (``429``) and "too many
+    connections" (``400 too_many_connections``) — gets its own sentence
+    instead of the hub's.
+
+    This call and :func:`disconnect` run on independent requests, so a slow
+    redeem here can still be in flight when a disconnect runs and completes
+    elsewhere. The generation captured before the hub round-trip and
+    re-checked after it catches exactly that: if a disconnect ran while this
+    call was waiting, the token the hub just issued is revoked instead of
+    saved, so a disconnect can never be undone by a redeem that was already
+    on the wire.
+    """
+    cleaned = (code or "").strip()
+    if not cleaned:
+        raise HubError("Paste the code Botcamp's /connect page showed you.", status=400)
+
+    generation = _connect_generation
+    body = json.dumps(
+        {"code": cleaned, "client_name": (client_name or "Condor")[:100]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    reply = _send("POST", f"{HUB_URL}/condor/connect-code/redeem", payload=body)
 
     if reply.status == 200:
-        payload = _decode(reply, "the device token")
+        payload = _decode(reply, "the connect-code token")
         access_token = str(payload.get("access_token") or "")
         scope_raw = payload.get("scope")
         if isinstance(scope_raw, str):
@@ -1569,96 +1617,78 @@ def device_state() -> DeviceLinkState:
             scope_list = []
         user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
         profile_handle = str(user.get("name") or user.get("id") or "")
-
-        # The attempt this exchange was for may have been cancelled, or
-        # replaced by a fresh `device_start()`, while the request was in
-        # flight. Re-check identity under the lock before storing anything:
-        # a token issued for an attempt that is no longer the one this
-        # install is tracking must be revoked, not linked (BUG from
-        # Greptile's review of PR #111's integration).
-        with _device_lock:
-            current = _pending_device
-            still_current = (
-                current is not None
-                and current.get("device_code") == snapshot["device_code"]
+        if not access_token:
+            raise HubError(
+                "The hub answered a successful redeem with no token to store."
             )
+
+        # The generation check and the credential write happen under the
+        # *same* lock hold, so a disconnect() cannot land in between: its own
+        # generation bump (_bump_connect_generation) takes this same lock,
+        # so it either lands before this check (caught below) or waits until
+        # this write has already happened — in which case disconnect's own
+        # unconditional clear, which runs after its bump, is what has the
+        # last word. There is no window left where the check passes but a
+        # disconnect still undoes the write (Greptile, PR #314).
+        from config_manager import get_config_manager
+
+        with _connect_lock:
+            still_current = generation == _connect_generation
             if still_current:
-                _pending_device = None
+                get_config_manager().update_hub(
+                    token=access_token,
+                    token_origin=_origin(HUB_URL),
+                    profile_handle=profile_handle,
+                    scope=scope_list,
+                    user=user,
+                )
 
         if not still_current:
-            if access_token:
-                try:
-                    _send("DELETE", f"{HUB_URL}/condor/me", token=access_token)
-                except HubError:
-                    log.warning(
-                        "hub: could not revoke a token issued for a cancelled "
-                        "or replaced device login",
-                        exc_info=True,
-                    )
-                log.info(
-                    "hub: discarded a device-login token for a cancelled or "
-                    "replaced attempt"
+            try:
+                _send("DELETE", f"{HUB_URL}/condor/me", token=access_token)
+            except HubError:
+                log.warning(
+                    "hub: could not revoke a connect-code token issued after "
+                    "a disconnect ran while the redeem was in flight",
+                    exc_info=True,
                 )
-            return device_state()
-
-        if access_token:
-            # The one write of the credential, as soon as it exists — never
-            # handed back past this function. The token is issued once per
-            # device_code and never reissued, so this is the only place it is
-            # ever read.
-            from config_manager import get_config_manager
-
-            get_config_manager().update_hub(
-                token=access_token,
-                token_origin=_origin(HUB_URL),
-                profile_handle=profile_handle,
-                scope=scope_list,
-                user=user,
+            raise HubError(
+                "Disconnected while this code was being redeemed — generate "
+                "a new code and reconnect."
             )
-            log.info("hub: linked to Botcamp profile '%s'", profile_handle)
-        return DeviceLinkState(
+
+        log.info("hub: linked to Botcamp profile '%s'", profile_handle)
+        return ConnectionState(
             status="linked",
-            profile_handle=profile_handle
-            or str(_section().get("profile_handle") or ""),
-            scope=scope_list or list(_section().get("scope") or []),
+            profile_handle=profile_handle,
+            scope=scope_list,
+            connect_url=approval_url(),
+        )
+
+    if reply.status == 429:
+        raise HubError(
+            "Too many attempts — wait a few minutes and try again.", status=429
         )
 
     if reply.status == 400:
-        payload = _decode(reply, "the device token")
+        payload = _decode(reply, "the connect-code redeem")
         error = str(payload.get("error") or "")
-        if error == "authorization_pending":
-            return DeviceLinkState(
-                status="pending",
-                user_code=snapshot["user_code"],
-                approval_url=snapshot["approval_url"],
-                expires_at=snapshot["wall_expires_at"],
+        if error == "too_many_connections":
+            raise HubError(
+                "This Botcamp account already has too many Condor "
+                "connections — disconnect one in Botcamp's profile, Condor "
+                "tab, then try again.",
+                status=400,
             )
-        if error == "slow_down":
-            with _device_lock:
-                if _pending_device is not None:
-                    _pending_device["interval"] += 5
-            return DeviceLinkState(
-                status="pending",
-                user_code=snapshot["user_code"],
-                approval_url=snapshot["approval_url"],
-                expires_at=snapshot["wall_expires_at"],
-            )
-        if error == "access_denied":
-            _clear_pending_device()
-            return DeviceLinkState(status="denied")
-        if error == "expired_token":
-            _clear_pending_device()
-            return DeviceLinkState(status="expired")
         if error == "invalid_grant":
-            _clear_pending_device()
-            return DeviceLinkState(status="invalid")
-        raise HubError(
-            f"The hub described the device login in an error this Condor "
-            f"does not know: {error!r}",
-            status=reply.status,
-        )
+            raise HubError(
+                "That code is wrong, expired or already used — generate a "
+                "new one at Botcamp's /connect page.",
+                status=400,
+            )
+        raise HubError(_refusal(reply, "redeeming the connect code"), status=400)
 
-    raise HubError(_refusal(reply, "polling the device login"), status=reply.status)
+    raise HubError(_refusal(reply, "redeeming the connect code"), status=reply.status)
 
 
 class DisconnectResult(BaseModel):
@@ -1667,45 +1697,34 @@ class DisconnectResult(BaseModel):
     ``revoked`` is ``True`` only once the hub itself confirmed
     ``DELETE /api/condor/me`` (PR #111), ``False`` when a token existed and
     the hub could not be reached or refused the revoke, and ``None`` when
-    there was nothing to tell the hub — a pending device login simply
-    cancelled, or this install held no token in the first place. The local
-    credential is cleared in every case; this only says whether Botcamp's
-    own copy of it was actually told, because reporting a revoke that did
-    not happen is worse than reporting none.
+    there was nothing to tell the hub — this install held no token in the
+    first place. The local credential is cleared in every case; this only
+    says whether Botcamp's own copy of it was actually told, because
+    reporting a revoke that did not happen is worse than reporting none.
     """
 
     revoked: bool | None = None
     error: str = ""
 
 
-def device_cancel() -> DisconnectResult:
-    """Cancel a device-login attempt in flight, or disconnect a linked profile.
+def disconnect() -> DisconnectResult:
+    """Disconnect this install's linked profile, if any.
 
-    A ``pending`` attempt is simply forgotten locally — the device-flow
-    contract has no cancel endpoint, and an unpolled device code just expires
-    at the hub on its own at the 600s deadline.
-
-    A ``linked`` profile is disconnected by first asking the hub to revoke
-    the presented token (``DELETE /api/condor/me``, PR #111). That call did
-    not exist before PR #111, which is why FEAT-148's disconnect cleared only
-    the local copy and the module docstring once said "there is nothing to
-    tell the hub" — there is now. The local credential, scope and user are
-    still cleared **regardless of whether the hub call succeeds**: a network
-    failure or a 5xx must not leave this install stuck pretending to be
-    connected. What changes is that the caller learns whether the hub's own
-    copy was actually revoked, via the returned :class:`DisconnectResult`,
+    Asks the hub to revoke the presented token first
+    (``DELETE /api/condor/me``, PR #111). The local credential, scope and
+    user are cleared **regardless of whether the hub call succeeds**: a
+    network failure or a 5xx must not leave this install stuck pretending to
+    be connected. What changes is that the caller learns whether the hub's
+    own copy was actually revoked, via the returned :class:`DisconnectResult`,
     instead of this function silently assuming it.
+
+    Bumps the connect generation first, unconditionally — even with no
+    token stored yet — so a :func:`redeem_connect_code` call already on the
+    wire cannot land its token after this disconnect and undo it.
     """
-    with _device_lock:
-        pending = _pending_device is not None
-
-    if pending:
-        _clear_pending_device()
-        log.info("hub: device login cancelled")
-        return DisconnectResult(revoked=None)
-
     from config_manager import get_config_manager
 
+    _bump_connect_generation()
     current_token = token()
     result = DisconnectResult(revoked=None)
     if current_token:
@@ -1728,15 +1747,13 @@ def device_cancel() -> DisconnectResult:
                     reply.status,
                 )
 
-    get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
+    # Under the same lock a racing redeem checks its generation against, so
+    # this clear can never land strictly between that check and its write —
+    # see redeem_connect_code.
+    with _connect_lock:
+        get_config_manager().update_hub(token="", profile_handle="", scope=[], user={})
     log.info("hub: disconnected from Botcamp")
     return result
-
-
-def _clear_pending_device() -> None:
-    global _pending_device
-    with _device_lock:
-        _pending_device = None
 
 
 # ── Who the linked token identifies, read live (PR #111's `GET /me`) ─────
@@ -1752,13 +1769,13 @@ class MeUser(BaseModel):
 
 class MeInfo(BaseModel):
     """Who this install's token identifies, and what it may do — read fresh
-    from the hub rather than trusted from the device-login record.
+    from the hub rather than trusted from the connect-code redeem's record.
 
-    :func:`device_state` stores ``profile_handle`` and ``scope`` once, at
-    link time, and never asks again while ``status`` reads ``"linked"``.
-    This is the live answer: it is what catches a token Botcamp's own
-    profile page revoked out from under this install, before the next
-    publish attempt finds out the hard way.
+    :func:`redeem_connect_code` stores ``profile_handle`` and ``scope`` once,
+    at link time, and :func:`connection_state` never asks the hub again while
+    ``status`` reads ``"linked"``. This is the live answer: it is what
+    catches a token Botcamp's own profile page revoked out from under this
+    install, before the next publish attempt finds out the hard way.
     """
 
     user: MeUser = Field(default_factory=MeUser)

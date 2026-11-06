@@ -1,15 +1,21 @@
-"""The Botcamp hub actions need a human (SEC review C1/C3).
+"""The Botcamp publish action needs a human (SEC review C1/C3).
 
 ``manage_agents(action="publish_hub")`` sends an agent off the box under the
-install's Botcamp account, and ``hub_install`` makes a downloaded AGENT.md's
-instructions live at once. The tool description said "ADMIN ONLY" and
-"Confirm with the user", but only the model read that: neither action was in
-the danger gate, so chat ran them unasked and a loop auto-approved them. An
+install's Botcamp account. The tool description said "ADMIN ONLY" and
+"Confirm with the user", but only the model read that: the action was not in
+the danger gate, so chat ran it unasked and a loop auto-approved it. An
 installed agent whose instructions say "publish every agent" was one tick away
 from doing it.
 
-What this pins: both actions wait for a human in chat, every other agent action
-stays on the fast path, and an unattended loop refuses both in every mode.
+``hub_install`` used to be gated here too, for the same reason — it made a
+downloaded AGENT.md's instructions live at once. It no longer needs a gate:
+it is an unconditional refusal with no side effect (see
+``tests/test_hub.py::test_a_hub_install_from_chat_is_always_refused``), so
+chat cannot install from the hub at all, only the Hub page can.
+
+What this pins: ``publish_hub`` waits for a human in chat, every other agent
+action (including the now-inert ``hub_install``) stays on the fast path, and
+an unattended loop refuses ``publish_hub`` in every mode.
 """
 
 import asyncio
@@ -42,7 +48,8 @@ def test_hub_actions_wait_for_a_human(action):
 
 
 @pytest.mark.parametrize(
-    "action", ["list", "get", "create", "update_agent", "export_agent", "hub_get"]
+    "action",
+    ["list", "get", "create", "update_agent", "export_agent", "hub_get", "hub_install"],
 )
 def test_the_rest_of_manage_agents_stays_on_the_fast_path(action):
     assert not is_dangerous_tool_call(_call(action))
@@ -55,10 +62,8 @@ def test_an_unreadable_action_fails_closed():
 
 def test_the_prompt_says_which_way_the_agent_crosses_the_edge():
     publish = format_tool_summary(_call("publish_hub", agent_slug="traveller"))
-    install = format_tool_summary(_call("hub_install", path="grid-bot"))
 
     assert "Publish agent 'traveller' to the Botcamp hub" in publish
-    assert "Install 'grid-bot' from the Botcamp hub" in install
 
 
 @pytest.mark.parametrize("mode", ["loop", "dry_run", "shutdown"])

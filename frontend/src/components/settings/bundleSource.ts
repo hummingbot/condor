@@ -21,8 +21,22 @@ import {
  * FEAT-133's import plan and an `update` FEAT-145's diff, and the dialog puts
  * each into the state that renders it.
  */
+/**
+ * `fullDescription` is the hub catalogue's own long-form text — a different
+ * field from `plan.description`, which is the AGENT.md's short routing blurb
+ * (what decides whether another agent consults this one). A file import has
+ * no catalogue entry to carry one from, so it stays unset there.
+ */
 export type BundlePreview =
-  | { verb: "install"; plan: AgentImportPlan }
+  | {
+      verb: "install";
+      plan: AgentImportPlan;
+      fullDescription?: string;
+      /** Set only by a hub source: whether this account already consented
+       *  to this exact version with Botcamp, so the dialog can pre-tick
+       *  step 2's box instead of re-asking. */
+      alreadyConsented?: boolean;
+    }
   | { verb: "update"; plan: AgentUpdatePlan };
 
 /**
@@ -40,9 +54,13 @@ export interface BundleSource {
   /** Identity of this source. A change re-previews from scratch. */
   key: string;
   preview(asSlug: string): Promise<BundlePreview>;
-  install(asSlug: string): Promise<AgentImportPlan>;
+  /** `accepted` is the operator's own tick of the review dialog's consent
+   *  checkbox. A file source has no hub acceptance to send and ignores it;
+   *  a hub source sends it on so the server never records an affirmation
+   *  nobody showed the caller. */
+  install(asSlug: string, accepted: boolean): Promise<AgentImportPlan>;
   previewUpdate(slug: string): Promise<AgentUpdatePlan>;
-  applyUpdate(slug: string): Promise<AgentUpdatePlan>;
+  applyUpdate(slug: string, accepted: boolean): Promise<AgentUpdatePlan>;
 }
 
 /** A bundle the operator picked off their own disk (FEAT-133). */

@@ -91,16 +91,19 @@ def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
     """True if ``name`` is a routine this assistant can actually run.
 
     Validated against the *same* scope the runtime resolves routines in —
+    :func:`routines.base.catalog_routine_names`, the listing-shaped twin of
     :func:`routines.base.assistant_routines`: an assistant's own library plus
-    the shared one. Sharing the resolver is the point: without it a shared skill
+    the shared one, minus mutes. Built without importing a single file, so
+    validating a skill's reference can never be why a hub-allowed routine's
+    module runs. Sharing the resolver is the point: without it a shared skill
     referencing a shared routine would report ``routine_ok: false`` for every
     agent while running perfectly well. A miss simply reports ``routine_ok=false``
     (advisory; never fatal).
     """
     try:
-        from routines.base import assistant_routines
+        from routines.base import catalog_routine_names
 
-        return name in assistant_routines(agent_slug)
+        return name in catalog_routine_names(agent_slug)
     except Exception:
         return False
 

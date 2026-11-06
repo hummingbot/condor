@@ -1,6 +1,15 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, Globe, Loader2, Lock, Store, Upload } from "lucide-react";
+import {
+  Brain,
+  Globe,
+  Loader2,
+  Lock,
+  PanelLeftOpen,
+  Store,
+  Upload,
+} from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   HubDeviceField,
@@ -23,12 +32,13 @@ import { api } from "@/lib/api";
  * and publish lived only on each agent's own workspace page — three doors to
  * one subject, one of them (withdraw) with no dashboard control at all. This
  * is the one page: Pull agents requires this install to already be linked to
- * Botcamp — the backend's own read endpoints accept an anonymous lookup, but
- * this dashboard asks for a signed-in install before it will use them, so
- * "connect to Botcamp" is the one gate every visitor meets before anything
- * else on this page works; publishing is admin-only, by `useIsAdmin`
- * (cosmetic — the server's own `require_admin` on each route is what actually
- * gates publish/withdraw).
+ * Botcamp — only the catalogue read itself is anonymous on the backend, a
+ * per-agent listing or bundle is not (CORR-980), so this dashboard asks for a
+ * signed-in install before it shows Pull agents at all, and "connect to
+ * Botcamp" is the one gate every visitor meets before anything else on this
+ * page works; publishing is admin-only, by `useIsAdmin` (cosmetic — the
+ * server's own `require_admin` on each route is what actually gates
+ * publish/withdraw).
  *
  * **Two jobs, two tabs.** Pulling somebody else's agent and publishing one of
  * yours are different errands that happen to share a hub, and the first cut
@@ -58,8 +68,19 @@ import { api } from "@/lib/api";
  * seat is allowed to see, and `HubDeviceSignIn` mounts the admin-only state
  * machine inside the gate's own `isAdmin` branch.
  */
-export function AgentHub() {
+export function AgentHub({
+  onOpenRail,
+}: {
+  /**
+   * Opens the conversation rail, below `md` only — the Hub owns the whole
+   * column there (FEAT-153) and carries no tab strip of its own above it,
+   * so this is the one door back to another conversation a narrow screen
+   * has while the Hub is open.
+   */
+  onOpenRail?: () => void;
+}) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const [tab, setTab] = useState<"pull" | "publish">("pull");
   const { data: hubDevice } = useQuery({
@@ -84,6 +105,15 @@ export function AgentHub() {
       <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div className="min-w-0">
           <h1 className="flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
+            {onOpenRail && (
+              <button
+                onClick={onOpenRail}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
+                title="Show agents and conversations"
+              >
+                <PanelLeftOpen className="h-4 w-4" />
+              </button>
+            )}
             <Globe className="h-5 w-5" />
             Agent Hub
           </h1>
@@ -135,14 +165,15 @@ export function AgentHub() {
           <p className="mb-4 max-w-2xl text-xs leading-relaxed text-[var(--color-text-muted)]">
             Agents other people published on Botcamp. Installing one goes
             through the same review as a file: every executable is named before
-            anything is written, the routines and skills arrive switched off,
-            and nothing is started.
+            anything is written, everything the agent declares arrives enabled
+            and ready, and nothing is started until you start it.
           </p>
           {linked ? (
             <HubBrowser
               onInstalled={() =>
                 queryClient.invalidateQueries({ queryKey: ["agents"] })
               }
+              onOpenAgent={(slug) => navigate(`/?agent=${encodeURIComponent(slug)}`)}
             />
           ) : (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-10 text-center">

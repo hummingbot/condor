@@ -83,8 +83,18 @@ def trust_path(agent_slug: str | None) -> Path:
 
 
 def digest_of(text: str) -> str:
-    """The sha256 that identifies this exact file content."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    """The sha256 that identifies this exact file content.
+
+    Normalizes line endings first. A grant hashes a bundle's ``entry.text``
+    as it travelled — CRLF intact, for a file exported on Windows — while a
+    check hashes what ``Path.read_text()`` handed back, which universal
+    newlines has already collapsed to LF. Hashing either form raw would make
+    the two digests disagree about a file that never actually changed
+    (Greptile, PR #314).
+    """
+    return hashlib.sha256(
+        text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    ).hexdigest()
 
 
 @dataclass(frozen=True)

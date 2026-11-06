@@ -357,7 +357,15 @@ export function AgentChatTab() {
   const agentParam = searchParams.get("agent");
   const askParam = searchParams.get("ask");
   useEffect(() => {
-    if (!agentParam || consumedAgentParam.current) return;
+    // Reset on every clearing of the param, not just once on mount: this
+    // effect deletes `agent` itself right after consuming it, so a *second*
+    // "Start chatting" (Hub -> `/?agent=A` -> Hub -> `/?agent=B`) must find
+    // the guard open again rather than stuck true from the first agent.
+    if (!agentParam) {
+      consumedAgentParam.current = false;
+      return;
+    }
+    if (consumedAgentParam.current) return;
     consumedAgentParam.current = true;
     if (askParam) talkTo(agentParam, { intent: "fresh", text: askParam });
     else talkTo(agentParam);
@@ -630,7 +638,15 @@ export function AgentChatTab() {
                 `openPane({ kind: "agent" })`). The agent is named by its own
                 tab and again by that panel — a chip here repeating both, plus
                 the model and the server, was the same agent said three times
-                across one row. */}
+                across one row.
+
+                Not on the Hub: there is no conversation to tab between, so this
+                bar would be either empty chrome or a strip of tabs with none of
+                them lit — the same reason Settings and every other full-pane
+                screen carries no bar here at all. The rail's mobile toggle lives
+                inside `AgentHub`'s own header instead, so narrow screens keep a
+                door to the rail without resurrecting the tab strip for it. */}
+            {onHub ? null : (
             <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
               <button
                 onClick={() => setRailOpen((v) => !v)}
@@ -647,8 +663,7 @@ export function AgentChatTab() {
                   background — switching, and the only way to stop one. */}
               <SessionTabs
                 slots={chat.slots}
-                // No tab is the one on screen while the Hub has the column.
-                activeSlotId={onHub ? null : chat.activeSlotId}
+                activeSlotId={chat.activeSlotId}
                 isSlotStreaming={chat.isSlotStreaming}
                 permissionRequests={chat.permissionRequests}
                 onSelect={(slotId) => {
@@ -666,10 +681,11 @@ export function AgentChatTab() {
                 className="min-w-0 flex-1"
               />
             </div>
+            )}
 
             {onHub ? (
               <div className="min-h-0 flex-1 overflow-y-auto">
-                <AgentHub />
+                <AgentHub onOpenRail={() => setRailOpen(true)} />
               </div>
             ) : (
             <ChatThread
@@ -681,7 +697,9 @@ export function AgentChatTab() {
               onResolvePermission={chat.resolvePermission}
               switchError={switchError}
               onDismissSwitchError={dismissSwitchError}
-              onRetryModel={(agentKey) => switchBrain({ agentKey })}
+              onRetryModel={(agentKey, messageId) =>
+                switchBrain({ agentKey }, messageId)
+              }
               defaultAgentKey={defaultAgent}
               agentBindings={agentBindings}
               onSend={(text, files) =>
@@ -876,19 +894,28 @@ export function AgentChatTab() {
             }
           />
 
-          <ContextDock
-            panels={context}
-            delegations={delegations}
-            conversationId={activeSlot?.info.conversation_id || ""}
-            agentSlug={activeSlot?.info.agent_slug || ""}
-            agentName={boundAgent?.name}
-            // A routine launched from the dock's library is this
-            // conversation's: it runs on the server the chat is talking to,
-            // reports back into it, and is filed under whoever is answering.
-            runContext={runContext}
-            library={pane?.kind === "routines" ? pane.focus : null}
-            onLibraryChange={onLibraryChange}
-          />
+          {/* "This conversation" has nothing to say about a column that has
+              no conversation in it — the dock would show only its own empty
+              states (no delegation, no routine run) beside the catalogue,
+              chrome for a subject that is not there. Hidden here rather than
+              inside `ContextDock`, the same way the tab strip above is: both
+              are about the chat this column no longer holds while the Hub
+              has it. */}
+          {!onHub && (
+            <ContextDock
+              panels={context}
+              delegations={delegations}
+              conversationId={activeSlot?.info.conversation_id || ""}
+              agentSlug={activeSlot?.info.agent_slug || ""}
+              agentName={boundAgent?.name}
+              // A routine launched from the dock's library is this
+              // conversation's: it runs on the server the chat is talking to,
+              // reports back into it, and is filed under whoever is answering.
+              runContext={runContext}
+              library={pane?.kind === "routines" ? pane.focus : null}
+              onLibraryChange={onLibraryChange}
+            />
+          )}
         </div>
 
         {/* Everything that opens beside the conversation, in one strip on the

@@ -44,7 +44,7 @@ Only an admin can copy a local agent into the shipped `agents/` library
 | One controller for an existing agent | skip both — follow `controller_sources` (see Controllers) |
 | A bundle someone exported (`*.condor-agent.json`) | skip both — `manage_agents(action="import", path=...)`, then review its muted routines before unmuting and report its `unmet` list |
 | A bundle of an agent this install ALREADY has | skip both — `manage_agents(action="upgrade", agent_slug=..., path=...)`; never import a second copy |
-| "Is there an agent that does X already?" / "get me one from the hub" | skip both — `manage_agents(action="hub_browse")`, then `hub_install` with the listing_id; review its muted routines before unmuting, and never read its badge back as a safety verdict |
+| "Is there an agent that does X already?" / "get me one from the hub" | skip both — `manage_agents(action="hub_browse")` to find it, then tell the user to open Agent Hub and install it there; chat cannot install a hub agent, and never read a listing's badge back as a safety verdict |
 
 Label each message with the current step, e.g. `[B2 — Discuss]`. Only the step label as a
 header; status as key: value.
@@ -365,12 +365,12 @@ Read its result out rather than summarising it:
 Every replaced routine needs allowing again before it runs — consent is keyed by content.
 Nothing is started by an upgrade.
 
-**The hub, for handing an agent to a stranger.** Three more actions, same gate:
+**The hub, for handing an agent to a stranger.** Two more read actions, plus publish, same gate:
 
 | Action | What to do with it |
 |---|---|
 | `hub_browse` | What the hub offers (`agent_slug` doubles as a search term). No account needed. Each row's `badge` is **provenance, never a verdict**: `validated` means a human reviewed ONE submitted revision once, `community` means nobody did. Say which it is and say what it is not — not a signature, Condor verifies nothing against it, and it does not shorten the review. Never report a badge as a reason something is safe to run. |
-| `hub_install` | Install a listing (`path` is the **listing_id**, not a file path; `agent_slug` renames it if the name is taken). The bytes are digest-checked before anything parses them, and then this is the import door exactly: a listing of an agent they already have becomes an UPGRADE automatically — `verb` says which happened — everything arrives muted, no routine may execute until allowed, nothing is started. Read `findings` and `unmet` out; neither blocks it. |
+| `hub_install` | **Always refused — there is no installing a hub agent from chat.** Installing records the owner's consent that this exact version's code may run on their machine, and that consent can only come from the owner reading the Hub page's own checkbox; a human confirming a chat tool call is not that. Tell the user to open Agent Hub (the card at the bottom of the conversation sidebar) and install it there. |
 | `publish_hub` | **Admin only, and confirm first.** Not the same as `publish`, which copies an agent into the repo's tracked library; this uploads it for strangers. It needs the install's token (Settings → Agents) and cannot take one as an argument — a token in a tool argument is a token in a transcript. It sends the same bytes `export` writes, so it refuses outright on a value that can only be a secret. Publishing sends content off the box and is irreversible in practice: unpublishing removes the listing, it does not recall a download. |
 
 ## Rules

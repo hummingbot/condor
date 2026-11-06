@@ -31,6 +31,7 @@ vi.mock("@/lib/api", () => ({
   api: {
     getRoutines: (...a: unknown[]) => getRoutines(...a),
     getRoutineReports: (...a: unknown[]) => getRoutineReports(...a),
+    getRoutineFields: () => Promise.resolve({ fields: {} }),
     getRoutineSource: () => Promise.resolve({ filename: "x.py", source: "" }),
     getRoutineInstance: () => Promise.resolve(null),
     runRoutine: (...a: unknown[]) => runRoutine(...a),

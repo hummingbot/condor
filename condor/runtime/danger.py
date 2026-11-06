@@ -132,16 +132,18 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
-#: The Botcamp hub actions within ``manage_agents`` (SEC review C1/C3). Neither
-#: moves funds, but both cross the box's edge in a way nobody can take back:
-#: ``publish_hub`` sends the agent's routines, skills, controllers and sample
-#: configs out under the install's Botcamp account, and ``hub_install`` makes a
-#: downloaded AGENT.md's instructions and ``tools:`` allowlist live at once —
-#: one whose instructions say "publish every agent" chains straight into the
-#: first. So each waits for a human in chat, and an unattended loop is refused
-#: them outright (``condor.agents.risk``). Every other agent action edits this
-#: install's own library and stays on the fast path.
-DANGEROUS_AGENT_ACTIONS = {"publish_hub", "hub_install"}
+#: The Botcamp hub actions within ``manage_agents`` that still do something
+#: (SEC review C1/C3). ``publish_hub`` sends the agent's routines, skills,
+#: controllers and sample configs out under the install's Botcamp account —
+#: a one-way move nobody can take back, so it waits for a human in chat, and
+#: an unattended loop is refused it outright (``condor.agents.risk``).
+#: ``hub_install`` used to be here too (it made a downloaded AGENT.md's
+#: instructions and ``tools:`` allowlist live at once, with no owner
+#: consent step the way the Hub page's install dialog has one); it is now an
+#: unconditional refusal with no side effect, so it needs no gate — chat
+#: cannot install from the hub at all, only the Hub page can. Every other
+#: agent action edits this install's own library and stays on the fast path.
+DANGEROUS_AGENT_ACTIONS = {"publish_hub"}
 
 #: The tool that carries them.
 AGENTS_TOOL = "manage_agents"
@@ -992,8 +994,8 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         return f"Agent instance {agent_id}: {action}"
 
     if tool_name == AGENTS_TOOL:
-        # Only the hub actions reach a human; the line says which way the
-        # agent crosses the box's edge, since neither can be taken back.
+        # Only publish_hub reaches a human now; hub_install is an
+        # unconditional refusal with no side effect to confirm.
         action = input_data.get("action", "?")
         if action == "publish_hub":
             slug = input_data.get("agent_slug") or "?"
@@ -1009,12 +1011,6 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
                     "as not keys"
                 )
             return summary
-        if action == "hub_install":
-            slug = input_data.get("path") or "?"
-            return (
-                f"Install '{slug}' from the Botcamp hub "
-                "(its instructions and tool allowlist go live at once)"
-            )
         return f"Agents: {action}"
 
     if tool_name == "execute_swap":
