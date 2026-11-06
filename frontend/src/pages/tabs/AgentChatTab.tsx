@@ -5,6 +5,7 @@ import {
   ClipboardList,
   PanelLeftClose,
   PanelLeftOpen,
+  Rocket,
   ShieldAlert,
   Wallet,
 } from "lucide-react";
@@ -95,14 +96,32 @@ const CONDOR_STARTERS: Starter[] = [
 ];
 const AGENT_STARTERS: Starter[] = [
   {
-    icon: Activity,
-    title: "What are you working on?",
-    hint: "Current loops, open tasks and the last tick",
+    icon: Bot,
+    title: "What does this agent do?",
+    hint: "Strategy, markets, and how it makes money",
+    prompt:
+      "Explain what this agent does in plain language: the strategy it runs, which markets or pairs it trades, what it is trying to capture, and the main risks. Facts only — don't change configs or place/cancel orders.",
   },
   {
     icon: ClipboardList,
-    title: "Review your last session",
-    hint: "What it decided, what it traded, what it learned",
+    title: "Am I ready to run?",
+    hint: "Missing setup, capital, connectors, or other blockers",
+    prompt:
+      "Preflight only — don't start trading yet. Check whatever this agent needs (deps, controllers/tools, funding, permissions). List what's OK and what's blocking, in plain language.",
+  },
+  {
+    icon: Rocket,
+    title: "Help me start this agent",
+    hint: "Test mode, readiness check, then launch if clear",
+    prompt:
+      "Help me start this agent. Use its test mode settings. Do a short readiness check first, report anything blocking, then start or launch only if clear. Don't switch to full-size or production settings unless I ask.",
+  },
+  {
+    icon: Activity,
+    title: "What is the status?",
+    hint: "Running or not, last activity, key metrics, issues",
+    prompt:
+      "Give a concise status of what this agent is doing now: running or not, last meaningful activity, key metrics it tracks, and anything that looks wrong or still warming up. Facts only — don't change configs or place/cancel orders unless I ask.",
   },
 ];
 
@@ -440,6 +459,8 @@ export function AgentChatTab() {
   const slotStarters = useStarters(
     slotSlug,
     slotSlug ? AGENT_STARTERS : CONDOR_STARTERS,
+    true,
+    slotSlug ? 4 : 3,
   );
 
   /**
@@ -1026,6 +1047,8 @@ function Hero({
   const starters = useStarters(
     agent?.slug || "",
     agent ? AGENT_STARTERS : CONDOR_STARTERS,
+    true,
+    agent ? 4 : 3,
   );
 
   return (

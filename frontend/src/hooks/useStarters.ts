@@ -92,6 +92,7 @@ export function useStarters(
   agentSlug: string,
   fallback: Starter[],
   enabled = true,
+  limit = 3,
 ): Starter[] {
   const slug = agentSlug || CHAT_SLUG;
   const { data } = useQuery({
@@ -105,7 +106,7 @@ export function useStarters(
 
   const learned = data?.starters;
   return useMemo(
-    () => mergeStarters((learned ?? []).map(starterFromRow), fallback),
-    [learned, fallback],
+    () => mergeStarters((learned ?? []).map(starterFromRow), fallback, limit),
+    [learned, fallback, limit],
   );
 }
