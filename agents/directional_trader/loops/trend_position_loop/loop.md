@@ -44,9 +44,9 @@ and the open PnL in ATR when a position is open) and one of:
   the rule; carry it out.
 - `Decide from the snapshot:` and the rule. Drex gave no answer this tick (no
   `NACE_API_KEY`, or the request failed). Apply the rule yourself.
-- `Drex was not asked:` the book is neither empty nor one filled position of
-  this side on this pair (an order still filling, a second executor, another
-  pair). Read the executors and decide yourself.
+- `Drex was not asked:` the book is neither empty nor one filled position
+  executor of this side on this connector and pair (an order still filling, a
+  second executor, another market). Read the executors and decide yourself.
 
 On a Drex HOLD the engine journals the answer and skips your turn (a dry run
 shows it to you instead). The position's own stop-loss is what protects it

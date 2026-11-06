@@ -1119,8 +1119,18 @@ class TickEngine:
                     self.journal.append_action(
                         self.journal.tick_count + 1, "model_skipped", line
                     )
-                    self.journal.record_tick(line)
+                    tick_num = self.journal.record_tick(line)
                     self._record_reading_snapshot()
+                    self.journal.write_summary(
+                        tick=tick_num,
+                        status="Running",
+                        pnl=self._last_skill_data.get("total_pnl", 0.0),
+                        open_count=len(self._last_skill_data.get("executors", [])),
+                        last_action=line,
+                    )
+                # Most ticks of a gated loop end here, so the live report
+                # refreshes here too, or it would show the last model turn's book.
+                await self._refresh_session_report()
                 return None
             core_data_summaries["drex_gate"] = gate_text
 
@@ -1135,13 +1145,16 @@ class TickEngine:
         """Drex's answer for this tick, or ``None``, and the text the model gets.
 
         Drex is asked only when the book is exactly what its question describes:
-        no bot, and at most one running executor, on the loop's pair and side,
-        with a known entry. Anything else, and any failure, is left to the model.
+        no bot, and at most one running executor: a position executor on the
+        loop's connector, pair and side that has filled (traded volume, so not a
+        resting limit order) at a known entry. Anything else, and any failure,
+        is left to the model.
         The loop's ``start_when`` / ``stop_when`` text replaces the default rule.
         """
         from . import drex_gate
 
         gate = self.config["drex_gate"]
+        connector = self.config.get("connector_name", "")
         pair = self.config.get("trading_pair", "")
         side = str(gate.get("side", "")).upper()
         data = executors_result.data if executors_result else {}
@@ -1152,7 +1165,12 @@ class TickEngine:
             and running is not None
             and len(running) <= 1
             and all(
-                r.get("pair") == pair and r.get("side") == want and r.get("entry_price")
+                r.get("type") == "position_executor"
+                and r.get("connector") == connector
+                and r.get("pair") == pair
+                and r.get("side") == want
+                and r.get("volume")
+                and r.get("entry_price")
                 for r in running
             )
             and not data.get("orphaned_executors")
@@ -1162,13 +1180,13 @@ class TickEngine:
         )
         if not one_position:
             return None, (
-                f"Drex was not asked: the book is not one {side} position on "
-                f"{pair}, or none. You decide this tick."
+                f"Drex was not asked: the book is not one filled {side} position "
+                f"on {connector} {pair}, or none. You decide this tick."
             )
         try:
             return await drex_gate.decide(
                 client,
-                connector_name=self.config.get("connector_name", ""),
+                connector_name=connector,
                 trading_pair=pair,
                 interval=gate.get("interval", "1h"),
                 side=side,
@@ -1515,24 +1533,7 @@ class TickEngine:
         )
         actions_mod.append_actions(self.session_dir, tick_actions)
 
-        # Live session report (FEAT-036). Deterministic render over data we
-        # already hold — no tokens. The guard is load-bearing: a charting or
-        # report-index failure must never take down a trading tick.
-        if self._session_report is not None:
-            try:
-                await self._session_report.update(
-                    info=self.get_info(),
-                    journal=self.journal,
-                    session_dir=self.session_dir,
-                    executors=self._last_skill_data.get("all_executors")
-                    or self._last_skill_data.get("executors")
-                    or [],
-                    pnl_series=await self._pnl_series(),
-                )
-            except Exception:
-                log.exception(
-                    "TickEngine %s: session report update failed", self.agent_id
-                )
+        await self._refresh_session_report()
 
         log.info(
             "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
@@ -1541,6 +1542,27 @@ class TickEngine:
             len(tool_calls),
             len(response_text),
         )
+
+    async def _refresh_session_report(self) -> None:
+        """Re-render the live session report (FEAT-036) from data already held.
+
+        Deterministic, no tokens. The guard is load-bearing: a charting or
+        report-index failure must never take down a trading tick.
+        """
+        if self._session_report is None:
+            return
+        try:
+            await self._session_report.update(
+                info=self.get_info(),
+                journal=self.journal,
+                session_dir=self.session_dir,
+                executors=self._last_skill_data.get("all_executors")
+                or self._last_skill_data.get("executors")
+                or [],
+                pnl_series=await self._pnl_series(),
+            )
+        except Exception:
+            log.exception("TickEngine %s: session report update failed", self.agent_id)
 
     def _apply_drift_verdict(self, risk_state, drift_result) -> None:
         """Carry the venue check's verdict into the risk state ([[FEAT-113]]).
