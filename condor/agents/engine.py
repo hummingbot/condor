@@ -1036,8 +1036,6 @@ class TickEngine:
             nothing_at_stake=nothing_at_stake,
             reading_in_hand=reading_in_hand,
         )
-        live_executors = self._last_skill_data.get("executors", [])
-        live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
         # Inherited positions count against the limits (CORR-726). The provider
         # reads only this session's own ``controller_id``, so an adopted orphan
         # is exposure this session is responsible for -- it is in the prompt as
@@ -1045,18 +1043,9 @@ class TickEngine:
         # book could not see. Left out, a restarted session holding three
         # inherited executors could open its full ``max_open_executors`` on top
         # of them and never be refused.
-        adopted = [
-            row
-            for row in (getattr(self, "_adopted_executors", None) or [])
-            if isinstance(row, dict)
-        ]
-        risk_state.executor_count = live_open_count + len(adopted)
-        # ``amount`` is the quote exposure ``build_executor_row`` computes, the
-        # same field the provider sums for its own rows, so the two halves of
-        # the total are in one unit.
-        risk_state.total_exposure = float(
-            self._last_skill_data.get("total_exposure", 0.0) or 0.0
-        ) + sum(float(row.get("amount") or 0.0) for row in adopted)
+        book_open_count, book_exposure = self._book_totals()
+        risk_state.executor_count = book_open_count
+        risk_state.total_exposure = book_exposure
         # A pending order nothing could price is exposure of unknown size, not
         # zero: the book cannot size a create, so it refuses them like any
         # other missing metric while every brake still passes.
@@ -1106,7 +1095,7 @@ class TickEngine:
             return None
         self._last_block_reason = ""
 
-        prompt = self._build_prompt(core_data_summaries, risk_state, live_open_count)
+        prompt = self._build_prompt(core_data_summaries, risk_state, book_open_count)
         return _TickContext(
             risk_state=risk_state,
             core_data_summaries=core_data_summaries,
@@ -1117,7 +1106,7 @@ class TickEngine:
         self,
         core_data_summaries: dict[str, str],
         risk_state: RiskState,
-        live_open_count: int,
+        book_open_count: int,
     ) -> str:
         """Read the journal and the per-tick context, and render the tick prompt.
 
@@ -1180,7 +1169,7 @@ class TickEngine:
                 canvas_nudge = self._nudge.next(
                     tick=next_tick,
                     last_revised_tick=canvas_mod.last_revised_tick(self.session_dir),
-                    open_count=live_open_count,
+                    open_count=book_open_count,
                     total_pnl=float(self._last_skill_data.get("total_pnl", 0.0) or 0.0),
                     had_error=bool(self._last_error),
                 )
@@ -1419,7 +1408,10 @@ class TickEngine:
             self._journal_mode_mismatch(tick_num)
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-            skill_executors = len(self._last_skill_data.get("executors", []))
+            # The book, not the provider's session-scoped rows: the summary is
+            # what the agent reads back, and an adopted band missing from it is
+            # a band it is told it does not have.
+            skill_executors = self._book_totals()[0]
             self._record_reading_snapshot()
 
             if failure:
@@ -1795,6 +1787,30 @@ class TickEngine:
             )
         return "\n".join(lines)
 
+    def _book_totals(self) -> tuple[int, float]:
+        """``(open count, quote exposure)`` for the book this session answers for.
+
+        The provider fetches under this session's own tag, so a band inherited
+        from a dead session of the same strategy is in none of its rows. Those
+        are adopted separately (CORR-726) and are exposure this session is told
+        to monitor and may stop; a journal line or a prompt that counts only the
+        provider's rows reports a book smaller than the one the gate protects.
+        """
+        rows = self._last_skill_data.get("executors") or []
+        count = len(rows) if isinstance(rows, list) else 0
+        exposure = float(self._last_skill_data.get("total_exposure", 0.0) or 0.0)
+        adopted = [
+            row
+            for row in (getattr(self, "_adopted_executors", None) or [])
+            if isinstance(row, dict)
+        ]
+        # ``amount`` is the quote exposure ``build_executor_row`` computes, the
+        # same field the provider sums for its own rows, so the two halves are
+        # in one unit.
+        return count + len(adopted), exposure + sum(
+            float(row.get("amount") or 0.0) for row in adopted
+        )
+
     async def _pnl_series(self) -> list[dict]:
         """This session's realized curve for the live report, or ``[]``.
 
@@ -1951,11 +1967,20 @@ class TickEngine:
         non-readings again. A blocked tick that still could not read adds an
         ``empty`` line and stays blocked, correctly.
         """
+        open_count, _ = self._book_totals()
         self.journal.record_snapshot(
             total_pnl=self._last_skill_data.get("total_pnl", 0.0),
             total_volume=self._last_skill_data.get("total_volume", 0.0),
-            open_count=len(self._last_skill_data.get("executors", [])),
-            position_size=self._last_skill_data.get("total_exposure", 0.0),
+            open_count=open_count,
+            # Exposure stays the provider's own, because it is the denominator
+            # of the drawdown over this same PnL: an adopted band's PnL is not
+            # in ``total_pnl``, so counting its size here would shrink the
+            # percentage until the configured pause and shutdown limits stopped
+            # firing. The book *count* is recorded because it is the number the
+            # agent reads, and there it costs nothing.
+            position_size=float(
+                self._last_skill_data.get("total_exposure", 0.0) or 0.0
+            ),
             # Whether the figures above are a reading at all ([[FEAT-137]],
             # [[CORR-725]]). Written onto the line because the four of them
             # are the same zeros either way: without it the guard reading
