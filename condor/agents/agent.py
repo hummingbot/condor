@@ -51,6 +51,7 @@ indexes, because a coordinator is not a peer.
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -367,6 +368,14 @@ class AgentStore:
         # clobbered (CORR-635).
         if self.get(slug) is not None:
             raise AlreadyExistsError(f"Agent '{slug}' already exists")
+        # Delete keeps skills and memory on purpose, and it also keeps
+        # routines. A new agent of the same name is a new lineage: the old
+        # playbook must not come back with it. Skills stay.
+        home = agent_home(slug)
+        if home.is_dir() and not (home / AGENT_MD).exists():
+            routines = home / "routines"
+            if routines.is_dir():
+                shutil.rmtree(routines)
         agent = Agent(
             slug=slug,
             name=name,

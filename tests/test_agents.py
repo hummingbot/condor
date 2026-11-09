@@ -1261,3 +1261,22 @@ def test_mcp_reachable_empty_and_unchanged_pins_are_stored(tmp_path, monkeypatch
         action="update", agent_slug="sentry", server_name="mine", description="d"
     )["updated"]
     assert ta.manage_agents(action="get", agent_slug="sentry")["server_name"] == "mine"
+
+
+def test_recreating_an_agent_drops_the_previous_routines(tmp_path, monkeypatch):
+    """Delete keeps the brain. A new agent of the same name must not keep the old playbook."""
+    _patch_roots(monkeypatch, tmp_path)
+    store = AgentStore()
+    created = store.create(name="Scout")
+    created.routines_dir.mkdir()
+    (created.routines_dir / "old.py").write_text("print('old')\n")
+    skill = created.home / "skills" / "kept"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("keep\n")
+
+    assert store.delete(created.slug)
+    assert store.get("scout") is None
+
+    again = store.create(name="Scout")
+    assert not (again.routines_dir / "old.py").exists()
+    assert (again.home / "skills" / "kept" / "SKILL.md").read_text() == "keep\n"
