@@ -2287,10 +2287,15 @@ class TickEngine:
                     else {}
                 )
             ),
-            "agent_key": self._agent_key(),
-            # The pin above is what was asked for; this is what the adapter
-            # answered ([[FEAT-136]]). They differ exactly when a pin did not
-            # apply, which is what a pin audit before a race start looks for.
+            # The pin that was asked for, not the model inheritance filled in.
+            # An empty pin means inherit (see ``pin_snapshot``); the inherited
+            # model is ``active_model_id`` below. Reporting the resolved key
+            # here counted an untouched model as drift against a file that
+            # stores nothing (GitHub #306).
+            "agent_key": self.config.get("agent_key") or "",
+            # What the adapter answered ([[FEAT-136]]). It differs from the pin
+            # exactly when a pin did not apply, which is what a pin audit
+            # before a race start looks for.
             "active_model_id": self._active_model_id,
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
