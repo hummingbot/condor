@@ -203,9 +203,11 @@ class RiskLimitsConfig(BaseModel):
         "an omitted one). -1 = disabled",
     )
 
-    @field_validator("max_position_size_quote")
+    @field_validator("max_position_size_quote", mode="before")
     @classmethod
-    def _position_limit_is_a_real_amount(cls, value: float) -> float:
+    def _position_limit_is_a_real_amount(cls, value: Any) -> float:
+        # Before coercion: Pydantic turns True into 1.0, and the check would
+        # then accept a boolean the engine refuses.
         return require_positive_amount(value, "max_position_size_quote")
 
 

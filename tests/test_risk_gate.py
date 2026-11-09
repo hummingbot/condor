@@ -1479,8 +1479,12 @@ def test_a_real_position_limit_still_refuses_the_overflow():
     [float("nan"), float("inf"), float("-inf"), None, "inf", 0, -5, True],
 )
 def test_a_position_limit_that_is_not_a_positive_number_is_rejected_when_set(limit):
+    from condor.agents.config import RiskLimitsConfig
+
     with pytest.raises(ValueError):
         RiskLimits.from_dict({"max_position_size_quote": limit})
+    with pytest.raises(ValueError):
+        RiskLimitsConfig(max_position_size_quote=limit)
 
 
 def test_a_stored_position_limit_that_is_not_a_number_refuses_the_trade():
