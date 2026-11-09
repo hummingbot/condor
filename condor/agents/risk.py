@@ -114,10 +114,29 @@ class RiskLimits:
             # ``unrecognized`` is a field but never a *setting*: accepting it
             # from config would let a config describe its own leftovers.
             if key in cls.__dataclass_fields__ and key != "unrecognized":
+                if key == "max_position_size_quote":
+                    from condor.agents.config import require_positive_amount
+
+                    value = require_positive_amount(value, key)
                 known[key] = value
             else:
                 unknown[key] = value
         return cls(**known, unrecognized=unknown)
+
+    def position_cap(self) -> float | None:
+        """The quote cap, or ``None`` when it cannot refuse anything.
+
+        NaN and infinity compare as if the cap were absent. ``None`` and text
+        raise ``TypeError`` on the first trade. Both are a cap that was never
+        a number, so callers refuse instead of trading through them.
+        """
+        value = self.max_position_size_quote
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if not math.isfinite(number) or number <= 0:
+            return None
+        return number
 
 
 @dataclass
@@ -563,11 +582,14 @@ class RiskEngine:
             return False, "Planned quote exposure is unavailable"
         amount = planned_amount_quote
 
-        if current_state.total_exposure + amount > self.limits.max_position_size_quote:
+        cap = self.limits.position_cap()
+        if cap is None:
+            return False, "Position limit must be a positive number"
+        if current_state.total_exposure + amount > cap:
             return False, (
                 "Would exceed position limit: "
                 f"{self._amount(current_state.total_exposure + amount)} > "
-                f"{self._amount(self.limits.max_position_size_quote)}"
+                f"{self._amount(cap)}"
             )
 
         # Approved: accumulate into the snapshot so the next create in this
@@ -632,6 +654,7 @@ class RiskEngine:
         if action == "deploy":
             raw_cap = input_data.get("max_global_drawdown_quote")
             cap: float | None = None
+            position_cap = self.limits.position_cap()
             # Unset (None or "") means no platform-side loss cap at all,
             # matching the hummingbot-api client's own default: it omits the
             # field from the deploy payload rather than sending a sentinel
@@ -653,10 +676,12 @@ class RiskEngine:
                         f"be a positive amount, got {raw_cap!r} — omit the "
                         "field entirely for no loss cap"
                     )
-                if cap > self.limits.max_position_size_quote:
+                if position_cap is None:
+                    return False, "Position limit must be a positive number"
+                if cap > position_cap:
                     return False, (
                         f"max_global_drawdown_quote {self._amount(cap)} exceeds "
-                        f"position limit {self._amount(self.limits.max_position_size_quote)}"
+                        f"position limit {self._amount(position_cap)}"
                     )
             if capital_quote is not None:
                 # DT-2: the money the bot will trade, not the loss it declares,
@@ -667,12 +692,14 @@ class RiskEngine:
                 # under a $500 limit both passed and committed $600 between
                 # them.
                 committed = current_state.total_exposure if current_state else 0.0
-                headroom = self.limits.max_position_size_quote - committed
+                if position_cap is None:
+                    return False, "Position limit must be a positive number"
+                headroom = position_cap - committed
                 if capital_quote > headroom:
                     return False, (
                         f"the controllers would trade {self._amount(capital_quote)}, "
                         f"over the {self._amount(headroom)} left of this "
-                        f"session's {self._amount(self.limits.max_position_size_quote)} "
+                        f"session's {self._amount(position_cap)} "
                         f"position limit ({self._amount(committed)} already "
                         "committed) — lower their total_amount_quote or raise "
                         "the limit"
@@ -706,11 +733,14 @@ class RiskEngine:
                 )
             except ValueError as exc:
                 return False, f"manage_bots {action}: {exc}"
-            if amount > self.limits.max_position_size_quote:
+            position_cap = self.limits.position_cap()
+            if position_cap is None:
+                return False, "Position limit must be a positive number"
+            if amount > position_cap:
                 return False, (
                     f"update_config total_amount_quote {self._amount(amount)} "
                     "exceeds position limit "
-                    f"{self._amount(self.limits.max_position_size_quote)}"
+                    f"{self._amount(position_cap)}"
                 )
 
         if action == "deploy" and capital_quote is not None and current_state:
@@ -825,12 +855,15 @@ class RiskEngine:
                 "is unavailable"
             )
 
+        cap = self.limits.position_cap()
+        if cap is None:
+            return False, "Position limit must be a positive number"
         projected = current_state.total_exposure + notional_quote
-        if projected > self.limits.max_position_size_quote:
+        if projected > cap:
             return False, (
                 f"DEX {_dex_call_label(tool_name, input_data)} would exceed "
                 f"position limit: {self._amount(projected)} > "
-                f"{self._amount(self.limits.max_position_size_quote)}"
+                f"{self._amount(cap)}"
             )
 
         # Approved: accumulate so the next signature in this tick is gated
