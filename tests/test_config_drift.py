@@ -75,6 +75,66 @@ def test_a_pydantic_risk_limits_model_compares_against_the_file_dict():
     assert drift == {"risk_limits.max_leverage": {"running": 3.0, "file": 9.0}}
 
 
+def test_an_omitted_risk_limit_is_the_default_not_a_change():
+    """A full running dump against a file that only stored the set keys."""
+    from condor.agents.config import RiskLimitsConfig
+
+    running = RiskLimitsConfig(max_leverage=5.0).model_dump()
+    assert config_drift(
+        {"risk_limits": running},
+        {"risk_limits": {"max_leverage": 5.0}},
+    ) == {}
+
+
+def test_a_real_change_against_an_omitted_default_is_still_drift():
+    drift = config_drift(
+        {"risk_limits": {"max_leverage": 5.0}},
+        {"risk_limits": {}},
+    )
+    assert drift == {"risk_limits.max_leverage": {"running": 5.0, "file": -1.0}}
+
+
+def test_the_badge_counts_only_the_settings_that_were_changed():
+    """GitHub #306: an inherited model and an untouched limit are not drift.
+
+    The file stores a blank pin as "inherit" and only the risk limits that
+    were set. A running dump lists every limit, and the status used to report
+    the inherited model as if it had been pinned.
+    """
+    from condor.agents.config import RiskLimitsConfig
+
+    running = RiskLimitsConfig(max_position_size_quote=200).model_dump()
+    drift = config_drift(
+        {
+            "server_name": "local",
+            "agent_key": "",
+            "model_base_url": "",
+            "risk_limits": running,
+        },
+        {
+            "server_name": "",
+            "agent_key": "",
+            "model_base_url": "",
+            "risk_limits": {"max_position_size_quote": 600},
+        },
+    )
+
+    assert drift == {
+        "server_name": {"running": "local", "file": ""},
+        "risk_limits.max_position_size_quote": {"running": 200.0, "file": 600},
+    }
+
+
+def test_an_unknown_risk_limit_key_on_only_one_side_is_still_drift():
+    drift = config_drift(
+        {"risk_limits": {"max_leverage": -1.0, "min_wallet_sol_reserve": 1.0}},
+        {"risk_limits": {"max_leverage": -1.0}},
+    )
+    assert drift == {
+        "risk_limits.min_wallet_sol_reserve": {"running": 1.0, "file": None}
+    }
+
+
 def test_a_field_the_running_session_does_not_report_is_not_drift():
     """A caller that did not read a field is not a session that disagrees."""
     assert config_drift({}, {"server_name": "brigado"}) == {}
@@ -455,3 +515,48 @@ def test_every_pin_is_diffable_because_the_engine_reports_all_three():
         }
     }
     assert info["active_model_id"] == "claude-opus-4-8"
+
+
+def test_an_inherited_model_is_not_reported_as_the_pin():
+    """The status pin is what was asked for. The inherited model stays beside it."""
+    from condor.agents.engine import TickEngine
+
+    config = {
+        "server_name": "local",
+        "agent_key": "",
+        "model_base_url": "",
+        "risk_limits": {"max_position_size_quote": 200},
+    }
+    stub = SimpleNamespace(
+        _last_skill_data={},
+        config=config,
+        journal=None,
+        agent_id="ag.st_4",
+        strategy=SimpleNamespace(name="st", slug="st"),
+        session_num=4,
+        status="running",
+        _agent_key=lambda: "claude-acp:sonnet",
+        _active_model_id="claude-sonnet",
+        _last_tick_at=0.0,
+        _last_reading_at=0.0,
+        _last_successful_action_at=0.0,
+        _last_tick_duration=0.0,
+        _last_error="",
+        _throttled_venues=lambda: [],
+        session_dir=None,
+        is_experiment=False,
+    )
+
+    info = TickEngine.get_info(stub)
+
+    assert info["agent_key"] == ""
+    assert info["active_model_id"] == "claude-sonnet"
+    assert "agent_key" not in config_drift(
+        info,
+        {
+            "server_name": "",
+            "agent_key": "",
+            "model_base_url": "",
+            "risk_limits": {"max_position_size_quote": 600},
+        },
+    )

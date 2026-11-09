@@ -110,7 +110,11 @@ def config_drift(
 
     A dict field (``risk_limits``) is compared per sub-key and reported dotted
     (``risk_limits.max_leverage``), so one changed limit reads as one changed
-    limit rather than as two blobs to diff by eye.
+    limit rather than as two blobs to diff by eye. A risk-limit key missing
+    from one side is that side's documented default, not a change: a running
+    dump lists every limit and a file usually stores only the ones that were
+    set. A key that is not a documented limit still counts when only one side
+    has it.
 
     A field ``running`` does not carry at all is skipped rather than reported
     as drifted against the file: that is a caller who did not read it, not a
@@ -129,12 +133,14 @@ def config_drift(
         if isinstance(live, dict) or isinstance(filed, dict):
             live_d = live if isinstance(live, dict) else {}
             file_d = filed if isinstance(filed, dict) else {}
+            defaults = (
+                RiskLimitsConfig().model_dump() if name == "risk_limits" else {}
+            )
             for key in sorted(set(live_d) | set(file_d)):
-                if live_d.get(key) != file_d.get(key):
-                    drift[f"{name}.{key}"] = {
-                        "running": live_d.get(key),
-                        "file": file_d.get(key),
-                    }
+                live_v = live_d[key] if key in live_d else defaults.get(key)
+                file_v = file_d[key] if key in file_d else defaults.get(key)
+                if live_v != file_v:
+                    drift[f"{name}.{key}"] = {"running": live_v, "file": file_v}
         elif live != filed:
             drift[name] = {"running": live, "file": filed}
     return drift
