@@ -23,9 +23,31 @@ def test_default_budget_allows_a_correction():
     assert _client().tool_retries == DEFAULT_TOOL_RETRY_BUDGET
 
 
-def test_budget_is_passed_to_the_agent():
-    client = _client(tool_retries=5)
-    assert client.tool_retries == 5
+@pytest.mark.parametrize("budget", [DEFAULT_TOOL_RETRY_BUDGET, 5, 1])
+def test_budget_is_passed_to_the_agent(monkeypatch, budget):
+    """The value has to reach Agent(...), not just sit on the client.
+
+    Without this the wiring could be deleted and every other test here would
+    still pass.
+    """
+    import pydantic_ai
+
+    seen = {}
+
+    class SpyAgent:
+        def __init__(self, model, **kwargs):
+            seen["model"] = model
+            seen.update(kwargs)
+
+    # ``_make_agent`` imports Agent when it runs, so patching the source module
+    # is what the production call actually resolves.
+    monkeypatch.setattr(pydantic_ai, "Agent", SpyAgent)
+
+    client = _client(tool_retries=budget)
+    made = client._make_agent(model="dummy-model", toolsets=[], capabilities=None)
+
+    assert isinstance(made, SpyAgent)
+    assert seen["retries"] == budget
 
 
 def test_callers_can_restore_the_old_single_attempt():

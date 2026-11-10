@@ -514,6 +514,23 @@ class PydanticAIClient:
         # here knows what a turn is.
         self.usage = TokenUsage()
 
+    def _make_agent(self, model, toolsets, capabilities):
+        """Build the pydantic-ai agent.
+
+        Kept as its own method so the wiring that matters here — the retry
+        budget reaching ``Agent`` rather than merely sitting on the client — is
+        something a test can assert directly.
+        """
+        from pydantic_ai import Agent
+
+        return Agent(
+            model,
+            instructions=self.system_prompt or None,
+            toolsets=self._gate_toolsets(toolsets),
+            capabilities=capabilities,
+            retries=self.tool_retries,
+        )
+
     async def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
 
@@ -779,13 +796,7 @@ class PydanticAIClient:
         capabilities = (
             [PrepareTools(self._prepare_tools)] if self.allowed_tools else None
         )
-        self._agent = Agent(
-            model,
-            instructions=self.system_prompt or None,
-            toolsets=self._gate_toolsets(toolsets),
-            capabilities=capabilities,
-            retries=self.tool_retries,
-        )
+        self._agent = self._make_agent(model, toolsets, capabilities)
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same local inference server share one request
