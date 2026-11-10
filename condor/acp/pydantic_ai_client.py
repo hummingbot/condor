@@ -406,6 +406,15 @@ async def _dead_transport(servers: list[Any]) -> str | None:
     return None
 
 
+# pydantic-ai retries a failed *tool call* once by default. A model that emits
+# a malformed call -- a stringified argument, a stray "?" -- is then failed with
+# UnexpectedModelBehavior, and an unattended loop loses the whole tick to a
+# mistake the model could have corrected on the next attempt. Three attempts
+# costs one extra round-trip on a bad call and turns a lost tick into a retry.
+# Callers may lower it (``tool_retries=1``) to restore the old behaviour.
+DEFAULT_TOOL_RETRY_BUDGET = 3
+
+
 class PydanticAIClient:
     """Manages a pydantic-ai agent with MCP tool servers.
 
@@ -442,8 +451,12 @@ class PydanticAIClient:
         ) = None,  # restrict the agent to these tool names
         system_prompt: str = "",
         env_keys_allowed: bool = True,
+        tool_retries: int = DEFAULT_TOOL_RETRY_BUDGET,
     ):
         self.model_name = model
+        if tool_retries < 1:
+            raise ValueError(f"tool_retries must be at least 1, got {tool_retries!r}")
+        self.tool_retries = tool_retries
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
@@ -771,6 +784,7 @@ class PydanticAIClient:
             instructions=self.system_prompt or None,
             toolsets=self._gate_toolsets(toolsets),
             capabilities=capabilities,
+            retries=self.tool_retries,
         )
 
         # Resolve the global semaphore for this server's base URL so all client
