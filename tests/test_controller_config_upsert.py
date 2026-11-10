@@ -119,3 +119,72 @@ def test_a_normalised_number_is_not_mistaken_for_a_lost_field():
     result = _upsert(a, confirm_override=True)
 
     assert result["unverified_fields"] == []
+
+# ----------------------------------------------------------------------
+# Review follow-ups (Greptile on PR #330)
+# ----------------------------------------------------------------------
+
+
+def test_a_truncated_nested_object_is_not_reported_as_identical():
+    """Every key sent must appear in the stored dict, not the other way round.
+
+    A backend that keeps one of a nested object's settings -- or none -- used to
+    compare as identical, because the check asked whether the *stored* keys were
+    a subset of the sent ones.
+    """
+    from mcp_servers.hummingbot_api.tools.controllers import _fields_that_did_not_land
+
+    sent = {"trailing_stop": {"activation_price": 1, "trailing_delta": 0.5}}
+    assert _fields_that_did_not_land(sent, {"trailing_stop": {"activation_price": 1}})
+    assert _fields_that_did_not_land(sent, {"trailing_stop": {}})
+    assert _fields_that_did_not_land(
+        sent, {"trailing_stop": {"activation_price": 1, "trailing_delta": 0.5}}
+    ) == []
+
+
+def test_extra_stored_defaults_are_not_a_lost_field():
+    from mcp_servers.hummingbot_api.tools.controllers import _fields_that_did_not_land
+
+    sent = {"total_amount_quote": 12}
+    stored = {"total_amount_quote": 12, "some_backend_default": True}
+    assert _fields_that_did_not_land(sent, stored) == []
+
+
+def test_the_read_error_is_carried_into_the_failure():
+    """'timed out' and 'not there' are the same verdict, not the same incident."""
+
+    class TimedOutControllers(ScriptedControllers):
+        async def get_controller_config(self, config_name):
+            raise TimeoutError("read-back timed out after 30s")
+
+    client = ScriptedClient()
+    client.controllers = TimedOutControllers()
+
+    with pytest.raises(RuntimeError) as exc:
+        _upsert(client, confirm_override=True)
+
+    assert "not readable afterwards" in str(exc.value)
+    assert "timed out" in str(exc.value), "the reason the read failed must survive"
+
+
+def test_the_public_tool_returns_the_verification_fields():
+    """The agent reads the tool result, so the fields have to be in it."""
+    from mcp_servers.hummingbot_api.tools.controllers import manage_controllers
+
+    stored = {k: v for k, v in CONFIG.items() if k != "total_amount_quote"}
+    client = ScriptedClient(stored_after=stored)
+
+    result = asyncio.run(
+        manage_controllers(
+            client=client,
+            action="upsert",
+            target="config",
+            config_name=CONFIG["id"],
+            config_data=dict(CONFIG),
+            confirm_override=True,
+        )
+    )
+
+    assert result["wrote"] is True
+    assert result["outcome"] in ("created", "updated")
+    assert "total_amount_quote" in result["unverified_fields"]

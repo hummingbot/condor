@@ -51,7 +51,7 @@ async def _gather_calls(*awaitables: Any) -> list[Any]:
 
 async def _read_back_controller_config(
     client: Any, config_name: str
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str]:
     """Read a config back from the API, or ``None`` if it is not there.
 
     The API's 200 is not evidence that a write landed. Writes have been observed
@@ -62,11 +62,14 @@ async def _read_back_controller_config(
     """
     try:
         stored = await client.controllers.get_controller_config(config_name)
-    except Exception:  # noqa: BLE001 - a 404 here is the answer, not an error
-        return None
+    except Exception as exc:  # noqa: BLE001 - a 404 here is the answer
+        # The cause is kept, not swallowed: "the read-back timed out" and "the
+        # config is not there" are the same verdict here but not the same
+        # incident, and the raise carries it to whoever reads the journal.
+        return None, f"{type(exc).__name__}: {exc}"
     if not isinstance(stored, dict) or not stored:
-        return None
-    return stored
+        return None, "the API returned no config"
+    return stored, ""
 
 
 def _same_config_value(sent: Any, stored: Any) -> bool:
@@ -88,8 +91,13 @@ def _same_config_value(sent: Any, stored: Any) -> bool:
             _same_config_value(a, b) for a, b in zip(sent, stored)
         )
     if isinstance(sent, dict) and isinstance(stored, dict):
-        return set(stored) <= set(sent) and all(
-            _same_config_value(sent[k], stored[k]) for k in stored
+        # Every key SENT must be in the stored dict and match it. The other
+        # direction would pass a nested object the backend truncated -- send
+        # ``trailing_stop`` with two settings, get one back, and the comparison
+        # still says "identical". Extra keys in ``stored`` are the backend's own
+        # defaults and are fine.
+        return set(sent) <= set(stored) and all(
+            _same_config_value(sent[k], stored[k]) for k in sent
         )
     return sent == stored
 
@@ -579,12 +587,15 @@ async def modify_controllers(
             # readable config is the failure this exists to catch: the agent
             # believes it committed a config, deploys that name, and the bot
             # dies on a file that was never written.
-            stored = await _read_back_controller_config(client, config_name)
+            stored, read_error = await _read_back_controller_config(
+                client, config_name
+            )
             if stored is None:
                 raise RuntimeError(
                     f"manage_controllers config upsert: the API accepted "
-                    f"'{config_name}' but it is not readable afterwards — treat "
-                    "this as a failed write, not a saved config"
+                    f"'{config_name}' but it is not readable afterwards "
+                    f"({read_error}) — treat this as a failed write, not a "
+                    "saved config"
                 )
             unverified = _fields_that_did_not_land(clean_data, stored)
             return {
