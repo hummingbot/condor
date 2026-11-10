@@ -582,6 +582,7 @@ class RiskEngine:
         tool_call: dict,
         current_state: RiskState | None = None,
         capital_quote: float | None = None,
+        largest_position_quote: float | None = None,
     ) -> tuple[bool, str]:
         """Check a manage_bots call against risk limits.
 
@@ -652,6 +653,23 @@ class RiskEngine:
                         "manage_bots deploy: max_global_drawdown_quote must "
                         f"be a positive amount, got {raw_cap!r} — omit the "
                         "field entirely for no loss cap"
+                    )
+                # The floor (DT-6). A cap under one position is not a small
+                # kill switch, it is a switch that fires on the deploy tick:
+                # see :func:`_largest_position_quote` for the measurement.
+                if (
+                    largest_position_quote is not None
+                    and cap < largest_position_quote
+                ):
+                    return False, (
+                        f"max_global_drawdown_quote {self._amount(cap)} is below "
+                        f"the {self._amount(largest_position_quote)} of the "
+                        "largest position this deploy opens. The first "
+                        "performance tick after a position opens books it as a "
+                        "loss before it is valued, so this cap is breached on "
+                        "the deploy tick itself and the strategy stops seconds "
+                        "after opening. Set it above that position and below "
+                        "the capital they trade"
                     )
                 if cap > self.limits.max_position_size_quote:
                     return False, (
@@ -1196,9 +1214,12 @@ def auto_approve_with_risk_check(
                         )
                     except Exception as exc:
                         return deny(tool_name, f"its capital could not be read: {exc}")
+                    largest_position = await _largest_position_quote(
+                        input_data, price_client
+                    )
                     if capital_quote is not None:
                         allowed, reason = risk_engine.check_bot_action(
-                            tool_call, risk_state, capital_quote
+                            tool_call, risk_state, capital_quote, largest_position
                         )
                         if not allowed:
                             return deny(tool_name, reason)
@@ -1339,6 +1360,78 @@ def _is_quote_denominated(value: Any) -> bool:
     marker has to be read before the multiplication, not stripped and forgotten.
     """
     return isinstance(value, str) and value.strip().startswith("$")
+
+
+async def _largest_position_quote(
+    input_data: dict[str, Any], client: Any
+) -> float | None:
+    """The largest single position a deploy's controllers will open, in quote.
+
+    A drawdown cap has a *floor* as well as a ceiling. The cap is enforced by the
+    strategy's global drawdown check, and the first performance tick after a
+    CLMM position opens books the whole position as a loss before the position is
+    valued: on a live bot ``global_pnl_quote`` read -5.88 on a 5.88 USDC position
+    at t+15s and -0.004 at t+30s. A cap below one position is therefore breached
+    on the deploy tick itself, and the strategy stops seconds after it opened --
+    ``Global drawdown reached. Stopping the strategy.`` The ceiling (MM-4) cannot
+    catch it: a cap this small passes every upper bound.
+
+    Deliberately narrow: only configs that declare an ``lp_provider`` are
+    measured. A spot market maker books each fill against a matched order and
+    does not have this failure, so the floor would refuse caps that are fine
+    today (a 12 USDC book running 5 USDC of clips).
+
+    ``None`` when the deploy names no configs, when no client is available (the
+    capital resolver refuses that case first), or when no named config is an LP
+    one. The position size is the config's own allocation: ``lp_positions``
+    shares when present, else an even split over ``max_positions``, else the
+    whole ``total_amount_quote``.
+    """
+    names = input_data.get("controllers_config") or []
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list) or not names or client is None:
+        return None
+
+    largest: float | None = None
+    for name in names:
+        config_id = str(name or "").strip()
+        if not config_id:
+            continue
+        try:
+            config = await client.controllers.get_controller_config(config_id)
+        except Exception:  # noqa: BLE001 - the capital resolver refuses this
+            continue
+        if not isinstance(config, dict) or not config.get("lp_provider"):
+            continue
+        try:
+            total = float(config.get("total_amount_quote") or 0)
+        except (TypeError, ValueError):
+            continue
+        if total <= 0:
+            continue
+
+        allocations: list[float] = []
+        for entry in config.get("lp_positions") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                pct = float(entry.get("allocation_pct") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pct > 0:
+                allocations.append(pct)
+        if allocations:
+            position = total * (max(allocations) / 100.0)
+        else:
+            try:
+                slots = int(config.get("max_positions") or 0)
+            except (TypeError, ValueError):
+                slots = 0
+            position = total / slots if slots > 0 else total
+        largest = max(largest or 0.0, position)
+
+    return largest
 
 
 async def _deployed_capital_quote(
