@@ -1064,6 +1064,12 @@ class TickEngine:
             nothing_at_stake=nothing_at_stake,
             reading_in_hand=reading_in_hand,
         )
+        # The block above may have been lifted because our bot is gone. That
+        # answers "may this tick run", not "may it add exposure": a bot that
+        # died before reporting can leave LP/spot positions the book cannot see.
+        # Recovery ticks stay open so the session can clean up; new exposure
+        # waits until the departed bot is retired by stopping it.
+        risk_state.recovery_only = none_of_ours_running
         live_executors = self._last_skill_data.get("executors", [])
         live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
         # Inherited positions count against the limits (CORR-726). The provider
@@ -1433,6 +1439,16 @@ class TickEngine:
         if self.ledger is not None:
             for bot_name in actions_mod.deployed_bot_names(tool_calls):
                 self.ledger.note_deploy(bot_name)
+            # A stop that lands on a bot the orchestrator no longer lists is the
+            # session saying "this one is done". Retiring it is what releases
+            # the exposure freeze: the ledger stops claiming a base that has no
+            # bot behind it, so the next tick is ordinary again.
+            for bot_name in actions_mod.stopped_bot_names(tool_calls):
+                from .ownership import strip_deploy_suffix
+
+                base = strip_deploy_suffix(bot_name)
+                if self._live_known and base not in self._live_bases:
+                    self.ledger.forget(base)
 
         # Every journal.md update of this tick goes into one batch, so the file
         # is rewritten once instead of three-to-five times (PERF-136).
