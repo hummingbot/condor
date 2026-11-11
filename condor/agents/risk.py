@@ -1161,7 +1161,16 @@ def auto_approve_with_risk_check(
                 # this tag is what per-session PnL attribution keys on. It is a
                 # top-level typed parameter now, not a field buried in a config
                 # blob, so there is one place it can be.
-                tag = str(input_data.get("controller_id") or "")
+                tag = str(input_data.get("controller_id") or "").strip()
+                if not tag and agent_id:
+                    # Default the attribution tag to this session. The tag exists
+                    # so the position can be attributed, and the session is right
+                    # here -- denying instead cost a live agent its only executor
+                    # path (aegis, tick 3) over a field it could not guess, and a
+                    # create that lands unattributed is the thing we are avoiding
+                    # only if we let it land unlabelled. Still refused when the
+                    # session id itself is unknown.
+                    input_data["controller_id"] = tag = agent_id
                 if not tag:
                     return deny(
                         tool_name,

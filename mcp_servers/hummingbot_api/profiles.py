@@ -87,6 +87,7 @@ TRADING_TOOLS: tuple[str, ...] = (
     "create_lp_executor",
     "list_executors",
     "get_executor",
+    "close_position",
     "stop_executor",
     "list_orphaned_positions",
     "resolve_orphaned_position",

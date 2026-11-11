@@ -296,7 +296,13 @@ class BotLedger:
         """
         name = (name or "").strip()
         if not name:
-            return False
+            # An omitted name means this session's own bot -- the same derivation
+            # ``resolve_bot_name`` makes for ``bot_mode: bot``. Refusing it made a
+            # plain ``manage_bots(deploy)`` look like a namespace violation, and a
+            # live agent retried the refusal eight times in one tick instead of
+            # deploying. Bounded by the namespace, which is this (agent, strategy)
+            # slot alone, so nothing gains reach over another session's bot.
+            name = self.namespace
         if in_namespace(name, self.namespace):
             return True
         if any(in_namespace(name, d) for d in self.declared):
