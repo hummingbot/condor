@@ -905,6 +905,18 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
         return {"error": f"Agent routine '{name}' not found"}
 
     file_path.unlink()
+    if routines_dir != _shared_root():
+        # routines_dir is agent_home(slug)/"routines" (assistant_routines_dir),
+        # so its parent's name is the owning agent's slug. Clearing consent and
+        # the mute entry here too, not just the file, is what stops a routine of
+        # the same name coming back pre-allowed or silently hidden if the slug
+        # is ever reused (CORR-1134).
+        from condor.agents import code_trust
+        from condor.memory.mutes import set_muted
+
+        agent_slug = routines_dir.parent.name
+        code_trust.revoke(agent_slug, name)
+        set_muted(agent_slug, "routines", name, False)
     return {"deleted": True, "name": name}
 
 

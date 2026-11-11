@@ -51,6 +51,7 @@ indexes, because a coordinator is not a peer.
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -419,13 +420,11 @@ class AgentStore:
         from condor.agents.bundle import stamp_path
 
         stamp_path(agent_dir).unlink(missing_ok=True)
-        # Remove the whole dir only when nothing else lives there (no strategies,
-        # store or skills) — the brain/strategies must not be silently dropped.
-        try:
-            if not any(agent_dir.iterdir()):
-                agent_dir.rmdir()
-        except Exception:
-            pass
+        # Remove everything else this agent owns too — routines, store/
+        # (code_trust.yml), mutes.yml, forked skills, strategies. Leaving any
+        # of it behind on a partial rmdir is what let a recreated agent of the
+        # same slug silently inherit the old one's routines (CORR-1134).
+        shutil.rmtree(agent_dir, ignore_errors=True)
         log.info("Deleted agent %s", slug)
         return True
 

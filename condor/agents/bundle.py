@@ -1095,12 +1095,13 @@ def apply(import_plan: ImportPlan, user_id: int) -> dict:
 
     slug = import_plan.slug
     home = agent_home(slug)
-    # ``home`` can predate this import: a deleted agent's memory, loops,
-    # skills or store survive ``AgentStore.delete()`` on purpose, and
-    # ``_collision`` deliberately lets a reimport write into that leftover
-    # directory (it judges the collision by the store, not by the directory's
-    # existence). Snapshotting what was already there means a failure below
-    # rolls back only this import's own writes, never the retained content.
+    # ``home`` can predate this import: a *previous* import attempt into this
+    # same slug that failed partway (``_collision`` judges by the store, not
+    # by the directory's existence, so a retry is allowed to write here).
+    # AgentStore.delete() clears the whole home (CORR-1134), so a deleted
+    # agent's slug starts genuinely empty — it is only a failed import's own
+    # leftovers this snapshot protects. A failure below then rolls back only
+    # this import's own writes, never what was already there.
     pre_existing = (
         {p.relative_to(home) for p in home.rglob("*") if p.is_file()}
         if home.exists()
@@ -1221,11 +1222,11 @@ def _undo_partial_import(home: Path, pre_existing: set[Path]) -> None:
 
     ``pre_existing`` is the file set ``apply`` snapshotted before writing
     anything, so this rolls back exactly the files this import added — never
-    a deleted agent's retained memory, loops, skills or store, which were
-    already there and are never this import's to remove. Best-effort: a file
-    that will not unlink or a directory that still has something in it is
-    left alone rather than raising a second exception on top of the one that
-    triggered this cleanup.
+    whatever a previous failed import into this same slug already left
+    behind, which is already there and is never this import's to remove.
+    Best-effort: a file that will not unlink or a directory that still has
+    something in it is left alone rather than raising a second exception on
+    top of the one that triggered this cleanup.
     """
     paths = sorted(home.rglob("*"), key=lambda p: len(p.parts), reverse=True)
     for path in paths:
@@ -1321,14 +1322,12 @@ def _collision(slug: str) -> tuple[str, str]:
     if slug == CHAT_SLUG:
         return slug, _first_free(slug)
     store = AgentStore()
-    # Not a bare ``agent_home(slug).exists()`` check: AgentStore.delete()
-    # intentionally leaves the directory behind when strategies/store survive
-    # it, so a deleted agent's old home would otherwise collide forever with
-    # its own reimport. ``store.get`` is the actual "is something installed
-    # here" answer, through both layers; ``apply``'s own failure cleanup
-    # (``_undo_partial_import``) is what makes writing into that leftover
-    # directory safe — it rolls back only the files this import added, never
-    # the retained content a failed import must not touch.
+    # Not a bare ``agent_home(slug).exists()`` check: a previous import's own
+    # failure can leave a home on disk with no ``AGENT.md`` (``apply``'s
+    # failure path removes only what *it* wrote — see ``_undo_partial_import``),
+    # and that leftover home must not collide forever with a retry.
+    # ``store.get`` is the actual "is something installed here" answer,
+    # through both layers.
     if store.get(slug) is not None:
         return slug, _first_free(slug)
     return "", ""
