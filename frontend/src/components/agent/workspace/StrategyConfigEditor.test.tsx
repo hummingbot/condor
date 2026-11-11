@@ -30,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configToYaml, parseYamlMapping } from "@/lib/configYaml";
 
 vi.mock("@/lib/api", () => ({
-  api: { updateStrategyConfig: vi.fn() },
+  api: { updateStrategyConfig: vi.fn(), previewStrategyConfigDiff: vi.fn() },
 }));
 
 vi.mock("@/components/editor/CodeEditor", () => ({
@@ -85,11 +85,16 @@ const SAVED = {
 /** One client per test, so a re-render is a re-render and not a remount. */
 let client: QueryClient;
 
-function render(config: Record<string, unknown> = CONFIG) {
+function render(config: Record<string, unknown> = CONFIG, confirmDiff = false) {
   act(() => {
     root.render(
       <QueryClientProvider client={client}>
-        <StrategyConfigEditor slug="brigado" sslug="pmm_king" config={config} />
+        <StrategyConfigEditor
+          slug="brigado"
+          sslug="pmm_king"
+          config={config}
+          confirmDiff={confirmDiff}
+        />
       </QueryClientProvider>,
     );
   });
@@ -133,6 +138,10 @@ beforeEach(() => {
   });
   vi.mocked(api.updateStrategyConfig).mockReset();
   vi.mocked(api.updateStrategyConfig).mockResolvedValue(SAVED);
+  vi.mocked(api.previewStrategyConfigDiff).mockReset();
+  vi.mocked(api.previewStrategyConfigDiff).mockResolvedValue({
+    lines: ["frequency_sec: 3600s (1h) → 60s (1m)"],
+  });
 });
 
 afterEach(() => {
@@ -297,5 +306,66 @@ describe("StrategyConfigEditor", () => {
     render({ ...CONFIG, frequency_sec: 900 });
     expect(yamlBox().value).toContain("frequency_sec: 900");
     expect(saveButton().disabled).toBe(true);
+  });
+
+  // ── `confirmDiff` (FEAT-202/FEAT-192) ──
+
+  it("writes immediately on Save when the host did not ask for confirmDiff", async () => {
+    render();
+    type(configToYaml({ ...CONFIG, frequency_sec: 60 }));
+    await act(async () => saveButton().click());
+    await settle();
+
+    expect(api.previewStrategyConfigDiff).not.toHaveBeenCalled();
+    expect(api.updateStrategyConfig).toHaveBeenCalled();
+  });
+
+  it("with confirmDiff, Save shows the diff and writes nothing until confirmed", async () => {
+    render(CONFIG, true);
+    type(configToYaml({ ...CONFIG, frequency_sec: 60 }));
+    await act(async () => saveButton().click());
+    await settle();
+
+    expect(api.previewStrategyConfigDiff).toHaveBeenCalledWith("brigado", "pmm_king", {
+      ...CONFIG,
+      frequency_sec: 60,
+    });
+    expect(api.updateStrategyConfig).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-config-diff]")?.textContent).toContain(
+      "frequency_sec: 3600s (1h) → 60s (1m)",
+    );
+  });
+
+  it("writes only once the shown diff is confirmed", async () => {
+    render(CONFIG, true);
+    type(configToYaml({ ...CONFIG, frequency_sec: 60 }));
+    await act(async () => saveButton().click());
+    await settle();
+
+    const confirmButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Confirm",
+    )!;
+    await act(async () => confirmButton.click());
+    await settle();
+
+    expect(api.updateStrategyConfig).toHaveBeenCalledWith("brigado", "pmm_king", {
+      ...CONFIG,
+      frequency_sec: 60,
+    });
+  });
+
+  it("cancelling the diff writes nothing and drops the panel", async () => {
+    render(CONFIG, true);
+    type(configToYaml({ ...CONFIG, frequency_sec: 60 }));
+    await act(async () => saveButton().click());
+    await settle();
+
+    const cancelButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Cancel",
+    )!;
+    await act(async () => cancelButton.click());
+
+    expect(container.querySelector("[data-config-diff]")).toBeNull();
+    expect(api.updateStrategyConfig).not.toHaveBeenCalled();
   });
 });

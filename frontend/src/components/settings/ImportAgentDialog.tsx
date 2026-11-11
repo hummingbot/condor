@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Upload,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import {
   useEffect,
   useRef,
@@ -16,7 +17,9 @@ import {
   type ReactNode,
 } from "react";
 
+import { StrategyConfigEditor } from "@/components/agent/workspace/StrategyConfigEditor";
 import {
+  api,
   type AgentBundleFinding,
   type AgentImportPlan,
   type AgentUpdatePlan,
@@ -1356,6 +1359,37 @@ export function ImportAgentDialog({
 }
 
 /**
+ * One just-landed loop's venue, pairs, capital, model pin and cadence/
+ * budget/risk-limit values, editable right here (FEAT-202) — reusing
+ * `StrategyConfigEditor`, the same component and write path the
+ * Configuration panel already uses (FEAT-183's single source of truth), with
+ * `confirmDiff` so a change here goes through FEAT-192's own diff+confirm
+ * step instead of writing on Save alone.
+ *
+ * Its own `getStrategy` fetch rather than a prop: the import/update response
+ * carries only the loop's slug (from its `loop.md` path), not the config
+ * `load_full_config` resolves from `loop.md`'s `default_config` front
+ * matter — the same fetch `AgentRunScreen` makes once the operator opens the
+ * strategy normally.
+ */
+function LoopConfigReview({ slug, sslug }: { slug: string; sslug: string }) {
+  const { data: strategy } = useQuery({
+    queryKey: ["strategy", slug, sslug],
+    queryFn: () => api.getStrategy(slug, sslug),
+  });
+  // No spinner, no error banner: this is a bonus surface on top of a landed
+  // import, not a gate on it — a fetch that is slow or fails just leaves
+  // nothing here to edit, and the agent's bundled defaults still apply.
+  if (!strategy) return null;
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5">
+      <p className="mb-2 text-xs font-semibold text-[var(--color-text)]">{sslug}</p>
+      <StrategyConfigEditor slug={slug} sslug={sslug} config={strategy.config} confirmDiff />
+    </div>
+  );
+}
+
+/**
  * The outcome, once an import or update has landed — a success state of its
  * own rather than the review screen with one more paragraph bolted on.
  *
@@ -1400,6 +1434,16 @@ function SuccessScreen({
   // about allowing them (Greptile, PR #314) — `churn`-style updates that
   // touch no routine were saying "no further allow needed" regardless.
   const appliedHasRoutines = applied ? applied.files.some((f) => routineNameOf(f.path) !== null) : false;
+  // Same `loops/<name>/loop.md` shape the pre-confirm review screen reads
+  // (`carriedLoops` above) — the loops this exact install/update just landed,
+  // so FEAT-202's review step knows which strategies to offer for editing
+  // before "Start chatting" rather than guessing from the agent's full roster.
+  const landedLoops = result.files
+    .filter((f) => {
+      const parts = f.path.split("/");
+      return parts.length === 3 && parts[0] === "loops" && parts[2] === "loop.md";
+    })
+    .map((f) => f.path.split("/")[1]);
 
   return (
     <div className="space-y-4">
@@ -1418,7 +1462,7 @@ function SuccessScreen({
           stitching all three together. */}
       <div
         data-import-facts
-        className="space-y-1.5 text-sm leading-relaxed text-[var(--color-text-muted)]"
+        className="space-y-3 text-sm leading-relaxed text-[var(--color-text-muted)]"
       >
         <p>
           {landed && <span data-import-done>Nothing is running yet.</span>}
@@ -1507,53 +1551,71 @@ function SuccessScreen({
       )}
 
       {findings.length > 0 && (
-        <ReviewSection
-          summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
-        >
-          <div className="@container">
-            <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
-              {categoriesOf(findings).map((category) => {
-                const rows = findings.filter((f) => f.category === category);
-                const copy = FINDING_COPY[category];
-                return (
-                  <div
-                    key={category}
-                    className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
-                  >
-                    <p className="text-[11px] font-semibold text-[var(--color-text)]">
-                      {copy?.title ?? category}{" "}
-                      <span className="font-normal text-[var(--color-text-muted)]">
-                        ({rows.length})
-                      </span>
-                    </p>
-                    <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
-                      {rows.map((f) => (
-                        <li
-                          key={`${f.path}:${f.start}:${f.label}`}
-                          className="text-[11px] text-[var(--color-text-muted)]"
-                        >
-                          <span
-                            className={
-                              f.certain
-                                ? "font-semibold text-[var(--color-red)]"
-                                : "text-amber-400"
-                            }
+        <div className="mt-1">
+          <ReviewSection
+            summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
+          >
+            <div className="@container">
+              <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
+                {categoriesOf(findings).map((category) => {
+                  const rows = findings.filter((f) => f.category === category);
+                  const copy = FINDING_COPY[category];
+                  return (
+                    <div
+                      key={category}
+                      className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+                    >
+                      <p className="text-[11px] font-semibold text-[var(--color-text)]">
+                        {copy?.title ?? category}{" "}
+                        <span className="font-normal text-[var(--color-text-muted)]">
+                          ({rows.length})
+                        </span>
+                      </p>
+                      <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
+                        {rows.map((f) => (
+                          <li
+                            key={`${f.path}:${f.start}:${f.label}`}
+                            className="text-[11px] text-[var(--color-text-muted)]"
                           >
-                            {f.label}
-                            {f.certain && " (certain)"}
-                          </span>{" "}
-                          <span className="font-mono text-[var(--color-text)]">
-                            {f.path}:{f.line}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                );
-              })}
+                            <span
+                              className={
+                                f.certain
+                                  ? "font-semibold text-[var(--color-red)]"
+                                  : "text-amber-400"
+                              }
+                            >
+                              {f.label}
+                              {f.certain && " (certain)"}
+                            </span>{" "}
+                            <span className="font-mono text-[var(--color-text)]">
+                              {f.path}:{f.line}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        </ReviewSection>
+          </ReviewSection>
+        </div>
+      )}
+
+      {/* Venue, pairs, capital, model pin and loop cadence/budget/risk-limit,
+          pre-filled from the bundled defaults and editable right here —
+          before "Start chatting" is pressed, not only afterward from the
+          Configuration panel (FEAT-202). One per loop the bundle carries;
+          an agent with none renders nothing extra here. */}
+      {landedLoops.length > 0 && (
+        <div data-review-config className="space-y-2">
+          <p className="text-xs font-semibold text-[var(--color-text)]">
+            Review its configuration
+          </p>
+          {landedLoops.map((sslug) => (
+            <LoopConfigReview key={sslug} slug={slug} sslug={sslug} />
+          ))}
+        </div>
       )}
 
       {(onOpenAgent || onDismiss) && (

@@ -13,6 +13,7 @@
  * @vitest-environment jsdom
  */
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -27,6 +28,26 @@ import { ImportAgentDialog } from "./ImportAgentDialog";
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
+
+/** CodeMirror needs layout jsdom does not have; substituted the same way
+ *  `StrategyConfigEditor.test.tsx` does, since nothing here is about it —
+ *  the success screen's review step (FEAT-202) mounts `StrategyConfigEditor`
+ *  for a bundle that carries a loop. */
+vi.mock("@/components/editor/CodeEditor", () => ({
+  CodeEditor: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange?: (next: string) => void;
+  }) => (
+    <textarea
+      data-yaml
+      value={value}
+      onChange={(e) => onChange?.(e.target.value)}
+    />
+  ),
+}));
 
 const PLAN: AgentImportPlan = {
   slug: "traveller",
@@ -196,9 +217,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function render(onImported = () => {}) {
+async function render(onImported = () => {}, onOpenAgent?: (slug: string) => void) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   await act(async () => {
-    root.render(<ImportAgentDialog onImported={onImported} />);
+    root.render(
+      <QueryClientProvider client={client}>
+        <ImportAgentDialog onImported={onImported} onOpenAgent={onOpenAgent} />
+      </QueryClientProvider>,
+    );
   });
 }
 
@@ -391,6 +419,65 @@ it("only posts to the apply endpoint when the operator confirms", async () => {
     "/api/v1/agents/import",
   ]);
   expect(imported).toHaveBeenCalledOnce();
+});
+
+it("offers the carried loop's config to review before Start chatting, and declining still allows it (FEAT-202)", async () => {
+  reply = {
+    ...PLAN,
+    files: [...PLAN.files, { path: "loops/l/loop.md", bytes: 50 }],
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/strategies/l")) {
+        return new Response(
+          JSON.stringify({
+            slug: "l",
+            agent_slug: "traveller",
+            name: "l",
+            description: "",
+            strategy_md: "",
+            config: { frequency_sec: 60 },
+            default_trading_context: "",
+            learnings: "",
+            status: "idle",
+            agent_id: "",
+            sessions: [],
+            experiments: [],
+            instances: [],
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify(reply), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }),
+  );
+  const onOpenAgent = vi.fn();
+  await render(() => {}, onOpenAgent);
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+  await act(async () => {
+    button("Import traveller").click();
+  });
+  // The loop's config query settles a tick after it mounts.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const review = container.querySelector("[data-review-config]");
+  expect(review?.textContent).toContain("l");
+  expect(
+    (review?.querySelector("[data-yaml]") as HTMLTextAreaElement | null)?.value,
+  ).toContain("frequency_sec");
+
+  // Declining to change anything still allows Start chatting.
+  await act(async () => {
+    button("Start chatting").click();
+  });
+  expect(onOpenAgent).toHaveBeenCalledWith("traveller");
 });
 
 it("refuses to apply a plan the server already refused", async () => {
