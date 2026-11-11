@@ -33,6 +33,24 @@ from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
 
+
+def _usage_limits():
+    """Request budget for one agent turn.
+
+    pydantic_ai defaults ``request_limit`` to 50. A real agent tick (read the
+    playbook, reconcile the venue, plan, then deploy) can exceed that and dies
+    mid-turn with UsageLimitExceeded -- every tool call is a model request. Set
+    CONDOR_ACP_REQUEST_LIMIT to change it; 0 or unset keeps the default.
+    """
+    from pydantic_ai.usage import UsageLimits
+
+    raw = os.environ.get("CONDOR_ACP_REQUEST_LIMIT", "400").strip()
+    try:
+        limit = int(raw) or None
+    except ValueError:
+        limit = 400
+    return UsageLimits(request_limit=limit)
+
 # pydantic-ai 2.x prints an ASCII banner on stderr once per process. Every
 # pydantic-ai import in this module is deferred, so this runs ahead of them all.
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
@@ -406,6 +424,13 @@ async def _dead_transport(servers: list[Any]) -> str | None:
     return None
 
 
+# pydantic-ai retries a failed *tool call* once by default. A model that emits a
+# malformed call is then failed with UnexpectedModelBehavior, and an unattended
+# loop loses the whole tick to a mistake the model could have corrected on the
+# next attempt. Three attempts costs one extra round-trip on a bad call.
+DEFAULT_TOOL_RETRY_BUDGET = 3
+
+
 class PydanticAIClient:
     """Manages a pydantic-ai agent with MCP tool servers.
 
@@ -442,8 +467,12 @@ class PydanticAIClient:
         ) = None,  # restrict the agent to these tool names
         system_prompt: str = "",
         env_keys_allowed: bool = True,
+        tool_retries: int = DEFAULT_TOOL_RETRY_BUDGET,
     ):
         self.model_name = model
+        if tool_retries < 1:
+            raise ValueError(f"tool_retries must be at least 1, got {tool_retries!r}")
+        self.tool_retries = tool_retries
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
@@ -771,6 +800,7 @@ class PydanticAIClient:
             instructions=self.system_prompt or None,
             toolsets=self._gate_toolsets(toolsets),
             capabilities=capabilities,
+            retries=self.tool_retries,
         )
 
         # Resolve the global semaphore for this server's base URL so all client
@@ -1163,6 +1193,7 @@ class PydanticAIClient:
                     self._agent.iter(
                         self._build_user_prompt(text, images),
                         message_history=self._message_history,
+                        usage_limits=_usage_limits(),
                     ) as run,
                     self._usage_counted(run),
                 ):

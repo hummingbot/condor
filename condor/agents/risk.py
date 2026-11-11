@@ -64,9 +64,21 @@ class RiskLimits:
     max_position_size_quote: float = 500.0
     max_open_executors: int = 5
     max_drawdown_pct: float = -1.0
+    # Quote-denominated forms of the same two brakes. A strategy that states its
+    # basis (``entry_stop_basis_usd``) has said what a dollar of drawdown is a
+    # percentage of, so these can be judged exactly like the *_pct versions
+    # instead of being dropped on the floor ([[LP-3]]): before this, a pack
+    # writing ``entry_stop_loss_usd: 1`` was warned at startup that the key "bounds
+    # nothing", and it didn't -- only order size limited risk.
+    entry_stop_loss_pct: float = -1.0
+    entry_stop_loss_usd: float = -1.0
+    entry_stop_basis_usd: float = -1.0
+    max_global_drawdown_quote: float = -1.0
+    shutdown_drawdown_quote: float = -1.0
     # Hard kill-switch: a deeper drawdown than the soft ``max_drawdown_pct`` pause;
     # breaching it winds down positions (see condor.agents.shutdown). -1 = disabled.
     shutdown_drawdown_pct: float = -1.0
+    # (see also ``shutdown_drawdown_quote`` below, converted with the same basis)
     # Largest |drift| in quote, among rows this agent's controllers are party to,
     # that still counts as a book worth trading on ([[FEAT-113]]). -1 = disabled
     # (the default: small drift is normal — dust from partial fills, a fee taken
@@ -91,6 +103,38 @@ class RiskLimits:
     #: the runtime as nothing at all. Populated by :meth:`from_dict`; surfaced
     #: by ``RiskState.to_dict`` and the log line at engine start.
     unrecognized: dict[str, Any] = field(default_factory=dict)
+
+    def _quote_as_pct(self, amount: float) -> float:
+        """A quote amount as a percentage of the configured basis, or -1 if it can't be.
+
+        Silent conversion would be worse than refusal: a 1-unit stop judged
+        against an unstated basis is not a limit, it is a guess. Without a
+        positive basis the limit stays disabled and ``unrecognized`` carries the
+        reason to the operator.
+        """
+        if amount is None or amount < 0:
+            return -1.0
+        if self.entry_stop_basis_usd is None or self.entry_stop_basis_usd <= 0:
+            return -1.0
+        return amount / self.entry_stop_basis_usd * 100.0
+
+    def drawdown_limits_pct(self) -> tuple[float, float]:
+        """Effective (soft, hard) drawdown limits in percent, tightest wins.
+
+        Every configured form is a statement of the same brake; when a pack sets
+        more than one, the most conservative is the one it meant.
+        """
+        soft = [x for x in (
+            self.max_drawdown_pct,
+            self.entry_stop_loss_pct,
+            self._quote_as_pct(self.entry_stop_loss_usd),
+            self._quote_as_pct(self.max_global_drawdown_quote),
+        ) if x is not None and x >= 0]
+        hard = [x for x in (
+            self.shutdown_drawdown_pct,
+            self._quote_as_pct(self.shutdown_drawdown_quote),
+        ) if x is not None and x >= 0]
+        return (min(soft) if soft else -1.0, min(hard) if hard else -1.0)
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
@@ -117,7 +161,18 @@ class RiskLimits:
                 known[key] = value
             else:
                 unknown[key] = value
-        return cls(**known, unrecognized=unknown)
+        built = cls(**known, unrecognized=unknown)
+        # A quote-denominated limit needs a basis to become a percentage. Saying
+        # nothing here would be the same defect the `unrecognized` map exists to
+        # cure: the pack reads as configured, the runtime does nothing.
+        if built.entry_stop_basis_usd is None or built.entry_stop_basis_usd <= 0:
+            for key in ("entry_stop_loss_usd", "max_global_drawdown_quote",
+                        "shutdown_drawdown_quote"):
+                if getattr(built, key, -1) is not None and getattr(built, key, -1) >= 0:
+                    built.unrecognized[key] = (
+                        "no effect: set entry_stop_basis_usd so it can be read as a percentage"
+                    )
+        return built
 
 
 @dataclass
@@ -440,12 +495,11 @@ class RiskEngine:
         # Check blocking conditions
         reasons = []
 
-        if (
-            self.limits.max_drawdown_pct >= 0
-            and state.drawdown_pct > self.limits.max_drawdown_pct
-        ):
+        soft_pct, hard_pct = self.limits.drawdown_limits_pct()
+
+        if soft_pct >= 0 and state.drawdown_pct > soft_pct:
             reasons.append(
-                f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {self.limits.max_drawdown_pct:.1f}%"
+                f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {soft_pct:.1f}%"
             )
 
         if reasons:
@@ -455,14 +509,11 @@ class RiskEngine:
         # Hard kill-switch: a deeper drawdown than the soft pause. Evaluated
         # independently so a breach escalates to a winddown even though it also
         # trips the soft block (the engine checks should_shutdown first).
-        if (
-            self.limits.shutdown_drawdown_pct >= 0
-            and state.drawdown_pct > self.limits.shutdown_drawdown_pct
-        ):
+        if hard_pct >= 0 and state.drawdown_pct > hard_pct:
             state.should_shutdown = True
             state.shutdown_reason = (
                 f"Drawdown {state.drawdown_pct:.1f}% exceeds shutdown limit "
-                f"{self.limits.shutdown_drawdown_pct:.1f}%"
+                f"{hard_pct:.1f}%"
             )
 
         return state
