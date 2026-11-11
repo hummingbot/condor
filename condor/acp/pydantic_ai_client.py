@@ -268,6 +268,29 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
     return _NULL_SAFE_MODEL_CLS(model_id, provider=provider)
 
 
+def _apply_arg_patch(part: Any, result: Any) -> None:
+    """Write the gate's corrections into the arguments the tool will receive.
+
+    A provider that sends ``args`` as a JSON string is the trap here: parsing it
+    to inspect (``_tool_args_to_dict``) hands back a new dict, so edits to that
+    copy never reached the call. Rewrite the string in place for that case.
+    """
+    if not isinstance(result, dict):
+        return
+    patch = result.get("patch")
+    if not isinstance(patch, dict) or not patch:
+        return
+    current = _tool_args_to_dict(getattr(part, "args", None)) or {}
+    merged = {**current, **patch}
+    if isinstance(getattr(part, "args", None), str):
+        part.args = json.dumps(merged)
+    elif isinstance(getattr(part, "args", None), dict):
+        part.args.clear()
+        part.args.update(merged)
+    else:
+        part.args = merged
+
+
 def _tool_args_to_dict(args: Any) -> dict | None:
     """Normalise a pydantic-ai tool-call `args` value to a dict.
 
@@ -1472,6 +1495,8 @@ class PydanticAIClient:
             approved = False
             reason = f"permission check failed ({exc})"
 
+        if approved:
+            _apply_arg_patch(part, result)
         self._permission_gate.record(part.tool_call_id, tool_name, approved, reason)
         return approved, reason
 

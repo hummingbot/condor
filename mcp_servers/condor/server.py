@@ -567,7 +567,7 @@ async def manage_routines(
             available = sorted(
                 {
                     r.get("name")
-                    for r in (list_routines(None) or {}).get("routines", [])
+                    for r in (routines.list_routines(agent) or {}).get("routines", [])
                     if r.get("name")
                 }
             )

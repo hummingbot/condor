@@ -1310,7 +1310,7 @@
       }
     },
     "close_position": {
-      "description": "Flatten an open perpetual position with a reduce-only market order.\n\n    Closing does not need an executor, and it must not depend on one: stopping\n    an executor can leave the position behind (``keep_position``), and a session\n    that stops its executors while positions stay open leaves leveraged exposure\n    with no barrier on the venue. Call this per position at shutdown, then\n    re-read positions to prove the book is flat.\n\n    Args:\n        account_name: Account holding the position\n        connector_name: Perpetual connector (e.g. gate_io_perpetual)\n        trading_pair: Pair to flatten\n        amount: Base amount; defaults to the whole position\n\n    Returns:\n        Human-readable result including the order id\n    ",
+      "description": "Flatten an open perpetual position with a reduce-only market order.\n\n    Closing does not need an executor, and it must not depend on one: stopping\n    an executor can leave the position behind (``keep_position``), and a session\n    that stops its executors while positions stay open leaves leveraged exposure\n    with no barrier on the venue. Call this per position at shutdown, then\n    re-read positions to prove the book is flat.\n\n    Args:\n        account_name: Account holding the position\n        connector_name: Perpetual connector (e.g. gate_io_perpetual)\n        trading_pair: Pair to flatten\n        amount: Base amount; defaults to the whole position\n        controller_id: Your controller/session id. Required to close a position\n            that a live executor still owns -- see below.\n\n    OWNERSHIP: a position is account-scoped, not session-scoped, so closing by\n    connector and pair alone would let one strategy flatten another's book on a\n    shared account. The check is therefore on what is still running: while a\n    live executor owns this pair, the close is refused unless `controller_id`\n    matches it -- stop that executor instead, which is ownership-checked. Once\n    nothing is running on the pair, the position is exactly the leftover this\n    tool exists to flatten (an executor stopped with `keep_position`, or one\n    that died), and closing it is the safe action.\n\n    Returns:\n        Human-readable result including the order id\n    ",
       "inputSchema": {
         "properties": {
           "account_name": {
@@ -1332,6 +1332,18 @@
           "connector_name": {
             "title": "Connector Name",
             "type": "string"
+          },
+          "controller_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Controller Id"
           },
           "trading_pair": {
             "title": "Trading Pair",

@@ -58,41 +58,52 @@ def _deploy(cap, configs=("orca_s10",)):
 
 def test_position_size_comes_from_the_lp_allocations():
     got = asyncio.run(
-        _largest_position_quote({"controllers_config": ["orca_s10"]},
-                                FakeClient(LP_CONFIG))
+        _largest_position_quote(
+            {"controllers_config": ["orca_s10"]}, FakeClient(LP_CONFIG)
+        )
     )
     assert got == pytest.approx(6.0), "12 USDC split 50/50 is two 6 USDC positions"
 
 
 def test_even_split_when_only_max_positions_is_declared():
-    configs = {"c": {"total_amount_quote": 12, "lp_provider": "orca/clmm",
-                     "max_positions": 3}}
-    got = asyncio.run(_largest_position_quote({"controllers_config": ["c"]},
-                                              FakeClient(configs)))
+    configs = {
+        "c": {"total_amount_quote": 12, "lp_provider": "orca/clmm", "max_positions": 3}
+    }
+    got = asyncio.run(
+        _largest_position_quote({"controllers_config": ["c"]}, FakeClient(configs))
+    )
     assert got == pytest.approx(4.0)
 
 
 def test_the_whole_book_when_nothing_says_how_it_is_split():
     configs = {"c": {"total_amount_quote": 12, "lp_provider": "orca/clmm"}}
-    got = asyncio.run(_largest_position_quote({"controllers_config": ["c"]},
-                                              FakeClient(configs)))
+    got = asyncio.run(
+        _largest_position_quote({"controllers_config": ["c"]}, FakeClient(configs))
+    )
     assert got == pytest.approx(12.0)
 
 
 def test_a_spot_market_maker_is_not_measured():
     """Its fills are matched orders; the phantom tick does not apply to it."""
     got = asyncio.run(
-        _largest_position_quote({"controllers_config": ["churn_default"]},
-                                FakeClient(SPOT_CONFIG))
+        _largest_position_quote(
+            {"controllers_config": ["churn_default"]}, FakeClient(SPOT_CONFIG)
+        )
     )
     assert got is None
 
 
 def test_no_configs_or_no_client_measures_nothing():
-    assert asyncio.run(_largest_position_quote({"controllers_config": []},
-                                               FakeClient(LP_CONFIG))) is None
-    assert asyncio.run(_largest_position_quote({"controllers_config": ["orca_s10"]},
-                                               None)) is None
+    assert (
+        asyncio.run(
+            _largest_position_quote({"controllers_config": []}, FakeClient(LP_CONFIG))
+        )
+        is None
+    )
+    assert (
+        asyncio.run(_largest_position_quote({"controllers_config": ["orca_s10"]}, None))
+        is None
+    )
 
 
 # ----------------------------------------------------------------------
@@ -134,7 +145,10 @@ def test_the_floor_does_not_apply_without_a_declared_cap():
     engine = RiskEngine(RiskLimits(max_position_size_quote=1000))
     call = {
         "tool": "manage_bots",
-        "input": {"action": "deploy", "bot_name": "b",
-                  "controllers_config": ["orca_s10"]},
+        "input": {
+            "action": "deploy",
+            "bot_name": "b",
+            "controllers_config": ["orca_s10"],
+        },
     }
     assert engine.check_bot_action(call, RiskState(), 12.0, 6.0) == (True, "")
