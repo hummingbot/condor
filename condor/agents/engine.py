@@ -108,10 +108,21 @@ def _supervisor():
 def resolve_agent_key(config: dict[str, Any], strategy, agent) -> str:
     """The model a run uses: run config override > strategy override > Agent.
 
+    ``agent_key: auto`` on the Agent inherits the install-wide default
+    (``CONDOR_DEFAULT_AGENT``, resolved fresh — not the import-time
+    ``DEFAULT_AGENT`` constant) instead of naming a backend (CORR-1160): a
+    bundled specialist agent that ships with no ``AGENT.md`` edit still
+    starts, on whichever model family the install actually has configured.
+    A run config or strategy override still wins outright — only the Agent's
+    own literal value is ever resolved as "auto".
+
     Module-level so the start route can check the very key the engine will run
     before building one — building an engine allocates a session on disk.
     """
-    return config.get("agent_key") or strategy.agent_key or agent.agent_key
+    from condor.llm.options import resolve_auto_agent_key
+
+    key = config.get("agent_key") or strategy.agent_key or agent.agent_key
+    return resolve_auto_agent_key(key)
 
 
 # How long a caller that just started a run waits for its first tick before it

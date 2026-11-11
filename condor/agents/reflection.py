@@ -292,7 +292,9 @@ async def reflect(user_id: int, meta: ConversationMeta) -> bool:
             log.debug("No agent %s to reflect conversation %s with", slug, meta.id)
             return False
 
-        model_key = meta.agent_key or agent.agent_key
+        from condor.llm.options import resolve_auto_agent_key
+
+        model_key = resolve_auto_agent_key(meta.agent_key or agent.agent_key)
         if not model_key:
             log.debug(
                 "No model for agent %s; conversation %s unreflected", slug, meta.id

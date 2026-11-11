@@ -178,8 +178,10 @@ def resolve(
         log.warning("No %s/AGENT.md — the chat starts without instructions", CHAT_SLUG)
 
     # An explicit model on the spec beats the Agent's configured default: the
-    # user picking a model in the UI is a deliberate override.
-    agent_key = spec.agent_key or agent.agent_key
+    # user picking a model in the UI is a deliberate override. ``auto`` — every
+    # bundled agent's own default (CORR-1160) — defers to the install-wide
+    # default instead of naming a backend.
+    agent_key = llm_options.resolve_auto_agent_key(spec.agent_key or agent.agent_key)
 
     # A server pinned on the Agent wins over the chat's ambient server.
     effective_server = agent.server_name or spec.server_name or ""

@@ -2339,7 +2339,11 @@ async def agent_message_handler(
         # Check if the CLI binary is installed before attempting to spawn. A
         # bound Agent runs on its own configured model, so that is the one whose
         # CLI has to be there.
-        probe_key = (agent.agent_key or agent_key) if agent else agent_key
+        from condor.llm.options import resolve_auto_agent_key
+
+        probe_key = resolve_auto_agent_key(
+            (agent.agent_key or agent_key) if agent else agent_key
+        )
         if not _is_agent_available(probe_key):
             log.debug("Agent CLI for %s not found, skipping auto-create", probe_key)
             return

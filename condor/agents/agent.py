@@ -87,7 +87,10 @@ class Agent:
     name: str
     description: str = ""
     instructions: str = ""  # AGENT.md body: identity + domain knowledge
-    agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
+    agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code");
+    # "auto" (the bundled-agent default, CORR-1160) defers to the install-wide
+    # default (CONDOR_DEFAULT_AGENT) instead of naming a backend — resolved by
+    # condor.agents.engine.resolve_agent_key, never read as a literal key.
     # Tool-name allowlist (pydantic-ai only), enforced on BOTH delegate and loop.
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
     # Empty => UNRESTRICTED (all discovered tools).
