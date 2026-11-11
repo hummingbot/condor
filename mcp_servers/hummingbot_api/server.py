@@ -306,6 +306,7 @@ async def close_position(
     connector_name: str,
     trading_pair: str,
     amount: float | None = None,
+    side: str | None = None,
     controller_id: str | None = None,
 ) -> str:
     """Flatten an open perpetual position with a reduce-only market order.
@@ -321,6 +322,9 @@ async def close_position(
         connector_name: Perpetual connector (e.g. gate_io_perpetual)
         trading_pair: Pair to flatten
         amount: Base amount; defaults to the whole position
+        side: "LONG" or "SHORT". Required when the pair holds both at once (a
+            HEDGE-mode account): closing by pair alone would take the first leg
+            and could leave the one you meant to close open.
         controller_id: Your controller/session id. Required to close a position
             that a live executor still owns -- see below.
 
@@ -341,16 +345,31 @@ async def close_position(
         account_names=[account_name], connector_names=[connector_name]
     )
     rows = raw.get("data", raw) if isinstance(raw, dict) else raw
-    match = None
-    for p in rows or []:
-        if (
-            str(p.get("trading_pair")) == trading_pair
-            and str(p.get("connector_name")) == connector_name
-        ):
-            match = p
-            break
-    if match is None:
+    wanted = (side or "").strip().upper()
+    legs = [
+        p
+        for p in (rows or [])
+        if str(p.get("trading_pair")) == trading_pair
+        and str(p.get("connector_name")) == connector_name
+    ]
+    if wanted:
+        legs = [p for p in legs if str(p.get("side", "")).upper() == wanted]
+        if not legs:
+            return (
+                f"No open {wanted} {trading_pair} position on {connector_name} "
+                f"({account_name})."
+            )
+    if not legs:
         return f"No open {trading_pair} position on {connector_name} ({account_name})."
+    if len(legs) > 1:
+        # HEDGE mode: both directions can be open on one pair. Guessing here
+        # closes the wrong leg and leaves the intended one exposed.
+        held = ", ".join(str(p.get("side", "?")).upper() for p in legs)
+        return (
+            f"{trading_pair} holds more than one position ({held}). Pass "
+            'side="LONG" or side="SHORT" to say which to close.'
+        )
+    match = legs[0]
 
     # Who is still running on this pair? Read it before closing anything.
     try:
