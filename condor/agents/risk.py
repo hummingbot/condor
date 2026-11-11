@@ -64,9 +64,21 @@ class RiskLimits:
     max_position_size_quote: float = 500.0
     max_open_executors: int = 5
     max_drawdown_pct: float = -1.0
+    # Quote-denominated forms of the same two brakes. A strategy that states its
+    # basis (``entry_stop_basis_usd``) has said what a dollar of drawdown is a
+    # percentage of, so these can be judged exactly like the *_pct versions
+    # instead of being dropped on the floor ([[LP-3]]): before this, a pack
+    # writing ``entry_stop_loss_usd: 1`` was warned at startup that the key "bounds
+    # nothing", and it didn't -- only order size limited risk.
+    entry_stop_loss_pct: float = -1.0
+    entry_stop_loss_usd: float = -1.0
+    entry_stop_basis_usd: float = -1.0
+    max_global_drawdown_quote: float = -1.0
+    shutdown_drawdown_quote: float = -1.0
     # Hard kill-switch: a deeper drawdown than the soft ``max_drawdown_pct`` pause;
     # breaching it winds down positions (see condor.agents.shutdown). -1 = disabled.
     shutdown_drawdown_pct: float = -1.0
+    # (see also ``shutdown_drawdown_quote`` below, converted with the same basis)
     # Largest |drift| in quote, among rows this agent's controllers are party to,
     # that still counts as a book worth trading on ([[FEAT-113]]). -1 = disabled
     # (the default: small drift is normal — dust from partial fills, a fee taken
@@ -91,6 +103,36 @@ class RiskLimits:
     #: the runtime as nothing at all. Populated by :meth:`from_dict`; surfaced
     #: by ``RiskState.to_dict`` and the log line at engine start.
     unrecognized: dict[str, Any] = field(default_factory=dict)
+
+    def drawdown_limits_pct(self) -> tuple[float, float]:
+        """Effective (soft, hard) drawdown limits in percent, tightest wins.
+
+        Every configured form is a statement of the same brake; when a pack sets
+        more than one, the most conservative is the one it meant.
+        """
+        soft = [
+            x
+            for x in (self.max_drawdown_pct, self.entry_stop_loss_pct)
+            if x is not None and x >= 0
+        ]
+        hard = [x for x in (self.shutdown_drawdown_pct,) if x is not None and x >= 0]
+        return (min(soft) if soft else -1.0, min(hard) if hard else -1.0)
+
+    def drawdown_quote_limits(self) -> tuple[float, float]:
+        """Effective (soft, hard) drawdown limits as absolute quote amounts.
+
+        Kept in their own units rather than divided by a basis: the journal
+        reports the actual loss in quote too, so the two are directly
+        comparable and nothing depends on a basis matching the live exposure.
+        Tightest wins, as above. ``-1`` means "not configured".
+        """
+        soft = [
+            x
+            for x in (self.entry_stop_loss_usd, self.max_global_drawdown_quote)
+            if x is not None and x >= 0
+        ]
+        hard = [x for x in (self.shutdown_drawdown_quote,) if x is not None and x >= 0]
+        return (min(soft) if soft else -1.0, min(hard) if hard else -1.0)
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
@@ -117,6 +159,9 @@ class RiskLimits:
                 known[key] = value
             else:
                 unknown[key] = value
+        # Quote-denominated limits need no basis any more: they are compared
+        # directly against the drawdown the journal reports in quote, so there
+        # is nothing left here that can be configured but bound nothing.
         return cls(**known, unrecognized=unknown)
 
 
@@ -125,6 +170,8 @@ class RiskState:
     total_exposure: float = 0.0
     executor_count: int = 0
     drawdown_pct: float = 0.0
+    #: The same drawdown as an absolute quote amount, for limits stated in quote.
+    drawdown_quote: float | None = None
     is_blocked: bool = False
     block_reason: str = ""
     # Hard escalation: set when the shutdown drawdown threshold is breached. The
@@ -289,6 +336,12 @@ def _shutdown_refusal(tool_name: str, input_data: dict[str, Any]) -> str:
     action = action if isinstance(action, str) else ""
     if tool_name == "stop_executor":
         return ""
+    # Flattening is the whole point of a winddown: a position left behind by a
+    # stopped executor has no barrier on the venue. Refusing it here would keep
+    # the exit this gate exists to force out of reach (review, PR #335), and it
+    # still meets the ownership check the gate runs afterwards.
+    if tool_name == "close_position":
+        return ""
     if tool_name == "manage_bots" and action in SHUTDOWN_BOT_ACTIONS:
         return ""
     if (
@@ -398,6 +451,16 @@ class RiskEngine:
                 # A tracker with no checked reading cannot report absence, so
                 # its number is taken as one: behavior unchanged for it.
                 state.drawdown_pct = tracker.get_drawdown_pct()
+            # The same loss in quote, from whichever tracker is in hand. Read
+            # after the branch above, not inside one of them: the normal path
+            # is the one a live tick takes, and leaving the quote reading to the
+            # fallback meant every real session kept the caps unset.
+            quote_reader = getattr(tracker, "get_drawdown_quote_checked", None)
+            if callable(quote_reader):
+                try:
+                    state.drawdown_quote = quote_reader()[0]
+                except Exception:  # noqa: BLE001 - quote limits just stay unset
+                    state.drawdown_quote = None
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
@@ -440,12 +503,24 @@ class RiskEngine:
         # Check blocking conditions
         reasons = []
 
+        soft_pct, hard_pct = self.limits.drawdown_limits_pct()
+
+        if soft_pct >= 0 and state.drawdown_pct > soft_pct:
+            reasons.append(
+                f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {soft_pct:.1f}%"
+            )
+
+        # Quote-denominated caps, compared against the quote drawdown the same
+        # journal computed -- never converted through a basis, which is what put
+        # the threshold and the measurement in different units.
+        soft_quote, hard_quote = self.limits.drawdown_quote_limits()
         if (
-            self.limits.max_drawdown_pct >= 0
-            and state.drawdown_pct > self.limits.max_drawdown_pct
+            soft_quote >= 0
+            and state.drawdown_quote is not None
+            and state.drawdown_quote > soft_quote
         ):
             reasons.append(
-                f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {self.limits.max_drawdown_pct:.1f}%"
+                f"Drawdown {state.drawdown_quote:.2f} exceeds limit {soft_quote:.2f}"
             )
 
         if reasons:
@@ -456,13 +531,20 @@ class RiskEngine:
         # independently so a breach escalates to a winddown even though it also
         # trips the soft block (the engine checks should_shutdown first).
         if (
-            self.limits.shutdown_drawdown_pct >= 0
-            and state.drawdown_pct > self.limits.shutdown_drawdown_pct
+            hard_quote >= 0
+            and state.drawdown_quote is not None
+            and state.drawdown_quote > hard_quote
         ):
             state.should_shutdown = True
             state.shutdown_reason = (
+                f"Drawdown {state.drawdown_quote:.2f} exceeds shutdown limit "
+                f"{hard_quote:.2f}"
+            )
+        elif hard_pct >= 0 and state.drawdown_pct > hard_pct:
+            state.should_shutdown = True
+            state.shutdown_reason = (
                 f"Drawdown {state.drawdown_pct:.1f}% exceeds shutdown limit "
-                f"{self.limits.shutdown_drawdown_pct:.1f}%"
+                f"{hard_pct:.1f}%"
             )
 
         return state
@@ -582,6 +664,7 @@ class RiskEngine:
         tool_call: dict,
         current_state: RiskState | None = None,
         capital_quote: float | None = None,
+        largest_position_quote: float | None = None,
     ) -> tuple[bool, str]:
         """Check a manage_bots call against risk limits.
 
@@ -652,6 +735,20 @@ class RiskEngine:
                         "manage_bots deploy: max_global_drawdown_quote must "
                         f"be a positive amount, got {raw_cap!r} — omit the "
                         "field entirely for no loss cap"
+                    )
+                # The floor (DT-6). A cap under one position is not a small
+                # kill switch, it is a switch that fires on the deploy tick:
+                # see :func:`_largest_position_quote` for the measurement.
+                if largest_position_quote is not None and cap < largest_position_quote:
+                    return False, (
+                        f"max_global_drawdown_quote {self._amount(cap)} is below "
+                        f"the {self._amount(largest_position_quote)} of the "
+                        "largest position this deploy opens. The first "
+                        "performance tick after a position opens books it as a "
+                        "loss before it is valued, so this cap is breached on "
+                        "the deploy tick itself and the strategy stops seconds "
+                        "after opening. Set it above that position and below "
+                        "the capital they trade"
                     )
                 if cap > self.limits.max_position_size_quote:
                     return False, (
@@ -1036,6 +1133,13 @@ def auto_approve_with_risk_check(
         return {"outcome": {"outcome": "cancelled"}, "reason": reason}
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
+        # Corrections the gate decided on (an attribution tag it filled, a bot
+        # name it resolved) are returned alongside the approval and applied to
+        # the arguments that actually run. Mutating ``input_data`` alone changed
+        # a parsed copy: the permission reply carries only the outcome, so the
+        # tool still received the unlabelled call (SEC review, PR #335).
+        patch: dict[str, Any] = {}
+
         # Controller code has one careful path (manage_agent_controllers: drift
         # check, backup, confirmation), so the raw upsert is refused in every
         # mode, like `place_order` below (SEC-713). It is checked first because
@@ -1092,7 +1196,17 @@ def auto_approve_with_risk_check(
                 # this tag is what per-session PnL attribution keys on. It is a
                 # top-level typed parameter now, not a field buried in a config
                 # blob, so there is one place it can be.
-                tag = str(input_data.get("controller_id") or "")
+                tag = str(input_data.get("controller_id") or "").strip()
+                if not tag and agent_id:
+                    # Default the attribution tag to this session. The tag exists
+                    # so the position can be attributed, and the session is right
+                    # here -- denying instead cost a live agent its only executor
+                    # path (aegis, tick 3) over a field it could not guess, and a
+                    # create that lands unattributed is the thing we are avoiding
+                    # only if we let it land unlabelled. Still refused when the
+                    # session id itself is unknown.
+                    input_data["controller_id"] = tag = agent_id
+                    patch["controller_id"] = tag
                 if not tag:
                     return deny(
                         tool_name,
@@ -1164,6 +1278,13 @@ def auto_approve_with_risk_check(
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
                         bot_name = input_data.get("bot_name", "") or ""
+                        if not bot_name.strip():
+                            # Deploying without a name is ordinary for a
+                            # bot_mode: bot session; approving it without
+                            # naming the bot left manage_bots(error) to fail
+                            # anyway. Resolve it here and hand it to the call.
+                            bot_name = ledger.namespace
+                            patch["bot_name"] = bot_name
                         if not ledger.owns(bot_name):
                             ledger.note_violation(bot_name, action)
                             return deny(
@@ -1196,9 +1317,12 @@ def auto_approve_with_risk_check(
                         )
                     except Exception as exc:
                         return deny(tool_name, f"its capital could not be read: {exc}")
+                    largest_position = await _largest_position_quote(
+                        input_data, price_client
+                    )
                     if capital_quote is not None:
                         allowed, reason = risk_engine.check_bot_action(
-                            tool_call, risk_state, capital_quote
+                            tool_call, risk_state, capital_quote, largest_position
                         )
                         if not allowed:
                             return deny(tool_name, reason)
@@ -1305,10 +1429,16 @@ def auto_approve_with_risk_check(
         # Auto-approve everything else
         for opt in options:
             if opt.get("kind") in ("allow_once", "allow_always"):
-                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
+                reply: dict[str, Any] = {
+                    "outcome": {"outcome": "selected", "optionId": opt["optionId"]}
+                }
+                if patch:
+                    reply["patch"] = patch
+                return reply
         if options:
             return {
-                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]},
+                **({"patch": patch} if patch else {}),
             }
         return deny(tool_call_name(tool_call), "no permission option was offered")
 
@@ -1339,6 +1469,78 @@ def _is_quote_denominated(value: Any) -> bool:
     marker has to be read before the multiplication, not stripped and forgotten.
     """
     return isinstance(value, str) and value.strip().startswith("$")
+
+
+async def _largest_position_quote(
+    input_data: dict[str, Any], client: Any
+) -> float | None:
+    """The largest single position a deploy's controllers will open, in quote.
+
+    A drawdown cap has a *floor* as well as a ceiling. The cap is enforced by the
+    strategy's global drawdown check, and the first performance tick after a
+    CLMM position opens books the whole position as a loss before the position is
+    valued: on a live bot ``global_pnl_quote`` read -5.88 on a 5.88 USDC position
+    at t+15s and -0.004 at t+30s. A cap below one position is therefore breached
+    on the deploy tick itself, and the strategy stops seconds after it opened --
+    ``Global drawdown reached. Stopping the strategy.`` The ceiling (MM-4) cannot
+    catch it: a cap this small passes every upper bound.
+
+    Deliberately narrow: only configs that declare an ``lp_provider`` are
+    measured. A spot market maker books each fill against a matched order and
+    does not have this failure, so the floor would refuse caps that are fine
+    today (a 12 USDC book running 5 USDC of clips).
+
+    ``None`` when the deploy names no configs, when no client is available (the
+    capital resolver refuses that case first), or when no named config is an LP
+    one. The position size is the config's own allocation: ``lp_positions``
+    shares when present, else an even split over ``max_positions``, else the
+    whole ``total_amount_quote``.
+    """
+    names = input_data.get("controllers_config") or []
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list) or not names or client is None:
+        return None
+
+    largest: float | None = None
+    for name in names:
+        config_id = str(name or "").strip()
+        if not config_id:
+            continue
+        try:
+            config = await client.controllers.get_controller_config(config_id)
+        except Exception:  # noqa: BLE001 - the capital resolver refuses this
+            continue
+        if not isinstance(config, dict) or not config.get("lp_provider"):
+            continue
+        try:
+            total = float(config.get("total_amount_quote") or 0)
+        except (TypeError, ValueError):
+            continue
+        if total <= 0:
+            continue
+
+        allocations: list[float] = []
+        for entry in config.get("lp_positions") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                pct = float(entry.get("allocation_pct") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pct > 0:
+                allocations.append(pct)
+        if allocations:
+            position = total * (max(allocations) / 100.0)
+        else:
+            try:
+                slots = int(config.get("max_positions") or 0)
+            except (TypeError, ValueError):
+                slots = 0
+            position = total / slots if slots > 0 else total
+        largest = max(largest or 0.0, position)
+
+    return largest
 
 
 async def _deployed_capital_quote(

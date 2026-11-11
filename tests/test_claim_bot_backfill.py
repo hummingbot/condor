@@ -168,7 +168,9 @@ def test_claiming_one_bot_does_not_claim_the_server(tmp_path):
     reopened = _claim(session_dir, "pmm-king-btcbrl", since=1_788_448_200.0)
 
     assert not reopened.owns("someone-elses-bot")
-    assert not reopened.owns("")
+    # An omitted name means this session's own bot -- the same derivation
+    # resolve_bot_name makes for bot_mode=bot -- so it is owned, not foreign.
+    assert reopened.owns("")
 
 
 @pytest.mark.parametrize("name", ["", "   ", "-20260903-181000"])

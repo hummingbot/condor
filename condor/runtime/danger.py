@@ -58,6 +58,11 @@ DANGEROUS_TOOLS = {
     # executor_defaults) is safe by name and never reaches a human.
     *CREATE_EXECUTOR_TOOLS,
     "stop_executor",
+    # Flattening a position is a market write like any other -- the same
+    # reason stop_executor is here. It is mounted for every trading seat, so
+    # leaving it out let a dry run approve it and an attended caller skip
+    # confirmation: a rehearsal could have closed a real position.
+    "close_position",
     # Account-wide leverage. It opens no position of its own, which is exactly
     # why it was missed: it re-prices the ones already open. A create is gated
     # on the capital it commits, and leverage is what decides how far the market
@@ -648,6 +653,7 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
         "place_order",
         "execute_swap",
         "stop_executor",
+        "close_position",
         LEVERAGE_TOOL,
     }
 

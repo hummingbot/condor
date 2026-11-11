@@ -427,7 +427,7 @@ class _FakeAgent:
         self.history_seen = None
 
     @asynccontextmanager
-    async def iter(self, text, message_history=None):
+    async def iter(self, text, message_history=None, usage_limits=None):
         self.history_seen = message_history
         yield self._run
 
