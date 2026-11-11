@@ -331,7 +331,10 @@ async def close_position(
     rows = raw.get("data", raw) if isinstance(raw, dict) else raw
     match = None
     for p in rows or []:
-        if str(p.get("trading_pair")) == trading_pair and str(p.get("connector_name")) == connector_name:
+        if (
+            str(p.get("trading_pair")) == trading_pair
+            and str(p.get("connector_name")) == connector_name
+        ):
             match = p
             break
     if match is None:

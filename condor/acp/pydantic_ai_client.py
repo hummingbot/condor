@@ -35,21 +35,41 @@ log = logging.getLogger(__name__)
 
 
 def _usage_limits():
-    """Request budget for one agent turn.
+    """Request budget for one agent turn, from ``CONDOR_ACP_REQUEST_LIMIT``.
 
-    pydantic_ai defaults ``request_limit`` to 50. A real agent tick (read the
-    playbook, reconcile the venue, plan, then deploy) can exceed that and dies
-    mid-turn with UsageLimitExceeded -- every tool call is a model request. Set
-    CONDOR_ACP_REQUEST_LIMIT to change it; 0 or unset keeps the default.
+    pydantic_ai defaults ``request_limit`` to 50. A real agent tick -- read the
+    playbook, reconcile the venue, plan, deploy -- spends more than that, and
+    every tool call is a model request, so the tick died mid-turn with
+    UsageLimitExceeded.
+
+    The variable is read as follows, and this is exactly what the code does:
+
+    ====================  ==========================================================
+    unset or blank        400 -- a budget that finishes a real tick
+    positive integer      that many requests
+    ``0`` or negative     no cap at all (``request_limit=None``), documented rather
+                          than implied: it is a deliberate "run until the model
+                          stops", not a way to restore pydantic_ai's 50
+    non-numeric           falls back to 400, like unset
+    ====================  ==========================================================
     """
     from pydantic_ai.usage import UsageLimits
 
-    raw = os.environ.get("CONDOR_ACP_REQUEST_LIMIT", "400").strip()
-    try:
-        limit = int(raw) or None
-    except ValueError:
-        limit = 400
+    raw = (os.environ.get("CONDOR_ACP_REQUEST_LIMIT") or "").strip()
+    if not raw:
+        limit: int | None = 400
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            limit = 400
+        else:
+            # 0 or negative is the explicit "no cap" spelling. It is NOT how an
+            # operator restores pydantic_ai's default of 50 -- unsetting the
+            # variable selects 400, and 50 must be written as the number.
+            limit = None if value <= 0 else value
     return UsageLimits(request_limit=limit)
+
 
 # pydantic-ai 2.x prints an ASCII banner on stderr once per process. Every
 # pydantic-ai import in this module is deferred, so this runs ahead of them all.
