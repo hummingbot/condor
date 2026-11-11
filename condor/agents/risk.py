@@ -124,16 +124,24 @@ class RiskLimits:
         Every configured form is a statement of the same brake; when a pack sets
         more than one, the most conservative is the one it meant.
         """
-        soft = [x for x in (
-            self.max_drawdown_pct,
-            self.entry_stop_loss_pct,
-            self._quote_as_pct(self.entry_stop_loss_usd),
-            self._quote_as_pct(self.max_global_drawdown_quote),
-        ) if x is not None and x >= 0]
-        hard = [x for x in (
-            self.shutdown_drawdown_pct,
-            self._quote_as_pct(self.shutdown_drawdown_quote),
-        ) if x is not None and x >= 0]
+        soft = [
+            x
+            for x in (
+                self.max_drawdown_pct,
+                self.entry_stop_loss_pct,
+                self._quote_as_pct(self.entry_stop_loss_usd),
+                self._quote_as_pct(self.max_global_drawdown_quote),
+            )
+            if x is not None and x >= 0
+        ]
+        hard = [
+            x
+            for x in (
+                self.shutdown_drawdown_pct,
+                self._quote_as_pct(self.shutdown_drawdown_quote),
+            )
+            if x is not None and x >= 0
+        ]
         return (min(soft) if soft else -1.0, min(hard) if hard else -1.0)
 
     @classmethod
@@ -166,8 +174,11 @@ class RiskLimits:
         # nothing here would be the same defect the `unrecognized` map exists to
         # cure: the pack reads as configured, the runtime does nothing.
         if built.entry_stop_basis_usd is None or built.entry_stop_basis_usd <= 0:
-            for key in ("entry_stop_loss_usd", "max_global_drawdown_quote",
-                        "shutdown_drawdown_quote"):
+            for key in (
+                "entry_stop_loss_usd",
+                "max_global_drawdown_quote",
+                "shutdown_drawdown_quote",
+            ):
                 if getattr(built, key, -1) is not None and getattr(built, key, -1) >= 0:
                     built.unrecognized[key] = (
                         "no effect: set entry_stop_basis_usd so it can be read as a percentage"
@@ -708,10 +719,7 @@ class RiskEngine:
                 # The floor (DT-6). A cap under one position is not a small
                 # kill switch, it is a switch that fires on the deploy tick:
                 # see :func:`_largest_position_quote` for the measurement.
-                if (
-                    largest_position_quote is not None
-                    and cap < largest_position_quote
-                ):
+                if largest_position_quote is not None and cap < largest_position_quote:
                     return False, (
                         f"max_global_drawdown_quote {self._amount(cap)} is below "
                         f"the {self._amount(largest_position_quote)} of the "

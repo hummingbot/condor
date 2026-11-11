@@ -34,6 +34,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "create_lp_executor": "Open a managed CLMM position — spends funds",
     "list_executors": "List executors, filtered",
     "get_executor": "One executor's full detail, optionally with logs",
+    "close_position": "Flatten an open perp position at market -- needs no executor",
     "stop_executor": "Stop an executor and close or keep its position",
     "list_orphaned_positions": "Terminated executors that may still own a position",
     "resolve_orphaned_position": "Mark an orphaned position recovered",
