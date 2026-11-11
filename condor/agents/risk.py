@@ -336,6 +336,12 @@ def _shutdown_refusal(tool_name: str, input_data: dict[str, Any]) -> str:
     action = action if isinstance(action, str) else ""
     if tool_name == "stop_executor":
         return ""
+    # Flattening is the whole point of a winddown: a position left behind by a
+    # stopped executor has no barrier on the venue. Refusing it here would keep
+    # the exit this gate exists to force out of reach (review, PR #335), and it
+    # still meets the ownership check the gate runs afterwards.
+    if tool_name == "close_position":
+        return ""
     if tool_name == "manage_bots" and action in SHUTDOWN_BOT_ACTIONS:
         return ""
     if (
