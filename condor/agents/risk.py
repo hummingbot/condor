@@ -104,20 +104,6 @@ class RiskLimits:
     #: by ``RiskState.to_dict`` and the log line at engine start.
     unrecognized: dict[str, Any] = field(default_factory=dict)
 
-    def _quote_as_pct(self, amount: float) -> float:
-        """A quote amount as a percentage of the configured basis, or -1 if it can't be.
-
-        Silent conversion would be worse than refusal: a 1-unit stop judged
-        against an unstated basis is not a limit, it is a guess. Without a
-        positive basis the limit stays disabled and ``unrecognized`` carries the
-        reason to the operator.
-        """
-        if amount is None or amount < 0:
-            return -1.0
-        if self.entry_stop_basis_usd is None or self.entry_stop_basis_usd <= 0:
-            return -1.0
-        return amount / self.entry_stop_basis_usd * 100.0
-
     def drawdown_limits_pct(self) -> tuple[float, float]:
         """Effective (soft, hard) drawdown limits in percent, tightest wins.
 
@@ -126,22 +112,26 @@ class RiskLimits:
         """
         soft = [
             x
-            for x in (
-                self.max_drawdown_pct,
-                self.entry_stop_loss_pct,
-                self._quote_as_pct(self.entry_stop_loss_usd),
-                self._quote_as_pct(self.max_global_drawdown_quote),
-            )
+            for x in (self.max_drawdown_pct, self.entry_stop_loss_pct)
             if x is not None and x >= 0
         ]
-        hard = [
+        hard = [x for x in (self.shutdown_drawdown_pct,) if x is not None and x >= 0]
+        return (min(soft) if soft else -1.0, min(hard) if hard else -1.0)
+
+    def drawdown_quote_limits(self) -> tuple[float, float]:
+        """Effective (soft, hard) drawdown limits as absolute quote amounts.
+
+        Kept in their own units rather than divided by a basis: the journal
+        reports the actual loss in quote too, so the two are directly
+        comparable and nothing depends on a basis matching the live exposure.
+        Tightest wins, as above. ``-1`` means "not configured".
+        """
+        soft = [
             x
-            for x in (
-                self.shutdown_drawdown_pct,
-                self._quote_as_pct(self.shutdown_drawdown_quote),
-            )
+            for x in (self.entry_stop_loss_usd, self.max_global_drawdown_quote)
             if x is not None and x >= 0
         ]
+        hard = [x for x in (self.shutdown_drawdown_quote,) if x is not None and x >= 0]
         return (min(soft) if soft else -1.0, min(hard) if hard else -1.0)
 
     @classmethod
@@ -169,21 +159,10 @@ class RiskLimits:
                 known[key] = value
             else:
                 unknown[key] = value
-        built = cls(**known, unrecognized=unknown)
-        # A quote-denominated limit needs a basis to become a percentage. Saying
-        # nothing here would be the same defect the `unrecognized` map exists to
-        # cure: the pack reads as configured, the runtime does nothing.
-        if built.entry_stop_basis_usd is None or built.entry_stop_basis_usd <= 0:
-            for key in (
-                "entry_stop_loss_usd",
-                "max_global_drawdown_quote",
-                "shutdown_drawdown_quote",
-            ):
-                if getattr(built, key, -1) is not None and getattr(built, key, -1) >= 0:
-                    built.unrecognized[key] = (
-                        "no effect: set entry_stop_basis_usd so it can be read as a percentage"
-                    )
-        return built
+        # Quote-denominated limits need no basis any more: they are compared
+        # directly against the drawdown the journal reports in quote, so there
+        # is nothing left here that can be configured but bound nothing.
+        return cls(**known, unrecognized=unknown)
 
 
 @dataclass
@@ -191,6 +170,8 @@ class RiskState:
     total_exposure: float = 0.0
     executor_count: int = 0
     drawdown_pct: float = 0.0
+    #: The same drawdown as an absolute quote amount, for limits stated in quote.
+    drawdown_quote: float | None = None
     is_blocked: bool = False
     block_reason: str = ""
     # Hard escalation: set when the shutdown drawdown threshold is breached. The
@@ -464,6 +445,16 @@ class RiskEngine:
                 # A tracker with no checked reading cannot report absence, so
                 # its number is taken as one: behavior unchanged for it.
                 state.drawdown_pct = tracker.get_drawdown_pct()
+            # The same loss in quote, from whichever tracker is in hand. Read
+            # after the branch above, not inside one of them: the normal path
+            # is the one a live tick takes, and leaving the quote reading to the
+            # fallback meant every real session kept the caps unset.
+            quote_reader = getattr(tracker, "get_drawdown_quote_checked", None)
+            if callable(quote_reader):
+                try:
+                    state.drawdown_quote = quote_reader()[0]
+                except Exception:  # noqa: BLE001 - quote limits just stay unset
+                    state.drawdown_quote = None
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
@@ -513,6 +504,19 @@ class RiskEngine:
                 f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {soft_pct:.1f}%"
             )
 
+        # Quote-denominated caps, compared against the quote drawdown the same
+        # journal computed -- never converted through a basis, which is what put
+        # the threshold and the measurement in different units.
+        soft_quote, hard_quote = self.limits.drawdown_quote_limits()
+        if (
+            soft_quote >= 0
+            and state.drawdown_quote is not None
+            and state.drawdown_quote > soft_quote
+        ):
+            reasons.append(
+                f"Drawdown {state.drawdown_quote:.2f} exceeds limit {soft_quote:.2f}"
+            )
+
         if reasons:
             state.is_blocked = True
             state.block_reason = "; ".join(reasons)
@@ -520,7 +524,17 @@ class RiskEngine:
         # Hard kill-switch: a deeper drawdown than the soft pause. Evaluated
         # independently so a breach escalates to a winddown even though it also
         # trips the soft block (the engine checks should_shutdown first).
-        if hard_pct >= 0 and state.drawdown_pct > hard_pct:
+        if (
+            hard_quote >= 0
+            and state.drawdown_quote is not None
+            and state.drawdown_quote > hard_quote
+        ):
+            state.should_shutdown = True
+            state.shutdown_reason = (
+                f"Drawdown {state.drawdown_quote:.2f} exceeds shutdown limit "
+                f"{hard_quote:.2f}"
+            )
+        elif hard_pct >= 0 and state.drawdown_pct > hard_pct:
             state.should_shutdown = True
             state.shutdown_reason = (
                 f"Drawdown {state.drawdown_pct:.1f}% exceeds shutdown limit "
@@ -1113,6 +1127,13 @@ def auto_approve_with_risk_check(
         return {"outcome": {"outcome": "cancelled"}, "reason": reason}
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
+        # Corrections the gate decided on (an attribution tag it filled, a bot
+        # name it resolved) are returned alongside the approval and applied to
+        # the arguments that actually run. Mutating ``input_data`` alone changed
+        # a parsed copy: the permission reply carries only the outcome, so the
+        # tool still received the unlabelled call (SEC review, PR #335).
+        patch: dict[str, Any] = {}
+
         # Controller code has one careful path (manage_agent_controllers: drift
         # check, backup, confirmation), so the raw upsert is refused in every
         # mode, like `place_order` below (SEC-713). It is checked first because
@@ -1179,6 +1200,7 @@ def auto_approve_with_risk_check(
                     # only if we let it land unlabelled. Still refused when the
                     # session id itself is unknown.
                     input_data["controller_id"] = tag = agent_id
+                    patch["controller_id"] = tag
                 if not tag:
                     return deny(
                         tool_name,
@@ -1250,6 +1272,13 @@ def auto_approve_with_risk_check(
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
                         bot_name = input_data.get("bot_name", "") or ""
+                        if not bot_name.strip():
+                            # Deploying without a name is ordinary for a
+                            # bot_mode: bot session; approving it without
+                            # naming the bot left manage_bots(error) to fail
+                            # anyway. Resolve it here and hand it to the call.
+                            bot_name = ledger.namespace
+                            patch["bot_name"] = bot_name
                         if not ledger.owns(bot_name):
                             ledger.note_violation(bot_name, action)
                             return deny(
@@ -1394,10 +1423,16 @@ def auto_approve_with_risk_check(
         # Auto-approve everything else
         for opt in options:
             if opt.get("kind") in ("allow_once", "allow_always"):
-                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
+                reply: dict[str, Any] = {
+                    "outcome": {"outcome": "selected", "optionId": opt["optionId"]}
+                }
+                if patch:
+                    reply["patch"] = patch
+                return reply
         if options:
             return {
-                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]},
+                **({"patch": patch} if patch else {}),
             }
         return deny(tool_call_name(tool_call), "no permission option was offered")
 

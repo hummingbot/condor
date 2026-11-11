@@ -306,6 +306,7 @@ async def close_position(
     connector_name: str,
     trading_pair: str,
     amount: float | None = None,
+    controller_id: str | None = None,
 ) -> str:
     """Flatten an open perpetual position with a reduce-only market order.
 
@@ -320,6 +321,17 @@ async def close_position(
         connector_name: Perpetual connector (e.g. gate_io_perpetual)
         trading_pair: Pair to flatten
         amount: Base amount; defaults to the whole position
+        controller_id: Your controller/session id. Required to close a position
+            that a live executor still owns -- see below.
+
+    OWNERSHIP: a position is account-scoped, not session-scoped, so closing by
+    connector and pair alone would let one strategy flatten another's book on a
+    shared account. The check is therefore on what is still running: while a
+    live executor owns this pair, the close is refused unless `controller_id`
+    matches it -- stop that executor instead, which is ownership-checked. Once
+    nothing is running on the pair, the position is exactly the leftover this
+    tool exists to flatten (an executor stopped with `keep_position`, or one
+    that died), and closing it is the safe action.
 
     Returns:
         Human-readable result including the order id
@@ -339,6 +351,42 @@ async def close_position(
             break
     if match is None:
         return f"No open {trading_pair} position on {connector_name} ({account_name})."
+
+    # Who is still running on this pair? Read it before closing anything.
+    try:
+        listed = await executors_tools.list_executors(
+            client,
+            account_names=[account_name],
+            connector_names=[connector_name],
+            trading_pairs=[trading_pair],
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed, never close blind
+        return (
+            f"Refusing to close {trading_pair}: could not read which executors "
+            f"own it ({exc})."
+        )
+    if listed.get("error"):
+        return (
+            f"Refusing to close {trading_pair}: could not read which executors "
+            f"own it ({listed['error']})."
+        )
+    terminal = {"TERMINATED", "FAILED", "COMPLETED", "CLOSED", "STOPPED", "CANCELLED"}
+    owners = set()
+    for row in listed.get("executors") or []:
+        status = str(row.get("status") or "").upper()
+        if status in terminal:
+            continue
+        owner = str(row.get("controller_id") or "").strip()
+        owners.add(owner)  # empty means "unattributed but live"
+    mine = (controller_id or "").strip()
+    if owners and mine not in owners:
+        named = ", ".join(sorted(o or "<unattributed>" for o in owners))
+        return (
+            f"{trading_pair} is owned by a live executor (controller: {named}). "
+            "Pass controller_id=<yours> if it is your position, or stop that "
+            "executor instead -- stopping is ownership-checked, closing by pair "
+            "is not."
+        )
 
     held = abs(float(match.get("amount") or 0))
     size = float(amount) if amount is not None else held

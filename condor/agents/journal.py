@@ -1076,6 +1076,25 @@ class JournalManager:
             return 0.0, True
         return drawdown / exposure * 100, True
 
+    def get_drawdown_quote_checked(self) -> tuple[float, bool]:
+        """The drawdown as an absolute quote amount, and whether it is a reading.
+
+        ``get_drawdown_pct_checked`` divides by the live exposure, which is the
+        right denominator for a percentage limit and the wrong one for a limit
+        that is already stated in quote: scaling such a cap into a percentage
+        with any other basis silently moves the threshold. Both readings come
+        from the same snapshots, so they can never disagree about the loss.
+        """
+        snapshots = self._reading_snapshots()
+        if not snapshots:
+            return 0.0, self.tick_count == 0
+        pnls = [s.get("pnl", 0) for s in snapshots]
+        current = pnls[-1]
+        archived_peak = self._archived_peak_pnl()
+        if archived_peak is not None:
+            pnls.append(archived_peak)
+        return max(0.0, max(pnls) - current), True
+
     def get_pnl_series(self) -> list[dict]:
         """PnL points still held in journal.md (at most MAX_SNAPSHOT_LINES).
 
