@@ -589,7 +589,12 @@ def build_tick_prompt(
     }
     config_lines = [
         "[CURRENT CONFIG]",
-        "These are the ACTIVE values for this session. If the loop instructions mention different defaults, IGNORE them and use these values instead.",
+        "These are the ACTIVE values for this session, read from the same config.yml "
+        "the preflight check already verified against. A loop written to read "
+        "trading_requirements and total_amount_quote from here is already describing "
+        "these values, not a different set to override — treat any literal venue, "
+        "pair or amount still written into the loop's own prose as a stale example "
+        "and use these values instead.",
     ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
