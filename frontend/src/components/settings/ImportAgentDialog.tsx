@@ -1462,7 +1462,7 @@ function SuccessScreen({
           stitching all three together. */}
       <div
         data-import-facts
-        className="space-y-3 text-sm leading-relaxed text-[var(--color-text-muted)]"
+        className="space-y-1.5 text-sm leading-relaxed text-[var(--color-text-muted)]"
       >
         <p>
           {landed && <span data-import-done>Nothing is running yet.</span>}
@@ -1551,55 +1551,53 @@ function SuccessScreen({
       )}
 
       {findings.length > 0 && (
-        <div className="mt-1">
-          <ReviewSection
-            summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
-          >
-            <div className="@container">
-              <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
-                {categoriesOf(findings).map((category) => {
-                  const rows = findings.filter((f) => f.category === category);
-                  const copy = FINDING_COPY[category];
-                  return (
-                    <div
-                      key={category}
-                      className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
-                    >
-                      <p className="text-[11px] font-semibold text-[var(--color-text)]">
-                        {copy?.title ?? category}{" "}
-                        <span className="font-normal text-[var(--color-text-muted)]">
-                          ({rows.length})
-                        </span>
-                      </p>
-                      <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
-                        {rows.map((f) => (
-                          <li
-                            key={`${f.path}:${f.start}:${f.label}`}
-                            className="text-[11px] text-[var(--color-text-muted)]"
+        <ReviewSection
+          summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
+        >
+          <div className="@container">
+            <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
+              {categoriesOf(findings).map((category) => {
+                const rows = findings.filter((f) => f.category === category);
+                const copy = FINDING_COPY[category];
+                return (
+                  <div
+                    key={category}
+                    className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+                  >
+                    <p className="text-[11px] font-semibold text-[var(--color-text)]">
+                      {copy?.title ?? category}{" "}
+                      <span className="font-normal text-[var(--color-text-muted)]">
+                        ({rows.length})
+                      </span>
+                    </p>
+                    <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
+                      {rows.map((f) => (
+                        <li
+                          key={`${f.path}:${f.start}:${f.label}`}
+                          className="text-[11px] text-[var(--color-text-muted)]"
+                        >
+                          <span
+                            className={
+                              f.certain
+                                ? "font-semibold text-[var(--color-red)]"
+                                : "text-amber-400"
+                            }
                           >
-                            <span
-                              className={
-                                f.certain
-                                  ? "font-semibold text-[var(--color-red)]"
-                                  : "text-amber-400"
-                              }
-                            >
-                              {f.label}
-                              {f.certain && " (certain)"}
-                            </span>{" "}
-                            <span className="font-mono text-[var(--color-text)]">
-                              {f.path}:{f.line}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  );
-                })}
-              </div>
+                            {f.label}
+                            {f.certain && " (certain)"}
+                          </span>{" "}
+                          <span className="font-mono text-[var(--color-text)]">
+                            {f.path}:{f.line}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
             </div>
-          </ReviewSection>
-        </div>
+          </div>
+        </ReviewSection>
       )}
 
       {/* Venue, pairs, capital, model pin and loop cadence/budget/risk-limit,
