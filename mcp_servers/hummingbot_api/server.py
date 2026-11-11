@@ -300,6 +300,61 @@ async def set_account_position_mode_and_leverage(
     return response.strip()
 
 
+@handle_errors("close position")
+async def close_position(
+    account_name: str,
+    connector_name: str,
+    trading_pair: str,
+    amount: float | None = None,
+) -> str:
+    """Flatten an open perpetual position with a reduce-only market order.
+
+    Closing does not need an executor, and it must not depend on one: stopping
+    an executor can leave the position behind (``keep_position``), and a session
+    that stops its executors while positions stay open leaves leveraged exposure
+    with no barrier on the venue. Call this per position at shutdown, then
+    re-read positions to prove the book is flat.
+
+    Args:
+        account_name: Account holding the position
+        connector_name: Perpetual connector (e.g. gate_io_perpetual)
+        trading_pair: Pair to flatten
+        amount: Base amount; defaults to the whole position
+
+    Returns:
+        Human-readable result including the order id
+    """
+    client = await hummingbot_client.get_client()
+    raw = await client.trading.get_positions(
+        account_names=[account_name], connector_names=[connector_name]
+    )
+    rows = raw.get("data", raw) if isinstance(raw, dict) else raw
+    match = None
+    for p in rows or []:
+        if str(p.get("trading_pair")) == trading_pair and str(p.get("connector_name")) == connector_name:
+            match = p
+            break
+    if match is None:
+        return f"No open {trading_pair} position on {connector_name} ({account_name})."
+
+    held = abs(float(match.get("amount") or 0))
+    size = float(amount) if amount is not None else held
+    if size <= 0:
+        return f"{trading_pair} reads a zero position size; nothing to close."
+    side = "SELL" if str(match.get("side", "")).upper() == "LONG" else "BUY"
+    order = await client.trading.place_order(
+        account_name=account_name,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        trade_type=side,
+        amount=size,
+        order_type="MARKET",
+        position_action="CLOSE",
+    )
+    order_id = (order or {}).get("order_id", "?")
+    return f"Closed {trading_pair} {str(match.get('side','')).upper()} {size} on {connector_name} — order {order_id}"
+
+
 @handle_errors("search history")
 async def search_history(
     data_type: Literal["orders", "perp_positions", "clmm_positions"],
