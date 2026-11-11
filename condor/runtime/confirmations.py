@@ -416,6 +416,57 @@ def _controller_overwrite_detail(tool_call: dict[str, Any], session_key: str) ->
     return preview.impact.render(overwriting=True)
 
 
+def _loop_update_detail(tool_call: dict[str, Any]) -> str:
+    """The old→new diff of a ``manage_loops(action="update")`` write, or ``""`` (FEAT-192).
+
+    A raw ``frequency_sec: 1800`` means nothing to a human deciding whether to
+    approve a chat-driven edit — this is where the diff that decision needs
+    gets built, from the loop's stored record compared against the fields this
+    particular call actually sent.
+    """
+    if danger.tool_call_name(tool_call) != "manage_loops":
+        return ""
+    args = danger.tool_call_input(tool_call)
+    if args is None or args.get("action") not in danger.DANGEROUS_LOOP_ACTIONS:
+        return ""
+
+    from condor.agents.config import describe_loop_update
+    from condor.agents.strategy import StrategyStore
+
+    loop_id = args.get("loop_id")
+    if not (isinstance(loop_id, str) and loop_id):
+        return "No loop_id on this call — nothing to diff."
+    strategy = StrategyStore().get_by_key(loop_id)
+    if strategy is None:
+        return f"Loop '{loop_id}' not found — nothing to diff."
+
+    current = {
+        "name": strategy.name,
+        "description": strategy.description,
+        "instructions": strategy.instructions,
+        "agent_key": strategy.agent_key,
+        "skills": strategy.skills,
+        "config": strategy.default_config,
+    }
+    # Mirrors `update_strategy`'s own truthy checks (`trading_agent.py`) exactly:
+    # an empty string or an empty config dict is a no-op there, so it must read
+    # as "unchanged" here too, or the diff would warn about an edit the write
+    # itself will silently skip. `skills` is the one field that checks `is not
+    # None` instead, since `[]` there means "clear every skill".
+    incoming: dict[str, Any] = {}
+    for key in ("name", "description", "instructions", "agent_key"):
+        if args.get(key):
+            incoming[key] = args[key]
+    if args.get("skills") is not None:
+        incoming["skills"] = args["skills"]
+    if args.get("config"):
+        incoming["config"] = args["config"]
+    lines = describe_loop_update(current, incoming)
+    if not lines:
+        return "No field in this update differs from the loop's current settings."
+    return "Changing:\n" + "\n".join(f"- {line}" for line in lines)
+
+
 def _detail(tool_call: dict[str, Any], session_key: str) -> str:
     """Extra context for the prompt, or a truthful stand-in when reading it raises.
 
@@ -423,7 +474,9 @@ def _detail(tool_call: dict[str, Any], session_key: str) -> str:
     becomes a cancellation (CORR-294).
     """
     try:
-        return _controller_overwrite_detail(tool_call, session_key)
+        return _controller_overwrite_detail(
+            tool_call, session_key
+        ) or _loop_update_detail(tool_call)
     except Exception:
         log.exception("Could not build the confirmation detail")
         return DETAIL_UNAVAILABLE
