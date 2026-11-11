@@ -491,6 +491,21 @@ async def manage_routines(
     code: str | None = None,
     shared: bool | None = None,
 ) -> dict:
+    if action in ("run", "run_async", "describe", "read_routine", "start", "stop", "edit_routine") \
+            and not (name or "").strip():
+        try:
+            available = sorted(
+                {r.get("name") for r in (list_routines(None) or {}).get("routines", [])
+                 if r.get("name")}
+            )
+        except Exception:  # noqa: BLE001
+            available = []
+        raise ValueError(
+            f"name is required for action={action!r}. "
+            f"Call manage_routines(action={action!r}, name=\"<routine>\") -- "
+            f"available routines: {', '.join(available) or 'none'}"
+        )
+
     """Manage and run Condor routines (auto-discoverable Python scripts).
 
     Actions -- Discovery & Execution:
