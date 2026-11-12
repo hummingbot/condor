@@ -190,9 +190,16 @@ class ConfigManager:
         self._sync_lock = threading.RLock()
         self._synced: Optional[dict] = None
         self._disk_sig: Optional[tuple] = None
-        self._load_config()
-        if not self._load_failed:
-            self._mark_synced()
+        self._file_lock_depth = 0  # re-entrant: guarded by _sync_lock
+        # Read and baseline under one exclusive lock (saves made while loading
+        # included): a save by another process between the read and
+        # _mark_synced would leave us with old contents under the new file's
+        # signature, so we would never merge that save and our next save
+        # would erase it.
+        with self._sync_lock, self._file_lock(exclusive=True):
+            self._load_config()
+            if not self._load_failed:
+                self._mark_synced()
         self._load_audit_log()
 
     # ------------------------------------------------------------------
@@ -237,9 +244,14 @@ class ConfigManager:
         manager = self
 
         class _Lock:
+            # Re-entrant within this process: a save made while loading takes
+            # the lock again, and a second flock() on a new descriptor would
+            # block on our own lock. Callers hold _sync_lock, which guards the
+            # depth counter.
             def __enter__(self):
                 self.fd = None
-                if fcntl is None:
+                manager._file_lock_depth += 1
+                if manager._file_lock_depth > 1 or fcntl is None:
                     return self
                 lock_path = manager.config_path.with_suffix(
                     manager.config_path.suffix + ".lock"
@@ -255,6 +267,7 @@ class ConfigManager:
                 return self
 
             def __exit__(self, *exc):
+                manager._file_lock_depth -= 1
                 if self.fd is not None:
                     fcntl.flock(self.fd, fcntl.LOCK_UN)
                     os.close(self.fd)
@@ -276,9 +289,16 @@ class ConfigManager:
             self._disk_sig = sig
             return
         theirs = self._projection(theirs)
+        servers_before = copy.deepcopy(self._store.get("servers") or {})
         _merge_changes(self._synced, self._store, theirs)
         self._synced = copy.deepcopy(theirs)
         self._disk_sig = sig
+        # A server another process repointed or removed must not keep being
+        # served by the client and caches built from its old settings.
+        servers_after = self._store.get("servers") or {}
+        for name in servers_before.keys() | servers_after.keys():
+            if servers_before.get(name) != servers_after.get(name):
+                self._invalidate_server_caches(name)
         logger.debug(f"Merged external changes to {self.config_path}")
 
     def _refresh_from_disk(self) -> None:

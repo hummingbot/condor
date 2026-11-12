@@ -9,11 +9,17 @@ erased it. Two instances over one path stand in for the two processes.
 """
 
 import os
+import threading
 
 import pytest
 import yaml
 
 from config_manager import ConfigManager, _merge_changes
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 BASE_CONFIG = {
     "servers": {"local": {"host": "localhost", "port": 8000}},
@@ -117,10 +123,76 @@ def test_a_reference_held_across_a_refresh_still_writes_to_live_state(config_pat
 
 def test_an_unreadable_file_mid_run_keeps_the_in_memory_state(config_path):
     cm = ConfigManager(str(config_path))
-    config_path.write_text("servers:\n  local:\n   host: broken\n  port: x\n")
+    config_path.write_text("servers: {local: [unclosed\n")
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(config_path.read_text())
     _bump_mtime(config_path)
 
-    assert "local" in cm._data["servers"]
+    assert cm._data["servers"] == BASE_CONFIG["servers"]
+
+
+def test_a_server_changed_by_another_process_drops_its_cached_client(config_path):
+    dashboard = ConfigManager(str(config_path))
+    mcp = ConfigManager(str(config_path))
+    stale = object()
+    dashboard._clients["local"] = (stale, 0.0)
+    dashboard._status_cache["local"] = ({"status": "online"}, 0.0)
+
+    mcp._store["servers"]["local"]["host"] = "10.0.0.2"
+    mcp._save_config()
+    _bump_mtime(config_path)
+
+    assert dashboard.get_server("local")["host"] == "10.0.0.2"
+    assert "local" not in dashboard._clients
+    assert "local" not in dashboard._status_cache
+
+
+def test_an_unchanged_server_keeps_its_cached_client(config_path):
+    dashboard = ConfigManager(str(config_path))
+    mcp = ConfigManager(str(config_path))
+    client = object()
+    dashboard._clients["local"] = (client, 0.0)
+
+    mcp._store["chat_defaults"][42] = "local"
+    mcp._save_config()
+    _bump_mtime(config_path)
+
+    assert dashboard._data["chat_defaults"] == {42: "local"}
+    assert dashboard._clients["local"][0] is client
+
+
+@pytest.mark.skipif(fcntl is None, reason="POSIX file locks only")
+def test_startup_waits_for_a_save_in_progress(config_path):
+    """Load and baseline happen under the lock, so a concurrent save can't
+    slip between them and be erased later."""
+    lock_path = str(config_path) + ".lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)  # another process is mid-save
+    built = []
+    t = threading.Thread(target=lambda: built.append(ConfigManager(str(config_path))))
+    try:
+        t.start()
+        t.join(0.3)
+        assert not built, "loaded while another process held the lock"
+        data = yaml.safe_load(config_path.read_text())
+        data["hub"]["submissions"]["new_agent"] = {"status": "pending"}
+        config_path.write_text(yaml.dump(data, sort_keys=False))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    t.join(5)
+
+    assert _submissions(built[0]) == {"old_agent", "new_agent"}
+
+
+def test_a_save_while_loading_does_not_deadlock_on_our_own_lock(config_path):
+    data = dict(BASE_CONFIG, users={})  # admin missing: loading saves it back
+    config_path.write_text(yaml.dump(data, sort_keys=False))
+
+    cm = ConfigManager(str(config_path))
+
+    assert 111 in cm._data["users"]
+    assert 111 in yaml.safe_load(config_path.read_text())["users"]
 
 
 def test_no_external_change_is_a_plain_save(config_path):
