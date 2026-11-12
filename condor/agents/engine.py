@@ -194,6 +194,9 @@ class TickEngine:
     _tick_reading: str = field(default="", init=False)
     _last_successful_action_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
+    # Whether the tick in flight already wrote its Ticks line (so a failure
+    # raised after _persist_tick is not counted twice).
+    _ticked_this_iteration: bool = field(default=False, init=False)
     # The first tick's two moments, so a caller that started this run can report
     # what the run did instead of that a task was created (CORR-728).
     # ``_first_tick_arrived`` is set as the tick is entered; ``_first_tick_done``
@@ -800,6 +803,7 @@ class TickEngine:
             if not self._paused:
                 tick_error = ""
                 self._first_tick_arrived.set()
+                self._ticked_this_iteration = False
                 try:
                     await self._tick()
                     self._last_error = ""
@@ -815,6 +819,14 @@ class TickEngine:
                     log.exception("TickEngine %s tick error", self.agent_id)
                     if self.journal:
                         self.journal.append_error(tick_error)
+                        # A tick that raised never reached _persist_session, so it
+                        # wrote no Ticks line and left the counter where it was. The
+                        # session then read as never having ticked (status.tick 0)
+                        # while its tool calls may already have deployed a bot and
+                        # left orders on the venue -- a live desk indistinguishable
+                        # from an idle one. Count it, and say why.
+                        if not self._ticked_this_iteration:
+                            self.journal.record_tick("failed: " + tick_error)
                     if self.is_experiment:
                         self._record_failed_experiment(tick_error)
                     elif not repeated:
@@ -1319,6 +1331,7 @@ class TickEngine:
             await self._persist_session(
                 ctx, response_text, tool_calls, tick_duration, timestamp, failure
             )
+        self._ticked_this_iteration = True
 
     def _persist_experiment(
         self,
