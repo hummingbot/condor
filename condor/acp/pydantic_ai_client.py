@@ -406,6 +406,15 @@ async def _dead_transport(servers: list[Any]) -> str | None:
     return None
 
 
+# pydantic-ai retries a failed *tool call* once by default. A model that emits
+# a malformed call -- a stringified argument, a stray "?" -- is then failed with
+# UnexpectedModelBehavior, and an unattended loop loses the whole tick to a
+# mistake the model could have corrected on the next attempt. Three attempts
+# costs one extra round-trip on a bad call and turns a lost tick into a retry.
+# Callers may lower it (``tool_retries=1``) to restore the old behaviour.
+DEFAULT_TOOL_RETRY_BUDGET = 3
+
+
 class PydanticAIClient:
     """Manages a pydantic-ai agent with MCP tool servers.
 
@@ -442,8 +451,12 @@ class PydanticAIClient:
         ) = None,  # restrict the agent to these tool names
         system_prompt: str = "",
         env_keys_allowed: bool = True,
+        tool_retries: int = DEFAULT_TOOL_RETRY_BUDGET,
     ):
         self.model_name = model
+        if tool_retries < 1:
+            raise ValueError(f"tool_retries must be at least 1, got {tool_retries!r}")
+        self.tool_retries = tool_retries
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
@@ -500,6 +513,23 @@ class PydanticAIClient:
         # life (FEAT-120). The session takes per-turn deltas of it; nothing
         # here knows what a turn is.
         self.usage = TokenUsage()
+
+    def _make_agent(self, model, toolsets, capabilities):
+        """Build the pydantic-ai agent.
+
+        Kept as its own method so the wiring that matters here — the retry
+        budget reaching ``Agent`` rather than merely sitting on the client — is
+        something a test can assert directly.
+        """
+        from pydantic_ai import Agent
+
+        return Agent(
+            model,
+            instructions=self.system_prompt or None,
+            toolsets=self._gate_toolsets(toolsets),
+            capabilities=capabilities,
+            retries=self.tool_retries,
+        )
 
     async def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
@@ -766,12 +796,7 @@ class PydanticAIClient:
         capabilities = (
             [PrepareTools(self._prepare_tools)] if self.allowed_tools else None
         )
-        self._agent = Agent(
-            model,
-            instructions=self.system_prompt or None,
-            toolsets=self._gate_toolsets(toolsets),
-            capabilities=capabilities,
-        )
+        self._agent = self._make_agent(model, toolsets, capabilities)
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same local inference server share one request
