@@ -6,12 +6,13 @@ in the agent directory, editable via key=value messages or web UI.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from condor.fsutil import atomic_write_text
 
@@ -96,6 +97,21 @@ def _comparable(value: Any) -> Any:
     """``value`` as something comparable: a pydantic model as its dict."""
     dump = getattr(value, "model_dump", None)
     return dump() if callable(dump) else value
+
+
+def require_positive_amount(value: Any, name: str) -> float:
+    """A position cap: a real number above zero, never NaN or infinity.
+
+    Those two compare as "not greater" and silently turn the cap off. A
+    missing or textual value used to survive until the first trade and then
+    raise ``TypeError`` instead of being refused when it was set.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a positive number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return number
 
 
 def config_drift(
@@ -186,6 +202,13 @@ class RiskLimitsConfig(BaseModel):
         "declares no leverage is refused (the venue's own default applies to "
         "an omitted one). -1 = disabled",
     )
+
+    @field_validator("max_position_size_quote", mode="before")
+    @classmethod
+    def _position_limit_is_a_real_amount(cls, value: Any) -> float:
+        # Before coercion: Pydantic turns True into 1.0, and the check would
+        # then accept a boolean the engine refuses.
+        return require_positive_amount(value, "max_position_size_quote")
 
 
 class TradingRequirementsConfig(BaseModel):

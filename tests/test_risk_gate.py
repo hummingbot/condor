@@ -1463,3 +1463,43 @@ def test_shutdown_mode_still_reads_routines_and_past_runs(tmp_path):
         _code_call(action="get", run_id="cr_1"),
     ):
         assert _outcome(asyncio.run(gate(call, _OPTIONS))) == "selected", call
+
+
+def test_a_real_position_limit_still_refuses_the_overflow():
+    engine = RiskEngine(RiskLimits.from_dict({"max_position_size_quote": 500}))
+    allowed, reason = engine.check_executor_action(
+        _create_call(1000.0), RiskState(), 1000.0
+    )
+    assert not allowed
+    assert "position limit" in reason
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [float("nan"), float("inf"), float("-inf"), None, "inf", 0, -5, True],
+)
+def test_a_position_limit_that_is_not_a_positive_number_is_rejected_when_set(limit):
+    from condor.agents.config import RiskLimitsConfig
+
+    with pytest.raises(ValueError):
+        RiskLimits.from_dict({"max_position_size_quote": limit})
+    with pytest.raises(ValueError):
+        RiskLimitsConfig(max_position_size_quote=limit)
+
+
+def test_a_stored_position_limit_that_is_not_a_number_refuses_the_trade():
+    """Constructed past ``from_dict``, NaN used to compare as 'not over the cap'."""
+    engine = RiskEngine(RiskLimits(max_position_size_quote=float("nan")))
+    allowed, reason = engine.check_executor_action(
+        _create_call(1000.0), RiskState(), 1000.0
+    )
+    assert not allowed
+    assert "positive number" in reason
+
+
+def test_an_unknown_risk_limit_key_is_still_kept():
+    limits = RiskLimits.from_dict(
+        {"max_position_size_quote": 500, "min_wallet_sol_reserve": 0.3}
+    )
+    assert limits.max_position_size_quote == 500
+    assert limits.unrecognized == {"min_wallet_sol_reserve": 0.3}
