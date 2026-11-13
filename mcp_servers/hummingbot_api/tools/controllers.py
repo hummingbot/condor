@@ -48,6 +48,72 @@ async def _gather_calls(*awaitables: Any) -> list[Any]:
     return list(results)
 
 
+
+async def _read_back_controller_config(
+    client: Any, config_name: str
+) -> tuple[dict[str, Any] | None, str]:
+    """Read a config back from the API, or ``None`` if it is not there.
+
+    The API's 200 is not evidence that a write landed. Writes have been observed
+    returning ``{"message": "Configuration ... saved successfully"}`` while
+    ``GET /controllers/configs/<name>`` stayed 404 afterwards; the agent then
+    deploys that name and the bot dies on a missing controller file, with an
+    action journal in which every write reported success.
+    """
+    try:
+        stored = await client.controllers.get_controller_config(config_name)
+    except Exception as exc:  # noqa: BLE001 - a 404 here is the answer
+        # The cause is kept, not swallowed: "the read-back timed out" and "the
+        # config is not there" are the same verdict here but not the same
+        # incident, and the raise carries it to whoever reads the journal.
+        return None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(stored, dict) or not stored:
+        return None, "the API returned no config"
+    return stored, ""
+
+
+def _same_config_value(sent: Any, stored: Any) -> bool:
+    """Loose comparison: the backend normalises numbers and trims strings."""
+    if isinstance(sent, bool) or isinstance(stored, bool):
+        return sent == stored
+    for a, b in ((sent, stored), (stored, sent)):
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            return abs(float(a) - float(b)) < 1e-9
+        if isinstance(a, (int, float)) and isinstance(b, str):
+            try:
+                return abs(float(a) - float(b)) < 1e-9
+            except ValueError:
+                continue
+    if isinstance(sent, str) and isinstance(stored, str):
+        return sent.strip() == stored.strip()
+    if isinstance(sent, list) and isinstance(stored, list):
+        return len(sent) == len(stored) and all(
+            _same_config_value(a, b) for a, b in zip(sent, stored)
+        )
+    if isinstance(sent, dict) and isinstance(stored, dict):
+        # Every key SENT must be in the stored dict and match it. The other
+        # direction would pass a nested object the backend truncated -- send
+        # ``trailing_stop`` with two settings, get one back, and the comparison
+        # still says "identical". Extra keys in ``stored`` are the backend's own
+        # defaults and are fine.
+        return set(sent) <= set(stored) and all(
+            _same_config_value(sent[k], stored[k]) for k in sent
+        )
+    return sent == stored
+
+
+def _fields_that_did_not_land(
+    sent: dict[str, Any], stored: dict[str, Any]
+) -> list[str]:
+    """Fields that were sent but are absent or different in the stored config."""
+    missing = [k for k in sent if k not in stored]
+    changed = [
+        k
+        for k, v in sent.items()
+        if k in stored and not _same_config_value(v, stored[k])
+    ]
+    return sorted(set(missing) | set(changed))
+
 def _validate_config_against_template(
     config_data: dict[str, Any],
     template: dict[str, Any],
@@ -499,6 +565,10 @@ async def modify_controllers(
                     "action": "upsert",
                     "target": "config",
                     "exists": True,
+                    # Nothing was written, and saying so is the point: a caller
+                    # that reads only the message cannot tell this from a write.
+                    "outcome": "unchanged",
+                    "wrote": False,
                     "config_name": config_name,
                     "current_config": existing_config,
                     "message": (
@@ -512,12 +582,34 @@ async def modify_controllers(
             result = await client.controllers.create_or_update_controller_config(
                 config_name, clean_data
             )
+
+            # Read it back before reporting a write. A success payload without a
+            # readable config is the failure this exists to catch: the agent
+            # believes it committed a config, deploys that name, and the bot
+            # dies on a file that was never written.
+            stored, read_error = await _read_back_controller_config(
+                client, config_name
+            )
+            if stored is None:
+                raise RuntimeError(
+                    f"manage_controllers config upsert: the API accepted "
+                    f"'{config_name}' but it is not readable afterwards "
+                    f"({read_error}) — treat this as a failed write, not a "
+                    "saved config"
+                )
+            unverified = _fields_that_did_not_land(clean_data, stored)
             return {
                 "action": "upsert",
                 "target": "config",
                 "exists": exists,
+                "outcome": "updated" if exists else "created",
+                "wrote": True,
                 "config_name": config_name,
                 "result": result,
+                # Sent and not found in the stored config. Reported rather than
+                # raised: the backend may legitimately drop a field, but a
+                # caller planning a deploy should know which ones it lost.
+                "unverified_fields": unverified,
                 "message": f"Config {'updated' if exists else 'created'}: {result}",
             }
 
