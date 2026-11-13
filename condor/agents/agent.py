@@ -417,30 +417,23 @@ class AgentStore:
         path = agent_dir / AGENT_MD
         if not path.exists():
             return False
-        path.unlink()
-        # The bundle stamp is install bookkeeping about the AGENT.md just
-        # removed, not brain content — left behind, it keeps agent_home()
-        # existing forever and makes a later re-pull of this slug read as an
-        # update of nothing rather than a fresh install.
-        from condor.agents.bundle import stamp_path
-
-        stamp_path(agent_dir).unlink(missing_ok=True)
-        if has_stock_twin:
-            # Only the local fork of AGENT.md was this install's to remove —
-            # the slug still resolves (to the shipped definition), so its
-            # loops, sessions, config and journals are still a live agent's,
-            # not an orphan. Wiping agent_dir here would be the config.yml,
-            # loops/*/sessions and routines of a shipped agent the user only
-            # ever re-modeled, which "delete" never asked for.
-            log.info("Reverted %s to stock (removed its local AGENT.md fork)", slug)
-            return True
-        # A genuinely local agent: remove everything else it owns too —
-        # routines, store/ (code_trust.yml), mutes.yml, forked skills,
-        # strategies. Leaving any of it behind on a partial rmdir is what let
-        # a recreated agent of the same slug silently inherit the old one's
-        # routines (CORR-1134).
+        # Remove everything this install ever wrote for this agent — the
+        # AGENT.md fork, the bundle stamp, routines, store/ (code_trust.yml),
+        # mutes.yml, loops/* (config.yml, sessions), forked skills. That is
+        # what the only delete UI tells the user it does ("Delete <agent>
+        # and all its loops?"), and it is what a later reimport of the same
+        # slug needs: `bundle.apply()` treats a deleted slug's home as
+        # starting genuinely empty, so any of this left behind is exactly
+        # what let a recreated/reimported agent silently inherit the old
+        # one's routines, config and consent (CORR-1134). A stock twin still
+        # resolves (to the shipped definition) after this — reverted to
+        # stock, not gone — but with none of its local customization left to
+        # orphan.
         shutil.rmtree(agent_dir, ignore_errors=True)
-        log.info("Deleted agent %s", slug)
+        if has_stock_twin:
+            log.info("Reverted %s to stock (cleared its local customization)", slug)
+        else:
+            log.info("Deleted agent %s", slug)
         return True
 
     def _save(self, agent: Agent) -> None:
