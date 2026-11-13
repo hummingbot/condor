@@ -4,10 +4,12 @@ Manages servers, users, permissions, and settings in a single config.yml file.
 """
 
 import asyncio
+import copy
 import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 from enum import Enum
 from pathlib import Path
@@ -16,7 +18,41 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import yaml
 from aiohttp import ClientTimeout
 
+try:  # POSIX only; elsewhere the cross-process lock is a no-op.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+
 logger = logging.getLogger(__name__)
+
+_MISSING = object()
+
+
+def _merge_changes(base: dict, ours: dict, theirs: dict) -> None:
+    """Apply into ``ours``, in place, what ``theirs`` changed since ``base``.
+
+    Three-way merge for one ``config.yml`` written by more than one process
+    (the bot/dashboard and each MCP server hold their own ``ConfigManager``).
+    ``base`` is what this process last read or wrote, ``ours`` its in-memory
+    state, ``theirs`` the file as another process left it. A key only one side
+    changed takes that side's value; a key both changed recurses when both are
+    dicts and is otherwise ours. In place, so a caller holding a reference to a
+    nested dict (``users = self._data["users"]``) keeps writing to the live one.
+    """
+    for key in list(base.keys() | ours.keys() | theirs.keys()):
+        b = base.get(key, _MISSING)
+        o = ours.get(key, _MISSING)
+        t = theirs.get(key, _MISSING)
+        if t is b or t == b:
+            continue  # they did not touch it
+        if isinstance(o, dict) and isinstance(t, dict):
+            _merge_changes(b if isinstance(b, dict) else {}, o, t)
+        elif o is b or o == b:  # we did not touch it: take theirs
+            if t is _MISSING:
+                ours.pop(key, None)
+            else:
+                ours[key] = copy.deepcopy(t)
+        # else: both changed a leaf; ours wins.
 
 
 class UserRole(str, Enum):
@@ -149,7 +185,134 @@ class ConfigManager:
         # True when an existing config file could not be read: the in-memory
         # state is empty and MUST NOT be written back over the file on disk.
         self._load_failed = False
-        self._load_config()
+        # Cross-process sync: what this process last read from or wrote to
+        # config.yml (``_synced``) and the file's stat signature at that time.
+        self._sync_lock = threading.RLock()
+        self._synced: Optional[dict] = None
+        self._disk_sig: Optional[tuple] = None
+        self._file_lock_depth = 0  # re-entrant: guarded by _sync_lock
+        # Read and baseline under one exclusive lock (saves made while loading
+        # included): a save by another process between the read and
+        # _mark_synced would leave us with old contents under the new file's
+        # signature, so we would never merge that save and our next save
+        # would erase it.
+        with self._sync_lock, self._file_lock(exclusive=True):
+            self._load_config()
+            if not self._load_failed:
+                self._mark_synced()
+        self._load_audit_log()
+
+    # ------------------------------------------------------------------
+    # Cross-process sync
+    # ------------------------------------------------------------------
+    # The bot/dashboard and every MCP server process load config.yml into
+    # their own ConfigManager. Without this, each kept the copy it read at
+    # startup forever: a write from one process was invisible to the others,
+    # and the next save from any of them rewrote the file from its stale copy,
+    # silently dropping the other's write (a hub submission recorded over MCP
+    # never reached the dashboard and was erased by the dashboard's next save).
+
+    @property
+    def _data(self) -> dict:
+        self._refresh_from_disk()
+        return self._store
+
+    @_data.setter
+    def _data(self, value: dict) -> None:
+        self._store = value
+
+    def _projection(self, data: dict) -> dict:
+        """The declared sections of ``data``: exactly what a save writes."""
+        return {
+            name: data.get(name, default(self))
+            for name, default in CONFIG_SECTIONS.items()
+        }
+
+    def _stat_sig(self) -> Optional[tuple]:
+        try:
+            st = os.stat(self.config_path)
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def _mark_synced(self) -> None:
+        self._synced = copy.deepcopy(self._projection(self._store))
+        self._disk_sig = self._stat_sig()
+
+    def _file_lock(self, exclusive: bool):
+        """An advisory lock on ``config.yml.lock``, shared by every process."""
+        manager = self
+
+        class _Lock:
+            # Re-entrant within this process: a save made while loading takes
+            # the lock again, and a second flock() on a new descriptor would
+            # block on our own lock. Callers hold _sync_lock, which guards the
+            # depth counter.
+            def __enter__(self):
+                self.fd = None
+                manager._file_lock_depth += 1
+                if manager._file_lock_depth > 1 or fcntl is None:
+                    return self
+                lock_path = manager.config_path.with_suffix(
+                    manager.config_path.suffix + ".lock"
+                )
+                try:
+                    self.fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                    fcntl.flock(self.fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                except OSError as e:
+                    logger.warning(f"Could not lock {lock_path}: {e}")
+                    if self.fd is not None:
+                        os.close(self.fd)
+                    self.fd = None
+                return self
+
+            def __exit__(self, *exc):
+                manager._file_lock_depth -= 1
+                if self.fd is not None:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+                    os.close(self.fd)
+                return False
+
+        return _Lock()
+
+    def _absorb_disk_changes(self) -> None:
+        """Merge what another process wrote since our last sync. Caller locks."""
+        if self._synced is None:
+            return
+        sig = self._stat_sig()
+        if sig is None or sig == self._disk_sig:
+            return
+        theirs = self._read_config_file(self.config_path)
+        if not isinstance(theirs, dict):
+            # Unreadable right now: keep memory, and do not retry on every
+            # access until the file changes again.
+            self._disk_sig = sig
+            return
+        theirs = self._projection(theirs)
+        servers_before = copy.deepcopy(self._store.get("servers") or {})
+        _merge_changes(self._synced, self._store, theirs)
+        self._synced = copy.deepcopy(theirs)
+        self._disk_sig = sig
+        # A server another process repointed or removed must not keep being
+        # served by the client and caches built from its old settings.
+        servers_after = self._store.get("servers") or {}
+        for name in servers_before.keys() | servers_after.keys():
+            if servers_before.get(name) != servers_after.get(name):
+                self._invalidate_server_caches(name)
+        logger.debug(f"Merged external changes to {self.config_path}")
+
+    def _refresh_from_disk(self) -> None:
+        """Pick up another process's writes before a read (one stat when idle)."""
+        if getattr(self, "_disk_sig", None) is None or self._load_failed:
+            return
+        if self._stat_sig() == self._disk_sig:
+            return
+        with self._sync_lock, self._file_lock(exclusive=False):
+            self._absorb_disk_changes()
+
+    def reload(self) -> None:
+        """Reload configuration from file (merging, never dropping our writes)."""
+        self._refresh_from_disk()
         self._load_audit_log()
 
     @classmethod
@@ -293,15 +456,22 @@ class ConfigManager:
             )
             return
 
+        with self._sync_lock, self._file_lock(exclusive=True):
+            # Read-merge-write under the lock: another process may have saved
+            # since we last synced, and writing our whole copy over it would
+            # drop that write.
+            self._absorb_disk_changes()
+            self._write_config_file()
+            if self._synced is not None or self._disk_sig is not None:
+                self._mark_synced()
+
+    def _write_config_file(self):
         try:
             # A projection over the declared sections, not dict(self._data):
             # whatever a caller stuffed into _data at runtime is deliberately
             # not persisted. The projection is generated so it can no longer
             # fall behind the declaration (ARCH-738).
-            data = {
-                name: self._data.get(name, default(self))
-                for name, default in CONFIG_SECTIONS.items()
-            }
+            data = self._projection(self._store)
             # Keep a copy of the last known-good file before truncating it,
             # so a partial write can be recovered from on the next load.
             if self.config_path.exists():
@@ -363,11 +533,6 @@ class ConfigManager:
             logger.debug(f"Saved {len(self._audit_log)} audit log entries")
         except Exception as e:
             logger.error(f"Failed to save audit log: {e}")
-
-    def reload(self):
-        """Reload configuration from file."""
-        self._load_config()
-        self._load_audit_log()
 
     @property
     def admin_id(self) -> Optional[int]:
