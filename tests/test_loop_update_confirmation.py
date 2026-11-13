@@ -87,7 +87,8 @@ def test_describe_loop_update_translates_a_risk_limit_denominated_in_quote():
 
 
 def test_describe_loop_update_reports_a_full_replace_as_removed_keys():
-    """``config`` replaces whole (trading_agent.py); a dropped key is a real deletion."""
+    """A key ``current`` has and ``incoming`` omits reads as a real deletion —
+    only `_diff_config_values` is pinned here; production callers merge first."""
     lines = describe_loop_update(
         {"config": {"frequency_sec": 60, "max_ticks": 10}},
         {"config": {"frequency_sec": 60}},

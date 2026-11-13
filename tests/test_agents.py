@@ -346,6 +346,43 @@ def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
     assert "error" in result and "not found" in result["error"].lower()
 
 
+def test_update_strategy_config_takes_effect_over_a_saved_config_yml(
+    tmp_path, monkeypatch
+):
+    """Review on PR #334: ``manage_loops(update, config=...)`` whole-replaced
+    ``default_config`` (``loop.md``), which a saved ``config.yml`` always
+    overrides (``load_full_config``) — so for any loop whose config was ever
+    saved from the dashboard, the chat-approved write was a silent no-op. It
+    must land in the *effective* config instead, merged, same as the
+    dashboard's own ``update_strategy_config`` route."""
+    from condor.agents.config import load_full_config, save_full_config
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "mm", name="MM", agent_key="claude-code")
+    strategy = StrategyStore().create(
+        agent_slug="mm",
+        name="Grid",
+        instructions="tick",
+        default_config={"frequency_sec": 300, "max_pairs": 3},
+    )
+    # The dashboard saved a runtime override, as `update_strategy_config` does.
+    save_full_config(
+        strategy.home,
+        load_full_config(strategy.home, {"frequency_sec": 1800, "max_pairs": 3}),
+    )
+
+    result = ta.manage_loops(
+        action="update", loop_id=strategy.key, config={"frequency_sec": 600}
+    )
+
+    assert result == {"updated": True, "loop_id": strategy.key, "name": "Grid"}
+    effective = load_full_config(strategy.home, strategy.default_config)
+    assert effective["frequency_sec"] == 600
+    # The rest of the saved config.yml survives the merge.
+    assert effective["max_pairs"] == 3
+
+
 def test_routines_dir_resolves_bare_agent_slug(tmp_path, monkeypatch):
     """A bare agent slug (no strategy yet) resolves to its routines dir."""
     from mcp_servers.condor.tools import routines as routines_tool

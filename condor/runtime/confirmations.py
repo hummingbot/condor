@@ -430,7 +430,7 @@ def _loop_update_detail(tool_call: dict[str, Any]) -> str:
     if args is None or args.get("action") not in danger.DANGEROUS_LOOP_ACTIONS:
         return ""
 
-    from condor.agents.config import describe_loop_update
+    from condor.agents.config import describe_loop_update, load_full_config
     from condor.agents.strategy import StrategyStore
 
     loop_id = args.get("loop_id")
@@ -440,13 +440,20 @@ def _loop_update_detail(tool_call: dict[str, Any]) -> str:
     if strategy is None:
         return f"Loop '{loop_id}' not found — nothing to diff."
 
+    # A saved `config.yml` overrides `loop.md`'s `default_config`
+    # (`load_full_config` overlays it) — the *effective* current config, and
+    # the one `update_strategy` actually writes back to. Diffing against the
+    # bare `default_config` would show a stale "old" value for any loop whose
+    # config was ever saved from the dashboard, for a write that otherwise
+    # looked approved but changed nothing a human could see.
+    current_config = load_full_config(strategy.home, strategy.default_config)
     current = {
         "name": strategy.name,
         "description": strategy.description,
         "instructions": strategy.instructions,
         "agent_key": strategy.agent_key,
         "skills": strategy.skills,
-        "config": strategy.default_config,
+        "config": current_config,
     }
     # Mirrors `update_strategy`'s own truthy checks (`trading_agent.py`) exactly:
     # an empty string or an empty config dict is a no-op there, so it must read
@@ -460,7 +467,10 @@ def _loop_update_detail(tool_call: dict[str, Any]) -> str:
     if args.get("skills") is not None:
         incoming["skills"] = args["skills"]
     if args.get("config"):
-        incoming["config"] = args["config"]
+        # `update_strategy` merges into the effective config, same as the
+        # dashboard's own config write (`update_strategy_config`) — never a
+        # whole replace — so the diff is built the same way here too.
+        incoming["config"] = {**current_config, **args["config"]}
     lines = describe_loop_update(current, incoming)
     if not lines:
         return "No field in this update differs from the loop's current settings."

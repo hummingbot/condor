@@ -203,14 +203,15 @@ _LOOP_SCALAR_FIELDS: tuple[str, ...] = ("name", "description", "agent_key")
 
 
 def _diff_config_values(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:
-    """Dotted old→new lines for a ``config``/``default_config`` replacement.
+    """Dotted old→new lines for a ``config``/``default_config`` comparison.
 
-    ``update_strategy`` (``mcp_servers/condor/tools/trading_agent.py``) assigns
-    ``default_config`` whole rather than patching it — a key the incoming dict
-    omits is a key that write deletes, so that is reported as ``(removed)``
-    rather than silently matching old-equals-new. A nested dict (``risk_limits``)
-    is compared per sub-key, dotted, the same way :func:`config_drift` already
-    reports one.
+    A key ``old`` has and ``new`` omits is reported as ``(removed)`` rather
+    than silently matching old-equals-new — callers that merge the incoming
+    config onto the current one before diffing (``update_strategy``,
+    ``update_strategy_config``) never trigger this; it only fires for a
+    caller that genuinely replaces the dict whole. A nested dict
+    (``risk_limits``) is compared per sub-key, dotted, the same way
+    :func:`config_drift` already reports one.
     """
     lines: list[str] = []
     for key in sorted(set(old) | set(new)):
@@ -253,8 +254,11 @@ def describe_loop_update(
     ``agent_key``, ``skills``, ``config``). ``incoming`` is the same shape,
     carrying only the keys this particular call actually sent — a key it omits
     never appears here, since ``update_strategy`` leaves a field it was not
-    given untouched (unlike ``config``, which it replaces whole; see
-    :func:`_diff_config_values`).
+    given untouched. ``config`` is the caller's own merge of the incoming
+    values onto the loop's *effective* current config (``load_full_config``,
+    which a saved ``config.yml`` overrides ``default_config`` on) — the
+    omitted-key-is-removed reading of :func:`_diff_config_values` only fires
+    for a hand-built ``current``/``incoming`` pair that genuinely drops one.
 
     This is what a human reads in the confirmation prompt before approving the
     write — the only place it is shown to anyone.

@@ -65,6 +65,7 @@ from condor.layering import (
     fork_if_stock,
     resolves_to_stock,
     stock_delete_error,
+    stock_path,
 )
 from condor.memory.paths import (
     CHAT_SLUG,
@@ -403,6 +404,7 @@ class AgentStore:
             )
         try:
             stock_only_def = resolves_to_stock(slug, AGENT_MD)
+            has_stock_twin = stock_path(slug, AGENT_MD) is not None
             agent_dir = agent_home(slug)
         except UnsafeIdError:
             # A traversal slug names no deletable agent (SEC-648).
@@ -423,10 +425,20 @@ class AgentStore:
         from condor.agents.bundle import stamp_path
 
         stamp_path(agent_dir).unlink(missing_ok=True)
-        # Remove everything else this agent owns too — routines, store/
-        # (code_trust.yml), mutes.yml, forked skills, strategies. Leaving any
-        # of it behind on a partial rmdir is what let a recreated agent of the
-        # same slug silently inherit the old one's routines (CORR-1134).
+        if has_stock_twin:
+            # Only the local fork of AGENT.md was this install's to remove —
+            # the slug still resolves (to the shipped definition), so its
+            # loops, sessions, config and journals are still a live agent's,
+            # not an orphan. Wiping agent_dir here would be the config.yml,
+            # loops/*/sessions and routines of a shipped agent the user only
+            # ever re-modeled, which "delete" never asked for.
+            log.info("Reverted %s to stock (removed its local AGENT.md fork)", slug)
+            return True
+        # A genuinely local agent: remove everything else it owns too —
+        # routines, store/ (code_trust.yml), mutes.yml, forked skills,
+        # strategies. Leaving any of it behind on a partial rmdir is what let
+        # a recreated agent of the same slug silently inherit the old one's
+        # routines (CORR-1134).
         shutil.rmtree(agent_dir, ignore_errors=True)
         log.info("Deleted agent %s", slug)
         return True

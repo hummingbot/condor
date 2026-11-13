@@ -194,6 +194,34 @@ def test_deleting_a_stock_agent_is_refused(stock):
     assert (stock / "AGENT.md").exists()
 
 
+def test_deleting_a_locally_forked_stock_agent_only_removes_the_fork(stock):
+    """A local fork of a shipped agent still has a stock twin — delete must
+    only undo the fork (reverting to stock), not wipe the whole agent home.
+
+    Review on PR #334: a forked ``AGENT.md`` (picking a model, say) made
+    ``resolves_to_stock`` false, so ``shutil.rmtree(agent_dir)`` ran and took
+    the agent's config.yml, loops and sessions with it even though the agent
+    stayed listed (reverted to stock)."""
+    agent = AgentStore().get("scout")
+    agent.agent_key = "claude-code"
+    AgentStore().update(agent)
+    local_loop = agent_home("scout") / "loops" / "grid" / "loop.md"
+    _write(local_loop, "---\nname: Grid\n---\n\ntick\n")
+    config_yml = agent_home("scout") / "config.yml"
+    _write(config_yml, "frequency_sec: 60\n")
+
+    assert AgentStore().delete("scout") is True
+
+    assert not (agent_home("scout") / "AGENT.md").exists()
+    assert (stock / "AGENT.md").exists()
+    # Reverted to stock, not gone.
+    assert AgentStore().get("scout") is not None
+    assert AgentStore().get("scout").source == stock / "AGENT.md"
+    # Everything else this install's fork of the agent owned is untouched.
+    assert local_loop.exists()
+    assert config_yml.exists()
+
+
 def test_deleting_a_stock_strategy_is_refused(stock):
     _write(
         stock / "loops" / "shipped" / "loop.md",

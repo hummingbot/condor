@@ -110,9 +110,20 @@ def _manage_strategy(
             s.agent_key = agent_key
         if skills is not None:
             s.skills = skills
-        if config:
-            s.default_config = config
         store.update(s)
+        if config:
+            # Merged into the *effective* config (`config.yml`, which always
+            # overrides `loop.md`'s `default_config` once saved — see
+            # `load_full_config`), the same way the dashboard's own config
+            # write does (`update_strategy_config`). A whole-replace of
+            # `default_config` here was a silent no-op for any loop whose
+            # config was ever saved from the dashboard: `config.yml` kept
+            # overriding it and the chat-approved change never took effect.
+            from condor.agents.config import load_full_config, save_full_config
+
+            effective = load_full_config(s.home, s.default_config)
+            effective.update(config)
+            save_full_config(s.home, effective)
         return {"updated": True, "loop_id": s.key, "name": s.name}
 
     elif action == "delete_strategy":
