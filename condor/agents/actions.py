@@ -214,6 +214,34 @@ def last_effect_at(actions: Iterable[AgentAction]) -> float:
     return max((a.at for a in actions if is_effect(a)), default=0.0)
 
 
+#: The verb whose subject is a bot that was told to stop. The brake, and the
+#: act that retires a departed bot from this session's ledger.
+STOP_VERB = "manage_bots:stop_bot"
+
+
+def stopped_bot_names(tool_calls: list[dict[str, Any]]) -> list[str]:
+    """Bot names this tick actually stopped, in stream order.
+
+    Pure, and derived from the same folded list the action log is, so a stop
+    that is logged is a stop that retired the bot.
+    """
+    names: list[str] = []
+    for tool_call in tool_calls:
+        try:
+            if str(tool_call.get("status") or "") != "completed":
+                continue
+            call = _as_gate_call(tool_call)
+            if _verb(tool_call_name(call), call) != STOP_VERB:
+                continue
+            args = tool_call_input(call)
+            name = args.get("bot_name") if isinstance(args, dict) else None
+            if isinstance(name, str) and name.strip() and name.strip() not in names:
+                names.append(name.strip())
+        except Exception:  # noqa: BLE001 - one odd call must not lose the rest
+            log.debug("actions: skipping an unreadable tool call", exc_info=True)
+    return names
+
+
 def _deployed_name(verb: str, call: dict[str, Any]) -> str:
     """The bot name a deploy names, or ``""`` for anything that is not one."""
     if verb != DEPLOY_VERB:

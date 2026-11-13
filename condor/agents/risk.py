@@ -143,6 +143,13 @@ class RiskState:
     # flat book, and it is treated like a tracker that raised rather than
     # compared against the limits.
     drawdown_known: bool = True
+    # A session whose bot has gone but whose positions were never verified
+    # closed. It may take recovery ticks -- otherwise the tick that could clean
+    # up is the one being refused -- but it may not add exposure, because the
+    # bot book cannot see a dead bot's LP or spot positions and nothing has
+    # proved they are gone. Cleared by stopping the departed bot, which retires
+    # it from the ledger.
+    recovery_only: bool = False
     # The limits these metrics are judged against, carried so ``to_dict`` can
     # show them to the agent. A bare ``RiskState()`` reports ``RiskLimits``'
     # own defaults; ``RiskEngine.get_state`` passes the engine's limits.
@@ -625,6 +632,21 @@ class RiskEngine:
         action = input_data.get("action", "")
 
         if action in EXPOSURE_ADDING_BOT_ACTIONS:
+            if current_state is not None and getattr(
+                current_state, "recovery_only", False
+            ):
+                # The drawdown block was lifted because no bot of ours is
+                # running -- not because the funds were accounted for. A bot
+                # that died before its first reading may have left LP or spot
+                # positions on the venue, which the bot book cannot see and the
+                # venue guard does not cover. Adding exposure on top of that is
+                # the step that turns one unexplained position into two.
+                return False, (
+                    "this session's bot is gone and its positions have never "
+                    "been verified closed, so new exposure is refused: check "
+                    "the venue, then stop/archive the departed bot "
+                    "(manage_bots action='stop_bot') to retire it"
+                )
             refusal = _book_refusal(current_state)
             if refusal:
                 return refusal

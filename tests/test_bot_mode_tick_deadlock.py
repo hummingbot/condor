@@ -533,3 +533,129 @@ def test_a_confirmed_claim_ends_the_drawdown_exemption(tmp_path, monkeypatch):
     # The real adoption pass sees the bot, and the exemption is over.
     asyncio.run(engine._adopt_running_bots(_LiveBots(["brigado-grid-20261027-101500"])))
     assert asyncio.run(engine._gather_tick_context(object())) is None
+
+# ----------------------------------------------------------------------
+# 5. A deploy that landed and then died: the bot never produced a reading
+# ----------------------------------------------------------------------
+
+
+def _liveness(names, known=True):
+    async def go(client):
+        return list(names), known
+
+    return go
+
+
+def _engine_holding_a_dead_bot(tmp_path, monkeypatch, *, live, known=True):
+    """A session that deployed, whose bot died before it could report."""
+    engine = _engine(tmp_path, monkeypatch, bot_mode="bot", bot_name="brigado-grid")
+    monkeypatch.setattr(engine, "_adopt_running_bots", _async(None))
+    monkeypatch.setattr(
+        engine.provider_registry, "run_core_providers", _providers(reading="missing")
+    )
+    monkeypatch.setattr(engine, "_notify", _async(None))
+    import condor.fetchers.bot_performance as bot_performance
+
+    monkeypatch.setattr(
+        bot_performance, "fetch_live_instance_names_checked", _liveness(live, known)
+    )
+    assert engine.ledger is not None
+    engine.ledger.note_deploy("brigado-grid")
+    assert engine.ledger.confirmed_bases() == ["brigado-grid"]
+    engine.journal.record_tick("deployed")
+    engine.journal.record_snapshot(0.0, 0.0, 0, 0.0, reading="missing")
+    return engine
+
+
+def test_a_deploy_that_died_stops_holding_the_loop(tmp_path, monkeypatch):
+    """The reported lock-up, end to end.
+
+    The deploy landed, so the ledger holds a *confirmed* base; the bot died at
+    startup, so no reading was ever recorded. Nothing can clear it — the tick
+    that would produce a reading is the tick being blocked — and the session
+    reported ``Running`` while taking no ticks. With the orchestrator showing no
+    live bot behind that base, nothing is at stake.
+    """
+    engine = _engine_holding_a_dead_bot(tmp_path, monkeypatch, live=[])
+
+    ctx = asyncio.run(engine._gather_tick_context(object()))
+
+    assert ctx is not None, "a session whose bot is gone may still take a tick"
+    assert ctx.risk_state.is_blocked is False
+
+
+def test_a_live_but_silent_bot_still_blocks(tmp_path, monkeypatch):
+    """The narrowing: liveness, not the ledger, decides what is at stake."""
+    engine = _engine_holding_a_dead_bot(
+        tmp_path, monkeypatch, live=["brigado-grid-20261110-041813"]
+    )
+
+    assert asyncio.run(engine._gather_tick_context(object())) is None
+    assert "no drawdown reading on record" in engine.journal._path.read_text()
+
+
+def test_unknown_liveness_still_blocks(tmp_path, monkeypatch):
+    """An orchestrator that did not answer is not evidence that nothing runs."""
+    engine = _engine_holding_a_dead_bot(tmp_path, monkeypatch, live=[], known=False)
+
+    assert asyncio.run(engine._gather_tick_context(object())) is None
+    assert "no drawdown reading on record" in engine.journal._path.read_text()
+
+# ----------------------------------------------------------------------
+# 6. Recovery ticks may run, but may not add exposure (review follow-up)
+# ----------------------------------------------------------------------
+
+
+def test_a_recovery_tick_is_marked_and_may_not_add_exposure(tmp_path, monkeypatch):
+    """Lifting the drawdown block is not the same as accounting for the funds.
+
+    A bot that died before its first reading can leave LP or spot positions the
+    bot book cannot see, and the venue guard does not cover them. The tick may
+    run so the session can clean up; a deploy on top is refused until the
+    departed bot is retired.
+    """
+    engine = _engine_holding_a_dead_bot(tmp_path, monkeypatch, live=[])
+
+    ctx = asyncio.run(engine._gather_tick_context(object()))
+    assert ctx is not None
+    assert ctx.risk_state.recovery_only is True
+
+    call = {
+        "tool": "manage_bots",
+        "input": {"action": "deploy", "bot_name": "brigado-grid",
+                  "controllers_config": ["cfg"]},
+    }
+    allowed, reason = engine.risk.check_bot_action(call, current_state=ctx.risk_state)
+    assert allowed is False
+    assert "never been verified closed" in reason
+
+
+def test_recovery_still_allows_the_brakes(tmp_path, monkeypatch):
+    engine = _engine_holding_a_dead_bot(tmp_path, monkeypatch, live=[])
+    ctx = asyncio.run(engine._gather_tick_context(object()))
+
+    call = {"tool": "manage_bots", "input": {"action": "stop_bot", "bot_name": "brigado-grid"}}
+    allowed, _ = engine.risk.check_bot_action(call, current_state=ctx.risk_state)
+    assert allowed is True, "standing in front of a brake is the worse failure"
+
+
+def test_stopping_a_departed_bot_retires_it(tmp_path, monkeypatch):
+    from condor.agents.actions import stopped_bot_names
+
+    call = {
+        "name": "manage_bots",
+        "status": "completed",
+        "input": {"action": "stop_bot", "bot_name": "brigado-grid-20261110-041813"},
+    }
+    assert stopped_bot_names([call]) == ["brigado-grid-20261110-041813"]
+
+    engine = _engine_holding_a_dead_bot(tmp_path, monkeypatch, live=[])
+    assert engine.ledger.confirmed_bases() == ["brigado-grid"]
+    engine.ledger.forget("brigado-grid")
+    assert engine.ledger.confirmed_bases() == []
+
+    # With the base retired there is nothing to be at stake, and nothing to
+    # freeze: the next tick is an ordinary one.
+    ctx = asyncio.run(engine._gather_tick_context(object()))
+    assert ctx is not None
+    assert ctx.risk_state.recovery_only is False

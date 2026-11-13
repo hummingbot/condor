@@ -193,6 +193,15 @@ class TickEngine:
     # now that the risk gate and the journal snapshot do ([[CORR-750]]).
     _tick_reading: str = field(default="", init=False)
     _last_successful_action_at: float = field(default=0.0, init=False)
+    # Whether any bot this session owns is RUNNING, as the orchestrator lists
+    # it. ``_live_read_at`` is compared with ``_last_tick_at`` to tell a reading
+    # taken this tick from one carried over. Used only by the drawdown guard:
+    # a base the ledger holds with no live bot behind it has nothing at stake,
+    # which is the difference between a bot that died before it could report
+    # and one that is trading silently.
+    _live_bases: set[str] = field(default_factory=set, init=False)
+    _live_known: bool = field(default=False, init=False)
+    _live_read_at: float = field(default=-1.0, init=False)
     _last_error: str = field(default="", init=False)
     # The first tick's two moments, so a caller that started this run can report
     # what the run did instead of that a task was created (CORR-728).
@@ -1020,10 +1029,29 @@ class TickEngine:
         # stake. Reading it as "nothing deployed" there would switch the guard
         # off for every executor-mode agent permanently — the opposite of the
         # narrow exemption this is.
+        # A confirmed base used to end the exemption on its own, and a deploy
+        # that landed and then died leaves one behind: the bot was created, so
+        # the ledger holds it; it never reported, so the tracker stays
+        # ``missing`` for ever. Nothing can clear that -- the tick that would
+        # produce a reading is the tick being blocked -- and the session sits at
+        # "no drawdown reading on record" while its journal says ``Running``.
+        #
+        # So a base counts only while it is actually running, and an unknown
+        # answer exempts nothing: a session that cannot see its own fleet is
+        # exactly the blind spot this guard exists for.
+        confirmed = (
+            self.ledger.confirmed_bases()
+            if self.ledger is not None and self.ledger.enforced
+            else []
+        )
+        live_known, live_bases = await self._bot_liveness(client)
+        none_of_ours_running = (
+            bool(confirmed) and live_known and not (set(confirmed) & live_bases)
+        )
         nothing_at_stake = (
             self.ledger is not None
             and bool(self.ledger.enforced)
-            and not self.ledger.confirmed_bases()
+            and (not confirmed or none_of_ours_running)
         )
         # And whether the providers answered *this* tick. The journal is written
         # after this gate, so a tick whose read succeeded still presents an empty
@@ -1036,6 +1064,12 @@ class TickEngine:
             nothing_at_stake=nothing_at_stake,
             reading_in_hand=reading_in_hand,
         )
+        # The block above may have been lifted because our bot is gone. That
+        # answers "may this tick run", not "may it add exposure": a bot that
+        # died before reporting can leave LP/spot positions the book cannot see.
+        # Recovery ticks stay open so the session can clean up; new exposure
+        # waits until the departed bot is retired by stopping it.
+        risk_state.recovery_only = none_of_ours_running
         live_executors = self._last_skill_data.get("executors", [])
         live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
         # Inherited positions count against the limits (CORR-726). The provider
@@ -1405,6 +1439,16 @@ class TickEngine:
         if self.ledger is not None:
             for bot_name in actions_mod.deployed_bot_names(tool_calls):
                 self.ledger.note_deploy(bot_name)
+            # A stop that lands on a bot the orchestrator no longer lists is the
+            # session saying "this one is done". Retiring it is what releases
+            # the exposure freeze: the ledger stops claiming a base that has no
+            # bot behind it, so the next tick is ordinary again.
+            for bot_name in actions_mod.stopped_bot_names(tool_calls):
+                from .ownership import strip_deploy_suffix
+
+                base = strip_deploy_suffix(bot_name)
+                if self._live_known and base not in self._live_bases:
+                    self.ledger.forget(base)
 
         # Every journal.md update of this tick goes into one batch, so the file
         # is rewritten once instead of three-to-five times (PERF-136).
@@ -1540,6 +1584,32 @@ class TickEngine:
         """
         return bool(self.ledger is not None and self.ledger.confirmed_bases())
 
+    async def _bot_liveness(self, client) -> tuple[bool, set[str]]:
+        """Whether this session's bots are running, as the orchestrator lists them.
+
+        Reuses what the adoption pass read this tick; otherwise asks. An
+        unanswered listing is ``(False, set())`` -- "unknown", never "nothing
+        running" -- because the exemption it feeds must not open on a failure.
+        """
+        # -1 until a reading exists: "never read" must not compare as "read this
+        # tick", and at startup ``_last_tick_at`` is still 0.
+        if self._live_read_at > 0 and self._live_read_at >= self._last_tick_at:
+            return self._live_known, self._live_bases
+        from .ownership import strip_deploy_suffix
+        from condor.fetchers.bot_performance import fetch_live_instance_names_checked
+
+        try:
+            live, live_known = await fetch_live_instance_names_checked(client)
+        except Exception:  # noqa: BLE001 - an unanswered listing is "unknown"
+            return False, set()
+        if not live_known:
+            return False, set()
+        bases = {strip_deploy_suffix(n) for n in live if n}
+        self._live_known = True
+        self._live_bases = bases
+        self._live_read_at = time.time()
+        return True, bases
+
     async def _adopt_running_bots(self, client) -> None:
         """Record the bots already live that belong to us (FEAT-017).
 
@@ -1606,6 +1676,15 @@ class TickEngine:
         # ownership window on bots that may be dead. Deferring costs a tick and
         # is the same best-effort contract every other failure here uses.
         live, live_known = await fetch_live_instance_names_checked(client)
+        # Recorded even when the rest of the pass defers: whether a base of ours
+        # is running is not an adoption, and the drawdown guard needs it either
+        # way. Unknown stays unknown -- see the exemption in
+        # ``_gather_tick_context``, which never exempts on an unanswered listing.
+        self._live_known = bool(live_known)
+        self._live_bases = (
+            {strip_deploy_suffix(n) for n in live if n} if live_known else set()
+        )
+        self._live_read_at = time.time()
         if not live_known:
             log.warning(
                 "TickEngine %s: bot adoption deferred (liveness unknown — the "
