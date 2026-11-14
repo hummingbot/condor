@@ -178,10 +178,19 @@ class _FakeExecutorsAPI:
             "positions": self._positions_sequence[0] if self._positions_sequence else []
         }
 
+    async def search_executors(self, **kwargs):
+        """Account-wide walk: these tests model a single session, so empty."""
+        return {"data": [], "pagination": {"next_cursor": None}}
+
 
 class _FakeClient:
-    def __init__(self, positions_sequence):
+    def __init__(self, positions_sequence, venue_positions=None):
         self.executors = _FakeExecutorsAPI(positions_sequence)
+        # The file's real _FakeTradingAPI (defined below for the order sweep);
+        # these tests model a book Condor tracked, so the venue adds nothing
+        # unless a test hands it rows.
+        self.trading = _FakeTradingAPI([])
+        self.trading.venue_positions = list(venue_positions or [])
 
 
 class _FakeJournal:
@@ -1077,6 +1086,14 @@ class _FakeTradingAPI:
         self.cancel_calls = []
         self.list_calls = 0
         self.list_filters = []
+        # Account-wide venue positions, for the winddown's book read.
+        self.venue_positions: list = []
+
+    async def get_positions(self, **kwargs):
+        return {
+            "data": list(self.venue_positions),
+            "pagination": {"next_cursor": None},
+        }
 
     async def get_active_orders(
         self, limit=50, connector_names=None, trading_pairs=None, **_kw
