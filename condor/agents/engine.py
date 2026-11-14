@@ -494,6 +494,11 @@ class TickEngine:
                 await finished.wait()
             return False
         self._running = False
+        # A bot this session deployed keeps trading on its own: cancelling the
+        # tick task ends the loop, not the thing the loop started. Stop it here
+        # for the same reason the emergency winddown does (MM-3) -- a session
+        # that reports itself stopped must not leave a controller placing orders.
+        await self._stop_bots_on_stop()
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -502,6 +507,43 @@ class TickEngine:
                 pass
         await self._finish(LoopState.STOPPED, "user")
         return True
+
+    async def _stop_bots_on_stop(self) -> None:
+        """Stop the bots this session deployed, on a graceful stop.
+
+        The winddown has stopped bots since MM-3, but only the *kill switch*
+        path called it. A plain ``stop`` cancelled the tick task and recorded
+        STOPPED while a controller-mode bot went on trading -- the flag-based
+        Orca desk was observed still running, and still holding its LP position,
+        long after its session reported stopped.
+
+        Positions are not force-closed here: this is the graceful path and the
+        bot's own stop decides what happens to what it holds. What it must not
+        do is keep running.
+
+        Deliberately quiet about failure: a stop that cannot reach the API still
+        has to stop the loop, so every error is logged and the teardown
+        continues. The operator sees the bot in the listing either way.
+        """
+        ledger = getattr(self, "ledger", None)
+        if ledger is None or not ledger.bases():
+            return
+        try:
+            client = await self._get_client()
+        except Exception:
+            log.exception("stop: no API client, bots left running")
+            return
+        from .shutdown import _stop_owned_bots
+
+        try:
+            stopped, failures = await _stop_owned_bots(self, client)
+        except Exception:
+            log.exception("stop: could not stop this session's bots")
+            return
+        if stopped:
+            log.warning("stop: stopped %d bot(s): %s", len(stopped), ", ".join(stopped))
+        for failure in failures:
+            log.warning("stop: bot stop failed: %s", failure)
 
     async def _reap_client(self, *, during: str = "") -> None:
         """Stop the live per-tick ACP client, if any.

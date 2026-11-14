@@ -17,6 +17,16 @@ import condor.agents.journal as journal_mod
 from condor.agents import shutdown as shutdown_module
 from condor.agents import strategy as strategy_module
 from condor.agents.engine import TickEngine
+
+
+async def _no_bots():
+    """Stub bot pass: these tests model sessions that deployed no bot.
+
+    The bot pass itself is covered in tests/test_engine_stop_bots.py.
+    """
+    return None
+
+
 from condor.agents.journal import JournalManager
 from condor.agents.shutdown import (
     DEFAULT_POLICY,
@@ -178,10 +188,19 @@ class _FakeExecutorsAPI:
             "positions": self._positions_sequence[0] if self._positions_sequence else []
         }
 
+    async def search_executors(self, **kwargs):
+        """Account-wide walk: these tests model a single session, so empty."""
+        return {"data": [], "pagination": {"next_cursor": None}}
+
 
 class _FakeClient:
-    def __init__(self, positions_sequence):
+    def __init__(self, positions_sequence, venue_positions=None):
         self.executors = _FakeExecutorsAPI(positions_sequence)
+        # The file's real _FakeTradingAPI (defined below for the order sweep);
+        # these tests model a book Condor tracked, so the venue adds nothing
+        # unless a test hands it rows.
+        self.trading = _FakeTradingAPI([])
+        self.trading.venue_positions = list(venue_positions or [])
 
 
 class _FakeJournal:
@@ -403,6 +422,7 @@ def test_run_shutdown_idempotent(monkeypatch):
         notifications.append(msg)
 
     stub = SimpleNamespace(
+        _stop_bots_on_stop=_no_bots,
         _shutting_down=False,
         _running=True,
         _paused=False,
@@ -459,6 +479,7 @@ def _winddown_stub(monkeypatch):
         events.append(("notify", msg))
 
     stub = SimpleNamespace(
+        _stop_bots_on_stop=_no_bots,
         _shutting_down=False,
         _shutdown_finished=None,
         _running=True,
@@ -830,9 +851,12 @@ def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
 def test_winddown_survives_a_positions_fetch_failure_during_verify(
     tmp_path, monkeypatch
 ):
-    """_verify_and_retry calls the positions fetch unguarded, so it must go
-    through the non-strict fetcher: a failed request reads as no positions and
-    the winddown still completes instead of propagating ([[ARCH-682]])."""
+    """A failed positions read must not raise, and must not read as flat.
+
+    The verification reads are strict so a broken endpoint cannot be mistaken
+    for an empty book: the winddown still completes instead of propagating
+    ([[ARCH-682]]), but it reports ``verify=unknown`` and warns, because it
+    never saw the book (hummingbot/condor#339)."""
     running = [{"id": "e_perp", "connector": "binance_perpetual"}]
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
 
@@ -842,9 +866,10 @@ def test_winddown_survives_a_positions_fetch_failure_during_verify(
     monkeypatch.setattr(client.executors, "get_positions_summary", boom)
     asyncio.run(run_shutdown(engine, "test breach"))
 
-    assert ("shutdown_done", "stopped=1, bots=0, failures=0, verify=flat") in [
-        (a, r) for a, r in engine.journal.actions
-    ]
+    done = [r for a, r in engine.journal.actions if a == "shutdown_done"]
+    assert done and "verify=unknown" in done[0]
+    assert "flat" not in done[0]
+    assert any("could NOT be read" in n for n in notes)
 
 
 # ── winddown reads only the executor list (PERF-641) ──
@@ -1073,6 +1098,14 @@ class _FakeTradingAPI:
         self.cancel_calls = []
         self.list_calls = 0
         self.list_filters = []
+        # Account-wide venue positions, for the winddown's book read.
+        self.venue_positions: list = []
+
+    async def get_positions(self, **kwargs):
+        return {
+            "data": list(self.venue_positions),
+            "pagination": {"next_cursor": None},
+        }
 
     async def get_active_orders(
         self, limit=50, connector_names=None, trading_pairs=None, **_kw
