@@ -107,11 +107,13 @@ def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
 # This runs first and without any LLM, so a kill switch is guaranteed to act even
 # when the model or market is misbehaving (the exact conditions that trigger it).
 # The reliable close primitive is ``stop_executor(keep_position=False)``, which
-# closes the position the executor holds. We deliberately do NOT call
-# ``clear_position_held`` on live positions: it only clears *tracking* (for
-# already externally-closed positions) and would hide a still-open one. Genuine
-# orphan positions (open, no executor) are left to the LLM cleanup pass and, if
-# they persist, the verify step raises a loud alert.
+# closes the position the executor holds. For a position no executor holds, the
+# verify step now market-closes it itself (``_close_stranded_positions``) --
+# ``flatten_all`` advertised a capability nothing in the winddown exercised
+# (hummingbot/condor#339). ``clear_position_held`` is still never called on a
+# position that may be open: it only clears *tracking* and would hide live
+# exposure. It is called after a confirmed close, and only then, so the stale
+# record cannot keep a closed position reading as stranded forever.
 
 
 def _is_perp(connector: str) -> bool:
@@ -299,15 +301,18 @@ async def _stop_owned_bots(engine: Any, client: Any) -> tuple[list[str], list[st
     return stopped, failures
 
 
-async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
+async def _fetch_positions(
+    client: Any, agent_id: str, strict: bool = False
+) -> list[dict]:
     """Positions summary scoped to this session (``controller_id``).
 
-    Non-strict on purpose: ``run_shutdown`` never raises for an individual API
-    failure and ``_verify_and_retry`` calls this unguarded, so a failed request
-    is logged by the fetcher and reads as no positions.
+    Non-strict by default: ``run_shutdown`` never raises for an individual API
+    failure, so a failed request is logged by the fetcher and reads as no
+    positions. The verify step passes ``strict=True`` instead -- a failed read
+    must never be reported as a flat book (hummingbot/condor#339).
     """
     return await fetch_tracked_positions(
-        client, controller_id=agent_id or None, strict=False
+        client, controller_id=agent_id or None, strict=strict
     )
 
 
@@ -350,16 +355,492 @@ async def _deterministic_baseline(
     return stopped, failures
 
 
+def _position_side(position: dict) -> str:
+    """``LONG``/``SHORT`` for a position row, from either field it may use."""
+    return (
+        str(position.get("side") or position.get("position_side") or "").strip().upper()
+    )
+
+
+def _position_amount(position: dict) -> float:
+    """Absolute base size of ``position``; ``0.0`` when the row does not say."""
+    for key in ("amount", "net_amount_base", "net_amount", "units"):
+        raw = position.get(key)
+        if raw is None:
+            continue
+        try:
+            return abs(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+_TERMINAL_EXECUTOR_STATES = {
+    "TERMINATED",
+    "FAILED",
+    "COMPLETED",
+    "CLOSED",
+    "STOPPED",
+    "CANCELLED",
+}
+
+
+def _position_key(position: dict) -> tuple[str, str]:
+    """``(connector, pair)`` -- the identity a position and an executor share."""
+    return (_position_connector(position), _position_pair(position))
+
+
+async def _account_executor_pairs(
+    engine: Any, client: Any
+) -> tuple[set[tuple[str, str]], str]:
+    """Pairs owned by *any* live executor on the account, and a failure reason.
+
+    Session-wide ownership is too narrow to gate a close. A second strategy on
+    the same account owns its own executor rows and this winddown never read
+    them, so the pair looks unowned and the reduce-only close would flatten
+    another desk's position. Live *and* ``SHUTTING_DOWN`` rows both own their
+    pair: an executor that is already flattening is not unowned, and a second
+    close would race it (CORR-710).
+
+    The result is cached on the engine for the life of one winddown, which
+    reads the book three times (first verification, post-stop, post-close) and
+    would otherwise pay for a full-history executor walk on each.
+
+    Returns ``(pairs, "")`` on success, ``(set(), reason)`` on failure. A
+    failure is *not* an empty set of owners -- the caller must treat it as
+    unproven ownership and close nothing.
+    """
+    cached = getattr(engine, "_shutdown_account_pairs", None)
+    if cached is not None:
+        return cached
+
+    from condor.fetchers.executors import describe_executor_error, fetch_all_executors
+
+    pairs: set[tuple[str, str]] = set()
+    for status in ("RUNNING", "SHUTTING_DOWN"):
+        try:
+            rows = await fetch_all_executors(client, status=status) or []
+        except Exception as e:
+            # describe_executor_error, never str(e): this text reaches the
+            # operator's shutdown notification and an aiohttp error embeds the
+            # backend URL.
+            _, message = describe_executor_error(e)
+            result = (set(), f"could not read {status.lower()} executors: {message}")
+            engine._shutdown_account_pairs = result
+            return result
+        pairs |= _live_executor_pairs(rows)
+
+    result = (pairs, "")
+    engine._shutdown_account_pairs = result
+    return result
+
+
+def _live_executor_pairs(running: list[dict]) -> set[tuple[str, str]]:
+    """(connector, pair) still owned by a live executor, per the rows handed in."""
+    owned: set[tuple[str, str]] = set()
+    for ex in running or []:
+        if str(ex.get("status") or "").upper() in _TERMINAL_EXECUTOR_STATES:
+            continue
+        connector = ex.get("connector") or ex.get("connector_name") or ""
+        pair = ex.get("trading_pair") or ex.get("pair") or ""
+        if connector and pair:
+            owned.add((str(connector), str(pair)))
+    return owned
+
+
+async def _close_with_limit(
+    client: Any,
+    account: str,
+    connector: str,
+    pair: str,
+    side: str,
+    size: float,
+) -> bool:
+    """Retry a refused MARKET close as an aggressive IOC limit at the mark.
+
+    Not every connector can price a MARKET order on its own. Derive answers
+    ``No order book exists for 'ETH-USDC'`` for one, because its market-order
+    path reads a cached book snapshot that a quiet instrument may never have
+    produced. A winddown that only speaks MARKET therefore cannot close that
+    position at all: it reports the exposure and asks the operator to do by
+    hand what the agent could have done.
+
+    The limit is 0.3% *through* the mark -- enough to cross, and inside the
+    band venues that police limit prices enforce (Derive rejects a far-through
+    price with ``11013 Invalid limit price``). The trading router has no
+    ``time_in_force`` parameter, so this cannot ask for IOC: a crossing limit
+    fills as a taker immediately, and anything still resting a moment later is
+    cancelled, because a close that fails must not leave a new order behind.
+
+    Returns ``True`` when the venue accepted the order. Any failure returns
+    ``False`` and the caller reports the original MARKET failure, which is the
+    more informative of the two.
+    """
+    from condor.fetchers.market_data import fetch_current_price
+
+    try:
+        price = await fetch_current_price(
+            client, connector_name=connector, trading_pair=pair
+        )
+    except Exception:
+        log.exception(
+            "shutdown: could not price a limit close for %s %s", connector, pair
+        )
+        return False
+    if not price or price <= 0:
+        log.warning(
+            "shutdown: no price for %s %s; cannot fall back to a limit close",
+            connector,
+            pair,
+        )
+        return False
+
+    limit = float(price) * (0.997 if side == "LONG" else 1.003)
+    order: dict = {}
+    try:
+        order = await client.trading.place_order(
+            account_name=account,
+            connector_name=connector,
+            trading_pair=pair,
+            trade_type="SELL" if side == "LONG" else "BUY",
+            amount=size,
+            order_type="LIMIT",
+            price=round(limit, 8),
+            position_action="CLOSE",
+        )
+    except Exception as e:
+        log.warning(
+            "shutdown: limit fallback for %s %s also failed: %s", connector, pair, e
+        )
+        return False
+
+    # A crossing limit should fill at once. Anything still resting is a close
+    # that did not happen, and leaving it would hand the next tick a resting
+    # order where it expected a flat pair.
+    order_id = str((order or {}).get("order_id") or "")
+    await asyncio.sleep(2)
+    try:
+        resting = await client.trading.get_active_orders(
+            limit=50, connector_names=[connector], trading_pairs=[pair]
+        )
+        rows = resting.get("data") if isinstance(resting, dict) else resting
+        for row in rows or []:
+            if order_id and str(row.get("order_id")) != order_id:
+                continue
+            await client.trading.cancel_order(
+                account_name=account, connector_name=connector, order_id=order_id
+            )
+            log.warning(
+                "shutdown: the %s %s fallback did not cross; cancelled %s",
+                connector,
+                pair,
+                order_id,
+            )
+            return False
+    except Exception:
+        log.exception(
+            "shutdown: could not confirm the %s %s fallback fill", connector, pair
+        )
+
+    log.warning(
+        "shutdown: closed %s %s with a %s %s limit at %s (the venue refused MARKET)",
+        connector,
+        pair,
+        side,
+        size,
+        round(limit, 8),
+    )
+    return True
+
+
+async def _close_stranded_positions(
+    engine: Any,
+    client: Any,
+    policy: ShutdownPolicy,
+    stranded: list[dict],
+    running: list[dict] | None = None,
+) -> tuple[list[str], list[str], list[dict]]:
+    """Market-close the perp positions the policy said to close, executor or not.
+
+    A position can outlive every executor that could have closed it.
+    ``create_order_executor`` terminates once it has placed a held position, so
+    by the time the kill switch runs there is nothing to stop, nothing resting
+    to cancel, and ``create_order_executor`` is itself refused *because* the
+    session is winding down (hummingbot/condor#339). The winddown then reported
+    the position stranded while holding the one primitive that removes it: a
+    reduce-only market close. This calls that primitive.
+
+    Scoping, so a winddown never closes another strategy's book:
+
+    * only perp connectors -- there is no reduce-only market close for spot, so
+      spot stays the LLM cleanup pass's job, exactly as before;
+    * never a pair a live executor still owns -- that one is ``stop_executor``'s
+      to close, and stopping is the ownership-checked path;
+    * only positions this policy says must go (``_should_remain_open``);
+    * a row with no account, no side or no size is skipped rather than guessed
+      at: a close in the wrong direction opens exposure instead of removing it.
+
+    Idempotent: a second pass over the same book re-reads positions, finds them
+    gone, and closes nothing.
+
+    Returns ``(closed_labels, failures, closed_rows)``. The rows are returned
+    because a close on the venue does not clear Condor's own held-position
+    record -- the caller has to, once the fill is confirmed.
+    """
+    if running is None:
+        running = await _get_running_executors(engine, client)
+    owned = _live_executor_pairs(running)
+
+    # The agent provider keeps only ``RUNNING`` rows, and an executor in
+    # ``SHUTTING_DOWN`` still has a close order working on the venue (CORR-710):
+    # its pair is not unowned, and a second close here would race it and could
+    # reopen the exposure it is flattening. Reading that status costs one walk.
+    # A failure to read it means ownership cannot be proven, so nothing is
+    # closed at all -- closing blind is the failure mode this guard exists for.
+    try:
+        from condor.fetchers.executors import (
+            describe_executor_error,
+            fetch_all_executors,
+        )
+
+        stopping = await fetch_all_executors(client, status="SHUTTING_DOWN") or []
+    except Exception as e:
+        # Never str(e) here: an ``aiohttp`` error stringifies with the backend
+        # URL in it, and this text reaches the operator's shutdown notification.
+        _, message = describe_executor_error(e)
+        return [], [f"could not read stopping executors: {message}"], []
+    owned |= _live_executor_pairs(stopping)
+
+    # ...and every other session's executors too. A second strategy on the same
+    # account is still an owner; without this its pair reads as unowned and the
+    # close would flatten it.
+    account_pairs, why_not = await _account_executor_pairs(engine, client)
+    if why_not:
+        return [], [why_not], []
+    owned |= account_pairs
+
+    async def _close_one(position: dict) -> tuple[dict | None, str | None]:
+        connector = _position_connector(position)
+        pair = _position_pair(position)
+        if not _is_perp(connector) or _should_remain_open(position, policy):
+            return None, None
+        if (connector, pair) in owned:
+            return None, None
+        account = str(position.get("account_name") or "").strip()
+        side = _position_side(position)
+        size = _position_amount(position)
+        if not account or side not in ("LONG", "SHORT") or size <= 0:
+            return None, None
+        try:
+            await client.trading.place_order(
+                account_name=account,
+                connector_name=connector,
+                trading_pair=pair,
+                trade_type="SELL" if side == "LONG" else "BUY",
+                amount=size,
+                order_type="MARKET",
+                position_action="CLOSE",
+            )
+        except Exception as e:
+            # MARKET is not always placeable: a connector that prices it from a
+            # cached book snapshot refuses on a quiet instrument. Fall back to a
+            # crossing IOC limit before reporting the close as failed.
+            if await _close_with_limit(client, account, connector, pair, side, size):
+                return position, None
+            # Keep the raw exception in the failure text: it is what the
+            # operator reads, and a silent close failure is worse than a loud
+            # one -- the position is still there either way.
+            return None, f"close {connector} {pair}: {e}"
+        return position, None
+
+    results = await asyncio.gather(*(_close_one(p) for p in stranded))
+    closed_rows = [row for row, _ in results if row is not None]
+    failures = [message for _, message in results if message]
+    labels = [f"{_position_connector(p)} {_position_pair(p)}" for p in closed_rows]
+    return labels, failures, closed_rows
+
+
+async def _confirm_closes(engine: Any, client: Any, closed_rows: list[dict]) -> None:
+    """Confirm the closes on the venue, then clear the tracking they stranded.
+
+    ``_fetch_positions`` reads Condor's own held-position records, not the
+    exchange. A market close changes the venue position and leaves that record
+    untouched, so without this the verification read keeps finding a position
+    that no longer exists and the winddown reports it stranded forever.
+
+    Clearing is gated on the venue on purpose. ``clear_position_held`` only
+    removes *tracking*, so calling it on a position that is still open would
+    hide live exposure -- exactly what the module comment above forbids. It is
+    called here only for a pair the venue no longer reports, and only for this
+    session's controller.
+
+    A market order fills a moment after it is accepted, so the check is bounded
+    and repeated rather than one-shot: a close that has not filled yet must keep
+    its record visible.
+
+    The read is per connector and must be provably complete. ``fetch_positions``
+    walks at most ``MAX_POSITIONS_FETCH`` rows, so on a server whose book exceeds
+    that cap a truncated read would make an unrelated position's absence look
+    like proof that this close filled -- the record would be cleared and the
+    winddown would report flat while the exposure was still there. A read that
+    hits the cap is therefore inconclusive: that connector's records are left
+    alone.
+    """
+    if not closed_rows:
+        return
+    from condor.fetchers.positions import MAX_POSITIONS_FETCH, fetch_positions
+
+    accounts = {
+        (_position_connector(p), _position_pair(p)): str(
+            p.get("account_name") or "master_account"
+        )
+        for p in closed_rows
+    }
+    confirmed: set[tuple[str, str]] = set()
+    still_open: set[tuple[str, str]] = set()
+
+    for attempt in range(3):
+        confirmed, still_open = set(), set()
+        for connector in {c for c, _ in accounts}:
+            try:
+                rows = (
+                    await fetch_positions(client, connector_name=connector, strict=True)
+                    or []
+                )
+            except Exception:
+                log.exception("shutdown: could not confirm the closes on the venue")
+                engine._verify_read_failed = True
+                return
+            if len(rows) >= MAX_POSITIONS_FETCH:
+                log.warning(
+                    "shutdown: venue read for %s hit the %s-row cap; an "
+                    "incomplete read cannot prove a close, so nothing is cleared",
+                    connector,
+                    MAX_POSITIONS_FETCH,
+                )
+                continue
+            on_venue = {str(r.get("trading_pair") or "") for r in rows}
+            for pair in [p for c, p in accounts if c == connector]:
+                key = (connector, pair)
+                if pair in on_venue:
+                    still_open.add(key)
+                else:
+                    confirmed.add(key)
+        if not still_open or attempt == 2:
+            break
+        await asyncio.sleep(2)
+
+    for connector, pair in sorted(confirmed - still_open):
+        try:
+            await client.executors.clear_position_held(
+                connector_name=connector,
+                trading_pair=pair,
+                account_name=accounts[(connector, pair)],
+                controller_id=engine.agent_id,
+            )
+        except Exception:
+            log.exception(
+                "shutdown: could not clear the held record for %s %s", connector, pair
+            )
+
+
+async def _fetch_venue_positions(
+    engine: Any, client: Any, why: str
+) -> list[dict] | None:
+    """Account-wide open positions **on the venue**; ``None`` when unreadable.
+
+    ``_fetch_positions`` reads Condor's own held-position records, which only
+    exist for a position an executor opened. A desk that signs its orders
+    itself -- flyby's Derive perp, theta's hedge -- never writes one, so the
+    tracked read returns nothing and a winddown announced ``verify=flat`` over
+    a live ETH-PERP position while the venue still held it.
+
+    This is the account-wide read that does answer the question. A capped read
+    is inconclusive for the same reason it is in ``_confirm_closes``: the
+    fetcher walks at most ``MAX_POSITIONS_FETCH`` rows, so a truncated walk
+    cannot prove a position absent, and guessing there is how a winddown
+    reports flat over an open book.
+    """
+    from condor.fetchers.positions import MAX_POSITIONS_FETCH, fetch_positions
+
+    try:
+        rows = await fetch_positions(client, strict=True) or []
+    except Exception:
+        log.exception("shutdown: could not read the venue book for %s", why)
+        engine._verify_read_failed = True
+        return None
+    if len(rows) >= MAX_POSITIONS_FETCH:
+        log.warning(
+            "shutdown: venue read for %s hit the %s-row cap; an incomplete "
+            "read cannot prove a book flat, so nothing is closed on it",
+            why,
+            MAX_POSITIONS_FETCH,
+        )
+        engine._verify_read_failed = True
+        return None
+    return rows
+
+
+async def _read_positions(
+    engine: Any, client: Any, why: str = "the verification"
+) -> list[dict] | None:
+    """Strict book read: this session's tracked positions plus the venue's.
+
+    Every verification read goes through here. A failed request is not an empty
+    book, and a winddown that cannot see the book must say so rather than
+    announce a clean close over it (hummingbot/condor#339).
+
+    The two sources answer different halves of one question. ``tracked`` is
+    what Condor opened; ``venue`` is what the account actually holds. A venue
+    row joins the book only when nothing tracks it **and** no live executor
+    owns its pair -- an executor-owned pair belongs to ``stop_executor``, and
+    reporting it stranded would raise a false alarm on a neighbour's desk. The
+    surviving rows are marked ``_venue_only`` so the close path can tell a
+    position Condor never tracked from one it did.
+    """
+    try:
+        tracked = await _fetch_positions(client, engine.agent_id, strict=True)
+    except Exception:
+        log.exception("shutdown: could not read positions for %s", why)
+        engine._verify_read_failed = True
+        return None
+
+    venue = await _fetch_venue_positions(engine, client, why)
+    if venue is None:
+        return None
+
+    owned, _ = await _account_executor_pairs(engine, client)
+    rows = list(tracked)
+    known = {_position_key(p) for p in rows}
+    for row in venue:
+        key = _position_key(row)
+        if not key[0] or not key[1] or key in known or key in owned:
+            continue
+        known.add(key)
+        marked = dict(row)
+        marked["_venue_only"] = True
+        rows.append(marked)
+    return rows
+
+
 async def _verify_and_retry(
     engine: Any, client: Any, policy: ShutdownPolicy
 ) -> list[dict]:
-    """Re-query positions; retry the deterministic close once; return residuals.
+    """Re-query positions; retry the close; return residuals.
 
     Never trusts the LLM: computes which positions *should* be gone under the
-    policy, and if any remain, stops any still-running executor that should be
-    closed and re-checks. Returns the list of positions still stranded.
+    policy, and if any remain, closes the ones no executor owns and stops any
+    executor that still holds the rest, then re-checks. Returns the list of
+    positions still stranded.
+
+    A read that fails is not a flat book. Every read here is ``strict`` and a
+    failure is recorded on the engine, so the winddown reports ``verify=unknown``
+    and a warning instead of a green "complete" over a book it never saw
+    (hummingbot/condor#339).
     """
-    positions = await _fetch_positions(client, engine.agent_id)
+    positions = await _read_positions(engine, client, why="the first verification")
+    if positions is None:
+        return []
     stranded = [p for p in positions if not _should_remain_open(p, policy)]
     if not stranded:
         return []
@@ -382,7 +863,35 @@ async def _verify_and_retry(
 
     await asyncio.gather(*(_retry_one(ex) for ex in targets))
 
-    positions = await _fetch_positions(client, engine.agent_id)
+    positions = await _read_positions(engine, client, why="the post-stop verification")
+    if positions is None:
+        return []
+    stranded = [p for p in positions if not _should_remain_open(p, policy)]
+    if not stranded:
+        return []
+
+    # Nothing is running for these any more -- stopping was the retry above --
+    # so the position is exactly the leftover a reduce-only close exists for.
+    closed, close_failures, closed_rows = await _close_stranded_positions(
+        engine, client, policy, stranded
+    )
+    engine._stranded_closed = closed
+    engine._stranded_close_failures = close_failures
+    if closed:
+        log.warning(
+            "shutdown: closed %d stranded position(s) no executor owned: %s",
+            len(closed),
+            ", ".join(closed),
+        )
+        # The venue close does not clear Condor's own held record; without this
+        # the read below still finds the position and reports it stranded.
+        await _confirm_closes(engine, client, closed_rows)
+    if not closed and not close_failures:
+        return stranded
+
+    positions = await _read_positions(engine, client, why="the post-close verification")
+    if positions is None:
+        return []
     return [p for p in positions if not _should_remain_open(p, policy)]
 
 
@@ -935,8 +1444,21 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     await _run_llm_cleanup(engine, client, policy, body, failures, cancel)
 
     stranded = await _verify_and_retry(engine, client, policy)
+    closed_stranded = list(getattr(engine, "_stranded_closed", []) or [])
+    failures = failures + list(getattr(engine, "_stranded_close_failures", []) or [])
 
-    if stranded:
+    if getattr(engine, "_verify_read_failed", False):
+        # Not the green message: the winddown could not read the book, so it
+        # cannot claim the book is empty (hummingbot/condor#339).
+        details = ", ".join(_describe_position(p) for p in stranded) or "unknown"
+        msg = (
+            f"⚠️ Agent {agent_id}: emergency shutdown finished, but the position "
+            f"book could NOT be read — verify by hand (policy "
+            f"'{policy.on_kill_switch}', stopped {stopped} executor(s), "
+            f"last seen: {details}). ({reason})"
+        )
+        log.error(msg)
+    elif stranded:
         details = ", ".join(_describe_position(p) for p in stranded) or "unknown"
         msg = (
             f"🚨 Agent {agent_id}: emergency shutdown left {len(stranded)} position(s) "
@@ -950,10 +1472,15 @@ async def run_shutdown(engine: Any, reason: str) -> None:
             if bots_stopped
             else ""
         )
+        closed_note = (
+            f", closed {len(closed_stranded)} stranded position(s)"
+            if closed_stranded
+            else ""
+        )
         msg = (
             f"✅ Agent {agent_id}: emergency shutdown complete — wound down per "
             f"'{policy.on_kill_switch}' (stopped {stopped} executor(s)"
-            f"{bots_note}). ({reason})"
+            f"{bots_note}{closed_note}). ({reason})"
         )
     if failures:
         msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
@@ -962,7 +1489,14 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     await engine._notify(msg)
 
     if engine.journal:
-        verified = "flat" if not stranded else f"{len(stranded)} stranded"
+        if getattr(engine, "_verify_read_failed", False):
+            # Never print "flat" on top of a read that failed: the book is
+            # unknown, and the operator needs to know that, not to be reassured.
+            verified = "unknown (positions unreadable)"
+        elif stranded:
+            verified = f"{len(stranded)} stranded"
+        else:
+            verified = "flat"
         # Both journal.md updates of this winddown go into one batch, so the file
         # is rewritten once instead of twice (PERF-136 idiom, PERF-173).
         with engine.journal.batch():
@@ -971,6 +1505,13 @@ async def run_shutdown(engine: Any, reason: str) -> None:
                     engine.journal.tick_count + 1,
                     "cancel_open_orders",
                     cancel.describe(),
+                )
+            if closed_stranded:
+                engine.journal.append_action(
+                    engine.journal.tick_count + 1,
+                    "close_stranded_positions",
+                    "reduce-only close, no live executor: "
+                    + ", ".join(closed_stranded),
                 )
             engine.journal.append_action(
                 engine.journal.tick_count + 1,
