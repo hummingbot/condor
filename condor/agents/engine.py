@@ -494,17 +494,32 @@ class TickEngine:
                 await finished.wait()
             return False
         self._running = False
-        # A bot this session deployed keeps trading on its own: cancelling the
-        # tick task ends the loop, not the thing the loop started. Stop it here
-        # for the same reason the emergency winddown does (MM-3) -- a session
-        # that reports itself stopped must not leave a controller placing orders.
-        await self._stop_bots_on_stop()
+        # The tick goes first, and before anything is awaited: a model turn still
+        # in flight can deploy a bot, and a snapshot taken while it runs would
+        # miss the one it deploys. Cancelling here also means the tick cannot
+        # reach _run_shutdown() once this method starts tearing down.
         if self._task and not self._task.done():
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
+
+        # Cancelling the tick is not instantaneous, so a winddown may have begun
+        # while it unwound -- the same case the guard at the top of this method
+        # handles. Tearing down underneath one would abort run_shutdown and leave
+        # positions stranded, so re-check before going further.
+        if self._shutting_down:
+            finished = getattr(self, "_shutdown_finished", None)
+            if finished is not None:
+                await finished.wait()
+            return False
+
+        # A bot this session deployed keeps trading on its own: stopping the tick
+        # ends the loop, not the thing the loop started. Stop it for the same
+        # reason the emergency winddown does (MM-3) -- a session that reports
+        # itself stopped must not leave a controller placing orders.
+        await self._stop_bots_on_stop()
         await self._finish(LoopState.STOPPED, "user")
         return True
 

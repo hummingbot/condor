@@ -1,14 +1,12 @@
 """A graceful stop must stop this session's bots -- and never fail the stop doing it."""
 
 import asyncio
-import sys
 import types
 
 import pytest
 
 from condor.agents import engine as engine_mod
 
-sys.path.insert(0, "tests")
 
 
 class _Ledger:
