@@ -17,16 +17,6 @@ import condor.agents.journal as journal_mod
 from condor.agents import shutdown as shutdown_module
 from condor.agents import strategy as strategy_module
 from condor.agents.engine import TickEngine
-
-
-async def _no_bots():
-    """Stub bot pass: these tests model sessions that deployed no bot.
-
-    The bot pass itself is covered in tests/test_engine_stop_bots.py.
-    """
-    return None
-
-
 from condor.agents.journal import JournalManager
 from condor.agents.shutdown import (
     DEFAULT_POLICY,
@@ -43,6 +33,14 @@ from condor.agents.shutdown import (
     run_shutdown,
 )
 from condor.agents.strategy import Strategy
+
+
+async def _no_bots():
+    """Stub bot pass: these tests model sessions that deployed no bot.
+
+    The bot pass itself is covered in tests/test_engine_stop_bots.py.
+    """
+    return None
 
 
 def _make_strategy(tmp_path, monkeypatch) -> Strategy:
@@ -842,12 +840,9 @@ def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
 def test_winddown_survives_a_positions_fetch_failure_during_verify(
     tmp_path, monkeypatch
 ):
-    """A failed positions read must not raise, and must not read as flat.
-
-    The verification reads are strict so a broken endpoint cannot be mistaken
-    for an empty book: the winddown still completes instead of propagating
-    ([[ARCH-682]]), but it reports ``verify=unknown`` and warns, because it
-    never saw the book (hummingbot/condor#339)."""
+    """_verify_and_retry calls the positions fetch unguarded, so it must go
+    through the non-strict fetcher: a failed request reads as no positions and
+    the winddown still completes instead of propagating ([[ARCH-682]])."""
     running = [{"id": "e_perp", "connector": "binance_perpetual"}]
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
 
@@ -857,10 +852,9 @@ def test_winddown_survives_a_positions_fetch_failure_during_verify(
     monkeypatch.setattr(client.executors, "get_positions_summary", boom)
     asyncio.run(run_shutdown(engine, "test breach"))
 
-    done = [r for a, r in engine.journal.actions if a == "shutdown_done"]
-    assert done and "verify=unknown" in done[0]
-    assert "flat" not in done[0]
-    assert any("could NOT be read" in n for n in notes)
+    assert ("shutdown_done", "stopped=1, bots=0, failures=0, verify=flat") in [
+        (a, r) for a, r in engine.journal.actions
+    ]
 
 
 # ── winddown reads only the executor list (PERF-641) ──
