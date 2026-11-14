@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from condor.fsutil import atomic_write_text
 
@@ -486,8 +486,16 @@ def load_full_config(
         except Exception:
             pass
 
-    # Validate core fields and fill in any missing AgentConfig defaults
-    core = AgentConfig.from_dict(result)
+    # Validate core fields and fill in any missing AgentConfig defaults. A
+    # value already on disk can be invalid (e.g. a correction writes a bad
+    # field, then a crash or a cancelled chat turn leaves it there) — fall
+    # back to bare defaults rather than raising, so a caller merging a
+    # correction on top of this result (``update_strategy``) can still load
+    # and overwrite the bad value instead of being blocked by it.
+    try:
+        core = AgentConfig.from_dict(result)
+    except ValidationError:
+        core = AgentConfig()
     core_defaults = core.model_dump()
     for k, v in core_defaults.items():
         result.setdefault(k, v)

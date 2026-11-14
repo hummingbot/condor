@@ -699,6 +699,8 @@ def build(
             text = _scrub_markdown(text)
         if rel.as_posix() == AGENT_MD:
             text = _carried_agent_md(text, agent_uid)
+        elif rel.name == "loop.md":
+            text = _carried_loop_md(text, agent_home(slug) / rel.parent)
         files.append(BundleFile(path=rel.as_posix(), sha256=_digest(text), text=text))
 
     digest = _content_digest(files)
@@ -765,6 +767,32 @@ def _carried_agent_md(text: str, agent_uid: str) -> str:
     meta[AGENT_UID_KEY] = agent_uid
     for key in BOOKKEEPING_KEYS:
         meta.pop(key, None)
+    return render_frontmatter(meta, body)
+
+
+def _carried_loop_md(text: str, home: Path) -> str:
+    """The ``loop.md`` the bundle carries: ``default_config`` as it actually
+    runs, not the frontmatter's own stale copy.
+
+    A chat-driven config update (``update_strategy``) and the dashboard's own
+    config editor both write only ``config.yml`` (see ``load_full_config``),
+    never ``loop.md``'s frontmatter — so a bundle that just read the file
+    back would ship whatever ``default_config`` the loop was *created* with,
+    silently dropping every edit approved since.
+
+    A loop with no ``config.yml`` at all has nothing an edit could have left
+    behind, so the file is returned untouched — ``load_full_config`` fills in
+    every ``AgentConfig`` default regardless, which would otherwise pad a
+    never-customized loop's frontmatter with a full config block it never had.
+    """
+    if not (home / "config.yml").exists():
+        return text
+
+    from condor.agents.config import load_full_config
+
+    meta, body = parse_frontmatter(text)
+    meta = meta if isinstance(meta, dict) else {}
+    meta["default_config"] = load_full_config(home, meta.get("default_config") or {})
     return render_frontmatter(meta, body)
 
 
