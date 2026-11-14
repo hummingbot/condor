@@ -93,6 +93,9 @@ export const CHAT_DRAFT_KEY_PREFIX = "condor.chat.draft:";
 /** The chosen theme, or absent for "follow the system" (hooks/useTheme). */
 export const THEME_KEY = "condor_theme";
 
+/** "1" when the colour-blind palette is on, absent otherwise (hooks/useTheme). */
+export const COLORBLIND_KEY = "condor_colorblind";
+
 /** Which currency amounts are rendered in (hooks/useDisplayCurrency). */
 export const DISPLAY_CURRENCY_KEY = "condor_display_currency";
 
@@ -164,6 +167,28 @@ export const ACCOUNT_DOCK_KEY = "condor.dock.account";
  * this screen is divided and nothing about whose balances were behind it.
  */
 export const DESK_SPLIT_KEY = "condor.dock.account.split";
+
+/**
+ * The layout picker's stacked "Chat + 2" — `{"top": …, "bottom": …}`, the panel
+ * in each half of the column beside the chat — or absent when the workspace is
+ * not stacked (`pages/tabs/AgentChatTab`, `components/chat/LayoutPicker`).
+ *
+ * KEPT, for the reason `DESK_SPLIT_KEY` is: it says how this screen is divided
+ * and nothing about whose data was behind it.
+ */
+export const LAYOUT_STACKED_KEY = "condor.workspace.stacked";
+
+/**
+ * How a stacked "Chat + 2" divides its column: the top panel's share, 0..1
+ * (`WorkspacePaneOutlet`, via `useDockSplit`). KEPT, like `DESK_SPLIT_KEY`.
+ */
+export const STACK_SPLIT_KEY = "condor.workspace.stack-split";
+
+/**
+ * How a free side-by-side "Chat + 2" divides its row: the first (wide)
+ * panel's share, 0..1 — the vertical seam's counterpart to `STACK_SPLIT_KEY`.
+ */
+export const SIDE_SPLIT_KEY = "condor.workspace.side-split";
 
 /**
  * Where the reader put the split between the transcript and the workspace

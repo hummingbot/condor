@@ -129,7 +129,7 @@ export function NotificationsSettings() {
         onClick={() => toggle.mutate(!on)}
         className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
           on
-            ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10"
+            ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10"
             : "border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
         } ${busy ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
       >

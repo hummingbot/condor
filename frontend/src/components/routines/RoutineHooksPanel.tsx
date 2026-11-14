@@ -109,7 +109,7 @@ function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
       onClick={onClick}
       className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
         on
-          ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
+          ? "bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)]"
           : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
       }`}
     >
@@ -193,7 +193,7 @@ function HooksForm({ routineName }: { routineName: string }) {
             type="button"
             disabled={saveMutation.isPending}
             onClick={() => saveMutation.mutate()}
-            className="flex shrink-0 items-center gap-1.5 rounded bg-[var(--color-primary)] px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+            className="flex shrink-0 items-center gap-1.5 rounded bg-[var(--color-primary-fill)] px-4 py-1.5 text-xs font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:opacity-50"
           >
             {saveMutation.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />

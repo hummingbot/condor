@@ -325,7 +325,7 @@ export function UploadDialog({
             onDrop={handleDrop}
             className={`rounded-lg border-2 border-dashed p-6 text-center transition-colors ${
               isDragging
-                ? "border-[var(--color-primary)] bg-[var(--color-primary)]/5"
+                ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/5"
                 : "border-[var(--color-border)] hover:border-[var(--color-text-muted)]"
             }`}
           >
@@ -368,7 +368,7 @@ export function UploadDialog({
           <button
             onClick={() => uploadMutation.mutate()}
             disabled={!canUpload}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-sm font-medium text-[var(--on-primary)] disabled:opacity-40"
           >
             {uploadMutation.isPending && (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -497,7 +497,7 @@ export function CloneConfigDialog({
           <button
             onClick={() => createMutation.mutate()}
             disabled={!newId.trim() || !!yamlError || createMutation.isPending}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-sm font-medium text-[var(--on-primary)] disabled:opacity-40"
           >
             {createMutation.isPending && (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -711,7 +711,7 @@ export function NewConfigDialog({
                       onClick={() => updateField(field.name, !fieldValues[field.name])}
                       className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
                         fieldValues[field.name]
-                          ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                          ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                           : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
                       }`}
                     >
@@ -761,7 +761,7 @@ export function NewConfigDialog({
           <button
             onClick={() => createMutation.mutate()}
             disabled={!configId.trim() || !selectedName || createMutation.isPending}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-sm font-medium text-white transition-all disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-sm font-medium text-[var(--on-primary)] transition-all disabled:opacity-40"
           >
             {createMutation.isPending && (
               <Loader2 className="h-3 w-3 animate-spin" />

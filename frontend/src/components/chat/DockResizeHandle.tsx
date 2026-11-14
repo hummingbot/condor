@@ -67,8 +67,8 @@ export function DockResizeHandle({
       onKeyDown={onKeyDown}
       onDoubleClick={() => onWidth(reset)}
       title="Drag to resize — double-click to reset"
-      className={`-ml-1 w-1.5 shrink-0 cursor-col-resize transition-colors hover:bg-[var(--color-primary)]/30 focus:outline-none focus-visible:bg-[var(--color-primary)]/30 ${
-        isDragging ? "bg-[var(--color-primary)]/30" : ""
+      className={`-ml-1 w-1.5 shrink-0 cursor-col-resize transition-colors hover:bg-[var(--color-primary-fill)]/30 focus:outline-none focus-visible:bg-[var(--color-primary-fill)]/30 ${
+        isDragging ? "bg-[var(--color-primary-fill)]/30" : ""
       }`}
     />
   );

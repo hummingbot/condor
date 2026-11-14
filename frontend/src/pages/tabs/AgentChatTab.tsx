@@ -42,11 +42,18 @@ import {
 } from "@/components/chat/paneUrl";
 import type { LibraryFocus } from "@/components/chat/DockRoutines";
 import { LoopsPanel } from "@/components/chat/LoopsPanel";
-import { SessionTabs } from "@/components/chat/SessionTabs";
+import { ChatIdentity } from "@/components/chat/ChatIdentity";
 import { StrategySheet } from "@/components/chat/StrategySheet";
 import { usePaneGuard } from "@/components/chat/usePaneGuard";
 import { ShareChatButton } from "@/components/chat/ShareChatButton";
-import { WorkspaceRail } from "@/components/chat/WorkspaceRail";
+import { LayoutPicker } from "@/components/chat/LayoutPicker";
+import {
+  isSide,
+  type LayoutChoice,
+  type MainSlot,
+  type SlotId,
+} from "@/components/chat/layoutSlots";
+import { WorkspaceRail, type RailItem } from "@/components/chat/WorkspaceRail";
 import {
   WorkspacePaneOutlet,
   WorkspacePaneProvider,
@@ -68,6 +75,7 @@ import {
   type PendingPick,
 } from "@/lib/sessionAgentKey";
 import { agentsQuery } from "@/lib/queryClient";
+import { LAYOUT_STACKED_KEY } from "@/lib/sessionState";
 import {
   api,
   CHAT_SLUG,
@@ -145,6 +153,33 @@ const NO_DELEGATIONS: Delegation[] = [];
  * you are talking to and start another conversation, which is the gesture the
  * old header selector could not do.
  */
+/**
+ * The two panels of a free "Chat + 2" (see `stack` in the tab): `top` is the
+ * pane, `bottom` the slot under it (`dir: "col"`, stacked) or beside it
+ * (`dir: "row"`, side by side).
+ */
+type StackPick = { top: SlotId; bottom: SlotId; dir: "col" | "row" };
+
+const SLOT_IDS: SlotId[] = ["agent", "portfolio", "execution", "loops", "tasks", "routines"];
+
+/** The stacked layout this browser last had, or `null` for none (or anything unreadable). */
+function readStack(): StackPick | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAYOUT_STACKED_KEY) || "null");
+    if (
+      raw &&
+      SLOT_IDS.includes(raw.top) &&
+      SLOT_IDS.includes(raw.bottom) &&
+      raw.top !== raw.bottom
+    ) {
+      return { top: raw.top, bottom: raw.bottom, dir: raw.dir === "row" ? "row" : "col" };
+    }
+  } catch {
+    // Unreadable or the old "1" flag: start side by side.
+  }
+  return null;
+}
+
 export function AgentChatTab() {
   const chat = useChat();
   const { server } = useServer();
@@ -409,6 +444,61 @@ export function AgentChatTab() {
     [liveKey],
   );
 
+  // What the session tabs used to carry, now on the conversation rows: which
+  // chats are answering in the background and which wait on an approval.
+  // Joined keys again, so the rail's `memo` holds while a reply streams.
+  const convIdOf = (s: (typeof chat.slots)[number]) =>
+    s.info.conversation_id || s.info.slot_id;
+  const busyKey = chat.slots
+    .filter((s) => chat.isSlotStreaming(s.info.slot_id) || s.pending)
+    .map(convIdOf)
+    .join("|");
+  const waitingKey = chat.slots
+    .filter((s) => chat.permissionRequests[s.info.slot_id])
+    .map(convIdOf)
+    .join("|");
+  const busyIds = useMemo(
+    () => new Set(busyKey ? busyKey.split("|") : []),
+    [busyKey],
+  );
+  const waitingIds = useMemo(
+    () => new Set(waitingKey ? waitingKey.split("|") : []),
+    [waitingKey],
+  );
+
+  /**
+   * One chat on screen, like Claude: no session tabs to collect. Opening
+   * another conversation (or a new one) ends the sessions left behind once
+   * they have nothing to do — not answering, not waiting on an approval. One
+   * still working keeps running and shows on its row; it is ended the same
+   * way once it finishes. The transcript stays on the server, so clicking
+   * the row picks the conversation back up; a chat closed without a word in
+   * it is discarded by the server.
+   */
+  const destroySession = chat.destroySession;
+  const activeSlotId = chat.activeSlotId;
+  const idleBehindKey = chat.slots
+    .filter(
+      (s) =>
+        s.info.slot_id !== activeSlotId &&
+        !s.pending &&
+        !chat.isSlotStreaming(s.info.slot_id) &&
+        !chat.permissionRequests[s.info.slot_id],
+    )
+    .map((s) => s.info.slot_id)
+    .join("|");
+  useEffect(() => {
+    if (!idleBehindKey) return;
+    for (const id of idleBehindKey.split("|")) destroySession(id);
+  }, [idleBehindKey, destroySession]);
+
+  // The list is the only way between chats now, so a chat appears in it (and
+  // re-sorts, and gets its title) when an answer starts or ends rather than
+  // on the next visit.
+  useEffect(() => {
+    queryClient.invalidateQueries({ queryKey: ["conversations"] });
+  }, [busyKey, queryClient]);
+
   // Stable identities, so the rail's `memo` holds while an answer streams.
   // `selectedSlug` is a string and the rest are `useCallback`s on genuinely
   // stable deps, so these only change when the rail's answer actually changes.
@@ -437,19 +527,23 @@ export function AgentChatTab() {
     },
     [leaveHub, talkTo],
   );
-  // The tab strip's `+`: always a *second* conversation, never a jump to one
-  // that already exists — "new chat" is the whole of what the button says, and
-  // focusing an existing tab is what the tabs beside it are for.
-  const newChat = useCallback(
-    (slug: string, agent: AgentSummary | null) => onTalk(slug, agent, true),
-    [onTalk],
-  );
   const closeRail = useCallback(() => setRailOpen(false), []);
 
   const boundAgent = activeSlot?.info.agent_slug
     ? agents.find((a) => a.slug === activeSlot.info.agent_slug)
     : undefined;
   const heroAgent = activeSlot ? undefined : pendingAgent;
+  // The open chat's title, from the rail's own cached list; a chat with no
+  // answer yet is titled by its first message, or not at all.
+  const { data: conversationList = [] } = useQuery<ConversationMeta[]>({
+    queryKey: ["conversations"],
+    queryFn: () => api.listConversations(),
+  });
+  const activeConvId = activeSlot?.info.conversation_id || activeSlot?.info.slot_id;
+  const activeTitle =
+    conversationList.find((c) => c.id === activeConvId)?.title ||
+    activeSlot?.messages.find((m) => m.role === "user")?.text?.slice(0, 80) ||
+    "";
 
   // What the agent in focus has learned this user asks it for, over the
   // static list. Two calls because the two empty states can be looking at
@@ -614,6 +708,228 @@ export function AgentChatTab() {
       openPane(focus ? { kind: "routines", focus } : null),
     [openPane],
   );
+
+  /**
+   * "Chat + 2" — the layout picker's free arrangement: the room beside the
+   * chat split in two, stacked or side by side, and *any* panel in either
+   * half. Side by side used to be the wide pane plus the conversation's side
+   * column, which only took Tasks or Routines; it is now this same split
+   * turned on its side.
+   *
+   * The top half is still the pane — the agent or the desk claim it exactly as
+   * they always have, and Tasks/Routines draw into it without a claim. The
+   * bottom half is the slot under it, filled by a second instance of whichever
+   * panel was picked (`slot="below"`). So this records the two picks, and the
+   * pane and the docks are driven to match them. Remembered per browser: it
+   * is how this person likes the screen divided.
+   */
+  const [stack, setStackState] = useState<StackPick | null>(readStack);
+  const setStack = (next: StackPick | null) => {
+    setStackState(next);
+    try {
+      if (next) localStorage.setItem(LAYOUT_STACKED_KEY, JSON.stringify(next));
+      else localStorage.removeItem(LAYOUT_STACKED_KEY);
+    } catch {
+      /* private mode: the arrangement just lasts the session */
+    }
+  };
+  // The agent panel in the bottom half keeps its own section — the pane's
+  // section lives on the URL and belongs to the top.
+  const [belowAgentTab, setBelowAgentTab] = useState<KnowledgeTabId | undefined>(undefined);
+
+  /**
+   * The layout picker's view of the row: what fills the wide pane, what fills
+   * the side column, and so how many panels are beside the chat. Derived from
+   * the pane and the docks, so the rail tiles and the picker can never disagree.
+   */
+  const layoutMain: MainSlot | null =
+    pane?.kind === "agent" || pane?.kind === "strategy"
+      ? "agent"
+      : pane?.kind === "desk"
+        ? (account.shown[0] ?? null)
+        : null;
+  const layoutSide = context.shown[0] ?? null;
+  // What the top half really shows: the pane when something holds it (a strategy
+  // sheet opened from the agent still reads as the agent), else the side panel
+  // that was picked for it.
+  const stackTop: SlotId | null = !stack
+    ? null
+    : pane
+      ? layoutMain
+      : isSide(stack.top)
+        ? stack.top
+        : null;
+  const stackBottom: SlotId | null =
+    stack && stackTop && stack.bottom !== stackTop ? stack.bottom : null;
+  const stackActive = !!stack && !!stackTop;
+  const stackDir = stack?.dir ?? "col";
+  const panelCount = (pane ? 1 : 0) + (context.shown.length > 0 ? 1 : 0);
+  const layoutChoice: LayoutChoice = stackActive
+    ? stackDir === "row"
+      ? "side"
+      : "stack"
+    : panelCount === 0
+      ? "chat"
+      : panelCount === 1
+        ? "one"
+        : "side";
+  const pickMain = (id: MainSlot) =>
+    id === "agent" ? openPane({ kind: "agent" }) : account.showOnly(id);
+  /**
+   * Put `id` in the top half: the pane for agent/desk, nothing in it for a side
+   * panel. Emptying the pane goes through the desk's own close, which also
+   * forgets its sections — otherwise `deskWasOpen` would put the desk back in
+   * the top half on the next load, over the Tasks/Routines picked for it.
+   */
+  const applyTop = (id: SlotId) => {
+    if (!isSide(id)) return pickMain(id);
+    account.close();
+    openPane(null);
+  };
+  /** Show exactly `id` beside the chat, outside the stacked layout. */
+  const showOne = (id: SlotId) => {
+    if (isSide(id)) {
+      openPane(null);
+      context.showOnly(id);
+    } else {
+      context.closeAll();
+      pickMain(id);
+    }
+  };
+  const enterStack = (dir: StackPick["dir"]) => {
+    const top: SlotId = layoutMain ?? layoutSide ?? "agent";
+    const bottom: SlotId =
+      layoutMain && layoutSide
+        ? layoutSide
+        : (["tasks", "portfolio", "agent"] as SlotId[]).find((x) => x !== top)!;
+    applyTop(top);
+    setStack({ top, bottom, dir });
+  };
+  /**
+   * The split as it stands, for a pick to start from. Two panels opened from
+   * the rail's tiles (the pane plus the side column) read as "side by side"
+   * without being the free split yet; the first pick in the picker turns them
+   * into it, keeping both where they are.
+   */
+  const currentSplit = (): StackPick & { top: SlotId } =>
+    stackActive && stack
+      ? { ...stack, top: stackTop! }
+      : { top: layoutMain ?? "agent", bottom: layoutSide ?? "tasks", dir: "row" };
+  const pickStackTop = (id: SlotId) => {
+    const cur = currentSplit();
+    // Picking what the other half holds swaps them rather than showing one twice.
+    const bottom = id === cur.bottom ? cur.top : cur.bottom;
+    applyTop(id);
+    setStack({ top: id, bottom, dir: cur.dir });
+  };
+  const pickStackBottom = (id: SlotId) => {
+    const cur = currentSplit();
+    if (id === cur.top) {
+      applyTop(cur.bottom);
+      setStack({ top: cur.bottom, bottom: id, dir: cur.dir });
+    } else {
+      if (!stackActive) applyTop(cur.top);
+      setStack({ top: cur.top, bottom: id, dir: cur.dir });
+    }
+  };
+  /** Close one half: the other stays, as the one panel beside the chat. */
+  const closeStackHalf = (half: "top" | "bottom") => {
+    const keep = half === "top" ? stackBottom : stackTop;
+    setStack(null);
+    if (keep) showOne(keep);
+    else openPane(null);
+  };
+  const setLayoutChoice = (choice: LayoutChoice) => {
+    if (choice === "stack" || choice === "side") {
+      const dir = choice === "stack" ? "col" : "row";
+      // Already split: turn it on its side, both panels staying put.
+      if (stackActive && stack) setStack({ ...stack, top: stackTop!, dir });
+      else enterStack(dir);
+      return;
+    }
+    if (stackActive) {
+      const halves = [stackTop, stackBottom].filter(Boolean) as SlotId[];
+      setStack(null);
+      if (choice === "chat") {
+        openPane(null);
+        context.closeAll();
+      } else {
+        showOne(halves[0] ?? "agent");
+      }
+      return;
+    }
+    if (choice === "chat") {
+      openPane(null);
+      context.closeAll();
+    } else {
+      // Keep whichever panel is already up; with both up, the wide one stays.
+      if (pane && context.shown.length > 0) context.closeAll();
+      else if (!pane && context.shown.length === 0) pickMain("agent");
+    }
+  };
+  /**
+   * The rail's tiles, while stacked: a tile on screen closes its half, any
+   * other tile takes the bottom half. Outside the stacked layout they are the
+   * tiles they have always been.
+   */
+  const stackTile = (item: RailItem): RailItem => {
+    if (!stackActive) return item;
+    const id = item.id as SlotId;
+    const half = id === stackTop ? "top" : id === stackBottom ? "bottom" : null;
+    return {
+      ...item,
+      active: half !== null,
+      onToggle: () => (half ? closeStackHalf(half) : pickStackBottom(id)),
+    };
+  };
+  // Tasks/Routines in the stacked halves: the dock's own state is left alone
+  // (it is the side column's), and each half gets the one pane it was picked for.
+  const stackedContext = useMemo(
+    () =>
+      ({
+        ...context,
+        shown: stackTop && isSide(stackTop) ? [stackTop] : [],
+        closeAll: () => closeStackHalf("top"),
+        toggle: () => closeStackHalf("top"),
+      }) as typeof context,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [context, stackTop, stackBottom],
+  );
+  const belowContext = useMemo(
+    () =>
+      ({
+        ...context,
+        shown: stackBottom && isSide(stackBottom) ? [stackBottom] : [],
+        closeAll: () => closeStackHalf("bottom"),
+        toggle: () => closeStackHalf("bottom"),
+      }) as typeof context,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [context, stackTop, stackBottom],
+  );
+
+  const agentWiring = (panelOwner: string) => (
+    <AgentWiring
+      slot={activeSlot}
+      pendingAgentKey={pickFor(pendingPick, normalizeAgentSlug(panelOwner)) ?? defaultAgent}
+      ambientServer={server || ""}
+      agents={modelOptions}
+      customProviders={customProviders}
+      agentBindings={agentBindings}
+      isStreaming={isActiveStreaming}
+      // With a session this moves the conversation; without one it is the
+      // model the next `start_session` carries, which is the same field the
+      // hero's picker sets.
+      onSelectBrain={(sel) => {
+        if (activeSlot) switchBrain(sel);
+        else if (sel.agentKey !== undefined)
+          setPendingPick({ slug: normalizeAgentSlug(panelOwner), key: sel.agentKey });
+      }}
+      onSelectServer={(name) => {
+        if (activeSlot) switchServer(activeSlot.info.slot_id, name);
+      }}
+    />
+  );
+
   return (
     <WorkspacePaneProvider>
       <div className="flex h-full min-h-0">
@@ -623,6 +939,8 @@ export function AgentChatTab() {
           activeSlug={activeSlot?.info.agent_slug || ""}
           hasSession={!!activeSlot}
           liveIds={liveIds}
+          busyIds={busyIds}
+          waitingIds={waitingIds}
           activeId={
             onHub ? null : activeSlot?.info.conversation_id || chat.activeSlotId
           }
@@ -680,27 +998,30 @@ export function AgentChatTab() {
                   <PanelLeftOpen className="h-4 w-4" />
                 )}
               </button>
-              {/* Every live session, including the ones answering in the
-                  background — switching, and the only way to stop one. */}
-              <SessionTabs
-                slots={chat.slots}
-                activeSlotId={chat.activeSlotId}
-                isSlotStreaming={chat.isSlotStreaming}
-                permissionRequests={chat.permissionRequests}
-                onSelect={(slotId) => {
-                  leaveHub();
-                  chat.setActiveSlotId(slotId);
-                }}
-                // The session ends; the transcript stays on the server, so the
-                // conversation is still in the rail and clicking it respawns it.
-                onClose={(slotId) => chat.destroySession(slotId)}
-                // The strip's own `+`: another conversation, with whoever you
-                // pick — the rail is where that used to be, and the rail is a
-                // column most readers keep collapsed.
-                agents={agents}
-                onNew={newChat}
-                className="min-w-0 flex-1"
-              />
+              {/* Who this chat is with, and what it is about — the place
+                  the session tabs held. The list on the left is how you move
+                  between chats; this says which one you are in. */}
+              {!onHub && (
+                <ChatIdentity
+                  agentName={
+                    activeSlot
+                      ? activeSlot.info.agent_slug
+                        ? (boundAgent?.name ?? activeSlot.info.agent_slug)
+                        : (agents.find((a) => a.slug === CHAT_SLUG)?.name ?? "Condor")
+                      : (heroAgent?.name ?? "Condor")
+                  }
+                  bound={!!(activeSlot ? activeSlot.info.agent_slug : heroAgent)}
+                  title={activeTitle}
+                  busy={isActiveStreaming || !!activeSlot?.pending}
+                  // Renamable once the conversation is saved, which is once
+                  // something has been said in it.
+                  conversationId={
+                    conversationList.some((c) => c.id === activeConvId)
+                      ? activeConvId
+                      : undefined
+                  }
+                />
+              )}
             </div>
             )}
 
@@ -793,7 +1114,11 @@ export function AgentChatTab() {
               still there to ask about it. The doors are the `WorkspaceRail`
               tiles at the far edge (plus an Execution row in the desk and a
               pasted `?panel=`); the bar above the transcript carries none. */}
-          <WorkspacePaneOutlet />
+          <WorkspacePaneOutlet
+            // The column is split, with its seam, only while both halves hold
+            // something (the layout picker's stacked "Chat + 2").
+            split={stackActive && stackBottom ? stackDir : null}
+          />
 
           {pane?.kind === "agent" && (
             <AgentPanel
@@ -805,34 +1130,7 @@ export function AgentChatTab() {
               name={openAgent?.name || "Condor"}
               // What the conversation runs on, in the panel's own bar — the
               // first thing waiting on the other side of the click.
-              wiring={
-                <AgentWiring
-                  slot={activeSlot}
-                  pendingAgentKey={
-                    pickFor(pendingPick, normalizeAgentSlug(openSlug)) ??
-                    defaultAgent
-                  }
-                  ambientServer={server || ""}
-                  agents={modelOptions}
-                  customProviders={customProviders}
-                  agentBindings={agentBindings}
-                  isStreaming={isActiveStreaming}
-                  // With a session this moves the conversation; without one
-                  // it is the model the next `start_session` carries, which
-                  // is the same field the hero's picker sets.
-                  onSelectBrain={(sel) => {
-                    if (activeSlot) switchBrain(sel);
-                    else if (sel.agentKey !== undefined)
-                      setPendingPick({
-                        slug: normalizeAgentSlug(openSlug),
-                        key: sel.agentKey,
-                      });
-                  }}
-                  onSelectServer={(name) => {
-                    if (activeSlot) switchServer(activeSlot.info.slot_id, name);
-                  }}
-                />
-              }
+              wiring={agentWiring(openSlug)}
               // Which section is open lives on the home's query string
               // (FEAT-118), so Back steps through the seven and a pane open on
               // Tools can be sent to somebody.
@@ -846,6 +1144,26 @@ export function AgentChatTab() {
             />
           )}
           {paneGuard.dialog}
+
+          {/* The stacked layout's bottom half, when the agent was picked for it:
+              the conversation's agent, in its own instance under the pane. */}
+          {stackBottom === "agent" && (
+            <AgentPanel
+              key={`below:${panelSlug}`}
+              slot="below"
+              slug={panelSlug}
+              name={panelAgent?.name || "Condor"}
+              wiring={agentWiring(panelSlug)}
+              tab={belowAgentTab}
+              onTabChange={setBelowAgentTab}
+              onOpenRoutine={onPanelOpenRoutine}
+              onOpenStrategy={(sslug) =>
+                openPane({ kind: "strategy", agentSlug: panelSlug, strategySlug: sslug })
+              }
+              onAskAgent={(text) => talkTo(panelSlug, { intent: "fresh", text })}
+              onClose={() => closeStackHalf("bottom")}
+            />
+          )}
 
           {/* One of the agent's loops, on its own — opened by a strategy card
               in the panel, or from a pasted `?panel=strategy&loop=`. It
@@ -914,17 +1232,31 @@ export function AgentChatTab() {
               openPane({ kind: "strategy", agentSlug, strategySlug })
             }
           />
+          {/* The stacked layout's bottom half, when a desk section was picked
+              for it — a second desk, showing just that one section. */}
+          {stackBottom && !isSide(stackBottom) && stackBottom !== "agent" && (
+            <AccountDock
+              slot="below"
+              server={dockServer}
+              shown={[stackBottom]}
+              onToggle={() => closeStackHalf("bottom")}
+              onClose={() => closeStackHalf("bottom")}
+              onOpenAgent={(slug) => openPane({ kind: "agent", slug })}
+              onOpenLoop={(agentSlug, strategySlug) =>
+                openPane({ kind: "strategy", agentSlug, strategySlug })
+              }
+            />
+          )}
 
           {/* "This conversation" has nothing to say about a column that has
               no conversation in it — the dock would show only its own empty
               states (no delegation, no routine run) beside the catalogue,
               chrome for a subject that is not there. Hidden here rather than
-              inside `ContextDock`, the same way the tab strip above is: both
-              are about the chat this column no longer holds while the Hub
-              has it. */}
+              inside `ContextDock`: it is about the chat this column no longer
+              holds while the Hub has it. */}
           {!onHub && (
             <ContextDock
-              panels={context}
+              panels={stackActive ? stackedContext : context}
               delegations={delegations}
               conversationId={activeSlot?.info.conversation_id || ""}
               agentSlug={activeSlot?.info.agent_slug || ""}
@@ -935,6 +1267,23 @@ export function AgentChatTab() {
               runContext={runContext}
               library={pane?.kind === "routines" ? pane.focus : null}
               onLibraryChange={onLibraryChange}
+              // Stacked, Tasks/Routines picked for the top half draw in the pane.
+              stackSlot={stackActive ? "top" : null}
+            />
+          )}
+          {!onHub && stackBottom && isSide(stackBottom) && (
+            <ContextDock
+              key="below"
+              panels={belowContext}
+              delegations={delegations}
+              conversationId={activeSlot?.info.conversation_id || ""}
+              agentSlug={activeSlot?.info.agent_slug || ""}
+              agentName={boundAgent?.name}
+              runContext={runContext}
+              // The library opens in the pane; the top dock owns that sheet.
+              library={null}
+              onLibraryChange={onLibraryChange}
+              stackSlot="bottom"
             />
           )}
         </div>
@@ -972,6 +1321,27 @@ export function AgentChatTab() {
             a squeeze is recoverable. It is also why the dock's overlay below
             `xl` no longer covers it: the overlay is anchored to the row. */}
         <WorkspaceRail
+          header={
+            <LayoutPicker
+              choice={layoutChoice}
+              main={layoutMain}
+              side={layoutSide}
+              // The free split's two panels — or, for two opened from the tiles
+              // (pane + side column), those two, which a pick turns into it.
+              stackTop={stackActive ? stackTop : layoutChoice === "side" ? layoutMain : null}
+              stackBottom={stackActive ? stackBottom : layoutChoice === "side" ? layoutSide : null}
+              onStackTop={pickStackTop}
+              onStackBottom={pickStackBottom}
+              onChoice={setLayoutChoice}
+              onMain={pickMain}
+              onSide={(id) => {
+                // In "chat + 1" the side column *is* the one panel, so filling
+                // it from the picker gives the wide pane back.
+                if (layoutChoice === "one" && pane) openPane(null);
+                context.showOnly(id);
+              }}
+            />
+          }
           groups={[
             {
               id: "agent",
@@ -995,20 +1365,20 @@ export function AgentChatTab() {
                         : { kind: "agent" },
                     ),
                 },
-              ],
+              ].map(stackTile),
             },
             // Portfolio, Execution and now Loops (FEAT-1xx) — one group, one
             // selector (the server), so the tile that used to open a global
             // "every agent" Loops sheet of its own is gone: `account.railItems`
             // already carries a Loops tile scoped to this server, with the
             // same badge the old one showed, right beside the other two.
-            { id: "desk", items: account.railItems },
+            { id: "desk", items: account.railItems.map(stackTile) },
             /* Tasks and Routines, and no Deployed: the conversation's ledger
                went with FEAT-118, and FEAT-119 gives it a home on the run
                screen where a conversation is one more kind of run. Until then
                the fleet browser answers it, filtered to this chat's own
                deployments. */
-            { id: "conversation", items: context.railItems },
+            { id: "conversation", items: context.railItems.map(stackTile) },
           ]}
         />
       </div>

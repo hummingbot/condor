@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Loader2, Search, Star, X } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, Loader2, Search, Star, X } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { formatConnectorName } from "@/lib/formatters";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
@@ -387,13 +388,29 @@ export function MarketBrowser({
               Loading markets...
             </p>
           ) : visible.length === 0 ? (
-            <p className="px-3 py-8 text-center text-xs text-[var(--color-text-muted)]">
-              {tickers.length === 0
-                ? "No ticker data for this venue"
-                : favoritesOnly
-                  ? "No starred markets on this venue"
-                  : "No markets match the search"}
-            </p>
+            <div className="flex flex-col items-center gap-2 px-3 py-8 text-center text-xs text-[var(--color-text-muted)]">
+              <p>
+                {tickers.length === 0
+                  ? "No ticker data for this venue"
+                  : favoritesOnly
+                    ? "No starred markets on this venue"
+                    : "No markets match the search"}
+              </p>
+              {/* A token that is not listed on any order-book venue may well
+                  trade in an on-chain pool — the other half of trading in
+                  Condor, one page over. DEX search takes an address, not a
+                  ticker, so this opens the pool browser rather than a search. */}
+              {!favoritesOnly && tickers.length > 0 && (
+                <Link
+                  to="/dex"
+                  onClick={onClose}
+                  className="inline-flex items-center gap-1 font-medium text-[var(--color-primary)] hover:underline"
+                >
+                  Looking for an on-chain token? Browse DEX pools
+                  <ArrowRight className="h-3 w-3" />
+                </Link>
+              )}
+            </div>
           ) : (
             visible.map((t, i) => {
               const [base, quoteAsset] = t.trading_pair.split("-");
@@ -407,7 +424,7 @@ export function MarketBrowser({
                   data-market-row
                   className={`grid grid-cols-[1.5rem_1fr_8rem_7rem_6rem] items-center gap-2 px-3 text-xs ${
                     i === cursor
-                      ? "bg-[var(--color-primary)]/10"
+                      ? "bg-[var(--color-primary-fill)]/10"
                       : "hover:bg-[var(--color-surface-hover)]"
                   }`}
                 >

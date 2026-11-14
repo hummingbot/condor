@@ -246,7 +246,7 @@ function HubTab({
       onClick={onSelect}
       className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
         active
-          ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+          ? "border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
           : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)] disabled:hover:text-[var(--color-text-muted)]"
       }`}
     >
@@ -298,7 +298,7 @@ function UploadYours() {
           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
         >
           <span className="flex min-w-0 items-center gap-2 text-sm text-[var(--color-text)]">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-primary)]/10 text-[var(--color-primary)]">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]">
               <Brain className="h-3.5 w-3.5" />
             </span>
             <span className="truncate font-mono text-xs">{slug}</span>

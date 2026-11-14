@@ -13,6 +13,8 @@ import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
 import { PoolAddress, PoolStats } from "@/components/dex/PoolStats";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
+import { GatewayDownBanner } from "@/components/dex/GatewayDownBanner";
+import { useGatewayStatus } from "@/hooks/useGatewayStatus";
 import { poolLabel, poolSymbols } from "@/components/dex/format";
 import {
   ErrorToast,
@@ -234,6 +236,10 @@ export function DexPool() {
 
   const pair = pool?.trading_pair ?? "";
   const lpAvailable = caps.supportsLp && !!pool?.lp_supported;
+  // With Gateway stopped, the token check and the venue list fail, and those
+  // failures read as "token not listed" / "no CLMM here". One banner says the
+  // real cause instead, and the misleading messages stand down (below).
+  const gateway = useGatewayStatus(server);
 
   // `pair` is the executor's `<base_mint>-<quote_symbol>` form. The tickers only
   // exist on the pool, so every symbol-shaped consumer — balance lookups, amount
@@ -400,7 +406,14 @@ export function DexPool() {
           with one already on the list cannot be registered — and the only symptom
           is a balance that reads 0 for a wallet that is not empty. The button is
           the fix in place: retry a failed save, or replace the ticker's holder. */}
-      {unlistedTokens.length > 0 && (
+      {gateway.down && (
+        <GatewayDownBanner
+          className="shrink-0 border-b"
+          detail="The chart and pool stats still load, but swaps, liquidity and wallet balances need Gateway."
+        />
+      )}
+
+      {!gateway.down && unlistedTokens.length > 0 && (
         <div
           role="status"
           className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs"
@@ -501,7 +514,7 @@ export function DexPool() {
               onClick={() => setIntervalValue(iv)}
               className={`rounded px-1.5 py-0.5 text-[11px] transition-colors ${
                 interval === iv
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
               }`}
             >
@@ -518,7 +531,7 @@ export function DexPool() {
               onClick={() => setLookbackSeconds(o.seconds)}
               className={`rounded px-1.5 py-0.5 text-[11px] transition-colors ${
                 lookbackSeconds === o.seconds
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
               }`}
             >
@@ -581,8 +594,12 @@ export function DexPool() {
               ) : (
                 <div className="relative flex shrink-0">
                   {depth && !depth.available ? (
-                    <p className="w-[120px] shrink-0 border-l border-[var(--color-border)] px-2 py-2 text-[10px] leading-relaxed text-[var(--color-text-muted)]">
-                      {depth.reason ?? "No liquidity bins for this pool."}
+                    <p className="w-[120px] shrink-0 border-l border-[var(--color-border)] px-2 py-2 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                      {/* The bins are read through Gateway; stopped, the route
+                          hands back its raw 503 as the reason. */}
+                      {gateway.down
+                        ? "Liquidity depth needs Gateway."
+                        : (depth.reason ?? "No liquidity bins for this pool.")}
                     </p>
                   ) : (
                     <LiquidityDepthColumn
@@ -605,7 +622,7 @@ export function DexPool() {
           </div>
 
           <div
-            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] transition-colors hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20"
+            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] transition-colors hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20"
             onMouseDown={startVDrag}
           >
             <div className="absolute inset-x-0 top-1/2 mx-auto h-px w-12 -translate-y-1/2 rounded bg-amber-400/60 transition-colors group-hover/hdrag:bg-amber-400" />
@@ -628,7 +645,7 @@ export function DexPool() {
         </div>
 
         <div
-          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] transition-colors hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20"
+          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] transition-colors hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20"
           onMouseDown={startHDrag}
         >
           <div className="absolute inset-y-0 left-1/2 my-auto h-12 w-px -translate-x-1/2 rounded bg-amber-400/60 transition-colors group-hover/vdrag:bg-amber-400" />
@@ -666,12 +683,18 @@ export function DexPool() {
           {/* A pool with no CLMM provider is a state, not an error: a router pool,
               a plain AMM or a Uniswap v4 pool can still be swapped in. */}
           {!lpAvailable && (
-            <p className="border-b border-[var(--color-border)] px-3 py-2 text-[10px] leading-relaxed text-[var(--color-text-muted)]">
-              No liquidity position available here —{" "}
-              {caps.supportsLp
-                ? `${pool.dex_id} is not a concentrated-liquidity venue Condor can add to.`
-                : `${network} takes no CLMM position.`}{" "}
-              Market swaps still work.
+            <p className="border-b border-[var(--color-border)] px-3 py-2 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+              {gateway.down
+                ? "Liquidity positions and swaps need Gateway, which is stopped — start it from the banner above."
+                : (
+                  <>
+                    No liquidity position available here —{" "}
+                    {caps.supportsLp
+                      ? `${pool.dex_id} is not a concentrated-liquidity venue Condor can add to.`
+                      : `${network} takes no CLMM position.`}{" "}
+                    Market swaps still work.
+                  </>
+                )}
             </p>
           )}
 
@@ -724,7 +747,7 @@ export function DexPool() {
             <button
               onClick={() => createMutation.mutate()}
               disabled={!active.validation.valid || createMutation.isPending || !pair}
-              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              className="w-full rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-xs font-semibold text-[var(--on-primary)] transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {createMutation.isPending
                 ? "Creating…"

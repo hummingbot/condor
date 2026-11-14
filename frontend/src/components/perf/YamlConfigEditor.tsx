@@ -105,7 +105,7 @@ export function YamlConfigEditor({
           <button
             onClick={() => saveMutation.mutate()}
             disabled={!isDirty || !!parseError || saveMutation.isPending}
-            className="flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-semibold transition-colors disabled:opacity-30 bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary)]/80 disabled:hover:bg-[var(--color-primary)]"
+            className="flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-semibold transition-colors disabled:opacity-30 bg-[var(--color-primary-fill)] text-[var(--on-primary)] hover:bg-[var(--color-primary-fill)]/80 disabled:hover:bg-[var(--color-primary-fill)]"
           >
             {saveMutation.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />

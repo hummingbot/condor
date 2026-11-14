@@ -40,6 +40,7 @@ export function WorkspaceSheet({
   fullscreen = true,
   onFullscreen,
   paneProfile = "read",
+  slot = "main",
   children,
 }: {
   title: string;
@@ -102,8 +103,17 @@ export function WorkspaceSheet({
    * even split. See `PANE_PROFILES` in {@link WorkspacePaneProvider}.
    */
   paneProfile?: PaneProfile;
+  /**
+   * Which half of the pane's column this sheet draws in. `"main"` is the pane
+   * as it has always been — claimed, one holder at a time. `"below"` is the
+   * lower slot a stacked "Chat + 2" opens under it (the layout picker): it does
+   * not claim the pane, so it never competes with whatever is above it, and
+   * two sheets of the same kind can be on screen at once — one per half.
+   */
+  slot?: "main" | "below";
   children: React.ReactNode;
 }) {
+  const below = slot === "below";
   const pane = useWorkspacePane();
   const canSplit = !!pane?.canSplit;
   const [zen, setZen] = useState(() =>
@@ -121,7 +131,8 @@ export function WorkspaceSheet({
    * this sheet asks whether that is itself.
    */
   const token = useId();
-  const taken = !!pane?.holder && pane.holder !== token;
+  // The lower slot is nobody's to take, so it is never "taken" either.
+  const taken = !below && !!pane?.holder && pane.holder !== token;
   const split = canSplit && !zen && !taken;
 
   // Hold the pane open for as long as this sheet is in it, so the outlet takes
@@ -137,9 +148,9 @@ export function WorkspaceSheet({
   // one of those commits settles in the same frame and only the pane is seen.
   const claim = pane?.claim;
   useLayoutEffect(() => {
-    if (!split || !claim) return;
+    if (!split || !claim || below) return;
     return claim(token, paneProfile);
-  }, [split, claim, token, paneProfile]);
+  }, [split, claim, token, paneProfile, below]);
 
   // Esc closes, as it does for every overlay here. Not in the pane, though: the
   // chat beside it is live and Esc belongs to whatever has focus there.
@@ -277,12 +288,13 @@ export function WorkspaceSheet({
   if (split) {
     // No host on the very first render of a provider still mounting; the outlet
     // is always mounted, so the next one has one.
-    if (!pane?.host) return null;
+    const target = below ? pane?.belowHost : pane?.host;
+    if (!target) return null;
     return createPortal(
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {chrome}
       </div>,
-      pane.host,
+      target,
     );
   }
 

@@ -112,7 +112,7 @@ export function PersonRow({
         <span
           className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
             person.known
-              ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+              ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
               : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
           }`}
           aria-hidden

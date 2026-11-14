@@ -58,14 +58,16 @@ const fakeWindow = {
 
 let container: HTMLDivElement;
 let root: Root;
-let setTheme: (t: "dark" | "light" | "colorblind") => void;
+let setTheme: (t: "dark" | "light") => void;
+let setColorblind: (on: boolean) => void;
 
 /** Exposes the shell's theme control to the test, beside the frame it drives. */
 function Harness() {
-  const { setTheme: set } = useTheme();
+  const { setTheme: set, setColorblind: setCb } = useTheme();
   useEffect(() => {
     setTheme = set;
-  }, [set]);
+    setColorblind = setCb;
+  }, [set, setCb]);
   return <ReportFrame reportId="r1" title="A report" />;
 }
 
@@ -111,12 +113,13 @@ describe("ReportFrame's theme", () => {
     await act(async () => setTheme("dark"));
     expect(posted.at(-1)).toBe("dark");
 
-    // Colorblind is a dark-based palette, and the report protocol has no third
-    // value: it reads as dark, which is what surrounds the frame anyway.
-    await act(async () => setTheme("colorblind"));
-    expect(posted.at(-1)).toBe("dark");
-
     await act(async () => setTheme("light"));
     expect(posted.at(-1)).toBe("light");
+
+    // The colour-blind palette is an overlay, not a theme: the report keeps
+    // following light/dark underneath it.
+    await act(async () => setColorblind(true));
+    expect(posted.at(-1)).toBe("light");
+    await act(async () => setColorblind(false));
   });
 });

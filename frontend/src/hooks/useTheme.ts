@@ -1,27 +1,55 @@
 import { useCallback, useSyncExternalStore } from "react";
 
-import { THEME_KEY } from "@/lib/sessionState";
+import { COLORBLIND_KEY, THEME_KEY } from "@/lib/sessionState";
 
-export type Theme = "dark" | "light" | "colorblind";
+/**
+ * Appearance is two independent choices:
+ *
+ * - `theme` — light or dark. The top-bar toggle flips this and nothing else.
+ * - `colorblind` — an accessibility palette (blue/orange instead of
+ *   green/red, blue instead of gold) applied *on top of* either theme. It is
+ *   chosen in Settings → Appearance, not cycled through from the top bar,
+ *   where it used to read as a third theme.
+ *
+ * On <html>: `data-theme="light|dark"` and, when on, `data-colorblind`.
+ */
+export type Theme = "dark" | "light";
 
-const THEMES: Theme[] = ["dark", "light", "colorblind"];
+const THEMES: Theme[] = ["dark", "light"];
 
 function getSystemTheme(): Theme {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function getStoredTheme(): Theme {
-  const stored = localStorage.getItem(THEME_KEY) as Theme | null;
-  if (stored && THEMES.includes(stored)) return stored;
-  return getSystemTheme();
+function readStored(): { theme: Theme; colorblind: boolean } {
+  const stored = localStorage.getItem(THEME_KEY);
+  // Before appearance was split, colour-blind was a third, dark-based theme.
+  // Carry that choice over as dark + colour-blind rather than dropping it.
+  if (stored === "colorblind") {
+    localStorage.setItem(THEME_KEY, "dark");
+    localStorage.setItem(COLORBLIND_KEY, "1");
+    return { theme: "dark", colorblind: true };
+  }
+  const theme = stored && (THEMES as string[]).includes(stored) ? (stored as Theme) : getSystemTheme();
+  return { theme, colorblind: localStorage.getItem(COLORBLIND_KEY) === "1" };
 }
 
-// Simple external store for theme
-let currentTheme: Theme = getStoredTheme();
+type State = { theme: Theme; colorblind: boolean };
+
+let current: State = readStored();
 const listeners = new Set<() => void>();
 
-function applyTheme(theme: Theme) {
-  document.documentElement.setAttribute("data-theme", theme);
+function apply({ theme, colorblind }: State) {
+  const root = document.documentElement;
+  root.setAttribute("data-theme", theme);
+  if (colorblind) root.setAttribute("data-colorblind", "");
+  else root.removeAttribute("data-colorblind");
+}
+
+function set(next: State) {
+  current = next;
+  apply(next);
+  listeners.forEach((l) => l());
 }
 
 function subscribe(listener: () => void) {
@@ -29,27 +57,30 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
-function getSnapshot(): Theme {
-  return currentTheme;
+function getSnapshot(): State {
+  return current;
 }
 
-// Apply initial theme immediately
-applyTheme(currentTheme);
+// Apply initial appearance immediately
+apply(current);
 
 export function useTheme() {
-  const theme = useSyncExternalStore(subscribe, getSnapshot);
+  const { theme, colorblind } = useSyncExternalStore(subscribe, getSnapshot);
 
   const setTheme = useCallback((t: Theme) => {
-    currentTheme = t;
     localStorage.setItem(THEME_KEY, t);
-    applyTheme(t);
-    listeners.forEach((l) => l());
+    set({ ...current, theme: t });
   }, []);
 
   const toggleTheme = useCallback(() => {
-    const idx = THEMES.indexOf(currentTheme);
-    setTheme(THEMES[(idx + 1) % THEMES.length]);
+    setTheme(current.theme === "dark" ? "light" : "dark");
   }, [setTheme]);
 
-  return { theme, setTheme, toggleTheme };
+  const setColorblind = useCallback((on: boolean) => {
+    if (on) localStorage.setItem(COLORBLIND_KEY, "1");
+    else localStorage.removeItem(COLORBLIND_KEY);
+    set({ ...current, colorblind: on });
+  }, []);
+
+  return { theme, setTheme, toggleTheme, colorblind, setColorblind };
 }

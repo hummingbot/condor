@@ -85,14 +85,14 @@ export function Switch({
       }}
       className={`mt-0.5 flex h-3.5 w-6 shrink-0 items-center rounded-full border p-px transition-colors ${
         on
-          ? "border-[var(--color-primary)]/50 bg-[var(--color-primary)]/30"
+          ? "border-[var(--color-primary)]/50 bg-[var(--color-primary-fill)]/30"
           : "border-[var(--color-border)] bg-[var(--color-surface-hover)]"
       }`}
     >
       <span
         className={`h-2.5 w-2.5 rounded-full transition-transform ${
           on
-            ? "translate-x-[10px] bg-[var(--color-primary)]"
+            ? "translate-x-[10px] bg-[var(--color-primary-fill)]"
             : "translate-x-0 bg-[var(--color-text-muted)]"
         }`}
       />
@@ -322,7 +322,7 @@ export function EditorShell({
           <button
             onClick={onSave}
             disabled={!canSave || isPending}
-            className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-30"
+            className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-semibold text-[var(--on-primary)] transition-all disabled:opacity-30"
           >
             <Save className="h-3.5 w-3.5" />
             {isPending ? "Saving…" : "Save"}

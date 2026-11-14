@@ -115,6 +115,11 @@ export function SessionTabs({
             <SessionTab
               key={slot.info.slot_id}
               slot={slot}
+              agentName={
+                slot.info.agent_slug
+                  ? agents.find((a) => a.slug === slot.info.agent_slug)?.name
+                  : undefined
+              }
               suffix={suffix}
               isActive={slot.info.slot_id === activeSlotId}
               isStreaming={isSlotStreaming(slot.info.slot_id)}
@@ -298,8 +303,15 @@ function NewChatOption({
 
 // ── Session Tab ──
 
+/** `market_making_expert` → "Market making expert", for an agent not in the list. */
+function humanize(slug: string): string {
+  const words = slug.replace(/[_-]+/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function SessionTab({
   slot,
+  agentName,
   suffix,
   isActive,
   isStreaming,
@@ -308,6 +320,8 @@ function SessionTab({
   onClose,
 }: {
   slot: ChatSlot;
+  /** The bound agent's display name — the slot carries only its slug. */
+  agentName?: string;
   /** `#2`, `#3` … when this agent has more than one chat open. */
   suffix: string;
   isActive: boolean;
@@ -321,22 +335,27 @@ function SessionTab({
   // server belong to the agent panel, one click away on the rail's Agent tile,
   // so neither is restated here. An unbound chat is "Condor" — the same word
   // the rail uses for the same conversation.
-  const agentShort = slot.info.label || slot.info.agent_slug || "Condor";
+  const agentShort =
+    agentName || slot.info.label || (slot.info.agent_slug ? humanize(slot.info.agent_slug) : "Condor");
   const TabIcon = slot.info.agent_slug ? Bot : Zap;
   const busy = isStreaming || slot.pending;
   // Strictly `=== false`: a roster from a backend older than `alive` omits the
   // key entirely, and an unknown state has to keep reading as it did before.
   const detached = slot.info.alive === false;
-  const status = busy
-    ? "Answering"
+  const status = slot.pending
+    ? "Starting the session"
+    : isStreaming
+      ? "Answering"
     : detached
       ? "Detached — reattaches on your next message"
       : "Session live";
   // The server is not on the tab, and nothing else in this row carries it any
   // more, so the tooltip is where that fact stays reachable without a click.
-  const title = slot.info.server_name
-    ? `${agentShort}${suffix} — ${slot.info.server_name}`
-    : `${agentShort}${suffix}`;
+  // What a tab *is* was nowhere on screen: an open chat, kept here until it
+  // is closed. The tooltip says so, with the server it runs on.
+  const title = `${agentShort}${suffix}${
+    slot.info.server_name ? ` · ${slot.info.server_name}` : ""
+  } — ${status.toLowerCase()}. Open chats stay here until you close them (×).`;
 
   return (
     <button
@@ -349,7 +368,7 @@ function SessionTab({
       // not shift the row by 2 px.
       className={`group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-t border-b-2 px-3 text-xs transition-colors ${
         isActive
-          ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+          ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 font-medium text-[var(--color-primary)]"
           : "border-transparent text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
       }`}
     >
@@ -395,7 +414,12 @@ function SessionTab({
             onClose();
           }
         }}
-        className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-[var(--color-surface-hover)] group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100"
+        title="Close this chat (the conversation stays in the list)"
+        // Always shown on the tab you are in; on the others, on hover — a
+        // close that only exists under the pointer read as "these never go".
+        className={`ml-0.5 rounded p-0.5 transition-opacity hover:bg-[var(--color-surface-hover)] group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100 ${
+          isActive ? "opacity-60" : "opacity-0"
+        }`}
       >
         <X className="h-2.5 w-2.5" />
       </span>

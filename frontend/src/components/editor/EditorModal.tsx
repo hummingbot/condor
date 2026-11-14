@@ -207,7 +207,7 @@ function FileTree({
                     }}
                     className={`flex items-center gap-1.5 w-full px-2 py-0.5 ml-3 rounded truncate transition-colors ${
                       activeFileId === f.id
-                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                         : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
                     }`}
                   >
@@ -425,7 +425,7 @@ function EditorPane({
             <button
               onClick={handleSave}
               disabled={!canSave || saveMutation.isPending}
-              className="flex items-center gap-1 rounded bg-[var(--color-primary)] px-2.5 py-1 text-xs font-medium text-white transition-opacity disabled:opacity-40"
+              className="flex items-center gap-1 rounded bg-[var(--color-primary-fill)] px-2.5 py-1 text-xs font-medium text-[var(--on-primary)] transition-opacity disabled:opacity-40"
             >
               {saveMutation.isPending ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -810,7 +810,7 @@ export function EditorModal({ open, onClose }: { open: boolean; onClose: () => v
                     }}
                     className={`px-2 py-1.5 border-b border-l border-[var(--color-border)] transition-colors ${
                       splitMode
-                        ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                        ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                         : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                     }`}
                     title="Toggle split view"

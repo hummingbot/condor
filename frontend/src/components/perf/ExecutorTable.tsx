@@ -450,7 +450,7 @@ export function DetailPanel({
         style={{ width: panelWidth }}
       >
         <div
-          className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-[var(--color-primary)]/30 transition-colors z-10"
+          className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-[var(--color-primary-fill)]/30 transition-colors z-10"
           onMouseDown={onMouseDown}
         />
 

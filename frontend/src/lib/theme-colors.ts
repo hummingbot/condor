@@ -35,15 +35,16 @@ function readThemeColors(): ThemeColors {
 }
 
 // Invalidate the cache whenever the theme changes. Theme switching toggles the
-// [data-theme] attribute on <html> (see hooks/useTheme.ts), so observe that signal.
+// [data-theme] / [data-colorblind] attributes on <html> (see hooks/useTheme.ts),
+// so observe those signals.
 if (typeof document !== "undefined") {
   const observer = new MutationObserver(() => {
     cachedColors = null;
   });
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-colorblind"] });
 }
 
-/** Read chart colors from CSS variables (respects dark/light/colorblind theme). */
+/** Read chart colors from CSS variables (respects light/dark and the colour-blind palette). */
 export function getThemeColors(): ThemeColors {
   if (cachedColors === null) cachedColors = readThemeColors();
   return cachedColors;

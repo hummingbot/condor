@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  Archive,
   ArrowUpRight,
   Bot,
   ChevronDown,
@@ -18,7 +19,7 @@ import { Link } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { ConversationList } from "@/components/chat/ConversationList";
+import { ConversationList, REMOVED_GROUP } from "@/components/chat/ConversationList";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
@@ -58,9 +59,9 @@ function readOpen(): boolean {
 export const ChatRail = memo(function ChatRail({
   agents,
   runningTasks,
-  activeSlug,
   hasSession,
-  liveIds,
+  busyIds,
+  waitingIds,
   activeId,
   hubActive = false,
   open,
@@ -73,10 +74,15 @@ export const ChatRail = memo(function ChatRail({
   /** Delegations running anywhere, for the live strip's count. */
   runningTasks: number;
   /** Bound agent of the conversation on screen, `""` for Condor. */
-  activeSlug: string;
+  activeSlug?: string;
   /** Whether a conversation is on screen at all, so no row lights up before. */
   hasSession: boolean;
-  liveIds: Set<string>;
+  /** No longer drawn: with one chat at a time, live is just the open one. */
+  liveIds?: Set<string>;
+  /** Conversations answering right now (or starting). */
+  busyIds?: Set<string>;
+  /** Conversations holding a tool call that waits on the user. */
+  waitingIds?: Set<string>;
   /** Conversation on screen — `null` before a session exists. */
   activeId: string | null;
   /** The Hub is in the workspace's column, so its row is the one lit. */
@@ -199,7 +205,7 @@ export const ChatRail = memo(function ChatRail({
     <aside
       className={`${
         open ? "flex" : "hidden"
-      } absolute inset-y-0 left-0 z-30 w-[260px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] md:relative md:flex`}
+      } absolute inset-y-0 left-0 z-30 w-[288px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] md:relative md:flex`}
     >
       {/* What is looping right now, the way into it, and the way out of the
           column — the mirror of the dock's own collapse. */}
@@ -214,57 +220,75 @@ export const ChatRail = memo(function ChatRail({
         </button>
       </div>
 
-      {/* Who you can talk to */}
-      <div className="border-b border-[var(--color-border)] py-1">
-        <div className="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-          Agents
-        </div>
-        <RailRow
-          label={condor?.name || "Condor"}
-          icon={<MessageSquare className="h-3 w-3 shrink-0" />}
-          active={!hubActive && hasSession && !activeSlug}
-          title={condor?.description || "General trading assistant"}
-          onClick={() => onTalk("", null)}
-          newTitle={`New chat with ${condor?.name || "Condor"}`}
-          onNew={() => onTalk("", null, true)}
-        />
-        {specialists.map((agent) => {
-          const live = deriveAgentStatus(agent) === "running";
-          return (
-            <RailRow
-              key={agent.slug}
-              label={agent.name}
-              icon={
-                <Bot className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-              }
-              live={live}
-              isNew={agent.is_new}
-              active={!hubActive && activeSlug === agent.slug}
-              title={agent.description || agent.name}
-              onClick={() => onTalk(agent.slug, agent)}
-              newTitle={`New chat with ${agent.name}`}
-              onNew={() => onTalk(agent.slug, agent, true)}
-              slug={agent.slug}
-              // A looping agent cannot be deleted — the server refuses it —
-              // so the menu says so where the click is, rather than letting
-              // the refusal come back as a failed dialog.
-              running={live}
-              onDelete={() => setPendingDelete(agent)}
-            />
-          );
-        })}
+      {/* One action above the list: a new chat with whoever is selected
+          (Condor before anything is). A specific agent's is the `+` on its
+          row. */}
+      <div className="px-2 pb-1 pt-2">
+        <button
+          onClick={onNew}
+          // Always raised — the same card the open chat is — so the one
+          // action in the column reads as a button, not as a row of the list.
+          className="flex w-full items-center gap-2.5 rounded-lg bg-[var(--color-surface)] px-2 py-2 text-left text-sm font-medium text-[var(--color-text)] shadow-sm ring-1 ring-[var(--color-border)] transition-shadow hover:shadow-md"
+        >
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-fill)] text-[var(--on-primary)]">
+            <Plus className="h-3.5 w-3.5" />
+          </span>
+          New chat
+        </button>
       </div>
 
-      {/* What you already said — the rail's own list, in flow */}
+      {/* Agents, each with its chats inside — one row per agent, so no agent
+          is ever listed twice. */}
       <ConversationList
-        liveIds={liveIds}
+        agents={condor ? [condor, ...specialists] : specialists}
+        busyIds={busyIds}
+        waitingIds={waitingIds}
         activeId={activeId}
-        // "New chat" means a fresh one with whoever is selected — Condor only
-        // when Condor is who you are pointing at.
-        onNew={onNew}
         onOpen={(meta) => {
           onClose();
           onOpenConversation(meta);
+        }}
+        renderAgent={({ agent, slug, name, count, expanded, holdsActive, onToggle }) => {
+          const isCondor = slug === CHAT_SLUG;
+          const talkSlug = isCondor ? "" : slug;
+          const live = !!agent && !isCondor && deriveAgentStatus(agent) === "running";
+          return (
+            <RailRow
+              key={slug}
+              label={name}
+              icon={
+                slug === REMOVED_GROUP ? (
+                  <Archive className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
+                ) : isCondor ? (
+                  // The house assistant keeps the brand colour; every
+                  // specialist shares one quiet line icon.
+                  <MessageSquare className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+                ) : (
+                  <Bot className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
+                )
+              }
+              expanded={count > 0 ? expanded : undefined}
+              count={count}
+              live={live}
+              isNew={agent?.is_new}
+              // Lit when its chat is on screen but folded away, so the open
+              // chat is always findable in the list.
+              active={!hubActive && hasSession && holdsActive && !expanded}
+              title={
+                slug === REMOVED_GROUP
+                  ? "Chats with agents that are no longer installed"
+                  : agent?.description || name
+              }
+              // An agent with chats opens and closes them; one without starts
+              // the first.
+              onClick={() => (count > 0 ? onToggle() : onTalk(talkSlug, isCondor ? null : agent))}
+              newTitle={`New chat with ${name}`}
+              onNew={agent ? () => onTalk(talkSlug, isCondor ? null : agent, true) : undefined}
+              slug={!isCondor && agent ? slug : undefined}
+              running={live}
+              onDelete={!isCondor && agent ? () => setPendingDelete(agent) : undefined}
+            />
+          );
         }}
       />
 
@@ -283,14 +307,14 @@ export const ChatRail = memo(function ChatRail({
           onClick={onClose}
           className={`group flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-left transition-colors ${
             hubActive
-              ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10"
+              ? "border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10"
               : "border-[var(--color-border)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)]"
           }`}
         >
           <span
             className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors ${
               hubActive
-                ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
+                ? "bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)]"
                 : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] group-hover:text-[var(--color-primary)]"
             }`}
           >
@@ -477,6 +501,8 @@ function LiveStrip({
 function RailRow({
   label,
   icon,
+  expanded,
+  count,
   live,
   isNew,
   active,
@@ -490,6 +516,10 @@ function RailRow({
 }: {
   label: string;
   icon: React.ReactNode;
+  /** Has chats under it: open (`true`) or folded (`false`). Absent: none. */
+  expanded?: boolean;
+  /** How many chats it holds, shown folded. */
+  count?: number;
   live?: boolean;
   /** Cloned from Botcamp and not opened once yet — see `ChatRail`'s `markSeen`. */
   isNew?: boolean;
@@ -506,81 +536,84 @@ function RailRow({
   onDelete?: () => void;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      className={`group flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
-        active
-          ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-          : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-      }`}
-    >
-      {icon}
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      {isNew && (
-        // A one-shot badge, never a second "live"-style dot: a dot would
-        // read as "running" next to the real one, and this is the opposite
-        // fact — nobody has opened it yet. Gone the instant the row is
-        // clicked (`ChatRail`'s `markSeen`), so it never lingers past the
-        // first chat.
-        <span
-          className="shrink-0 rounded-full bg-amber-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-400"
-          title="Cloned from Botcamp — not opened yet"
-        >
-          New
-        </span>
-      )}
-      {live && (
-        <span
-          className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
-          title="Loop running"
-        />
-      )}
-      {onNew && (
-        // A span, not a button: this sits inside the row's own button.
-        //
-        // The `+` used to appear only on hover, which made the second
-        // conversation a thing you had to already know about. Now it is always
-        // on the row and the *hover* is what explains it: the icon grows a
-        // "New" label, so the affordance is discovered by pointing rather than
-        // by guessing. Hovering the pill itself is a third step in the same
-        // gesture — it takes the accent colour, so you can see the click will
-        // land here and not on the row underneath.
-        <span
-          role="button"
-          tabIndex={0}
-          aria-label={newTitle}
-          title={newTitle}
-          onClick={(e) => {
-            e.stopPropagation();
-            onNew();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              e.stopPropagation();
-              onNew();
-            }
-          }}
-          className="flex shrink-0 items-center gap-0.5 rounded-full px-1 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)] opacity-60 transition-all duration-200 group-hover:bg-[var(--color-surface-hover)] group-hover:opacity-100 group-focus-within:bg-[var(--color-surface-hover)] group-focus-within:opacity-100 hover:bg-[var(--color-primary)]/15! hover:text-[var(--color-primary)]! focus-visible:opacity-100"
-        >
-          <Plus className="h-3 w-3 shrink-0" />
-          {/* Width, not display: a label that animates from nothing keeps the
-              row's own text from jumping when the pill grows. */}
-          <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:max-w-[2.5rem] group-hover:pr-0.5 group-hover:opacity-100 group-focus-within:max-w-[2.5rem] group-focus-within:pr-0.5 group-focus-within:opacity-100">
+    // The row and its hover actions are siblings, not one button with
+    // buttons inside: the actions float over the row's end (count, chevron)
+    // instead of squeezing into it, so pointing at a row never reflows it, and
+    // they go when the pointer does — a click no longer leaves them stuck on
+    // through focus.
+    <div className="group/agent relative px-2">
+      <button
+        onClick={onClick}
+        title={title}
+        className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition-colors group-hover/agent:bg-[var(--color-surface-hover)] ${
+          active ? "font-semibold text-[var(--color-text)]" : "font-medium text-[var(--color-text)]"
+        }`}
+      >
+        {icon}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {/* States as labelled pills, not bare dots: "Live" reads itself. */}
+        {live && (
+          <span
+            className="shrink-0 rounded-md border border-[var(--color-green)]/30 bg-[var(--color-green)]/10 px-1.5 py-px text-2xs font-medium text-[var(--color-green)]"
+            title="Loop running"
+          >
+            Live
+          </span>
+        )}
+        {isNew && (
+          // Cloned from Botcamp and never opened; gone the instant the row is
+          // clicked (`ChatRail`'s `markSeen`).
+          <span
+            className="shrink-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-px text-2xs font-medium text-[var(--color-text-muted)]"
+            title="Cloned from Botcamp — not opened yet"
+          >
             New
           </span>
-        </span>
+        )}
+        {!!count && (
+          <span
+            title={`${count} chat${count === 1 ? "" : "s"}`}
+            className="shrink-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-px text-2xs font-medium tabular-nums text-[var(--color-text-muted)]"
+          >
+            {count}
+          </span>
+        )}
+        {expanded !== undefined && (
+          <ChevronDown
+            className={`h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)] transition-transform ${
+              expanded ? "" : "-rotate-90"
+            }`}
+          />
+        )}
+      </button>
+
+      {(onNew || (slug && onDelete)) && (
+        <div
+          className="pointer-events-none absolute inset-y-0 right-2 flex items-center gap-0.5 rounded-r-lg pl-8 pr-1.5 opacity-0 transition-opacity group-hover/agent:pointer-events-auto group-hover/agent:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100"
+          // Fades in from the row's own hover colour, so it covers the count
+          // and chevron without a hard edge.
+          style={{
+            background:
+              "linear-gradient(to right, transparent, var(--color-surface-hover) 40%)",
+          }}
+        >
+          {onNew && (
+            <button
+              type="button"
+              aria-label={newTitle}
+              title={newTitle}
+              onClick={onNew}
+              className="flex rounded-md p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-primary-fill)]/15 hover:text-[var(--color-primary)]"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {slug && onDelete && (
+            <RowMenu slug={slug} label={label} running={running} onDelete={onDelete} />
+          )}
+        </div>
       )}
-      {slug && onDelete && (
-        <RowMenu
-          slug={slug}
-          label={label}
-          running={running}
-          onDelete={onDelete}
-        />
-      )}
-    </button>
+    </div>
   );
 }
 
@@ -633,16 +666,17 @@ function RowMenu({
             setOpen((v) => !v);
           }
         }}
-        className={`flex shrink-0 items-center rounded-full p-0.5 text-[var(--color-text-muted)] transition-all duration-200 hover:bg-[var(--color-primary)]/15! hover:text-[var(--color-primary)]! focus-visible:opacity-100 ${
+        className={`flex shrink-0 items-center rounded-md p-1 text-[var(--color-text-muted)] transition-all duration-200 hover:bg-[var(--color-primary-fill)]/15! hover:text-[var(--color-primary)]! focus-visible:opacity-100 ${
           // Unlike the `+`, this is hidden until the row is pointed at: it is
           // the rare errand, and six always-on `⋯` would make the list busier
           // than the agents in it.
-          open
-            ? "opacity-100"
-            : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+          // `hidden`, not transparent: an invisible `⋯` still took its width,
+          // which pushed every count but Condor's (no menu) out of line.
+          // Shown by the hover overlay it sits in (`RailRow`).
+          "flex"
         }`}
       >
-        <MoreHorizontal className="h-3 w-3 shrink-0" />
+        <MoreHorizontal className="h-3.5 w-3.5 shrink-0" />
       </span>
       <AnchoredMenu
         anchor={anchor}

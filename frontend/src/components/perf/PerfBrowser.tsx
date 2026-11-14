@@ -2252,7 +2252,7 @@ export function PerfBrowser({
     return {
       // The same label the route entry uses, so the cache's half of this screen
       // and the reader's half render as one screen rather than two.
-      label: "Bots",
+      label: "Activity",
       subject,
       onScreen: {
         population,
@@ -2400,7 +2400,7 @@ export function PerfBrowser({
                     title={hint}
                     className={`flex-1 rounded px-1 py-1 text-[10px] font-medium transition-colors ${
                       grain === key
-                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                         : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                     }`}
                   >
@@ -2423,7 +2423,7 @@ export function PerfBrowser({
                       aria-pressed={period === key}
                       className={`flex-1 rounded px-1 py-1 text-[10px] font-medium transition-colors ${
                         period === key
-                          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                          ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                           : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                       }`}
                     >
@@ -2519,7 +2519,7 @@ export function PerfBrowser({
                 title={`Select all — ${plural(scopeCounts.controllers, "controller")}`}
                 className={`flex w-full items-center justify-center py-3 transition-colors ${
                   atRoot
-                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                     : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
               >
@@ -2540,7 +2540,7 @@ export function PerfBrowser({
                   title="Report on everything in scope, combined"
                   className={`ml-auto flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
                     atRoot
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]/15 font-semibold text-[var(--color-primary)]"
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/15 font-semibold text-[var(--color-primary)]"
                       : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
                   }`}
                 >
@@ -2770,7 +2770,7 @@ export function PerfBrowser({
                 and this one arrived in a link rather than being ticked. */}
             {runNum !== null && (
               <span
-                className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
+                className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
                 title={
                   owner
                     ? `Only the bots, controllers and executors run ${runNum} deployed`
@@ -2821,7 +2821,7 @@ export function PerfBrowser({
             {scope.kind === "fleet" && (
               <button
                 onClick={() => setShowDeploy(true)}
-                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
+                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/10"
                 title="Deploy a new bot"
               >
                 <Rocket className="h-3.5 w-3.5" />
@@ -2878,7 +2878,7 @@ export function PerfBrowser({
                   onClick={() => setDrawer((d) => (d === "logs" ? null : "logs"))}
                   className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
                     openDrawer === "logs"
-                      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                      ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                   }`}
                   title={openDrawer === "logs" ? "Hide logs" : "Show logs"}
@@ -2905,7 +2905,7 @@ export function PerfBrowser({
               onClick={() => setDrawer((d) => (d === "diagnostics" ? null : "diagnostics"))}
               className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
                 openDrawer === "diagnostics"
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
               }`}
               title={
@@ -2929,7 +2929,7 @@ export function PerfBrowser({
             {activeRun?.archive_db_path && (
               <button
                 onClick={() => setOpenArchive(activeRun)}
-                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
+                className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/10"
                 title="Open this run's archived database"
               >
                 <Database className="h-3.5 w-3.5" />
@@ -2995,7 +2995,7 @@ export function PerfBrowser({
                     }
                     className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
                       execChart === mode
-                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                         : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                     }`}
                   >
@@ -3036,7 +3036,7 @@ export function PerfBrowser({
                 onClick={() => setDrawer((d) => (d === "config" ? null : "config"))}
                 className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
                   openDrawer === "config"
-                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                     : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
                 title={openDrawer === "config" ? "Hide config" : "Show config"}
@@ -3119,7 +3119,7 @@ export function PerfBrowser({
                 {scope.kind === "fleet" && (
                   <button
                     onClick={() => setShowDeploy(true)}
-                    className="mt-3 flex items-center gap-1.5 rounded border border-[var(--color-primary)]/40 px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10"
+                    className="mt-3 flex items-center gap-1.5 rounded border border-[var(--color-primary)]/40 px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/10"
                     title="Deploy a new bot"
                   >
                     <Rocket className="h-3.5 w-3.5" />

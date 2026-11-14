@@ -183,7 +183,7 @@ export function TickSpine({
         onClick={() => onSelectTick(null)}
         className={`mr-1 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${
           selectedTick === null
-            ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+            ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
             : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
         }`}
       >

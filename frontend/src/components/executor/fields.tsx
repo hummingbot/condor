@@ -85,7 +85,7 @@ export function PriceField({
           }
           className={`flex items-center rounded border px-2 transition-colors ${
             isActive
-              ? "border-[var(--color-primary)] bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
+              ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)]"
               : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
           }`}
           title="Pick from chart"
@@ -291,11 +291,11 @@ export function SelectField({
               }}
               className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors ${
                 isActive
-                  ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                   : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
               }`}
             >
-              {isActive && <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-primary)]" />}
+              {isActive && <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-primary-fill)]" />}
               <span className={isActive ? "" : "ml-3.5"}>{opt.label}</span>
             </button>
           );
@@ -327,7 +327,7 @@ export function ToggleField({
         aria-label={label}
         onClick={() => dispatch({ type: "SET_FIELD", field, value: !value })}
         className={`relative h-5 w-9 rounded-full transition-colors ${
-          value ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
+          value ? "bg-[var(--color-primary-fill)]" : "bg-[var(--color-border)]"
         }`}
       >
         <span

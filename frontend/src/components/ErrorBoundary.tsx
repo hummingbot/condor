@@ -109,7 +109,7 @@ export class ErrorBoundary extends Component<Props, State> {
                   this.setState({ hasError: false, error: null, componentStack: null });
                 }
               }}
-              className="rounded-md bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-colors hover:opacity-90"
+              className="rounded-md bg-[var(--color-primary-fill)] px-4 py-2 text-sm font-medium text-[var(--on-primary)] transition-colors hover:opacity-90"
             >
               {this.state.error && isChunkLoadError(this.state.error) ? "Reload" : "Try Again"}
             </button>

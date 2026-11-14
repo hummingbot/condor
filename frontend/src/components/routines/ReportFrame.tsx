@@ -37,11 +37,9 @@ export function ReportFrame({
   className?: string;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const { theme: appTheme } = useTheme();
-  // The app has three themes, the report protocol has two. Colorblind is a
-  // dark-based palette, so it reads as dark inside the frame too — which is
-  // also what the report side assumes: anything but `light` is dark.
-  const theme = appTheme === "light" ? "light" : "dark";
+  // Light/dark maps 1:1 onto the report protocol; the colour-blind palette is
+  // an app-side overlay the report does not know about.
+  const { theme } = useTheme();
 
   const { data: html, isLoading, isError, error } = useQuery({
     queryKey: ["report-html", reportId],

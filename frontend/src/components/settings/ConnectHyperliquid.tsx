@@ -246,7 +246,7 @@ export function ConnectHyperliquid({
             className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
               partial
                 ? "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
-                : "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text)]"
+                : "border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/5 text-[var(--color-text)]"
             }`}
           >
             <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
@@ -265,7 +265,7 @@ export function ConnectHyperliquid({
 
           {/* Referral code — link the Hummingbot code for a fee discount (one-time). */}
           {referral === "linked" ? (
-            <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
+            <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/5 p-3 text-sm text-[var(--color-text)]">
               <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
               <span>
                 Hummingbot referral linked — {REFERRAL_FEE_DISCOUNT} off fees.
@@ -296,7 +296,7 @@ export function ConnectHyperliquid({
                 <button
                   onClick={handleLinkReferral}
                   disabled={referral === "linking"}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   {referral === "linking" ? (
                     <>

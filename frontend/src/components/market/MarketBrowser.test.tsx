@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Ticker } from "@/lib/api";
 import { changeColumnLabel } from "@/lib/marketChange";
 import { MarketBrowser, type MarketPick } from "./MarketBrowser";
+import { MemoryRouter } from "react-router-dom";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -69,15 +70,19 @@ async function render() {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <MarketBrowser
-          server="srv"
-          connector="binance"
-          pair="BTC-USDT"
-          connectors={CONNECTORS}
-          credentialed={new Set(["binance"])}
-          onPick={(m) => picked.push(m)}
-          onClose={() => {}}
-        />
+        {/* The empty state links to the DEX browser, so the picker needs the
+            router it always has inside the Trade page. */}
+        <MemoryRouter>
+          <MarketBrowser
+            server="srv"
+            connector="binance"
+            pair="BTC-USDT"
+            connectors={CONNECTORS}
+            credentialed={new Set(["binance"])}
+            onPick={(m) => picked.push(m)}
+            onClose={() => {}}
+          />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
   });

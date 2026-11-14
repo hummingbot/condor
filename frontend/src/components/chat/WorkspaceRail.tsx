@@ -80,12 +80,24 @@ export type RailGroup = {
   items: RailItem[];
 };
 
-export function WorkspaceRail({ groups }: { groups: RailGroup[] }) {
+export function WorkspaceRail({
+  groups,
+  header,
+}: {
+  groups: RailGroup[];
+  /** Drawn above the groups and ruled off from them — the layout picker. */
+  header?: React.ReactNode;
+}) {
   return (
     <aside
       data-testid="workspace-rail"
       className="flex w-16 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg)] py-2"
     >
+      {header && (
+        <div className="mb-1.5 flex w-full shrink-0 flex-col items-center border-b border-[var(--color-border)] pb-2">
+          {header}
+        </div>
+      )}
       {groups
         .filter((g) => g.items.length > 0)
         .map((group, i) => (
@@ -136,7 +148,7 @@ export function RailButton({
       title={disabled ? disabledHint || hint : hint}
       className={`relative flex w-14 shrink-0 flex-col items-center gap-1 rounded-lg px-1 py-2 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
         active
-          ? "bg-[var(--color-primary)]/12 text-[var(--color-primary)]"
+          ? "bg-[var(--color-primary-fill)]/12 text-[var(--color-primary)]"
           : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
       }`}
     >
@@ -146,7 +158,7 @@ export function RailButton({
       {active && (
         <span
           aria-hidden
-          className="absolute inset-y-1.5 right-0 w-0.5 rounded-full bg-[var(--color-primary)]"
+          className="absolute inset-y-1.5 right-0 w-0.5 rounded-full bg-[var(--color-primary-fill)]"
         />
       )}
       <span className="relative">

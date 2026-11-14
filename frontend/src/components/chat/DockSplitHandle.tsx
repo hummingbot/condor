@@ -39,6 +39,7 @@ export function DockSplitHandle({
   setFrac,
   defaultFrac,
   label,
+  axis = "y",
 }: {
   frac: number;
   setFrac: (f: number) => void;
@@ -46,17 +47,23 @@ export function DockSplitHandle({
   defaultFrac: number;
   /** What this seam separates, for the reader who cannot see it. */
   label: string;
+  /**
+   * `y` (default): the sections are one above the other and the seam is a
+   * horizontal line. `x`: they sit side by side and the seam is vertical.
+   */
+  axis?: "x" | "y";
 }) {
   const geom = useRef({ top: 0, avail: 1 });
+  const across = axis === "x";
 
   const { onMouseDown: startDrag, isDragging } = useResizeDrag({
-    axis: "y",
+    axis,
     value: 0, // `compute` is absolute; the drag has no starting size to grow.
     onChange: (px) => setFrac(px / geom.current.avail),
     min: MIN_SECTION_PX,
     max: () => geom.current.avail - MIN_SECTION_PX,
     compute: (coord) => coord - geom.current.top,
-    cursor: "row-resize",
+    cursor: across ? "col-resize" : "row-resize",
     lockUserSelect: true,
   });
 
@@ -65,10 +72,10 @@ export function DockSplitHandle({
     const above = handle.previousElementSibling as HTMLElement | null;
     const below = handle.nextElementSibling as HTMLElement | null;
     if (above && below) {
-      geom.current = {
-        top: above.getBoundingClientRect().top,
-        avail: above.offsetHeight + below.offsetHeight,
-      };
+      const r = above.getBoundingClientRect();
+      geom.current = across
+        ? { top: r.left, avail: above.offsetWidth + below.offsetWidth }
+        : { top: r.top, avail: above.offsetHeight + below.offsetHeight };
     }
     startDrag(e);
   };
@@ -76,8 +83,8 @@ export function DockSplitHandle({
   const onKeyDown = (e: React.KeyboardEvent) => {
     // Down grows the section above, up gives the room back — the seam moves the
     // way the arrow points.
-    if (e.key === "ArrowDown") setFrac(frac + 0.02);
-    else if (e.key === "ArrowUp") setFrac(frac - 0.02);
+    if (e.key === (across ? "ArrowRight" : "ArrowDown")) setFrac(frac + 0.02);
+    else if (e.key === (across ? "ArrowLeft" : "ArrowUp")) setFrac(frac - 0.02);
     else return;
     e.preventDefault();
   };
@@ -85,7 +92,7 @@ export function DockSplitHandle({
   return (
     <div
       role="separator"
-      aria-orientation="horizontal"
+      aria-orientation={across ? "vertical" : "horizontal"}
       aria-label={label}
       aria-valuenow={Math.round(frac * 100)}
       aria-valuemin={Math.round(MIN_SPLIT_FRAC * 100)}
@@ -97,8 +104,8 @@ export function DockSplitHandle({
       title="Drag to resize — double-click to reset"
       // Pulled up over the section border above it, so the grabbable strip is
       // the seam the reader can see rather than a gap below it.
-      className={`-mt-1 h-1.5 shrink-0 cursor-row-resize transition-colors hover:bg-[var(--color-primary)]/30 focus:outline-none focus-visible:bg-[var(--color-primary)]/30 ${
-        isDragging ? "bg-[var(--color-primary)]/30" : ""
+      className={`${across ? "-ml-1 w-1.5 cursor-col-resize" : "-mt-1 h-1.5 cursor-row-resize"} shrink-0 transition-colors hover:bg-[var(--color-primary-fill)]/30 focus:outline-none focus-visible:bg-[var(--color-primary-fill)]/30 ${
+        isDragging ? "bg-[var(--color-primary-fill)]/30" : ""
       }`}
     />
   );

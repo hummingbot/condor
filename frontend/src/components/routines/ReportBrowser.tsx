@@ -756,7 +756,7 @@ export function ReportBrowser({
                   }}
                   className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
                     showConfigPanel
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`}
                   title="Configure & Run"
@@ -771,7 +771,7 @@ export function ReportBrowser({
                   }}
                   className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
                     showNotifyPanel
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`}
                   title="Post-run notifications"
@@ -782,7 +782,7 @@ export function ReportBrowser({
                 <button
                   onClick={() => runMutation.mutate()}
                   disabled={runMutation.isPending || !runServer}
-                  className="flex items-center gap-1 rounded bg-[var(--color-primary)] px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                  className="flex items-center gap-1 rounded bg-[var(--color-primary-fill)] px-2.5 py-1 text-[10px] font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:opacity-50"
                   title="Run with current config"
                 >
                   {runMutation.isPending ? (
@@ -830,7 +830,7 @@ export function ReportBrowser({
                     onClick={() => setView(id)}
                     className={`rounded px-2 py-0.5 text-[10px] font-semibold capitalize transition-colors ${
                       view === id
-                        ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                        ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                         : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                     }`}
                     title={
@@ -983,7 +983,7 @@ export function ReportBrowser({
                 onClick={() => setSelectedReportIdx(idx)}
                 className={`shrink-0 rounded px-2 py-1 text-[10px] transition-all ${
                   idx === selectedReportIdx
-                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
+                    ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)] font-medium"
                     : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
                 title={r.title}
@@ -1001,7 +1001,7 @@ export function ReportBrowser({
                   }}
                   className={`appearance-none rounded-md pl-2.5 pr-7 py-1 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
                     selectedReportIdx >= 10
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] border border-[var(--color-primary)]/30"
+                      ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)] border border-[var(--color-primary)]/30"
                       : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text)] hover:border-[var(--color-text-muted)]/30"
                   }`}
                 >
@@ -1067,7 +1067,7 @@ export function ReportBrowser({
                       <button
                         onClick={() => runMutation.mutate()}
                         disabled={runMutation.isPending}
-                        className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                        className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-xs font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:opacity-50"
                       >
                         {runMutation.isPending ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1110,7 +1110,7 @@ export function ReportBrowser({
                     <button
                       onClick={() => runMutation.mutate()}
                       disabled={runMutation.isPending}
-                      className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                      className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary-fill)] px-5 py-2.5 text-sm font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:opacity-50"
                     >
                       {runMutation.isPending ? (
                         <Loader2 className="h-4 w-4 animate-spin" />

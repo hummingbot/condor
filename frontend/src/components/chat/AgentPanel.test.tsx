@@ -433,8 +433,11 @@ describe("the panel", () => {
       onAskAgent: true,
       onDirtyChange: true,
       onClose: true,
+      // Where the panel draws (the pane, or a stacked layout's lower slot) —
+      // layout placement, not wiring the panel reads.
+      slot: true,
     };
-    expect(Object.keys(exactKeys)).toHaveLength(10);
+    expect(Object.keys(exactKeys)).toHaveLength(11);
 
     await renderPanel({ wiring: <span data-testid="host-wiring">wired</span> });
 

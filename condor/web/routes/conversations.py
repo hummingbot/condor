@@ -76,9 +76,12 @@ async def list_conversations(
     """Every conversation the caller has ever held, newest first.
 
     One keyspace across surfaces, so a chat started in Telegram is listed here
-    exactly like one started in the dashboard.
+    exactly like one started in the dashboard. A chat opened and left without
+    a message is not one, and is not listed.
     """
-    return conversations.list_conversations(_owner(user, user_id), limit=limit)
+    return conversations.list_conversations(
+        _owner(user, user_id), limit=limit, skip_empty=True
+    )
 
 
 @router.get("/{conversation_id}")

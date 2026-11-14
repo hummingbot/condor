@@ -45,7 +45,7 @@ export function TelemetryConsentBanner() {
   const { disclosure } = data;
 
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] bg-[var(--color-primary)]/10 px-4 py-2">
+    <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] bg-[var(--color-primary-fill)]/10 px-4 py-2">
       <ShieldCheck className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
 
       {/* `min-w-0` so the copy wraps inside its own column instead of pushing
@@ -68,7 +68,7 @@ export function TelemetryConsentBanner() {
         <button
           disabled={setLevel.isPending}
           onClick={() => setLevel.mutate("usage")}
-          className="whitespace-nowrap rounded-md bg-[var(--color-primary)] px-3 py-1 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-60"
+          className="whitespace-nowrap rounded-md bg-[var(--color-primary-fill)] px-3 py-1 text-xs font-medium text-[var(--on-primary)] transition-colors hover:opacity-90 disabled:opacity-60"
         >
           {disclosure.acknowledge}
         </button>

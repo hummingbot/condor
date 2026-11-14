@@ -1,5 +1,6 @@
 import { PanelRightClose, Radio, Zap } from "lucide-react";
 import { memo, useState } from "react";
+import { createPortal } from "react-dom";
 
 import {
   DockRoutines,
@@ -14,6 +15,7 @@ import type { RoutineRunContext } from "@/components/routines/ReportBrowser";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import type { Delegation } from "@/lib/api";
 import { inScope, resolveRoutine, type RoutineScope } from "@/lib/routineUtils";
+import { useWorkspacePane } from "@/hooks/useWorkspacePane";
 import { DOCK_WIDTH_KEY } from "@/lib/sessionState";
 
 const DEFAULT_WIDTH = 300;
@@ -91,6 +93,7 @@ export const ContextDock = memo(function ContextDock({
   runContext,
   library,
   onLibraryChange,
+  stackSlot = null,
 }: {
   /** Which panes are open, and the lists behind them ({@link ContextPanels}). */
   panels: ContextPanels;
@@ -114,7 +117,21 @@ export const ContextDock = memo(function ContextDock({
    */
   library: LibraryFocus | null;
   onLibraryChange: (focus: LibraryFocus | null) => void;
+  /**
+   * Draw the column in one half of the workspace pane's column instead of
+   * beside it — the layout picker's stacked "Chat + 2", where either half may
+   * hold Tasks or Routines. It takes the half's width, so the dock drops its
+   * own. `null` is the side column it has always been.
+   */
+  stackSlot?: "top" | "bottom" | null;
 }) {
+  const workspace = useWorkspacePane();
+  const stackInto =
+    stackSlot === "top"
+      ? (workspace?.host ?? null)
+      : stackSlot === "bottom"
+        ? (workspace?.belowHost ?? null)
+        : null;
   const { shown, toggle, closeAll, instances, routines } = panels;
   const setLibrary = onLibraryChange;
   // Whose routines the picker lists — the agent on the other end of this
@@ -208,75 +225,85 @@ export const ContextDock = memo(function ContextDock({
    * reason — it keeps its identity, and the report inside it keeps its scroll,
    * through a close of the column beside it.
    */
+  const column =
+    shown.length > 0 ? (
+    <aside
+      data-testid="context-dock"
+      className={
+        stackInto
+          ? "flex min-h-0 flex-1 bg-[var(--color-bg)]"
+          : "absolute inset-y-0 right-0 z-30 flex border-l border-[var(--color-border)] bg-[var(--color-bg)] xl:relative xl:z-auto"
+      }
+      style={
+        stackInto
+          ? undefined
+          : {
+              width,
+              minWidth: SQUEEZE_WIDTH,
+              maxWidth: `calc(100vw - ${MIN_CHAT_PX}px)`,
+            }
+      }
+    >
+      {!stackInto && (
+        <DockResizeHandle
+          width={width}
+          onWidth={setWidth}
+          min={MIN_WIDTH}
+          max={() => Math.max(MIN_WIDTH, window.innerWidth - MIN_CHAT_PX)}
+          reset={DEFAULT_WIDTH}
+          label="Resize dock"
+        />
+      )}
+      <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
+          <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            This conversation
+          </span>
+          <button
+            onClick={closeAll}
+            className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            title="Close"
+          >
+            <PanelRightClose className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <DockSection
+          icon={<Radio className="h-3 w-3 shrink-0" />}
+          label="Tasks"
+          hint="Work handed to other agents from this conversation"
+          open={shown.includes("tasks")}
+          onToggle={() => toggle("tasks")}
+        >
+          <DockTasks
+            delegations={delegations}
+            conversationId={conversationId}
+            agentSlug={agentSlug}
+          />
+        </DockSection>
+
+        <DockSection
+          icon={<Zap className="h-3 w-3 shrink-0" />}
+          label="Routines"
+          hint="Scripts this agent runs, on demand or on a schedule"
+          open={shown.includes("routines")}
+          onToggle={() => toggle("routines")}
+        >
+          <DockRoutines
+            instances={instances}
+            agentSlug={agentSlug}
+            conversationId={conversationId}
+            onLibraryChange={openFocus}
+          />
+        </DockSection>
+      </div>
+    </aside>
+    ) : null;
+
   return (
     <>
-      {shown.length > 0 && (
-        <aside
-          data-testid="context-dock"
-          style={{
-            width,
-            minWidth: SQUEEZE_WIDTH,
-            // The floor the transcript keeps, held in CSS as well as in the drag:
-            // a window that shrinks under the dock must not squeeze the chat away,
-            // and clamping here leaves the width the reader chose on record for
-            // when the room comes back.
-            maxWidth: `calc(100vw - ${MIN_CHAT_PX}px)`,
-          }}
-          className="absolute inset-y-0 right-0 z-30 flex border-l border-[var(--color-border)] bg-[var(--color-bg)] xl:relative xl:z-auto"
-        >
-          <DockResizeHandle
-            width={width}
-            onWidth={setWidth}
-            min={MIN_WIDTH}
-            max={() => Math.max(MIN_WIDTH, window.innerWidth - MIN_CHAT_PX)}
-            reset={DEFAULT_WIDTH}
-            label="Resize dock"
-          />
-          <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-            <div className={`${WORKSPACE_BAR} gap-2 px-3`}>
-              <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                This conversation
-              </span>
-              <button
-                onClick={closeAll}
-                className="rounded p-1 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                title="Close"
-              >
-                <PanelRightClose className="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            <DockSection
-              icon={<Radio className="h-3 w-3 shrink-0" />}
-              label="Tasks"
-              hint="Work handed to other agents from this conversation"
-              open={shown.includes("tasks")}
-              onToggle={() => toggle("tasks")}
-            >
-              <DockTasks
-                delegations={delegations}
-                conversationId={conversationId}
-                agentSlug={agentSlug}
-              />
-            </DockSection>
-
-            <DockSection
-              icon={<Zap className="h-3 w-3 shrink-0" />}
-              label="Routines"
-              hint="Scripts this agent runs, on demand or on a schedule"
-              open={shown.includes("routines")}
-              onToggle={() => toggle("routines")}
-            >
-              <DockRoutines
-                instances={instances}
-                agentSlug={agentSlug}
-                conversationId={conversationId}
-                onLibraryChange={openFocus}
-              />
-            </DockSection>
-          </div>
-        </aside>
-      )}
+      {/* Beside the pane, or — stacked — portalled under it (see `stackInto`). */}
+      {column && (stackInto ? createPortal(column, stackInto) : column)}
       {librarySheet}
     </>
   );

@@ -165,7 +165,7 @@ function VenueGroup({
           className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs transition-colors ${
             c === value
               ? mine
-                ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+                ? "bg-[var(--color-primary-fill)]/10 font-medium text-[var(--color-primary)]"
                 : "bg-[var(--color-surface-hover)] font-medium text-[var(--color-text)]"
               : mine
                 ? "font-medium text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"

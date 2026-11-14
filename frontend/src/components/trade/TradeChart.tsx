@@ -549,7 +549,7 @@ export function TradeChart({
         },
       });
     });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-colorblind"] });
     return () => observer.disconnect();
   }, [chartReady]);
 
@@ -1112,7 +1112,7 @@ export function TradeChart({
             {pickLabel(activePickField, lineLabels)}{" "}
             price
           </p>
-          <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
+          <span className="animate-pulse rounded bg-[var(--color-primary-fill)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode:{" "}
             {pickLabel(activePickField, lineLabels)}
           </span>
