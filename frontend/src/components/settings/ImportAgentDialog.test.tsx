@@ -13,14 +13,16 @@
  * @vitest-environment jsdom
  */
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import type {
-  AgentBundleFinding,
-  AgentImportPlan,
-  AgentUpdatePlan,
+import {
+  CHAT_SLUG,
+  type AgentBundleFinding,
+  type AgentImportPlan,
+  type AgentUpdatePlan,
 } from "@/lib/api";
 import { ImportAgentDialog } from "./ImportAgentDialog";
 
@@ -196,9 +198,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function render(onImported = () => {}) {
+async function render(
+  onImported = () => {},
+  onOpenAgent?: (slug: string, text?: string) => void,
+) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   await act(async () => {
-    root.render(<ImportAgentDialog onImported={onImported} />);
+    root.render(
+      <QueryClientProvider client={client}>
+        <ImportAgentDialog onImported={onImported} onOpenAgent={onOpenAgent} />
+      </QueryClientProvider>,
+    );
   });
 }
 
@@ -391,6 +403,51 @@ it("only posts to the apply endpoint when the operator confirms", async () => {
     "/api/v1/agents/import",
   ]);
   expect(imported).toHaveBeenCalledOnce();
+});
+
+it("opens a chat with Condor on Start chatting, never the agent that just landed", async () => {
+  const onOpenAgent = vi.fn();
+  await render(() => {}, onOpenAgent);
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+  await act(async () => {
+    button("Import traveller").click();
+  });
+
+  await act(async () => {
+    button("Start chatting").click();
+  });
+  expect(onOpenAgent).toHaveBeenCalledWith(CHAT_SLUG);
+});
+
+it("offers to finalize a carried loop's config with Condor instead of a raw editor", async () => {
+  reply = {
+    ...PLAN,
+    files: [...PLAN.files, { path: "loops/l/loop.md", bytes: 50 }],
+  };
+  const onOpenAgent = vi.fn();
+  await render(() => {}, onOpenAgent);
+  await choose();
+  await continueToConfirm();
+  await tickConsent();
+  await act(async () => {
+    button("Import traveller").click();
+  });
+
+  // No raw config editor on this screen any more — Condor walks through it.
+  expect(container.querySelector("[data-finalize-setup]")?.textContent).toContain(
+    "traveller",
+  );
+
+  await act(async () => {
+    button("Finalize setup with Condor").click();
+  });
+  expect(onOpenAgent).toHaveBeenCalledTimes(1);
+  const [chatSlug, seed] = onOpenAgent.mock.calls[0];
+  expect(chatSlug).toBe(CHAT_SLUG);
+  expect(seed).toContain("traveller");
+  expect(seed).toContain("l");
 });
 
 it("refuses to apply a plan the server already refused", async () => {

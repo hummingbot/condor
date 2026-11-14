@@ -4443,6 +4443,23 @@ export const api = {
     ),
 
   /**
+   * The old→new lines `updateStrategyConfig` would produce, without writing
+   * anything — FEAT-192's own diff (`describe_loop_update`), reused here so a
+   * review surface outside chat (the import flow) can show the operator the
+   * identical confirmation text a chat-driven `manage_loops(action="update")`
+   * would.
+   */
+  previewStrategyConfigDiff: (
+    slug: string,
+    sslug: string,
+    config: Record<string, unknown>,
+  ) =>
+    apiFetch<{ lines: string[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config/diff`,
+      { method: "POST", body: JSON.stringify({ config }) },
+    ),
+
+  /**
    * Attribute an already-running bot to this strategy's newest session.
    *
    * The repair for a run whose ownership claim never landed — every run from

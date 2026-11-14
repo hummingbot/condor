@@ -33,6 +33,8 @@ def _manage_strategy(
     store = StrategyStore()
 
     if action == "list_strategies":
+        from condor.agents.config import load_full_config
+
         strategies = store.list_all()
         return {
             "loops": [
@@ -43,7 +45,12 @@ def _manage_strategy(
                     "description": s.description,
                     "agent_key": s.agent_key,
                     "skills": s.skills,
-                    "default_config": s.default_config,
+                    # The *effective* config (`config.yml` over `loop.md`'s
+                    # `default_config`) — `update_strategy` below only ever
+                    # writes `config.yml`, so reading back the bare
+                    # ``default_config`` would show a stale value right after
+                    # an approved edit.
+                    "default_config": load_full_config(s.home, s.default_config),
                 }
                 for s in strategies
             ]
@@ -55,6 +62,8 @@ def _manage_strategy(
         s = store.get_by_key(loop_id)
         if not s:
             return {"error": f"Loop '{loop_id}' not found"}
+        from condor.agents.config import load_full_config
+
         return {
             "id": s.key,
             "agent_slug": s.agent_slug,
@@ -63,7 +72,7 @@ def _manage_strategy(
             "agent_key": s.agent_key,
             "instructions": s.instructions,
             "skills": s.skills,
-            "default_config": s.default_config,
+            "default_config": load_full_config(s.home, s.default_config),
             "created_by": s.created_by,
             "created_at": s.created_at,
         }
@@ -110,9 +119,30 @@ def _manage_strategy(
             s.agent_key = agent_key
         if skills is not None:
             s.skills = skills
-        if config:
-            s.default_config = config
         store.update(s)
+        if config:
+            # Merged into the *effective* config (`config.yml`, which always
+            # overrides `loop.md`'s `default_config` once saved — see
+            # `load_full_config`), the same way the dashboard's own config
+            # write does (`update_strategy_config`). A whole-replace of
+            # `default_config` here was a silent no-op for any loop whose
+            # config was ever saved from the dashboard: `config.yml` kept
+            # overriding it and the chat-approved change never took effect.
+            from pydantic import ValidationError
+
+            from condor.agents.config import (
+                AgentConfig,
+                load_full_config,
+                save_full_config,
+            )
+
+            effective = load_full_config(s.home, s.default_config)
+            effective.update(config)
+            try:
+                AgentConfig.from_dict(effective)
+            except ValidationError as exc:
+                return {"error": f"Invalid config: {exc}"}
+            save_full_config(s.home, effective)
         return {"updated": True, "loop_id": s.key, "name": s.name}
 
     elif action == "delete_strategy":

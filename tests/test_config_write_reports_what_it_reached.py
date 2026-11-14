@@ -167,6 +167,34 @@ def test_a_paused_session_counts_because_it_resumes_on_its_old_config(
     assert body["applies_to_running"] is False
 
 
+# ── The diff preview (FEAT-202) ──
+
+
+def _post_diff(config):
+    return _client().post(
+        "/agents/brigado/strategies/mm/config/diff", json={"config": config}
+    )
+
+
+def test_the_diff_preview_names_the_change_in_fe192s_own_words(strategy):
+    """A review surface outside chat (the import flow) gets FEAT-192's own
+    diff text (`describe_loop_update`), not a second implementation of it."""
+    body = _post_diff({"frequency_sec": 120}).json()
+
+    assert body["lines"] == ["frequency_sec: 60s (1m) → 120s (2m)"]
+
+
+def test_the_diff_preview_writes_nothing(strategy):
+    _post_diff({"frequency_sec": 120})
+
+    config = _client().get("/agents/brigado/strategies/mm").json()["config"]
+    assert config["frequency_sec"] == 60
+
+
+def test_the_diff_preview_reports_no_lines_for_no_change(strategy):
+    assert _post_diff({"frequency_sec": 60}).json()["lines"] == []
+
+
 # ── The one write that does reach a live engine ──
 
 

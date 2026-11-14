@@ -146,10 +146,11 @@ export function HubBrowser({
   onOpenAgent,
 }: {
   onInstalled: () => void;
-  /** "Start chatting" on the success screen opens a chat with the agent by
-   *  calling this, rather than HubBrowser reaching for a router itself — it
-   *  stays mountable on its own, the way its tests already mount it. */
-  onOpenAgent?: (slug: string) => void;
+  /** "Start chatting" and "Finalize setup with Condor" on the success screen
+   *  open a chat — optionally seeded with a message — by calling this,
+   *  rather than HubBrowser reaching for a router itself — it stays
+   *  mountable on its own, the way its tests already mount it. */
+  onOpenAgent?: (slug: string, text?: string) => void;
 }) {
   const [slug, setSlug] = useState("");
   const [looked, setLooked] = useState("");

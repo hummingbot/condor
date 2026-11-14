@@ -328,6 +328,23 @@ def test_control_agent_is_registered_by_the_condor_server():
     ), "control_agent is gated but no seat mounts it — the gate is dead code"
 
 
+def test_manage_loops_is_mounted_for_an_attended_seat_but_never_for_a_tick():
+    """FEAT-192: a chat seat must have the tool a confirmed update goes through;
+    a tick must not — it is the loop these tools start and stop, not a peer of
+    it (the same split `control_agent` makes, see `ORCHESTRATION_TOOLS`)."""
+    from condor.runtime.danger import DANGEROUS_LOOP_ACTIONS
+    from mcp_servers.condor import server as condor_server
+
+    assert "manage_loops" in DANGEROUS_TOOLS
+    tool = getattr(condor_server, "manage_loops", None)
+    assert tool is not None, "manage_loops is gated but the condor server drops it"
+    assert (
+        condor_server.manage_loops in condor_server.TOOL_PROFILES["agent"]
+    ), "manage_loops is gated but no attended seat mounts it"
+    assert condor_server.manage_loops not in condor_server.TOOL_PROFILES["tick"]
+    assert DANGEROUS_LOOP_ACTIONS <= _action_literals("manage_loops")
+
+
 def test_gated_control_actions_exist_on_the_tool():
     unknown = DANGEROUS_CONTROL_ACTIONS - _control_actions()
     assert not unknown, f"control_agent has no such action(s): {sorted(unknown)}"

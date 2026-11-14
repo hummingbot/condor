@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from condor.fsutil import atomic_write_text
 
@@ -138,6 +138,148 @@ def config_drift(
         elif live != filed:
             drift[name] = {"running": live, "file": filed}
     return drift
+
+
+#: Config keys denominated in seconds, whose confirmation line should also
+#: spell out minutes/hours (FEAT-192) — a raw ``frequency_sec: 1800`` means
+#: nothing to a human deciding whether to approve a chat-driven edit.
+_SECONDS_FIELDS = frozenset({"frequency_sec", "tick_timeout_sec"})
+#: Config keys denominated in the loop's quote currency.
+_QUOTE_FIELDS = frozenset(
+    {
+        "total_amount_quote",
+        "max_position_size_quote",
+        "max_drift_quote",
+        "canvas_band_usd",
+        "capital_amount",
+    }
+)
+#: Config keys already a percentage; -1 is this family's shared "disabled".
+_PERCENT_FIELDS = frozenset({"max_drawdown_pct", "shutdown_drawdown_pct"})
+
+
+def _human_duration(seconds: float) -> str:
+    """``seconds`` as the coarsest round unit it divides evenly into."""
+    whole = int(seconds)
+    if whole <= 0:
+        return "0s"
+    if whole % 3600 == 0:
+        return f"{whole // 3600}h"
+    if whole % 60 == 0:
+        return f"{whole // 60}m"
+    minutes, secs = divmod(whole, 60)
+    return f"{minutes}m{secs}s" if minutes else f"{secs}s"
+
+
+def humanize_config_value(dotted_key: str, value: Any) -> str:
+    """One config value in the unit a human reads, not just the one it is stored in.
+
+    ``dotted_key`` is the key as a loop-update diff names it (``frequency_sec``,
+    or ``risk_limits.max_drawdown_pct`` for a nested one) — only the last segment
+    decides the unit, since ``AgentConfig`` and ``RiskLimitsConfig`` do not share
+    a field name.
+    """
+    bare = dotted_key.rsplit(".", 1)[-1]
+    if value is None:
+        return "(not set)"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if bare in _SECONDS_FIELDS:
+            return f"{value:g}s ({_human_duration(value)})"
+        if bare in _QUOTE_FIELDS:
+            return f"{value:g} quote"
+        if bare in _PERCENT_FIELDS:
+            return "disabled" if value < 0 else f"{value:g}%"
+        # No known unit (e.g. ``max_leverage``, a bare multiplier): still
+        # trimmed of a numeric type's trailing ``.0`` so the diff reads the
+        # way a human would type it.
+        return f"{value:g}"
+    return str(value)
+
+
+#: The loop fields (as ``manage_loops``' own wire arguments name them) a chat
+#: update can change outside ``config`` — compared as scalars, never diffed by
+#: sub-key the way ``config`` is.
+_LOOP_SCALAR_FIELDS: tuple[str, ...] = ("name", "description", "agent_key")
+
+
+def _diff_config_values(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:
+    """Dotted old→new lines for a ``config``/``default_config`` comparison.
+
+    A key ``old`` has and ``new`` omits is reported as ``(removed)`` rather
+    than silently matching old-equals-new — callers that merge the incoming
+    config onto the current one before diffing (``update_strategy``,
+    ``update_strategy_config``) never trigger this; it only fires for a
+    caller that genuinely replaces the dict whole. A nested dict
+    (``risk_limits``) is compared per sub-key, dotted, the same way
+    :func:`config_drift` already reports one.
+    """
+    lines: list[str] = []
+    for key in sorted(set(old) | set(new)):
+        old_v, new_v = old.get(key), new.get(key)
+        if isinstance(old_v, Mapping) or isinstance(new_v, Mapping):
+            old_d = old_v if isinstance(old_v, Mapping) else {}
+            new_d = new_v if isinstance(new_v, Mapping) else {}
+            for sub in sorted(set(old_d) | set(new_d)):
+                dotted = f"{key}.{sub}"
+                sub_old, sub_new = old_d.get(sub), new_d.get(sub)
+                if sub_old == sub_new:
+                    continue
+                old_text = (
+                    "(not set)"
+                    if sub not in old_d
+                    else humanize_config_value(dotted, sub_old)
+                )
+                new_text = (
+                    "(removed)"
+                    if sub not in new_d
+                    else humanize_config_value(dotted, sub_new)
+                )
+                lines.append(f"{dotted}: {old_text} → {new_text}")
+            continue
+        if old_v == new_v:
+            continue
+        old_text = "(not set)" if key not in old else humanize_config_value(key, old_v)
+        new_text = "(removed)" if key not in new else humanize_config_value(key, new_v)
+        lines.append(f"{key}: {old_text} → {new_text}")
+    return lines
+
+
+def describe_loop_update(
+    current: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> list[str]:
+    """Old→new lines for a chat-driven ``manage_loops(action="update")`` (FEAT-192).
+
+    ``current`` is the loop's stored record, keyed the way ``manage_loops``
+    itself names its arguments (``name``, ``description``, ``instructions``,
+    ``agent_key``, ``skills``, ``config``). ``incoming`` is the same shape,
+    carrying only the keys this particular call actually sent — a key it omits
+    never appears here, since ``update_strategy`` leaves a field it was not
+    given untouched. ``config`` is the caller's own merge of the incoming
+    values onto the loop's *effective* current config (``load_full_config``,
+    which a saved ``config.yml`` overrides ``default_config`` on) — the
+    omitted-key-is-removed reading of :func:`_diff_config_values` only fires
+    for a hand-built ``current``/``incoming`` pair that genuinely drops one.
+
+    This is what a human reads in the confirmation prompt before approving the
+    write — the only place it is shown to anyone.
+    """
+    lines: list[str] = []
+    for field in _LOOP_SCALAR_FIELDS:
+        if field in incoming and incoming[field] != current.get(field):
+            old = current.get(field) or "(none)"
+            lines.append(f"{field}: {old} → {incoming[field]}")
+    if "instructions" in incoming and incoming["instructions"] != current.get(
+        "instructions"
+    ):
+        lines.append("instructions: (playbook text changed)")
+    if "skills" in incoming and incoming["skills"] != current.get("skills"):
+        old_skills = current.get("skills") or []
+        lines.append(f"skills: {old_skills} → {incoming['skills']}")
+    if "config" in incoming and incoming["config"]:
+        lines.extend(
+            _diff_config_values(current.get("config") or {}, incoming["config"])
+        )
+    return lines
 
 
 def load_session_pins(session_dir: Path) -> dict[str, Any]:
@@ -344,8 +486,16 @@ def load_full_config(
         except Exception:
             pass
 
-    # Validate core fields and fill in any missing AgentConfig defaults
-    core = AgentConfig.from_dict(result)
+    # Validate core fields and fill in any missing AgentConfig defaults. A
+    # value already on disk can be invalid (e.g. a correction writes a bad
+    # field, then a crash or a cancelled chat turn leaves it there) — fall
+    # back to bare defaults rather than raising, so a caller merging a
+    # correction on top of this result (``update_strategy``) can still load
+    # and overwrite the bad value instead of being blocked by it.
+    try:
+        core = AgentConfig.from_dict(result)
+    except ValidationError:
+        core = AgentConfig()
     core_defaults = core.model_dump()
     for k, v in core_defaults.items():
         result.setdefault(k, v)

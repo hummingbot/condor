@@ -2,7 +2,7 @@
 name: Directional Trader
 description: Specialist in directional strategy design, signal engineering, Hummingbot
   controller development, backtesting, and live vs backtest comparison
-agent_key: claude-acp:sonnet
+agent_key: auto
 tools: []
 when_to_consult: When the user wants to design or research a directional strategy,
   build indicators or signals with pandas/pandas_ta, create or debug a Hummingbot

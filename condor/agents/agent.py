@@ -51,6 +51,7 @@ indexes, because a coordinator is not a peer.
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -64,6 +65,7 @@ from condor.layering import (
     fork_if_stock,
     resolves_to_stock,
     stock_delete_error,
+    stock_path,
 )
 from condor.memory.paths import (
     CHAT_SLUG,
@@ -86,7 +88,10 @@ class Agent:
     name: str
     description: str = ""
     instructions: str = ""  # AGENT.md body: identity + domain knowledge
-    agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
+    agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code");
+    # "auto" (the bundled-agent default, CORR-1160) defers to the install-wide
+    # default (CONDOR_DEFAULT_AGENT) instead of naming a backend — resolved by
+    # condor.agents.engine.resolve_agent_key, never read as a literal key.
     # Tool-name allowlist (pydantic-ai only), enforced on BOTH delegate and loop.
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
     # Empty => UNRESTRICTED (all discovered tools).
@@ -399,6 +404,7 @@ class AgentStore:
             )
         try:
             stock_only_def = resolves_to_stock(slug, AGENT_MD)
+            has_stock_twin = stock_path(slug, AGENT_MD) is not None
             agent_dir = agent_home(slug)
         except UnsafeIdError:
             # A traversal slug names no deletable agent (SEC-648).
@@ -411,22 +417,23 @@ class AgentStore:
         path = agent_dir / AGENT_MD
         if not path.exists():
             return False
-        path.unlink()
-        # The bundle stamp is install bookkeeping about the AGENT.md just
-        # removed, not brain content — left behind, it keeps agent_home()
-        # existing forever and makes a later re-pull of this slug read as an
-        # update of nothing rather than a fresh install.
-        from condor.agents.bundle import stamp_path
-
-        stamp_path(agent_dir).unlink(missing_ok=True)
-        # Remove the whole dir only when nothing else lives there (no strategies,
-        # store or skills) — the brain/strategies must not be silently dropped.
-        try:
-            if not any(agent_dir.iterdir()):
-                agent_dir.rmdir()
-        except Exception:
-            pass
-        log.info("Deleted agent %s", slug)
+        # Remove everything this install ever wrote for this agent — the
+        # AGENT.md fork, the bundle stamp, routines, store/ (code_trust.yml),
+        # mutes.yml, loops/* (config.yml, sessions), forked skills. That is
+        # what the only delete UI tells the user it does ("Delete <agent>
+        # and all its loops?"), and it is what a later reimport of the same
+        # slug needs: `bundle.apply()` treats a deleted slug's home as
+        # starting genuinely empty, so any of this left behind is exactly
+        # what let a recreated/reimported agent silently inherit the old
+        # one's routines, config and consent (CORR-1134). A stock twin still
+        # resolves (to the shipped definition) after this — reverted to
+        # stock, not gone — but with none of its local customization left to
+        # orphan.
+        shutil.rmtree(agent_dir, ignore_errors=True)
+        if has_stock_twin:
+            log.info("Reverted %s to stock (cleared its local customization)", slug)
+        else:
+            log.info("Deleted agent %s", slug)
         return True
 
     def _save(self, agent: Agent) -> None:
