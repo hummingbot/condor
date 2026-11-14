@@ -385,6 +385,56 @@ _TERMINAL_EXECUTOR_STATES = {
 }
 
 
+def _position_key(position: dict) -> tuple[str, str]:
+    """``(connector, pair)`` -- the identity a position and an executor share."""
+    return (_position_connector(position), _position_pair(position))
+
+
+async def _account_executor_pairs(
+    engine: Any, client: Any
+) -> tuple[set[tuple[str, str]], str]:
+    """Pairs owned by *any* live executor on the account, and a failure reason.
+
+    Session-wide ownership is too narrow to gate a close. A second strategy on
+    the same account owns its own executor rows and this winddown never read
+    them, so the pair looks unowned and the reduce-only close would flatten
+    another desk's position. Live *and* ``SHUTTING_DOWN`` rows both own their
+    pair: an executor that is already flattening is not unowned, and a second
+    close would race it (CORR-710).
+
+    The result is cached on the engine for the life of one winddown, which
+    reads the book three times (first verification, post-stop, post-close) and
+    would otherwise pay for a full-history executor walk on each.
+
+    Returns ``(pairs, "")`` on success, ``(set(), reason)`` on failure. A
+    failure is *not* an empty set of owners -- the caller must treat it as
+    unproven ownership and close nothing.
+    """
+    cached = getattr(engine, "_shutdown_account_pairs", None)
+    if cached is not None:
+        return cached
+
+    from condor.fetchers.executors import describe_executor_error, fetch_all_executors
+
+    pairs: set[tuple[str, str]] = set()
+    for status in ("RUNNING", "SHUTTING_DOWN"):
+        try:
+            rows = await fetch_all_executors(client, status=status) or []
+        except Exception as e:
+            # describe_executor_error, never str(e): this text reaches the
+            # operator's shutdown notification and an aiohttp error embeds the
+            # backend URL.
+            _, message = describe_executor_error(e)
+            result = (set(), f"could not read {status.lower()} executors: {message}")
+            engine._shutdown_account_pairs = result
+            return result
+        pairs |= _live_executor_pairs(rows)
+
+    result = (pairs, "")
+    engine._shutdown_account_pairs = result
+    return result
+
+
 def _live_executor_pairs(running: list[dict]) -> set[tuple[str, str]]:
     """(connector, pair) still owned by a live executor, per the rows handed in."""
     owned: set[tuple[str, str]] = set()
@@ -396,6 +446,111 @@ def _live_executor_pairs(running: list[dict]) -> set[tuple[str, str]]:
         if connector and pair:
             owned.add((str(connector), str(pair)))
     return owned
+
+
+async def _close_with_limit(
+    client: Any,
+    account: str,
+    connector: str,
+    pair: str,
+    side: str,
+    size: float,
+) -> bool:
+    """Retry a refused MARKET close as an aggressive IOC limit at the mark.
+
+    Not every connector can price a MARKET order on its own. Derive answers
+    ``No order book exists for 'ETH-USDC'`` for one, because its market-order
+    path reads a cached book snapshot that a quiet instrument may never have
+    produced. A winddown that only speaks MARKET therefore cannot close that
+    position at all: it reports the exposure and asks the operator to do by
+    hand what the agent could have done.
+
+    The limit is 0.3% *through* the mark -- enough to cross, and inside the
+    band venues that police limit prices enforce (Derive rejects a far-through
+    price with ``11013 Invalid limit price``). The trading router has no
+    ``time_in_force`` parameter, so this cannot ask for IOC: a crossing limit
+    fills as a taker immediately, and anything still resting a moment later is
+    cancelled, because a close that fails must not leave a new order behind.
+
+    Returns ``True`` when the venue accepted the order. Any failure returns
+    ``False`` and the caller reports the original MARKET failure, which is the
+    more informative of the two.
+    """
+    from condor.fetchers.market_data import fetch_current_price
+
+    try:
+        price = await fetch_current_price(
+            client, connector_name=connector, trading_pair=pair
+        )
+    except Exception:
+        log.exception(
+            "shutdown: could not price a limit close for %s %s", connector, pair
+        )
+        return False
+    if not price or price <= 0:
+        log.warning(
+            "shutdown: no price for %s %s; cannot fall back to a limit close",
+            connector,
+            pair,
+        )
+        return False
+
+    limit = float(price) * (0.997 if side == "LONG" else 1.003)
+    order: dict = {}
+    try:
+        order = await client.trading.place_order(
+            account_name=account,
+            connector_name=connector,
+            trading_pair=pair,
+            trade_type="SELL" if side == "LONG" else "BUY",
+            amount=size,
+            order_type="LIMIT",
+            price=round(limit, 8),
+            position_action="CLOSE",
+        )
+    except Exception as e:
+        log.warning(
+            "shutdown: limit fallback for %s %s also failed: %s", connector, pair, e
+        )
+        return False
+
+    # A crossing limit should fill at once. Anything still resting is a close
+    # that did not happen, and leaving it would hand the next tick a resting
+    # order where it expected a flat pair.
+    order_id = str((order or {}).get("order_id") or "")
+    await asyncio.sleep(2)
+    try:
+        resting = await client.trading.get_active_orders(
+            limit=50, connector_names=[connector], trading_pairs=[pair]
+        )
+        rows = resting.get("data") if isinstance(resting, dict) else resting
+        for row in rows or []:
+            if order_id and str(row.get("order_id")) != order_id:
+                continue
+            await client.trading.cancel_order(
+                account_name=account, connector_name=connector, order_id=order_id
+            )
+            log.warning(
+                "shutdown: the %s %s fallback did not cross; cancelled %s",
+                connector,
+                pair,
+                order_id,
+            )
+            return False
+    except Exception:
+        log.exception(
+            "shutdown: could not confirm the %s %s fallback fill", connector, pair
+        )
+
+    log.warning(
+        "shutdown: closed %s %s with a %s %s limit at %s (the venue refused MARKET)",
+        connector,
+        pair,
+        side,
+        size,
+        round(limit, 8),
+    )
+    return True
 
 
 async def _close_stranded_positions(
@@ -456,6 +611,14 @@ async def _close_stranded_positions(
         return [], [f"could not read stopping executors: {message}"], []
     owned |= _live_executor_pairs(stopping)
 
+    # ...and every other session's executors too. A second strategy on the same
+    # account is still an owner; without this its pair reads as unowned and the
+    # close would flatten it.
+    account_pairs, why_not = await _account_executor_pairs(engine, client)
+    if why_not:
+        return [], [why_not], []
+    owned |= account_pairs
+
     async def _close_one(position: dict) -> tuple[dict | None, str | None]:
         connector = _position_connector(position)
         pair = _position_pair(position)
@@ -479,6 +642,11 @@ async def _close_stranded_positions(
                 position_action="CLOSE",
             )
         except Exception as e:
+            # MARKET is not always placeable: a connector that prices it from a
+            # cached book snapshot refuses on a quiet instrument. Fall back to a
+            # crossing IOC limit before reporting the close as failed.
+            if await _close_with_limit(client, account, connector, pair, side, size):
+                return position, None
             # Keep the raw exception in the failure text: it is what the
             # operator reads, and a silent close failure is worse than a loud
             # one -- the position is still there either way.
@@ -576,21 +744,83 @@ async def _confirm_closes(engine: Any, client: Any, closed_rows: list[dict]) -> 
             )
 
 
+async def _fetch_venue_positions(
+    engine: Any, client: Any, why: str
+) -> list[dict] | None:
+    """Account-wide open positions **on the venue**; ``None`` when unreadable.
+
+    ``_fetch_positions`` reads Condor's own held-position records, which only
+    exist for a position an executor opened. A desk that signs its orders
+    itself -- flyby's Derive perp, theta's hedge -- never writes one, so the
+    tracked read returns nothing and a winddown announced ``verify=flat`` over
+    a live ETH-PERP position while the venue still held it.
+
+    This is the account-wide read that does answer the question. A capped read
+    is inconclusive for the same reason it is in ``_confirm_closes``: the
+    fetcher walks at most ``MAX_POSITIONS_FETCH`` rows, so a truncated walk
+    cannot prove a position absent, and guessing there is how a winddown
+    reports flat over an open book.
+    """
+    from condor.fetchers.positions import MAX_POSITIONS_FETCH, fetch_positions
+
+    try:
+        rows = await fetch_positions(client, strict=True) or []
+    except Exception:
+        log.exception("shutdown: could not read the venue book for %s", why)
+        engine._verify_read_failed = True
+        return None
+    if len(rows) >= MAX_POSITIONS_FETCH:
+        log.warning(
+            "shutdown: venue read for %s hit the %s-row cap; an incomplete "
+            "read cannot prove a book flat, so nothing is closed on it",
+            why,
+            MAX_POSITIONS_FETCH,
+        )
+        engine._verify_read_failed = True
+        return None
+    return rows
+
+
 async def _read_positions(
     engine: Any, client: Any, why: str = "the verification"
 ) -> list[dict] | None:
-    """Strict positions read; ``None`` when the read itself failed.
+    """Strict book read: this session's tracked positions plus the venue's.
 
     Every verification read goes through here. A failed request is not an empty
     book, and a winddown that cannot see the book must say so rather than
     announce a clean close over it (hummingbot/condor#339).
+
+    The two sources answer different halves of one question. ``tracked`` is
+    what Condor opened; ``venue`` is what the account actually holds. A venue
+    row joins the book only when nothing tracks it **and** no live executor
+    owns its pair -- an executor-owned pair belongs to ``stop_executor``, and
+    reporting it stranded would raise a false alarm on a neighbour's desk. The
+    surviving rows are marked ``_venue_only`` so the close path can tell a
+    position Condor never tracked from one it did.
     """
     try:
-        return await _fetch_positions(client, engine.agent_id, strict=True)
+        tracked = await _fetch_positions(client, engine.agent_id, strict=True)
     except Exception:
         log.exception("shutdown: could not read positions for %s", why)
         engine._verify_read_failed = True
         return None
+
+    venue = await _fetch_venue_positions(engine, client, why)
+    if venue is None:
+        return None
+
+    owned, _ = await _account_executor_pairs(engine, client)
+    rows = list(tracked)
+    known = {_position_key(p) for p in rows}
+    for row in venue:
+        key = _position_key(row)
+        if not key[0] or not key[1] or key in known or key in owned:
+            continue
+        known.add(key)
+        marked = dict(row)
+        marked["_venue_only"] = True
+        rows.append(marked)
+    return rows
 
 
 async def _verify_and_retry(

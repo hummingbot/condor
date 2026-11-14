@@ -22,10 +22,25 @@ KEEP_SPOT = "---\non_kill_switch: keep_spot_close_perp\n---\nBody\n"
 
 
 class _FakeExecutorsAPI:
-    def __init__(self, positions_sequence):
+    def __init__(self, positions_sequence, account_executors=None):
         self._positions = list(positions_sequence)
         self.stop_calls = []
         self.cleared = []
+        # Rows the account-wide walk sees (``fetch_all_executors``), i.e. every
+        # session's executors, not just this one's.
+        self._account_executors = list(account_executors or [])
+        self.search_failures = 0
+
+    async def search_executors(self, **kwargs):
+        if self.search_failures:
+            raise RuntimeError("executor search unavailable")
+        wanted = str(kwargs.get("status") or "").upper()
+        rows = [
+            ex
+            for ex in self._account_executors
+            if not wanted or str(ex.get("status") or "").upper() == wanted
+        ]
+        return {"data": rows, "pagination": {"next_cursor": None}}
 
     async def stop_executor(self, executor_id, keep_position=False):
         self.stop_calls.append((executor_id, keep_position))
@@ -44,22 +59,65 @@ class _FakeExecutorsAPI:
         return {"status": "ok"}
 
 
-class _FakeTradingAPI:
-    def __init__(self, place_error=None):
+class _FakeMarketDataAPI:
+    """Just enough for ``fetch_current_price``."""
+
+    def __init__(self, price=100.0):
+        self.price = price
         self.calls = []
+
+    async def get_prices(self, connector_name=None, trading_pairs=None):
+        self.calls.append((connector_name, trading_pairs))
+        return {"prices": {trading_pairs: self.price} if trading_pairs else {}}
+
+
+class _FakeTradingAPI:
+    def __init__(self, place_error=None, venue_positions=None):
+        self.calls = []
+        self.cancel_calls = []
         self._error = place_error
+        # When set, MARKET orders are refused the way Derive refuses them.
+        self.refuse_market = None
+        # What the venue reports account-wide -- the read that sees a position
+        # Condor never tracked.
+        self.venue_positions = list(venue_positions or [])
+        self.position_reads = 0
+        self.position_error = None
+
+    async def get_positions(self, **kwargs):
+        self.position_reads += 1
+        if self.position_error:
+            raise self.position_error
+        return {"data": list(self.venue_positions), "pagination": {"next_cursor": None}}
 
     async def place_order(self, **kwargs):
+        if self.refuse_market and str(kwargs.get("order_type")) == "MARKET":
+            raise RuntimeError(self.refuse_market)
         if self._error:
             raise self._error
         self.calls.append(kwargs)
         return {"order_id": "ord-1"}
 
+    async def get_active_orders(self, **kwargs):
+        """Nothing rests: the crossing limit filled."""
+        return {"data": [], "pagination": {"next_cursor": None}}
+
+    async def cancel_order(self, **kwargs):
+        self.cancel_calls.append(kwargs)
+        return {"status": "ok"}
+
 
 class _FakeClient:
-    def __init__(self, positions_sequence, place_error=None):
-        self.executors = _FakeExecutorsAPI(positions_sequence)
-        self.trading = _FakeTradingAPI(place_error)
+    def __init__(
+        self,
+        positions_sequence,
+        place_error=None,
+        venue_positions=None,
+        account_executors=None,
+    ):
+        self.executors = _FakeExecutorsAPI(positions_sequence, account_executors)
+        self.trading = _FakeTradingAPI(place_error, venue_positions)
+        self.market_data = _FakeMarketDataAPI()
 
 
 class _FakeJournal:
@@ -351,7 +409,11 @@ def test_a_capped_venue_read_never_clears_the_record(tmp_path, monkeypatch):
     stuck = [_perp_short()]
 
     async def _capped(client, connector_name=None, **kwargs):
-        # As many rows as the walker will take: proof of nothing.
+        # The account-wide read (no connector filter) is clean and empty; the
+        # per-connector *confirmation* read is the one that truncates, which is
+        # the read this test is about.
+        if connector_name is None:
+            return []
         return [
             {"connector_name": "hyperliquid_perpetual", "trading_pair": f"X{i}-USD"}
             for i in range(3)
@@ -389,3 +451,141 @@ def test_read_errors_never_reach_the_notification_with_a_url(tmp_path, monkeypat
     text = "\n".join(notes)
     assert "executors unavailable" in text
     assert "10.0.0.5:8000" not in text
+
+
+# ---------------------------------------------------------------------------
+# The book includes positions Condor never tracked.
+# ---------------------------------------------------------------------------
+#
+# A desk that signs its own orders (flyby's Derive perp, theta's hedge) leaves
+# no ``position_held`` record, so a tracker-only read is empty and the winddown
+# announced ``verify=flat`` over a live position. The venue read closes that
+# gap, and account-wide ownership keeps it from closing a neighbour's book.
+
+
+def test_a_position_only_the_venue_knows_about_is_closed(tmp_path, monkeypatch):
+    """No tracker row, no executor -- but the venue says the position is open."""
+    venue = [_perp_short()]
+
+    async def _venue(client, **kwargs):
+        # Open until the winddown closes it, then flat -- what a real venue does.
+        return venue if not client.trading.calls else []
+
+    monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
+    engine, client, _ = _engine(
+        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+    )
+    asyncio.run(run_shutdown(engine, "kill"))
+
+    assert len(client.trading.calls) == 1
+    order = client.trading.calls[0]
+    assert order["connector_name"] == "hyperliquid_perpetual"
+    assert order["trading_pair"] == "SOL-USD"
+    assert order["trade_type"] == "BUY"  # closing a SHORT
+    assert order["order_type"] == "MARKET"
+    assert order["position_action"] == "CLOSE"
+    done = engine.journal.actions_named("shutdown_done")
+    assert done and "verify=flat" in done[0]
+
+
+def test_a_pair_owned_by_another_sessions_executor_is_never_closed(
+    tmp_path, monkeypatch
+):
+    """Second strategy on the same account: its executor owns the pair."""
+    venue = [_perp_short()]
+
+    async def _venue(client, **kwargs):
+        return venue
+
+    async def _account_executors(client, status=None, **kwargs):
+        if str(status or "").upper() == "RUNNING":
+            return [
+                {
+                    "id": "someone-elses",
+                    "status": "RUNNING",
+                    "connector": "hyperliquid_perpetual",
+                    "trading_pair": "SOL-USD",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
+    monkeypatch.setattr(executors_fetcher, "fetch_all_executors", _account_executors)
+    engine, client, _ = _engine(
+        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+    )
+    asyncio.run(run_shutdown(engine, "kill"))
+
+    assert client.trading.calls == []  # not this winddown's book
+    done = engine.journal.actions_named("shutdown_done")
+    # Owned by a live executor, so it is not stranded either -- reporting it
+    # would raise a false alarm over a neighbour's position.
+    assert done and "verify=flat" in done[0]
+
+
+def test_an_unreadable_account_executor_list_closes_nothing(tmp_path, monkeypatch):
+    """Unproven ownership is not absent ownership."""
+    venue = [_perp_short()]
+
+    async def _venue(client, **kwargs):
+        return venue
+
+    async def _account_executors(client, status=None, **kwargs):
+        raise RuntimeError("executor search unavailable")
+
+    monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
+    monkeypatch.setattr(executors_fetcher, "fetch_all_executors", _account_executors)
+    engine, client, notes = _engine(
+        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+    )
+    asyncio.run(run_shutdown(engine, "kill"))
+
+    assert client.trading.calls == []
+    done = engine.journal.actions_named("shutdown_done")
+    assert done and "verify=flat" not in done[0]
+    assert "failures=1" in done[0]  # the unreadable executor list is reported
+
+
+def test_a_failed_venue_read_is_not_reported_as_flat(tmp_path, monkeypatch):
+    async def _boom(client, **kwargs):
+        raise RuntimeError("venue down")
+
+    monkeypatch.setattr(positions_fetcher, "fetch_positions", _boom)
+    engine, client, notes = _engine(
+        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+    )
+    asyncio.run(run_shutdown(engine, "kill"))
+
+    done = engine.journal.actions_named("shutdown_done")
+    assert done and "verify=unknown" in done[0]
+    assert client.trading.calls == []
+    assert any("could NOT be read" in n for n in notes)
+
+
+def test_a_refused_market_close_falls_back_to_a_crossing_ioc_limit(
+    tmp_path, monkeypatch
+):
+    """Derive answers 'No order book exists' for MARKET; the close must still land."""
+    venue = [_perp_short()]
+
+    async def _venue(client, **kwargs):
+        return venue if not client.trading.calls else []
+
+    monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
+    engine, client, notes = _engine(
+        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+    )
+    client.trading.refuse_market = "No order book exists for 'SOL-USD'."
+    client.market_data.price = 100.0
+
+    asyncio.run(run_shutdown(engine, "kill"))
+
+    assert len(client.trading.calls) == 1
+    order = client.trading.calls[0]
+    assert order["order_type"] == "LIMIT"
+    assert "time_in_force" not in order  # the router has no such field
+    assert order["trade_type"] == "BUY"  # closing a SHORT
+    assert order["position_action"] == "CLOSE"
+    assert order["price"] == pytest.approx(100.3)  # 0.3% through the mark
+    done = engine.journal.actions_named("shutdown_done")
+    assert done and "verify=flat" in done[0]
