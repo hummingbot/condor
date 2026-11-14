@@ -196,9 +196,28 @@ export const ConversationList = memo(function ConversationList({
         items,
         latest: items[0]?.updated_at ?? "",
       }))
-      .sort((x, y) => (x.latest < y.latest ? 1 : x.latest > y.latest ? -1 : 0));
+      // Condor heads the list whatever is most recent: it is the house
+      // assistant, where a reader looks first, and must not wander down the
+      // list each time a specialist is talked to.
+      .sort((x, y) =>
+        x.slug === CHAT_SLUG
+          ? -1
+          : y.slug === CHAT_SLUG
+            ? 1
+            : x.latest < y.latest
+              ? 1
+              : x.latest > y.latest
+                ? -1
+                : 0,
+      );
+    // With no chats yet it still heads "Your chats" rather than joining the
+    // agents never talked to.
+    const condor = known.get(CHAT_SLUG);
+    if (condor && !bySlug.has(CHAT_SLUG)) {
+      talked.unshift({ slug: CHAT_SLUG, agent: condor, items: [], latest: "" });
+    }
     const quiet = agents
-      .filter((a) => !bySlug.has(a.slug))
+      .filter((a) => !bySlug.has(a.slug) && a.slug !== CHAT_SLUG)
       .map((a) => ({ slug: a.slug, agent: a, items: [] as ConversationMeta[], latest: "" }));
     const tail = [
       // Always listed, empty or not: where archived chats go has to be
@@ -357,8 +376,12 @@ export const ConversationList = memo(function ConversationList({
   // Talked-to agents scroll in the column's body; the ones never talked to
   // and the archive of removed agents sit at its foot, pinned above the Hub —
   // they are where to *start*, not part of the history above them.
-  const talked = groups.filter((g) => g.items.length > 0 && !isFootGroup(g.slug));
-  const quiet = groups.filter((g) => g.items.length === 0 && !isFootGroup(g.slug));
+  const talked = groups.filter(
+    (g) => (g.items.length > 0 || g.slug === CHAT_SLUG) && !isFootGroup(g.slug),
+  );
+  const quiet = groups.filter(
+    (g) => g.items.length === 0 && g.slug !== CHAT_SLUG && !isFootGroup(g.slug),
+  );
   const foot = groups.filter((g) => isFootGroup(g.slug));
 
   const renderGroup = (g: (typeof groups)[number], i: number) => {

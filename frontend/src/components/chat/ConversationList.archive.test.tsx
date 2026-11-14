@@ -113,6 +113,27 @@ async function render() {
   }
 }
 
+describe("order", () => {
+  it("keeps Condor first even when a specialist's chat is newer", async () => {
+    list = [
+      conv("grid-new", { agent_slug: "grid", updated_at: "2026-11-05T00:00:00Z" }),
+      conv("condor-old", { agent_slug: "", updated_at: "2026-10-01T00:00:00Z" }),
+    ];
+    await render();
+    const headers = [...container.querySelectorAll("[data-group]")].map((h) =>
+      h.getAttribute("data-group"),
+    );
+    expect(headers[0]).toBe("Condor");
+    expect(headers.indexOf("Grid Trader")).toBeGreaterThan(0);
+  });
+
+  it("keeps Condor first before it has any chat", async () => {
+    list = [conv("grid-new", { agent_slug: "grid" })];
+    await render();
+    expect(container.querySelector("[data-group]")?.getAttribute("data-group")).toBe("Condor");
+  });
+});
+
 describe("archived and deleted-agent chats", () => {
   it("files each chat in one place: its agent, or Archived; never a removed agent's", async () => {
     await render();
