@@ -2,6 +2,8 @@ import { memo, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  Archive,
+  ArchiveRestore,
   Check,
   Loader2,
   Pencil,
@@ -49,13 +51,11 @@ function humanize(slug: string): string {
 /** Chats shown per agent before "Show more". */
 const PER_AGENT = 5;
 
-/**
- * The group for chats whose agent is no longer installed — deleted, or
- * reinstalled from the Hub under another slug. Filed apart and folded: as
- * groups of their own they read as duplicates of the agents still here
- * ("Trend aware lp rebalancer agent" beside "Trend Aware LP Rebalancer").
- */
-export const REMOVED_GROUP = "__removed__";
+/** Chats their owner archived — and only those. */
+export const ARCHIVED_GROUP = "__archived__";
+
+/** The foot-of-column group, which lists each chat with its agent's name. */
+const isFootGroup = (slug: string) => slug === ARCHIVED_GROUP;
 
 /** What an agent's header row needs to draw itself. */
 export interface AgentGroupHeader {
@@ -128,6 +128,24 @@ export const ConversationList = memo(function ConversationList({
     onSuccess: invalidate,
   });
 
+  // Optimistic like rename: the row moves at once, and moves back if refused.
+  const archiveMutation = useMutation({
+    mutationFn: ({ id, archived }: { id: string; archived: boolean }) =>
+      api.setConversationArchived(id, archived),
+    onMutate: async ({ id, archived }) => {
+      await queryClient.cancelQueries({ queryKey: QUERY_KEY });
+      const prev = queryClient.getQueryData<ConversationMeta[]>(QUERY_KEY);
+      queryClient.setQueryData<ConversationMeta[]>(QUERY_KEY, (list) =>
+        list?.map((c) => (c.id === id ? { ...c, archived } : c)),
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData(QUERY_KEY, ctx.prev);
+    },
+    onSettled: invalidate,
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteConversation(id),
     onSuccess: invalidate,
@@ -145,7 +163,7 @@ export const ConversationList = memo(function ConversationList({
   const groups = useMemo(() => {
     const bySlug = new Map<string, ConversationMeta[]>();
     for (const c of conversations) {
-      const slug = c.agent_slug || CHAT_SLUG;
+      const slug = c.archived ? ARCHIVED_GROUP : c.agent_slug || CHAT_SLUG;
       const list = bySlug.get(slug);
       if (list) list.push(c);
       else bySlug.set(slug, [c]);
@@ -153,14 +171,15 @@ export const ConversationList = memo(function ConversationList({
     const known = new Map(agents.map((a) => [a.slug, a]));
     // Newest chat first within a group (the API already sorts), groups by
     // their newest chat; agents with no chats after, in registry order.
-    const removed: ConversationMeta[] = [];
-    for (const [slug, items] of bySlug) {
-      if (!known.has(slug)) {
-        removed.push(...items);
-        bySlug.delete(slug);
-      }
+    const archived = bySlug.get(ARCHIVED_GROUP) ?? [];
+    bySlug.delete(ARCHIVED_GROUP);
+    // Chats bound to an agent that is not installed are not listed: deleting
+    // an agent deletes its chats, so these are leftovers (another user's
+    // agent, a reinstall under a new slug) that as groups of their own read as
+    // duplicate agents with no one to answer them.
+    for (const slug of [...bySlug.keys()]) {
+      if (!known.has(slug)) bySlug.delete(slug);
     }
-    removed.sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
     const talked = [...bySlug.entries()]
       .map(([slug, items]) => ({
         slug,
@@ -172,22 +191,21 @@ export const ConversationList = memo(function ConversationList({
     const quiet = agents
       .filter((a) => !bySlug.has(a.slug))
       .map((a) => ({ slug: a.slug, agent: a, items: [] as ConversationMeta[], latest: "" }));
-    const tail = removed.length
-      ? [{ slug: REMOVED_GROUP, agent: null, items: removed, latest: "" }]
-      : [];
+    const tail = [
+      // Always listed, empty or not: where archived chats go has to be
+      // findable before the first one is archived.
+      { slug: ARCHIVED_GROUP, agent: null, items: archived, latest: "" },
+    ];
     return [...talked, ...quiet, ...tail];
   }, [conversations, agents]);
 
   const activeSlugOfList = conversations.find((c) => c.id === activeId);
   const activeAgentSlug = activeSlugOfList ? activeSlugOfList.agent_slug || CHAT_SLUG : null;
-  const activeGroup =
-    activeAgentSlug && !agents.some((a) => a.slug === activeAgentSlug)
-      ? REMOVED_GROUP
-      : activeAgentSlug;
+  const activeGroup = activeSlugOfList?.archived ? ARCHIVED_GROUP : activeAgentSlug;
   // Open by default: the agent of the chat on screen, and the two most recent.
   const isExpanded = (slug: string, index: number, count: number) =>
     count > 0 &&
-    (toggled[slug] ?? (slug === activeGroup || (index < 2 && slug !== REMOVED_GROUP)));
+    (toggled[slug] ?? (slug === activeGroup || (index < 2 && !isFootGroup(slug))));
 
   const renderRow = (meta: ConversationMeta, withAgent = false) => {
     const isActive = meta.id === activeId;
@@ -241,7 +259,7 @@ export const ConversationList = memo(function ConversationList({
       );
     }
     return (
-      <div key={meta.id} className="px-2">
+      <div key={meta.id} data-chat={meta.id} className="px-2">
       <div
         // The open chat is a raised card on the column, the way a selected
         // item sits in a sidebar tree, rather than a tint.
@@ -265,8 +283,12 @@ export const ConversationList = memo(function ConversationList({
             }`}
           >
             {title}
-            {withAgent && meta.agent_slug && (
-              <span className="text-[var(--color-text-muted)]"> · {humanize(meta.agent_slug)}</span>
+            {withAgent && (
+              <span className="text-[var(--color-text-muted)]">
+                {" · "}
+                {agents.find((a) => a.slug === (meta.agent_slug || CHAT_SLUG))?.name ??
+                  (meta.agent_slug ? humanize(meta.agent_slug) : "Condor")}
+              </span>
             )}
           </span>
           {waitingIds?.has(meta.id) ? (
@@ -304,6 +326,13 @@ export const ConversationList = memo(function ConversationList({
             <Share2 className="h-3 w-3" />
           </button>
           <button
+            onClick={() => archiveMutation.mutate({ id: meta.id, archived: !meta.archived })}
+            className="rounded bg-[var(--color-surface)] p-1 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            title={meta.archived ? "Move back to your chats" : "Archive"}
+          >
+            {meta.archived ? <ArchiveRestore className="h-3 w-3" /> : <Archive className="h-3 w-3" />}
+          </button>
+          <button
             onClick={() => setConfirmDelete(meta.id)}
             className="rounded bg-[var(--color-surface)] p-1 text-[var(--color-text-muted)] hover:text-[var(--color-red)]"
             title="Delete"
@@ -316,65 +345,77 @@ export const ConversationList = memo(function ConversationList({
     );
   };
 
-  const firstQuiet = groups.findIndex((g) => g.items.length === 0);
+  // Talked-to agents scroll in the column's body; the ones never talked to
+  // and the archive of removed agents sit at its foot, pinned above the Hub —
+  // they are where to *start*, not part of the history above them.
+  const talked = groups.filter((g) => g.items.length > 0 && !isFootGroup(g.slug));
+  const quiet = groups.filter((g) => g.items.length === 0 && !isFootGroup(g.slug));
+  const foot = groups.filter((g) => isFootGroup(g.slug));
+
+  const renderGroup = (g: (typeof groups)[number], i: number) => {
+    const expanded = isExpanded(g.slug, i, g.items.length);
+    const shown = showAll[g.slug] ? g.items : g.items.slice(0, PER_AGENT);
+    const hidden = g.items.length - shown.length;
+    return (
+      <div key={g.slug}>
+        {renderAgent({
+          agent: g.agent,
+          slug: g.slug,
+          name: g.slug === ARCHIVED_GROUP ? "Archived" : (g.agent?.name ?? humanize(g.slug)),
+          count: g.items.length,
+          expanded,
+          holdsActive: g.slug === activeGroup,
+          onToggle: () => setToggled((t) => ({ ...t, [g.slug]: !expanded })),
+        })}
+        {expanded && (
+          <div className="pb-1">
+            {shown.map((m) => renderRow(m, isFootGroup(g.slug)))}
+            {hidden > 0 && (
+              <button
+                onClick={() => setShowAll((s) => ({ ...s, [g.slug]: true }))}
+                className="w-full py-1.5 pl-12 text-left text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              >
+                Show {hidden} more
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-1 flex-col gap-0.5 overflow-y-auto py-1">
+      <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto py-1">
         {isLoading && (
           <div className="flex items-center gap-2 px-3 py-4 text-xs text-[var(--color-text-muted)]">
             <Loader2 className="h-3 w-3 animate-spin" /> Loading…
           </div>
         )}
-
-        {groups.map((g, i) => {
-          const expanded = isExpanded(g.slug, i, g.items.length);
-          const shown = showAll[g.slug] ? g.items : g.items.slice(0, PER_AGENT);
-          const hidden = g.items.length - shown.length;
-          return (
-            <div key={g.slug}>
-              {i === 0 && g.items.length > 0 && (
-                <div className="px-4 pb-1.5 pt-2 text-xs font-medium text-[var(--color-text-muted)]">
-                  Your chats
-                </div>
-              )}
-              {/* The archive sits apart, under a rule — under "Start a chat
-                  with" it read as one more agent to talk to. */}
-              {g.slug === REMOVED_GROUP && (
-                <div className="mx-4 mb-1 mt-3 border-t border-[var(--color-border)]" />
-              )}
-              {i === firstQuiet && i > 0 && g.slug !== REMOVED_GROUP && (
-                <div className="px-4 pb-1.5 pt-4 text-xs font-medium text-[var(--color-text-muted)]">
-                  Start a chat with
-                </div>
-              )}
-              {renderAgent({
-                agent: g.agent,
-                slug: g.slug,
-                name:
-                  g.slug === REMOVED_GROUP ? "Removed agents" : (g.agent?.name ?? humanize(g.slug)),
-                count: g.items.length,
-                expanded,
-                holdsActive: g.slug === activeGroup,
-                onToggle: () => setToggled((t) => ({ ...t, [g.slug]: !expanded })),
-              })}
-              {expanded && (
-                <div className="pb-1">
-                  {shown.map((m) => renderRow(m, g.slug === REMOVED_GROUP))}
-                  {hidden > 0 && (
-                    <button
-                      onClick={() => setShowAll((s) => ({ ...s, [g.slug]: true }))}
-                      className="w-full py-1.5 pl-12 text-left text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                    >
-                      Show {hidden} more
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {talked.length > 0 && (
+          <div className="px-4 pb-1.5 pt-2 text-xs font-medium text-[var(--color-text-muted)]">
+            Your chats
+          </div>
+        )}
+        {talked.map((g, i) => renderGroup(g, i))}
       </div>
+
+      {(quiet.length > 0 || foot.length > 0) && (
+        // Its own scroll past a third of the column, so a long list of unused
+        // agents never pushes the chats off screen.
+        <div className="flex max-h-[38%] shrink-0 flex-col gap-0.5 overflow-y-auto border-t border-[var(--color-border)] py-1">
+          {quiet.length > 0 && (
+            <div className="px-4 pb-1.5 pt-2 text-xs font-medium text-[var(--color-text-muted)]">
+              Start a chat with
+            </div>
+          )}
+          {quiet.map((g) => renderGroup(g, Infinity))}
+          {foot.length > 0 && quiet.length > 0 && (
+            <div className="mx-4 my-1 border-t border-[var(--color-border)]" />
+          )}
+          {foot.map((g) => renderGroup(g, Infinity))}
+        </div>
+      )}
 
       {/* One dialog for the whole rail rather than one per row: it is mounted
           only while a conversation is selected, and its preview query is keyed

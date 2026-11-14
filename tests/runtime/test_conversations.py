@@ -1715,3 +1715,28 @@ def test_skip_empty_leaves_empties_out_before_the_limit(conv_root):
     assert [m.id for m in listed] == [talked.id]
     # Without the flag every caller still sees them (reflection, sharing sweep).
     assert len(conversations.list_conversations(42, limit=0)) == 4
+
+
+# ── Archive, and an agent's chats going with it ──
+
+
+def test_archive_and_restore(conv_root):
+    meta = conversations.new_conversation(42, "web")
+    assert conversations.set_archived(42, meta.id, True) is True
+    assert conversations.get_conversation(42, meta.id).archived is True
+    conversations.set_archived(42, meta.id, False)
+    assert conversations.get_conversation(42, meta.id).archived is False
+
+
+def test_deleting_an_agent_deletes_only_its_chats(conv_root):
+    mine = conversations.new_conversation(42, "web", agent_slug="quad")
+    other_agent = conversations.new_conversation(42, "web", agent_slug="grid")
+    condor = conversations.new_conversation(42, "web")
+    someone_else = conversations.new_conversation(7, "web", agent_slug="quad")
+
+    assert conversations.delete_for_agent(42, "quad") == 1
+    assert conversations.get_conversation(42, mine.id) is None
+    assert conversations.get_conversation(42, other_agent.id) is not None
+    assert conversations.get_conversation(42, condor.id) is not None
+    # Another user's chats with the same agent are theirs to delete.
+    assert conversations.get_conversation(7, someone_else.id) is not None

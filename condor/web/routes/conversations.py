@@ -64,7 +64,10 @@ def _meta_or_404(owner_id: int, conversation_id: str) -> ConversationMeta:
 
 
 class RenameRequest(BaseModel):
-    title: str
+    """A partial update: rename, archive/restore, or both."""
+
+    title: str | None = None
+    archived: bool | None = None
 
 
 @router.get("", response_model=list[ConversationMeta])
@@ -110,7 +113,10 @@ async def rename_conversation(
 ):
     owner_id = _owner(user, user_id)
     _meta_or_404(owner_id, conversation_id)
-    conversations.rename(owner_id, conversation_id, body.title)
+    if body.title is not None:
+        conversations.rename(owner_id, conversation_id, body.title)
+    if body.archived is not None:
+        conversations.set_archived(owner_id, conversation_id, body.archived)
     return _meta_or_404(owner_id, conversation_id)
 
 

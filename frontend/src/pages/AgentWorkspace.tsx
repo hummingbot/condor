@@ -80,6 +80,8 @@ export function AgentWorkspace() {
     mutationFn: () => api.deleteAgent(slug),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: agentsQuery().queryKey });
+      // Its chats were deleted with it (server side), so the rail re-reads.
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
       navigate("/");
     },
   });
@@ -225,8 +227,8 @@ export function AgentWorkspace() {
         onConfirm={() => deleteAgentMutation.mutate()}
         onClose={() => setShowDeleteConfirm(false)}
       >
-        Delete <strong className="text-[var(--color-text)]">{agent.name}</strong> and
-        all its loops? This cannot be undone.
+        Delete <strong className="text-[var(--color-text)]">{agent.name}</strong>, its
+        loops and your chats with it? This cannot be undone.
       </ConfirmDialog>
     </>
   );

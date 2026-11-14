@@ -249,3 +249,14 @@ def test_a_traversal_in_the_url_is_404_not_a_file(store):
     meta = _seed(USER.id)
     resp = _client(USER).get(f"/conversations/{meta.id}/attachments/..%2Fmeta.json")
     assert resp.status_code == 404
+
+
+def test_archive_through_the_same_patch(store):
+    meta = _seed(USER.id)
+    body = (
+        _client(USER).patch(f"/conversations/{meta.id}", json={"archived": True}).json()
+    )
+    assert body["archived"] is True
+    # Archiving leaves the title alone.
+    assert body["title"] == "hello"
+    assert conversations.get_conversation(USER.id, meta.id).archived is True

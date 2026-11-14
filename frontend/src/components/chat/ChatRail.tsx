@@ -19,7 +19,7 @@ import { Link } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { ConversationList, REMOVED_GROUP } from "@/components/chat/ConversationList";
+import { ARCHIVED_GROUP, ConversationList } from "@/components/chat/ConversationList";
 import { WORKSPACE_BAR } from "@/components/chat/workspaceBar";
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import { useWorkspacePane } from "@/hooks/useWorkspacePane";
@@ -107,6 +107,8 @@ export const ChatRail = memo(function ChatRail({
     mutationFn: (slug: string) => api.deleteAgent(slug),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: agentsQuery().queryKey });
+      // Its chats were deleted with it (server side), so the rail re-reads.
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
       setPendingDelete(null);
     },
   });
@@ -257,8 +259,9 @@ export const ChatRail = memo(function ChatRail({
               key={slug}
               label={name}
               icon={
-                slug === REMOVED_GROUP ? (
+                slug === ARCHIVED_GROUP ? (
                   <Archive className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
+
                 ) : isCondor ? (
                   // The house assistant keeps the brand colour; every
                   // specialist shares one quiet line icon.
@@ -275,13 +278,21 @@ export const ChatRail = memo(function ChatRail({
               // chat is always findable in the list.
               active={!hubActive && hasSession && holdsActive && !expanded}
               title={
-                slug === REMOVED_GROUP
-                  ? "Chats with agents that are no longer installed"
+                slug === ARCHIVED_GROUP
+                  ? count > 0
+                    ? "Chats you archived. Each shows which agent it was with."
+                    : "Nothing archived yet. Point at a chat and use the box icon to archive it."
                   : agent?.description || name
               }
               // An agent with chats opens and closes them; one without starts
               // the first.
-              onClick={() => (count > 0 ? onToggle() : onTalk(talkSlug, isCondor ? null : agent))}
+              onClick={() =>
+                count > 0
+                  ? onToggle()
+                  : agent
+                    ? onTalk(talkSlug, isCondor ? null : agent)
+                    : undefined // an empty archive: nothing to open
+              }
               newTitle={`New chat with ${name}`}
               onNew={agent ? () => onTalk(talkSlug, isCondor ? null : agent, true) : undefined}
               slug={!isCondor && agent ? slug : undefined}
@@ -362,8 +373,8 @@ export const ChatRail = memo(function ChatRail({
         Delete{" "}
         <strong className="text-[var(--color-text)]">
           {pendingDelete?.name}
-        </strong>{" "}
-        and all its loops? This cannot be undone.
+        </strong>
+        , its loops and your chats with it? This cannot be undone.
       </ConfirmDialog>
     </aside>
   );
