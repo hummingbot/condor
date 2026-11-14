@@ -88,6 +88,7 @@ export const ConversationList = memo(function ConversationList({
   agents,
   busyIds,
   waitingIds,
+  liveDrafts,
   activeId,
   onOpen,
   renderAgent,
@@ -98,6 +99,8 @@ export const ConversationList = memo(function ConversationList({
   busyIds?: Set<string>;
   /** Waiting on the user's approval — the row says so. */
   waitingIds?: Set<string>;
+  /** Chats on screen the server does not list yet; shown until it does. */
+  liveDrafts?: ConversationMeta[];
   activeId: string | null;
   onOpen: (meta: ConversationMeta) => void;
   renderAgent: (header: AgentGroupHeader) => ReactNode;
@@ -114,11 +117,17 @@ export const ConversationList = memo(function ConversationList({
   // The rail mounts with the chat workspace, so "always" is one fetch per
   // arrival at the workspace — and a chat started seconds ago is at the top
   // where the user expects it.
-  const { data: conversations = [], isLoading } = useQuery({
+  const { data: saved = [], isLoading } = useQuery({
     queryKey: QUERY_KEY,
     queryFn: () => api.listConversations(),
     refetchOnMount: "always",
   });
+  const conversations = useMemo(() => {
+    if (!liveDrafts?.length) return saved;
+    const have = new Set(saved.map((c) => c.id));
+    const extra = liveDrafts.filter((d) => !have.has(d.id));
+    return extra.length ? [...extra, ...saved] : saved;
+  }, [saved, liveDrafts]);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: QUERY_KEY });
 

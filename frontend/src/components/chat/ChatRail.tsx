@@ -62,6 +62,7 @@ export const ChatRail = memo(function ChatRail({
   hasSession,
   busyIds,
   waitingIds,
+  liveDrafts,
   activeId,
   hubActive = false,
   open,
@@ -83,6 +84,8 @@ export const ChatRail = memo(function ChatRail({
   busyIds?: Set<string>;
   /** Conversations holding a tool call that waits on the user. */
   waitingIds?: Set<string>;
+  /** Chats on screen the server does not list yet (first answer running). */
+  liveDrafts?: ConversationMeta[];
   /** Conversation on screen — `null` before a session exists. */
   activeId: string | null;
   /** The Hub is in the workspace's column, so its row is the one lit. */
@@ -245,6 +248,7 @@ export const ChatRail = memo(function ChatRail({
         agents={condor ? [condor, ...specialists] : specialists}
         busyIds={busyIds}
         waitingIds={waitingIds}
+        liveDrafts={liveDrafts}
         activeId={activeId}
         onOpen={(meta) => {
           onClose();

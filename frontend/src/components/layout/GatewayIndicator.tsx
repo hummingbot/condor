@@ -45,7 +45,7 @@ export function GatewayIndicator() {
       className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-2.5 py-1 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-[var(--color-red)]/15"
     >
       <span className="h-2 w-2 rounded-full bg-current" />
-      Gateway off
+      {isError ? "Gateway status?" : "Gateway off"}
     </Link>
   );
 }

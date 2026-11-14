@@ -281,13 +281,17 @@ export function WorkspacePaneOutlet({
   if (!pane) return null;
   // Destructured, not read through `pane` in the JSX: the ref lint rule reads
   // any member of an object whose property is passed as `ref` as a ref itself.
-  const { setHost, setBelowHost, open, frac, setFrac, defaultFrac } = pane;
-  const split = dir === "row" ? sideSplit : stackSplit;
-  const row = dir === "row";
+  const { setHost, setBelowHost, open, frac, setFrac, defaultFrac, canSplit } = pane;
+  // Too narrow to sit beside the chat: the split becomes what every sheet is
+  // at this width, an overlay over the transcript, stacked — rather than a
+  // 640 px column that squeezes the chat to nothing.
+  const overlay = dir !== null && !canSplit;
+  const row = dir === "row" && !overlay;
+  const split = row ? sideSplit : stackSplit;
   const shown = open || dir !== null;
   return (
     <>
-      {shown && (
+      {shown && !overlay && (
         <PaneResizeHandle
           frac={frac}
           setFrac={setFrac}
@@ -299,15 +303,17 @@ export function WorkspacePaneOutlet({
           grow in the ratio the reader left them in, whatever width the row
           turns out to have. Inline, so it overrides the `flex-1` shorthand. */}
       <div
-        style={shown ? { flexGrow: frac / (1 - frac) } : undefined}
+        style={shown && !overlay ? { flexGrow: frac / (1 - frac) } : undefined}
         className={
           // Split, the column is up even when no sheet holds the pane: the
           // first panel may be Tasks/Routines, which draw here without a claim.
-          shown
-            ? `flex min-h-0 flex-1 border-l border-[var(--color-border)] bg-[var(--color-bg)] ${
-                row ? "min-w-[640px] flex-row" : "min-w-[400px] flex-col"
-              }`
-            : "hidden"
+          !shown
+            ? "hidden"
+            : overlay
+              ? "absolute inset-y-0 right-0 z-30 flex w-[min(480px,100%)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl"
+              : `flex min-h-0 flex-1 border-l border-[var(--color-border)] bg-[var(--color-bg)] ${
+                  row ? "min-w-[640px] flex-row" : "min-w-[400px] flex-col"
+                }`
         }
       >
         <aside

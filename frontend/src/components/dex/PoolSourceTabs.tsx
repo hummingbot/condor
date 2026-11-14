@@ -271,6 +271,16 @@ export function PoolSourceTabs({
   const [lastList, setLastList] = useState<PoolSource>(
     isSearch ? { kind: "gecko", view: "trending" } : source,
   );
+  // A list remembered on one chain means nothing on another: the parent
+  // already resets to Trending when the chain changes, so this does too —
+  // otherwise clearing a search on Base brought back Solana's Meteora list.
+  // Adjusted during render (React's "reset state on prop change" pattern),
+  // not in an effect, so there is no frame with the stale list.
+  const [listNetwork, setListNetwork] = useState(network);
+  if (listNetwork !== network) {
+    setListNetwork(network);
+    setLastList({ kind: "gecko", view: "trending" });
+  }
   const pick = (next: PoolSource) => {
     setLastList(next);
     onQueryChange("");

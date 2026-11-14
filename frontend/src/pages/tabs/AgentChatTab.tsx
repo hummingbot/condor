@@ -449,8 +449,17 @@ export function AgentChatTab() {
   // Joined keys again, so the rail's `memo` holds while a reply streams.
   const convIdOf = (s: (typeof chat.slots)[number]) =>
     s.info.conversation_id || s.info.slot_id;
+  // A turn is in flight from the moment it is sent, not from its first
+  // fragment: `isSlotStreaming` only turns on when the answer starts, so a
+  // chat whose last message is still the user's (or whose send is queued) is
+  // working too, and must neither read as idle nor be closed behind the user.
+  const inFlight = (s: (typeof chat.slots)[number]) =>
+    !!s.pending ||
+    chat.isSlotStreaming(s.info.slot_id) ||
+    chat.isSlotQueued(s.info.slot_id) ||
+    s.messages[s.messages.length - 1]?.role === "user";
   const busyKey = chat.slots
-    .filter((s) => chat.isSlotStreaming(s.info.slot_id) || s.pending)
+    .filter(inFlight)
     .map(convIdOf)
     .join("|");
   const waitingKey = chat.slots
@@ -481,8 +490,7 @@ export function AgentChatTab() {
     .filter(
       (s) =>
         s.info.slot_id !== activeSlotId &&
-        !s.pending &&
-        !chat.isSlotStreaming(s.info.slot_id) &&
+        !inFlight(s) &&
         !chat.permissionRequests[s.info.slot_id],
     )
     .map((s) => s.info.slot_id)
@@ -498,6 +506,45 @@ export function AgentChatTab() {
   useEffect(() => {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
   }, [busyKey, queryClient]);
+
+  /**
+   * Chats on screen that the server does not list yet. A conversation's first
+   * turn is written when its prompt ends, and the list leaves out
+   * conversations with nothing in them — so a new chat is absent from the rail
+   * for as long as its first answer runs or waits on an approval. With the
+   * session tabs gone the rail is the only way back to it, so it is listed
+   * from the session itself until the server has it.
+   */
+  const liveDraftKey = chat.slots
+    .filter((s) => s.messages.some((m) => m.role === "user"))
+    .map((s) =>
+      [
+        convIdOf(s),
+        s.info.agent_slug || "",
+        (s.messages.find((m) => m.role === "user")?.text || "").slice(0, 80).replace(/[|\n]/g, " "),
+      ].join("\u0001"),
+    )
+    .join("|");
+  const liveDrafts = useMemo<ConversationMeta[]>(() => {
+    if (!liveDraftKey) return [];
+    const now = new Date().toISOString();
+    return liveDraftKey.split("|").map((row) => {
+      const [id, agent_slug, title] = row.split("\u0001");
+      return {
+        id,
+        user_id: 0,
+        surface: "web",
+        title,
+        agent_key: "",
+        agent_slug,
+        server_name: null,
+        created_at: now,
+        updated_at: now,
+        turn_count: 1,
+        last_snippet: "",
+      };
+    });
+  }, [liveDraftKey]);
 
   // Stable identities, so the rail's `memo` holds while an answer streams.
   // `selectedSlug` is a string and the rest are `useCallback`s on genuinely
@@ -736,6 +783,14 @@ export function AgentChatTab() {
   // The agent panel in the bottom half keeps its own section — the pane's
   // section lives on the URL and belongs to the top.
   const [belowAgentTab, setBelowAgentTab] = useState<KnowledgeTabId | undefined>(undefined);
+  // The lower Agent panel's unsaved edit. The pane's own panel is guarded by
+  // `usePaneGuard`; this one is unmounted by layout changes instead, so every
+  // layout change that would drop it asks first.
+  const [belowDirty, setBelowDirty] = useState(false);
+  const keepsBelowDraft = () =>
+    !belowDirty ||
+    stack?.bottom !== "agent" ||
+    window.confirm("The lower Agent panel has unsaved changes. Discard them?");
 
   /**
    * The layout picker's view of the row: what fills the wide pane, what fills
@@ -786,6 +841,21 @@ export function AgentChatTab() {
     account.close();
     openPane(null);
   };
+  /**
+   * Bring a remembered split back on arrival. Its picks are restored from
+   * storage, but the first panel lives in the pane, which follows the URL —
+   * arriving through the Agents link (no `?panel=`) left the pane empty, so
+   * the split read as inactive and never came back. Once per mount, and only
+   * when the URL named no panel of its own.
+   */
+  const restoredSplit = useRef(false);
+  useEffect(() => {
+    if (restoredSplit.current) return;
+    restoredSplit.current = true;
+    if (stack && !pane && !isSide(stack.top)) pickMain(stack.top as MainSlot);
+    // Mount only: later changes are the reader's own.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   /** Show exactly `id` beside the chat, outside the stacked layout. */
   const showOne = (id: SlotId) => {
     if (isSide(id)) {
@@ -816,6 +886,7 @@ export function AgentChatTab() {
       ? { ...stack, top: stackTop! }
       : { top: layoutMain ?? "agent", bottom: layoutSide ?? "tasks", dir: "row" };
   const pickStackTop = (id: SlotId) => {
+    if (!keepsBelowDraft()) return;
     const cur = currentSplit();
     // Picking what the other half holds swaps them rather than showing one twice.
     const bottom = id === cur.bottom ? cur.top : cur.bottom;
@@ -823,6 +894,7 @@ export function AgentChatTab() {
     setStack({ top: id, bottom, dir: cur.dir });
   };
   const pickStackBottom = (id: SlotId) => {
+    if (id !== "agent" && !keepsBelowDraft()) return;
     const cur = currentSplit();
     if (id === cur.top) {
       applyTop(cur.bottom);
@@ -834,12 +906,15 @@ export function AgentChatTab() {
   };
   /** Close one half: the other stays, as the one panel beside the chat. */
   const closeStackHalf = (half: "top" | "bottom") => {
+    if (!keepsBelowDraft()) return;
     const keep = half === "top" ? stackBottom : stackTop;
     setStack(null);
     if (keep) showOne(keep);
     else openPane(null);
   };
   const setLayoutChoice = (choice: LayoutChoice) => {
+    // Turning the split on its side keeps both panels mounted; only leaving it drops one.
+    if ((choice === "chat" || choice === "one") && !keepsBelowDraft()) return;
     if (choice === "stack" || choice === "side") {
       const dir = choice === "stack" ? "col" : "row";
       // Already split: turn it on its side, both panels staying put.
@@ -941,6 +1016,7 @@ export function AgentChatTab() {
           liveIds={liveIds}
           busyIds={busyIds}
           waitingIds={waitingIds}
+          liveDrafts={liveDrafts}
           activeId={
             onHub ? null : activeSlot?.info.conversation_id || chat.activeSlotId
           }
@@ -1156,6 +1232,7 @@ export function AgentChatTab() {
               wiring={agentWiring(panelSlug)}
               tab={belowAgentTab}
               onTabChange={setBelowAgentTab}
+              onDirtyChange={setBelowDirty}
               onOpenRoutine={onPanelOpenRoutine}
               onOpenStrategy={(sslug) =>
                 openPane({ kind: "strategy", agentSlug: panelSlug, strategySlug: sslug })
