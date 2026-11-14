@@ -8,7 +8,6 @@ import pytest
 from condor.agents import engine as engine_mod
 
 
-
 class _Ledger:
     def __init__(self, bases):
         self._bases = bases
