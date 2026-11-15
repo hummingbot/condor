@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Any, Mapping
 
+from condor.agents.ownership import strip_deploy_suffix
 from condor.fetchers._pagination import walk_pages
 from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, extract_executors_list
-from condor.agents.ownership import strip_deploy_suffix
 
 if TYPE_CHECKING:
     from condor.agents.attribution import OwnershipWindow
