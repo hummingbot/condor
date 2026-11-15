@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from condor.fetchers._pagination import walk_pages
 from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, extract_executors_list
+from condor.agents.ownership import strip_deploy_suffix
 
 if TYPE_CHECKING:
     from condor.agents.attribution import OwnershipWindow
@@ -424,6 +425,29 @@ def _build_perf_from_rows(
     )
 
 
+def _live_bases(bases: Any, live_names: set[str] | None) -> set[str]:
+    """Bases with at least one instance in the live listing.
+
+    ``live_names`` answers the moment a deploy exists; the performance snapshot
+    that :func:`~condor.fetchers.bot_performance.resolve_bots` joins against can
+    lag it by a tick. In that window ``resolve_bots`` drops the base entirely —
+    it keeps a base only when an instance is in the snapshot *and* the listing —
+    so the reading stays ``missing`` for a bot the venue is already reporting on.
+    The risk gate reads ``missing`` as "no drawdown", so a freshly deployed
+    bot-mode agent had its second tick refused every time: it deploys, then
+    blocks, and only trades once the snapshot catches up.
+
+    A base with a running instance has been answered for. That is the same
+    statement the per-bot ``reading`` raises, made from the fresher of the two
+    listings, and it can only ever raise a reading from ``missing`` to ``ok`` —
+    never lower one a snapshot did report.
+    """
+    if not live_names:
+        return set()
+    stripped = {strip_deploy_suffix(name) for name in live_names}
+    return {base for base in bases if base in stripped}
+
+
 async def fetch_agent_performance_batch(
     client: Any,
     agent_ids: list[str],
@@ -548,6 +572,9 @@ async def fetch_agent_performance_batch(
             # for a fleet that returned nothing, which is the very confusion
             # [[CORR-725]] exists to end.
             out[aid].reading = "missing"
+            # Bases the venue is already reporting as running, even if the
+            # performance snapshot has not listed them yet.
+            live_bases = _live_bases(bases, live_names)
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
@@ -609,6 +636,10 @@ async def fetch_agent_performance_batch(
                     out[aid].reading = _best_reading(
                         out[aid].reading, str(bot.get("reading") or "missing")
                     )
+                elif base in live_bases:
+                    # Running but not yet in the snapshot: the deploy exists, the
+                    # figures do not. Reading is the liveness fact alone.
+                    out[aid].reading = _best_reading(out[aid].reading, "ok")
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
