@@ -534,6 +534,7 @@ def test_a_confirmed_claim_ends_the_drawdown_exemption(tmp_path, monkeypatch):
     asyncio.run(engine._adopt_running_bots(_LiveBots(["brigado-grid-20261027-101500"])))
     assert asyncio.run(engine._gather_tick_context(object())) is None
 
+
 # ----------------------------------------------------------------------
 # 5. A deploy that landed and then died: the bot never produced a reading
 # ----------------------------------------------------------------------
@@ -601,6 +602,7 @@ def test_unknown_liveness_still_blocks(tmp_path, monkeypatch):
     assert asyncio.run(engine._gather_tick_context(object())) is None
     assert "no drawdown reading on record" in engine.journal._path.read_text()
 
+
 # ----------------------------------------------------------------------
 # 6. Recovery ticks may run, but may not add exposure (review follow-up)
 # ----------------------------------------------------------------------
@@ -622,8 +624,11 @@ def test_a_recovery_tick_is_marked_and_may_not_add_exposure(tmp_path, monkeypatc
 
     call = {
         "tool": "manage_bots",
-        "input": {"action": "deploy", "bot_name": "brigado-grid",
-                  "controllers_config": ["cfg"]},
+        "input": {
+            "action": "deploy",
+            "bot_name": "brigado-grid",
+            "controllers_config": ["cfg"],
+        },
     }
     allowed, reason = engine.risk.check_bot_action(call, current_state=ctx.risk_state)
     assert allowed is False
@@ -634,7 +639,10 @@ def test_recovery_still_allows_the_brakes(tmp_path, monkeypatch):
     engine = _engine_holding_a_dead_bot(tmp_path, monkeypatch, live=[])
     ctx = asyncio.run(engine._gather_tick_context(object()))
 
-    call = {"tool": "manage_bots", "input": {"action": "stop_bot", "bot_name": "brigado-grid"}}
+    call = {
+        "tool": "manage_bots",
+        "input": {"action": "stop_bot", "bot_name": "brigado-grid"},
+    }
     allowed, _ = engine.risk.check_bot_action(call, current_state=ctx.risk_state)
     assert allowed is True, "standing in front of a brake is the worse failure"
 
