@@ -818,14 +818,17 @@ class TickEngine:
                     self._last_error = tick_error
                     log.exception("TickEngine %s tick error", self.agent_id)
                     if self.journal:
-                        self.journal.append_error(tick_error)
-                        # A tick that raised never reached _persist_session, so it
-                        # wrote no Ticks line and left the counter where it was. The
-                        # session then read as never having ticked (status.tick 0)
-                        # while its tool calls may already have deployed a bot and
-                        # left orders on the venue -- a live desk indistinguishable
-                        # from an idle one. Count it, and say why.
-                        if not self._ticked_this_iteration:
+                        if self._ticked_this_iteration:
+                            self.journal.append_error(tick_error)
+                        else:
+                            # A tick that raised never reached _persist_session,
+                            # so it wrote no Ticks line and left the counter
+                            # where it was: the session read as never having
+                            # ticked (status.tick 0) while its tool calls may
+                            # already have left orders on the venue. Count it.
+                            # The reason rides on the tick record, and the
+                            # error stream does not repeat it -- one mention
+                            # per failure.
                             self.journal.record_tick("failed: " + tick_error)
                     if self.is_experiment:
                         self._record_failed_experiment(tick_error)
