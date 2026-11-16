@@ -1595,8 +1595,9 @@ class TickEngine:
         # tick", and at startup ``_last_tick_at`` is still 0.
         if self._live_read_at > 0 and self._live_read_at >= self._last_tick_at:
             return self._live_known, self._live_bases
-        from .ownership import strip_deploy_suffix
         from condor.fetchers.bot_performance import fetch_live_instance_names_checked
+
+        from .ownership import strip_deploy_suffix
 
         try:
             live, live_known = await fetch_live_instance_names_checked(client)
