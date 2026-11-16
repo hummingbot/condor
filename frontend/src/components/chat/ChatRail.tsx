@@ -33,6 +33,16 @@ import {
 import { agentsQuery } from "@/lib/queryClient";
 import { CHAT_RAIL_OPEN_KEY } from "@/lib/sessionState";
 
+/** The reader's own choice, if they ever made one: `null` when never set. */
+function readStoredOpen(): boolean | null {
+  try {
+    const v = localStorage.getItem(CHAT_RAIL_OPEN_KEY);
+    return v === null ? null : v === "true";
+  } catch {
+    return null;
+  }
+}
+
 function readOpen(): boolean {
   return localStorage.getItem(CHAT_RAIL_OPEN_KEY) !== "false";
 }
@@ -122,7 +132,10 @@ export const ChatRail = memo(function ChatRail({
   const lent = useRef<boolean | null>(null);
   useEffect(() => {
     if (paneOpen) {
-      if (lent.current === null) {
+      // A rail the reader opened by hand is theirs: it is not lent away, so a
+      // reload with a pane already open leaves it open, as they were using it.
+      // Only a rail nobody has chosen for steps back on its own.
+      if (lent.current === null && readStoredOpen() !== true) {
         lent.current = expanded;
         setExpanded(false);
       }
