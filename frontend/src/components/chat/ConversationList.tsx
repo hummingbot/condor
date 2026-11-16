@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { ShareConversation } from "@/components/chat/ShareConversation";
+import { RAIL_OPEN_GROUPS_KEY } from "@/lib/sessionState";
 import { api, CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
 
 const QUERY_KEY = ["conversations"] as const;
@@ -46,6 +47,16 @@ function plainSnippet(md: string): string {
 function humanize(slug: string): string {
   const words = slug.replace(/[_-]+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** The agents left open last time, or none (or anything unreadable). */
+function readOpenGroups(): Record<string, boolean> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RAIL_OPEN_GROUPS_KEY) || "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
 }
 
 /** Chats shown per agent before "Show more". */
@@ -110,8 +121,22 @@ export const ConversationList = memo(function ConversationList({
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
-  // Groups the reader opened or closed by hand; the rest follow the default.
-  const [toggled, setToggled] = useState<Record<string, boolean>>({});
+  // The agents the reader opened. Closed is the default — a rail that opened
+  // agents on its own read as somebody else's arrangement — and what the
+  // reader opens is remembered, so a reload leaves the rail as it was.
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(readOpenGroups);
+  const setGroupOpen = (slug: string, open: boolean) =>
+    setOpenGroups((prev) => {
+      const next = { ...prev };
+      if (open) next[slug] = true;
+      else delete next[slug];
+      try {
+        localStorage.setItem(RAIL_OPEN_GROUPS_KEY, JSON.stringify(next));
+      } catch {
+        /* private mode: it lasts the session */
+      }
+      return next;
+    });
   const [showAll, setShowAll] = useState<Record<string, boolean>>({});
 
   // The rail mounts with the chat workspace, so "always" is one fetch per
@@ -230,10 +255,8 @@ export const ConversationList = memo(function ConversationList({
   const activeSlugOfList = conversations.find((c) => c.id === activeId);
   const activeAgentSlug = activeSlugOfList ? activeSlugOfList.agent_slug || CHAT_SLUG : null;
   const activeGroup = activeSlugOfList?.archived ? ARCHIVED_GROUP : activeAgentSlug;
-  // Open by default: the agent of the chat on screen, and the two most recent.
-  const isExpanded = (slug: string, index: number, count: number) =>
-    count > 0 &&
-    (toggled[slug] ?? (slug === activeGroup || (index < 2 && !isFootGroup(slug))));
+  // Open only if the reader opened it (and there is something inside).
+  const isExpanded = (slug: string, count: number) => count > 0 && !!openGroups[slug];
 
   const renderRow = (meta: ConversationMeta, withAgent = false) => {
     const isActive = meta.id === activeId;
@@ -384,8 +407,8 @@ export const ConversationList = memo(function ConversationList({
   );
   const foot = groups.filter((g) => isFootGroup(g.slug));
 
-  const renderGroup = (g: (typeof groups)[number], i: number) => {
-    const expanded = isExpanded(g.slug, i, g.items.length);
+  const renderGroup = (g: (typeof groups)[number]) => {
+    const expanded = isExpanded(g.slug, g.items.length);
     const shown = showAll[g.slug] ? g.items : g.items.slice(0, PER_AGENT);
     const hidden = g.items.length - shown.length;
     return (
@@ -397,7 +420,7 @@ export const ConversationList = memo(function ConversationList({
           count: g.items.length,
           expanded,
           holdsActive: g.slug === activeGroup,
-          onToggle: () => setToggled((t) => ({ ...t, [g.slug]: !expanded })),
+          onToggle: () => setGroupOpen(g.slug, !expanded),
         })}
         {expanded && (
           <div className="pb-1">
@@ -429,7 +452,7 @@ export const ConversationList = memo(function ConversationList({
             Your chats
           </div>
         )}
-        {talked.map((g, i) => renderGroup(g, i))}
+        {talked.map((g) => renderGroup(g))}
       </div>
 
       {(quiet.length > 0 || foot.length > 0) && (
@@ -441,11 +464,11 @@ export const ConversationList = memo(function ConversationList({
               Start a chat with
             </div>
           )}
-          {quiet.map((g) => renderGroup(g, Infinity))}
+          {quiet.map((g) => renderGroup(g))}
           {foot.length > 0 && quiet.length > 0 && (
             <div className="mx-4 my-1 border-t border-[var(--color-border)]" />
           )}
-          {foot.map((g) => renderGroup(g, Infinity))}
+          {foot.map((g) => renderGroup(g))}
         </div>
       )}
 

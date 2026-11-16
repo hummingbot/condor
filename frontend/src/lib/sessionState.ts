@@ -191,6 +191,12 @@ export const STACK_SPLIT_KEY = "condor.workspace.stack-split";
 export const SIDE_SPLIT_KEY = "condor.workspace.side-split";
 
 /**
+ * Which agents the chat rail has open, as `{ [agentSlug]: true }`. Groups
+ * start closed; what the reader opens stays open across reloads.
+ */
+export const RAIL_OPEN_GROUPS_KEY = "condor.rail.open-groups";
+
+/**
  * Where the reader put the split between the transcript and the workspace
  * pane, as a fraction of the row (ARCH-273, ARCH-291).
  *
