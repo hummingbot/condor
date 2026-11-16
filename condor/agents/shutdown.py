@@ -744,6 +744,41 @@ async def _confirm_closes(engine: Any, client: Any, closed_rows: list[dict]) -> 
             )
 
 
+def _declared_pairs(engine: Any) -> list[tuple[str, str]]:
+    """``shutdown_positions`` as ``(connector, pair)``, from the loop config.
+
+    A desk that signs its own orders -- a covered-call writer, a funding farmer --
+    holds positions no Condor executor opened, so the session's tracked rows are
+    empty by construction. The account-wide venue read below already rescues it,
+    but account-wide is blunt: a *second* direct-signing desk on the same account
+    has no executor row either, so nothing can prove the position is this
+    session's and one winddown can close the other's book.
+
+    A loop can therefore name what it holds, and then only those pairs are read:
+
+        shutdown_positions:
+          - derive_perpetual:XRP-USDC
+
+    Matched exactly as the API reports ``trading_pair``. Malformed entries are
+    ignored rather than guessed at; no declaration keeps the account-wide read.
+    """
+    raw = (
+        engine.config.get("shutdown_positions")
+        if getattr(engine, "config", None)
+        else None
+    )
+    if not raw:
+        return []
+    out: list[tuple[str, str]] = []
+    for item in raw if isinstance(raw, (list, tuple)) else [raw]:
+        text = str(item or "").strip()
+        connector, _, pair = text.partition(":")
+        connector, pair = connector.strip(), pair.strip()
+        if connector and pair:
+            out.append((connector, pair))
+    return out
+
+
 async def _fetch_venue_positions(
     engine: Any, client: Any, why: str
 ) -> list[dict] | None:
@@ -762,6 +797,27 @@ async def _fetch_venue_positions(
     reports flat over an open book.
     """
     from condor.fetchers.positions import MAX_POSITIONS_FETCH, fetch_positions
+
+    declared = _declared_pairs(engine)
+    if declared:
+        wanted = set(declared)
+        rows: list[dict] = []
+        try:
+            for connector in {c for c, _ in declared}:
+                venue_rows = (
+                    await fetch_positions(client, connector_name=connector, strict=True)
+                    or []
+                )
+                rows.extend(
+                    r
+                    for r in venue_rows
+                    if (_position_connector(r), _position_pair(r)) in wanted
+                )
+        except Exception:
+            log.exception("shutdown: could not read a declared venue book for %s", why)
+            engine._verify_read_failed = True
+            return None
+        return rows
 
     try:
         rows = await fetch_positions(client, strict=True) or []
