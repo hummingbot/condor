@@ -112,3 +112,34 @@ def test_the_snapshot_still_decides_when_it_has_the_instance():
     assert perf.reading == "ok"
     assert perf.realized_pnl == 3.0
     assert perf.volume == 250.0
+
+
+class _BrokenOrchestration(_Orchestration):
+    async def get_latest_controller_performance(self, bot_name=None):
+        raise RuntimeError("snapshot down")
+
+
+def test_a_degraded_snapshot_does_not_become_a_reading():
+    """A failed performance fetch is *unknown*, even if the bot is still listed live.
+
+    `fetch_bot_universe_checked` degrades to {} with degraded=True when the
+    snapshot fetch raises. The liveness listing still names the running
+    instance, so an unguarded rescue would report `ok` for a tick that read
+    nothing — the tri-state's whole point is to keep those apart.
+    """
+    clear_snapshot_cache()
+    clear_live_names_cache()
+    client = _Client(
+        [], {"status": "success", "data": {LIVE_INSTANCE: {"status": "running"}}}
+    )
+    client.bot_orchestration = _BrokenOrchestration(
+        [], {"status": "success", "data": {LIVE_INSTANCE: {"status": "running"}}}
+    )
+    perf = asyncio.run(
+        fetch_agent_performance_batch(
+            client, ["desk.orchestrate_1"], {"desk.orchestrate_1": [BASE]}
+        )
+    )["desk.orchestrate_1"]
+    assert (
+        perf.reading == "missing"
+    ), "a failed snapshot must not read as a valid reading"

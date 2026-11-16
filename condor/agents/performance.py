@@ -574,7 +574,13 @@ async def fetch_agent_performance_batch(
             out[aid].reading = "missing"
             # Bases the venue is already reporting as running, even if the
             # performance snapshot has not listed them yet.
-            live_bases = _live_bases(bases, live_names)
+            # A degraded snapshot is not an empty one: `fetch_bot_universe_checked`
+            # returns {} with degraded=True when the fetch itself failed, and a
+            # liveness listing that still names the bot would then raise the
+            # reading to `ok` on a tick that read nothing — the exact confusion
+            # the tri-state exists to prevent. Rescue only on a snapshot that
+            # actually answered.
+            live_bases = set() if degraded else _live_bases(bases, live_names)
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
