@@ -48,7 +48,6 @@ async def _gather_calls(*awaitables: Any) -> list[Any]:
     return list(results)
 
 
-
 async def _read_back_controller_config(
     client: Any, config_name: str
 ) -> tuple[dict[str, Any] | None, str]:
@@ -113,6 +112,7 @@ def _fields_that_did_not_land(
         if k in stored and not _same_config_value(v, stored[k])
     ]
     return sorted(set(missing) | set(changed))
+
 
 def _validate_config_against_template(
     config_data: dict[str, Any],
@@ -587,9 +587,7 @@ async def modify_controllers(
             # readable config is the failure this exists to catch: the agent
             # believes it committed a config, deploys that name, and the bot
             # dies on a file that was never written.
-            stored, read_error = await _read_back_controller_config(
-                client, config_name
-            )
+            stored, read_error = await _read_back_controller_config(client, config_name)
             if stored is None:
                 raise RuntimeError(
                     f"manage_controllers config upsert: the API accepted "

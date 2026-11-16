@@ -1,4 +1,5 @@
 """Tests: a config upsert must not report a write it cannot prove."""
+
 import asyncio
 
 import pytest
@@ -26,7 +27,9 @@ class ScriptedControllers:
     async def get_controller_config_template(self, controller_type, controller_name):
         return {k: {"default": 0} for k in CONFIG}
 
-    async def validate_controller_config(self, controller_type, controller_name, config):
+    async def validate_controller_config(
+        self, controller_type, controller_name, config
+    ):
         return {"valid": True}
 
     async def list_controller_configs(self):
@@ -120,6 +123,7 @@ def test_a_normalised_number_is_not_mistaken_for_a_lost_field():
 
     assert result["unverified_fields"] == []
 
+
 # ----------------------------------------------------------------------
 # Review follow-ups (Greptile on PR #330)
 # ----------------------------------------------------------------------
@@ -137,9 +141,12 @@ def test_a_truncated_nested_object_is_not_reported_as_identical():
     sent = {"trailing_stop": {"activation_price": 1, "trailing_delta": 0.5}}
     assert _fields_that_did_not_land(sent, {"trailing_stop": {"activation_price": 1}})
     assert _fields_that_did_not_land(sent, {"trailing_stop": {}})
-    assert _fields_that_did_not_land(
-        sent, {"trailing_stop": {"activation_price": 1, "trailing_delta": 0.5}}
-    ) == []
+    assert (
+        _fields_that_did_not_land(
+            sent, {"trailing_stop": {"activation_price": 1, "trailing_delta": 0.5}}
+        )
+        == []
+    )
 
 
 def test_extra_stored_defaults_are_not_a_lost_field():
