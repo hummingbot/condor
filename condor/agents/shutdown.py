@@ -443,6 +443,14 @@ def _live_executor_pairs(running: list[dict]) -> set[tuple[str, str]]:
             continue
         connector = ex.get("connector") or ex.get("connector_name") or ""
         pair = ex.get("trading_pair") or ex.get("pair") or ""
+        # ``fetch_all_executors`` returns raw rows, and an executor's market can
+        # live under ``config`` rather than at the top level. Reading only the
+        # top level left a SHUTTING_DOWN executor out of ``owned``, so the
+        # winddown sent a second close while that executor's own close was still
+        # working the pair.
+        nested = ex.get("config") if isinstance(ex.get("config"), dict) else {}
+        connector = connector or nested.get("connector_name") or ""
+        pair = pair or nested.get("trading_pair") or ""
         if connector and pair:
             owned.add((str(connector), str(pair)))
     return owned
@@ -525,11 +533,28 @@ async def _close_with_limit(
         )
         rows = resting.get("data") if isinstance(resting, dict) else resting
         for row in rows or []:
-            if order_id and str(row.get("order_id")) != order_id:
+            row_id = str(row.get("order_id") or "")
+            client_id = str(row.get("client_order_id") or "")
+            # Match on either identifier: a row can carry the client id while the
+            # venue's own id is absent, and skipping it would leave a resting
+            # close behind.
+            if order_id and row_id and row_id != order_id and not client_id:
                 continue
-            await client.trading.cancel_order(
-                account_name=account, connector_name=connector, order_id=order_id
-            )
+            if not row_id and not client_id:
+                continue
+            # Cancel with the identifier the route accepts -- the other cancel
+            # paths in this file use client_order_id, and passing the wrong
+            # argument raises instead of cancelling.
+            if client_id:
+                await client.trading.cancel_order(
+                    account_name=account,
+                    connector_name=connector,
+                    client_order_id=client_id,
+                )
+            else:
+                await client.trading.cancel_order(
+                    account_name=account, connector_name=connector, order_id=row_id
+                )
             log.warning(
                 "shutdown: the %s %s fallback did not cross; cancelled %s",
                 connector,
@@ -538,9 +563,13 @@ async def _close_with_limit(
             )
             return False
     except Exception:
+        # A read or cancel that failed is NOT a confirmed close: reporting
+        # success would leave a resting order behind while the winddown claimed
+        # the pair flat.
         log.exception(
             "shutdown: could not confirm the %s %s fallback fill", connector, pair
         )
+        return False
 
     log.warning(
         "shutdown: closed %s %s with a %s %s limit at %s (the venue refused MARKET)",
@@ -690,18 +719,24 @@ async def _confirm_closes(engine: Any, client: Any, closed_rows: list[dict]) -> 
         return
     from condor.fetchers.positions import MAX_POSITIONS_FETCH, fetch_positions
 
-    accounts = {
-        (_position_connector(p), _position_pair(p)): str(
-            p.get("account_name") or "master_account"
+    # Keyed by account as well as market: two accounts can hold the same pair,
+    # and a dict keyed by (connector, pair) collapsed them into one -- so only
+    # one record was ever cleared, and a pair still held on the *other* account
+    # cleared neither.
+    wanted: set[tuple[str, str, str]] = {
+        (
+            str(p.get("account_name") or "master_account"),
+            _position_connector(p),
+            _position_pair(p),
         )
         for p in closed_rows
     }
-    confirmed: set[tuple[str, str]] = set()
-    still_open: set[tuple[str, str]] = set()
+    confirmed: set[tuple[str, str, str]] = set()
+    still_open: set[tuple[str, str, str]] = set()
 
     for attempt in range(3):
         confirmed, still_open = set(), set()
-        for connector in {c for c, _ in accounts}:
+        for connector in {c for _, c, _ in wanted}:
             try:
                 rows = (
                     await fetch_positions(client, connector_name=connector, strict=True)
@@ -719,10 +754,22 @@ async def _confirm_closes(engine: Any, client: Any, closed_rows: list[dict]) -> 
                     MAX_POSITIONS_FETCH,
                 )
                 continue
-            on_venue = {str(r.get("trading_pair") or "") for r in rows}
-            for pair in [p for c, p in accounts if c == connector]:
-                key = (connector, pair)
-                if pair in on_venue:
+            # A venue row may omit the account. Compare it on market alone in
+            # that case rather than assuming one: defaulting to master_account
+            # made every other account's row look absent, so a close that had
+            # not filled cleared its own tracking record.
+            on_venue: set[tuple[str, str, str]] = set()
+            on_venue_unaccounted: set[tuple[str, str]] = set()
+            for r in rows:
+                acct = str(r.get("account_name") or "")
+                conn = str(r.get("connector_name") or connector)
+                pair_name = str(r.get("trading_pair") or "")
+                if acct:
+                    on_venue.add((acct, conn, pair_name))
+                else:
+                    on_venue_unaccounted.add((conn, pair_name))
+            for key in [k for k in wanted if k[1] == connector]:
+                if key in on_venue or (key[1], key[2]) in on_venue_unaccounted:
                     still_open.add(key)
                 else:
                     confirmed.add(key)
@@ -730,12 +777,12 @@ async def _confirm_closes(engine: Any, client: Any, closed_rows: list[dict]) -> 
             break
         await asyncio.sleep(2)
 
-    for connector, pair in sorted(confirmed - still_open):
+    for account, connector, pair in sorted(confirmed - still_open):
         try:
             await client.executors.clear_position_held(
                 connector_name=connector,
                 trading_pair=pair,
-                account_name=accounts[(connector, pair)],
+                account_name=account,
                 controller_id=engine.agent_id,
             )
         except Exception:
@@ -808,6 +855,19 @@ async def _fetch_venue_positions(
                     await fetch_positions(client, connector_name=connector, strict=True)
                     or []
                 )
+                # A capped read cannot prove a declared pair absent: the walk
+                # stops at MAX_POSITIONS_FETCH, so a pair beyond the cap would be
+                # filtered out and the winddown would report flat over it.
+                # Inconclusive, exactly as in the account-wide path below.
+                if len(venue_rows) >= MAX_POSITIONS_FETCH:
+                    log.warning(
+                        "shutdown: declared venue read for %s hit the %s-row cap; "
+                        "an incomplete read cannot prove a book flat",
+                        connector,
+                        MAX_POSITIONS_FETCH,
+                    )
+                    engine._verify_read_failed = True
+                    return None
                 rows.extend(
                     r
                     for r in venue_rows
@@ -866,16 +926,36 @@ async def _read_positions(
         return None
 
     owned, _ = await _account_executor_pairs(engine, client)
+    declared = set(_declared_pairs(engine))
     rows = list(tracked)
     known = {_position_key(p) for p in rows}
+    left_alone: list[str] = []
     for row in venue:
         key = _position_key(row)
         if not key[0] or not key[1] or key in known or key in owned:
+            continue
+        # A venue row no executor owns is not proof that THIS session owns it: a
+        # second direct-signing desk on the same account holds positions with no
+        # executor row either, and closing one of those is the worst thing a
+        # winddown can do. Ownership has to be stated, not inferred -- either the
+        # loop declares the pair, or the row carries this session's attribution.
+        attributed = str(row.get("controller_id") or row.get("agent_id") or "")
+        if key not in declared and attributed != str(engine.agent_id or ""):
+            left_alone.append(f"{key[0]} {key[1]}")
             continue
         known.add(key)
         marked = dict(row)
         marked["_venue_only"] = True
         rows.append(marked)
+    if left_alone:
+        # Named, not silently skipped: an operator reading the journal should be
+        # able to tell "this desk is flat" from "this desk is flat and something
+        # else on the account is not".
+        log.warning(
+            "shutdown: leaving %s untouched -- no executor owns it and this "
+            "session cannot prove it (declare it in shutdown_positions)",
+            ", ".join(sorted(left_alone)),
+        )
     return rows
 
 

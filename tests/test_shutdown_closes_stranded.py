@@ -163,6 +163,7 @@ def _engine(
     place_error=None,
     monkeypatch=None,
     tmp_path=None,
+    config=None,
 ):
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     strat = Strategy(agent_slug="acme", name="Scalper")
@@ -187,7 +188,7 @@ def _engine(
     engine = SimpleNamespace(
         strategy=strat,
         agent_id="acme.scalper_1",
-        config={},
+        config=dict(config or {}),
         journal=_FakeJournal(),
         provider_registry=_Registry(),
         ledger=None,
@@ -264,7 +265,12 @@ def test_tracking_is_kept_when_the_venue_still_holds_the_position(
 
     monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue_still_open)
     engine, client, notes = _engine(
-        FLAT, [], [stuck, stuck, stuck], monkeypatch=monkeypatch, tmp_path=tmp_path
+        FLAT,
+        [],
+        [stuck, stuck, stuck],
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        config={"shutdown_positions": ["hyperliquid_perpetual:SOL-USD"]},
     )
     asyncio.run(run_shutdown(engine, "kill"))
 
@@ -473,7 +479,12 @@ def test_a_position_only_the_venue_knows_about_is_closed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
     engine, client, _ = _engine(
-        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+        FLAT,
+        [],
+        [[], [], []],
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        config={"shutdown_positions": ["hyperliquid_perpetual:SOL-USD"]},
     )
     asyncio.run(run_shutdown(engine, "kill"))
 
@@ -536,7 +547,12 @@ def test_an_unreadable_account_executor_list_closes_nothing(tmp_path, monkeypatc
     monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
     monkeypatch.setattr(executors_fetcher, "fetch_all_executors", _account_executors)
     engine, client, notes = _engine(
-        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+        FLAT,
+        [],
+        [[], [], []],
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        config={"shutdown_positions": ["hyperliquid_perpetual:SOL-USD"]},
     )
     asyncio.run(run_shutdown(engine, "kill"))
 
@@ -573,7 +589,12 @@ def test_a_refused_market_close_falls_back_to_a_crossing_ioc_limit(
 
     monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
     engine, client, notes = _engine(
-        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+        FLAT,
+        [],
+        [[], [], []],
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        config={"shutdown_positions": ["hyperliquid_perpetual:SOL-USD"]},
     )
     client.trading.refuse_market = "No order book exists for 'SOL-USD'."
     client.market_data.price = 100.0
@@ -589,3 +610,25 @@ def test_a_refused_market_close_falls_back_to_a_crossing_ioc_limit(
     assert order["price"] == pytest.approx(100.3)  # 0.3% through the mark
     done = engine.journal.actions_named("shutdown_done")
     assert done and "verify=flat" in done[0]
+
+
+def test_an_undeclared_venue_position_is_left_alone(tmp_path, monkeypatch):
+    """No proof of ownership, no close.
+
+    A second direct-signing desk on the same account has no executor row either,
+    so "no executor owns it" is not evidence that THIS session owns it. Without
+    a declaration the winddown leaves the row alone and says so.
+    """
+    venue = [_perp_short()]
+
+    async def _venue(client, **kwargs):
+        return venue
+
+    monkeypatch.setattr(positions_fetcher, "fetch_positions", _venue)
+    engine, client, notes = _engine(
+        FLAT, [], [[], [], []], monkeypatch=monkeypatch, tmp_path=tmp_path
+    )
+
+    asyncio.run(run_shutdown(engine, "kill"))
+
+    assert client.trading.calls == [], "an unprovable position must not be closed"
