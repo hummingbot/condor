@@ -51,7 +51,7 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { connectorCapabilities, orderBookVenues } from "@/lib/connector-capabilities";
-import { executorsQuery } from "@/lib/queryClient";
+import { executorsQuery, priceQuery } from "@/lib/queryClient";
 import { BROWSE_HINT_KEY } from "@/lib/sessionState";
 import type { ChartPriceMapping, ExecutorType, PickSlot } from "@/components/executor/types";
 import {
@@ -325,12 +325,9 @@ export function CreateExecutor() {
   // venue without that trait reads the last close off the candle stream instead. The store is
   // a singleton over one shared channel and TradeChart already subscribes with these
   // exact arguments, so this costs no extra connection.
-  const { data: priceData } = useQuery({
-    queryKey: ["price", server, connector, pair],
-    queryFn: () => api.getPrice(server!, connector, pair),
-    enabled: !!server && !!connector && !!pair && caps.hasRestPrice,
-    refetchInterval: 5000,
-  });
+  const { data: priceData } = useQuery(
+    priceQuery(server, connector, pair, { enabled: caps.hasRestPrice }),
+  );
 
   // Only the last close is read, so only the last close is subscribed: a fresh
   // candle array once a second would re-render this page — chart wrapper, every

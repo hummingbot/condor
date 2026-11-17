@@ -263,6 +263,37 @@ export function agentsQuery(opts: { enabled?: boolean } = {}) {
 }
 
 /**
+ * Poll cadence for a market's REST price.
+ *
+ * One constant for the reason `AGENTS_REFETCH_MS` spells out. `/trade` mounts
+ * two observers of this key — the page, whose order forms price off it, and
+ * the ticker strip, which reads bid/ask — and they used to declare 5 s and
+ * 15 s by hand; react-query ran the shared key at 5 s, so the 15 s was a
+ * number that described nothing (FD-11). 5 s is what the forms need and what
+ * the page was already paying.
+ */
+export const PRICE_REFETCH_MS = 5_000;
+
+/**
+ * The one declaration of `GET /market/prices` for a market: key, fetch and
+ * cadence. `enabled` carries the caller's own condition — a venue without a
+ * REST price never asks.
+ */
+export function priceQuery(
+  server: string | null,
+  connector: string,
+  pair: string,
+  opts: { enabled?: boolean } = {},
+) {
+  return {
+    queryKey: ["price", server, connector, pair] as const,
+    queryFn: () => api.getPrice(server!, connector, pair),
+    enabled: !!server && !!connector && !!pair && (opts.enabled ?? true),
+    refetchInterval: PRICE_REFETCH_MS,
+  };
+}
+
+/**
  * Recover the filters from an executors key, or `null` if the key is not one.
  *
  * Deliberately strict: a cache scan reaches this with arbitrary keys, and the
