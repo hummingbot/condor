@@ -327,6 +327,9 @@ class ServerDataService:
         # In-flight fetches per key (single-flight coalescing). Per-instance, so
         # a second ServerDataService in a test never shares one.
         self._inflight = SingleFlight()
+        # Bumped by invalidate(): a fetch that started under an older
+        # generation must not write its (pre-mutation) answer back as fresh.
+        self._generations: Dict[Tuple[str, ServerDataType], int] = {}
         self._running = False
         self._last_cleanup = time.time()
         # Sync listeners (e.g. WebSocketManager broadcasts)
@@ -532,6 +535,7 @@ class ServerDataService:
         ]
         for k in keys_to_remove:
             del self._cache[k]
+        self._supersede_inflight(server, data_types)
         if keys_to_remove:
             logger.debug(
                 "SDS invalidated %d entries for %s: %s",
@@ -545,11 +549,29 @@ class ServerDataService:
         keys_to_remove = [k for k in self._cache if k.server == server]
         for k in keys_to_remove:
             del self._cache[k]
+        self._supersede_inflight(server, tuple(ServerDataType))
         logger.info(
             "SDS invalidated all cache for server %s (%d entries)",
             server,
             len(keys_to_remove),
         )
+
+    def _supersede_inflight(
+        self, server: str, data_types: Tuple[ServerDataType, ...]
+    ) -> None:
+        """Make an invalidation win over fetches that are already in flight.
+
+        Deleting the entry is not enough: a request that left before the
+        mutation landed would still be joined by the very next reader, and
+        would then write its pre-mutation answer back stamped as fresh. So the
+        generation moves on (the old fetch skips its cache write) and the
+        in-flight entry is forgotten (the next reader starts a new request).
+        """
+        for dt in data_types:
+            self._generations[(server, dt)] = self._generations.get((server, dt), 0) + 1
+        for k in list(self._inflight):
+            if k.server == server and k.data_type in data_types:
+                self._inflight.forget(k)
 
     # ------ Cache-write listeners (for WebSocketManager) ------
 
@@ -873,6 +895,8 @@ class ServerDataService:
 
         health = self.get_server_health(key.server)
         t0 = time.monotonic()
+        gen_key = (key.server, key.data_type)
+        generation = self._generations.get(gen_key, 0)
 
         try:
             client = await self._get_client(key.server)
@@ -882,6 +906,8 @@ class ServerDataService:
                 "SDS fetch failed %s:%s: %s", key.server, key.data_type.value, e
             )
             health.record_error()
+            if self._generations.get(gen_key, 0) != generation:
+                return None  # invalidated mid-flight; a newer fetch owns the entry
 
             # Record error on cache entry
             entry = self._cache.get(key)
@@ -902,6 +928,12 @@ class ServerDataService:
 
         latency_ms = (time.monotonic() - t0) * 1000
         health.record_success(latency_ms)
+
+        if self._generations.get(gen_key, 0) != generation:
+            # invalidate() ran while this request was out: the answer may
+            # predate the mutation that prompted it. Hand it to the callers
+            # that were already waiting, but never cache it.
+            return result
 
         old_entry = self._cache.get(key)
         old_value = old_entry.value if old_entry else None

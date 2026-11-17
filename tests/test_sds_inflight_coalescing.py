@@ -119,3 +119,75 @@ def test_cancelled_waiter_does_not_kill_the_shared_fetch():
     assert calls["count"] == 1, "the cancellation must not have started a second fetch"
     assert survived == {"value": 1}, "the surviving waiter still gets the value"
     assert not sds._inflight
+
+
+def test_invalidate_wins_over_a_fetch_already_in_flight():
+    """DL-07: a request that left before the mutation must not be cached.
+
+    ``invalidate`` only deleted entries, so the handler's very next read joined
+    the poller's in-flight request — sent before the order/swap/key change
+    landed — and that request then wrote the pre-mutation snapshot back with a
+    fresh timestamp.
+    """
+    calls = {"count": 0}
+    state = {"value": "before"}
+
+    async def _drive():
+        release = asyncio.Event()
+
+        async def fetcher(client, **params):
+            calls["count"] += 1
+            snapshot = state["value"]  # what the server answered at send time
+            if calls["count"] == 1:
+                await release.wait()
+            return {"value": snapshot}
+
+        sds = _make_sds(fetcher)
+        early = asyncio.ensure_future(sds.get_or_fetch("srv", ServerDataType.PORTFOLIO))
+        await asyncio.sleep(0.01)
+        assert calls["count"] == 1 and sds._inflight
+
+        # The mutation lands, and the handler invalidates and re-reads.
+        state["value"] = "after"
+        sds.invalidate("srv", ServerDataType.PORTFOLIO)
+        fresh = await sds.get_or_fetch("srv", ServerDataType.PORTFOLIO)
+        assert calls["count"] == 2, "the re-read joined the pre-mutation request"
+        assert fresh == {"value": "after"}
+
+        # The old request settles late: its waiter is answered, the cache is not.
+        release.set()
+        assert await early == {"value": "before"}
+        await asyncio.sleep(0)
+        assert sds.get("srv", ServerDataType.PORTFOLIO) == {"value": "after"}
+        assert calls["count"] == 2
+        return sds
+
+    sds = asyncio.run(_drive())
+    assert not sds._inflight
+
+
+def test_invalidated_fetch_is_not_cached_when_nothing_re_reads():
+    """DL-07: with no re-read racing it, the stale answer still is not cached."""
+    calls = {"count": 0}
+
+    async def _drive():
+        release = asyncio.Event()
+
+        async def fetcher(client, **params):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                await release.wait()
+            return {"value": calls["count"]}
+
+        sds = _make_sds(fetcher)
+        early = asyncio.ensure_future(sds.get_or_fetch("srv", ServerDataType.PORTFOLIO))
+        await asyncio.sleep(0.01)
+
+        sds.invalidate_server("srv")
+        release.set()
+        await early
+
+        assert sds.get("srv", ServerDataType.PORTFOLIO) is None
+        assert await sds.get_or_fetch("srv", ServerDataType.PORTFOLIO) == {"value": 2}
+
+    asyncio.run(_drive())
