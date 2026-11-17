@@ -115,6 +115,7 @@ function DashboardStrip({
   controllerCount,
   botPnl,
   botVolume,
+  botConverted,
   activeExecutorCount,
   execStats,
   agents,
@@ -132,6 +133,9 @@ function DashboardStrip({
   controllerCount: number;
   botPnl: number;
   botVolume: number;
+  /** False when a controller's quote had no rate: the two sums above then hold
+   *  that controller's amounts in its own currency, and the tile says so. */
+  botConverted: boolean;
   activeExecutorCount: number;
   execStats: ExecutorPeriodSummary | undefined;
   agents: AgentSummary[];
@@ -162,7 +166,7 @@ function DashboardStrip({
           label="Bots"
           mainValue={botCount}
           pnl={botPnl}
-          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatCurrencyVolume(botVolume, currencySymbol)}`}
+          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatCurrencyVolume(botVolume, currencySymbol)}${botConverted ? "" : " ⚠"}`}
           currencySymbol={currencySymbol}
         />
 
@@ -952,12 +956,22 @@ export function Portfolio() {
   const activeExecutorCount = executorsList.filter((e) => isExecutorActive(e.status)).length;
 
   // Convert bot PnL and volume per-controller
+  // `convert` hands a value back in quote units when it has no rate (while the
+  // rates load, or for a quote the server has no path for). The sum still
+  // takes it — dropping a controller would be a different wrong number — and
+  // the tile carries the ⚠ the Executors tile already uses (FP-01).
   let botPnl = 0;
   let botVolume = 0;
+  let botConverted = true;
   for (const ctrl of controllers) {
     const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
-    botPnl += convert(ctrl.global_pnl_quote, quote).value;
-    botVolume += convert(ctrl.volume_traded, quote).value;
+    const pnl = convert(ctrl.global_pnl_quote, quote);
+    const volume = convert(ctrl.volume_traded, quote);
+    botPnl += pnl.value;
+    botVolume += volume.value;
+    if ((!pnl.converted && ctrl.global_pnl_quote !== 0) || (!volume.converted && ctrl.volume_traded !== 0)) {
+      botConverted = false;
+    }
   }
 
   // Flatten all tokens for top holdings
@@ -979,6 +993,7 @@ export function Portfolio() {
         controllerCount={controllerCount}
         botPnl={botPnl}
         botVolume={botVolume}
+        botConverted={botConverted}
         activeExecutorCount={activeExecutorCount}
         execStats={execStats}
         agents={agents ?? []}

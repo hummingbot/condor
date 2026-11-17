@@ -126,7 +126,7 @@ import { chartNotice } from "@/lib/perf-notices";
 import { buildPositionRows, parseSide, type PositionRow } from "@/lib/perf-positions";
 import { groupSpine, type FloorBucket } from "@/components/agent/floor/floor";
 import { mergeOwnerRows, ownerSeries } from "@/lib/owner-series";
-import { aggregatePnlSeries, snapshotsFromRunHistory } from "@/lib/pnl-chart";
+import { aggregatePnlSeries, snapshotsFromRunHistory, type PnlChartPoint } from "@/lib/pnl-chart";
 import { buildAttributor, runWindows } from "@/lib/run-attribution";
 import { dropDeletedRunQueries } from "@/lib/run-deletion";
 import type { ConvertFn } from "@/lib/rates";
@@ -177,19 +177,52 @@ function plural(count: number, noun: string): string {
  * fold at face value and disclose it. Never guess a quote from a bot's name,
  * and never pass the total off as dollars in silence. Drawn wherever a scope's
  * numbers are, which is why it is a component rather than a line in one header.
+ *
+ * A pair with **no rate** is the same failure by another road (FP-01): the
+ * leaf names its quote, but `convert` has nothing to divide by and hands the
+ * value back in quote units, which the fold adds to the dollars. `quotes` is
+ * what the fold and the chart reported they could not convert. While the rates
+ * are still loading that is every non-USD quote on the page, and the tiles are
+ * withheld rather than disclosed — so the line says that instead.
  */
-function UnpricedNote({ leaves }: { leaves: PerfLeaf[] }) {
-  if (leaves.length === 0) return null;
+function UnpricedNote({
+  leaves,
+  quotes,
+  loading,
+}: {
+  leaves: PerfLeaf[];
+  quotes: string[];
+  loading: boolean;
+}) {
+  if (leaves.length === 0 && quotes.length === 0) return null;
   return (
-    <span
-      className="block truncate text-[10px] text-amber-500/90"
-      title={`These stopped holding no position, so the record no longer says which pair they traded: ${leaves
-        .map((leaf) => leaf.label)
-        .join(", ")}`}
-    >
-      {plural(leaves.length, "record")} named no quote currency — counted at face value, not
-      converted
-    </span>
+    <>
+      {quotes.length > 0 &&
+        (loading ? (
+          <span data-unconverted="loading" className="block truncate text-[10px] text-[var(--color-text-muted)]">
+            Loading conversion rates for {quotes.join(", ")}…
+          </span>
+        ) : (
+          <span
+            data-unconverted="no-rate"
+            className="block truncate text-[10px] text-amber-500/90"
+            title="No conversion rate is available for these quote currencies, so amounts in them are added to the totals and the chart as they are — in their own currency, not the display currency."
+          >
+            ⚠ No rate for {quotes.join(", ")} — counted at face value, not converted
+          </span>
+        ))}
+      {leaves.length > 0 && (
+        <span
+          className="block truncate text-[10px] text-amber-500/90"
+          title={`These stopped holding no position, so the record no longer says which pair they traded: ${leaves
+            .map((leaf) => leaf.label)
+            .join(", ")}`}
+        >
+          {plural(leaves.length, "record")} named no quote currency — counted at face value, not
+          converted
+        </span>
+      )}
+    </>
   );
 }
 
@@ -212,6 +245,12 @@ const FLEET_SCOPE = "all";
 
 /** Held still, so an absent fleet map is not a new array on every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
+
+/** A scope that does not split: no owner chart, and nothing it failed to convert. */
+const NO_OWNER_FOLD: { chart: ReturnType<typeof mergeOwnerRows> | null; unconverted: string[] } = {
+  chart: null,
+  unconverted: [],
+};
 
 /** Held still, so an unpassed `snapshots` prop is not a new array on every render. */
 const EMPTY_SNAPSHOTS: ControllerPerformanceSnapshot[] = [];
@@ -323,6 +362,15 @@ interface PerfBrowserProps {
   server: string;
   convert: ConvertFn;
   currencySymbol: string;
+  /**
+   * The rate table behind `convert` has not answered yet (FP-01).
+   *
+   * Until it does, `convert` hands every non-USD amount back unconverted, and
+   * a total folded then is quote units under a display-currency symbol. The
+   * money tiles read "—" for as long as this is true *and* something in scope
+   * actually needs a rate. Unpassed reads as loaded.
+   */
+  ratesLoading?: boolean;
   /**
    * The fleet's performance history, already fetched by the page. A single
    * controller still loads its own finer series (see ControllerPnlChart); the
@@ -552,6 +600,7 @@ export function PerfBrowser({
   server,
   convert,
   currencySymbol,
+  ratesLoading = false,
   snapshots = EMPTY_SNAPSHOTS,
   truncated = false,
   executors = EMPTY_EXECUTORS,
@@ -1996,15 +2045,18 @@ export function PerfBrowser({
    * spines partition the scope's own, so the lines add up to it by construction
    * rather than by assertion (see `lib/owner-series`).
    */
-  const ownerChart = useMemo(() => {
-    if (ownerLines.length === 0) return null;
-    const series = ownerSeries(snapshots, ownerLines, scopedControllers, convert);
+  const ownerFold = useMemo(() => {
+    if (ownerLines.length === 0) return NO_OWNER_FOLD;
+    const unconverted = new Set<string>();
+    const series = ownerSeries(snapshots, ownerLines, scopedControllers, convert, unconverted);
     const merged = mergeOwnerRows([series.total], series.owners);
     // The same two-point threshold the aggregate chart holds itself to, and for
     // the same reason: a split of a history that has not been recorded yet says
     // less than the chain's own "no performance history" does.
-    return merged.rows.length >= 2 ? merged : null;
+    if (merged.rows.length < 2) return NO_OWNER_FOLD;
+    return { chart: merged, unconverted: [...unconverted] };
   }, [ownerLines, snapshots, scopedControllers, convert]);
+  const ownerChart = ownerFold.chart;
 
   // The same spine the tiles are folded from, cut two ways that the tree cannot
   // cut it: `leaf.connector` is on the leaf but is deliberately not a
@@ -2058,7 +2110,10 @@ export function PerfBrowser({
     (scope.kind === "controller" || scope.kind === "executor");
 
   /** The controller-history candidate: what this scope drew before FEAT-087. */
-  const controllerPoints = useMemo(() => {
+  const controllerFold = useMemo(() => {
+    // What the fold could not convert, alongside the points (FP-01).
+    const unconverted = new Set<string>();
+    const points = ((): PnlChartPoint[] => {
     // This scope splits, so the chart on screen is `OwnerPnlChart` (the JSX
     // below tests `ownerChart` first) and this candidate is never read. It is
     // also the *same fold*: `ownerSeries` already ran `aggregatePnlSeries` over
@@ -2097,17 +2152,20 @@ export function PerfBrowser({
         // records over would draw a flat line from its final trade to this
         // instant, which reads as a bot still holding a position. The curve
         // ends where the trading ended.
-        return aggregatePnlSeries(expanded, keys, [], convert);
+        return aggregatePnlSeries(expanded, keys, [], convert, unconverted);
       }
       // Nothing sampled: the outcome fold is the fallback, and
       // `resolvePerfSeries` reaches it because this candidate came back empty.
       return [];
     }
-    return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert);
+    return aggregatePnlSeries(snapshots, scopedKeys, scopedControllers, convert, unconverted);
+    })();
+    return { points, unconverted: [...unconverted] };
   }, [
     ownerChart, activeCtrl, population, snapshots, scopedKeys, scopedControllers,
     convert, runHistory, scopeRun, archiveOnlyController,
   ]);
+  const controllerPoints = controllerFold.points;
 
   /**
    * The one place that decides which of the three sources this scope draws.
@@ -2172,6 +2230,26 @@ export function PerfBrowser({
       ),
     [scopedLeaves],
   );
+
+  /**
+   * The quote currencies this scope's numbers hold **unconverted** (FP-01).
+   *
+   * `convert` hands a value back in quote units when it has no rate, and a sum
+   * keeps the number and loses the fact. `foldLeaves` and `aggregatePnlSeries`
+   * now report which quotes that happened to; this is the two of them together
+   * — the tiles' fold and whichever chart fold ran — for the one note that
+   * discloses it.
+   */
+  const unconvertedQuotes = useMemo(
+    () =>
+      [...new Set([...totals.unconverted, ...controllerFold.unconverted, ...ownerFold.unconverted])].sort(),
+    [totals.unconverted, controllerFold.unconverted, ownerFold.unconverted],
+  );
+  // Rates on their way: what cannot be converted *yet* is withheld, not
+  // disclosed — a tile of quote units under a `$` for the length of a request
+  // is the number this whole rule exists to keep off the screen.
+  const ratesPending = ratesLoading && unconvertedQuotes.length > 0;
+  const moneyWithheld = runWithheld || ratesPending;
 
   /**
    * What this scope folds, in words.
@@ -2573,6 +2651,7 @@ export function PerfBrowser({
             onToggleOpen={toggleOpen}
             cv={cv}
             currencySymbol={currencySymbol}
+            ratesLoading={ratesLoading}
             now={now}
             compact={isCompact}
             renderAction={isCompact ? undefined : renderBotAction}
@@ -2653,7 +2732,7 @@ export function PerfBrowser({
                       {activeCtrl.controller_id}
                     </span>
                   )}
-                  <UnpricedNote leaves={unpricedLeaves} />
+                  <UnpricedNote leaves={unpricedLeaves} quotes={unconvertedQuotes} loading={ratesPending} />
                 </div>
                 {activeCtrl.connector && (
                   <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)]/50">
@@ -2692,7 +2771,7 @@ export function PerfBrowser({
                       .filter(Boolean)
                       .join(" · ")}
                   </span>
-                  <UnpricedNote leaves={unpricedLeaves} />
+                  <UnpricedNote leaves={unpricedLeaves} quotes={unconvertedQuotes} loading={ratesPending} />
                 </div>
                 <span className="shrink-0 rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs text-[var(--color-text-muted)] border border-[var(--color-border)]/50">
                   {activeRun.deployment_status}
@@ -2745,7 +2824,7 @@ export function PerfBrowser({
                   {plural(scopedLeaves.length, scopeNoun)} aggregated
                   {filtersActive && " · filtered"}
                 </span>
-                <UnpricedNote leaves={unpricedLeaves} />
+                <UnpricedNote leaves={unpricedLeaves} quotes={unconvertedQuotes} loading={ratesPending} />
               </AgentScopeHeader>
             ) : (
               // Every other scope — the whole fleet, one live bot's share of
@@ -2772,7 +2851,7 @@ export function PerfBrowser({
                   {plural(scopedLeaves.length, scopeNoun)} aggregated
                   {filtersActive && " · filtered"}
                 </span>
-                <UnpricedNote leaves={unpricedLeaves} />
+                <UnpricedNote leaves={unpricedLeaves} quotes={unconvertedQuotes} loading={ratesPending} />
               </div>
             )}
           </div>
@@ -3160,13 +3239,13 @@ export function PerfBrowser({
               <div className="grid grid-cols-[repeat(auto-fit,minmax(104px,1fr))] gap-4">
                 <Kpi
                   label="Net PnL"
-                  value={runWithheld ? "—" : formatCurrencyPnl(totals.net, currencySymbol)}
-                  color={runWithheld ? undefined : pnlColor(totals.net)}
+                  value={moneyWithheld ? "—" : formatCurrencyPnl(totals.net, currencySymbol)}
+                  color={moneyWithheld ? undefined : pnlColor(totals.net)}
                   // The return % is per-leaf — each is measured against its own
                   // notional — so it rides along only where it means something.
                   // Summing or averaging them across a fold would report a
                   // return nobody earned.
-                  sub={runWithheld ? undefined : [
+                  sub={moneyWithheld ? undefined : [
                     perHour(totals.net, formatCurrencyPnl),
                     totals.returnPct !== undefined
                       ? `${totals.returnPct >= 0 ? "+" : ""}${totals.returnPct.toFixed(2)}%`
@@ -3177,19 +3256,19 @@ export function PerfBrowser({
                 />
                 <Kpi
                   label="Realized"
-                  value={runWithheld ? "—" : formatCurrencyPnl(totals.realized, currencySymbol)}
-                  color={runWithheld ? undefined : pnlColor(totals.realized)}
-                  sub={runWithheld ? undefined : perHour(totals.realized, formatCurrencyPnl)}
+                  value={moneyWithheld ? "—" : formatCurrencyPnl(totals.realized, currencySymbol)}
+                  color={moneyWithheld ? undefined : pnlColor(totals.realized)}
+                  sub={moneyWithheld ? undefined : perHour(totals.realized, formatCurrencyPnl)}
                 />
                 <Kpi
                   label="Unrealized"
-                  value={runWithheld ? "—" : formatCurrencyPnl(totals.unrealized, currencySymbol)}
-                  color={runWithheld ? undefined : pnlColor(totals.unrealized)}
+                  value={moneyWithheld ? "—" : formatCurrencyPnl(totals.unrealized, currencySymbol)}
+                  color={moneyWithheld ? undefined : pnlColor(totals.unrealized)}
                   // What the unrealized figure is *of*: with no open position
                   // there is nothing for it to be, and a stale non-zero reading
                   // beside "no open positions" is worth seeing.
                   sub={
-                    runWithheld
+                    moneyWithheld
                       ? undefined
                       : totals.positions === 0
                       ? "no open positions"
@@ -3218,13 +3297,13 @@ export function PerfBrowser({
                 />
                 <Kpi
                   label="Volume"
-                  value={runWithheld ? "—" : formatCurrencyVolume(totals.volume, currencySymbol)}
-                  sub={runWithheld ? undefined : perHour(totals.volume, formatCurrencyVolume)}
+                  value={moneyWithheld ? "—" : formatCurrencyVolume(totals.volume, currencySymbol)}
+                  sub={moneyWithheld ? undefined : perHour(totals.volume, formatCurrencyVolume)}
                 />
                 <Kpi
                   label="Fees"
                   value={
-                    !runWithheld && totals.fees > 0 ? formatCurrencyVolume(totals.fees, currencySymbol) : "—"
+                    !moneyWithheld && totals.fees > 0 ? formatCurrencyVolume(totals.fees, currencySymbol) : "—"
                   }
                   // A floor and not a total: `leafFromController` hardcodes
                   // `fees: 0` because the controllers payload reports no fee
@@ -3236,7 +3315,7 @@ export function PerfBrowser({
                   // What the fees ate: the share of gross the venue took, which
                   // is the thing an absolute fee total cannot say on its own.
                   sub={
-                    !runWithheld && totals.fees > 0 && totals.net + totals.fees !== 0
+                    !moneyWithheld && totals.fees > 0 && totals.net + totals.fees !== 0
                       ? `${((totals.fees / Math.abs(totals.net + totals.fees)) * 100).toFixed(1)}% of gross`
                       : undefined
                   }
@@ -3244,7 +3323,7 @@ export function PerfBrowser({
                 <Kpi
                   label="Capital"
                   value={
-                    !runWithheld && totals.capital > 0
+                    !moneyWithheld && totals.capital > 0
                       ? formatCurrencyVolume(totals.capital, currencySymbol)
                       : "—"
                   }
@@ -3252,7 +3331,7 @@ export function PerfBrowser({
                   // capital is working is the thing the two numbers beside it
                   // do not already say, and the count is on the Runtime tile.
                   sub={
-                    !runWithheld && totals.capital > 0
+                    !moneyWithheld && totals.capital > 0
                       ? `${(totals.volume / totals.capital).toFixed(1)}x turnover`
                       : undefined
                   }

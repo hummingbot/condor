@@ -35,9 +35,20 @@ import type { ConvertFn } from "@/lib/rates";
  * convert at all. FEAT-109's whole premise is that the headline and `/bots`
  * report one quantity — they would not, by an FX rate, if either host wrote its
  * own adapter and the two ever disagreed about the fallback quote.
+ *
+ * The number alone would drop `converted`, which is how a BRL leaf used to be
+ * summed into a dollar total with nothing said. So the adapter keeps the
+ * answer beside the number: `unconverted(pair)` names the quote a value is
+ * still in when there is no rate for it, and the fold reports those.
  */
 export function quoteConverter(convert: ConvertFn): ConvertQuote {
-  return (value: number, pair: string) => convert(value, pair?.split("-")[1] || "USDT").value;
+  const quoteOf = (pair: string) => pair?.split("-")[1] || "USDT";
+  const cv: ConvertQuote = (value, pair) => convert(value, quoteOf(pair)).value;
+  cv.unconverted = (pair) => {
+    const quote = quoteOf(pair);
+    return convert(1, quote).converted ? null : quote.toUpperCase();
+  };
+  return cv;
 }
 
 /**

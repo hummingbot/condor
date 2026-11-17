@@ -168,6 +168,7 @@ export function AgentFleet({
           bots={fleet.bots}
           server={server}
           convert={fleet.convert}
+          ratesLoading={fleet.ratesLoading}
           currencySymbol={fleet.currencySymbol}
           snapshots={fleet.snapshots}
           truncated={fleet.truncated}
