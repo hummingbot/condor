@@ -430,6 +430,32 @@ def test_route_reads_an_offline_server_as_unreachable(http):
     assert rows["controllers"][0]["server"]["verdict"] == "unreachable"
 
 
+def test_an_offline_server_never_names_the_backend_to_the_browser(http, monkeypatch):
+    """WR-09: the transport error's own string carries the internal host."""
+    from types import SimpleNamespace
+
+    from aiohttp import ClientConnectorError
+
+    web, _client, cm = http
+
+    async def refuse(_server_name):
+        raise ClientConnectorError(
+            SimpleNamespace(host="10.0.0.7", port=8000, ssl=None),
+            OSError(61, "Connection refused"),
+        )
+
+    monkeypatch.setattr(cm, "get_client", refuse)
+
+    listing = web.get("/agents/mm/controllers", params={"server_name": "srv"})
+    assert listing.json()["controllers"][0]["server"]["verdict"] == "unreachable"
+    assert "10.0.0.7" not in listing.text
+
+    sync = web.post("/agents/mm/controllers/pmm_king/sync", json={"server_name": "srv"})
+    assert sync.status_code == 502
+    assert "unreachable" in sync.json()["detail"]
+    assert "10.0.0.7" not in sync.text
+
+
 def test_routes_enforce_server_access(http):
     web, _client, _cm = http
     assert (

@@ -5108,8 +5108,15 @@ async def _controller_client(user: WebUser, server_name: str):
     try:
         return await get_config_manager().get_client(server_name)
     except Exception as exc:
+        # The exception's own string carries the backend address — log it, show
+        # the caller only the safe description (SEC-116, WR-09).
+        from condor.fetchers.executors import describe_executor_error
+
+        log.warning("get_client(%s) failed: %s", server_name, exc)
         raise HTTPException(
-            status_code=502, detail=f"Server '{server_name}' is unreachable: {exc}"
+            status_code=502,
+            detail=f"Server '{server_name}' is unreachable: "
+            f"{describe_executor_error(exc)[1]}",
         )
 
 
@@ -5138,9 +5145,12 @@ async def list_agent_controllers(
         try:
             client = await get_config_manager().get_client(server_name)
         except Exception as exc:
+            from condor.fetchers.executors import describe_executor_error
+
+            log.warning("get_client(%s) failed: %s", server_name, exc)
+            detail = describe_executor_error(exc)[1]
             statuses = {
-                src.name: ServerStatus("unreachable", detail=str(exc))
-                for src in sources
+                src.name: ServerStatus("unreachable", detail=detail) for src in sources
             }
         else:
             statuses = await controller_statuses(client, sources)
