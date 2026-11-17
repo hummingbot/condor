@@ -868,3 +868,51 @@ def test_one_tick_walks_the_running_set_once(tmp_path, monkeypatch):
     # And the shared answer is still the right one for the consumer that
     # started the walk.
     assert [r["id"] for r in engine._adopted_executors] == ["dead-1"]
+
+
+# ── The book those orphans belong to ───────────────────────────────────
+
+
+def test_the_book_totals_count_the_adopted_rows(tmp_path, monkeypatch):
+    """The provider's rows are this session's tag only; adopted rows add to them."""
+    engine, _ = _engine(tmp_path, monkeypatch, [])
+
+    engine._last_skill_data = {
+        "executors": [{"id": "own-1"}, {"id": "own-2"}],
+        "total_exposure": 100.0,
+    }
+    engine._adopted_executors = [{"id": "dead-1", "amount": 12.5}, "not a row"]
+
+    assert engine._book_totals() == (3, 112.5)
+
+
+def test_the_snapshot_records_the_adopted_book(tmp_path, monkeypatch):
+    """A journal line that counted only the provider's rows under-reported the book."""
+    engine, client = _engine(tmp_path, monkeypatch, [_row("dead-1", DEAD_TAG)])
+    asyncio.run(engine._adopt_running_executors(client))
+    engine._last_skill_data = {"executors": [], "total_exposure": 0.0}
+    engine._tick_reading = "ok"
+
+    recorded: dict = {}
+    engine.journal = SimpleNamespace(record_snapshot=lambda **kw: recorded.update(kw))
+    engine._record_reading_snapshot()
+
+    assert recorded["open_count"] == 1
+    assert recorded["reading"] == "ok"
+
+
+def test_the_snapshot_keeps_the_drawdown_denominator_scoped_to_its_pnl(
+    tmp_path, monkeypatch
+):
+    """Adopted size must not dilute a drawdown whose PnL excludes it."""
+    engine, _ = _engine(tmp_path, monkeypatch, [])
+    engine._last_skill_data = {"executors": [], "total_exposure": 100.0}
+    engine._adopted_executors = [{"id": "dead-1", "amount": 9000.0}]
+    engine._tick_reading = "ok"
+
+    recorded: dict = {}
+    engine.journal = SimpleNamespace(record_snapshot=lambda **kw: recorded.update(kw))
+    engine._record_reading_snapshot()
+
+    assert recorded["open_count"] == 1  # the book is recorded...
+    assert recorded["position_size"] == 100.0  # ...but the ratio stays in one scope
