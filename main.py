@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 # which makes safe log sharing impossible. Suppressing to WARNING preserves
 # real HTTP errors while removing the token leak.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# APScheduler logs two INFO lines per job run. With routines on short intervals
+# that is most of the log, pushing everything worth reading out of it.
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -1185,6 +1188,15 @@ def main() -> None:
     # reaper below most of all.
     if not _acquire_instance_lock():
         raise SystemExit(1)
+
+    # A log that outlives the tmux pane (rotating file under the runtime root),
+    # faulthandler for hard crashes, and redaction on every handler. After the
+    # lock, so two processes never rotate one file under each other.
+    from condor.logging_setup import setup_file_logging
+
+    log_file = setup_file_logging()
+    if log_file is not None:
+        logger.info("Logging to %s", log_file)
 
     # Refuse to start on a configuration that cannot mean what it says: telegram
     # mode (the default) with no token used to surface as an InvalidToken
