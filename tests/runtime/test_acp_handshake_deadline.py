@@ -109,3 +109,76 @@ def test_pydantic_ai_start_gives_up_on_mcp_servers_that_never_come_up(monkeypatc
 
     assert task.cancelled(), "the MCP lifecycle task was left running"
     assert client.alive is False, "a client that never came up must not look alive"
+
+
+_PINNABLE_SESSION = {
+    "sessionId": "s",
+    "configOptions": [
+        {
+            "id": "model",
+            "category": "model",
+            "currentValue": "opus",
+            "options": [{"value": "opus"}, {"value": "sonnet"}],
+        }
+    ],
+}
+
+
+def test_the_model_pin_is_sent_under_the_handshake_deadline(monkeypatch):
+    """A bridge that answers session/new and then goes quiet must not park start() (RT-10)."""
+    import time
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(timeouts, "TIMEOUTS", _fast(0.3))
+    client = ACPClient("claude-agent-acp", model="sonnet")
+    client._session_id = "s"
+    client._process = SimpleNamespace(stdin=_FakeWriter(), returncode=0)
+    # The real peer: nothing ever answers, so only a timeout can end the wait.
+    client._peer = JSONRPCPeer()
+
+    async def scenario():
+        with pytest.raises(TimeoutError) as excinfo:
+            await client._select_model(_PINNABLE_SESSION, time.monotonic() + 0.2)
+        return excinfo.value
+
+    # Without the deadline this never returns; the outer wait_for is what keeps
+    # the unfixed code from hanging the suite.
+    error = asyncio.run(asyncio.wait_for(scenario(), timeout=10))
+
+    assert "handshake" in str(error), f"unhelpful error: {error}"
+    assert client._peer._pending == {}, "the abandoned pin request leaked a future"
+    assert client.active_model_id == "opus", "a pin that timed out was recorded as set"
+
+
+def test_start_hands_its_deadline_to_the_model_pin(monkeypatch):
+    """start() passes what is left of its one budget, not a fresh one."""
+    import time
+
+    monkeypatch.setattr(timeouts, "TIMEOUTS", _fast(5.0))
+    seen = {}
+
+    class _Peer:
+        async def send_request(self, method, params, stdin, timeout=None):
+            if method == "session/new":
+                return dict(_PINNABLE_SESSION)
+            return {}
+
+        def cancel_all(self):
+            pass
+
+    client = ACPClient(command="sleep 30", model="sonnet")
+    client._peer = _Peer()
+
+    async def fake_select(session, deadline=None):
+        seen["remaining"] = deadline - time.monotonic()
+
+    client._select_model = fake_select
+
+    async def scenario():
+        try:
+            await client.start()
+        finally:
+            await client.stop()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=20))
+    assert 0 < seen["remaining"] <= 5.0
