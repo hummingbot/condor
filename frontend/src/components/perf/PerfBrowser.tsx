@@ -2037,7 +2037,10 @@ export function PerfBrowser({
   // scope-kind test anywhere: a scope that does not split answers with no
   // owners, and the aggregate chart below is what draws instead.
 
-  const ownerLines = useMemo(() => scopeOwners(scope, cv, now), [scope, cv, now]);
+  // Not a function of `now`: capital and net do not read the clock, and
+  // `ownerChart` below — N+1 folds of the whole history — is keyed on these
+  // lines' identity, so a minute tick must not mint new ones (FP-11).
+  const ownerLines = useMemo(() => scopeOwners(scope, cv), [scope, cv]);
 
   /**
    * The owner lines and their Total, merged onto one timeline.
