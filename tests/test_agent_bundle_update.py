@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -221,12 +222,35 @@ def test_an_older_bundle_blocks_and_an_equal_version_only_warns(installed):
 def test_a_live_loop_blocks_and_no_engine_does_not(installed, monkeypatch):
     assert ab.plan_update(_bundle(version=2), "drifter").blockers == []
 
+    # The registry is keyed by the engine's own ``agent_id`` —
+    # ``{agent}.{strategy}_{N}`` — never by the bare agent slug (AG2-03), so the
+    # fake registers the way ``LoopSupervisor`` does.
+    engines: dict[str, object] = {}
     monkeypatch.setattr(
-        "condor.agents.engine.get_engine", lambda slug: object(), raising=True
+        "condor.agents.engine.get_all_engines", lambda: dict(engines), raising=True
+    )
+
+    # Another agent's loop is not this agent's — not even one whose slug this
+    # one prefixes.
+    engines["drifter_two.grid_1"] = SimpleNamespace(
+        agent_id="drifter_two.grid_1", agent=SimpleNamespace(slug="drifter_two")
+    )
+    assert ab.plan_update(_bundle(version=2), "drifter").blockers == []
+
+    engines["drifter.grid_3"] = SimpleNamespace(
+        agent_id="drifter.grid_3", agent=SimpleNamespace(slug="drifter")
     )
     plan = ab.plan_update(_bundle(version=2), "drifter")
     assert [b.code for b in plan.blockers] == ["live_loop"]
     assert "running" in plan.blockers[0].message
+
+
+def test_an_unreachable_supervisor_does_not_block_a_preview(installed, monkeypatch):
+    def _boom():
+        raise RuntimeError("supervisor mid-import")
+
+    monkeypatch.setattr("condor.agents.engine.get_all_engines", _boom, raising=True)
+    assert ab.plan_update(_bundle(version=2), "drifter").blockers == []
 
 
 def test_an_agent_that_is_not_installed_blocks():

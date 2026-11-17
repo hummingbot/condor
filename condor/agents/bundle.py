@@ -2297,6 +2297,10 @@ def plan_update(
 def _engine_running(slug: str) -> bool:
     """Whether a ``TickEngine`` exists for ``slug`` — a live trading loop.
 
+    The registry is keyed by each engine's ``agent_id``
+    (``{agent}.{strategy}_{N}``), never by the bare agent slug, so the answer
+    comes from the engines' owning agents rather than from a lookup by ``slug``.
+
     A supervisor that cannot be reached answers *no engine*: this is one of six
     blockers and the only one that depends on live runtime state, and a preview
     that refused every update because the supervisor was mid-import would be a
@@ -2304,9 +2308,12 @@ def _engine_running(slug: str) -> bool:
     the check runs again against the state of the moment.
     """
     try:
-        from condor.agents.engine import get_engine
+        from condor.agents import engine as engine_module
 
-        return get_engine(slug) is not None
+        return any(
+            getattr(getattr(live, "agent", None), "slug", None) == slug
+            for live in engine_module.get_all_engines().values()
+        )
     except Exception:  # noqa: BLE001 - no supervisor is not a running loop
         log.debug("agents: could not ask the supervisor about '%s'", slug)
         return False
