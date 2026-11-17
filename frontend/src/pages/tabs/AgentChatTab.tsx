@@ -168,6 +168,12 @@ export function AgentChatTab() {
 
   const { switchBrain, switchServer, switchError, dismissSwitchError } =
     useBrainSwitch();
+  // One identity across a stream flush, like everything else the transcript's
+  // memoised messages are handed (FU-04).
+  const retryModel = useCallback(
+    (agentKey: string, messageId: string) => switchBrain({ agentKey }, messageId),
+    [switchBrain],
+  );
   const [railOpen, setRailOpen] = useState(false);
   /** The rail row selected while no session exists yet, to colour the hero. */
   const [pendingAgent, setPendingAgent] = useState<AgentSummary | null>(null);
@@ -718,9 +724,7 @@ export function AgentChatTab() {
               onResolvePermission={chat.resolvePermission}
               switchError={switchError}
               onDismissSwitchError={dismissSwitchError}
-              onRetryModel={(agentKey, messageId) =>
-                switchBrain({ agentKey }, messageId)
-              }
+              onRetryModel={retryModel}
               defaultAgentKey={defaultAgent}
               agentBindings={agentBindings}
               onSend={(text, files) =>

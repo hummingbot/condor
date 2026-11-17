@@ -156,6 +156,9 @@ describe("useBrainSwitch", () => {
 
   it("does not try to switch the brain when there is no session on screen", () => {
     chat.activeSlotId = null;
+    // The provider re-renders its readers when the active slot changes; the
+    // mock is a plain object, so the harness is re-rendered by hand.
+    act(() => root.render(<Harness />));
 
     act(() => latest().switchBrain({ agentKey: "claude-code" } as never));
 

@@ -169,6 +169,22 @@ export function ChatThread({
     [slot?.messages, slot?.info.label, boundAgent?.name, resolveSpeaker],
   );
 
+  // One identity for the life of the thread (FU-04). The surface passes this as
+  // an inline arrow and re-renders on every 50 ms stream flush; forwarded as
+  // is, it broke `ChatMessageView`'s memo and every settled message re-ran
+  // its markdown pass per flush. The ref keeps the wrapper calling whichever
+  // closure the latest render handed over.
+  const onRetryModelRef = useRef(onRetryModel);
+  useEffect(() => {
+    onRetryModelRef.current = onRetryModel;
+  });
+  const retryModel = useCallback(
+    (agentKey: string, messageId: string) =>
+      onRetryModelRef.current?.(agentKey, messageId),
+    [],
+  );
+  const canRetryModel = !!onRetryModel;
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | null>(null);
@@ -320,7 +336,7 @@ export function ChatThread({
                 attemptedAgentKey={slot?.info.agent_key}
                 attemptedAgentSlug={slot?.info.agent_slug}
                 defaultAgentKey={defaultAgentKey}
-                onRetryModel={onRetryModel}
+                onRetryModel={canRetryModel ? retryModel : undefined}
               />
             ))
           )}
