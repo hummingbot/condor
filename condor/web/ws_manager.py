@@ -353,7 +353,10 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
-                await self._subscribe_sds(channel)
+                # Registered now, primed in the background: the prime is an
+                # upstream fetch (a connect timeout when the server is down)
+                # and every later message on this socket would queue behind it.
+                self._start_sds_subscription(channel)
 
         elif action == "unsubscribe" and channel:
             self._drop_subscription(conn, channel)
@@ -371,30 +374,70 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
     # -- SDS bridge --
 
     async def _subscribe_sds(self, channel: str) -> None:
-        """Subscribe to SDS for a channel and prime cache."""
+        """Subscribe to SDS for a channel and wait for its cache to be primed.
+
+        The awaitable form of ``_start_sds_subscription``; a socket's receive
+        loop uses that one instead, so it never waits on the prime.
+        """
+        task = self._start_sds_subscription(channel)
+        if task is not None:
+            await task
+
+    def _start_sds_subscription(self, channel: str) -> asyncio.Task | None:
+        """Register the SDS subscription for a channel; prime it off-path.
+
+        Registration is synchronous, so a second subscriber arriving while the
+        prime is in flight does not start a second one. Returns the tracked
+        prime task, or ``None`` when there is nothing to start.
+        """
         if channel in self._sds_subscriptions:
-            return  # Already subscribed
+            return None  # Already subscribed
 
         parts = channel.split(":")
         if len(parts) < 2:
-            return
+            return None
         prefix = parts[0]
         server_name = parts[1]
 
         sdt_name = _CHANNEL_TO_SDT.get(prefix)
         if not sdt_name:
-            return
+            return None
 
-        sds = get_server_data_service()
         data_type = ServerDataType[sdt_name]
 
         # Params the channel scopes its key by, read off the channel segments
         # that follow the server (same table the broadcast direction uses).
         param_names = _CHANNEL_KEY_PARAMS.get(sdt_name, ())
         if len(parts) < 2 + len(param_names):
-            return
+            return None
         params = dict(zip(param_names, parts[2:]))
 
+        self._sds_subscriptions[channel] = CacheKey.make(
+            server_name, data_type, **params
+        )
+        return self._oneshot_tasks.track(
+            asyncio.create_task(
+                self._prime_sds(channel, server_name, data_type, params),
+                name=f"sds_prime:{channel}",
+            )
+        )
+
+    async def _prime_sds(
+        self,
+        channel: str,
+        server_name: str,
+        data_type: ServerDataType,
+        params: dict[str, str],
+    ) -> None:
+        """Subscribe to SDS (which primes the cache) and broadcast the result.
+
+        If the channel is torn down while the prime is in flight, unsubscribe
+        again — otherwise the poll would outlive its last subscriber.
+        """
+        if channel not in self._sds_subscriptions:
+            return  # Dropped before the prime even started
+
+        sds = get_server_data_service()
         try:
             cache_key = await sds.subscribe(
                 server=server_name,
@@ -402,7 +445,17 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                 subscriber_id="ws_manager",
                 **params,
             )
-            self._sds_subscriptions[channel] = cache_key
+        except Exception as e:
+            # Not subscribed after all: forget the registration so the next
+            # subscriber tries again.
+            self._sds_subscriptions.pop(channel, None)
+            logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
+            return
+
+        try:
+            if channel not in self._sds_subscriptions:
+                sds.unsubscribe(cache_key, "ws_manager")
+                return
 
             # Broadcast the primed data. The SDS entry holds the *raw* payload,
             # so bots goes through the same enrichment as every later frame
@@ -411,14 +464,14 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             # /bots flashed "No bots running" until the next real frame.
             result = sds.get(server_name, data_type, **params)
             if result is not None:
-                if sdt_name == "BOTS_STATUS":
+                if data_type is ServerDataType.BOTS_STATUS:
                     await self._broadcast_bots_update(channel, server_name, result)
                 else:
                     await self._broadcast_update(channel, result)
 
             # Portfolio history rides on the portfolio subscription: one SDS
             # key per range, primed now and polled until the last client leaves.
-            if prefix == "portfolio":
+            if data_type is ServerDataType.PORTFOLIO:
                 self._oneshot_tasks.track(
                     asyncio.create_task(
                         self._subscribe_portfolio_history(channel, server_name),
@@ -426,7 +479,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                     )
                 )
         except Exception as e:
-            logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
+            logger.debug("Failed to broadcast primed SDS data for %s: %s", channel, e)
 
     async def _subscribe_portfolio_history(
         self, channel: str, server_name: str
