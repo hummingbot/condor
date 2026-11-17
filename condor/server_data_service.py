@@ -315,6 +315,13 @@ _CLEANUP_INTERVAL = 300  # clean stale entries every 5 min
 _SKIP_LOG_INTERVAL = 60  # at most one rate-limit-skip warning per server per minute
 
 
+# Consecutive failures before a key counts as "in an outage" and is left alone
+# for its backoff window. Below this a failure is a blip: the poller retries on
+# its normal cadence and a read re-fetches. One threshold for both, so a read
+# never gives up on a key earlier than the poller does.
+_ERROR_BACKOFF_AFTER = 3
+
+
 def _error_backoff(entry: CacheEntry) -> float:
     """Seconds to leave a failing key alone after its last error."""
     return min(60, 2**entry.consecutive_errors)
@@ -485,11 +492,15 @@ class ServerDataService:
         3. a *failed* fetch, which returns the previous value at whatever age it
            has — or ``None`` if there never was one.
 
-        While a key that already holds a value is inside its error backoff
-        window (``min(60, 2**consecutive_errors)`` seconds after the last
-        failure), the previous value is returned *without* fetching: with the
-        server hanging rather than refusing, every read would otherwise block
-        for the full client timeout only to return that same value.
+        Once a key that already holds a value has failed
+        ``_ERROR_BACKOFF_AFTER`` times in a row (the poller's own threshold) and
+        is inside its error backoff window (``min(60, 2**consecutive_errors)``
+        seconds after the last failure), the previous value is returned
+        *without* fetching: with the server hanging rather than refusing, every
+        read would otherwise block for the full client timeout only to return
+        that same value. A first or second failure is a blip and the next read
+        still re-fetches, so one dropped request does not leave reads stale
+        after the server is answering again.
 
         The third case is silent and unbounded: nothing here caps how old the
         returned value may be, and a key with a live subscriber is never evicted
@@ -507,14 +518,15 @@ class ServerDataService:
         if cached is not None:
             return cached
 
-        # Fail fast during an outage: the fetch just failed, so hand back the
-        # last good value now instead of paying another timeout for it. An
-        # error-only entry (no value yet) is still retried on every read.
+        # Fail fast during an outage: the fetch keeps failing, so hand back the
+        # last good value now instead of paying another timeout for it. Only
+        # from the poller's own threshold on -- a single blip still re-fetches.
+        # An error-only entry (no value yet) is still retried on every read.
         entry = self._cache.get(key)
         if (
             entry is not None
             and entry.fetched_at > 0
-            and entry.consecutive_errors > 0
+            and entry.consecutive_errors >= _ERROR_BACKOFF_AFTER
             and time.time() - entry.last_error_at < _error_backoff(entry)
         ):
             return entry.value
@@ -862,7 +874,7 @@ class ServerDataService:
                     overdue = age / effective_interval
 
                 # Exponential backoff on consecutive errors
-                if entry.consecutive_errors >= 3:
+                if entry.consecutive_errors >= _ERROR_BACKOFF_AFTER:
                     if now - entry.last_error_at < _error_backoff(entry):
                         continue
 
