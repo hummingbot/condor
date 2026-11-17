@@ -11,6 +11,7 @@ import {
 import { speakerNames } from "@/lib/agentColor";
 import { ApprovalPrompt } from "./ApprovalPrompt";
 import { ChatInput } from "./ChatInput";
+import { CHAT_SURFACE_PROPS } from "./chatSurface";
 import { ChatMessageView } from "./ChatMessage";
 import { ConversationUsage } from "./ConversationUsage";
 import { Starters, type Starter } from "./Starters";
@@ -264,7 +265,12 @@ export function ChatThread({
       <ConversationUsage usage={slot?.usage} />
 
       {/* Messages area */}
-      <div ref={scrollAreaRef} className="flex-1 overflow-y-auto px-4 py-4">
+      <div
+        ref={scrollAreaRef}
+        className="flex-1 overflow-y-auto px-4 py-4"
+        // Esc pressed with focus in the transcript still stops the answer.
+        {...CHAT_SURFACE_PROPS}
+      >
         {/* `min-h-full` so an empty state can centre itself in the viewport
             while a long transcript is still free to grow past it. */}
         <div className={`flex min-h-full flex-col ${columnClassName}`}>

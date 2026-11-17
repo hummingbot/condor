@@ -2,9 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, useEffect, useCallback } from "react";
 import { Loader2, Mic, Paperclip, Send, Square, X } from "lucide-react";
 
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
 import { authFetch } from "@/lib/auth-token";
 import { readDraft, writeDraft } from "@/lib/chatDrafts";
+import { CHAT_SURFACE_PROPS, inChatSurface } from "./chatSurface";
 
 /** What the composer will accept, and what the store will keep. Kept in step
  *  with `condor/runtime/attachments.py` — the backend refuses anything else. */
@@ -233,10 +235,6 @@ export function ChatInput({
       e.preventDefault();
       handleSubmit();
     }
-    if (e.key === "Escape" && isStreaming && onAbort) {
-      e.preventDefault();
-      onAbort();
-    }
   };
 
   const startRecording = useCallback(async () => {
@@ -330,18 +328,16 @@ export function ChatInput({
     voiceSettingsRef.current = voiceSettings;
   }, [voiceSettings]);
 
-  // Global ESC to abort streaming
-  useEffect(() => {
-    if (!isStreaming || !onAbort) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onAbort();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [isStreaming, onAbort]);
+  // Esc stops the answer — registered at the bottom of the Escape stack, so an
+  // open menu, sheet or dialog takes the key instead, and only for a keypress
+  // made inside a chat surface: pressing Esc to dismiss something elsewhere on
+  // the page must not also stop an agent mid-trade (FU-05). This is the only
+  // path; the textarea has no Escape branch of its own, which used to abort
+  // twice per press.
+  useEscapeKey(!!isStreaming && !!onAbort, () => onAbort?.(), {
+    base: true,
+    when: inChatSurface,
+  });
 
   // Global keyboard shortcut: ⌘⇧M to toggle recording
   useEffect(() => {
@@ -375,7 +371,7 @@ export function ChatInput({
     // only as wide as the text column — a slab laid across the bottom of the
     // pane rather than the floor of it. Only the ring is gold, and only on
     // focus.
-    <div>
+    <div {...CHAT_SURFACE_PROPS}>
       {voiceError && <p className="mb-2 text-xs text-red-400">{voiceError}</p>}
       {fileError && <p className="mb-2 text-xs text-red-400">{fileError}</p>}
       {/* One composer chrome, owned here — the hero and the thread both get this
