@@ -3996,8 +3996,10 @@ async def get_session_executors(
     # Same rule as the rollup: a held client to a backend that has gone down
     # still answers, with zeros — say it was unreachable, not "traded nothing".
     failed_ids: set[str] = set()
+    # ``pnl_series=True``: the curve below is cut from the histories these
+    # figures are already sliced from, so the poll walks them once (WR-04).
     perf = await fetch_agent_performance(
-        client, agent_id, windows=windows, failed_ids=failed_ids
+        client, agent_id, windows=windows, pnl_series=True, failed_ids=failed_ids
     )
     # close_type_counts is base-lifetime, not window-sliced: the payload counts
     # closes per controller with no timestamp to slice on. Equal to the session's
@@ -4012,14 +4014,19 @@ async def get_session_executors(
     # believed at the time, so a session that ran while it was blind to its bots
     # has a permanently flat record; this is derived and therefore self-correcting.
     # A session that let go of every base stops the curve where it last held one.
-    since, until = window_span(windows)
-    try:
-        pnl_series = await fetch_agent_pnl_series(
-            client, list(windows), since, until=until
-        )
-    except Exception as e:
-        log.warning("pnl series for %s failed: %s", agent_id, e)
-        pnl_series = []
+    # ``perf.pnl_series`` is ``None`` whenever that one walk is not exactly what
+    # the standalone fetch would make (a released session, a base with no known
+    # takeover); only then is the second fetch paid for.
+    pnl_series = perf.pnl_series
+    if pnl_series is None:
+        since, until = window_span(windows)
+        try:
+            pnl_series = await fetch_agent_pnl_series(
+                client, list(windows), since, until=until
+            )
+        except Exception as e:
+            log.warning("pnl series for %s failed: %s", agent_id, e)
+            pnl_series = []
     # What this run put into the world (FEAT-100). Every input is already on this
     # stack; the only new I/O is the actions log, and a run without one simply
     # gets no tick numbers.
