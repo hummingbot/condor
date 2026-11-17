@@ -344,9 +344,15 @@ def test_a_raising_sink_never_reaches_the_producer(monkeypatch):
     monkeypatch.setattr(push_routes, "webpush_async", exploding_webpush)
     asyncio.run(push.save(ALICE.id, _sub(ALICE_ENDPOINT)))
 
-    stored = asyncio.run(
-        notifications.record(ALICE.id, "Routine finished", kind="routine")
-    )
+    async def record_and_deliver():
+        # The fan-out is its own task; wait for it so the sink really runs.
+        stored = await notifications.record(
+            ALICE.id, "Routine finished", kind="routine"
+        )
+        await notifications.drain()
+        return stored
+
+    stored = asyncio.run(record_and_deliver())
 
     assert stored is not None
     assert [n.text for n in notifications.list_for(ALICE.id)] == ["Routine finished"]

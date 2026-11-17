@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Any, Optional
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 # Re-exported for back-compat: tests and callers import the candle helpers
 # (and patch ``ws_manager.dex_candles``) through this module.
@@ -23,16 +23,26 @@ from condor import dex_candles  # noqa: F401
 from condor.asyncutil import TaskSet
 from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
 from condor.server_data_service import CacheKey, ServerDataType, get_server_data_service
-from condor.web.auth import decode_jwt
+from condor.web.auth import decode_jwt, is_active_user
 from condor.web.streams.candles import (  # noqa: F401
     CandleStreamsMixin,
     _CandleBuffer,
     _coerce_duration,
     parse_candle_channel,
 )
-from condor.web.streams.hummingbot_ws import HummingbotStreamsMixin
+from condor.web.streams.hummingbot_ws import (
+    STREAM_STATUS_PREFIX,
+    HummingbotStreamsMixin,
+)
 
 logger = logging.getLogger(__name__)
+
+# Longest one subscriber may hold up a broadcast. A tab that stops reading
+# with TCP still open (sleeping laptop, backgrounded phone) blocks its
+# ``send_text`` once the write buffer fills, and the broadcast is awaited by
+# the task reading the upstream socket — so without a bound that one tab
+# froze the channel for everyone until the keepalive ping gave up on it.
+WS_SEND_TIMEOUT = 10
 
 # Mapping from WS channel prefix to ServerDataType
 # NOTE: executors now uses dedicated WS streaming (not SDS polling)
@@ -137,6 +147,9 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         # so the GC can't cancel them mid-flight (the event loop only keeps a
         # weak reference). Entries auto-remove on completion.
         self._oneshot_tasks = TaskSet(logger, "One-shot task %s failed: %s")
+        # Stream channels whose upstream connection is currently lost: their
+        # subscribers were told ``stale`` and ``_last_data`` is frozen.
+        self._stale_streams: set[str] = set()
         # Lazily-built registry of per-type stream lifecycles (see _stream_registry)
         self._stream_registry_cache: dict | None = None
 
@@ -188,6 +201,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             tasks.clear()
         self._last_candle_ws_update.clear()
         self._candle_first_msg_logged.clear()
+        self._stale_streams.clear()
 
         # Cancel any still-pending one-shot tasks.
         self._oneshot_tasks.cancel_all()
@@ -276,6 +290,21 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
     # -- Message handling --
 
     async def handle_message(self, conn: _Connection, raw: str) -> None:
+        # The role ``connect`` checked is re-read on every action: a user
+        # blocked or demoted after the tab was opened must not keep driving
+        # the socket. The connection is closed and the caller's receive loop
+        # ended the way a client hang-up would end it.
+        if not is_active_user(conn.user_id):
+            logger.warning(
+                "WS closed: user %s is no longer an approved user", conn.user_id
+            )
+            self.disconnect(conn)
+            try:
+                await conn.ws.close(code=4003, reason="Forbidden")
+            except Exception:
+                pass
+            raise WebSocketDisconnect(code=4003)
+
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
@@ -315,48 +344,100 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                 # Send last known data immediately, then ensure the stream runs
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
+                    if channel in self._stale_streams:
+                        # The snapshot above is frozen, not live — say so.
+                        await conn.ws.send_text(
+                            self._encode_stream_status(channel, "stale")
+                        )
                 self._ensure_stream(prefix, channel)
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
-                await self._subscribe_sds(channel)
+                # Registered now, primed in the background: the prime is an
+                # upstream fetch (a connect timeout when the server is down)
+                # and every later message on this socket would queue behind it.
+                self._start_sds_subscription(channel)
 
         elif action == "unsubscribe" and channel:
             self._drop_subscription(conn, channel)
 
         elif action == "set_candle_duration" and channel:
             # Frontend changed duration without re-subscribing
+            # Only for a channel this connection holds: subscribing is where
+            # server access is checked, and without that gate any approved
+            # user could resize — and trigger a backfill through — the shared
+            # buffer of a server they cannot access.
             duration = _coerce_duration(msg.get("duration"))
-            if channel.startswith("candles:") and duration:
+            if channel.startswith("candles:") and duration and channel in conn.channels:
                 await self._handle_candle_duration_change(conn, channel, duration)
 
     # -- SDS bridge --
 
     async def _subscribe_sds(self, channel: str) -> None:
-        """Subscribe to SDS for a channel and prime cache."""
+        """Subscribe to SDS for a channel and wait for its cache to be primed.
+
+        The awaitable form of ``_start_sds_subscription``; a socket's receive
+        loop uses that one instead, so it never waits on the prime.
+        """
+        task = self._start_sds_subscription(channel)
+        if task is not None:
+            await task
+
+    def _start_sds_subscription(self, channel: str) -> asyncio.Task | None:
+        """Register the SDS subscription for a channel; prime it off-path.
+
+        Registration is synchronous, so a second subscriber arriving while the
+        prime is in flight does not start a second one. Returns the tracked
+        prime task, or ``None`` when there is nothing to start.
+        """
         if channel in self._sds_subscriptions:
-            return  # Already subscribed
+            return None  # Already subscribed
 
         parts = channel.split(":")
         if len(parts) < 2:
-            return
+            return None
         prefix = parts[0]
         server_name = parts[1]
 
         sdt_name = _CHANNEL_TO_SDT.get(prefix)
         if not sdt_name:
-            return
+            return None
 
-        sds = get_server_data_service()
         data_type = ServerDataType[sdt_name]
 
         # Params the channel scopes its key by, read off the channel segments
         # that follow the server (same table the broadcast direction uses).
         param_names = _CHANNEL_KEY_PARAMS.get(sdt_name, ())
         if len(parts) < 2 + len(param_names):
-            return
+            return None
         params = dict(zip(param_names, parts[2:]))
 
+        self._sds_subscriptions[channel] = CacheKey.make(
+            server_name, data_type, **params
+        )
+        return self._oneshot_tasks.track(
+            asyncio.create_task(
+                self._prime_sds(channel, server_name, data_type, params),
+                name=f"sds_prime:{channel}",
+            )
+        )
+
+    async def _prime_sds(
+        self,
+        channel: str,
+        server_name: str,
+        data_type: ServerDataType,
+        params: dict[str, str],
+    ) -> None:
+        """Subscribe to SDS (which primes the cache) and broadcast the result.
+
+        If the channel is torn down while the prime is in flight, unsubscribe
+        again — otherwise the poll would outlive its last subscriber.
+        """
+        if channel not in self._sds_subscriptions:
+            return  # Dropped before the prime even started
+
+        sds = get_server_data_service()
         try:
             cache_key = await sds.subscribe(
                 server=server_name,
@@ -364,7 +445,17 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                 subscriber_id="ws_manager",
                 **params,
             )
-            self._sds_subscriptions[channel] = cache_key
+        except Exception as e:
+            # Not subscribed after all: forget the registration so the next
+            # subscriber tries again.
+            self._sds_subscriptions.pop(channel, None)
+            logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
+            return
+
+        try:
+            if channel not in self._sds_subscriptions:
+                sds.unsubscribe(cache_key, "ws_manager")
+                return
 
             # Broadcast the primed data. The SDS entry holds the *raw* payload,
             # so bots goes through the same enrichment as every later frame
@@ -373,14 +464,14 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             # /bots flashed "No bots running" until the next real frame.
             result = sds.get(server_name, data_type, **params)
             if result is not None:
-                if sdt_name == "BOTS_STATUS":
+                if data_type is ServerDataType.BOTS_STATUS:
                     await self._broadcast_bots_update(channel, server_name, result)
                 else:
                     await self._broadcast_update(channel, result)
 
             # Portfolio history rides on the portfolio subscription: one SDS
             # key per range, primed now and polled until the last client leaves.
-            if prefix == "portfolio":
+            if data_type is ServerDataType.PORTFOLIO:
                 self._oneshot_tasks.track(
                     asyncio.create_task(
                         self._subscribe_portfolio_history(channel, server_name),
@@ -388,7 +479,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                     )
                 )
         except Exception as e:
-            logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
+            logger.debug("Failed to broadcast primed SDS data for %s: %s", channel, e)
 
     async def _subscribe_portfolio_history(
         self, channel: str, server_name: str
@@ -560,15 +651,65 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             # encode it would escape and kill the calling stream task.
             logger.warning("Broadcast encode failed: channel=%s: %s", channel, e)
             return
+        await self._fan_out(channel, subscribers, payload)
+
+    def _encode_stream_status(
+        self, channel: str, status: str, message: str = ""
+    ) -> str:
+        """Frame for the ``stream_status:<server>`` control channel."""
+        server_name = self._server_from_channel(channel) or ""
+        return self._encode(
+            f"{STREAM_STATUS_PREFIX}:{server_name}",
+            {"type": status, "channel": channel, "message": message},
+        )
+
+    async def _broadcast_stream_status(
+        self, channel: str, status: str, message: str = ""
+    ) -> None:
+        """Tell ``channel``'s subscribers its upstream went ``stale`` / ``live``.
+
+        Addressed to the subscribers of the data channel but carried on the
+        control channel, and never retained in ``_last_data``: the data
+        channel's last payload stays what it was.
+        """
+        subscribers = self._authorized_subscribers(channel)
+        if not subscribers:
+            return
+        payload = self._encode_stream_status(channel, status, message)
+        await self._fan_out(channel, subscribers, payload)
+
+    async def _fan_out(
+        self, channel: str, subscribers: list[_Connection], payload: str
+    ) -> None:
+        """Send one encoded frame to every subscriber, dropping dead sockets.
+
+        Each send is bounded by ``WS_SEND_TIMEOUT``. A subscriber that does not
+        take the frame in time is treated as dead: it is disconnected here and
+        its socket closed, so a tab that was only slow reconnects and
+        re-subscribes instead of sitting on a connection with no channels.
+        """
         # Fan out concurrently so a slow/backpressured client does not block the
         # rest of the subscribers in the same broadcast tick.
         results = await asyncio.gather(
-            *(conn.ws.send_text(payload) for conn in subscribers),
+            *(
+                asyncio.wait_for(conn.ws.send_text(payload), WS_SEND_TIMEOUT)
+                for conn in subscribers
+            ),
             return_exceptions=True,
         )
         dead: list[_Connection] = []
+        stalled: list[_Connection] = []
         for conn, result in zip(subscribers, results):
-            if isinstance(result, Exception):
+            if isinstance(result, asyncio.TimeoutError):
+                logger.warning(
+                    "Broadcast send stalled for %ds: channel=%s user=%s — "
+                    "dropping the connection",
+                    WS_SEND_TIMEOUT,
+                    channel,
+                    conn.user_id,
+                )
+                stalled.append(conn)
+            elif isinstance(result, Exception):
                 logger.warning(
                     "Broadcast send failed: channel=%s user=%s: %s",
                     channel,
@@ -576,8 +717,29 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                     result,
                 )
                 dead.append(conn)
-        for conn in dead:
+        for conn in dead + stalled:
             self.disconnect(conn)
+        for conn in stalled:
+            self._oneshot_tasks.track(
+                asyncio.create_task(
+                    self._close_stalled(conn), name=f"close_stalled:{conn.user_id}"
+                )
+            )
+
+    @staticmethod
+    async def _close_stalled(conn: _Connection) -> None:
+        """Close a socket whose send timed out, without waiting on it for long.
+
+        Off the broadcast path: the close frame queues behind the same full
+        write buffer. If it cannot go out either, the server's keepalive ping
+        ends the connection.
+        """
+        try:
+            await asyncio.wait_for(
+                conn.ws.close(code=1013, reason="Slow consumer"), WS_SEND_TIMEOUT
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _encode(channel: str, data: Any) -> str:
@@ -684,6 +846,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             task.cancel()
             logger.info(spec["stop_log"], channel)
         self._last_data.pop(channel, None)
+        self._stale_streams.discard(channel)
 
 
 # -- Singleton --

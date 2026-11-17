@@ -103,7 +103,7 @@ def test_mark_read_cannot_reach_across_users(store):
     b = asyncio.run(record(USER_B, "B's task"))
     assert b is not None
 
-    left = mark_read(USER_A, [b.id])
+    left = asyncio.run(mark_read(USER_A, [b.id]))
 
     assert left == 0  # A has nothing of their own
     assert unread_count(USER_B) == 1
@@ -116,8 +116,8 @@ def test_mark_read_all_and_by_id(store):
 
     made = asyncio.run(three())
 
-    assert mark_read(USER_A, [made[0].id]) == 2
-    assert mark_read(USER_A, None) == 0
+    assert asyncio.run(mark_read(USER_A, [made[0].id])) == 2
+    assert asyncio.run(mark_read(USER_A, None)) == 0
     assert unread_count(USER_A) == 0
 
 
@@ -181,6 +181,21 @@ def test_concurrent_records_do_not_lose_each_other(store):
 # ── The push bus ──
 
 
+def _record_and_deliver(*args, **kwargs):
+    """Record, then let the fan-out finish before the loop closes.
+
+    ``record`` returns as soon as the notification is stored; the push runs as
+    its own task, which ``asyncio.run`` would cancel on the way out.
+    """
+
+    async def go():
+        n = await record(*args, **kwargs)
+        await notifications.drain()
+        return n
+
+    return asyncio.run(go())
+
+
 def test_push_reaches_registered_sink(store):
     seen: list = []
 
@@ -188,7 +203,7 @@ def test_push_reaches_registered_sink(store):
         seen.append(n)
 
     notifications.register_push_sink(sink)
-    asyncio.run(record(USER_A, "live"))
+    _record_and_deliver(USER_A, "live")
 
     assert [n.text for n in seen] == ["live"]
 
@@ -201,10 +216,53 @@ def test_dead_sink_never_reaches_the_producer(store):
 
     notifications.register_push_sink(broken)
 
-    n = asyncio.run(record(USER_A, "still recorded"))
+    n = _record_and_deliver(USER_A, "still recorded")
 
     assert n is not None
     assert [i.text for i in list_for(USER_A)] == ["still recorded"]
+
+
+def test_record_does_not_wait_for_a_slow_sink(store):
+    """A vendor push round-trip must not hold up the task announcing itself (WS-11)."""
+    delivered: list[str] = []
+
+    async def go():
+        release = asyncio.Event()
+
+        async def slow(n):
+            await release.wait()
+            delivered.append(n.text)
+
+        notifications.register_push_sink(slow)
+
+        n = await asyncio.wait_for(record(USER_A, "routine finished"), timeout=1)
+        assert n is not None
+        assert delivered == [], "record() waited for the sink"
+        assert [i.text for i in list_for(USER_A)] == ["routine finished"]
+
+        release.set()
+        await notifications.drain()
+
+    asyncio.run(go())
+
+    assert delivered == ["routine finished"], "the sink never ran"
+
+
+def test_mark_read_waits_for_the_write_lock(store):
+    """It rewrites the whole store, so it must not interleave with a record."""
+
+    async def go():
+        n = await record(USER_A, "note")
+        await notifications._write_lock.acquire()
+        marking = asyncio.create_task(mark_read(USER_A, [n.id]))
+        await asyncio.sleep(0.01)
+        assert not marking.done(), "mark_read ran without the write lock"
+        assert unread_count(USER_A) == 1
+        notifications._write_lock.release()
+        return await marking
+
+    assert asyncio.run(go()) == 0
+    assert unread_count(USER_A) == 0
 
 
 # ── The WS surface ──
@@ -228,7 +286,7 @@ def test_ws_push_reaches_only_the_addressed_user(store, monkeypatch):
     a_ws, b_ws = _FakeWS(), _FakeWS()
     monkeypatch.setattr(chat_ws, "_attached_sockets", {USER_A: {a_ws}, USER_B: {b_ws}})
 
-    asyncio.run(record(USER_A, "A's task", kind="delegation", link="/routines"))
+    _record_and_deliver(USER_A, "A's task", kind="delegation", link="/routines")
 
     assert b_ws.sent == []
     assert len(a_ws.sent) == 1
@@ -246,7 +304,7 @@ def test_ws_push_on_a_dead_socket_still_stores(store, monkeypatch):
     monkeypatch.setattr(notifications, "_push_sinks", [chat_ws._push_notification])
     monkeypatch.setattr(chat_ws, "_attached_sockets", {USER_A: {_FakeWS(explode=True)}})
 
-    asyncio.run(record(USER_A, "unwatched"))
+    _record_and_deliver(USER_A, "unwatched")
 
     assert [n.text for n in list_for(USER_A)] == ["unwatched"]
 
