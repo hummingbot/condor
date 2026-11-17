@@ -312,6 +312,7 @@ class FetchSpec:
 
 _POLL_TICK = 1  # seconds between poll loop snapshots
 _CLEANUP_INTERVAL = 300  # clean stale entries every 5 min
+_SKIP_LOG_INTERVAL = 60  # at most one rate-limit-skip warning per server per minute
 
 
 def _error_backoff(entry: CacheEntry) -> float:
@@ -348,6 +349,10 @@ class ServerDataService:
         # fetch delays its own key and nothing else.
         self._poll_fetches: Dict[CacheKey, asyncio.Task] = {}
         self._poll_fetch_tasks = TaskSet(logger, "SDS poll fetch error for %s: %s")
+        # Poll fetches dropped because the server's rate budget was spent:
+        # running total per server, plus what the last warning already covered.
+        self._rate_limit_skips: Dict[str, int] = {}
+        self._skips_logged: Dict[str, Tuple[float, int]] = {}
 
     # ------ Fetch registry ------
 
@@ -833,7 +838,7 @@ class ServerDataService:
         is fetched at its own pace instead of piling up duplicates.
         """
         now = time.time()
-        due_keys: List[CacheKey] = []
+        due: List[Tuple[float, CacheKey]] = []
 
         for key, subs in list(self._subscriptions.items()):
             if not subs:
@@ -848,20 +853,28 @@ class ServerDataService:
             effective_interval = min(s.interval for s in subs.values())
 
             entry = self._cache.get(key)
+            overdue = float("inf")  # never fetched: nothing is more overdue
             if entry:
                 age = now - entry.fetched_at
                 if age < effective_interval:
                     continue
+                if effective_interval > 0:
+                    overdue = age / effective_interval
 
                 # Exponential backoff on consecutive errors
                 if entry.consecutive_errors >= 3:
                     if now - entry.last_error_at < _error_backoff(entry):
                         continue
 
-            due_keys.append(key)
+            due.append((overdue, key))
+
+        # Most overdue first, relative to each key's own cadence. Tokens used
+        # to go out in subscription order every tick, so once a server's budget
+        # was exceeded the most recently added keys never refreshed at all.
+        due.sort(key=lambda item: item[0], reverse=True)
 
         tasks: List[asyncio.Task] = []
-        for key in due_keys:
+        for _, key in due:
             task = asyncio.create_task(self._rate_limited_fetch(key))
             self._poll_fetches[key] = task
             task.add_done_callback(lambda t, k=key: self._poll_fetch_done(k, t))
@@ -878,6 +891,7 @@ class ServerDataService:
         """Acquire the server's rate limit, then refresh one key."""
         limiter = self._get_rate_limiter(key.server)
         if not await limiter.acquire(timeout=0.5):
+            self._record_rate_limit_skip(key)
             return
         try:
             await self._fetch_and_cache(key)
@@ -898,6 +912,27 @@ class ServerDataService:
             )
         except Exception:
             pass  # Error already recorded in _fetch_and_cache
+
+    def _record_rate_limit_skip(self, key: CacheKey) -> None:
+        """Count a poll fetch dropped for lack of rate budget, and say so."""
+        server = key.server
+        total = self._rate_limit_skips.get(server, 0) + 1
+        self._rate_limit_skips[server] = total
+
+        now = time.monotonic()
+        last_at, last_total = self._skips_logged.get(server, (0.0, 0))
+        if last_at and now - last_at < _SKIP_LOG_INTERVAL:
+            return
+        self._skips_logged[server] = (now, total)
+        logger.warning(
+            "SDS: rate limit on %s is skipping poll fetches (%d since the last "
+            "report, %d total; latest %s) — subscriptions exceed the server's "
+            "request budget",
+            server,
+            total - last_total,
+            total,
+            key.data_type.value,
+        )
 
     async def _fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache, coalescing concurrent fetches per key.
@@ -1027,6 +1062,7 @@ class ServerDataService:
             "active_subscriptions": sum(len(s) for s in self._subscriptions.values()),
             "subscribed_keys": len(self._subscriptions),
             "servers_tracked": len(self._health),
+            "rate_limit_skips": dict(self._rate_limit_skips),
             "health": {
                 name: {
                     "status": h.status.value,
