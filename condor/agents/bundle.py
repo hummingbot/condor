@@ -2404,13 +2404,18 @@ def apply_update(update_plan: UpdatePlan, user_id: int = 0) -> dict:
                 code_trust.allow(slug, name, texts[row.path])
     if _verdict_of(update_plan, AGENT_MD) == UNCHANGED:
         _carry_bookkeeping(home / AGENT_MD, update_plan)
+    # Copied from the stamp on disk rather than built fresh: a plain file
+    # update says nothing about where the agent came from, so the ``hub_*``
+    # provenance ``record_hub_install`` left there has to survive it.
     write_stamp(
         home,
-        BundleStamp(
-            agent_uid=update_plan.agent_uid,
-            version=update_plan.version,
-            exported_at=update_plan.bundle.exported_at,
-            digests=digests,
+        (read_stamp(home) or BundleStamp()).model_copy(
+            update={
+                "agent_uid": update_plan.agent_uid,
+                "version": update_plan.version,
+                "exported_at": update_plan.bundle.exported_at,
+                "digests": digests,
+            }
         ),
     )
 

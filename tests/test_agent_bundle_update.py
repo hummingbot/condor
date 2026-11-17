@@ -167,6 +167,25 @@ def test_a_plain_file_updates_hub_version_is_zero(installed):
     assert plan.installed_hub_version == 0
 
 
+def test_a_plain_file_update_keeps_the_hub_provenance_on_the_stamp(hub_installed):
+    """AG2-08: ``apply_update`` wrote a fresh stamp, resetting every ``hub_*``
+    field, so a hub-installed agent that took one file update dropped out of
+    Botcamp tracking (no delisted warning, hub version 0)."""
+    before = ab.read_stamp(hub_installed)
+
+    ab.apply_update(ab.plan_update(_newer(), "drifter"), user_id=7)
+
+    after = ab.read_stamp(hub_installed)
+    assert after.version == 2
+    assert after.digests != before.digests
+    for field in ("hub_slug", "hub_version", "hub_digest", "hub_status", "hub_seen"):
+        assert getattr(after, field) == getattr(before, field), field
+    assert after.hub_checked_at == before.hub_checked_at
+    assert after.hub_slug == "drifter" and after.hub_version == 4
+    # …which is what makes the next plan's installed hub number correct.
+    assert ab.plan_update(_newer(), "drifter").installed_hub_version == 4
+
+
 # ── Blockers ──
 
 
