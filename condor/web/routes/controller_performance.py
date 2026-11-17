@@ -24,6 +24,7 @@ from condor.fetchers.performance_history import (
 )
 from condor.fetchers.run_history import (
     RunHistoryUnavailable,
+    _to_ms,
     declared_controllers,
     fetch_run_history,
     fill_classes_from_config,
@@ -700,11 +701,18 @@ async def get_run_history(
     # walk per controller — and per controller is a correctness requirement, not
     # a tuning choice: upstream buckets by time only, so a request spanning
     # several controllers keeps one row per bucket and silently drops the rest.
-    run = await _find_run(client, bot_name, deployed_at)
+    try:
+        run = await _find_run(client, bot_name, deployed_at)
+    except Exception as e:
+        logger.warning("Could not resolve run %s on '%s': %s", bot_name, name, e)
+        raise upstream_error("Failed to fetch run history", e)
     if run is None:
         return RunHistoryResponse(
             source="none",
-            detail=f"No run recorded for {bot_name} at {deployed_at}",
+            detail=(
+                f"No run recorded for {bot_name} at {deployed_at} among its "
+                f"newest {_FIND_RUN_LIMIT} runs"
+            ),
         )
 
     try:
@@ -735,23 +743,44 @@ async def get_run_history(
     )
 
 
+#: How many of a bot name's newest runs ``_find_run`` looks through.
+_FIND_RUN_LIMIT = 50
+
+#: How far apart two spellings of one deploy instant may be and still be the
+#: same run: a caller that rounded the timestamp to the second, or a server
+#: that reformatted it. Far below the time a stop-archive-redeploy of the same
+#: name takes, so it cannot reach across to a neighbouring run.
+_RUN_MATCH_TOLERANCE_MS = 1000.0
+
+
 async def _find_run(client, bot_name: str, deployed_at: str) -> BotRunInfo | None:
-    """The run this request is about, by name and deploy time.
+    """The run this request is about, by name and deploy time — or ``None``.
 
     Both are needed because a bot name is reused across runs, and asked of the
     server rather than taken from the query so the controller ids come from the
     deployment itself rather than from whatever the caller passed.
+
+    Never a *different* run (WR-06). This used to fall back to the newest run of
+    the name when the timestamp matched none, and the route then drew that run's
+    curve under the requested run's row with nothing to say so. The timestamps
+    are compared as instants, with a tolerance, which is everything the fallback
+    was for; a run that still matches nothing is reported as not found.
+
+    A failed listing raises: an outage is not a run that never existed.
     """
-    try:
-        raw = await client.bot_orchestration.get_bot_runs(bot_name=bot_name, limit=50)
-    except Exception:
-        logger.debug("Could not resolve run %s for its history", bot_name)
-        return None
+    raw = await client.bot_orchestration.get_bot_runs(
+        bot_name=bot_name, limit=_FIND_RUN_LIMIT
+    )
     runs = [_parse_bot_run(r) for r in _extract_runs_list(raw)]
     exact = [r for r in runs if r.created_at == deployed_at]
     if exact:
         return exact[0]
-    # A caller that rounded the timestamp, or a server that reformatted it: fall
-    # back to the newest run of that name rather than refusing to draw anything.
-    named = sorted(runs, key=lambda r: r.created_at or "", reverse=True)
-    return named[0] if named else None
+    wanted = _to_ms(deployed_at)
+    if wanted is None:
+        return None
+    near: list[tuple[float, BotRunInfo]] = []
+    for run in runs:
+        at = _to_ms(run.created_at) if run.created_at else None
+        if at is not None and abs(at - wanted) <= _RUN_MATCH_TOLERANCE_MS:
+            near.append((abs(at - wanted), run))
+    return min(near, key=lambda pair: pair[0])[1] if near else None
