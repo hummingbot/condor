@@ -120,9 +120,9 @@ export function SessionExecutors({
     queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
-  // One query per snapshot body, shared with SnapshotDetail — see useSnapshotBubbles.
+  // Bodies are fetched on hover and shared with SnapshotDetail — see useSnapshotBubbles.
   const snapshotSummaries = useMemo(() => snapshotsData?.snapshots ?? [], [snapshotsData]);
-  const snapshotBubbles = useSnapshotBubbles(slug, sslug, sessionNum, snapshotSummaries);
+  const { bubbles: snapshotBubbles, loadPreview } = useSnapshotBubbles(slug, sslug, sessionNum, snapshotSummaries);
 
   // Group executors by connector:pair for charts
   const chartGroups = useMemo(
@@ -237,6 +237,7 @@ export function SessionExecutors({
               height={500}
               snapshots={snapshotBubbles}
               onSnapshotClick={onSnapshotClick}
+              onSnapshotHover={loadPreview}
             />
           </div>
         );

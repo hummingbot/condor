@@ -31,7 +31,7 @@ const getSnapshot = vi.fn((_slug: string, _sslug: string, _n: number, tick: numb
 
 vi.mock("@/lib/api", () => ({ api: { getSnapshot: (...a: [string, string, number, number]) => getSnapshot(...a) } }));
 
-const { snapshotQueryOptions, useSnapshotBubbles } = await import("./useSnapshotBubbles");
+const { parseSnapshotTs, snapshotQueryOptions, useSnapshotBubbles } = await import("./useSnapshotBubbles");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -39,7 +39,7 @@ declare global {
 
 const body = (tick: number, calls: number) =>
   [
-    `# Snapshot #${tick} — 2026-08-26 10:0${tick}:00`,
+    `# Snapshot #${tick} — 2026-08-26 10:0${tick} UTC`,
     "",
     "## Agent Response",
     `decision for tick ${tick}`,
@@ -51,7 +51,8 @@ const body = (tick: number, calls: number) =>
 
 const summary = (tick: number): SnapshotSummary => ({
   tick,
-  timestamp: `2026-08-26 10:0${tick}:00`,
+  // The engine's real title format (`strftime("%Y-%m-%d %H:%M UTC")`).
+  timestamp: `2026-08-26 10:0${tick} UTC`,
   file: `${tick}.md`,
 });
 
@@ -59,14 +60,17 @@ let container: HTMLDivElement;
 let root: Root;
 let client: QueryClient;
 
-const bubbles: { current: ReturnType<typeof useSnapshotBubbles> } = { current: [] };
+const bubbles: { current: ReturnType<typeof useSnapshotBubbles>["bubbles"] } = { current: [] };
+/** The hook's hover entry point, as `ExecutorChart` calls it. */
+const hover: { current: (tick: number) => void } = { current: () => {} };
 /** The tick `SnapshotDetail` rendered without a spinner, or null while loading. */
 const detail: { current: number | null } = { current: null };
 
 function Bubbles({ summaries }: { summaries: SnapshotSummary[] }) {
   const result = useSnapshotBubbles("agent", "strat", 1, summaries);
   useEffect(() => {
-    bubbles.current = result;
+    bubbles.current = result.bubbles;
+    hover.current = result.loadPreview;
   });
   return null;
 }
@@ -92,6 +96,12 @@ function Harness({ summaries, detailTick }: { summaries: SnapshotSummary[]; deta
 const render = (summaries: SnapshotSummary[], detailTick?: number) =>
   act(() => {
     root.render(createElement(Harness, { summaries, detailTick }));
+  });
+
+/** Hover every listed tick's marker — what asks for its body. */
+const hoverTicks = (...ticks: number[]) =>
+  act(() => {
+    for (const t of ticks) hover.current(t);
   });
 
 /**
@@ -136,13 +146,26 @@ afterEach(() => {
 });
 
 describe("useSnapshotBubbles", () => {
-  it("issues one request per tick and fills each marker as its own body lands", async () => {
+  it("requests no body until a marker is hovered (FP-04)", async () => {
     render([summary(1), summary(2), summary(3)]);
-    expect(ticksRequested().sort()).toEqual([1, 2, 3]);
 
-    // A marker exists for every known tick from the first render — the chart is
-    // never empty while bodies are in flight.
+    // A marker exists for every known tick from the first render, and costs
+    // nothing: the tick and its timestamp are in the summary row.
     expect(bubbles.current.map((b) => b.tick)).toEqual([1, 2, 3]);
+    expect(getSnapshot).not.toHaveBeenCalled();
+
+    hoverTicks(2);
+    expect(ticksRequested()).toEqual([2]);
+
+    // Hovering it again asks for nothing more.
+    hoverTicks(2);
+    expect(ticksRequested()).toEqual([2]);
+  });
+
+  it("fills each hovered marker as its own body lands", async () => {
+    render([summary(1), summary(2), summary(3)]);
+    hoverTicks(1, 2, 3);
+    expect(ticksRequested().sort()).toEqual([1, 2, 3]);
     expect(bubbles.current.every((b) => b.agentResponse === undefined)).toBe(true);
 
     // The second body landing fills only its own marker: no all-or-nothing wait.
@@ -155,6 +178,7 @@ describe("useSnapshotBubbles", () => {
 
   it("keeps markers in the summaries' order as bodies land out of order", async () => {
     render([summary(1), summary(2), summary(3)]);
+    hoverTicks(1, 2, 3);
     await land(3);
     await land(1);
     expect(bubbles.current.map((b) => b.tick)).toEqual([1, 2, 3]);
@@ -162,26 +186,30 @@ describe("useSnapshotBubbles", () => {
     expect(bubbles.current[2].agentResponse).toContain("tick 3");
   });
 
-  it("fetches only the new body when the session gains a tick", async () => {
+  it("keeps the previews already read when the session gains a tick", async () => {
     render([summary(1), summary(2)]);
+    hoverTicks(1, 2);
     await land(1);
     await land(2);
     getSnapshot.mockClear();
 
     // A tick added while the view is open: the two already fetched stay cached
-    // and keep their previews, and only the newcomer costs a request.
+    // and keep their previews, and the newcomer costs nothing until hovered.
     render([summary(1), summary(2), summary(3)]);
-    expect(ticksRequested()).toEqual([3]);
+    expect(getSnapshot).not.toHaveBeenCalled();
     expect(bubbles.current.map((b) => b.tick)).toEqual([1, 2, 3]);
     expect(bubbles.current[0].agentResponse).toContain("tick 1");
     expect(bubbles.current[1].agentResponse).toContain("tick 2");
 
+    hoverTicks(3);
+    expect(ticksRequested()).toEqual([3]);
     await land(3);
     expect(bubbles.current[2].agentResponse).toContain("tick 3");
   });
 
-  it("serves a clicked tick from the previews' cache — N requests, not N+1", async () => {
+  it("serves a clicked tick from the previews' cache — no second request", async () => {
     render([summary(1), summary(2)]);
+    hoverTicks(1, 2);
     await land(1);
     await land(2);
     expect(ticksRequested().sort()).toEqual([1, 2]);
@@ -191,5 +219,25 @@ describe("useSnapshotBubbles", () => {
     expect(getSnapshot).not.toHaveBeenCalled();
     // Rendered straight from cache: no spinner, the body is already there.
     expect(detail.current).toBe(2);
+  });
+});
+
+describe("parseSnapshotTs", () => {
+  it("reads the engine's title format as UTC", () => {
+    expect(parseSnapshotTs("2026-09-22 06:17 UTC")).toBe(Date.UTC(2026, 8, 22, 6, 17) / 1000);
+  });
+
+  it("reads seconds and a Z suffix", () => {
+    expect(parseSnapshotTs("2026-09-22 06:17:30 UTC")).toBe(Date.UTC(2026, 8, 22, 6, 17, 30) / 1000);
+    expect(parseSnapshotTs("2026-09-22T06:17:30Z")).toBe(Date.UTC(2026, 8, 22, 6, 17, 30) / 1000);
+  });
+
+  it("still reads a zone-less timestamp, as local time", () => {
+    expect(parseSnapshotTs("2024-01-15 14:30:22")).toBe(new Date(2024, 0, 15, 14, 30, 22).getTime() / 1000);
+  });
+
+  it("answers 0 for what it cannot read", () => {
+    expect(parseSnapshotTs("")).toBe(0);
+    expect(parseSnapshotTs("yesterday")).toBe(0);
   });
 });
