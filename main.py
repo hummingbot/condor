@@ -276,8 +276,14 @@ async def start_callback_handler(
 # discovery in ``routines.base.discover_routines(force_reload=True)``, which
 # owns reimporting individual routine modules. Only the base module is listed,
 # so that machinery itself stays fresh.
+#
+# ``config_manager`` is deliberately absent too, for the reason no
+# ``condor.runtime.*`` module is reloaded: it owns live state. Re-executing it
+# resets ``ConfigManager._instance``, so the next ``get_config_manager()`` built
+# a second manager with an empty client pool while every stream task that had
+# captured the first went on using it — two diverging configs, and one open
+# aiohttp session per server that teardown never closed.
 _EXTRA_RELOAD_MODULES = (
-    "config_manager",
     "utils.auth",
     "utils.telegram_formatters",
     "routines.base",
@@ -848,8 +854,12 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Reflection job registration failed (continuing without it)")
 
-    # Start file watcher
-    asyncio.create_task(watch_and_reload(application))
+    # Start file watcher. Through _spawn_background so the task has a strong
+    # reference (asyncio's own is weak) and a crash in it is logged.
+    if hot_reload_enabled():
+        _spawn_background(watch_and_reload(application), "Handler hot-reload watcher")
+    else:
+        logger.info("Handler hot-reload is off (%s)", HOT_RELOAD_ENV)
 
 
 async def teardown(application: Application) -> None:
@@ -910,6 +920,22 @@ async def teardown(application: Application) -> None:
         await telemetry.flush("teardown")
     except Exception:
         logger.debug("Telemetry teardown failed", exc_info=True)
+
+
+HOT_RELOAD_ENV = "CONDOR_HOT_RELOAD"
+
+
+def hot_reload_enabled() -> bool:
+    """Whether the handler file watcher runs. On unless switched off.
+
+    ``CONDOR_HOT_RELOAD=0`` (or ``false``/``off``/``no``) is for an install
+    where nobody edits code in place: there a change under ``handlers/`` or
+    ``routines/`` is a ``git pull``, and reloading half of it into the running
+    process is not what anyone asked for. On by default because routines and
+    handlers edited on a live bot are expected to take effect without a restart.
+    """
+    raw = os.environ.get(HOT_RELOAD_ENV, "").strip().lower()
+    return raw not in ("0", "false", "off", "no")
 
 
 async def watch_and_reload(application: Application) -> None:
