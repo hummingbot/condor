@@ -231,6 +231,10 @@ export function ChatInput({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Enter that confirms an IME candidate is part of writing the message, not
+    // the end of it (FU-16). `keyCode` 229 is the same fact on browsers that
+    // fire the keydown before they set `isComposing`.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -342,7 +346,9 @@ export function ChatInput({
   // Global keyboard shortcut: ⌘⇧M to toggle recording
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "m") {
+      // Lower-cased: with Shift held the key arrives as "M" on Windows and
+      // Linux, so the exact match never fired there.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "m") {
         e.preventDefault();
         if (recordingState === "recording") {
           stopRecording();
@@ -455,7 +461,7 @@ export function ChatInput({
               <span className="flex-1 text-xs text-[var(--color-text-muted)]">
                 Recording...{" "}
                 <kbd className="ml-1 rounded bg-[var(--color-bg)] px-1 py-0.5 text-[10px] font-mono border border-[var(--color-border)]">
-                  ⌘M
+                  ⌘⇧M
                 </kbd>{" "}
                 to stop
               </span>
@@ -543,7 +549,7 @@ export function ChatInput({
               <button
                 onClick={stopRecording}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white transition-opacity hover:opacity-90"
-                title="Stop recording (⌘M)"
+                title="Stop recording (⌘⇧M)"
               >
                 <Square className="h-3.5 w-3.5" />
               </button>
@@ -556,7 +562,7 @@ export function ChatInput({
                 onClick={startRecording}
                 disabled={disabled}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-40"
-                title="Record voice message (⌘M)"
+                title="Record voice message (⌘⇧M)"
               >
                 <Mic className="h-4 w-4" />
               </button>
