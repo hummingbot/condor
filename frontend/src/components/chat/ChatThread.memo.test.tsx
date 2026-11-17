@@ -42,13 +42,17 @@ let noteRetry: ((agentKey: string, messageId: string) => void) | undefined;
 
 vi.mock("./ChatMessage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./ChatMessage")>();
-  const { memo } = await import("react");
+  const { memo, useEffect } = await import("react");
   const Real = actual.ChatMessageView;
   return {
     ...actual,
-    // Same memo boundary as the real one — the spy only reads the prop.
+    // Same memo boundary as the real one — the spy only reads the prop, and
+    // only when it commits: a new identity is the one thing that makes it.
     ChatMessageView: memo(function Spy(props: React.ComponentProps<typeof Real>) {
-      if (props.message.kind === "start_error") noteRetry = props.onRetryModel;
+      const { message, onRetryModel } = props;
+      useEffect(() => {
+        if (message.kind === "start_error") noteRetry = onRetryModel;
+      });
       return <Real {...props} />;
     }),
   };
