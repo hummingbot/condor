@@ -21,6 +21,7 @@ local server is a normal state (the user simply isn't running it), reported as
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -300,25 +301,30 @@ async def local_servers() -> dict:
     Unreachable servers are reported (``reachable: false``), not raised — the
     user just isn't running that server.
     """
-    result: dict = {}
     timeout = httpx.Timeout(connect=1.5, read=3.0, write=1.5, pool=1.5)
+
+    async def _probe(client: httpx.AsyncClient, prefix: str) -> dict:
+        base = DEFAULT_BASE_URLS.get(prefix)
+        entry = {"base_url": base, "reachable": False, "models": []}
+        if base:
+            try:
+                resp = await client.get(f"{base.rstrip('/')}/models")
+                if resp.status_code == 200:
+                    data = resp.json().get("data", [])
+                    entry["reachable"] = True
+                    entry["models"] = sorted(
+                        m["id"] for m in data if isinstance(m, dict) and m.get("id")
+                    )
+            except Exception:
+                pass  # not running = normal, leave reachable=False
+        return entry
+
+    # Together, not in turn: a server that is down costs its connect timeout,
+    # and there is no reason for the next one to wait behind it.
+    prefixes = list(LOCAL_PREFIXES)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for prefix in LOCAL_PREFIXES:
-            base = DEFAULT_BASE_URLS.get(prefix)
-            entry = {"base_url": base, "reachable": False, "models": []}
-            if base:
-                try:
-                    resp = await client.get(f"{base.rstrip('/')}/models")
-                    if resp.status_code == 200:
-                        data = resp.json().get("data", [])
-                        entry["reachable"] = True
-                        entry["models"] = sorted(
-                            m["id"] for m in data if isinstance(m, dict) and m.get("id")
-                        )
-                except Exception:
-                    pass  # not running = normal, leave reachable=False
-            result[prefix] = entry
-    return result
+        entries = await asyncio.gather(*(_probe(client, p) for p in prefixes))
+    return dict(zip(prefixes, entries))
 
 
 def _bridge_readiness(entry: dict) -> Readiness:
@@ -376,7 +382,10 @@ async def probe_all(
     wanted = list(dict.fromkeys(bases))
     bridges: dict[str, dict] = {}
     if any(b in ACP_COMMANDS for b in wanted):
-        bridges = {e["agent_key"]: e for e in acp_bridges()}
+        # Off the event loop: acp_bridges() shells out to `npm root -g` (10s
+        # timeout) and, on macOS, to the keychain (5s). Inline, a stalled npm
+        # froze the bot, ticks included, for as long as it took.
+        bridges = {e["agent_key"]: e for e in await asyncio.to_thread(acp_bridges)}
     servers: dict = {}
     if any(b in LOCAL_PREFIXES for b in wanted):
         servers = await local_servers()
