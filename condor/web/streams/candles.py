@@ -248,6 +248,9 @@ class CandleStreamsMixin:
         @staticmethod
         def _classify_ws_error(exc: BaseException) -> str: ...
 
+        @staticmethod
+        async def _receive_upstream(ws: Any) -> dict: ...
+
     @staticmethod
     def _normalize_candle(c: Any) -> dict | None:
         """Normalize a candle from any format to a uniform dict with float values."""
@@ -474,7 +477,14 @@ class CandleStreamsMixin:
                     )
                     logger.info("Candle WS subscribed: %s", channel)
                     backoff = 5  # Reset on successful connection
-                    async for msg in ws:
+                    while True:
+                        try:
+                            # Bounded: a half-open socket otherwise never
+                            # reaches the reconnect below.
+                            msg = await self._receive_upstream(ws)
+                        except ConnectionError:
+                            # Upstream closed the socket.
+                            break
                         # Log first message per channel at INFO for diagnostics
                         if channel not in self._candle_first_msg_logged:
                             self._candle_first_msg_logged.add(channel)

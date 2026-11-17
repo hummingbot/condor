@@ -30,7 +30,10 @@ from condor.web.streams.candles import (  # noqa: F401
     _coerce_duration,
     parse_candle_channel,
 )
-from condor.web.streams.hummingbot_ws import HummingbotStreamsMixin
+from condor.web.streams.hummingbot_ws import (
+    STREAM_STATUS_PREFIX,
+    HummingbotStreamsMixin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,9 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
         # so the GC can't cancel them mid-flight (the event loop only keeps a
         # weak reference). Entries auto-remove on completion.
         self._oneshot_tasks = TaskSet(logger, "One-shot task %s failed: %s")
+        # Stream channels whose upstream connection is currently lost: their
+        # subscribers were told ``stale`` and ``_last_data`` is frozen.
+        self._stale_streams: set[str] = set()
         # Lazily-built registry of per-type stream lifecycles (see _stream_registry)
         self._stream_registry_cache: dict | None = None
 
@@ -188,6 +194,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             tasks.clear()
         self._last_candle_ws_update.clear()
         self._candle_first_msg_logged.clear()
+        self._stale_streams.clear()
 
         # Cancel any still-pending one-shot tasks.
         self._oneshot_tasks.cancel_all()
@@ -315,6 +322,11 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                 # Send last known data immediately, then ensure the stream runs
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
+                    if channel in self._stale_streams:
+                        # The snapshot above is frozen, not live — say so.
+                        await conn.ws.send_text(
+                            self._encode_stream_status(channel, "stale")
+                        )
                 self._ensure_stream(prefix, channel)
             else:
                 if channel in self._last_data:
@@ -560,6 +572,37 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             # encode it would escape and kill the calling stream task.
             logger.warning("Broadcast encode failed: channel=%s: %s", channel, e)
             return
+        await self._fan_out(channel, subscribers, payload)
+
+    def _encode_stream_status(
+        self, channel: str, status: str, message: str = ""
+    ) -> str:
+        """Frame for the ``stream_status:<server>`` control channel."""
+        server_name = self._server_from_channel(channel) or ""
+        return self._encode(
+            f"{STREAM_STATUS_PREFIX}:{server_name}",
+            {"type": status, "channel": channel, "message": message},
+        )
+
+    async def _broadcast_stream_status(
+        self, channel: str, status: str, message: str = ""
+    ) -> None:
+        """Tell ``channel``'s subscribers its upstream went ``stale`` / ``live``.
+
+        Addressed to the subscribers of the data channel but carried on the
+        control channel, and never retained in ``_last_data``: the data
+        channel's last payload stays what it was.
+        """
+        subscribers = self._authorized_subscribers(channel)
+        if not subscribers:
+            return
+        payload = self._encode_stream_status(channel, status, message)
+        await self._fan_out(channel, subscribers, payload)
+
+    async def _fan_out(
+        self, channel: str, subscribers: list[_Connection], payload: str
+    ) -> None:
+        """Send one encoded frame to every subscriber, dropping dead sockets."""
         # Fan out concurrently so a slow/backpressured client does not block the
         # rest of the subscribers in the same broadcast tick.
         results = await asyncio.gather(
@@ -684,6 +727,7 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
             task.cancel()
             logger.info(spec["stop_log"], channel)
         self._last_data.pop(channel, None)
+        self._stale_streams.discard(channel)
 
 
 # -- Singleton --

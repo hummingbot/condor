@@ -31,6 +31,17 @@ WS_PERMANENT = "permanent"
 WS_RETRY_CAP = 60
 WS_SLOW_RETRY_CAP = 300
 
+# Longest silence tolerated on an upstream socket. hummingbot-api heartbeats
+# every 30s, so two missed beats plus slack means the path is dead even though
+# no FIN/RST ever arrived (NAT idle drop, host sleep) — without a deadline the
+# read loop waits forever and the dashboard shows the last frame as live.
+WS_RECEIVE_TIMEOUT = 75
+
+# Control channel prefix for stream-health frames (``stream_status:<server>``).
+# Health is not sent on the data channel itself: those payloads are written
+# straight into the dashboard's caches, whose shapes a status frame would break.
+STREAM_STATUS_PREFIX = "stream_status"
+
 # Handshake statuses that mean the upstream refused us rather than failed.
 _REFUSED_STATUSES = frozenset({401, 403, 404})
 
@@ -43,8 +54,13 @@ class HummingbotStreamsMixin:
         _controller_perf_tasks: dict[str, asyncio.Task]
         # Host surface, provided by WebSocketManager.
         _last_data: dict[str, Any]
+        _stale_streams: set[str]
 
         async def broadcast(self, channel: str, data: Any) -> None: ...
+
+        async def _broadcast_stream_status(
+            self, channel: str, status: str, message: str = ""
+        ) -> None: ...
 
         async def _broadcast_update(self, channel: str, data: Any) -> None: ...
 
@@ -158,6 +174,35 @@ class HummingbotStreamsMixin:
 
         return WS_RETRY
 
+    @staticmethod
+    async def _receive_upstream(ws: Any) -> dict:
+        """Next upstream message, or ``TimeoutError`` after ``WS_RECEIVE_TIMEOUT``.
+
+        Calls ``receive()`` rather than iterating the socket: ``__anext__``
+        folds a close into ``StopAsyncIteration``, and there is nothing to put
+        a deadline on. A close still surfaces, as ``ConnectionError``.
+        """
+        try:
+            return await asyncio.wait_for(ws.receive(), timeout=WS_RECEIVE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"no message from upstream for {WS_RECEIVE_TIMEOUT}s"
+            ) from None
+
+    async def _mark_stream_stale(self, channel: str, message: str) -> None:
+        """Tell the channel's subscribers its data stopped updating (once)."""
+        if channel in self._stale_streams:
+            return
+        self._stale_streams.add(channel)
+        await self._broadcast_stream_status(channel, "stale", message)
+
+    async def _mark_stream_live(self, channel: str) -> None:
+        """Clear a stale mark once upstream data is flowing again."""
+        if channel not in self._stale_streams:
+            return
+        self._stale_streams.discard(channel)
+        await self._broadcast_stream_status(channel, "live")
+
     async def _run_ws_stream(
         self,
         channel: str,
@@ -172,10 +217,14 @@ class HummingbotStreamsMixin:
         """Shared connect/reconnect skeleton for all Hummingbot WS streams.
 
         Owns the while-True loop, subscriber check, heartbeat/error message
-        handling, error classification (``_classify_ws_error``) and
-        exponential backoff capped at ``WS_RETRY_CAP`` — or, for a stream the
-        upstream is refusing, at the longer ``WS_SLOW_RETRY_CAP``. Each stream
-        supplies only:
+        handling, the liveness watchdog (``WS_RECEIVE_TIMEOUT`` of silence is
+        a dead connection and reconnects), error classification
+        (``_classify_ws_error``) and exponential backoff capped at
+        ``WS_RETRY_CAP`` — or, for a stream the upstream is refusing, at the
+        longer ``WS_SLOW_RETRY_CAP``. Whenever the connection is lost the
+        channel's subscribers get a ``stale`` frame on the stream-status
+        channel, and a ``live`` one when data resumes. Each stream supplies
+        only:
 
         - ``open_ws``: client -> the WS async context manager to enter
           (e.g. ``lambda c: c.ws.market_data()``).
@@ -204,7 +253,12 @@ class HummingbotStreamsMixin:
                     if not backoff_on_empty_close:
                         backoff = 5
                     got_message = False
-                    async for msg in ws:
+                    while True:
+                        try:
+                            msg = await self._receive_upstream(ws)
+                        except ConnectionError:
+                            # Upstream closed the socket.
+                            break
                         if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing %s stream",
@@ -226,6 +280,9 @@ class HummingbotStreamsMixin:
                             )
                             break
                         await on_message(msg)
+                        await self._mark_stream_live(channel)
+
+                    await self._mark_stream_stale(channel, "Upstream connection closed")
 
                     if backoff_on_empty_close:
                         # Connection closed cleanly — back off if short-lived
@@ -246,6 +303,7 @@ class HummingbotStreamsMixin:
                 return
             except Exception as e:
                 verdict = self._classify_ws_error(e)
+                await self._mark_stream_stale(channel, "Upstream connection lost")
                 if verdict == WS_PERMANENT:
                     logger.error(
                         "%s stream permanent error for %s: %s — giving up",
