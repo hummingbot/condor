@@ -84,3 +84,34 @@ def test_an_empty_header_and_a_missing_one_parse_as_before():
         {},
         "---\nname: Grid\nno closing line",
     )
+
+
+def test_the_fast_loader_resolves_scalars_exactly_as_safe_load_does():
+    """The libyaml loader (AG2-10) is a speed-up, not a behaviour change."""
+    import yaml
+
+    header = (
+        "name: Grid\n"
+        "enabled: yes\n"
+        "ratio: 1e3\n"
+        "mask: 0x1f\n"
+        "octal: 010\n"
+        "since: 2026-01-01\n"
+        "empty:\n"
+        "tilde: ~\n"
+        "text: 'emoji 🚀 — dash'\n"
+        "block: |\n"
+        "  line one\n"
+        "  line two\n"
+        "nested:\n"
+        "  limits: {max_position_usd: 500.0, pairs: [SOL-USDC, BTC-USDT]}\n"
+    )
+
+    meta, body = parse_frontmatter(f"---\n{header}---\n\nBody\n")
+
+    assert meta == yaml.safe_load(header)
+    assert body == "Body"
+
+
+def test_a_malformed_header_still_degrades_to_no_metadata():
+    assert parse_frontmatter("---\nname: [unclosed\n---\nBody") == ({}, "Body")

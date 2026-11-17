@@ -19,6 +19,15 @@ import re
 
 import yaml
 
+# libyaml's loader is ~10x faster than the pure-Python one and every store
+# re-parses its headers on each listing. Loader only: ``CSafeDumper`` escapes
+# and folds differently (emoji, long lines), which would break the byte-identical
+# render promised above.
+try:
+    from yaml import CSafeLoader as _SafeLoader
+except ImportError:  # PyYAML built without libyaml
+    from yaml import SafeLoader as _SafeLoader
+
 log = logging.getLogger(__name__)
 
 # The closing delimiter is a whole line. Matching ``---`` as a substring ended
@@ -57,7 +66,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     body = text[closing.end() :].strip()
 
     try:
-        meta = yaml.safe_load(frontmatter_str) or {}
+        meta = yaml.load(frontmatter_str, Loader=_SafeLoader) or {}
     except yaml.YAMLError:
         log.warning("Failed to parse YAML frontmatter")
         meta = {}
