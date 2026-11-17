@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter, OrderedDict
 from functools import partial
@@ -1299,6 +1300,53 @@ MAX_HISTORY_INSTANCES = 24
 MAX_CONCURRENT_HISTORY_FETCHES = 10
 
 
+_DEPLOY_SUFFIX = re.compile(r"-(\d{8}-\d{6})$")
+
+
+def _instance_recency(name: str, all_bot_perf: dict[str, dict]) -> str:
+    """Sortable ``YYYYMMDD-HHMMSS`` stamp of how recent an instance is.
+
+    The deploy suffix when the name carries one — the only signal an archived
+    instance has — else the instance's latest snapshot time, else ``""``
+    (oldest).
+    """
+    match = _DEPLOY_SUFFIX.search(name)
+    if match:
+        return match.group(1)
+    epoch = _iso_to_epoch(all_bot_perf.get(name, {}).get("timestamp"))
+    if epoch is None:
+        return ""
+    return time.strftime("%Y%m%d-%H%M%S", time.gmtime(epoch))
+
+
+def cap_history_instances(
+    instances: Iterable[str],
+    all_bot_perf: dict[str, dict],
+    live: set[str] | None = None,
+) -> list[str]:
+    """At most ``MAX_HISTORY_INSTANCES`` of ``instances``, chosen by recency.
+
+    Sorting the names and keeping the tail is chronological only *within* one
+    base: across bases it is alphabetical, so a strategy with several bases and
+    many redeploys dropped every instance of its alphabetically-first base —
+    the running one included — and reported $0 realized for it. Running
+    instances (``live``, when the orchestrator answered) are always kept, over
+    the cap if need be; the remaining slots go to the most recently deployed.
+    Returned in name order.
+    """
+    names = sorted(set(instances))
+    if len(names) <= MAX_HISTORY_INSTANCES:
+        return names
+    keep = {n for n in names if live and n in live}
+    rest = sorted(
+        (n for n in names if n not in keep),
+        key=lambda n: (_instance_recency(n, all_bot_perf), n),
+        reverse=True,
+    )
+    keep.update(rest[: max(0, MAX_HISTORY_INSTANCES - len(keep))])
+    return sorted(keep)
+
+
 async def fetch_instance_histories(
     client: Any,
     all_bot_perf: dict[str, dict],
@@ -1325,13 +1373,16 @@ async def fetch_instance_histories(
     instances_by_base = partition_instances(all_bot_perf, bases, extra_names)
     all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
     if len(all_instances) > MAX_HISTORY_INSTANCES:
-        logger.warning(
-            "bot history: %d instances, capping at %d newest "
-            "(older sessions may under-report)",
-            len(all_instances),
-            MAX_HISTORY_INSTANCES,
+        kept = cap_history_instances(
+            all_instances, all_bot_perf, await fetch_live_instance_names(client)
         )
-        all_instances = all_instances[-MAX_HISTORY_INSTANCES:]
+        logger.warning(
+            "bot history: %d instances, keeping %d (running ones, then the "
+            "most recently deployed; older sessions may under-report)",
+            len(all_instances),
+            len(kept),
+        )
+        all_instances = kept
 
     # A zero/absent takeover instant means "unknown", not "epoch 0" — spanning
     # back to 1970 would coarsen every bot to daily buckets. Cap the span at what

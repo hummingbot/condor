@@ -1926,3 +1926,98 @@ def test_resolve_bots_carries_the_reading_across_instances():
 
     assert resolved["base"]["reading"] == "ok"
     assert resolved["base"]["volume_traded"] == 3.0
+
+
+# ---------------------------------------------------------------------------
+# DL-05: the history-instance cap ranks by recency, never by name across bases
+# ---------------------------------------------------------------------------
+
+
+def _many_deploys(base: str, n: int) -> list[str]:
+    return [f"{base}-202608{d:02d}-120000" for d in range(1, n + 1)]
+
+
+def test_history_cap_always_keeps_running_instances():
+    """``sorted(names)[-24:]`` is alphabetical across bases: 25 ``zeta-mm``
+    deploys pushed ``alpha-mm``'s only — running — instance out of the fetch."""
+    from condor.fetchers.bot_performance import (
+        MAX_HISTORY_INSTANCES,
+        cap_history_instances,
+    )
+
+    alpha = "alpha-mm-20260701-090000"  # older than every zeta deploy
+    zeta = _many_deploys("zeta-mm", 25)
+
+    kept = cap_history_instances([alpha, *zeta], {}, live={alpha, zeta[-1]})
+
+    assert alpha in kept, "a running instance was dropped by the cap"
+    assert zeta[-1] in kept
+    assert len(kept) == MAX_HISTORY_INSTANCES
+    # The slots left over go to the newest deploys; the oldest ones are dropped.
+    assert zeta[0] not in kept and zeta[1] not in kept
+    assert kept == sorted(kept)
+
+
+def test_history_cap_ranks_by_deploy_time_not_by_base_name():
+    """With liveness unknown, recency still decides — not the alphabet."""
+    from condor.fetchers.bot_performance import cap_history_instances
+
+    alpha = "alpha-mm-20260901-090000"  # the newest deploy of all
+    zeta = _many_deploys("zeta-mm", 25)
+
+    kept = cap_history_instances([alpha, *zeta], {}, live=None)
+
+    assert alpha in kept
+    assert zeta[0] not in kept and zeta[1] not in kept
+
+    # An unsuffixed name is ranked by its snapshot timestamp, when it has one.
+    perf = {"alpha-mm": {"timestamp": "2026-09-01T09:00:00+00:00"}}
+    kept = cap_history_instances(["alpha-mm", *zeta], perf, live=None)
+    assert "alpha-mm" in kept
+
+
+def test_history_cap_leaves_a_small_universe_alone():
+    from condor.fetchers.bot_performance import cap_history_instances
+
+    names = ["b-20260102-000000", "a-20260101-000000"]
+    assert cap_history_instances(names, {}, live=set()) == sorted(names)
+
+
+def test_instance_histories_fetch_the_running_instance_of_every_base():
+    """End to end: the capped fan-out still walks ``alpha-mm``'s live bot."""
+    from condor.fetchers.bot_performance import (
+        clear_live_names_cache,
+        fetch_instance_histories,
+    )
+
+    clear_live_names_cache()
+    alpha = "alpha-mm-20260701-090000"
+    zeta = _many_deploys("zeta-mm", 25)
+    walked: list[str] = []
+
+    class _Orch:
+        async def get_active_bots_status(self):
+            return {"status": "success", "data": {alpha: {"bot_name": alpha}}}
+
+        async def get_controller_performance_history(self, bot_name, **kw):
+            walked.append(bot_name)
+            if kw.get("cursor"):
+                return {"data": []}
+            return {"data": [_hist_row("2026-08-30T00:00:00+00:00", "c", 7.0, 100.0)]}
+
+    client = SimpleNamespace(base_url="", bot_orchestration=_Orch())
+    histories = asyncio.run(
+        fetch_instance_histories(
+            client,
+            {},
+            ["alpha-mm", "zeta-mm"],
+            0.0,
+            1e10,
+            extra_names=[alpha, *zeta],
+        )
+    )
+
+    assert alpha in walked
+    assert histories["alpha-mm"][alpha][-1][1] == 7.0
+    assert len(histories["zeta-mm"]) == 23
+    clear_live_names_cache()
