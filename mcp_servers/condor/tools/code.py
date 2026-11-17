@@ -6,9 +6,10 @@ must run where the cached API clients, the report index's single writer and the
 real bot are, so ``run`` crosses to the main process over ``call_main_api`` and
 everything else reads ``data/code_runs/`` directly.
 
-What the model gets back is clipped; what the store keeps never is. A snippet
-that failed is read back whole with ``action="get"``, corrected, and re-run —
-which is the whole point of persisting these at all.
+What the model gets back is clipped, on every action. A snippet that failed is
+read back with ``action="get"``, corrected, and re-run — which is the whole
+point of persisting these at all — and ``get`` pages through long output with
+``offset`` rather than returning all of it in one result (RT-08).
 """
 
 from mcp_servers.condor.condor_client import call_main_api
@@ -28,6 +29,11 @@ _HTTP_MARGIN = 15
 # Per-field ceiling in the tool's *reply*. Enough for a table or a traceback,
 # small enough that a runaway print loop cannot flood a context window.
 _CLIP = 4000
+
+# The same ceiling for ``get``, which is the "read it all" door and so gets a
+# larger window — but a window: one result must still fit a context, and the
+# rest is one more call away with ``offset``.
+_GET_CLIP = 20000
 
 
 def _store():
@@ -108,13 +114,37 @@ def list_runs(agent: str | None, limit: int) -> dict:
     }
 
 
-def get_run(run_id: str | None) -> dict:
-    """One run in full — code, stdout, result and traceback, unclipped."""
+def get_run(run_id: str | None, offset: int = 0) -> dict:
+    """One past run — code and traceback whole, stdout and result as a window.
+
+    ``offset`` is where the window starts in ``stdout`` and in ``result``
+    (characters). A run whose output is longer than the window says so and names
+    the offset that continues it, so a long run is read in pages instead of
+    arriving as one result too large for the host to accept.
+    """
     if not run_id:
         return {"error": "run_id is required for action='get'"}
     run = _store().get(run_id)
     if not run:
         return {"error": f"No code run '{run_id}'"}
+
+    start = max(0, int(offset or 0))
+    end = start + _GET_CLIP
+    remaining = 0
+    for field in ("stdout", "result"):
+        text = run.get(field) or ""
+        run[field] = text[start:end]
+        remaining = max(remaining, len(text) - end)
+    if start:
+        run["offset"] = start
+    if remaining > 0:
+        run["truncated"] = True
+        run["next_offset"] = end
+        run["note"] = (
+            f"stdout/result are shown from character {start} to {end}; up to "
+            f"{remaining} more follow. Continue with run_code(action='get', "
+            f"run_id='{run_id}', offset={end})."
+        )
     return run
 
 
@@ -126,6 +156,7 @@ async def run_code(
     run_id: str | None = None,
     agent: str | None = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> dict:
     """Dispatch the tool's three actions."""
     if action == "run":
@@ -133,5 +164,5 @@ async def run_code(
     if action == "history":
         return list_runs(agent, limit)
     if action == "get":
-        return get_run(run_id)
+        return get_run(run_id, offset)
     return {"error": f"Unknown action '{action}'. Use run | history | get."}

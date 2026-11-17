@@ -335,3 +335,64 @@ def test_the_run_records_its_provenance(store):
     assert stored["server"] == "prod"
     assert stored["session_key"] == "web:7:slot-1"
     assert stored["duration_ms"] >= 0
+
+
+# ── output is bounded where it is captured (RT-08) ──
+
+
+def test_a_flood_of_output_is_capped_with_a_marker(store):
+    """10 MB printed must not be 10 MB held, stored and handed back."""
+    out = run(
+        "print('START')\n"
+        "for i in range(100_000):\n"
+        "    print('x' * 99)\n"
+        "print('END')\n"
+    )
+
+    cap = code_runner.OUTPUT_HEAD + code_runner.OUTPUT_TAIL
+    assert out["status"] == "ok"
+    assert len(out["stdout"]) < cap + 500
+    assert out["stdout"].startswith("START\n")
+    assert out["stdout"].endswith("END\n")
+    assert "characters of output dropped" in out["stdout"]
+    stored = store.get(out["id"])["stdout"]
+    assert stored == out["stdout"]
+
+
+def test_the_marker_counts_exactly_what_was_dropped():
+    buffer = code_runner._CappedBuffer(head=10, tail=5)
+    for chunk in ("abcdefgh", "ijklmnop", "qrstuvwx", "yz"):
+        assert buffer.write(chunk) == len(chunk)
+
+    value = buffer.getvalue()
+
+    assert value.startswith("abcdefghij")
+    assert value.endswith("vwxyz")
+    assert "11 characters of output dropped" in value  # 26 - 10 - 5
+
+
+def test_one_oversized_write_keeps_its_head_and_its_tail():
+    buffer = code_runner._CappedBuffer(head=4, tail=3)
+    buffer.write("0123456789")
+
+    value = buffer.getvalue()
+
+    assert value.startswith("0123") and value.endswith("789")
+    assert "3 characters of output dropped" in value
+
+
+def test_output_under_the_cap_is_kept_exactly():
+    buffer = code_runner._CappedBuffer(head=10, tail=5)
+    buffer.write("hello ")
+    buffer.write("world")
+    buffer.write("!!")
+
+    assert buffer.getvalue() == "hello world!!"
+
+
+def test_a_huge_result_is_capped_the_same_way(store):
+    out = run("result = 'r' * 2_000_000")
+
+    cap = code_runner.OUTPUT_HEAD + code_runner.OUTPUT_TAIL
+    assert len(out["result"]) < cap + 500
+    assert "characters of output dropped" in out["result"]

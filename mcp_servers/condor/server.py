@@ -659,6 +659,7 @@ async def run_code(
     run_id: str | None = None,
     agent: str | None = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> dict:
     """Run a Python snippet inside Condor and get its output back.
 
@@ -697,8 +698,10 @@ async def run_code(
     Actions:
     - "run" (default): execute `code` and wait for it (requires code)
     - "history": list recent runs, newest first, with label and status
-    - "get": read one past run back in full — code, stdout, result, traceback
-      (requires run_id)
+    - "get": read one past run back — code, stdout, result, traceback
+      (requires run_id). stdout/result come 20,000 characters at a time; a
+      longer run answers "truncated": true with the `next_offset` to pass as
+      `offset` for the next page.
 
     Args:
         action: What to do — execute a snippet or read past ones.
@@ -710,13 +713,20 @@ async def run_code(
         agent: Whose runs to list (for "history"). Defaults to your own; pass
             "all" for every assistant's.
         limit: How many runs to list (for "history"). Default 20.
+        offset: Character offset into stdout/result to read from (for "get").
+            Default 0; pass the `next_offset` a truncated "get" returned.
 
     Returns:
         For "run": {run_id, status: ok|error|timeout, stdout, result, error,
         traceback, report_id, duration_ms}. Long stdout/result are clipped with
-        "truncated": true — read the whole run with action="get".
+        "truncated": true — read the rest with action="get". Output is not
+        unlimited: a run keeps the first 256 KB and the last 64 KB it printed,
+        with a marker where the middle was dropped, so print a summary rather
+        than every row.
     """
-    return await code_tool.run_code(code, action, label, timeout, run_id, agent, limit)
+    return await code_tool.run_code(
+        code, action, label, timeout, run_id, agent, limit, offset
+    )
 
 
 @handle_errors("manage servers")

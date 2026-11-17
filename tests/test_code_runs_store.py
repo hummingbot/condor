@@ -130,6 +130,50 @@ def test_cap_evicts_the_oldest_file_and_its_index_entry(store, tmp_path, monkeyp
     assert (tmp_path / "code_runs" / "code_4_a.json").exists()
 
 
+def test_a_byte_budget_evicts_the_oldest_runs_too(store, tmp_path, monkeypatch):
+    """Count alone let 300 runs at the output cap hold ~100 MB (RT-08)."""
+    monkeypatch.setattr("condor.code_runs.MAX_TOTAL_BYTES", 25_000)
+    for i in range(5):
+        store.save(_run(f"code_{i}_a", created=float(i), stdout="x" * 10_000))
+
+    assert [e["id"] for e in store.list(limit=99)] == ["code_4_a", "code_3_a"]
+    assert not (tmp_path / "code_runs" / "code_2_a.json").exists()
+    assert store.get("code_4_a")["stdout"] == "x" * 10_000
+
+
+def test_the_newest_run_is_kept_even_when_it_alone_is_over_budget(store, monkeypatch):
+    monkeypatch.setattr("condor.code_runs.MAX_TOTAL_BYTES", 100)
+    store.save(_run("code_1_a", stdout="x" * 5_000))
+    store.save(_run("code_2_a", stdout="y" * 5_000))
+
+    assert [e["id"] for e in store.list(limit=99)] == ["code_2_a"]
+    assert store.get("code_2_a") is not None
+
+
+def test_the_size_bookkeeping_stays_out_of_a_listing(store):
+    store.save(_run("code_1_a", stdout="x" * 100))
+
+    assert "bytes" not in store.list()[0]
+
+
+def test_an_index_written_before_sizes_were_tracked_is_measured(tmp_path, monkeypatch):
+    first = CodeRunStore(tmp_path / "code_runs")
+    for i in range(3):
+        first.save(_run(f"code_{i}_a", created=float(i), stdout="x" * 10_000))
+    index_path = tmp_path / "code_runs" / "_index.json"
+    legacy = [
+        {k: v for k, v in e.items() if k != "bytes"}
+        for e in json.loads(index_path.read_text())
+    ]
+    index_path.write_text(json.dumps(legacy))
+
+    monkeypatch.setattr("condor.code_runs.MAX_TOTAL_BYTES", 25_000)
+    reopened = CodeRunStore(tmp_path / "code_runs")
+    reopened.save(_run("code_9_a", created=9.0, stdout="x" * 10_000))
+
+    assert [e["id"] for e in reopened.list(limit=99)] == ["code_9_a", "code_2_a"]
+
+
 def test_index_survives_a_new_store_over_the_same_dir(tmp_path):
     first = CodeRunStore(tmp_path / "code_runs")
     first.save(_run("code_1_a", label="kept"))
