@@ -28,7 +28,7 @@ def _manage_strategy(
     skills: list[str] | None,
     config: dict | None,
 ) -> dict:
-    from condor.agents.strategy import StrategyStore, split_key
+    from condor.agents.strategy import StrategyStore
 
     store = StrategyStore()
 
@@ -146,15 +146,60 @@ def _manage_strategy(
         return {"updated": True, "loop_id": s.key, "name": s.name}
 
     elif action == "delete_strategy":
-        if not loop_id:
-            return {"error": "loop_id is required"}
-        parts = split_key(loop_id)
-        if not parts:
-            return {"error": f"Invalid loop_id '{loop_id}'"}
-        deleted = store.delete(parts[0], parts[1])
-        return {"deleted": deleted}
+        return {"error": _DELETE_IS_REMOTE}
 
     return {"error": f"Unknown loop action: {action}"}
+
+
+# A delete is the one CRUD action this subprocess must not carry out itself
+# (MC-02). Whether a loop is running is known only to the main process -- the
+# engine registry lives there -- and ``StrategyStore.delete`` removes the whole
+# home directory without asking: sessions, journal, learnings, config and state,
+# out from under an engine that keeps trading. The dashboard's route refuses
+# that; the tool wrote the store directly and so had no such refusal.
+_DELETE_IS_REMOTE = (
+    "delete is carried out by the main process, which knows what is running — "
+    "reach it through the tool (manage_loops_tool / manage_agents_tool)"
+)
+
+
+async def _delete_strategy(loop_id: str | None) -> dict:
+    """Delete a loop through the route that refuses a running one."""
+    from condor.agents.strategy import split_key
+
+    if not loop_id:
+        return {"error": "loop_id is required"}
+    parts = split_key(loop_id)
+    if not parts:
+        return {"error": f"Invalid loop_id '{loop_id}'"}
+    try:
+        return await call_main_api(
+            "DELETE", f"/agents/{parts[0]}/strategies/{parts[1]}"
+        )
+    except APIError as exc:
+        return {"error": str(exc)}
+
+
+async def _delete_agent(agent_slug: str | None) -> dict:
+    """Delete an agent through the route that refuses one with a running loop."""
+    if not agent_slug:
+        return {"error": "agent_slug is required"}
+    from condor.agents.strategy import StrategyStore
+
+    # A read, so it stays local: the route would remove the loops with the
+    # agent, and this tool has always made the caller delete them first.
+    owned = StrategyStore().list(agent_slug)
+    if owned:
+        return {
+            "error": (
+                f"Agent '{agent_slug}' still owns {len(owned)} loop(s). "
+                "Delete its loops first."
+            )
+        }
+    try:
+        return await call_main_api("DELETE", f"/agents/{agent_slug}")
+    except APIError as exc:
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -774,19 +819,7 @@ def _manage_agent(
         )
 
     if action == "delete_agent":
-        if not agent_slug:
-            return {"error": "agent_slug is required"}
-        from condor.agents.strategy import StrategyStore
-
-        owned = StrategyStore().list(agent_slug)
-        if owned:
-            return {
-                "error": (
-                    f"Agent '{agent_slug}' still owns {len(owned)} loop(s). "
-                    "Delete its loops first."
-                )
-            }
-        return {"deleted": store.delete(agent_slug)}
+        return {"error": _DELETE_IS_REMOTE}
 
     return {"error": f"Unknown agent action: {action}"}
 
@@ -1393,6 +1426,31 @@ def manage_loops(
         skills,
         config,
     )
+
+
+async def manage_agents_tool(action: str, **kwargs) -> dict:
+    """``manage_agents`` as the tool calls it: local, except what must not be.
+
+    Everything is the synchronous :func:`manage_agents` above, which reads and
+    writes the stores this subprocess shares with the main process. ``delete``
+    is the exception and crosses to the main process (MC-02).
+    """
+    resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
+    if err:
+        return err
+    if resolved == "delete_agent":
+        return await _delete_agent(kwargs.get("agent_slug"))
+    return manage_agents(action, **kwargs)
+
+
+async def manage_loops_tool(action: str, **kwargs) -> dict:
+    """``manage_loops`` as the tool calls it; ``delete`` crosses (MC-02)."""
+    resolved, err = _resolve_action("manage_loops", action, _STRATEGY_ACTIONS)
+    if err:
+        return err
+    if resolved == "delete_strategy":
+        return await _delete_strategy(kwargs.get("loop_id"))
+    return manage_loops(action, **kwargs)
 
 
 async def control_agent(

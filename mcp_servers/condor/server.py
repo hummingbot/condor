@@ -860,8 +860,9 @@ async def manage_agents(
     - "get": Full definition including the AGENT.md body (requires agent_slug).
     - "update": Change AGENT.md / metadata (requires agent_slug + fields to change).
     - "delete": Delete an agent (requires agent_slug; refuses if it still owns
-      loops). Refused outright for an agent the repo ships — mute or edit
-      it instead; an update would bring a deleted one straight back.
+      loops, or while any of its loops is running). Refused outright for an
+      agent the repo ships — mute or edit it instead; an update would bring a
+      deleted one straight back.
     - "publish": ADMIN ONLY. Copy a local agent into the tracked library the
       repo ships (requires agent_slug; `path` narrows it to one skill or
       loop). Every other write lands under .condor/agents/, so this is the
@@ -983,7 +984,7 @@ async def manage_agents(
     Returns:
         Action-specific result dict.
     """
-    return trading_agent.manage_agents(
+    return await trading_agent.manage_agents_tool(
         action,
         agent_slug=agent_slug,
         name=name,
@@ -1045,7 +1046,9 @@ async def manage_loops(
     - "get": Full details including the instructions body (requires loop_id).
     - "create": New loop under an agent (requires agent_slug, name, instructions).
     - "update": Change an existing loop (requires loop_id + fields to change).
-    - "delete": Delete a loop (requires loop_id).
+    - "delete": Delete a loop and everything under it — sessions, journal,
+      learnings, config (requires loop_id). Refused while an instance of it is
+      running: stop it first with `control_agent`.
 
     Args:
         action: What to do with the loop.
@@ -1063,7 +1066,7 @@ async def manage_loops(
     Returns:
         Action-specific result dict.
     """
-    return trading_agent.manage_loops(
+    return await trading_agent.manage_loops_tool(
         action,
         loop_id=loop_id,
         agent_slug=agent_slug,
