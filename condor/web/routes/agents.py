@@ -4453,6 +4453,20 @@ def _reset_ownership_caches(who: str) -> None:
         log.debug("%s: could not reset the fleet map cache", who, exc_info=True)
 
 
+def _require_strategy_server_reach(strategy, user: WebUser, session_dir=None) -> None:
+    """Refuse an ownership repair on a fleet the caller cannot reach (WR-01).
+
+    A claim moves a bot's PnL onto this strategy's book and an unclaim takes it
+    off, so both are statements about the server the strategy trades on. A
+    strategy that names no server has nothing to reach and passes.
+    """
+    server = _strategy_server(strategy.home, strategy.default_config, session_dir)
+    if server and not _may_use_strategy_server(
+        server, _strategy_principal(strategy, user)
+    ):
+        raise HTTPException(status_code=403, detail="No access")
+
+
 @router.post("/{slug}/strategies/{sslug}/claim-bot")
 async def claim_bot(
     slug: str,
@@ -4490,6 +4504,7 @@ async def claim_bot(
     from condor.agents.config import load_full_config
     from condor.agents.journal import iter_session_dirs
     from condor.agents.ownership import (
+        LEDGER_FILENAME,
         BotLedger,
         bot_namespace,
         declared_names,
@@ -4498,6 +4513,7 @@ async def claim_bot(
     )
 
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
 
     base = strip_deploy_suffix((req.bot_name or "").strip())
     if not base:
@@ -4519,20 +4535,26 @@ async def claim_bot(
             "Start it once, then claim.",
         )
 
+    _require_strategy_server_reach(strategy, user, session_dir)
+
     # A claim is the same authority that disowns, so it outranks a standing
     # disown rather than being silently skipped by the next adoption pass.
     reown(strategy.home, base)
 
     namespace = bot_namespace(slug, sslug)
     config = load_full_config(strategy.home, strategy.default_config)
-    # ``enforced=False``: the claim is the evidence, and the namespace rule is
-    # exactly what a hand-deployed bot fails. ``declared`` carries the name so a
-    # later reopen of this ledger still reads it as owned.
+    # The claim is the evidence, and the namespace rule is exactly what a
+    # hand-deployed bot fails — but that intent travels in ``declared`` (and in
+    # the recorded entry itself), which is what makes a later reopen of this
+    # ledger still read the bot as owned. The session's own ``enforced`` is not
+    # this route's to restate: ``None`` recovers what the session wrote, so a
+    # claim cannot rewrite a controller-mode session as unenforced (WR-01). A
+    # session with no ledger yet has nothing to recover and stays unenforced.
     ledger = BotLedger(
         namespace,
         session_dir,
         declared=[*declared_names(config, namespace), base],
-        enforced=False,
+        enforced=None if (session_dir / LEDGER_FILENAME).exists() else False,
     )
     ledger.adopt(base, req.since or None)
     for live in _live_ledgers(slug, sslug, session_dir):
@@ -4576,10 +4598,13 @@ async def unclaim_bot(
     from condor.agents.ownership import disown, strip_deploy_suffix
 
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
 
     base = strip_deploy_suffix((req.bot_name or "").strip())
     if not base:
         raise HTTPException(status_code=400, detail="No bot name given")
+
+    _require_strategy_server_reach(strategy, user)
 
     result = disown(strategy.home, base)
     live = sum(1 for ledger in _live_ledgers(slug, sslug) if ledger.forget(base))
