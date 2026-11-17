@@ -31,9 +31,10 @@ import {
   parseExecutorsKey,
   queryClient,
 } from "./queryClient";
-import type {
-  ControllerPerformanceHistoryResponse,
-  ControllerPerformanceSnapshot,
+import {
+  reportUnauthorized,
+  type ControllerPerformanceHistoryResponse,
+  type ControllerPerformanceSnapshot,
 } from "./api";
 import { CondorWebSocket } from "./websocket";
 
@@ -380,6 +381,11 @@ function openSocket(token: string): CondorWebSocket {
     resyncPerformanceHistories();
     for (const handler of connectHandlers) handler();
   });
+
+  // The socket has given up on a token the server refuses. Hand it to the same
+  // handler a REST 401 reaches: it ends the session, or claims a new one in
+  // local mode — and a new token re-acquires the socket (see `acquireSocket`).
+  ws.onAuthFailure(() => void reportUnauthorized());
 
   // The candle store reads candle frames straight off this socket.
   candleStore.attachWs(ws);
