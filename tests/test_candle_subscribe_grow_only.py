@@ -146,8 +146,107 @@ def test_duration_change_grow_resizes_backfills_and_rebroadcasts(mgr):
     mgr._backfill_candles = fake_backfill
     mgr.broadcast = fake_broadcast
 
-    run(mgr._handle_candle_duration_change(object(), CHANNEL, THIRTY_DAYS))
+    async def scenario():
+        await mgr._handle_candle_duration_change(object(), CHANNEL, THIRTY_DAYS)
+        await asyncio.gather(*mgr._oneshot_tasks)  # the tracked backfill
+
+    run(scenario())
 
     assert buf.max_size == 30 * 1440
     assert backfilled == [CHANNEL]
     assert len(broadcast) == 1 and len(broadcast[0]) == 100
+
+
+# ── set_candle_duration is untrusted input (WS-09) ──
+
+
+def test_duration_change_returns_before_the_backfill_completes(mgr):
+    """The backfill is a REST round-trip; the socket's receive loop must not wait."""
+    run(mgr._handle_candle_subscribe(object(), CHANNEL, ONE_HOUR))
+    release = None
+    broadcast: list = []
+
+    async def slow_backfill(channel):
+        await release.wait()
+
+    async def fake_broadcast(channel, data):
+        broadcast.append(data["data"])
+
+    mgr._backfill_candles = slow_backfill
+    mgr.broadcast = fake_broadcast
+
+    async def scenario():
+        nonlocal release
+        release = asyncio.Event()
+        mgr._candle_buffers[CHANNEL].upsert_many(_candles(100))
+        await asyncio.wait_for(
+            mgr._handle_candle_duration_change(object(), CHANNEL, THIRTY_DAYS), 1
+        )
+        assert broadcast == [], "the snapshot went out before the backfill"
+        release.set()
+        await asyncio.gather(*mgr._oneshot_tasks)
+
+    run(scenario())
+
+    assert len(broadcast) == 1
+
+
+class _Conn:
+    user_id = 7
+
+    def __init__(self, *channels):
+        self.channels = set(channels)
+
+
+def _set_duration(mgr, conn, channel, duration):
+    import json
+
+    called: list = []
+
+    async def record(conn, channel, duration):
+        called.append((channel, duration))
+
+    mgr._handle_candle_duration_change = record
+    msg = {"action": "set_candle_duration", "channel": channel, "duration": duration}
+    run(mgr.handle_message(conn, json.dumps(msg)))
+    return called
+
+
+def test_set_candle_duration_is_ignored_for_a_channel_not_subscribed(mgr):
+    """Subscribing is the server-access gate; this action must not bypass it."""
+    other = "candles:someone-elses:binance:BTC-USDT:1s"
+    mgr._candle_buffers[other] = _CandleBuffer("1s", ONE_HOUR)
+
+    assert _set_duration(mgr, _Conn(CHANNEL), other, THIRTY_DAYS) == []
+    assert mgr._candle_buffers[other].max_size == ONE_HOUR
+
+
+def test_set_candle_duration_still_works_for_a_subscribed_channel(mgr):
+    assert _set_duration(mgr, _Conn(CHANNEL), CHANNEL, THIRTY_DAYS) == [
+        (CHANNEL, THIRTY_DAYS)
+    ]
+
+
+@pytest.mark.parametrize("absurd", [1e12, "1e300", 10**40])
+def test_an_absurd_duration_is_clamped(mgr, absurd):
+    from condor.web.streams.candles import (
+        _MAX_CANDLE_BUFFER_SIZE,
+        _MAX_CANDLE_DURATION,
+        _coerce_duration,
+    )
+
+    assert _coerce_duration(absurd) == _MAX_CANDLE_DURATION
+    assert _set_duration(mgr, _Conn(CHANNEL), CHANNEL, absurd) == [
+        (CHANNEL, _MAX_CANDLE_DURATION)
+    ]
+    # ...and on subscribe, which accepts the same field.
+    one_second = "candles:srv:binance:SOL-USDC:1s"
+    run(mgr._handle_candle_subscribe(object(), one_second, absurd))
+    assert mgr._candle_buffers[one_second].max_size == _MAX_CANDLE_BUFFER_SIZE
+
+
+def test_an_infinite_duration_is_ignored_not_raised():
+    from condor.web.streams.candles import _coerce_duration
+
+    assert _coerce_duration(float("inf")) is None
+    assert _coerce_duration("nan") is None

@@ -88,21 +88,30 @@ def _gecko_poll_interval(interval_sec: int) -> int:
 _CANDLE_BUFFER_IDLE_TTL = 600  # 10 minutes
 
 
+# Ceilings on what a client can ask a shared candle buffer to hold. The
+# dashboard's longest window is 30 days; the backfill fetches at most 5000
+# candles whatever the buffer size. Without them one message could size a
+# buffer to ~1e12 slots, which eviction then never trims.
+_MAX_CANDLE_DURATION = 365 * 86400
+_MAX_CANDLE_BUFFER_SIZE = 100_000
+
+
 def _coerce_duration(value: object) -> int | None:
     """Coerce a client-supplied candle duration to a positive int (seconds).
 
     WS messages are untrusted input: a non-numeric value must not raise, or the
     ValueError would escape handle_message and tear down the client's entire
-    multiplexed connection. Returns None for missing/invalid/non-positive values.
+    multiplexed connection. Returns None for missing/invalid/non-positive values,
+    and clamps anything longer than ``_MAX_CANDLE_DURATION``.
     """
     if value is None or isinstance(value, bool):
         return None
     try:
         duration = int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning("Ignoring invalid candle duration from client: %r", value)
         return None
-    return duration if duration > 0 else None
+    return min(duration, _MAX_CANDLE_DURATION) if duration > 0 else None
 
 
 def parse_candle_channel(channel: str) -> tuple[str, str, str, str, str | None] | None:
@@ -144,7 +153,7 @@ class _CandleBuffer:
         """Resize buffer for the given duration. Returns the new max size."""
         interval_sec = _INTERVAL_SECONDS.get(self.interval, 60)
         needed = math.ceil(duration_seconds / interval_sec)
-        new_max = max(needed, 200)  # minimum 200
+        new_max = min(max(needed, 200), _MAX_CANDLE_BUFFER_SIZE)  # minimum 200
         old_max = self._max_size
         self._max_size = new_max
         self.last_accessed = time.monotonic()
@@ -169,7 +178,10 @@ class _CandleBuffer:
         unchanged when the request would shrink the buffer.
         """
         interval_sec = _INTERVAL_SECONDS.get(self.interval, 60)
-        needed = max(math.ceil(duration_seconds / interval_sec), 200)
+        needed = min(
+            max(math.ceil(duration_seconds / interval_sec), 200),
+            _MAX_CANDLE_BUFFER_SIZE,
+        )
         if needed <= self._max_size:
             return self._max_size
         return self.set_duration(duration_seconds)
@@ -310,6 +322,10 @@ class CandleStreamsMixin:
 
         Only grows the buffer — never shrinks. The frontend manages its own
         display window; the backend just ensures enough history is buffered.
+
+        A backfill is a REST round-trip, so it runs as a tracked one-shot task
+        (as the subscribe path's does) rather than inside the caller's socket
+        receive loop; the snapshot is re-broadcast when it lands.
         """
         buf = self._candle_buffers.get(channel)
         if buf is None:
@@ -319,8 +335,24 @@ class CandleStreamsMixin:
         if buf.grow_to(duration) <= old_max:
             return
         if buf.needs_backfill:
-            await self._backfill_candles(channel)
-        # Broadcast updated snapshot to ALL subscribers on this channel
+            self._oneshot_tasks.track(
+                asyncio.create_task(
+                    self._backfill_and_rebroadcast(channel),
+                    name=f"backfill:{channel}",
+                )
+            )
+            return
+        await self._rebroadcast_candles(channel)
+
+    async def _backfill_and_rebroadcast(self, channel: str) -> None:
+        await self._backfill_candles(channel)
+        await self._rebroadcast_candles(channel)
+
+    async def _rebroadcast_candles(self, channel: str) -> None:
+        """Broadcast the buffered snapshot to ALL subscribers on the channel."""
+        buf = self._candle_buffers.get(channel)
+        if buf is None:
+            return
         sorted_candles = buf.get_sorted()
         if sorted_candles:
             await self.broadcast(channel, {"type": "candles", "data": sorted_candles})

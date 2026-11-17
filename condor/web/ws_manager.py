@@ -338,8 +338,12 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
         elif action == "set_candle_duration" and channel:
             # Frontend changed duration without re-subscribing
+            # Only for a channel this connection holds: subscribing is where
+            # server access is checked, and without that gate any approved
+            # user could resize — and trigger a backfill through — the shared
+            # buffer of a server they cannot access.
             duration = _coerce_duration(msg.get("duration"))
-            if channel.startswith("candles:") and duration:
+            if channel.startswith("candles:") and duration and channel in conn.channels:
                 await self._handle_candle_duration_change(conn, channel, duration)
 
     # -- SDS bridge --
