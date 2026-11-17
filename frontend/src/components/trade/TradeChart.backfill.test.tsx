@@ -228,3 +228,43 @@ describe("TradeChart REST backfill", () => {
     );
   });
 });
+
+/**
+ * The backfill reaches only as far back as the chart will keep (FP-02).
+ *
+ * 1m × 30d asked upstream for 43,200 candles and the store evicted 95% of them
+ * on arrival. The pages step the interval up before it comes to that; a chart
+ * handed a too-fine interval anyway clamps the request and says so.
+ */
+describe("TradeChart range vs the candle budget", () => {
+  const DAY = 86400;
+  const startOf = (call: unknown[]) => call[5] as number;
+
+  it("asks for the whole range when it fits the budget", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    await render(false, { lookbackSeconds: 3 * DAY });
+
+    expect(store.setDuration).toHaveBeenLastCalledWith(3 * DAY);
+    const start = startOf(apiState.getCandles.mock.calls[0]);
+    expect(before - start).toBeGreaterThanOrEqual(3 * DAY);
+    expect(before - start).toBeLessThan(3 * DAY + 5);
+    expect(container.querySelector("[data-range-clamped]")).toBeNull();
+  });
+
+  it("clamps a 30-day range of 1m candles to the week it can keep, and says so", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    await render(false, { lookbackSeconds: 30 * DAY });
+
+    expect(store.setDuration).toHaveBeenLastCalledWith(7 * DAY);
+    const start = startOf(apiState.getCandles.mock.calls[0]);
+    expect(before - start).toBeLessThan(7 * DAY + 5);
+    expect(container.querySelector("[data-range-clamped]")?.textContent).toContain("7d of 30d at 1m");
+  });
+
+  it("does not clamp the same range at an interval that fits it", async () => {
+    await render(false, { lookbackSeconds: 30 * DAY, interval: "5m" });
+
+    expect(store.setDuration).toHaveBeenLastCalledWith(30 * DAY);
+    expect(container.querySelector("[data-range-clamped]")).toBeNull();
+  });
+});

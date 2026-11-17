@@ -9,6 +9,7 @@ import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/t
 import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
 import { roundToPricePrecision } from "@/lib/formatters";
+import { keptLookbackSeconds } from "@/lib/gridExecutor";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
 import { usePriceLineDrag } from "./usePriceLineDrag";
 
@@ -73,6 +74,13 @@ function rangeTail(stored: CandleData[], lookbackSeconds: number): CandleData[] 
   const cutoff = stored[stored.length - 1].timestamp - lookbackSeconds;
   const start = stored.findIndex((c) => c.timestamp >= cutoff);
   return start <= 0 ? stored : stored.slice(start);
+}
+
+/** `604800` → `"7d"`: a range, in the unit the picker names it in. */
+function formatSpan(seconds: number): string {
+  if (seconds >= 86400) return `${+(seconds / 86400).toFixed(1)}d`;
+  if (seconds >= 3600) return `${+(seconds / 3600).toFixed(1)}h`;
+  return `${Math.round(seconds / 60)}m`;
 }
 
 function toBar(c: CandleData) {
@@ -277,6 +285,9 @@ export function TradeChart({
     });
   }, [executorOverlays, minCandleTime, selectedExecutorId]);
 
+  // How much of the picked range this interval can actually show.
+  const keptSeconds = keptLookbackSeconds(lookbackSeconds, interval);
+
   // ── REST backfill on pair/interval/lookback change ──
   // The dependency array below is the whole gate: React re-runs this only when
   // one of those six changes. A ref remembering the last key would add nothing
@@ -285,10 +296,14 @@ export function TradeChart({
   // that outlives the remount would make the second pass a no-op, leaving the
   // chart with no history at all.
   useEffect(() => {
-    setDuration(lookbackSeconds);
+    // Asked for, and kept, only as far back as the candle budget reaches at
+    // this interval: a longer request downloads history the store would evict
+    // on arrival. The pages step the interval up so this rarely clamps; when
+    // it does, the chip over the chart says how much of the range is drawn.
+    setDuration(keptSeconds);
 
     let cancelled = false;
-    const startTime = Math.floor(Date.now() / 1000) - lookbackSeconds;
+    const startTime = Math.floor(Date.now() / 1000) - keptSeconds;
 
     const fetchWithRetry = (attempt: number) => {
       if (cancelled) return;
@@ -306,7 +321,7 @@ export function TradeChart({
     fetchWithRetry(0);
 
     return () => { cancelled = true; };
-  }, [server, connector, pair, interval, poolAddress, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [server, connector, pair, interval, poolAddress, keptSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Initialize chart ONCE ──
   useEffect(() => {
@@ -1188,6 +1203,15 @@ export function TradeChart({
           onPointerUp={handlePointerUp}
           onPointerCancel={drag.onPointerCancel}
         />
+        {keptSeconds < lookbackSeconds && (
+          <div
+            data-range-clamped
+            className="pointer-events-none absolute left-2 top-2 z-10 rounded border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]"
+          >
+            Showing the last {formatSpan(keptSeconds)} of {formatSpan(lookbackSeconds)} at {interval} — pick a
+            coarser interval for the full range
+          </div>
+        )}
         {/* Measure box overlay — pure DOM, never touches chart series */}
         <div
           ref={measureBoxRef}

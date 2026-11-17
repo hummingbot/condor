@@ -37,7 +37,7 @@ import {
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
-import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
+import { LOOKBACK_OPTIONS, intervalFloor, resolveChartInterval } from "@/lib/gridExecutor";
 import { executorsQuery } from "@/lib/queryClient";
 import { DEX_DEPTH_COLLAPSED_KEY } from "@/lib/sessionState";
 
@@ -80,6 +80,10 @@ export function DexPool() {
   // costs a third of what 5m did and shows twice the history.
   const [interval, setIntervalValue] = useState("15m");
   const [lookbackSeconds, setLookbackSeconds] = useState(7 * 86400);
+  // The interval the chart draws: the picked one, stepped up when the window
+  // would not fit the candle budget at it (1m × 30d is 43,200 candles).
+  const intervalMin = intervalFloor(lookbackSeconds, DEX_INTERVALS);
+  const chartInterval = resolveChartInterval(interval, lookbackSeconds, DEX_INTERVALS);
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
@@ -495,19 +499,24 @@ export function DexPool() {
       <div className="flex shrink-0 items-center gap-4 border-b border-[var(--color-border)] px-3 py-1.5">
         <div className="flex items-center gap-1">
           <span className="text-[11px] text-[var(--color-text-muted)]">Interval</span>
-          {DEX_INTERVALS.map((iv) => (
-            <button
-              key={iv}
-              onClick={() => setIntervalValue(iv)}
-              className={`rounded px-1.5 py-0.5 text-[11px] transition-colors ${
-                interval === iv
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              {iv}
-            </button>
-          ))}
+          {DEX_INTERVALS.map((iv) => {
+            const tooFine = DEX_INTERVALS.indexOf(iv) < DEX_INTERVALS.indexOf(intervalMin);
+            return (
+              <button
+                key={iv}
+                onClick={() => setIntervalValue(iv)}
+                disabled={tooFine}
+                title={tooFine ? `Too fine for this window — ${intervalMin} is the finest it can be drawn at` : undefined}
+                className={`rounded px-1.5 py-0.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  chartInterval === iv
+                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                }`}
+              >
+                {iv}
+              </button>
+            );
+          })}
         </div>
         <div className="h-4 w-px bg-[var(--color-border)]" />
         <div className="flex items-center gap-1">
@@ -541,13 +550,13 @@ export function DexPool() {
           <div className="flex min-h-0 flex-1">
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             <TradeChart
-              key={`${network}:${pool.address}:${interval}`}
+              key={`${network}:${pool.address}:${chartInterval}`}
               server={server}
               connector={network}
               pair={pair}
               // The pool the user opened, not the deepest pool for the pair.
               poolAddress={pool.address}
-              interval={interval}
+              interval={chartInterval}
               lookbackSeconds={lookbackSeconds}
               pricePrecision={pricePrecision}
               startPrice={active.chartProps.startPrice}
