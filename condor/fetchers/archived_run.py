@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import OrderedDict
 from typing import Any
 
@@ -62,6 +63,17 @@ class ArchivedRunUnavailable(Exception):
 _PERFORMANCE_CACHE_MAX = 32
 _performance_cache: OrderedDict[tuple[str, str], ArchivedBotPerformance] = OrderedDict()
 
+# The file is immutable; the *computed result* is not. It also depends on
+# whether the trade walk completed, whether the executor fetch succeeded and
+# whether every quote could be priced — and a result built on one of those
+# failing used to be cached under the same no-TTL key, pinning wrong numbers
+# until Condor restarted. A degraded result is kept only this long (monotonic
+# expiry per key): long enough that the page's follow-up requests share it
+# instead of each re-walking the trade table, short enough that the next look
+# gets another try.
+_DEGRADED_TTL = 60.0
+_degraded_until: dict[tuple[str, str], float] = {}
+
 # In-flight fetches keyed like the cache, so concurrent cold-cache requests for
 # the same archived bot share one backend walk.
 _performance_inflight = SingleFlight()
@@ -75,22 +87,50 @@ _TRADE_PAGE_ATTEMPTS = 3
 def _cache_get(cache_key: tuple[str, str]) -> ArchivedBotPerformance | None:
     """Return the cached entry, marking it most-recently-used."""
     perf = _performance_cache.get(cache_key)
-    if perf is not None:
-        _performance_cache.move_to_end(cache_key)
+    if perf is None:
+        return None
+    expires = _degraded_until.get(cache_key)
+    if expires is not None and time.monotonic() >= expires:
+        del _performance_cache[cache_key]
+        del _degraded_until[cache_key]
+        return None
+    _performance_cache.move_to_end(cache_key)
     return perf
 
 
-def _cache_put(cache_key: tuple[str, str], perf: ArchivedBotPerformance) -> None:
-    """Store an entry, evicting the least-recently-used past the cap."""
+def _cache_put(
+    cache_key: tuple[str, str], perf: ArchivedBotPerformance, *, degraded: bool = False
+) -> None:
+    """Store an entry, evicting the least-recently-used past the cap.
+
+    A ``degraded`` entry expires after ``_DEGRADED_TTL`` instead of living as
+    long as the process does.
+    """
     _performance_cache[cache_key] = perf
     _performance_cache.move_to_end(cache_key)
+    if degraded:
+        _degraded_until[cache_key] = time.monotonic() + _DEGRADED_TTL
+    else:
+        _degraded_until.pop(cache_key, None)
     while len(_performance_cache) > _PERFORMANCE_CACHE_MAX:
-        _performance_cache.popitem(last=False)
+        evicted, _ = _performance_cache.popitem(last=False)
+        _degraded_until.pop(evicted, None)
 
 
 def cached_run(name: str, db_path: str) -> ArchivedBotPerformance | None:
     """The warm entry for this run, or ``None``. Never fetches."""
     return _cache_get((name, db_path))
+
+
+def run_is_degraded(name: str, db_path: str) -> bool:
+    """Whether the cached entry for this run was built on a failed input.
+
+    True when the trade walk stopped early, the executor fetch failed or a
+    quote could not be priced. Such a result is worth showing now and must
+    never be persisted anywhere as the run's settled figures.
+    """
+    cache_key = (name, db_path)
+    return cache_key in _degraded_until and cache_key in _performance_cache
 
 
 def extract_bot_name(db_path: str) -> str:
@@ -320,14 +360,16 @@ async def _fetch_performance(
 
     # Fetch executors
     raw_executors: list[dict] = []
+    executors_complete = True
     try:
         exec_resp = await client.archived_bots.get_database_executors(db_path)
         if exec_resp and isinstance(exec_resp, dict):
             raw_executors = exec_resp.get("executors", [])
         elif exec_resp and isinstance(exec_resp, list):
             raw_executors = exec_resp
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Archived executor fetch for %s failed: %s", db_path, e)
+        executors_complete = False
 
     # Normalize executors to consistent field names
     executors = _normalize_executors(raw_executors)
@@ -440,6 +482,8 @@ async def _fetch_performance(
         converted=quote_rates.converted,
     )
 
-    # Cache full result (executors included — the executors route pages out of it)
-    _cache_put(cache_key, result)
+    # Cache full result (executors included — the executors route pages out of
+    # it). Only a result every input answered for is kept for good.
+    degraded = not (trades_complete and executors_complete and quote_rates.converted)
+    _cache_put(cache_key, result, degraded=degraded)
     return result
