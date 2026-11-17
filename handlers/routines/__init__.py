@@ -50,8 +50,14 @@ SCHEDULE_PRESETS = [
 
 DAILY_PRESETS = ["06:00", "09:00", "12:00", "18:00", "21:00"]
 
-# Global storage for continuous routine tasks (not persisted)
-_continuous_tasks: dict[str, asyncio.Task] = {}  # instance_id -> Task
+# Global storage for continuous routine tasks (not persisted).
+# Taken back from the module's own globals when it is re-executed: main.py's
+# hot reload runs ``importlib.reload`` on this module, and a fresh ``{}`` here
+# would orphan every running task — Stop would find nothing to cancel, drop the
+# instance and report success while the routine kept running (ST-04).
+_continuous_tasks: dict[str, asyncio.Task] = globals().get(
+    "_continuous_tasks", {}
+)  # instance_id -> Task
 
 
 # =============================================================================
