@@ -842,7 +842,8 @@ async def create_position_executor(
         amount: Position size in BASE currency (see above).
         entry_price: Limit entry price. OMIT for a market entry.
         leverage: Leverage multiplier. Backend default 1.
-        stop_loss: Stop-loss as a decimal fraction, e.g. 0.02 = 2%.
+        stop_loss: Stop-loss as a decimal fraction strictly between 0 and 1, e.g.
+            0.02 = 2%. A whole-number percent such as 2 is rejected.
         take_profit: Take-profit as a decimal fraction, e.g. 0.03 = 3%.
         time_limit: Maximum position duration in SECONDS.
         trailing_stop_activation_price: Price delta at which the trailing stop arms.
@@ -1095,7 +1096,8 @@ async def create_dca_executor(
         prices: Price for each level, same length as amounts_quote, e.g. [50000, 48000, 46000].
         leverage: Leverage multiplier. Backend default 1.
         take_profit: Take-profit as a decimal fraction, e.g. 0.03 = 3%.
-        stop_loss: Stop-loss as a decimal fraction, e.g. 0.05 = 5%.
+        stop_loss: Stop-loss as a decimal fraction strictly between 0 and 1, e.g.
+            0.05 = 5%. A whole-number percent such as 5 is rejected.
         time_limit: Maximum duration in SECONDS.
         trailing_stop_activation_price: Price delta at which the trailing stop arms.
             Only takes effect together with trailing_stop_trailing_delta.

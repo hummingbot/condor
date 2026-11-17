@@ -210,6 +210,56 @@ def _amount(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def _usd_amount(value: Any) -> float | None:
+    """The USD value of a ``'$100'``-style amount, or ``None`` if it is not one.
+
+    ``create_order_executor`` takes its amount in base currency OR as a
+    ``$``-prefixed USD value the backend converts at execution. ``_amount`` reads
+    the second form as "not a number", which made both preflights pass it by
+    default — the first example in the tool's own docstring was never checked
+    against the venue minimum or the balance.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("$"):
+        return None
+    return _amount(text[1:].strip())
+
+
+def _require_positive(name: str, value: Any, unit: str) -> None:
+    """Refuse a zero or negative money parameter, naming it.
+
+    The backend accepts these and the executor then either fails at start or —
+    for a negative size on some venues — is read as the opposite side.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or _amount(value) is None:
+        raise ValueError(f"{name} must be greater than 0 ({unit}), got {value!r}")
+
+
+def _require_stop_loss_fraction(value: float | None) -> None:
+    """Refuse a stop-loss that is not a fraction strictly between 0 and 1.
+
+    ``stop_loss=2`` meant as 2% is read as 200% — a stop that can never trigger —
+    and was accepted without a word.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not (0 < value < 1):
+        hint = (
+            f" For a {value:g}% stop pass {value / 100:g}."
+            if not isinstance(value, bool) and 1 <= value <= 100
+            else ""
+        )
+        raise ValueError(
+            "stop_loss is a decimal FRACTION of the entry price, strictly between "
+            f"0 and 1 (0.02 = 2%), got {value!r}. A value of 1 or more is a stop "
+            f"of 100% or more, which never triggers.{hint}"
+        )
+
+
 def usd(value: float) -> str:
     return f"${value:,.2f}"
 
@@ -263,6 +313,30 @@ async def _base_amount_violation(
     """Check a base-denominated amount (position, order) against both minimums."""
     amount = _amount(config.get("amount"))
     if amount is None:
+        usd_value = _usd_amount(config.get("amount"))
+        if usd_value is None:
+            return None
+        # A '$' amount IS its notional, so the notional minimum needs no price.
+        if min_notional is not None and usd_value < min_notional:
+            return (
+                f"Order notional {usd(usd_value)} is below {connector}'s minimum "
+                f"of {usd(min_notional)} for {pair}. Increase the amount to at "
+                f"least '${min_notional:g}'."
+            )
+        if min_order_size is None:
+            return None
+        price = await reference_price(client, connector, pair, config)
+        if price is None:
+            return None
+        base_amount = usd_value / price
+        if base_amount < min_order_size:
+            base = pair.split("-")[0]
+            return (
+                f"Order size {base_amount:.8g} {base} ({usd(usd_value)} at a price "
+                f"of {price:g}) is below {connector}'s minimum of "
+                f"{min_order_size:g} {base} for {pair}. Increase the amount to at "
+                f"least '${min_order_size * price:.8g}'."
+            )
         return None
 
     if min_order_size is not None and amount < min_order_size:
@@ -708,7 +782,20 @@ async def _required_spend(
     if executor_type in ("position_executor", "order_executor"):
         amount = _amount(config.get("amount"))
         if amount is None:
-            return None
+            usd_value = _usd_amount(config.get("amount"))
+            if usd_value is None:
+                return None
+            if buy:
+                # Spent in the quote currency, at face value.
+                return quote, usd_value, f"a {usd(usd_value)} buy"
+            price = await reference_price(client, connector, pair, config)
+            if price is None:
+                return None
+            return (
+                base,
+                usd_value / price,
+                f"a {usd(usd_value)} sell of {base} at {price:g}",
+            )
         if not buy:
             return base, amount, f"a {amount:g} {base} sell"
         price = await reference_price(client, connector, pair, config)
@@ -805,7 +892,14 @@ async def create_position_executor(
     controller_id: str | None = None,
     save_as_default: bool = False,
 ) -> dict[str, Any]:
-    """Open a directional position with triple-barrier exits."""
+    """Open a directional position with triple-barrier exits.
+
+    Raises ``ValueError`` on a size that is not positive, or a stop-loss that is
+    not a fraction: the backend accepts both.
+    """
+    _require_positive("amount", amount, "BASE currency")
+    _require_stop_loss_fraction(stop_loss)
+
     config = _compact(
         {
             "connector_name": connector_name,
@@ -877,6 +971,10 @@ async def create_grid_executor(
     the backend accepts an inverted grid and it simply never fills, so the invariant the
     guide states in prose is checked here where the caller can still fix it.
     """
+    _require_positive("total_amount_quote", total_amount_quote, "QUOTE currency")
+    _require_positive(
+        "min_order_amount_quote", min_order_amount_quote, "QUOTE currency"
+    )
     if side == 1 and not (limit_price < start_price < end_price):
         raise ValueError(
             "LONG grid (side=1) requires limit_price < start_price < end_price, got "
@@ -965,6 +1063,13 @@ async def create_dca_executor(
         )
     if not amounts_quote:
         raise ValueError("amounts_quote must contain at least one level")
+    for index, level in enumerate(amounts_quote, start=1):
+        _require_positive(
+            f"amounts_quote[{index - 1}] (level {index})", level, "QUOTE currency"
+        )
+    for index, level_price in enumerate(prices, start=1):
+        _require_positive(f"prices[{index - 1}] (level {index})", level_price, "price")
+    _require_stop_loss_fraction(stop_loss)
 
     config = _compact(
         {
@@ -1024,6 +1129,12 @@ async def create_order_executor(
     with no price, or a LIMIT_CHASER with no chaser config, is rejected by the backend
     only after a round trip.
     """
+    if _amount(amount) is None and _usd_amount(amount) is None:
+        raise ValueError(
+            "amount must be a positive number in BASE currency such as '0.5', or a "
+            f"USD value written with a leading '$' such as '$100', got {amount!r}. "
+            "No thousands separators."
+        )
     if execution_strategy in ("LIMIT", "LIMIT_MAKER") and price is None:
         raise ValueError(f"execution_strategy={execution_strategy} requires a price")
     if execution_strategy == "LIMIT_CHASER" and (
@@ -1093,6 +1204,9 @@ async def create_lp_executor(
         raise ValueError(
             f"lower_price must be below upper_price, got {lower_price} >= {upper_price}"
         )
+    for name, value in (("base_amount", base_amount), ("quote_amount", quote_amount)):
+        if value is not None and (isinstance(value, bool) or value < 0):
+            raise ValueError(f"{name} cannot be negative, got {value!r}")
     if not (base_amount or quote_amount):
         raise ValueError(
             "an LP position needs funding — give base_amount, quote_amount, or both"
