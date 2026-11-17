@@ -1010,8 +1010,80 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
             logger.warning(f"Failed to send message to chat {chat_id}: {e}")
 
 
+_INSTANCE_LOCK_FILENAME = "condor.lock"
+# Held for the life of the process and never read again: the lock is the open
+# descriptor, so the handle has to outlive main(). Python opens descriptors
+# close-on-exec, which is what lets a /update re-exec take it afresh.
+_instance_lock_handle = None
+
+
+def _acquire_instance_lock() -> bool:
+    """Take the one-Condor-per-runtime-root lock. False when another holds it.
+
+    Everything main() does next assumes it is alone: the ACP reaper kills every
+    process carrying this bot's marker, boot reconciliation rewrites any status
+    file under a foreign boot id as crashed, and polling competes for updates.
+    A second ``python main.py`` therefore tore down the live instance's agents
+    before failing on the port bind. The tmux check behind ``make run`` cannot
+    see a Condor started any other way; this can.
+
+    Same shape as the update run lock (``condor.updates.run``): advisory, and
+    refusing only when someone actually holds it. A filesystem with no flock
+    boots as before rather than being locked out by the safety net.
+    """
+    global _instance_lock_handle
+    if _instance_lock_handle is not None:
+        return True
+    path = paths.runtime_root() / _INSTANCE_LOCK_FILENAME
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - no flock on this platform
+        return True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # "a+" so losing the race does not wipe the holder's pid at open.
+        handle = path.open("a+")
+    except OSError:
+        logger.warning("Could not open %s; starting without the instance lock", path)
+        return True
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            handle.seek(0)
+            holder = handle.read().strip()
+        except OSError:
+            holder = ""
+        handle.close()
+        logger.error(
+            "Condor is already running against %s%s. Stop it first (make stop) "
+            "— a second instance would kill its agent sessions.",
+            path.parent,
+            f" (pid {holder})" if holder else "",
+        )
+        return False
+    except OSError:
+        handle.close()
+        logger.warning("Could not lock %s; starting without the instance lock", path)
+        return True
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+    except OSError:
+        pass
+    _instance_lock_handle = handle
+    return True
+
+
 def main() -> None:
     """Run the bot."""
+    # First, before anything that assumes this is the only Condor here — the
+    # reaper below most of all.
+    if not _acquire_instance_lock():
+        raise SystemExit(1)
+
     # Refuse to start on a configuration that cannot mean what it says: telegram
     # mode (the default) with no token used to surface as an InvalidToken
     # traceback from inside PTB, and must never be quietly read as "local mode".
@@ -1100,6 +1172,23 @@ def _web_server_config(web_app):
         log_level="info",
         access_log=False,
     )
+
+
+async def _drain_web_task(web_task: "asyncio.Future") -> None:
+    """Wait for uvicorn to finish, whatever it finished with.
+
+    ``BaseException`` on purpose: uvicorn reports a failed bind with
+    ``sys.exit(1)``, and a ``SystemExit`` out of this await used to skip every
+    shutdown step after it — leaving the engines and ACP children that
+    ``startup()`` had just started with nothing to stop them. The exit itself is
+    not lost: the loop re-raises it from ``asyncio.run`` once the steps are done.
+    """
+    try:
+        await web_task
+    except Exception:
+        logger.exception("Web server crashed during shutdown")
+    except BaseException as exc:
+        logger.error("Web server exited (%r); running the shutdown steps", exc)
 
 
 async def _run_dual(application: Application) -> None:
@@ -1308,10 +1397,7 @@ async def _run_dual(application: Application) -> None:
         logger.info("Shutting down...")
         stop_task.cancel()
         server.should_exit = True
-        try:
-            await web_task
-        except Exception:
-            logger.exception("Web server crashed during shutdown")
+        await _drain_web_task(web_task)
         # Run each step independently so one failure can't skip the rest.
         # teardown() runs last, mirroring where post_shutdown would have sat.
         # Local mode never initialized or started the Application, so the PTB

@@ -171,7 +171,7 @@ run: check-stopped build-frontend
 	@echo "  make logs - attach (detach: Ctrl+B then D)"
 	@echo "  make stop - stop Condor"
 
-run-fg: build-frontend
+run-fg: check-stopped build-frontend
 	uv run python main.py
 
 logs:
