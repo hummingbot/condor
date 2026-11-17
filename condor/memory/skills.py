@@ -84,7 +84,14 @@ from .paths import (
     shared_skills_root,
     shared_skills_roots,
 )
-from .store import _atomic_write, _slugify, _utcnow
+from .store import (
+    _atomic_write,
+    _slugify,
+    _utcnow,
+    match_score,
+    query_terms,
+    snippet,
+)
 
 
 def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
@@ -552,32 +559,45 @@ class SkillStore:
         )
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
-        """Keyword/substring search over name + when_to_use + description + body.
+        """Ranked keyword search over name + when_to_use + description + body.
 
         Single seam for upgrading to semantic retrieval later without changing
-        any caller (mirrors :meth:`MemoryStore.search`).
+        any caller (mirrors :meth:`MemoryStore.search_with_total`, ST-12): the
+        query is split into terms, a playbook matches when any appears, and
+        the best ``limit`` come back ranked by terms matched, then by where
+        (name > when_to_use > description > body). Ties keep library order.
+
+        Hits carry ``when_to_use`` and a short ``snippet``, never the body —
+        :meth:`read` is how a caller pays for the playbook it picked.
         """
-        q = (query or "").lower().strip()
-        results: list[dict] = []
+        terms = query_terms(query)
+        ranked = []
         for _slug, meta, body, _shared, _stock in self._iter_skills():
-            haystack = (
-                f"{meta.get('name', '')} {meta.get('when_to_use', '')} "
-                f"{meta.get('description', '')} {body}"
-            ).lower()
-            if not q or q in haystack:
-                ref = meta.get("references_routine")
-                hit = {
-                    "name": meta.get("name", ""),
-                    "description": meta.get("description", ""),
-                    "when_to_use": meta.get("when_to_use", ""),
-                    "body": body,
-                }
-                if ref:
-                    hit["references_routine"] = ref
-                    hit["routine_ok"] = _routine_exists(ref, self.agent_slug)
-                results.append(hit)
-            if len(results) >= limit:
-                break
+            name = meta.get("name", "")
+            when_to_use = meta.get("when_to_use", "")
+            description = meta.get("description", "")
+            score = match_score(
+                terms, ((name, 4), (when_to_use, 3), (description, 2), (body, 1))
+            )
+            if terms and score is None:
+                continue
+            hit = {
+                "name": name,
+                "description": description,
+                "when_to_use": when_to_use,
+                "snippet": snippet(body, terms),
+            }
+            ref = meta.get("references_routine")
+            if ref:
+                hit["references_routine"] = ref
+            ranked.append((score or (0, 0), hit))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        results = [hit for _, hit in ranked[: max(limit, 0)]]
+        for hit in results:
+            if "references_routine" in hit:
+                hit["routine_ok"] = _routine_exists(
+                    hit["references_routine"], self.agent_slug
+                )
         return results
 
     def catalog(self) -> list[dict]:

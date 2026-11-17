@@ -288,3 +288,97 @@ def test_audit_logs_are_per_assistant(tmp_path):
     assert grid.audit_file != ema.audit_file
     assert [e["target"] for e in grid.audit()] == ["memory:g"]
     assert [e["target"] for e in ema.audit()] == ["memory:e"]
+
+
+# ── ST-12: ranked, tokenized search ──
+
+
+def _seed_at(store, monkeypatch, created, name, content, description):
+    import condor.memory.store as store_module
+
+    monkeypatch.setattr(store_module, "_utcnow", lambda: created)
+    store.write(name, content, description)
+
+
+def test_search_matches_query_words_that_are_not_adjacent(memory_root):
+    s = MemoryStore(user_id=42)
+    s.write(
+        "Swap limits",
+        "On SOL pairs quoted in USDC keep slippage under 0.5%.",
+        "Slippage ceiling for swaps",
+    )
+    s.write("Report currency", "Always report in USD.", "Reporting currency")
+
+    hits = s.search("sol usdc slippage")
+
+    assert [h["name"] for h in hits] == ["swap_limits"]
+    # The old whole-phrase match found nothing for this query.
+    assert "sol usdc slippage" not in s.read("swap_limits").lower()
+
+
+def test_search_ranks_by_terms_matched_then_by_field(memory_root):
+    s = MemoryStore(user_id=42)
+    s.write("Notes", "Mentions slippage once, in passing.", "Assorted notes")
+    s.write("Slippage", "Keep it low.", "Tolerance on swaps")
+    s.write("Sol slippage", "For SOL keep slippage tight.", "SOL swap tolerance")
+
+    names = [h["name"] for h in s.search("sol slippage")]
+
+    # Both terms beats one; among one-term hits, the name beats the body.
+    assert names == ["sol_slippage", "slippage", "notes"]
+
+
+def test_search_breaks_ties_newest_first_and_cuts_the_oldest(memory_root, monkeypatch):
+    s = MemoryStore(user_id=42)
+    for day in range(1, 6):
+        _seed_at(
+            s,
+            monkeypatch,
+            f"2026-01-0{day}T00:00:00+00:00",
+            f"Venue note {day}",
+            "Binance fee tier changed.",
+            "Fee tier",
+        )
+
+    hits, total = s.search_with_total("binance", limit=2)
+
+    assert [h["name"] for h in hits] == ["venue_note_5", "venue_note_4"]
+    assert total == 5
+    # An empty query lists newest first too.
+    assert s.search("", limit=1)[0]["name"] == "venue_note_5"
+
+
+def test_search_returns_a_snippet_not_the_body(memory_root):
+    s = MemoryStore(user_id=42)
+    body = ("filler " * 200) + "the needle is here " + ("padding " * 200)
+    s.write("Long one", body, "A long memory")
+
+    hit = s.search("needle")[0]
+
+    assert "body" not in hit
+    assert "needle" in hit["snippet"]
+    assert len(hit["snippet"]) <= 202  # SNIPPET_CHARS plus the two ellipses
+    assert set(hit) == {"name", "description", "type", "snippet"}
+
+
+def test_the_mcp_tool_defaults_to_ten_ranked_hits_with_a_total(
+    memory_root, monkeypatch
+):
+    import asyncio
+
+    from mcp_servers.condor.tools import memory as memory_tool
+
+    s = MemoryStore(user_id=42)
+    for n in range(15):
+        s.write(f"Fact {n}", "Binance detail.", f"Fact number {n}")
+    monkeypatch.setattr(memory_tool, "_store", lambda: s)
+
+    out = asyncio.run(memory_tool.manage_memory("search", query="binance"))
+
+    assert len(out["results"]) == 10
+    assert out["total"] == 15
+    assert all("body" not in hit for hit in out["results"])
+    wide = asyncio.run(
+        memory_tool.manage_memory("search", query="binance", max_entries=12)
+    )
+    assert len(wide["results"]) == 12
