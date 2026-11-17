@@ -184,14 +184,29 @@ status:
 		echo "Condor is not running."; \
 	fi
 
+# Ctrl-C asks for a clean shutdown: the dashboard drains, agent sessions and
+# trading engines stop, state is flushed. That takes longer than the 10 seconds
+# this used to allow, and killing the session part-way skips the flushes and
+# orphans agent subprocesses. So wait STOP_WAIT seconds, say so, and kill only
+# after that. An engine in an emergency wind-down can need minutes more:
+# `make stop STOP_WAIT=900`.
+STOP_WAIT ?= 90
+
 stop:
 	@if tmux has-session -t $(SESSION) 2>/dev/null; then \
 		tmux send-keys -t $(SESSION) C-c; \
-		for i in $$(seq 1 20); do \
+		echo "Stopping Condor (waiting up to $(STOP_WAIT)s for a clean shutdown)..."; \
+		for i in $$(seq 1 $(STOP_WAIT)); do \
 			tmux has-session -t $(SESSION) 2>/dev/null || break; \
-			sleep 0.5; \
+			[ "$$(tmux list-panes -t $(SESSION) -F '#{pane_dead}' 2>/dev/null | head -1)" = "1" ] && break; \
+			sleep 1; \
 		done; \
-		tmux kill-session -t $(SESSION) 2>/dev/null || true; \
+		if tmux has-session -t $(SESSION) 2>/dev/null; then \
+			if [ "$$(tmux list-panes -t $(SESSION) -F '#{pane_dead}' 2>/dev/null | head -1)" != "1" ]; then \
+				echo "Condor did not exit within $(STOP_WAIT)s; killing the session."; \
+			fi; \
+			tmux kill-session -t $(SESSION) 2>/dev/null || true; \
+		fi; \
 		echo "Condor stopped."; \
 	else \
 		echo "Condor is not running."; \

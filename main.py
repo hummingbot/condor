@@ -862,64 +862,140 @@ async def startup(application: Application) -> None:
         logger.info("Handler hot-reload is off (%s)", HOT_RELOAD_ENV)
 
 
+# Ceiling for one teardown step, in seconds. A step that outlives it is
+# abandoned (cancelled, logged) so the steps after it — the state flushes most
+# of all — still run.
+TEARDOWN_STEP_TIMEOUT = 30.0
+# destroy_all stops sessions one at a time, each a subprocess tree to reap.
+TEARDOWN_SESSIONS_TIMEOUT = 60.0
+
+
+def _teardown_engines_timeout() -> float:
+    """Ceiling for stopping the trading engines.
+
+    A plain stop takes moments, but ``stop_all`` deliberately waits out an
+    engine that is already in an emergency wind-down rather than aborting it.
+    So this is the budget the timeout policy gives one whole wind-down, not the
+    short ceiling the other steps share: cutting it off early would be the
+    process walking away from positions it was in the middle of closing.
+    """
+    from condor.runtime.timeouts import TIMEOUTS
+
+    return TIMEOUTS.mcp_shutdown
+
+
+async def _teardown_step(name: str, step, timeout: float) -> None:
+    """Run one teardown step so that nothing it does can skip the next one.
+
+    ``step`` is a callable, sync or async. Its imports live inside it, so even
+    a module that fails to import costs only its own step.
+    """
+    try:
+        result = step()
+        if asyncio.iscoroutine(result):
+            await asyncio.wait_for(result, timeout)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Teardown step %s still running after %.0fs; moving on", name, timeout
+        )
+    except Exception:
+        logger.exception("Teardown step %s failed", name)
+
+
 async def teardown(application: Application) -> None:
     """Wind the process down: stop supervisors, flush state, close clients.
 
     The counterpart to :func:`startup`, and not PTB's ``post_shutdown`` for the
     same reason: ``Application.shutdown()`` does not call that hook either.
     Called explicitly from :func:`_run_dual`.
-    """
-    from condor.runtime import client as runtime
-    from condor.runtime import sessions as runtime_sessions
-    from condor.runtime.confirmations import get_registry
 
-    await runtime_sessions.stop_health_monitor()
-    await get_registry().stop()
-    await runtime.destroy_all()
+    Every step is isolated and bounded (:func:`_teardown_step`). It used to be
+    one straight run of awaits, so an exception out of an early step skipped
+    the engine stop, both flushes and every client close after it, and a step
+    that never returned held the process open until someone killed it.
+    """
+
+    async def _stop_health_monitor():
+        from condor.runtime import sessions as runtime_sessions
+
+        await runtime_sessions.stop_health_monitor()
+
+    async def _stop_confirmations():
+        from condor.runtime.confirmations import get_registry
+
+        await get_registry().stop()
+
+    async def _destroy_sessions():
+        from condor.runtime import client as runtime
+
+        await runtime.destroy_all()
 
     # Stop all trading agents. Graceful stop, deliberately NOT the shutdown
     # sequence — winding down positions is an emergency action, not what a
     # restart should do. Each engine records its final state on the way out.
-    from condor.runtime.conversations import flush_all as flush_conversations
-    from condor.runtime.loops import get_supervisor
-    from condor.runtime.state import flush_all
+    async def _stop_engines():
+        from condor.runtime.loops import get_supervisor
 
-    await get_supervisor().stop_all()
+        await get_supervisor().stop_all()
+
     # Writes are debounced, so force the last one out on a clean shutdown.
-    flush_all()
+    def _flush_state():
+        from condor.runtime.state import flush_all
+
+        flush_all()
+
     # A prompt still streaming when the bot went down holds its turn in
     # memory; write it out rather than losing the last thing that was said.
-    flush_conversations()
+    def _flush_conversations():
+        from condor.runtime.conversations import flush_all as flush_conversations
 
-    # Stop WebSocket manager
-    from condor.web.ws_manager import get_ws_manager
+        flush_conversations()
 
-    get_ws_manager().stop()
+    def _stop_ws_manager():
+        from condor.web.ws_manager import get_ws_manager
 
-    # Stop ServerDataService
-    from condor.server_data_service import get_server_data_service
+        get_ws_manager().stop()
 
-    get_server_data_service().stop()
+    def _stop_server_data_service():
+        from condor.server_data_service import get_server_data_service
+
+        get_server_data_service().stop()
 
     # Close cached Hummingbot API clients (ConfigManager)
-    from config_manager import get_config_manager
+    async def _close_api_clients():
+        from config_manager import get_config_manager
 
-    await get_config_manager().close_all_clients()
+        await get_config_manager().close_all_clients()
 
     # Close MCP hummingbot client
-    from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+    async def _close_mcp_client():
+        from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 
-    await hummingbot_client.close()
+        await hummingbot_client.close()
 
     # Record the clean exit and give the outbox one last chance. Both are no-ops
     # unless the admin opted in, and neither can fail the shutdown.
-    try:
+    async def _flush_telemetry():
         from condor import telemetry
 
         telemetry.shutdown("signal")
         await telemetry.flush("teardown")
-    except Exception:
-        logger.debug("Telemetry teardown failed", exc_info=True)
+
+    steps = (
+        ("health monitor", _stop_health_monitor, TEARDOWN_STEP_TIMEOUT),
+        ("confirmations", _stop_confirmations, TEARDOWN_STEP_TIMEOUT),
+        ("agent sessions", _destroy_sessions, TEARDOWN_SESSIONS_TIMEOUT),
+        ("trading engines", _stop_engines, _teardown_engines_timeout()),
+        ("state flush", _flush_state, TEARDOWN_STEP_TIMEOUT),
+        ("conversation flush", _flush_conversations, TEARDOWN_STEP_TIMEOUT),
+        ("websocket manager", _stop_ws_manager, TEARDOWN_STEP_TIMEOUT),
+        ("server data service", _stop_server_data_service, TEARDOWN_STEP_TIMEOUT),
+        ("API clients", _close_api_clients, TEARDOWN_STEP_TIMEOUT),
+        ("MCP client", _close_mcp_client, TEARDOWN_STEP_TIMEOUT),
+        ("telemetry", _flush_telemetry, TEARDOWN_STEP_TIMEOUT),
+    )
+    for name, step, timeout in steps:
+        await _teardown_step(name, step, timeout)
 
 
 HOT_RELOAD_ENV = "CONDOR_HOT_RELOAD"
@@ -1180,6 +1256,11 @@ def main() -> None:
             exec_restart()  # never returns
 
 
+# How long uvicorn waits for in-flight requests on shutdown before cancelling
+# them. Seconds.
+WEB_GRACEFUL_SHUTDOWN_SEC = 10
+
+
 def _web_server_config(web_app):
     """uvicorn's config for the dashboard, isolated so the bind address is testable.
 
@@ -1197,6 +1278,11 @@ def _web_server_config(web_app):
         port=WEB_PORT,
         log_level="info",
         access_log=False,
+        # uvicorn's default is to wait for in-flight requests without limit,
+        # and it is drained *before* teardown() destroys the sessions — but a
+        # streaming agent turn only ends when its session does. Unbounded, a
+        # SIGTERM or /update restart hung for as long as the longest turn.
+        timeout_graceful_shutdown=WEB_GRACEFUL_SHUTDOWN_SEC,
     )
 
 
