@@ -16,11 +16,15 @@ collapses a transport failure — which has neither — to a generic line.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException
 
 from condor.fetchers.executors import describe_executor_error
 
-__all__ = ["upstream_error"]
+__all__ = ["offline_hint", "server_client", "upstream_error"]
+
+logger = logging.getLogger(__name__)
 
 
 def upstream_error(action: str, exc: Exception) -> HTTPException:
@@ -38,3 +42,39 @@ def upstream_error(action: str, exc: Exception) -> HTTPException:
     status, message = describe_executor_error(exc)
     code = 400 if status is not None and 400 <= status < 500 else 502
     return HTTPException(status_code=code, detail=f"{action}: {message}")
+
+
+async def server_client(cm, name: str):
+    """The API client for ``name``, or an ``HTTPException`` saying why not (WR-02).
+
+    ``get_client`` raises before any route's own ``try`` is entered — a
+    ``ConnectionError`` for the whole failure TTL after a failed connect, the
+    transport error itself on the attempt that failed — and an unhandled one is
+    a bare 500 with no JSON detail. This is the ``settings._get_client`` mapping
+    for the routes that have no degraded shape to answer with: an unknown name
+    is a 404, anything else goes through :func:`upstream_error`.
+
+    ``cm`` is passed in rather than resolved, so a route keeps handing over the
+    manager it already holds.
+    """
+    try:
+        return await cm.get_client(name)
+    except HTTPException:
+        raise
+    except ValueError:
+        # The config manager's own "no such server". The name is the caller's.
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    except Exception as e:
+        logger.warning("Cannot connect to server '%s': %s", name, e)
+        raise upstream_error("Cannot connect to server", e)
+
+
+def offline_hint(exc: BaseException) -> str:
+    """The ``error_hint`` of a ``server_online: false`` answer (WR-09).
+
+    The degraded responses are the other door the raw exception used to leave
+    by: ``f"Connection error: {e}"`` on a transport failure names the backend's
+    host and port just as an ``HTTPException`` detail would. Same description,
+    same rule — the address stays in the log.
+    """
+    return f"Connection error: {describe_executor_error(exc)[1]}"

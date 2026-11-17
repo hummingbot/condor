@@ -5,9 +5,10 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from condor.telemetry.taps import web_tap
@@ -41,6 +42,7 @@ from condor.web.routes import (
     updates,
     ws,
 )
+from condor.web.routes._errors import upstream_error
 
 
 def _build_cors_origins() -> list[str]:
@@ -134,6 +136,19 @@ def create_app() -> FastAPI:
     # own router and no path parameter — a bot name, a server name, a report id
     # — is ever read. No-op unless the admin opted in.
     app.middleware("http")(web_tap)
+
+    # Backstop for an unreachable trading server (WR-02). ``get_client`` raises
+    # ``ConnectionError`` for the whole failure TTL after a failed connect, and
+    # the transport error itself on the attempt that failed; a route that awaits
+    # it outside its own ``try`` would answer a bare 500 with no JSON detail.
+    # The same 502 body ``upstream_error`` gives the routes that do catch it —
+    # never the exception's own text, which carries the backend address.
+    @app.exception_handler(ConnectionError)
+    @app.exception_handler(aiohttp.ClientConnectionError)
+    async def upstream_unreachable(request: Request, exc: Exception):
+        log.warning("Upstream unreachable on %s: %s", request.url.path, exc)
+        err = upstream_error("Cannot connect to server", exc)
+        return JSONResponse(status_code=err.status_code, content={"detail": err.detail})
 
     # ── API routes ──
     app.include_router(auth.router, prefix="/api/v1")

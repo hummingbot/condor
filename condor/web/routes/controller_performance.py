@@ -45,7 +45,7 @@ from condor.web.models import (
     TerminatedControllersResponse,
     WebUser,
 )
-from condor.web.routes._errors import upstream_error
+from condor.web.routes._errors import offline_hint, server_client, upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ async def get_bot_runs(
 
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     async def _fetch_runs():
         return await client.bot_orchestration.get_bot_runs(
@@ -231,7 +231,7 @@ async def delete_bot_run(
     """Delete an archived bot run by its numeric ID."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     try:
         result = await client.bot_orchestration.delete_bot_run(bot_run_id)
@@ -287,9 +287,8 @@ async def get_latest_controller_performance(
     """
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
-
     try:
+        client = await cm.get_client(name)
         if bot_name is None:
             snapshots = await fetch_latest_snapshots(client)
         else:
@@ -304,7 +303,7 @@ async def get_latest_controller_performance(
         )
         return ControllerPerformanceLatestResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     return ControllerPerformanceLatestResponse(
@@ -339,9 +338,8 @@ async def get_controller_performance_history(
     """Get historical controller performance with pagination and interval sampling."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
-
     try:
+        client = await cm.get_client(name)
         result = await client.bot_orchestration.get_controller_performance_history(
             bot_name=bot_name,
             controller_id=controller_id,
@@ -357,7 +355,7 @@ async def get_controller_performance_history(
         )
         return ControllerPerformanceHistoryResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     snapshots = _extract_snapshots(result)
@@ -475,9 +473,9 @@ async def get_performance_history(
         raise HTTPException(status_code=400, detail=foreign)
 
     cm = get_config_manager()
-    client = await cm.get_client(name)
 
     try:
+        client = await cm.get_client(name)
         result = await fetch_performance_history(
             client,
             subject=subject,
@@ -508,7 +506,7 @@ async def get_performance_history(
             subject=subject,
             interval=interval,
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     return PerformanceHistoryResponse(
@@ -592,21 +590,23 @@ async def get_terminated_controllers(
         return cached[1]
 
     cm = get_config_manager()
-    client = await cm.get_client(name)
 
-    async def _fetch_latest():
+    async def _fetch_latest(client):
         return await fetch_latest_snapshots(client)
 
-    async def _fetch_runs():
+    async def _fetch_runs(client):
         return await client.bot_orchestration.get_bot_runs(limit=limit)
 
     try:
-        latest, runs_raw = await asyncio.gather(_fetch_latest(), _fetch_runs())
+        client = await cm.get_client(name)
+        latest, runs_raw = await asyncio.gather(
+            _fetch_latest(client), _fetch_runs(client)
+        )
     except Exception as e:
         logger.warning("Failed to fetch terminated controllers from '%s': %s", name, e)
         return TerminatedControllersResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     runs = [_parse_bot_run(r) for r in _extract_runs_list(runs_raw)]
@@ -694,7 +694,7 @@ async def get_run_history(
             raise HTTPException(status_code=400, detail=str(e))
 
     cm = get_config_manager()
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     # The run's own deployment names its controllers, which is what makes the
     # walk per controller — and per controller is a correctness requirement, not
