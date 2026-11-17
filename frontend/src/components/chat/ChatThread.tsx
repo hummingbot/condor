@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  Bot,
+  Brain,
+  Loader2,
+  MessageSquare,
+  X,
+} from "lucide-react";
 
 import type { ChatSlot, PermissionRequest } from "@/hooks/useChatSocket";
 import { useConnectionLost } from "@/hooks/useConnectionLost";
+import { useStickToBottom } from "@/hooks/useStickToBottom";
 import {
   CHAT_SLUG,
   type AgentBindingOption,
@@ -16,9 +25,6 @@ import { CHAT_SURFACE_PROPS } from "./chatSurface";
 import { ChatMessageView } from "./ChatMessage";
 import { ConversationUsage } from "./ConversationUsage";
 import { Starters, type Starter } from "./Starters";
-
-/** How close to the end still counts as "following the answer", in pixels. */
-const NEAR_BOTTOM_PX = 80;
 
 /** Resolve a short label for an agent key. */
 export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
@@ -198,68 +204,17 @@ export function ChatThread({
 
   const connectionLost = useConnectionLost(isConnected);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const scrollFrameRef = useRef<number | null>(null);
-
-  /**
-   * Scroll the transcript to its end, at most once per animation frame.
-   *
-   * Streaming replaces the messages array on every chunk, so an ungated
-   * `scrollIntoView` runs once per token: each call restarts the browser's
-   * smooth-scroll animation from wherever the last one got to and forces a
-   * synchronous layout of the whole transcript, which is what makes a long
-   * answer stutter. Holding a single frame handle and cancelling the pending
-   * one collapses a burst of chunks into the one scroll that matters.
-   *
-   * `force` is for the discrete events — a new message, a different
-   * conversation — that should always land at the bottom. Everything else is
-   * gated on the viewport already being near the end, so a user who scrolled
-   * back to re-read an earlier answer is not dragged down by the next token.
-   */
-  const scrollToBottom = useCallback((behavior: ScrollBehavior, force: boolean) => {
-    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
-    scrollFrameRef.current = requestAnimationFrame(() => {
-      scrollFrameRef.current = null;
-      const area = scrollAreaRef.current;
-      if (!force && area) {
-        const distanceFromBottom = area.scrollHeight - area.scrollTop - area.clientHeight;
-        if (distanceFromBottom > NEAR_BOTTOM_PX) return;
-      }
-      const end = messagesEndRef.current;
-      if (typeof end?.scrollIntoView === "function") end.scrollIntoView({ behavior });
-    });
-  }, []);
-
-  const slotId = slot?.info.slot_id;
-  const messageCount = slot?.messages.length ?? 0;
-  // Seeded empty rather than with the current values, so the first run after
-  // mount counts as a slot change: a transcript that is already on screen when
-  // this mounts still opens at its end.
-  const prevSlotIdRef = useRef<string | undefined>(undefined);
-  const prevCountRef = useRef(0);
-
-  // Auto-scroll on new messages in the slot on screen, and follow a streaming
-  // answer while the user is watching its end. A chunk only ever rewrites the
-  // last bubble — tool calls and thoughts attach to it too — so the message
-  // count moving is the honest signal for "something new arrived".
-  useEffect(() => {
-    const slotChanged = prevSlotIdRef.current !== slotId;
-    const countChanged = prevCountRef.current !== messageCount;
-    prevSlotIdRef.current = slotId;
-    prevCountRef.current = messageCount;
-    // A freshly selected transcript opens at its end, without animating
-    // through everything above it.
-    if (slotChanged) scrollToBottom("auto", true);
-    else if (countChanged) scrollToBottom("smooth", true);
-    else scrollToBottom("auto", false);
-  }, [slotId, messageCount, slot?.messages, scrollToBottom]);
-
-  useEffect(() => {
-    return () => {
-      if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
-    };
-  }, []);
+  // Following the answer, and leaving a reader who scrolled back alone, is
+  // `useStickToBottom`'s. What it needs from here is which conversation is on
+  // screen and whether the transcript's last line is the user's own — the two
+  // events that always land at the end. A routine's outcome or a delegation's
+  // note appended mid-answer is neither, and no longer pulls a reader down.
+  const lastMessage = slot?.messages[slot.messages.length - 1];
+  const { scrollRef, contentRef, status, jumpToLatest } = useStickToBottom({
+    slotId: slot?.info.slot_id,
+    ownMessageId: lastMessage?.role === "user" ? lastMessage.id : undefined,
+    content: slot?.messages,
+  });
 
   return (
     <>
@@ -292,14 +247,14 @@ export function ChatThread({
 
       {/* Messages area */}
       <div
-        ref={scrollAreaRef}
+        ref={scrollRef}
         className="flex-1 overflow-y-auto px-4 py-4"
         // Esc pressed with focus in the transcript still stops the answer.
         {...CHAT_SURFACE_PROPS}
       >
         {/* `min-h-full` so an empty state can centre itself in the viewport
             while a long transcript is still free to grow past it. */}
-        <div className={`flex min-h-full flex-col ${columnClassName}`}>
+        <div ref={contentRef} className={`flex min-h-full flex-col ${columnClassName}`}>
           {!slot ? (
             emptyState
           ) : slot.messages.length === 0 ? (
@@ -380,7 +335,20 @@ export function ChatThread({
               Waiting its turn
             </div>
           )}
-          <div ref={messagesEndRef} />
+          {/* The way back for a reader who scrolled up. Zero-height and
+              sticky, so it rides the bottom edge of the viewport without
+              taking a line of the transcript. */}
+          {status !== "pinned" && (
+            <div className="pointer-events-none sticky bottom-0 z-10 flex h-0 justify-center">
+              <button
+                onClick={jumpToLatest}
+                className="pointer-events-auto absolute bottom-1 flex items-center gap-1 whitespace-nowrap rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 text-xs text-[var(--color-text)] shadow-md transition-colors hover:bg-[var(--color-surface-hover)]"
+              >
+                {status === "behind" ? "New messages" : "Jump to latest"}
+                <ArrowDown className="h-3 w-3" />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
