@@ -498,11 +498,39 @@ class TickEngine:
         down here: stop() waits until the winddown's own teardown has recorded
         STOPPED and returns False. Cancelling the tick task at that point would
         abort run_shutdown mid-flight and leave positions stranded.
+
+        The same goes for a run that is already ending itself (``max_ticks``, a
+        single-tick run, an error): its tick task is inside :meth:`_finish`,
+        and cancelling it would land in the order sweep or the close-out
+        report and leave orders resting with nothing recorded (AG1-11). stop()
+        waits for that teardown and returns False -- the run ended on its own,
+        with its own final state, and this call did not stop it.
         """
         if self._shutting_down:
             finished = getattr(self, "_shutdown_finished", None)
             if finished is not None:
                 await finished.wait()
+            return False
+        if getattr(self, "_finished", False):
+            task = self._task
+            if (
+                task is not None
+                and task is not asyncio.current_task()
+                and not task.done()
+            ):
+                try:
+                    # Shielded: a caller that is itself cancelled while waiting
+                    # (a request that went away) must not pass the cancel on to
+                    # the teardown it was waiting for.
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if not task.cancelled():
+                        raise
+                except Exception:
+                    log.exception(
+                        "TickEngine %s: the run's own teardown raised",
+                        self.agent_id,
+                    )
             return False
         self._running = False
         if self._task and not self._task.done():
@@ -825,7 +853,20 @@ class TickEngine:
                     self._last_error = tick_error
                     log.exception("TickEngine %s tick error", self.agent_id)
                     if self.journal:
-                        self.journal.append_error(tick_error)
+                        # A journal write that fails here must not end the
+                        # loop (AG2-01). This is an except handler, so a raise
+                        # from it is unhandled: the task died while
+                        # ``_running`` stayed True and the status went on
+                        # saying "running" over positions nobody was ticking.
+                        # The error is in the log above and still reaches the
+                        # owner below.
+                        try:
+                            self.journal.append_error(tick_error)
+                        except Exception:
+                            log.exception(
+                                "TickEngine %s: could not journal the tick error",
+                                self.agent_id,
+                            )
                     if self.is_experiment:
                         self._record_failed_experiment(tick_error)
                     elif not repeated:
@@ -977,7 +1018,18 @@ class TickEngine:
 
         # Extract structured data from providers for tracking
         executors_result = skill_results.get("executors")
-        if executors_result:
+        # Whether the executors provider ran and did not answer (AG1-01): its
+        # own error path (``{"error": ...}``) or the registry's catch-all for a
+        # provider that raised (``{}``). A provider that never ran is neither.
+        executors_failed = executors_result is not None and (
+            not executors_result.data or "error" in executors_result.data
+        )
+        # A failed read does not replace the last good one. Its dict carries no
+        # rows, so the stop gate's owner map, the stop sweep's market scope and
+        # the winddown's fallback would all go blind on the very tick the API
+        # is struggling. The carried rows are stale, which is why the book is
+        # marked untrusted below, and ``_tick_reading`` says what THIS tick read.
+        if executors_result and not executors_failed:
             self._last_skill_data = executors_result.data
         positions_result = skill_results.get("positions")
         if positions_result:
@@ -986,10 +1038,9 @@ class TickEngine:
         if drift_result:
             self._last_skill_data["drift"] = drift_result.data
         # What THIS tick read, taken from this tick's result rather than from
-        # the carried dict. A provider that failed returns ``data={}``, which
-        # replaces the dict and reads as "nothing"; a provider that never ran
-        # leaves the dict alone, and reading the stamp off it would present the
-        # last tick's reading as this one's.
+        # the carried dict. A provider that failed or never ran leaves the dict
+        # alone, and reading the stamp off it would present the last tick's
+        # reading as this one's.
         self._tick_reading = str(
             (executors_result.data if executors_result else {}).get("reading") or ""
         )
@@ -1090,6 +1141,18 @@ class TickEngine:
                 "so their exposure is unknown"
             )
         self._apply_drift_verdict(risk_state, drift_result)
+        # The executors provider did not answer, so the count and exposure
+        # above are the last good read's (or zero on a first tick), not this
+        # tick's. Fail closed like every other missing metric: new exposure is
+        # refused, every brake still passes (AG1-01). Last, so the reason the
+        # agent reads is the read that failed rather than a drift verdict
+        # computed beside it.
+        if executors_failed:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                "the executor list could not be read this tick, so what is "
+                "open is unknown"
+            )
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
         # pause below. Experiments never trade for real, so they never shut down.
@@ -1239,11 +1302,13 @@ class TickEngine:
         calls, the terminal ``PromptDone`` stop reason).
 
         A fresh client per tick (clean context window), streamed under the
-        tick's wall-clock budget. A timeout is not an error: the partial
-        response gets "(timed out)" appended. The client is always stopped and
-        ``_active_client`` cleared, whatever happens. Neither client raises when
-        the turn fails; it ends on a ``PromptDone`` whose reason says so, which
-        ``_tick`` checks against ``FAILED_STOP_REASONS``.
+        tick's wall-clock budget. A timeout does not raise here: the partial
+        response gets "(timed out)" appended and the stop reason is
+        ``"timeout"``, so the tick is persisted with whatever tool calls it
+        made and then reported as failed (AG1-13). The client is always stopped
+        and ``_active_client`` cleared, whatever happens. Neither client raises
+        when the turn fails; it ends on a ``PromptDone`` whose reason says so,
+        which ``_tick`` checks against ``FAILED_STOP_REASONS``.
         """
         acp_client = await self._create_client(risk_state, client)
         self._active_client = acp_client
@@ -1285,6 +1350,12 @@ class TickEngine:
                 tick_timeout,
             )
             response_chunks.append("(timed out)")
+            # The budget that actually fires is this one, and it used to leave
+            # the reason at "end_turn": a loop whose every tick was killed
+            # mid-turn cleared ``_last_error``, told nobody, and a dry run
+            # reported "complete". ``"timeout"`` is in ``FAILED_STOP_REASONS``,
+            # so the existing failure path journals it and notifies once.
+            stop_reason = "timeout"
         finally:
             await acp_client.stop()
             self._active_client = None

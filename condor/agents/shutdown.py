@@ -302,9 +302,10 @@ async def _stop_owned_bots(engine: Any, client: Any) -> tuple[list[str], list[st
 async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
     """Positions summary scoped to this session (``controller_id``).
 
-    Non-strict on purpose: ``run_shutdown`` never raises for an individual API
-    failure and ``_verify_and_retry`` calls this unguarded, so a failed request
-    is logged by the fetcher and reads as no positions.
+    Non-strict on purpose: this feeds the LLM cleanup pass its context, which
+    is best-effort, so a failed request is logged by the fetcher and reads as
+    no positions. The verify step must not read it that way and uses
+    :func:`_fetch_positions_strict`.
     """
     return await fetch_tracked_positions(
         client, controller_id=agent_id or None, strict=False
@@ -350,16 +351,38 @@ async def _deterministic_baseline(
     return stopped, failures
 
 
+async def _fetch_positions_strict(client: Any, agent_id: str) -> list[dict] | None:
+    """The verify step's read: ``None`` when the request itself failed.
+
+    Strict where :func:`_fetch_positions` is not, because the two callers ask
+    different questions. The cleanup pass wants context and can live with
+    "none"; the verify step decides whether the owner is told the book is flat,
+    and a timeout must never be that answer (AG1-04). Never raises, like every
+    other pass here -- the failure is the ``None``.
+    """
+    try:
+        return await fetch_tracked_positions(
+            client, controller_id=agent_id or None, strict=True
+        )
+    except Exception:
+        log.exception("shutdown: positions read failed during verify")
+        return None
+
+
 async def _verify_and_retry(
     engine: Any, client: Any, policy: ShutdownPolicy
-) -> list[dict]:
+) -> list[dict] | None:
     """Re-query positions; retry the deterministic close once; return residuals.
 
     Never trusts the LLM: computes which positions *should* be gone under the
     policy, and if any remain, stops any still-running executor that should be
-    closed and re-checks. Returns the list of positions still stranded.
+    closed and re-checks. Returns the list of positions still stranded, or
+    ``None`` when a positions read failed and nothing could be verified -- which
+    is not the same as nothing being stranded (AG1-04).
     """
-    positions = await _fetch_positions(client, engine.agent_id)
+    positions = await _fetch_positions_strict(client, engine.agent_id)
+    if positions is None:
+        return None
     stranded = [p for p in positions if not _should_remain_open(p, policy)]
     if not stranded:
         return []
@@ -382,7 +405,9 @@ async def _verify_and_retry(
 
     await asyncio.gather(*(_retry_one(ex) for ex in targets))
 
-    positions = await _fetch_positions(client, engine.agent_id)
+    positions = await _fetch_positions_strict(client, engine.agent_id)
+    if positions is None:
+        return None
     return [p for p in positions if not _should_remain_open(p, policy)]
 
 
@@ -869,7 +894,8 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     4. Execute ``cancel_open_orders`` over this session's markets, and record what
        it achieved -- including where it could not be carried out (CORR-727).
     5. Verify: re-query positions, retry the close once, and loudly alert the user
-       if anything the policy said to close is still open.
+       if anything the policy said to close is still open -- or if the re-query
+       itself failed, in which case nothing is claimed to be flat (AG1-04).
     6. Journal ``shutdown_done``.
 
     The caller (:meth:`TickEngine._run_shutdown`) owns the idempotency guard and
@@ -890,6 +916,15 @@ async def run_shutdown(engine: Any, reason: str) -> None:
             "shutdown_start",
             f"{reason} (policy={policy.on_kill_switch})",
         )
+    # Tell the owner now, not when it is over (AG1-07). The message below is
+    # sent only after the cleanup pass and the verify, which can be minutes
+    # after the kill switch fired; until then nothing said the session was
+    # being wound down. The final, verified message still follows. Not 🚨:
+    # that mark is kept for a winddown that failed or could not be verified.
+    await engine._notify(
+        f"⚠️ Agent {agent_id}: emergency shutdown STARTED — {reason}. Winding "
+        f"down per '{policy.on_kill_switch}'; a final report follows."
+    )
 
     client = await engine._get_client()
     if client is None:
@@ -936,7 +971,23 @@ async def run_shutdown(engine: Any, reason: str) -> None:
 
     stranded = await _verify_and_retry(engine, client, policy)
 
-    if stranded:
+    bots_note = (
+        f", {len(bots_stopped)} bot(s): {', '.join(bots_stopped)}"
+        if bots_stopped
+        else ""
+    )
+    if stranded is None:
+        # The third outcome (AG1-04). The read that would say whether anything
+        # is still open failed, so this can claim neither "complete" nor a
+        # count: what was sent is known, what it achieved is not.
+        msg = (
+            f"🚨 Agent {agent_id}: emergency shutdown could NOT verify — the "
+            f"positions read failed, so what is still open is UNKNOWN. Stops were "
+            f"sent per '{policy.on_kill_switch}' (stopped {stopped} executor(s)"
+            f"{bots_note}), but positions may be OPEN. Check manually! ({reason})"
+        )
+        log.error(msg)
+    elif stranded:
         details = ", ".join(_describe_position(p) for p in stranded) or "unknown"
         msg = (
             f"🚨 Agent {agent_id}: emergency shutdown left {len(stranded)} position(s) "
@@ -945,11 +996,6 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         )
         log.error(msg)
     else:
-        bots_note = (
-            f", {len(bots_stopped)} bot(s): {', '.join(bots_stopped)}"
-            if bots_stopped
-            else ""
-        )
         msg = (
             f"✅ Agent {agent_id}: emergency shutdown complete — wound down per "
             f"'{policy.on_kill_switch}' (stopped {stopped} executor(s)"
@@ -962,7 +1008,10 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     await engine._notify(msg)
 
     if engine.journal:
-        verified = "flat" if not stranded else f"{len(stranded)} stranded"
+        if stranded is None:
+            verified = "unverified"
+        else:
+            verified = "flat" if not stranded else f"{len(stranded)} stranded"
         # Both journal.md updates of this winddown go into one batch, so the file
         # is rewritten once instead of twice (PERF-136 idiom, PERF-173).
         with engine.journal.batch():
