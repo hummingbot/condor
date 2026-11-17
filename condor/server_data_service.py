@@ -314,6 +314,11 @@ _POLL_TICK = 1  # seconds between poll loop snapshots
 _CLEANUP_INTERVAL = 300  # clean stale entries every 5 min
 
 
+def _error_backoff(entry: CacheEntry) -> float:
+    """Seconds to leave a failing key alone after its last error."""
+    return min(60, 2**entry.consecutive_errors)
+
+
 class ServerDataService:
     """Unified server-centric data cache with subscription-based polling."""
 
@@ -475,6 +480,12 @@ class ServerDataService:
         3. a *failed* fetch, which returns the previous value at whatever age it
            has — or ``None`` if there never was one.
 
+        While a key that already holds a value is inside its error backoff
+        window (``min(60, 2**consecutive_errors)`` seconds after the last
+        failure), the previous value is returned *without* fetching: with the
+        server hanging rather than refusing, every read would otherwise block
+        for the full client timeout only to return that same value.
+
         The third case is silent and unbounded: nothing here caps how old the
         returned value may be, and a key with a live subscriber is never evicted
         by :meth:`_cleanup_stale`, so with the API server down this keeps handing
@@ -490,6 +501,18 @@ class ServerDataService:
         cached = self.get(server, data_type, **params)
         if cached is not None:
             return cached
+
+        # Fail fast during an outage: the fetch just failed, so hand back the
+        # last good value now instead of paying another timeout for it. An
+        # error-only entry (no value yet) is still retried on every read.
+        entry = self._cache.get(key)
+        if (
+            entry is not None
+            and entry.fetched_at > 0
+            and entry.consecutive_errors > 0
+            and time.time() - entry.last_error_at < _error_backoff(entry)
+        ):
+            return entry.value
 
         # Fetch fresh
         return await self._fetch_and_cache(key)
@@ -832,8 +855,7 @@ class ServerDataService:
 
                 # Exponential backoff on consecutive errors
                 if entry.consecutive_errors >= 3:
-                    backoff = min(60, 2**entry.consecutive_errors)
-                    if now - entry.last_error_at < backoff:
+                    if now - entry.last_error_at < _error_backoff(entry):
                         continue
 
             due_keys.append(key)
