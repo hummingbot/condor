@@ -44,13 +44,12 @@ and an old file on disk still loads without a fuss.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
 
 from condor import paths
-from condor.fsutil import atomic_write_json
+from condor.fsutil import atomic_write_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -159,18 +158,27 @@ def _normalize(entry: Any, routine_name: str) -> dict[str, dict]:
     }
 
 
-def _read_all() -> dict[str, dict[str, dict]]:
+def _read_all(*, for_write: bool = False) -> dict[str, dict[str, dict]]:
+    """Every routine's hooks, by owner.
+
+    A reader degrades to "no hooks" when the file cannot be read. A writer
+    (``for_write``) must not: this file holds every owner's delivery config,
+    and persisting one owner's entry over an index that merely failed to read
+    erased all the others (ST-08). There the failure raises and nothing is
+    written.
+    """
     path = paths.routine_hooks_path()
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(path.read_text())
+        data = read_json(path, {})
         if not isinstance(data, dict):
-            return {}
-        return {name: _normalize(entry, name) for name, entry in data.items()}
+            raise ValueError(f"expected an object, found {type(data).__name__}")
     except Exception:  # noqa: BLE001
+        if for_write:
+            logger.error("Failed to read %s; refusing to overwrite it", path)
+            raise
         logger.warning("Failed to read %s; treating as empty", path)
         return {}
+    return {name: _normalize(entry, name) for name, entry in data.items()}
 
 
 def _write_all(data: dict[str, dict[str, dict]]) -> None:
@@ -226,7 +234,7 @@ def save_hooks(routine_name: str, cfg: dict, user_id: int | None) -> dict:
     trigger = cfg.get("trigger")
     clean["trigger"] = trigger if trigger in _TRIGGERS else "success"
 
-    data = _read_all()
+    data = _read_all(for_write=True)
     owners = data.setdefault(routine_name, {})
     # An admin writing this routine's hooks adopts whatever the pre-ownership
     # file left behind, so the legacy entry stops shadowing their own config.
