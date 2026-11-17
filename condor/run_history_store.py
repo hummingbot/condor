@@ -420,6 +420,16 @@ def get_run_history_store() -> RunHistoryStore:
         return _store
 
 
+def prune_run_history_if_due() -> None:
+    """Run the daily retention check now, without waiting for a write (ST-13).
+
+    ``put`` is the only other caller of the check, so on a store nobody writes
+    to, payloads past retention stayed on disk indefinitely. Called once at
+    boot, off the event loop.
+    """
+    get_run_history_store()._maybe_prune()
+
+
 def reset_run_history_store() -> None:
     """Drop the singleton, so the next call re-resolves its directory. For tests."""
     global _store
