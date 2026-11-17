@@ -4,14 +4,30 @@ import type { CandleData } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import { intervalSeconds } from "@/lib/gridExecutor";
 
-/** Staleness thresholds by interval category */
-const STALE_THRESHOLD_SUB_1H_MS = 30_000; // 30s for intervals < 1h
-const STALE_THRESHOLD_1H_PLUS_MS = 120_000; // 2min for intervals >= 1h
+/**
+ * How long a candle channel may go without a frame before it reads as stalled.
+ *
+ * The backend sends a frame only when the newest candle *changed*
+ * (`condor/web/streams/candles.py`, the "Broadcast if we have newer candles OR
+ * ... OHLCV changed" branch), so silence is normal on a quiet market, and the
+ * cadence a healthy feed can legitimately fall to has two parts:
+ *
+ * - the poll itself: a CLOB channel re-fetches every `min(interval, 10)` s, a
+ *   DEX pool every `max(30, min(interval / 5, 180))` s (`_gecko_poll_interval`,
+ *   `_GECKO_POLL_MIN`/`_GECKO_POLL_MAX`). Two missed polls at the 180 s ceiling
+ *   is the floor here — one slow or rate-limited fetch is not a dead feed;
+ * - the candle: with no trades the forming bar does not move, and the only
+ *   change a poll is then sure to see is the next candle opening. Two intervals
+ *   covers one whole silent candle plus the poll that finds its successor.
+ *
+ * The old 30 s (sub-1h) / 120 s thresholds sat *below* the DEX poll period, so
+ * every healthy pool chart was flagged between two polls.
+ */
+const SLOWEST_POLL_MS = 180_000; // _GECKO_POLL_MAX
 const STALE_CHECK_INTERVAL_MS = 10_000; // check every 10s
 
-function getStaleThreshold(interval: string): number {
-  const hourPlus = ["1h", "2h", "4h", "1d", "1w"];
-  return hourPlus.includes(interval) ? STALE_THRESHOLD_1H_PLUS_MS : STALE_THRESHOLD_SUB_1H_MS;
+export function staleThresholdMs(interval: string): number {
+  return Math.max(2 * SLOWEST_POLL_MS, 2 * intervalSeconds(interval) * 1000);
 }
 
 /**
@@ -71,7 +87,7 @@ export function useCandleStore(
     });
 
     // Periodic staleness check
-    const threshold = getStaleThreshold(interval);
+    const threshold = staleThresholdMs(interval);
     const timer = setInterval(() => {
       if (keyRef.current !== key) return;
       const age = candleStore.getLastUpdateAge(key);

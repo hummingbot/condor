@@ -50,6 +50,12 @@ const store = {
     };
   },
 
+  /** Milliseconds since the channel's last frame, as the real store reports it. */
+  age: 0,
+  getLastUpdateAge(): number {
+    return store.age;
+  },
+
   /** Push a frame the way the WS does: a brand-new array, every time. */
   push(key: string, candles: CandleData[]) {
     store.candles.set(key, candles);
@@ -60,6 +66,7 @@ const store = {
     store.listeners.clear();
     store.subscribed = [];
     store.unsubscribed = [];
+    store.age = 0;
   },
 };
 
@@ -74,7 +81,7 @@ vi.mock("@/lib/candle-store", () => ({
   ) => `candles:${server}:${connector}:${pair}:${interval}` + (poolAddress ? `:${poolAddress}` : ""),
 }));
 
-const { useLastClose } = await import("./useCandleStore");
+const { useCandleStore, useLastClose, staleThresholdMs } = await import("./useCandleStore");
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -195,5 +202,86 @@ describe("useLastClose", () => {
 
     // afterEach unmounts again; a fresh root keeps that harmless.
     root = createRoot(container);
+  });
+});
+
+/**
+ * The stalled-feed threshold (review R4).
+ *
+ * Frames arrive only when the newest candle changed, and a DEX pool is polled
+ * every max(30, min(interval / 5, 180)) s — so the old 30 s threshold flagged
+ * every healthy pool chart between two polls.
+ */
+describe("staleThresholdMs", () => {
+  /** `_gecko_poll_interval` in condor/web/streams/candles.py. */
+  const geckoPollMs = (intervalSec: number) =>
+    Math.max(30, Math.min(Math.floor(intervalSec / 5), 180)) * 1000;
+
+  it.each([
+    ["1m", 60],
+    ["5m", 300],
+    ["15m", 900],
+    ["1h", 3600],
+    ["4h", 14400],
+    ["1d", 86400],
+  ])("outlasts two polls and two candles on %s", (interval, sec) => {
+    const threshold = staleThresholdMs(interval);
+    expect(threshold).toBeGreaterThanOrEqual(2 * geckoPollMs(sec));
+    expect(threshold).toBeGreaterThanOrEqual(2 * 180_000);
+    expect(threshold).toBeGreaterThanOrEqual(2 * sec * 1000);
+  });
+
+  it("is six minutes on a 1m chart and two candles on a coarse one", () => {
+    expect(staleThresholdMs("1m")).toBe(360_000);
+    expect(staleThresholdMs("15m")).toBe(1_800_000);
+  });
+});
+
+describe("useCandleStore staleness", () => {
+  const stale = { value: false };
+
+  function StaleHarness({ interval }: { interval: string }) {
+    const { isStale } = useCandleStore("srv", "meteora", "SOL-USDC", interval, "pool1");
+    useEffect(() => {
+      stale.value = isStale;
+    });
+    return null;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    stale.value = false;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const tick = () =>
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+  it("does not flag a pool chart that is merely between two polls", () => {
+    act(() => root.render(<StaleHarness interval="15m" />));
+
+    // A 15m pool polls every 180 s and is silent until the bar moves.
+    for (const age of [31_000, 181_000, 359_000, 900_000]) {
+      store.age = age;
+      tick();
+      expect(stale.value).toBe(false);
+    }
+  });
+
+  it("flags a feed that has been silent past two polls and two candles", () => {
+    act(() => root.render(<StaleHarness interval="1m" />));
+
+    store.age = 361_000;
+    tick();
+    expect(stale.value).toBe(true);
+
+    // A frame clears it.
+    act(() => store.push("candles:srv:meteora:SOL-USDC:1m:pool1", [candle(1, 100)]));
+    expect(stale.value).toBe(false);
   });
 });
