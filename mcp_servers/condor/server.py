@@ -543,7 +543,9 @@ async def manage_routines(
         agent: Slug of the agent whose routine library to target (agent-local
             CRUD, and "list"/"run"/"start" against another agent's routines).
             A run started with it is attributed to that agent. Omit to use
-            the current assistant's own library.
+            the current assistant's own library. A launched agent may read,
+            list and run another agent's routines but WRITES only its own:
+            create/edit/delete with another agent's slug is refused.
         code: Python source code for create_routine / edit_routine.
         shared: Target the shared library every assistant reads (routine CRUD).
             Condor only, and only without `agent` — for an agent it is ignored

@@ -24,6 +24,9 @@ from pathlib import Path
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import caller_slug, settings
+from mcp_servers.condor.tools._scope import ScopeError, UnknownAgent
+from mcp_servers.condor.tools._scope import owner_of as _owner_of
+from mcp_servers.condor.tools._scope import resolve_target
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +156,25 @@ def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | 
         return None
 
     return assistant_routines_dir(settings.specialist_slug or None)
+
+
+def _refuse_foreign_write(target: str | None) -> dict | None:
+    """The refusal for a specialist writing another agent's routines, or None.
+
+    ``list``/``describe``/``read_routine``/``run``/``start`` take ``agent=`` from
+    any seat, as the tool documents. The three that change a library do not:
+    routine code runs in the main process under the owning agent's name, so a
+    launched agent editing a peer's routine is that agent choosing what another
+    one executes (MC-07). An unknown target is left to the caller's own "pass
+    agent" error.
+    """
+    try:
+        resolve_target(target, write=True, what="routines")
+    except UnknownAgent:
+        return None
+    except ScopeError as exc:
+        return {"error": str(exc)}
+    return None
 
 
 def _stock_twin(routines_dir: Path, name: str) -> Path | None:
@@ -302,20 +324,6 @@ def describe_routine(name: str) -> dict:
         "type": "continuous" if routine.is_continuous else "one-shot",
         "fields": fields,
     }
-
-
-def _owner_of(target: str) -> str | None:
-    """The agent slug ``target`` names — itself, or the owner of a strategy key."""
-    from condor.agents.agent import AgentStore
-    from condor.agents.strategy import StrategyStore
-
-    if AgentStore().get(target):
-        return target
-    # Legacy/convenience form: a composite strategy key names its owning agent.
-    s = StrategyStore().get_by_key(target)
-    if s:
-        return s.agent_slug
-    return None
 
 
 def _resolve_with_owner(name: str, target: str | None):
@@ -751,6 +759,8 @@ def create_routine(
     """
     if bad := _bad_name(name):
         return bad
+    if refusal := _refuse_foreign_write(target):
+        return refusal
     if not code:
         return {"error": "code is required"}
 
@@ -836,6 +846,8 @@ def edit_routine(
     """Update the source code of a routine in the caller's writable library."""
     if bad := _bad_name(name):
         return bad
+    if refusal := _refuse_foreign_write(target):
+        return refusal
 
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
@@ -887,6 +899,8 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Delete a routine from the caller's writable library."""
     if bad := _bad_name(name):
         return bad
+    if refusal := _refuse_foreign_write(target):
+        return refusal
 
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
