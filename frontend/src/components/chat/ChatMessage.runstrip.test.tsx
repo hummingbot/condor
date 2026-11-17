@@ -92,3 +92,36 @@ describe("the run strip's disclosure", () => {
     expect(strip().getAttribute("aria-expanded")).toBe("false");
   });
 });
+
+describe("a call the user cut off (FU-06)", () => {
+  it("reads as stopped with an unknown outcome, never as a success", () => {
+    render(
+      message({
+        thought: undefined,
+        text: "Stopped.",
+        toolCalls: [
+          { tool_call_id: "t1", title: "get_prices", status: "completed" },
+          {
+            tool_call_id: "t2",
+            title: "create_position_executor",
+            status: "interrupted",
+          },
+        ],
+      }),
+      true,
+    );
+
+    const rows = Array.from(container.querySelectorAll(".font-mono")).map(
+      (el) => el.parentElement!,
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector(".lucide-check")).not.toBeNull();
+    // No tick, no cross, no spinner — and the row says why.
+    expect(rows[1].querySelector(".lucide-check")).toBeNull();
+    expect(rows[1].querySelector(".lucide-x")).toBeNull();
+    expect(rows[1].querySelector(".animate-spin")).toBeNull();
+    expect(rows[1].textContent).toContain("stopped — outcome unknown");
+    // Nothing is still running, so the strip's own spinner is gone too.
+    expect(strip().querySelector(".animate-spin")).toBeNull();
+  });
+});

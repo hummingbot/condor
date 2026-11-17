@@ -563,6 +563,13 @@ describe("toolCallState", () => {
       expect(toolCallState(refused)).toBe("error");
     }
   });
+
+  it("reads a call cut off by Stop as neither done nor still running (FU-06)", () => {
+    // Client-only: the settle pass writes it when the user stops or redirects
+    // a turn. It is terminal, so nothing spins — and it is not `ok`, because
+    // nobody on this side knows whether the call went through.
+    expect(toolCallState("interrupted")).toBe("interrupted");
+  });
 });
 
 // CORR-327: a tool's name can arrive on its update rather than its announcement,

@@ -2,9 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, useEffect, useCallback } from "react";
 import { Loader2, Mic, Paperclip, Send, Square, X } from "lucide-react";
 
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
 import { authFetch } from "@/lib/auth-token";
 import { readDraft, writeDraft } from "@/lib/chatDrafts";
+import { CHAT_SURFACE_PROPS, inChatSurface } from "./chatSurface";
 
 /** What the composer will accept, and what the store will keep. Kept in step
  *  with `condor/runtime/attachments.py` — the backend refuses anything else. */
@@ -96,10 +98,19 @@ export function ChatInput({
   }, []);
 
   // A different conversation: whatever was left in *its* box, not this one's.
+  // The pictures move with the words — left in the box, a screenshot picked
+  // for one chat was sent to the next one the user tabbed to (FU-15).
   useEffect(() => {
     if (draftKey === draftKeyRef.current) return;
+    const leaving = draftKeyRef.current;
     draftKeyRef.current = draftKey;
     setValue(readDraft(draftKey));
+    if (filesRef.current.length > 0) {
+      parkedFiles.current.set(leaving, filesRef.current);
+    }
+    setFiles(parkedFiles.current.get(draftKey) ?? []);
+    parkedFiles.current.delete(draftKey);
+    setFileError(null);
   }, [draftKey]);
 
   // The box around the textarea is the affordance, so it has to know when the
@@ -151,9 +162,15 @@ export function ChatInput({
   // the URLs of the chips beside it.
   const filesRef = useRef<PendingFile[]>([]);
   filesRef.current = files;
+  // The attachments of the conversations this composer is not showing, by
+  // draft key. Kept for the life of the composer only: unlike the words they
+  // are `File`s and object URLs, which do not survive a reload anyway.
+  const parkedFiles = useRef(new Map<string | undefined, PendingFile[]>());
   useEffect(() => {
+    const parked = parkedFiles.current;
     return () => {
       filesRef.current.forEach((f) => URL.revokeObjectURL(f.url));
+      parked.forEach((list) => list.forEach((f) => URL.revokeObjectURL(f.url)));
     };
   }, []);
 
@@ -229,13 +246,13 @@ export function ChatInput({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Enter that confirms an IME candidate is part of writing the message, not
+    // the end of it (FU-16). `keyCode` 229 is the same fact on browsers that
+    // fire the keydown before they set `isComposing`.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
-    }
-    if (e.key === "Escape" && isStreaming && onAbort) {
-      e.preventDefault();
-      onAbort();
     }
   };
 
@@ -330,23 +347,23 @@ export function ChatInput({
     voiceSettingsRef.current = voiceSettings;
   }, [voiceSettings]);
 
-  // Global ESC to abort streaming
-  useEffect(() => {
-    if (!isStreaming || !onAbort) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onAbort();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [isStreaming, onAbort]);
+  // Esc stops the answer — registered at the bottom of the Escape stack, so an
+  // open menu, sheet or dialog takes the key instead, and only for a keypress
+  // made inside a chat surface: pressing Esc to dismiss something elsewhere on
+  // the page must not also stop an agent mid-trade (FU-05). This is the only
+  // path; the textarea has no Escape branch of its own, which used to abort
+  // twice per press.
+  useEscapeKey(!!isStreaming && !!onAbort, () => onAbort?.(), {
+    base: true,
+    when: inChatSurface,
+  });
 
   // Global keyboard shortcut: ⌘⇧M to toggle recording
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "m") {
+      // Lower-cased: with Shift held the key arrives as "M" on Windows and
+      // Linux, so the exact match never fired there.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "m") {
         e.preventDefault();
         if (recordingState === "recording") {
           stopRecording();
@@ -375,7 +392,7 @@ export function ChatInput({
     // only as wide as the text column — a slab laid across the bottom of the
     // pane rather than the floor of it. Only the ring is gold, and only on
     // focus.
-    <div>
+    <div {...CHAT_SURFACE_PROPS}>
       {voiceError && <p className="mb-2 text-xs text-red-400">{voiceError}</p>}
       {fileError && <p className="mb-2 text-xs text-red-400">{fileError}</p>}
       {/* One composer chrome, owned here — the hero and the thread both get this
@@ -459,7 +476,7 @@ export function ChatInput({
               <span className="flex-1 text-xs text-[var(--color-text-muted)]">
                 Recording...{" "}
                 <kbd className="ml-1 rounded bg-[var(--color-bg)] px-1 py-0.5 text-[10px] font-mono border border-[var(--color-border)]">
-                  ⌘M
+                  ⌘⇧M
                 </kbd>{" "}
                 to stop
               </span>
@@ -547,7 +564,7 @@ export function ChatInput({
               <button
                 onClick={stopRecording}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white transition-opacity hover:opacity-90"
-                title="Stop recording (⌘M)"
+                title="Stop recording (⌘⇧M)"
               >
                 <Square className="h-3.5 w-3.5" />
               </button>
@@ -560,7 +577,7 @@ export function ChatInput({
                 onClick={startRecording}
                 disabled={disabled}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-40"
-                title="Record voice message (⌘M)"
+                title="Record voice message (⌘⇧M)"
               >
                 <Mic className="h-4 w-4" />
               </button>
