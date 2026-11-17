@@ -1170,7 +1170,7 @@ async def manage_memory(
     description: str | None = None,
     type: Literal["preference", "fact", "feedback", "reference"] = "fact",
     query: str | None = None,
-    max_entries: int | None = None,
+    max_entries: int = 30,
 ) -> dict:
     """Manage your persistent memory ABOUT THE USER (yours alone, across sessions).
 
@@ -1192,9 +1192,7 @@ async def manage_memory(
     Actions:
     - "write": Create/overwrite a memory (requires name, content, description; optional type).
     - "read": Get the full body of a memory (requires name).
-    - "search": Keyword search over your memories (requires query). Any query
-      word may match; results are ranked and carry a short snippet plus the
-      total match count — "read" the one you want for its full body.
+    - "search": Keyword search over your memories (requires query).
     - "list": Return the memory index (one line per memory).
     - "delete": Remove a memory (requires name).
     - "audit": Recent write/delete events (who changed what).
@@ -1206,8 +1204,7 @@ async def manage_memory(
         description: One-line summary shown in the index (required for write).
         type: What kind of memory this is (default "fact").
         query: Search string (for search).
-        max_entries: Cap for search/audit results (default 10 for search,
-            30 for audit).
+        max_entries: Cap for search/audit results (default 30).
 
     Returns:
         Action-specific result dict.
