@@ -23,6 +23,7 @@ nothing.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from condor.llm.openrouter_models import fetch_models
@@ -67,8 +68,11 @@ async def _custom_endpoints() -> list[dict]:
     re-fetched here so a stale endpoint shows up as ``reachable: false`` rather
     than being recommended and failing on the first agent run.
     """
+    # ``condor.llm`` directly, for the reason in the module docstring: the
+    # ``handlers.agents`` shim is the same module object behind a package
+    # __init__ this subprocess has no use for.
+    from condor.llm.custom_models import CustomProviderError, fetch_models
     from condor.preferences import get_custom_providers, load_user_data_for
-    from handlers.agents.custom_models import CustomProviderError, fetch_models
     from mcp_servers.condor.settings import settings
 
     try:
@@ -76,8 +80,7 @@ async def _custom_endpoints() -> list[dict]:
     except Exception:
         return []
 
-    out: list[dict] = []
-    for provider in providers:
+    async def probe(provider: dict) -> dict:
         entry = {
             "name": provider["name"],
             "base_url": provider["base_url"],
@@ -95,8 +98,12 @@ async def _custom_endpoints() -> list[dict]:
             ]
         except CustomProviderError:
             pass  # endpoint down or key rejected — report it, don't raise
-        out.append(entry)
-    return out
+        return entry
+
+    # Together, not one after another: each dead endpoint costs its full
+    # timeout, and in sequence three of them made the whole report wait for
+    # the sum. ``gather`` keeps the saved order.
+    return list(await asyncio.gather(*(probe(p) for p in providers)))
 
 
 async def get_available_models(
@@ -106,10 +113,17 @@ async def get_available_models(
     cloud_keys = {
         prefix: bool(os.environ.get(env)) for prefix, env in CLOUD_KEY_ENVS.items()
     }
+    # The three network probes are independent, so they run together: the
+    # report takes as long as the slowest of them, not as long as their sum.
+    custom, local, openrouter = await asyncio.gather(
+        _custom_endpoints(),
+        local_servers(),
+        _openrouter(openrouter_query, openrouter_limit),
+    )
     return {
         "acp_clis": acp_bridges(),
         "cloud_keys": cloud_keys,
-        "custom_endpoints": await _custom_endpoints(),
-        "local": await local_servers(),
-        "openrouter": await _openrouter(openrouter_query, openrouter_limit),
+        "custom_endpoints": custom,
+        "local": local,
+        "openrouter": openrouter,
     }

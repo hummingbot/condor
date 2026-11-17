@@ -1,5 +1,6 @@
 """Agent CRUD, loop CRUD, instance lifecycle, and the journal."""
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -109,17 +110,7 @@ def _manage_strategy(
         s = store.get_by_key(loop_id)
         if not s:
             return {"error": f"Loop '{loop_id}' not found"}
-        if name:
-            s.name = name
-        if description:
-            s.description = description
-        if instructions:
-            s.instructions = instructions
-        if agent_key:
-            s.agent_key = agent_key
-        if skills is not None:
-            s.skills = skills
-        store.update(s)
+        effective = None
         if config:
             # Merged into the *effective* config (`config.yml`, which always
             # overrides `loop.md`'s `default_config` once saved — see
@@ -128,6 +119,11 @@ def _manage_strategy(
             # `default_config` here was a silent no-op for any loop whose
             # config was ever saved from the dashboard: `config.yml` kept
             # overriding it and the chat-approved change never took effect.
+            #
+            # Validated ahead of every write, so a refused config leaves the
+            # loop whole rather than saving the name, instructions and skills
+            # that happened to be listed beside it and then answering "error"
+            # (MC-15) — the same order ``update_agent`` keeps for its pin.
             from pydantic import ValidationError
 
             from condor.agents.config import (
@@ -142,6 +138,19 @@ def _manage_strategy(
                 AgentConfig.from_dict(effective)
             except ValidationError as exc:
                 return {"error": f"Invalid config: {exc}"}
+        if name:
+            s.name = name
+        # ``is not None``, as ``update_agent`` has it: "" clears a description.
+        if description is not None:
+            s.description = description
+        if instructions:
+            s.instructions = instructions
+        if agent_key:
+            s.agent_key = agent_key
+        if skills is not None:
+            s.skills = skills
+        store.update(s)
+        if effective is not None:
             save_full_config(s.home, effective)
         return {"updated": True, "loop_id": s.key, "name": s.name}
 
@@ -1352,6 +1361,9 @@ _AGENT_ACTIONS = {
     "publish_hub": "publish_hub",
 }
 
+# The agent actions that do network I/O against the hub, synchronously.
+_HUB_NETWORK_ACTIONS = ("hub_browse", "hub_get", "publish_hub")
+
 _STRATEGY_ACTIONS = {
     "list": "list_strategies",
     "get": "get_strategy",
@@ -1473,6 +1485,11 @@ async def manage_agents_tool(action: str, **kwargs) -> dict:
         return err
     if resolved == "delete_agent":
         return await _delete_agent(kwargs.get("agent_slug"))
+    if resolved in _HUB_NETWORK_ACTIONS:
+        # These talk to the Botcamp hub with a blocking HTTP client. Run on
+        # this subprocess's event loop they stalled every other tool call the
+        # session had in flight for as long as the hub took to answer (MC-15).
+        return await asyncio.to_thread(manage_agents, action, **kwargs)
     return manage_agents(action, **kwargs)
 
 
