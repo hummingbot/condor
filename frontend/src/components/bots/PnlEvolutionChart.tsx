@@ -35,7 +35,7 @@
 //     with nothing in the types or the tests to say why. Deriving the id per
 //     instance costs a hook and removes the trap.
 
-import { useCallback, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useCallback, useId, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   Area,
   Bar,
@@ -381,7 +381,26 @@ interface Props {
   notice?: { label: string; detail?: string };
 }
 
-export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, currencySymbol = "$", filters, notice }: Props) {
+/**
+ * `notice` is built inline by every host, so it is a new object per render
+ * that almost always says the same thing; compared by what it says, the rest
+ * by identity. The hosts re-render on every fleet frame and every clock tick,
+ * and none of that is a reason to walk a thousand-point SVG again.
+ */
+function sameProps(a: Props, b: Props): boolean {
+  return (
+    a.data === b.data &&
+    a.title === b.title &&
+    a.pnlHeight === b.pnlHeight &&
+    a.volumeHeight === b.volumeHeight &&
+    a.currencySymbol === b.currencySymbol &&
+    a.filters === b.filters &&
+    a.notice?.label === b.notice?.label &&
+    a.notice?.detail === b.notice?.detail
+  );
+}
+
+export const PnlEvolutionChart = memo(function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, currencySymbol = "$", filters, notice }: Props) {
   // Unique per mounted instance: two charts on one page must not share a
   // gradient element or a sync group. useId() emits colons, which are legal in
   // an id but awkward in selectors, so strip them.
@@ -807,17 +826,21 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
               }
               wrapperStyle={TOOLTIP_WRAPPER_STYLE}
             />
+            {/* None of the series animates. recharts replays a 1.5 s entrance
+                on every new `data`, and this chart gets one every few seconds:
+                the page would spend a third of its time tweening paths that
+                had not changed shape (FP-12). */}
             {drawn.has("total") && (
-              <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} />
+              <Area type="monotone" dataKey="total" stroke="none" fill={`url(#${gradientId})`} activeDot={false} isAnimationActive={false} />
             )}
             {drawn.has("total") && (
-              <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
+              <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} isAnimationActive={false} />
             )}
             {drawn.has("realized") && (
-              <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} isAnimationActive={false} />
             )}
             {drawn.has("unrealized") && (
-              <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
+              <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
             )}
             {/* No <Legend> here, in either pane. It could only ever name this
                 pane's three series — it printed capitalised dataKeys as one
@@ -958,6 +981,7 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
                 fill={`url(#${posGradientId})`}
                 fillOpacity={0.22}
                 dot={false}
+                isAnimationActive={false}
               />
             )}
             {/* Drawn after the area so the baseline stays visible through the
@@ -991,4 +1015,4 @@ export function PnlEvolutionChart({ data, title, pnlHeight, volumeHeight, curren
       />
     </div>
   );
-}
+}, sameProps);
