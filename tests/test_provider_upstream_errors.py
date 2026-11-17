@@ -100,3 +100,42 @@ def test_no_provider_serializes_a_raw_exception():
     for path in providers.glob("*.py"):
         source = path.read_text()
         assert "str(e)" not in source and "str(exc)" not in source, path.name
+
+
+class _SearchRaises:
+    """The batch fetch's own request failing, one layer below the provider."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def search_executors(self, **kwargs):
+        self.calls += 1
+        raise TimeoutError("search_executors timed out")
+
+
+def test_a_failed_executor_search_is_not_a_healthy_empty_book():
+    """AG1-01: ``fetch_agent_performance`` swallows a failed ``search_executors``.
+
+    It hands back an empty performance object whose ``reading`` defaults to
+    ``ok``, so the provider used to report "none running" with zero exposure on
+    exactly the tick the API could not say what was running. The provider asks
+    the fetch which ids failed and returns its own error result instead.
+    """
+    from types import SimpleNamespace
+
+    api = _SearchRaises()
+    result = asyncio.run(
+        ExecutorsProvider().execute(
+            SimpleNamespace(executors=api), {}, agent_id="acme.mm_1"
+        )
+    )
+
+    assert api.calls == 1
+    assert "error" in result.data
+    # No ``reading`` and no rows: absence is the statement that nothing was read.
+    assert "reading" not in result.data
+    assert "executors" not in result.data
+    assert "total_exposure" not in result.data
+    assert "failed to fetch" in result.summary
+    assert "none running" not in result.summary
+    assert "timed out" not in result.summary

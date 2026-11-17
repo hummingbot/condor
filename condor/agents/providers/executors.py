@@ -47,6 +47,11 @@ class ExecutorsProvider(BaseProvider):
         # configured name, which is what the session would deploy under anyway.
         bases = list(bot_names or []) or [config.get("bot_name", "")]
 
+        # The batch fetch swallows a failed ``search_executors`` one layer down
+        # and hands back an empty performance object, which reads here as "ok,
+        # none running" (AG1-01). It reports the ids it could not read only to
+        # a caller that asks, so ask.
+        failed_ids: set[str] = set()
         try:
             # Each owned base is sliced to the window this session held it over,
             # so what the agent is told it earned is what the dashboard attributes
@@ -59,6 +64,7 @@ class ExecutorsProvider(BaseProvider):
                 # The session report's curve, cut from the histories these
                 # figures were sliced from, so the tick walks them once.
                 pnl_series=True,
+                failed_ids=failed_ids,
             )
         except Exception as e:
             # The summary is embedded in the tick prompt and snapshot, and the
@@ -69,6 +75,20 @@ class ExecutorsProvider(BaseProvider):
                 name=self.name,
                 data={"error": message},
                 summary=f"Active Executors: failed to fetch ({message})",
+            )
+        if agent_id in failed_ids:
+            # The same "nothing was read" result as the raise above: no
+            # ``reading`` key and no rows, so nothing downstream can take a
+            # failed read for a flat book. The exception was logged where it
+            # was caught; the message here names no backend detail.
+            message = "the executor list could not be read"
+            return ProviderResult(
+                name=self.name,
+                data={"error": message},
+                summary=(
+                    f"Active Executors: failed to fetch ({message}) — what is "
+                    "running is UNKNOWN this tick, not none"
+                ),
             )
 
         running = [e for e in perf.executors if e["status"] == "RUNNING"]

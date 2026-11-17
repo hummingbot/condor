@@ -112,3 +112,146 @@ def test_gather_tick_context_builds_the_prompt_when_not_blocked(tmp_path, monkey
     assert ctx.risk_state.is_blocked is False
     assert ctx.executors_summary == "No executor data."
     assert engine.journal.tick_count == 0, "gathering records no tick"
+
+
+# ── AG1-01: a failed executor read is not a healthy empty book ──
+
+
+def _create_call():
+    return {
+        "tool": "create_grid_executor",
+        "input": {
+            "connector_name": "binance",
+            "trading_pair": "SOL-USDC",
+            "total_amount_quote": 10,
+        },
+    }
+
+
+class _SearchRaises:
+    async def search_executors(self, **kwargs):
+        raise TimeoutError("search_executors timed out")
+
+
+def _executors_only(engine, monkeypatch, result_for):
+    """Run the gather phase with only the executors provider answering."""
+    from condor.agents.providers.base import ProviderResult
+
+    async def run_core_providers(*args, **kwargs):
+        data, summary = result_for()
+        return {
+            "executors": ProviderResult(name="executors", data=data, summary=summary)
+        }
+
+    monkeypatch.setattr(engine, "_adopt_running_bots", _async(None))
+    monkeypatch.setattr(engine, "_adopt_running_executors", _async(None))
+    monkeypatch.setattr(
+        engine.provider_registry, "run_core_providers", run_core_providers
+    )
+    return asyncio.run(engine._gather_tick_context(object()))
+
+
+def test_a_failed_executor_search_leaves_the_book_untrusted(tmp_path, monkeypatch):
+    """End to end through the real provider: the API's ``search_executors``
+    times out, and a create is refused instead of being sized against $0."""
+    from types import SimpleNamespace
+
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    engine = _engine(tmp_path, monkeypatch)
+    client = SimpleNamespace(executors=_SearchRaises())
+
+    async def run_core_providers(client_, config, **kwargs):
+        result = await ExecutorsProvider().execute(
+            client_, config, agent_id=kwargs["agent_id"]
+        )
+        return {"executors": result}
+
+    monkeypatch.setattr(engine, "_adopt_running_bots", _async(None))
+    monkeypatch.setattr(engine, "_adopt_running_executors", _async(None))
+    monkeypatch.setattr(
+        engine.provider_registry, "run_core_providers", run_core_providers
+    )
+
+    ctx = asyncio.run(engine._gather_tick_context(client))
+
+    assert ctx is not None, "an unreadable book refuses creates, it does not block"
+    assert ctx.risk_state.book_trusted is False
+    assert "could not be read" in ctx.risk_state.drift_reason
+    assert engine._tick_reading == ""
+    assert engine._last_reading_at == 0.0, "a failed read is not a reading"
+    assert "none running" not in ctx.prompt
+
+    allowed, reason = engine.risk.check_executor_action(
+        _create_call(), ctx.risk_state, 10.0
+    )
+    assert not allowed
+    assert "Book untrusted" in reason
+
+
+def test_a_provider_that_raised_outright_leaves_the_book_untrusted(
+    tmp_path, monkeypatch
+):
+    """The registry's catch-all for a provider that raised is ``data={}``."""
+    engine = _engine(tmp_path, monkeypatch)
+
+    ctx = _executors_only(
+        engine, monkeypatch, lambda: ({}, "(provider executors failed)")
+    )
+
+    assert ctx is not None
+    assert ctx.risk_state.book_trusted is False
+
+
+def test_an_answering_executors_provider_keeps_the_book_trusted(tmp_path, monkeypatch):
+    engine = _engine(tmp_path, monkeypatch)
+
+    ctx = _executors_only(
+        engine,
+        monkeypatch,
+        lambda: ({"executors": [], "reading": "ok"}, "Active Executors: none running"),
+    )
+
+    assert ctx is not None
+    assert ctx.risk_state.book_trusted is True
+
+
+def test_a_failed_read_keeps_the_last_good_rows(tmp_path, monkeypatch):
+    """The stop gate's owner map and the stop sweep read ``_last_skill_data``.
+
+    A failed read used to replace it with ``{"error": ...}``, so a stop on the
+    tick the API struggled had no rows to scope itself to. The last good rows
+    stay; the count and exposure the gate sizes against are theirs, and the
+    book is untrusted because they are stale.
+    """
+    engine = _engine(tmp_path, monkeypatch)
+    rows = [{"id": "ex-1", "pair": "SOL-USDC", "amount": 200.0}]
+    good = {
+        "executors": rows,
+        "all_executors": rows,
+        "total_exposure": 200.0,
+        "total_pnl": 3.0,
+        "reading": "ok",
+    }
+    answers = iter(
+        [
+            (good, "Active Executors (1)"),
+            ({"error": "the trading API is unreachable"}, "failed to fetch"),
+        ]
+    )
+
+    assert _executors_only(engine, monkeypatch, lambda: next(answers)) is not None
+    stamped = engine._last_reading_at
+    assert stamped > 0.0
+
+    ctx = _executors_only(engine, monkeypatch, lambda: next(answers))
+
+    assert ctx is not None
+    assert engine._last_skill_data["executors"] == rows
+    assert "error" not in engine._last_skill_data
+    assert engine._tick_reading == "", "this tick read nothing"
+    assert engine._last_reading_at == stamped, "and stamps no reading"
+    assert ctx.risk_state.book_trusted is False
+    assert ctx.risk_state.executor_count == 1
+    assert ctx.risk_state.total_exposure == 200.0
+    assert "ex-1" in engine._executor_owners()

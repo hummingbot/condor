@@ -977,7 +977,18 @@ class TickEngine:
 
         # Extract structured data from providers for tracking
         executors_result = skill_results.get("executors")
-        if executors_result:
+        # Whether the executors provider ran and did not answer (AG1-01): its
+        # own error path (``{"error": ...}``) or the registry's catch-all for a
+        # provider that raised (``{}``). A provider that never ran is neither.
+        executors_failed = executors_result is not None and (
+            not executors_result.data or "error" in executors_result.data
+        )
+        # A failed read does not replace the last good one. Its dict carries no
+        # rows, so the stop gate's owner map, the stop sweep's market scope and
+        # the winddown's fallback would all go blind on the very tick the API
+        # is struggling. The carried rows are stale, which is why the book is
+        # marked untrusted below, and ``_tick_reading`` says what THIS tick read.
+        if executors_result and not executors_failed:
             self._last_skill_data = executors_result.data
         positions_result = skill_results.get("positions")
         if positions_result:
@@ -986,10 +997,9 @@ class TickEngine:
         if drift_result:
             self._last_skill_data["drift"] = drift_result.data
         # What THIS tick read, taken from this tick's result rather than from
-        # the carried dict. A provider that failed returns ``data={}``, which
-        # replaces the dict and reads as "nothing"; a provider that never ran
-        # leaves the dict alone, and reading the stamp off it would present the
-        # last tick's reading as this one's.
+        # the carried dict. A provider that failed or never ran leaves the dict
+        # alone, and reading the stamp off it would present the last tick's
+        # reading as this one's.
         self._tick_reading = str(
             (executors_result.data if executors_result else {}).get("reading") or ""
         )
@@ -1090,6 +1100,18 @@ class TickEngine:
                 "so their exposure is unknown"
             )
         self._apply_drift_verdict(risk_state, drift_result)
+        # The executors provider did not answer, so the count and exposure
+        # above are the last good read's (or zero on a first tick), not this
+        # tick's. Fail closed like every other missing metric: new exposure is
+        # refused, every brake still passes (AG1-01). Last, so the reason the
+        # agent reads is the read that failed rather than a drift verdict
+        # computed beside it.
+        if executors_failed:
+            risk_state.book_trusted = False
+            risk_state.drift_reason = (
+                "the executor list could not be read this tick, so what is "
+                "open is unknown"
+            )
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
         # pause below. Experiments never trade for real, so they never shut down.
