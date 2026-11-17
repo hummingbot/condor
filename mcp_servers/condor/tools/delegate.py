@@ -19,6 +19,7 @@ This tool just calls back into the main process, where the agent runtime lives,
 via the web API.
 """
 
+from condor.runtime.timeouts import ASK_TIMED_OUT_MARK, TIMEOUTS
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.settings import caller_slug as _caller_slug
 from mcp_servers.condor.settings import settings
@@ -28,9 +29,13 @@ from mcp_servers.condor.settings import settings
 # which deliberately talks to the main process over HTTP and never imports it.
 ON_COMPLETE_CHOICES = ("notify", "resume")
 
-# Long enough to cover an ask's model/tool latency without holding the caller's
-# turn open indefinitely. An ask is blocking, so this bound is the caller's too.
-ASK_TIMEOUT_SEC = 180.0
+# How long the HTTP call behind an ask is waited on. NOT the bound on the ask:
+# the main process enforces that (``TIMEOUTS.ask``, in ``run_ask``), because it
+# is the only side that can actually stop the asked agent. This sits a margin
+# above it so the route always answers first and a timeout comes back as a
+# sentence from the main process rather than as a dropped connection behind
+# which the agent is still running (MC-03).
+ASK_TIMEOUT_SEC = TIMEOUTS.mcp_ask
 
 # The default wall-clock budget for a background task, stated here only so the
 # tool can tell the caller what it is getting when it asks for nothing. The
@@ -114,7 +119,7 @@ async def delegate(
                     f'"{settings.agent_slug}", ...).)'
                 )
             }
-        return await call_main_api(
+        result = await call_main_api(
             "POST",
             f"/agents/{agent}/ask",
             {
@@ -129,6 +134,17 @@ async def delegate(
             },
             timeout=ASK_TIMEOUT_SEC,
         )
+        answer = result.get("answer") if isinstance(result, dict) else None
+        if isinstance(answer, str) and answer.startswith(ASK_TIMED_OUT_MARK):
+            # Not an answer: the main process stopped the ask at its budget and
+            # said so. Returned as an error so it is never read as what the
+            # agent concluded.
+            return {
+                "agent": agent,
+                "timed_out": True,
+                "error": answer[len(ASK_TIMED_OUT_MARK) :].strip(),
+            }
+        return result
 
     if action == "start":
         # Hard stop, not a prompt rule (FEAT-032): a background worker runs with

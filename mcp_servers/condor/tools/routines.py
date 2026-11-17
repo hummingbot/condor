@@ -24,6 +24,9 @@ from pathlib import Path
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import caller_slug, settings
+from mcp_servers.condor.tools._scope import ScopeError, UnknownAgent
+from mcp_servers.condor.tools._scope import owner_of as _owner_of
+from mcp_servers.condor.tools._scope import resolve_target
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +34,11 @@ log = logging.getLogger(__name__)
 # executed the routine itself, and the granularity we poll the run with.
 _RUN_BUDGET = 120.0
 _POLL_INTERVAL = 1.0
+# The first checks come sooner than that. Most routines a skill links finish in
+# well under a second, and sleeping a full interval before the first look made
+# every one of them cost a second it did not use (MC-14). After the ramp the
+# poll settles at ``_POLL_INTERVAL``, which also caps each ramp step.
+_POLL_RAMP = (0.05, 0.1, 0.2, 0.5)
 
 _NO_SERVER = (
     "No active server is selected for this session, so the run cannot be "
@@ -153,6 +161,25 @@ def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | 
         return None
 
     return assistant_routines_dir(settings.specialist_slug or None)
+
+
+def _refuse_foreign_write(target: str | None) -> dict | None:
+    """The refusal for a specialist writing another agent's routines, or None.
+
+    ``list``/``describe``/``read_routine``/``run``/``start`` take ``agent=`` from
+    any seat, as the tool documents. The three that change a library do not:
+    routine code runs in the main process under the owning agent's name, so a
+    launched agent editing a peer's routine is that agent choosing what another
+    one executes (MC-07). An unknown target is left to the caller's own "pass
+    agent" error.
+    """
+    try:
+        resolve_target(target, write=True, what="routines")
+    except UnknownAgent:
+        return None
+    except ScopeError as exc:
+        return {"error": str(exc)}
+    return None
 
 
 def _stock_twin(routines_dir: Path, name: str) -> Path | None:
@@ -284,11 +311,17 @@ def list_routines(target: str | None = None) -> dict:
     return {"routines": result}
 
 
-def describe_routine(name: str) -> dict:
+def describe_routine(name: str, target: str | None = None) -> dict:
+    """A routine's config schema, resolved the way ``run`` resolves it.
+
+    ``target`` is the same ``agent=`` selector ``run``/``start`` take. Without
+    it honoured here, the chat could list and run an agent's routine and was
+    told "not found" when it asked what config that routine takes (MC-14).
+    """
     from condor.agents.code_trust import PendingConsentError
 
     try:
-        routine = _resolve_routine(name)
+        routine, _owner = _resolve_with_owner(name, target)
     except PendingConsentError as exc:
         # Describing it is a read, and this answer *is* the description: the
         # routine exists, and here is what has to happen before it can run.
@@ -302,20 +335,6 @@ def describe_routine(name: str) -> dict:
         "type": "continuous" if routine.is_continuous else "one-shot",
         "fields": fields,
     }
-
-
-def _owner_of(target: str) -> str | None:
-    """The agent slug ``target`` names — itself, or the owner of a strategy key."""
-    from condor.agents.agent import AgentStore
-    from condor.agents.strategy import StrategyStore
-
-    if AgentStore().get(target):
-        return target
-    # Legacy/convenience form: a composite strategy key names its owning agent.
-    s = StrategyStore().get_by_key(target)
-    if s:
-        return s.agent_slug
-    return None
 
 
 def _resolve_with_owner(name: str, target: str | None):
@@ -389,8 +408,9 @@ def _with_provenance(payload: dict) -> dict:
 async def _poll_until_done(instance_id: str) -> dict | None:
     """Follow a delegated run until it leaves ``running``. None on timeout."""
     deadline = time.monotonic() + _RUN_BUDGET
+    delays = iter(_POLL_RAMP)
     while time.monotonic() < deadline:
-        await asyncio.sleep(_POLL_INTERVAL)
+        await asyncio.sleep(min(next(delays, _POLL_INTERVAL), _POLL_INTERVAL))
         inst = await call_main_api("GET", f"/routines/instances/{instance_id}")
         if isinstance(inst, dict) and inst.get("status") != "running":
             return inst
@@ -751,6 +771,8 @@ def create_routine(
     """
     if bad := _bad_name(name):
         return bad
+    if refusal := _refuse_foreign_write(target):
+        return refusal
     if not code:
         return {"error": "code is required"}
 
@@ -836,6 +858,8 @@ def edit_routine(
     """Update the source code of a routine in the caller's writable library."""
     if bad := _bad_name(name):
         return bad
+    if refusal := _refuse_foreign_write(target):
+        return refusal
 
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
@@ -845,7 +869,14 @@ def edit_routine(
             "must be set."
         }
 
+    # Checked before anything is copied: a call with no code used to fork the
+    # shipped routine first and then refuse, leaving a local copy that shadows
+    # the shipped one from then on and stops receiving its updates (MC-14).
+    if not code:
+        return {"error": "code is required"}
+
     file_path = routines_dir / f"{name}.py"
+    forked = False
     if not file_path.exists():
         # A shipped routine is forked down and the edit lands on the copy, the
         # same copy-on-write every other write path does (FEAT-115).
@@ -856,10 +887,8 @@ def edit_routine(
             }
         file_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(twin, file_path)
+        forked = True
         log.info("agents: forked %s from stock (routine)", file_path)
-
-    if not code:
-        return {"error": "code is required"}
 
     old_code = file_path.read_text()
     file_path.write_text(code)
@@ -869,6 +898,16 @@ def edit_routine(
     loaded = discover_routines_from_path(routines_dir)
     if name not in loaded:
         reason = load_error(file_path) or "check for syntax errors"
+        if forked:
+            # The fork existed only to carry this edit. Reverting it to the
+            # shipped text would leave a silent fork behind a failed edit, so
+            # it is removed and the shipped routine is what runs again.
+            file_path.unlink()
+            log.info("agents: removed rejected fork %s (routine)", file_path)
+            return {
+                "error": f"Updated code failed to load: {reason}. "
+                "The shipped routine is unchanged."
+            }
         file_path.write_text(old_code)
         return {
             "error": f"Updated code failed to load: {reason}. "
@@ -887,6 +926,8 @@ def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Delete a routine from the caller's writable library."""
     if bad := _bad_name(name):
         return bad
+    if refusal := _refuse_foreign_write(target):
+        return refusal
 
     routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
@@ -940,7 +981,7 @@ async def manage_routines(
     if action == "describe":
         if not name:
             return {"error": "name is required"}
-        return describe_routine(name)
+        return describe_routine(name, target)
     if action == "run":
         if not name:
             return {"error": "name is required"}

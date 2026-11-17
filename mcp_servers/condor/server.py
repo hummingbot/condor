@@ -400,7 +400,9 @@ async def delegate(
       {"task_id", "status": "running", "next_steps"} — does NOT wait for completion.
     - "ask": Ask an agent and WAIT for its answer (requires agent, task). Returns
       {"agent", "answer"}. Refused if you are yourself answering an ask (depth
-      stops at one) or if you name your own slug.
+      stops at one) or if you name your own slug. BOUNDED at 180s: an ask that
+      has not answered by then is stopped and returns {"timed_out": true,
+      "error"} — do not re-ask it; hand anything that long to "start".
     - "list": List in-flight/finished delegations (task_id, agent, status).
     - "get": Get a delegation's status + result/error (requires task_id).
     - "stop": Cancel a running delegation (requires task_id).
@@ -541,7 +543,9 @@ async def manage_routines(
         agent: Slug of the agent whose routine library to target (agent-local
             CRUD, and "list"/"run"/"start" against another agent's routines).
             A run started with it is attributed to that agent. Omit to use
-            the current assistant's own library.
+            the current assistant's own library. A launched agent may read,
+            list and run another agent's routines but WRITES only its own:
+            create/edit/delete with another agent's slug is refused.
         code: Python source code for create_routine / edit_routine.
         shared: Target the shared library every assistant reads (routine CRUD).
             Condor only, and only without `agent` — for an agent it is ignored
@@ -655,6 +659,7 @@ async def run_code(
     run_id: str | None = None,
     agent: str | None = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> dict:
     """Run a Python snippet inside Condor and get its output back.
 
@@ -693,8 +698,10 @@ async def run_code(
     Actions:
     - "run" (default): execute `code` and wait for it (requires code)
     - "history": list recent runs, newest first, with label and status
-    - "get": read one past run back in full — code, stdout, result, traceback
-      (requires run_id)
+    - "get": read one past run back — code, stdout, result, traceback
+      (requires run_id). stdout/result come 20,000 characters at a time; a
+      longer run answers "truncated": true with the `next_offset` to pass as
+      `offset` for the next page.
 
     Args:
         action: What to do — execute a snippet or read past ones.
@@ -706,13 +713,20 @@ async def run_code(
         agent: Whose runs to list (for "history"). Defaults to your own; pass
             "all" for every assistant's.
         limit: How many runs to list (for "history"). Default 20.
+        offset: Character offset into stdout/result to read from (for "get").
+            Default 0; pass the `next_offset` a truncated "get" returned.
 
     Returns:
         For "run": {run_id, status: ok|error|timeout, stdout, result, error,
         traceback, report_id, duration_ms}. Long stdout/result are clipped with
-        "truncated": true — read the whole run with action="get".
+        "truncated": true — read the rest with action="get". Output is not
+        unlimited: a run keeps the first 256 KB and the last 64 KB it printed,
+        with a marker where the middle was dropped, so print a summary rather
+        than every row.
     """
-    return await code_tool.run_code(code, action, label, timeout, run_id, agent, limit)
+    return await code_tool.run_code(
+        code, action, label, timeout, run_id, agent, limit, offset
+    )
 
 
 @handle_errors("manage servers")
@@ -727,7 +741,10 @@ async def manage_servers(
     - "list": List all accessible servers with permissions and active status. Also
       returns the caller's context: active_server, user_role, is_admin, plus the
       active_agent_key (the LLM new agents inherit — never invent one) and the
-      custom_llm_endpoints the user has saved.
+      custom_llm_endpoints the user has saved. active_server is the server THIS
+      SESSION's tools act on, fixed when the session started; when the chat's
+      own default has since moved elsewhere it is reported beside it as
+      chat_default_server and does not apply until a new session.
     - "status": Check if a server is online (optional name, defaults to active server)
 
     Args:
@@ -858,8 +875,9 @@ async def manage_agents(
     - "get": Full definition including the AGENT.md body (requires agent_slug).
     - "update": Change AGENT.md / metadata (requires agent_slug + fields to change).
     - "delete": Delete an agent (requires agent_slug; refuses if it still owns
-      loops). Refused outright for an agent the repo ships — mute or edit
-      it instead; an update would bring a deleted one straight back.
+      loops, or while any of its loops is running). Refused outright for an
+      agent the repo ships — mute or edit it instead; an update would bring a
+      deleted one straight back.
     - "publish": ADMIN ONLY. Copy a local agent into the tracked library the
       repo ships (requires agent_slug; `path` narrows it to one skill or
       loop). Every other write lands under .condor/agents/, so this is the
@@ -981,7 +999,7 @@ async def manage_agents(
     Returns:
         Action-specific result dict.
     """
-    return trading_agent.manage_agents(
+    return await trading_agent.manage_agents_tool(
         action,
         agent_slug=agent_slug,
         name=name,
@@ -1043,7 +1061,9 @@ async def manage_loops(
     - "get": Full details including the instructions body (requires loop_id).
     - "create": New loop under an agent (requires agent_slug, name, instructions).
     - "update": Change an existing loop (requires loop_id + fields to change).
-    - "delete": Delete a loop (requires loop_id).
+    - "delete": Delete a loop and everything under it — sessions, journal,
+      learnings, config (requires loop_id). Refused while an instance of it is
+      running: stop it first with `control_agent`.
 
     Args:
         action: What to do with the loop.
@@ -1061,7 +1081,7 @@ async def manage_loops(
     Returns:
         Action-specific result dict.
     """
-    return trading_agent.manage_loops(
+    return await trading_agent.manage_loops_tool(
         action,
         loop_id=loop_id,
         agent_slug=agent_slug,
@@ -1345,8 +1365,8 @@ async def trading_agent_journal_read(
 
     Args:
         agent_id: The trading agent instance ID.
-        section: What to read:
-                 "recent" (last 10 decisions from run snapshots),
+        section: What to read (an unknown value is an error, not "recent"):
+                 "recent" (the last `max_entries` decisions from run snapshots),
                  "learnings" (all learnings, max 20),
                  "summary" (current status one-liner),
                  "state" (alias for summary),
@@ -1368,19 +1388,20 @@ async def trading_agent_journal_read(
 @telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
     agent_id: str,
-    entry_type: str,
+    entry_type: Literal["action", "learning", "state", "canvas"],
     text: str,
     reasoning: str = "",
     risk_note: str = "",
     tick: int = 0,
-    category: str = "",
-    section: str = "",
+    category: Literal["market", "execution"] | None = None,
+    section: Literal["thesis", "working", "changed", "questions"] | None = None,
 ) -> dict:
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
     Args:
         agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", "state", or "canvas".
+        entry_type: "action", "learning", "state", or "canvas". Anything else is
+            refused, not filed as an action.
             - "action": What you did this tick (auto-trimmed to last 10).
             - "learning": A new insight. Duplicates are auto-filtered. Only write
               if this is genuinely new and not already in learnings (max 20).
@@ -1398,7 +1419,7 @@ async def trading_agent_journal_write(
             tick 0.
         category: Learning category: "market" (observations, patterns, volatility)
             or "execution" (errors, fills, timing). Only used when entry_type="learning".
-            Defaults to "market".
+            OMIT for the default, "market".
         section: Which canvas section to replace — "thesis", "working",
             "changed", or "questions". Only used when entry_type="canvas".
 

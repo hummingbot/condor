@@ -41,9 +41,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import collections
 import contextvars
 import inspect
-import io
 import logging
 import sys
 import time
@@ -77,11 +77,83 @@ _orphaned_cleanups = TaskSet(
     logger, "code run %s: cleanup finished after the run was already reported (%s)"
 )
 
+# How much of a run's output is kept: the first ``OUTPUT_HEAD`` characters and
+# the last ``OUTPUT_TAIL``. ``code_guard`` bounds a snippet's time, not its
+# volume, so a ``print`` in a loop for a 120-second budget used to grow an
+# uncapped buffer in the process that runs the trading loops, then write all of
+# it to ``data/code_runs/`` and hand it back whole on ``get`` (RT-08). The head
+# is the larger half because that is where a table's header and a loop's first
+# iterations are; the tail keeps the last thing printed before a failure.
+OUTPUT_HEAD = 256 * 1024
+OUTPUT_TAIL = 64 * 1024
+
+
+def _dropped_marker(dropped: int) -> str:
+    return (
+        f"\n… [{dropped:,} characters of output dropped — a run keeps the first "
+        f"{OUTPUT_HEAD:,} and the last {OUTPUT_TAIL:,}] …\n"
+    )
+
+
+def _cap_text(text: str) -> str:
+    """``text`` cut to the same head-and-tail shape captured output has."""
+    if len(text) <= OUTPUT_HEAD + OUTPUT_TAIL:
+        return text
+    dropped = len(text) - OUTPUT_HEAD - OUTPUT_TAIL
+    return text[:OUTPUT_HEAD] + _dropped_marker(dropped) + text[-OUTPUT_TAIL:]
+
+
+class _CappedBuffer:
+    """A run's captured output: bounded memory, with the middle dropped.
+
+    The two methods the capture path uses of ``io.StringIO`` — ``write`` and
+    ``getvalue`` — and nothing else. Writes fill the head, then roll through a
+    tail of whole chunks trimmed from the left, so a write costs its own length
+    and never a copy of everything kept so far.
+    """
+
+    def __init__(self, head: int = OUTPUT_HEAD, tail: int = OUTPUT_TAIL) -> None:
+        self._head_cap = head
+        self._tail_cap = tail
+        self._head: list[str] = []
+        self._head_len = 0
+        self._tail: collections.deque[str] = collections.deque()
+        self._tail_len = 0
+        self._written = 0
+
+    def write(self, data) -> int:
+        data = str(data)
+        size = len(data)
+        self._written += size
+        room = self._head_cap - self._head_len
+        if room > 0:
+            self._head.append(data[:room])
+            self._head_len += min(size, room)
+            data = data[room:]
+        if data:
+            # One oversized write can only ever contribute its own last
+            # ``tail`` characters.
+            data = data[-self._tail_cap :] if self._tail_cap else ""
+            self._tail.append(data)
+            self._tail_len += len(data)
+            while self._tail and self._tail_len - len(self._tail[0]) >= self._tail_cap:
+                self._tail_len -= len(self._tail.popleft())
+        return size
+
+    def getvalue(self) -> str:
+        head = "".join(self._head)
+        tail = "".join(self._tail)[-self._tail_cap :] if self._tail_cap else ""
+        dropped = self._written - len(head) - len(tail)
+        if dropped <= 0:
+            return head + tail
+        return head + _dropped_marker(dropped) + tail
+
+
 # Where a run's ``print`` goes. Per-context, so concurrent runs cannot read each
 # other's output — which only holds because every run gets its own asyncio.Task
 # (a Task copies the context; awaiting a bare coroutine would share ours and
 # leak the buffer into the caller).
-_CAPTURE: contextvars.ContextVar[io.StringIO | None] = contextvars.ContextVar(
+_CAPTURE: contextvars.ContextVar[_CappedBuffer | None] = contextvars.ContextVar(
     "code_run_stdout", default=None
 )
 
@@ -159,7 +231,9 @@ def _render_result(namespace: dict) -> str:
     if value is None:
         return ""
     try:
-        return str(value)
+        # Capped like the output: a ``result`` holding a million-row frame's
+        # ``to_string()`` is the same flood by another door (RT-08).
+        return _cap_text(str(value))
     except Exception as e:  # a __str__ that raises must not fail the run
         return f"<unrenderable result: {type(e).__name__}: {e}>"
 
@@ -225,7 +299,7 @@ async def execute_code(
     run_id = new_run_id()
     agent = agent or CHAT_SLUG
     timeout = max(1.0, min(float(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
-    buffer = io.StringIO()
+    buffer = _CappedBuffer()
     started = time.monotonic()
 
     run = CodeRun(
