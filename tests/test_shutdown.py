@@ -306,6 +306,42 @@ def test_winddown_no_client_alerts_loudly(tmp_path, monkeypatch):
     assert any("🚨" in n and "could NOT reach the API" in n for n in notes)
 
 
+def test_the_owner_is_told_when_the_winddown_starts(tmp_path, monkeypatch):
+    """AG1-07: the first message goes out before any stop, the last is the
+    verified outcome -- the owner is not left silent for the whole winddown."""
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    stops_at_first_notice: list[int] = []
+    record = engine._notify
+
+    async def _notify(msg):
+        if not notes:
+            stops_at_first_notice.append(len(client.executors.stop_calls))
+        await record(msg)
+
+    engine._notify = _notify
+    asyncio.run(run_shutdown(engine, "drawdown 12% > 10%"))
+
+    assert len(notes) == 2
+    assert "STARTED" in notes[0] and "drawdown 12% > 10%" in notes[0]
+    assert "keep_spot_close_perp" in notes[0]
+    assert stops_at_first_notice == [0], "announced before the first stop"
+    assert "✅" in notes[1] and "complete" in notes[1]
+
+
+def test_a_winddown_with_no_client_still_announces_its_start(tmp_path, monkeypatch):
+    engine, client, notes = _fake_engine([], [[]], monkeypatch, tmp_path)
+
+    async def _no_client():
+        return None
+
+    engine._get_client = _no_client
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert "STARTED" in notes[0]
+    assert "could NOT reach the API" in notes[-1]
+
+
 # ── journal write amplification (PERF-173) ──
 
 
@@ -1069,7 +1105,8 @@ def test_one_failed_stop_is_reported_in_running_order(tmp_path, monkeypatch):
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
     client.executors.stop_executor = stop
     asyncio.run(run_shutdown(engine, "breach"))
-    [note] = notes
+    # The start notice (AG1-07), then the one final report.
+    _, note = notes
     assert "1 winddown error(s): stop e2: executor already stopping" in note
     assert "internal" not in note
 

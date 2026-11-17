@@ -916,6 +916,15 @@ async def run_shutdown(engine: Any, reason: str) -> None:
             "shutdown_start",
             f"{reason} (policy={policy.on_kill_switch})",
         )
+    # Tell the owner now, not when it is over (AG1-07). The message below is
+    # sent only after the cleanup pass and the verify, which can be minutes
+    # after the kill switch fired; until then nothing said the session was
+    # being wound down. The final, verified message still follows. Not 🚨:
+    # that mark is kept for a winddown that failed or could not be verified.
+    await engine._notify(
+        f"⚠️ Agent {agent_id}: emergency shutdown STARTED — {reason}. Winding "
+        f"down per '{policy.on_kill_switch}'; a final report follows."
+    )
 
     client = await engine._get_client()
     if client is None:
