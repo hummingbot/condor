@@ -830,9 +830,9 @@ def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
 def test_winddown_survives_a_positions_fetch_failure_during_verify(
     tmp_path, monkeypatch
 ):
-    """_verify_and_retry calls the positions fetch unguarded, so it must go
-    through the non-strict fetcher: a failed request reads as no positions and
-    the winddown still completes instead of propagating ([[ARCH-682]])."""
+    """A failed positions read during verify does not propagate ([[ARCH-682]]),
+    and does not read as "flat" either (AG1-04): the winddown completes and
+    reports that it could NOT verify, never the ✅ message."""
     running = [{"id": "e_perp", "connector": "binance_perpetual"}]
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
 
@@ -842,6 +842,50 @@ def test_winddown_survives_a_positions_fetch_failure_during_verify(
     monkeypatch.setattr(client.executors, "get_positions_summary", boom)
     asyncio.run(run_shutdown(engine, "test breach"))
 
+    assert ("shutdown_done", "stopped=1, bots=0, failures=0, verify=unverified") in [
+        (a, r) for a, r in engine.journal.actions
+    ]
+    final = notes[-1]
+    assert "🚨" in final and "could NOT verify" in final
+    assert "stopped 1 executor(s)" in final
+    assert "positions endpoint down" not in final
+    assert not any("✅" in n or "complete" in n for n in notes)
+
+
+def test_a_verify_read_that_fails_after_the_retry_is_not_reported_flat(
+    tmp_path, monkeypatch
+):
+    """The first read shows a stranded perp, the retry goes out, and the
+    re-check fails: still "could NOT verify", not ✅ and not a stale count."""
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    stuck = [{"connector_name": "binance_perpetual", "trading_pair": "ETH-USDT"}]
+    engine, client, notes = _fake_engine(running, [stuck], monkeypatch, tmp_path)
+    real = client.executors.get_positions_summary
+    calls = {"n": 0}
+
+    async def second_read_fails(controller_id=None):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("positions endpoint down")
+        return await real(controller_id=controller_id)
+
+    monkeypatch.setattr(client.executors, "get_positions_summary", second_read_fails)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert calls["n"] == 2
+    assert "could NOT verify" in notes[-1]
+    assert not any("✅" in n for n in notes)
+    # The baseline stop, then the retry that went out before the failed read.
+    assert client.executors.stop_calls.count(("e_perp", False)) == 2
+
+
+def test_a_verified_flat_book_still_reports_complete(tmp_path, monkeypatch):
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert "✅" in notes[-1] and "complete" in notes[-1]
+    assert not any("could NOT verify" in n for n in notes)
     assert ("shutdown_done", "stopped=1, bots=0, failures=0, verify=flat") in [
         (a, r) for a, r in engine.journal.actions
     ]
