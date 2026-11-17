@@ -1,7 +1,21 @@
 import { type Query, QueryClient } from "@tanstack/react-query";
 
 import { venuesQueryKey } from "@/components/market/useVenues";
-import { api, type AgentDetail } from "@/lib/api";
+import { api, errorStatus, type AgentDetail } from "@/lib/api";
+
+/**
+ * Default retry rule: one retry, and only for a failure that can change on a
+ * second attempt — no status at all (network), a 5xx, or 408/429. A 401, 403,
+ * 404 or 422 is the server's answer; repeating the request only delays the
+ * error and doubles the traffic (FD-06).
+ */
+export function shouldRetryQuery(failureCount: number, error: unknown): boolean {
+  const status = errorStatus(error);
+  return (
+    failureCount < 1 &&
+    (status === undefined || status >= 500 || status === 408 || status === 429)
+  );
+}
 
 /**
  * App-wide TanStack Query cache.
@@ -13,7 +27,7 @@ import { api, type AgentDetail } from "@/lib/api";
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      retry: shouldRetryQuery,
       staleTime: 5000,
     },
   },

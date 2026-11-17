@@ -34,6 +34,8 @@ import {
   invalidateServerScopedQueries,
   parseControllerPerfHistoryKey,
   parseExecutorsKey,
+  queryClient as appQueryClient,
+  shouldRetryQuery,
 } from "@/lib/queryClient";
 
 const PREVIOUS = "server-a";
@@ -77,6 +79,37 @@ beforeEach(() => {
 
 afterEach(() => {
   client.clear();
+});
+
+describe("shouldRetryQuery (FD-06)", () => {
+  const withStatus = (status?: number) =>
+    status === undefined ? new Error("network") : Object.assign(new Error("x"), { status });
+
+  it.each([
+    [undefined, true],
+    [500, true],
+    [502, true],
+    [503, true],
+    [408, true],
+    [429, true],
+    [400, false],
+    [401, false],
+    [403, false],
+    [404, false],
+    [409, false],
+    [422, false],
+  ])("status %s on the first failure retries: %s", (status, expected) => {
+    expect(shouldRetryQuery(0, withStatus(status))).toBe(expected);
+  });
+
+  it("never retries a second time", () => {
+    expect(shouldRetryQuery(1, withStatus(503))).toBe(false);
+    expect(shouldRetryQuery(1, withStatus())).toBe(false);
+  });
+
+  it("is the app client's default", () => {
+    expect(appQueryClient.getDefaultOptions().queries?.retry).toBe(shouldRetryQuery);
+  });
 });
 
 describe("invalidateServerScopedQueries", () => {
