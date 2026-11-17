@@ -276,6 +276,67 @@ def test_a_cancelled_stop_does_not_cancel_the_teardown_it_waits_on(
     assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
 
 
+# ── Review R2: a stop the stop_all deadline cut off is not a clean STOPPED ──
+
+
+def test_a_stop_cut_off_by_the_deadline_is_left_for_boot_to_reconcile(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    """The deadline's cancel lands in ``_finish``, whose ``finally`` unregisters
+    as STOPPED -- what an owner's stop writes. A ``restart_on_boot`` loop then
+    stayed down after the restart and was never reported as interrupted."""
+    from condor.runtime import loops as loops_module
+    from condor.runtime.registry_file import is_stale
+
+    monkeypatch.setattr(loops_module, "STOP_ALL_DEADLINE_SEC", 0.2)
+    engine = _engine(tmp_path, monkeypatch, mode="loop", restart_on_boot=True)
+    in_sweep = asyncio.Event()
+
+    async def hung_sweep():
+        in_sweep.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(engine, "_tick", lambda: asyncio.sleep(3600))
+    monkeypatch.setattr(engine, "_cancel_resting_orders", hung_sweep)
+    monkeypatch.setattr(engine, "_emit_closeout", _async(None))
+    monkeypatch.setattr(engine, "_preflight_gate", _async(None))
+
+    async def go():
+        await engine.start()
+        await asyncio.sleep(0)
+        await asyncio.wait_for(supervisor.stop_all(), timeout=5)
+
+    asyncio.run(go())
+
+    assert in_sweep.is_set(), "the stop was cut off inside its own teardown"
+    status = read_status(engine.session_dir)
+    assert status["state"] == LoopState.RUNNING
+    assert status["restart_on_boot"] is True
+    # What the next process sees: a run to report and (opted in) to restart.
+    assert is_stale({**status, "boot_id": "the-previous-boot"})
+
+
+def test_the_deadline_does_not_rewrite_a_run_that_was_ending_itself(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    from condor.runtime import loops as loops_module
+
+    monkeypatch.setattr(loops_module, "STOP_ALL_DEADLINE_SEC", 0.05)
+    sweep_events: list[str] = []
+    engine, in_sweep = _self_finishing_engine(tmp_path, monkeypatch, sweep_events)
+
+    async def go():
+        await engine.start()
+        await asyncio.wait_for(in_sweep.wait(), timeout=5)
+        await supervisor.stop_all()
+        await engine._task
+
+    asyncio.run(go())
+
+    assert sweep_events == ["start", "done"]
+    assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
+
+
 # ── Review R1: a cancelled /shutdown request must not abandon the winddown ──
 
 
