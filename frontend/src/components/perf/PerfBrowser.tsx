@@ -33,7 +33,7 @@ import {
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
-import { DetailPanel } from "@/components/perf/ExecutorTable";
+import { LiveDetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
 import { useExecutorStop } from "@/components/perf/executorActions";
@@ -696,7 +696,10 @@ export function PerfBrowser({
   // Stopping and the detail panel belong to whichever executor is in reach,
   // which is now any scope rather than one page (FEAT-086).
   const stop = useExecutorStop(server);
-  const [detail, setDetail] = useState<ExecutorInfo | null>(null);
+  // The *id* of the executor in the panel, never the clicked row's object:
+  // that object is one frame, and the panel has to follow the frames after it.
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const selectDetail = useCallback((ex: ExecutorInfo | null) => setDetailId(ex?.id ?? null), []);
   // The run whose archived database is open, if any. The drill-in is its own
   // view rather than a pane, because the archive is a different database with
   // its own controllers and its own history.
@@ -1572,6 +1575,16 @@ export function PerfBrowser({
   const scopedExecutors = useMemo(
     () => collectLeaves(scope, "executor").map((leaf) => leaf.source as ExecutorInfo),
     [scope],
+  );
+
+  /**
+   * Where the detail panel looks its executor up. The scope's own rows first —
+   * they are what was clicked — then everything the page loaded, so moving the
+   * scope elsewhere does not read as the executor having gone.
+   */
+  const detailExecutors = useMemo(
+    () => (executors ? [...scopedExecutors, ...executors] : scopedExecutors),
+    [scopedExecutors, executors],
   );
 
   /**
@@ -3468,8 +3481,8 @@ export function PerfBrowser({
                     <ExecutorRows
                       executors={scopedExecutors}
                       stop={stop}
-                      selectedId={detail?.id ?? null}
-                      onSelect={setDetail}
+                      selectedId={detailId}
+                      onSelect={selectDetail}
                       rateFormatPnl={rateFormatPnl}
                       rateFormatValue={rateFormatValue}
                       rateFormatDetailed={rateFormatDetailed}
@@ -3548,13 +3561,14 @@ export function PerfBrowser({
 
       {/* The executor detail panel, in the same slot the config and logs
           drawers use: a scope-owned column, closed until a row is clicked. */}
-      {detail && (
-        <DetailPanel
-          executor={detail}
+      {detailId && (
+        <LiveDetailPanel
+          executorId={detailId}
+          executors={detailExecutors}
           server={server}
-          onClose={() => setDetail(null)}
+          onClose={() => setDetailId(null)}
           onStop={(id) => stop.request([id])}
-          stopping={stop.stoppingIds.has(detail.id)}
+          stopping={stop.stoppingIds.has(detailId)}
           rateFormatPnl={rateFormatPnl}
           rateFormatValue={rateFormatValue}
           rateFormatDetailed={rateFormatDetailed}
