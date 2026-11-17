@@ -243,7 +243,7 @@ async def manage_gateway_swaps(
         condition = book.condition(row)
         if condition is not None:
             payload["condition"] = condition
-            payload["alerts"] = book.alerts([row])
+            payload["alerts"] = book.alerts([row], full_hash=True)
         return payload
 
     # ============================================
@@ -278,7 +278,7 @@ async def manage_gateway_swaps(
         book = watch()
         rows = _rows(result)
         book.observe(rows)
-        alerts = book.alerts(rows)
+        alerts = book.alerts(rows, full_hash=True)
 
         payload: dict[str, Any] = {
             "action": "search",

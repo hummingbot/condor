@@ -1719,7 +1719,8 @@ async def manage_gateway_config(
         pool_base: Base token symbol. Required to add a pool.
         pool_quote: Quote token symbol. Required to add a pool.
         pool_address: Pool contract address. Required to add a pool.
-        search: Filter tokens by symbol or name when listing.
+        search: Filter tokens by symbol or name when listing. An unfiltered token
+            list shows only its first 50 rows; a search shows every match.
         network: Bare network name ('mainnet-beta'). Required to list pools.
         chain: Filter wallets by chain when listing ('solana', 'ethereum').
     """

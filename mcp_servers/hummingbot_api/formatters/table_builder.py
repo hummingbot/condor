@@ -20,7 +20,8 @@ class ColumnDef:
         name: Column header name displayed in the table
         key: Field key(s) to extract from data. Can be a single string or a list of
              strings for fallback keys (tries each in order until one is found)
-        width: Column width in characters
+        width: Minimum column width in characters (values are padded to it,
+             never truncated)
         align: Text alignment ("left", "right", or "center")
         formatter: Optional callable to format the value. Receives the raw value
                    and should return a string
@@ -99,13 +100,10 @@ class ColumnDef:
         """
         value = self.format_value(item)
 
-        # Truncate if too long
-        if len(value) > self.width:
-            value = (
-                value[: self.width - 3] + "..."
-                if self.width > 3
-                else value[: self.width]
-            )
+        # ``width`` is a minimum, never a limit. A cell is an identifier or a
+        # number another tool call is built from — a hash, an address, a
+        # connector name — and one cut to fit a column cannot be passed on.
+        # A long value pushes its row out of alignment instead.
 
         # Apply alignment
         if self.align == "right":
@@ -175,8 +173,6 @@ class TableBuilder:
         cells = []
         for col in self.columns:
             header = col.name
-            if len(header) > col.width:
-                header = header[: col.width]
             cells.append(header.ljust(col.width))
         return self.column_separator.join(cells)
 

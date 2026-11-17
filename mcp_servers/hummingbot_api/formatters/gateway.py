@@ -4,8 +4,11 @@ Gateway formatters for the Hummingbot MCP server.
 
 from typing import Any
 
-from .base import format_number, format_timestamp, truncate_address
+from .base import format_number, format_timestamp
 from .table_builder import ColumnDef, TableBuilder
+
+#: Rows of an UNFILTERED token list shown per call. A search shows every match.
+TOKEN_LIST_PAGE = 50
 
 
 def format_gateway_config_result(result: dict[str, Any]) -> str:
@@ -47,23 +50,42 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
         elif result_resource_type == "tokens":
             tokens = result.get("result", {}).get("tokens", [])
             result_network_id = result.get("result", {}).get("network_id", "")
-            output = f"Tokens on {result_network_id} ({len(tokens)} total):\n\n"
+            search = result.get("search")
+            matching = f" matching '{search}'" if search else ""
+            output = (
+                f"Tokens on {result_network_id}{matching} ({len(tokens)} total):\n\n"
+            )
+            if not tokens and search:
+                return output + (
+                    f"No token matches '{search}'. Gateway cannot resolve it by "
+                    "symbol; a swap or quote can still name the token by its "
+                    "address.\n"
+                )
+            # A search is a question about specific tokens, so every match is
+            # shown. An unfiltered list is a page of a registry that can hold
+            # thousands of rows.
+            shown = tokens if search else tokens[:TOKEN_LIST_PAGE]
             # ``decimals`` is in the row and was being dropped. It is the whole
             # answer to "is this token's amount scaled wrong", which the Solana
             # decimal-mismatch playbook sends an operator here to find — and
             # without it that diagnosis stalls at its second step (CO-5).
             output += "symbol   | decimals | address\n"
             output += "-" * 62 + "\n"
-            for token in tokens[:20]:
-                symbol = token.get("symbol", "")[:8]
+            for token in shown:
+                symbol = str(token.get("symbol") or "")
                 decimals = token.get("decimals")
                 decimals = "?" if decimals is None else str(decimals)
-                address = token.get("address", "")
-                if len(address) > 20:
-                    address = f"{address[:8]}...{address[-6:]}"
+                # The full address, always: it is the argument `add`, `delete`
+                # and a swap by address take, and the only way to tell two
+                # tokens with one symbol apart.
+                address = str(token.get("address") or "")
                 output += f"{symbol:8} | {decimals:>8} | {address}\n"
-            if len(tokens) > 20:
-                output += f"... and {len(tokens) - 20} more tokens\n"
+            if len(tokens) > len(shown):
+                output += (
+                    f"\nShowing the first {len(shown)} of {len(tokens)} tokens. A "
+                    "token missing from this page is NOT missing from Gateway: "
+                    "list again with search='<symbol or name>' to look one up.\n"
+                )
             return output
 
         elif result_resource_type == "wallets":
@@ -71,9 +93,9 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
             output = f"Configured Wallets ({len(wallets)} total):\n\n"
             for wallet in wallets:
                 chain_name = wallet.get("chain", "")
+                # Full, never shortened: this is the value every tool's
+                # `wallet_address` parameter takes.
                 address = wallet.get("address", "")
-                if len(address) > 20:
-                    address = f"{address[:10]}...{address[-8:]}"
                 output += f"- {chain_name}: {address}\n"
             return output
 
@@ -125,12 +147,9 @@ SWAP_SEARCH_COLUMNS = [
         formatter=_format_swap_amount,
     ),
     ColumnDef(name="status", key="status", width=9),
-    ColumnDef(
-        name="tx",
-        key="transaction_hash",
-        width=17,
-        formatter=lambda tx_hash: truncate_address(str(tx_hash)),
-    ),
+    # Last, and whole: `get_swap_status` and `resolve_swap` take this hash, and
+    # this table is where their docstrings send the caller to find it.
+    ColumnDef(name="transaction_hash", key="transaction_hash", width=16),
 ]
 
 
@@ -150,8 +169,8 @@ def _unverifiable_block(result: dict[str, Any]) -> str:
         f"  • {row.get('message', '')}" for row in alerts if isinstance(row, dict)
     ]
     lines.append(
-        "  Resolve one with resolve_swap(transaction_hash=…) once a status read "
-        "succeeds. Do not report it as lost."
+        "  Resolve one with resolve_swap(transaction_hash=<the full hash above>) "
+        "once a status read succeeds. Do not report it as lost."
     )
     return "\n".join(lines)
 
@@ -176,11 +195,11 @@ def format_gateway_swap_result(action: str, result: dict[str, Any]) -> str:
         tx_hash = result.get("transaction_hash", "")
         if not result.get("supported", False):
             return (
-                f"Swap resolve unavailable for {truncate_address(str(tx_hash))}: "
+                f"Swap resolve unavailable for {tx_hash}: "
                 f"{result.get('detail', 'this server does not offer the route')}"
             )
         return (
-            f"Swap resolve requested for {truncate_address(str(tx_hash))}.\n"
+            f"Swap resolve requested for {tx_hash}.\n"
             f"The server's answer: {result.get('result')}\n"
             f"That answer is the swap's state — Condor recorded nothing of its own."
         )

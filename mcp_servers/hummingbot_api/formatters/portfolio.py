@@ -6,7 +6,7 @@ This module provides table formatters for portfolio balances and holdings.
 
 from typing import Any
 
-from .base import format_number, format_table_separator, get_field, truncate_address
+from .base import format_number, format_table_separator, get_field
 from .table_builder import ColumnDef, TableBuilder
 
 # Default number of LP position rows rendered in the CLMM table. The fetch is
@@ -100,12 +100,11 @@ LP_POSITION_COLUMNS = [
     ColumnDef(
         name="upper_price", key="upper_price", width=11, formatter=_format_lp_price
     ),
-    ColumnDef(
-        name="position_address",
-        key="position_address",
-        width=17,
-        formatter=lambda address: truncate_address(str(address)),
-    ),
+    # Both addresses whole: `manage_clmm(action="close")` takes the two of them,
+    # and the orphan listing sends the caller to this table to find them.
+    ColumnDef(name="network", key="network", width=19),
+    ColumnDef(name="position_address", key="position_address", width=44),
+    ColumnDef(name="pool_address", key=["pool_address", "poolAddress"], width=44),
 ]
 
 
@@ -115,7 +114,8 @@ def format_lp_positions_table(
     """
     Format open CLMM (LP) positions as a table string.
 
-    Columns: connector | trading_pair | lower_price | upper_price | position_address
+    Columns: connector | trading_pair | lower_price | upper_price | network |
+    position_address | pool_address
 
     Args:
         positions: List of open LP position dictionaries
