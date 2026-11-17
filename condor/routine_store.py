@@ -307,6 +307,45 @@ _MAX_TERMINAL_INSTANCES = _MAX_RESULTS
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped"})
 
 
+# Bounds on a web/MCP schedule's interval (ST-10). The floor is what keeps a
+# zero or negative value from becoming a back-to-back loop against the exchange
+# API — ``asyncio.sleep`` returns at once for both.
+MIN_SCHEDULE_INTERVAL_SEC = 10
+MAX_SCHEDULE_INTERVAL_SEC = 86400
+
+# A schedule failing every tick used to retry at full rate for ever, each
+# failure ringing the owner's bell and firing failure hooks. Past this many
+# consecutive failures the wait doubles per further failure, up to the cap (or
+# the schedule's own interval, when that is longer). One success resets it.
+_SCHEDULE_FAILURES_BEFORE_BACKOFF = 5
+_SCHEDULE_MAX_BACKOFF_SEC = 3600
+
+
+def _next_slot_delay(anchor: float, interval_sec: float, now: float) -> float:
+    """Seconds from ``now`` to the next ``anchor + n * interval_sec`` slot.
+
+    The cadence is anchored to when the schedule started, so "every 5 minutes"
+    is every 5 minutes rather than 5 minutes plus however long the run took. A
+    run that overran one or more slots skips them — it never fires a burst to
+    catch up.
+    """
+    slots_done = int((now - anchor) // interval_sec) + 1
+    return max(anchor + slots_done * interval_sec - now, 0.0)
+
+
+def _failure_backoff(interval_sec: float, failures: int) -> float:
+    """Extra wait owed after ``failures`` consecutive failed ticks (0 = none)."""
+    over = failures - _SCHEDULE_FAILURES_BEFORE_BACKOFF
+    if over < 0:
+        return 0.0
+    ceiling = max(_SCHEDULE_MAX_BACKOFF_SEC, interval_sec)
+    return min(interval_sec * 2 ** min(over + 1, 16), ceiling)
+
+
+class ScheduleIntervalError(ValueError):
+    """``RoutineStore.schedule`` was asked for an interval outside its bounds."""
+
+
 class RoutineStopUnavailable(RuntimeError):
     """The store holds an instance's record but not the means to stop it.
 
@@ -803,8 +842,10 @@ class RoutineStore:
         fire_hooks: bool = True,
         agent: str = "",
         trigger: str = "other",
-    ) -> None:
+    ) -> bool:
         """Run a routine once, store the result, update instance metadata, fire hooks.
+
+        Returns whether the run failed — what the scheduler counts to back off.
 
         Shared by one-shot, continuous and scheduled runs — the entry points
         only differ in loop/cancellation semantics. ``status_after`` is the
@@ -919,6 +960,7 @@ class RoutineStore:
 
         if fire_hooks:
             await self._fire_hooks(instance_id, result, report_id, failed)
+        return failed
 
     def _resolve_routine(self, routine_name: str):
         """Resolve a routine by name, supporting 'agent_slug/routine_name' format.
@@ -1103,6 +1145,15 @@ class RoutineStore:
         user_id: int = 0,
     ) -> str:
         """Schedule a routine to repeat at interval_sec. Returns instance_id."""
+        if not (
+            isinstance(interval_sec, int)
+            and MIN_SCHEDULE_INTERVAL_SEC <= interval_sec <= MAX_SCHEDULE_INTERVAL_SEC
+        ):
+            raise ScheduleIntervalError(
+                f"interval_sec must be an integer between "
+                f"{MIN_SCHEDULE_INTERVAL_SEC} and {MAX_SCHEDULE_INTERVAL_SEC}, "
+                f"got {interval_sec!r}"
+            )
         routine = self._resolve_routine(routine_name)
         if not routine:
             raise ValueError(f"Routine '{routine_name}' not found")
@@ -1122,7 +1173,7 @@ class RoutineStore:
         # that snippet's deadline and die with it (code_guard).
         task = asyncio.create_task(
             self._run_scheduled(
-                instance_id, routine, config, server_name, interval_sec, user_id
+                instance_id, routine_name, config, server_name, interval_sec, user_id
             ),
             context=code_guard.detached_context(),
         )
@@ -1132,31 +1183,80 @@ class RoutineStore:
     async def _run_scheduled(
         self,
         instance_id: str,
-        routine,
+        routine_name: str,
         config: dict,
         server_name: str,
         interval_sec: int,
         user_id: int = 0,
     ) -> None:
+        anchor = time.monotonic()
+        failures = 0
         try:
             while instance_id in self._instances:
-                await self._execute_and_record(
-                    instance_id,
-                    routine,
-                    config,
-                    server_name,
-                    user_id,
-                    status_after="scheduled",
-                    trigger="schedule",
-                )
+                # Resolved again on every tick (ST-10): the RoutineInfo captured
+                # at schedule time kept running the old code after an edit, and
+                # kept running at all after its consent was revoked or its file
+                # was deleted.
+                try:
+                    routine = self._resolve_routine(routine_name)
+                    unrunnable = (
+                        None if routine else f"Routine '{routine_name}' not found"
+                    )
+                except Exception as e:
+                    routine, unrunnable = None, str(e)
+                if routine is None:
+                    # A failed tick, not the end of the schedule: a file caught
+                    # mid-save resolves again on a later tick, and one that
+                    # never does is slowed by the same backoff as any failure.
+                    failed = True
+                    await self._record_unrunnable_tick(
+                        instance_id, unrunnable or "", first=failures == 0
+                    )
+                else:
+                    failed = await self._execute_and_record(
+                        instance_id,
+                        routine,
+                        config,
+                        server_name,
+                        user_id,
+                        status_after="scheduled",
+                        trigger="schedule",
+                    )
                 # A cancel that lands mid-run is swallowed (and recorded) by
                 # _execute_and_record; stop() removed the instance, so bail out
                 # instead of sleeping through one more interval.
                 if instance_id not in self._instances:
                     break
-                await asyncio.sleep(interval_sec)
+                failures = failures + 1 if failed else 0
+                self._instances[instance_id]["consecutive_failures"] = failures
+                delay = _next_slot_delay(anchor, interval_sec, time.monotonic())
+                backoff = _failure_backoff(interval_sec, failures)
+                if backoff > delay:
+                    logger.warning(
+                        f"Scheduled routine {routine_name}[{instance_id}] failed "
+                        f"{failures} times in a row; next attempt in {backoff:.0f}s"
+                    )
+                    delay = backoff
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             logger.info(f"Scheduled routine {instance_id} cancelled")
+
+    async def _record_unrunnable_tick(
+        self, instance_id: str, reason: str, *, first: bool
+    ) -> None:
+        """Record a tick whose routine could not be resolved; nothing was run.
+
+        The owner's bell rings on the first such tick of a streak only — the
+        instance record carries the error for as long as it lasts.
+        """
+        logger.error(f"Scheduled routine instance {instance_id} skipped: {reason}")
+        meta = self._instances.get(instance_id)
+        if meta is None:
+            return
+        summary = f"Error: {reason}"
+        meta.update({"last_result": summary, "error": reason})
+        if first:
+            await self._report_run(instance_id, summary, reason)
 
     def stop(self, instance_id: str) -> bool:
         """Stop an instance and drop its record. False when it is unknown.

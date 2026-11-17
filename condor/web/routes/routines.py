@@ -8,13 +8,16 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from condor import routine_hooks
 from condor.agents.code_trust import PendingConsentError
 from condor.reports import list_reports
 from condor.routine_store import (
+    MAX_SCHEDULE_INTERVAL_SEC,
+    MIN_SCHEDULE_INTERVAL_SEC,
     RoutineStopUnavailable,
+    ScheduleIntervalError,
     get_routine_store,
     routine_source_roots,
 )
@@ -67,7 +70,11 @@ class ScheduleRequestV2(BaseModel):
     routine_name: str
     server_name: str
     config: dict = {}
-    interval_sec: int = 300
+    # Bounded here and again in ``RoutineStore.schedule`` (ST-10): 0 or a
+    # negative value used to become a back-to-back loop.
+    interval_sec: int = Field(
+        300, ge=MIN_SCHEDULE_INTERVAL_SEC, le=MAX_SCHEDULE_INTERVAL_SEC
+    )
 
 
 class HookTelegram(BaseModel):
@@ -267,6 +274,8 @@ async def schedule_routine_v2(
             interval_sec=body.interval_sec,
             user_id=user.id,
         )
+    except ScheduleIntervalError as e:
+        raise HTTPException(422, str(e))
     except PendingConsentError as e:
         # 403, not 404: the routine is right there, and the operator has not
         # allowed its file to execute on this install yet (FEAT-147).
