@@ -18,6 +18,11 @@ log = logging.getLogger(__name__)
 
 ENV_PREFIX = "CONDOR_TIMEOUT_"
 
+#: Leads the answer ``run_ask`` returns for an ask it stopped at its budget, so
+#: the tool on the other side of the HTTP crossing can tell it from something
+#: the agent said. Here because this is the one module both sides import.
+ASK_TIMED_OUT_MARK = "[ask timed out]"
+
 
 @dataclass(frozen=True)
 class TimeoutPolicy:
@@ -58,6 +63,12 @@ class TimeoutPolicy:
     # a second one (MC-01). ``tests/test_mcp_start_budget.py`` holds this above
     # that wait; the engine constant cannot be imported here.
     mcp_start: float = 60.0
+    # How long a blocking ask (``delegate(action="ask")``) may run before the
+    # main process stops it. Enforced in ``run_ask``, where the run can actually
+    # be cancelled: the caller's HTTP timeout used to be the only bound, and a
+    # client that stops waiting cancels nothing, so the asked agent ran on with
+    # auto-approved tools to the session ceiling and answered nobody (MC-03).
+    ask: int = 180
     # How long to probe a local inference server for the model it serves, when
     # a bare "ollama:" / "lmstudio:" key leaves the model id to us. Short: it
     # is a localhost request on the session-start path, and a backend that is
@@ -80,6 +91,16 @@ class TimeoutPolicy:
     # The conversation is durable (FEAT-015), so this is a detach, not a loss.
     # 0 disables the sweep. 1 hour.
     session_idle: int = 3600
+
+    @property
+    def mcp_ask(self) -> float:
+        """Budget for the ask tool call: the ask's own budget plus a margin.
+
+        Above ``ask`` so the main process always answers first — with the
+        agent's answer or with the timeout it enforced — and the caller never
+        gives up on a run that is still going. Derived so the two cannot drift.
+        """
+        return float(self.ask + 15)
 
     @property
     def mcp_shutdown(self) -> float:

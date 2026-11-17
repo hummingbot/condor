@@ -400,7 +400,9 @@ async def delegate(
       {"task_id", "status": "running", "next_steps"} — does NOT wait for completion.
     - "ask": Ask an agent and WAIT for its answer (requires agent, task). Returns
       {"agent", "answer"}. Refused if you are yourself answering an ask (depth
-      stops at one) or if you name your own slug.
+      stops at one) or if you name your own slug. BOUNDED at 180s: an ask that
+      has not answered by then is stopped and returns {"timed_out": true,
+      "error"} — do not re-ask it; hand anything that long to "start".
     - "list": List in-flight/finished delegations (task_id, agent, status).
     - "get": Get a delegation's status + result/error (requires task_id).
     - "stop": Cancel a running delegation (requires task_id).

@@ -431,3 +431,101 @@ def test_ask_route_forces_the_caller_user_id(monkeypatch):
     assert result["answer"] == "ok"
     assert seen["user_id"] == 42  # caller's id, not the 999 override
     assert seen["server_name"] == "X"
+
+
+# ── the budget is the main process's to enforce (MC-03 / AG2-05) ──
+
+
+def test_an_ask_past_its_budget_is_cancelled_and_recorded_stopped(monkeypatch):
+    """The asked agent is stopped, not left running behind a caller that left."""
+    state = {"cancelled": False, "finished": False}
+
+    async def slow_engine(**kw):
+        try:
+            await asyncio.sleep(30)
+            state["finished"] = True
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+        return "too late"
+
+    monkeypatch.setattr(agent_run_module, "run_agent_to_completion", slow_engine)
+
+    answer = asyncio.run(
+        agent_run_module.run_ask(
+            slug="scout",
+            user_id=7,
+            chat_id=42,
+            server_name=None,
+            task="a very long question",
+            timeout=0.05,
+        )
+    )
+
+    assert state == {"cancelled": True, "finished": False}
+    from condor.runtime.timeouts import ASK_TIMED_OUT_MARK
+
+    assert answer.startswith(ASK_TIMED_OUT_MARK)
+    assert "0.05s" in answer
+    assert 'delegate(action="start"' in answer
+    record = _only_record()
+    assert record["status"] == "stopped"
+    assert "Timed out after 0.05s" in record["error"]
+
+
+def test_a_timeout_inside_the_engine_is_still_that_runs_own_error(monkeypatch):
+    """Only the ask's own deadline reads as a stopped ask."""
+    with pytest.raises(TimeoutError, match="provider"):
+        _ask(monkeypatch, boom=TimeoutError("provider took too long"))
+
+    assert _only_record()["status"] == "error"
+
+
+def test_the_default_budget_is_the_shared_policy(monkeypatch):
+    import inspect
+
+    from condor.runtime.timeouts import TIMEOUTS
+
+    assert (
+        inspect.signature(agent_run_module.run_ask).parameters["timeout"].default
+        is None
+    )
+    assert "TIMEOUTS.ask" in inspect.getsource(agent_run_module.run_ask)
+    # The caller waits longer than the run is allowed, so the main process
+    # always answers first.
+    assert TIMEOUTS.mcp_ask > TIMEOUTS.ask
+
+
+def test_the_tool_waits_longer_than_the_ask_is_allowed_to_run(monkeypatch):
+    from condor.runtime.timeouts import TIMEOUTS
+
+    tool, _ = _tool(monkeypatch)
+
+    assert tool.ASK_TIMEOUT_SEC == TIMEOUTS.mcp_ask
+    assert tool.ASK_TIMEOUT_SEC > TIMEOUTS.ask
+
+
+def test_a_stopped_ask_reaches_the_caller_as_a_typed_timeout(monkeypatch):
+    tool, _ = _tool(monkeypatch)
+
+    async def fake_api(method, path, body=None, timeout=None):
+        return {
+            "agent": "lp",
+            "answer": agent_run_module.ask_timeout_answer("lp", 180),
+        }
+
+    monkeypatch.setattr(tool, "call_main_api", fake_api)
+
+    result = asyncio.run(tool.delegate(action="ask", agent="lp", task="long one"))
+
+    assert result["timed_out"] is True
+    assert "answer" not in result
+    assert "did not answer within 180s" in result["error"]
+    assert not result["error"].startswith("[")
+
+
+def test_the_ask_docstring_states_the_bound():
+    from condor.runtime.timeouts import TIMEOUTS
+    from mcp_servers.condor import server
+
+    assert f"BOUNDED at {TIMEOUTS.ask}s" in server.delegate.__doc__
