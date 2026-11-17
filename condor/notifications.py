@@ -35,7 +35,9 @@ from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, NamedTuple
 
 from condor import paths
+from condor.asyncutil import TaskSet
 from condor.fsutil import atomic_write_json
+from condor.runtime import code_guard
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +97,35 @@ async def _push(notification: Notification) -> None:
             log.warning("Notification push sink failed", exc_info=True)
 
 
+# In-flight fan-outs. Delivery runs off the producer's await: by the time it
+# starts the notification is already stored, the sinks are best-effort by this
+# module's own contract, and one of them is a round-trip to a vendor push
+# service (up to 10s per device) — which an agent's ``send_notification``, a
+# finishing routine or the boot announce would otherwise sit waiting on.
+_push_tasks = TaskSet(log, "Notification fan-out %s failed: %s")
+
+
+def _dispatch(notification: Notification) -> None:
+    """Start the fan-out for ``notification`` without waiting for it."""
+    _push_tasks.track(
+        asyncio.create_task(
+            _push(notification),
+            name=f"notify:{notification.id}",
+            # Detached: a producer running under a ``run_code`` deadline must
+            # not hand that deadline to a delivery meant to outlive it.
+            context=code_guard.detached_context(),
+        )
+    )
+
+
+async def drain() -> None:
+    """Wait for the fan-outs already started on this loop (tests, shutdown)."""
+    loop = asyncio.get_running_loop()
+    pending = [t for t in _push_tasks if t.get_loop() is loop and not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 # ── The store ──
 
 
@@ -147,6 +178,9 @@ async def record(
 ) -> Notification | None:
     """Store a notification for ``user_id`` and push it to live surfaces.
 
+    Returns once the notification is stored; the push to live surfaces is
+    dispatched, not awaited (see ``_push_tasks``).
+
     Returns the stored notification, or ``None`` when there is nobody to
     address it to (a falsy ``user_id``) or nothing to say — a producer with no
     user behind it must not be an error, it simply has no bell to ring.
@@ -174,7 +208,7 @@ async def record(
         except Exception:  # noqa: BLE001 - an unwritable store still gets a push
             log.warning("Could not persist notification for %s", user_id, exc_info=True)
 
-    await _push(notification)
+    _dispatch(notification)
     return notification
 
 
@@ -192,33 +226,40 @@ def unread_count(user_id: int) -> int:
     return sum(1 for n in list_for(user_id, limit=_MAX_PER_USER) if not n.read)
 
 
-def mark_read(user_id: int, ids: list[str] | None = None) -> int:
+async def mark_read(user_id: int, ids: list[str] | None = None) -> int:
     """Mark ``ids`` read (``None`` = all of them). Returns the unread count left.
 
     Scoped to ``user_id``'s own bucket, so an id belonging to someone else is
     simply not found — there is no way to reach across users from here.
+
+    A read-modify-write of the whole store, so it takes the write lock like
+    :func:`record` and :func:`clear`: it used to be safe only by containing no
+    await, which nothing enforced.
     """
     if not user_id:
         return 0
     key = str(int(user_id))
-    data = _read_all()
-    items = data.get(key) or []
-    wanted = set(ids) if ids is not None else None
-    changed = False
-    for raw in items:
-        if not isinstance(raw, dict):
-            continue
-        if wanted is not None and str(raw.get("id")) not in wanted:
-            continue
-        if not raw.get("read"):
-            raw["read"] = True
-            changed = True
-    if changed:
-        data[key] = items
-        try:
-            _write_all(data)
-        except Exception:  # noqa: BLE001
-            log.warning("Could not persist read state for %s", user_id, exc_info=True)
+    async with _write_lock:
+        data = _read_all()
+        items = data.get(key) or []
+        wanted = set(ids) if ids is not None else None
+        changed = False
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            if wanted is not None and str(raw.get("id")) not in wanted:
+                continue
+            if not raw.get("read"):
+                raw["read"] = True
+                changed = True
+        if changed:
+            data[key] = items
+            try:
+                _write_all(data)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "Could not persist read state for %s", user_id, exc_info=True
+                )
     return sum(1 for raw in items if isinstance(raw, dict) and not raw.get("read"))
 
 
