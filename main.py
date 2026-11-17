@@ -1198,6 +1198,13 @@ def main() -> None:
     if log_file is not None:
         logger.info("Logging to %s", log_file)
 
+    # Handlers and routines build Plotly figures directly, in this process.
+    # Applied here rather than on ``import condor`` so that the processes that
+    # never draw a chart (every MCP server, the doctor) stop paying for it.
+    from condor.plotly_compat import ensure_plotly_templates_patched
+
+    ensure_plotly_templates_patched()
+
     # Refuse to start on a configuration that cannot mean what it says: telegram
     # mode (the default) with no token used to surface as an InvalidToken
     # traceback from inside PTB, and must never be quietly read as "local mode".
