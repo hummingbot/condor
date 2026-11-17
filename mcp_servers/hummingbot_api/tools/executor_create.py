@@ -88,6 +88,107 @@ def _triple_barrier(
     return barrier
 
 
+#: What ``save_as_default`` may persist, per executor type: settings that are
+#: about HOW the user trades and stay true on the next pair. A saved default
+#: merges underneath every later create of that type, so anything about one
+#: trade — the pair, the side, an amount, a price, a ladder, a pool, a time
+#: limit, a level id — would silently reshape a different trade: a saved
+#: ``entry_price`` turned the next "market" entry on another pair into a limit
+#: at the old pair's price. Top-level keys, then the keys allowed inside
+#: ``triple_barrier_config``.
+_SAVEABLE_DEFAULTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "position_executor": (
+        frozenset({"leverage"}),
+        frozenset(
+            {
+                "stop_loss",
+                "take_profit",
+                "open_order_type",
+                "take_profit_order_type",
+                "stop_loss_order_type",
+                "time_limit_order_type",
+            }
+        ),
+    ),
+    "grid_executor": (
+        frozenset(
+            {
+                "leverage",
+                "min_spread_between_orders",
+                "max_open_orders",
+                "max_orders_per_batch",
+                "order_frequency",
+                "activation_bounds",
+                "safe_extra_spread",
+                "keep_position",
+                "coerce_tp_to_step",
+                "deduct_base_fees",
+            }
+        ),
+        frozenset({"take_profit", "open_order_type", "take_profit_order_type"}),
+    ),
+    "dca_executor": (
+        frozenset({"leverage", "mode", "take_profit", "stop_loss"}),
+        frozenset(),
+    ),
+    "order_executor": (frozenset({"leverage", "chaser_config"}), frozenset()),
+    "lp_executor": (
+        frozenset({"swap_provider", "keep_position", "extra_params"}),
+        frozenset(),
+    ),
+}
+
+
+def saveable_defaults(executor_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    """The slice of ``config`` that ``save_as_default`` is allowed to persist.
+
+    An unknown type saves nothing: the allowlist fails closed.
+    """
+    top_keys, barrier_keys = _SAVEABLE_DEFAULTS.get(
+        executor_type, (frozenset(), frozenset())
+    )
+    saved = {key: value for key, value in config.items() if key in top_keys}
+    barrier = config.get("triple_barrier_config")
+    if isinstance(barrier, dict):
+        kept = {key: value for key, value in barrier.items() if key in barrier_keys}
+        if kept:
+            saved["triple_barrier_config"] = kept
+    return saved
+
+
+def _flatten_defaults(values: dict[str, Any]) -> list[str]:
+    """``k=v`` pairs, one level deep (``triple_barrier_config.take_profit=…``)."""
+    pairs: list[str] = []
+    for key, value in values.items():
+        if isinstance(value, dict):
+            pairs += [
+                f"{key}.{inner}={inner_value}" for inner, inner_value in value.items()
+            ]
+        else:
+            pairs.append(f"{key}={value}")
+    return pairs
+
+
+def applied_defaults(config: dict[str, Any], merged: dict[str, Any]) -> list[str]:
+    """Every value in ``merged`` that came from a saved default, as ``k=v``.
+
+    The create result prints these. Without them a saved default is invisible:
+    the model reads back the arguments it passed and reports a strategy that is
+    not the one that was deployed.
+    """
+    applied: dict[str, Any] = {}
+    for key, value in merged.items():
+        if key in ("type", "controller_id"):
+            continue
+        if key not in config:
+            applied[key] = value
+        elif isinstance(value, dict) and isinstance(config[key], dict):
+            inner = {k: v for k, v in value.items() if k not in config[key]}
+            if inner:
+                applied[key] = inner
+    return _flatten_defaults(applied)
+
+
 def _amount(value: Any) -> float | None:
     """Read a config amount as a positive float, or ``None`` if it is not one.
 
@@ -294,6 +395,18 @@ async def create_executor(
     # inside the config.
     merged_config.pop("controller_id", None)
 
+    # Named in every outcome below, refusals included: a preflight can refuse on
+    # a value the caller never passed, and that is unreadable without this line.
+    applied = applied_defaults(config, merged_config)
+    defaults_line = (
+        f"Applied saved defaults: {', '.join(applied)}\n"
+        "  (not passed in this call; pass the parameter to override, or edit "
+        "them with executor_defaults)\n"
+        if applied
+        else ""
+    )
+    defaults_note = f"\n\n{defaults_line}" if defaults_line else ""
+
     logger.info(
         "create_%s: controller_id=%r, account=%s, pair=%s",
         executor_type,
@@ -311,7 +424,9 @@ async def create_executor(
             "action": "create",
             "executor_type": executor_type,
             "error": violation,
-            "formatted_output": f"Error creating {executor_type}: {violation}",
+            "formatted_output": (
+                f"Error creating {executor_type}: {violation}{defaults_note}"
+            ),
         }
 
     shortfall = await balance_violation(client, executor_type, merged_config, account)
@@ -323,7 +438,9 @@ async def create_executor(
             "action": "create",
             "executor_type": executor_type,
             "error": shortfall,
-            "formatted_output": f"Error creating {executor_type}: {shortfall}",
+            "formatted_output": (
+                f"Error creating {executor_type}: {shortfall}{defaults_note}"
+            ),
         }
 
     try:
@@ -340,8 +457,11 @@ async def create_executor(
             "formatted_output": f"Error creating {executor_type}: {exc}",
         }
 
+    saved: dict[str, Any] = {}
     if save_as_default:
-        executor_preferences.update_defaults(executor_type, config)
+        saved = saveable_defaults(executor_type, config)
+        if saved:
+            executor_preferences.update_defaults(executor_type, saved)
 
     executor_id = result.get("executor_id") or result.get("id")
 
@@ -358,6 +478,7 @@ async def create_executor(
         f"Type: {executor_type}\n"
         f"Account: {account}\n"
         f"Controller: {tag}\n"
+        f"{defaults_line}"
     )
 
     if status == "TERMINATED" and close_type in _NEVER_STARTED_CLOSE_TYPES:
@@ -404,8 +525,18 @@ async def create_executor(
         )
 
     formatted = f"{state}\n\n{header}"
-    if save_as_default:
-        formatted += f"\nConfiguration saved as default for {executor_type}"
+    if save_as_default and saved:
+        formatted += (
+            f"\nSaved as default for {executor_type}: "
+            f"{', '.join(_flatten_defaults(saved))}. The pair, side, amounts, "
+            "prices and time limit of this call are never saved."
+        )
+    elif save_as_default:
+        formatted += (
+            f"\nNothing saved as default for {executor_type}: this call passed no "
+            "reusable setting (leverage, order types, spreads, keep_position). The "
+            "pair, side, amounts, prices and time limit are never saved."
+        )
 
     return {
         "action": "create",
@@ -417,7 +548,9 @@ async def create_executor(
         "close_type": close_type or None,
         "filled_amount_quote": filled,
         "config_used": merged_config,
-        "saved_as_default": save_as_default,
+        "applied_defaults": applied,
+        "saved_as_default": bool(saved),
+        "saved_defaults": saved,
         "result": result,
         "formatted_output": formatted,
     }

@@ -408,8 +408,8 @@ def test_a_read_tool_is_never_gated():
 def shipped_preferences(tmp_path, monkeypatch):
     """The preferences a fresh install actually gets, on a throwaway path.
 
-    Not a stub: the shipped template is the thing under test here, since it writes
-    an ACTIVE grid ``triple_barrier_config`` on first run.
+    Not a stub: the shipped template is the thing under test here. It ships with
+    every block commented out (MH-01), so a fresh install applies nothing.
     """
     from mcp_servers.hummingbot_api.executor_preferences import (
         ExecutorPreferencesManager,
@@ -420,7 +420,16 @@ def shipped_preferences(tmp_path, monkeypatch):
     return manager
 
 
-def test_the_shipped_grid_barrier_survives_a_create_that_names_no_barrier(
+_SAVED_GRID_BARRIER = {
+    "triple_barrier_config": {
+        "take_profit": 0.0002,
+        "open_order_type": 3,
+        "take_profit_order_type": 3,
+    }
+}
+
+
+def test_a_saved_grid_barrier_survives_a_create_that_names_no_barrier(
     shipped_preferences,
 ):
     """The grid tool always sends the block (the backend schema requires it).
@@ -428,6 +437,7 @@ def test_the_shipped_grid_barrier_survives_a_create_that_names_no_barrier(
     An empty one used to replace the saved block, deploying a grid with no
     take-profit and taker exits — a different strategy from the one on file.
     """
+    shipped_preferences.update_defaults("grid_executor", _SAVED_GRID_BARRIER)
     client = _RecordingClient()
 
     asyncio.run(
@@ -452,6 +462,7 @@ def test_the_shipped_grid_barrier_survives_a_create_that_names_no_barrier(
 def test_an_explicit_barrier_wins_key_by_key_and_the_rest_fills_in(
     shipped_preferences,
 ):
+    shipped_preferences.update_defaults("grid_executor", _SAVED_GRID_BARRIER)
     client = _RecordingClient()
 
     asyncio.run(
@@ -507,6 +518,7 @@ def test_saving_a_partial_barrier_updates_the_stored_block_rather_than_truncatin
     shipped_preferences,
 ):
     """``save_as_default`` writes through the same merge, so a save cannot truncate."""
+    shipped_preferences.update_defaults("grid_executor", _SAVED_GRID_BARRIER)
     shipped_preferences.update_defaults(
         "grid_executor", {"triple_barrier_config": {"take_profit": 0.005}}
     )
@@ -514,3 +526,189 @@ def test_saving_a_partial_barrier_updates_the_stored_block_rather_than_truncatin
     stored = shipped_preferences.get_defaults("grid_executor")["triple_barrier_config"]
     assert stored["take_profit"] == 0.005
     assert stored["open_order_type"] == 3, "the untouched key must survive the save"
+
+
+# ---------------------------------------------------------------------------
+# Saved defaults never change a trade silently (MH-01)
+# ---------------------------------------------------------------------------
+
+
+def _grid_kwargs(**extra):
+    return {
+        "connector_name": "binance_perpetual",
+        "trading_pair": "SOL-USDT",
+        "side": 1,
+        "start_price": 140,
+        "end_price": 150,
+        "limit_price": 138,
+        "total_amount_quote": 500,
+        **extra,
+    }
+
+
+def test_a_fresh_install_sends_only_what_the_caller_passed(shipped_preferences):
+    """The shipped template used to carry live grid keys (keep_position: true,
+    max_open_orders: 15, a 0.02% take-profit), contradicting the docstring's
+    stated backend defaults on the very first create."""
+    client = _RecordingClient()
+
+    result = asyncio.run(executor_create.create_grid_executor(client, **_grid_kwargs()))
+
+    config = client.calls[0]["config"]
+    assert set(config) == {
+        "connector_name",
+        "trading_pair",
+        "side",
+        "start_price",
+        "end_price",
+        "limit_price",
+        "total_amount_quote",
+        "triple_barrier_config",
+        "type",
+    }
+    assert config["triple_barrier_config"] == {}
+    assert "Applied saved defaults" not in result["formatted_output"]
+    for executor_type in executor_create._SAVEABLE_DEFAULTS:
+        assert shipped_preferences.get_defaults(executor_type) == {}
+
+
+def test_save_as_default_never_carries_a_price_or_amount_to_the_next_pair(
+    shipped_preferences,
+):
+    """A saved BTC limit long turned the next ETH "market" entry into a limit at
+    BTC's price."""
+    client = _RecordingClient()
+
+    first = asyncio.run(
+        executor_create.create_position_executor(
+            client,
+            connector_name="binance_perpetual",
+            trading_pair="BTC-USDT",
+            side=1,
+            amount=0.01,
+            entry_price=60000.0,
+            leverage=5,
+            stop_loss=0.02,
+            time_limit=3600,
+            level_id="lvl-1",
+            save_as_default=True,
+        )
+    )
+    asyncio.run(
+        executor_create.create_position_executor(
+            client,
+            connector_name="binance_perpetual",
+            trading_pair="ETH-USDT",
+            side=2,
+            amount=0.5,
+        )
+    )
+
+    assert shipped_preferences.get_defaults("position_executor") == {
+        "leverage": 5,
+        "triple_barrier_config": {"stop_loss": 0.02},
+    }
+    assert "leverage=5" in first["formatted_output"]
+    assert "never saved" in first["formatted_output"]
+
+    second = client.calls[1]["config"]
+    assert second["trading_pair"] == "ETH-USDT"
+    assert second["side"] == 2
+    assert second["amount"] == 0.5
+    assert "entry_price" not in second
+    assert "level_id" not in second
+    assert second["leverage"] == 5
+    assert second["triple_barrier_config"] == {"stop_loss": 0.02}
+
+
+def test_saving_an_lp_create_keeps_no_pool_amount_or_limit_price(shipped_preferences):
+    client = _RecordingClient()
+
+    asyncio.run(
+        executor_create.create_lp_executor(
+            client,
+            connector_name="solana-mainnet-beta",
+            lp_provider="meteora/clmm",
+            trading_pair="SOL-USDC",
+            pool_address="Pool111",
+            lower_price=130,
+            upper_price=170,
+            side=3,
+            base_amount=1.0,
+            quote_amount=150.0,
+            upper_limit_price=175,
+            lower_limit_price=125,
+            swap_provider="jupiter/router",
+            extra_params={"strategyType": 0},
+            save_as_default=True,
+        )
+    )
+
+    assert shipped_preferences.get_defaults("lp_executor") == {
+        "swap_provider": "jupiter/router",
+        "extra_params": {"strategyType": 0},
+    }
+
+
+def test_a_save_with_nothing_reusable_says_so_and_writes_nothing(shipped_preferences):
+    client = _RecordingClient()
+
+    result = asyncio.run(
+        executor_create.create_grid_executor(
+            client, **_grid_kwargs(save_as_default=True)
+        )
+    )
+
+    assert "Nothing saved as default" in result["formatted_output"]
+    assert shipped_preferences.get_defaults("grid_executor") == {}
+
+
+def test_the_result_names_every_saved_default_that_was_applied(shipped_preferences):
+    shipped_preferences.update_defaults(
+        "grid_executor",
+        {"keep_position": True, "max_open_orders": 15, **_SAVED_GRID_BARRIER},
+    )
+    client = _RecordingClient()
+
+    result = asyncio.run(
+        executor_create.create_grid_executor(
+            client, **_grid_kwargs(max_open_orders=3, take_profit=0.002)
+        )
+    )
+
+    line = next(
+        row
+        for row in result["formatted_output"].splitlines()
+        if row.startswith("Applied saved defaults:")
+    )
+    assert "keep_position=True" in line
+    assert "triple_barrier_config.open_order_type=3" in line
+    # Passed explicitly, so neither is a default that was applied.
+    assert "max_open_orders" not in line
+    assert "triple_barrier_config.take_profit=" not in line
+
+
+def test_the_preferences_file_is_replaced_whole_never_truncated_in_place(
+    shipped_preferences, monkeypatch
+):
+    """Every MCP subprocess re-reads this file per create; a write that fails
+    midway must leave the previous content, not half a file."""
+    import os
+
+    before = shipped_preferences.get_raw_content()
+
+    def _boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(OSError):
+        shipped_preferences.update_defaults("grid_executor", {"leverage": 3})
+    monkeypatch.undo()
+
+    assert shipped_preferences.preferences_path.read_text() == before
+    leftovers = [
+        path.name
+        for path in shipped_preferences.preferences_path.parent.iterdir()
+        if path.name.endswith(".tmp")
+    ]
+    assert leftovers == []

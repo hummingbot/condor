@@ -8,7 +8,9 @@ Preferences are stored at: ~/.hummingbot_mcp/executor_preferences.md
 """
 
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,11 @@ DEFAULT_PREFERENCES_TEMPLATE = """# Executor Preferences
 This file stores your default configurations for different executor types.
 You can edit this file manually or use `save_as_default=true` when creating executors.
 
+A default is applied to every later create that omits that key, on every pair.
+Keep reusable settings here (leverage, order types, spreads, keep_position);
+never a trading pair, a side, an amount or a price. `save_as_default` stores
+only the reusable settings.
+
 ---
 
 ## Your Default Configurations
@@ -39,10 +46,9 @@ These defaults will be applied when creating new executors.
 position_executor:
   # Add your default position executor config here
   # Example:
-  # connector_name: binance_perpetual
-  # trading_pair: BTC-USDT
-  # side: BUY
   # leverage: 10
+  # triple_barrier_config:
+  #   open_order_type: 3  # LIMIT_MAKER
 ```
 
 ### DCA Executor Defaults
@@ -51,37 +57,31 @@ position_executor:
 dca_executor:
   # Add your default DCA executor config here
   # Example:
-  # connector_name: binance
-  # trading_pair: BTC-USDT
-  # amounts_quote: [100, 100, 100]
-  # prices: [50000, 48000, 46000]
+  # leverage: 1
+  # mode: MAKER
 ```
 
 ### Grid Executor Defaults
 
-Note: This is a tight scalping configuration. Adjust prices and amounts to your market.
+Note: The example below is a tight scalping configuration. Nothing in it is
+active until you uncomment it: a key left commented is not sent, and the
+backend's own default applies.
 
 ```yaml
 grid_executor:
-  # connector_name: binance_perpetual
-  # trading_pair: BTC-USDT
-  # side: 1  # 1=BUY (LONG grid), 2=SELL (SHORT grid)
-  # start_price: 89000
-  # end_price: 90000
-  # limit_price: 88700  # Below start for LONG
-  min_spread_between_orders: 0.0001  # 0.01% between levels
-  min_order_amount_quote: 6
-  # total_amount_quote: 100  # Always specify — capital in quote currency
-  max_open_orders: 15
-  activation_bounds: 0.001  # 0.1% — only place orders near current price
-  order_frequency: 5  # seconds between order batches
-  max_orders_per_batch: 1
-  keep_position: true
-  coerce_tp_to_step: true
-  triple_barrier_config:
-    take_profit: 0.0002  # 0.02%
-    open_order_type: 3  # LIMIT_MAKER (post-only, earns maker fees)
-    take_profit_order_type: 3  # LIMIT_MAKER
+  # Add your default grid executor config here
+  # Example:
+  # min_spread_between_orders: 0.0001  # 0.01% between levels
+  # max_open_orders: 15
+  # activation_bounds: 0.001  # 0.1% — only place orders near current price
+  # order_frequency: 5  # seconds between order batches
+  # max_orders_per_batch: 1
+  # keep_position: true
+  # coerce_tp_to_step: true
+  # triple_barrier_config:
+  #   take_profit: 0.0002  # 0.02%
+  #   open_order_type: 3  # LIMIT_MAKER (post-only, earns maker fees)
+  #   take_profit_order_type: 3  # LIMIT_MAKER
 ```
 
 ### Order Executor Defaults
@@ -90,32 +90,18 @@ grid_executor:
 order_executor:
   # Add your default order executor config here
   # Example:
-  # connector_name: binance
-  # trading_pair: BTC-USDT
-  # side: 1  # 1=BUY, 2=SELL
-  # amount: "0.001"
-  # execution_strategy: LIMIT_MAKER
-  # price: "95000"
+  # leverage: 1
 ```
 
 ### Lp Executor Defaults
 
 ```yaml
 lp_executor:
-  # Set your preferred defaults here (all optional, ask user if not set):
-  # connector_name: solana-mainnet-beta  # chain-network identifier (NOT the DEX)
-  #   Solana: solana-mainnet-beta
-  #   EVM: ethereum-mainnet, arbitrum-one, base-mainnet, binance-smart-chain
-  # lp_provider: meteora/clmm  # DEX + trading type (required)
-  #   Solana: meteora/clmm, raydium/clmm, orca/clmm
-  #   EVM: uniswap/clmm, pancakeswap/clmm
+  # Set your preferred defaults here (all optional):
   # swap_provider: jupiter/router  # optional — defaults to network's default swap provider
-  # trading_pair: SOL-USDC
+  # keep_position: false
   # extra_params:
   #   strategyType: 0  # Meteora only: 0=Spot, 1=Curve, 2=Bid-Ask
-  #
-  # Note: base_token/quote_token are inferred from trading_pair
-  # Note: side is TradeType enum (1=BUY/quote-only, 2=SELL/base-only, 3=RANGE/both)
 ```
 
 ---
@@ -172,7 +158,7 @@ class ExecutorPreferencesManager:
 
     def _write_template(self) -> None:
         """Write the default template to the preferences file."""
-        self.preferences_path.write_text(DEFAULT_PREFERENCES_TEMPLATE)
+        self._write_content(DEFAULT_PREFERENCES_TEMPLATE)
 
     def _read_content(self) -> str:
         """Read the preferences file content."""
@@ -181,8 +167,28 @@ class ExecutorPreferencesManager:
         return self.preferences_path.read_text()
 
     def _write_content(self, content: str) -> None:
-        """Write content to the preferences file."""
-        self.preferences_path.write_text(content)
+        """Write content to the preferences file, atomically.
+
+        The file is shared by every MCP subprocess of this OS user, and each of
+        them re-reads it on every create. A plain ``write_text`` truncates first,
+        so a create racing a save could parse half a file and silently drop
+        every default in it; a temp file renamed into place is seen whole or not
+        at all.
+        """
+        directory = self.preferences_path.parent
+        fd, tmp_name = tempfile.mkstemp(
+            dir=directory, prefix=f".{self.preferences_path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(content)
+            os.replace(tmp_name, self.preferences_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def _parse_yaml_blocks(self, content: str) -> dict[str, dict[str, Any]]:
         """Parse YAML blocks from markdown content.

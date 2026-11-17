@@ -788,6 +788,10 @@ async def create_position_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -810,7 +814,9 @@ async def create_position_executor(
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here — it is what attributes
             the position to the session that opened it.
-        save_as_default: Save these arguments as the defaults for position executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for position executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - Long 0.01 BTC at 5x with a 2% stop and 3% target:
@@ -907,6 +913,10 @@ async def create_grid_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'SOL-USDT'.
@@ -943,7 +953,9 @@ async def create_grid_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for grid executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for grid executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - A $500 long grid on SOL-USDT between 140 and 150, stopping under 138:
@@ -1028,6 +1040,10 @@ async def create_dca_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -1046,7 +1062,9 @@ async def create_dca_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for DCA executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for DCA executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - Ladder $350 into BTC across three levels with a 3% target and 5% stop:
@@ -1133,6 +1151,10 @@ async def create_order_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, or a NETWORK id for a DEX swap (see above).
         trading_pair: Trading pair, e.g. 'SOL-USDC'. On a DEX either side may be a raw
@@ -1158,7 +1180,9 @@ async def create_order_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for order executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for order executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Examples:
     - Market-buy $100 of SOL: create_order_executor("binance", "SOL-USDT", 1, "$100",
@@ -1247,6 +1271,10 @@ async def create_lp_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: The NETWORK, e.g. 'solana-mainnet-beta'. See above.
         lp_provider: DEX and trading type as 'dex/trading_type' — 'meteora/clmm',
@@ -1271,7 +1299,9 @@ async def create_lp_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for LP executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for LP executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - Single-sided 1 SOL into a BONK-SOL pool with a range below spot:
