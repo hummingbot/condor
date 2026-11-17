@@ -11,11 +11,11 @@
  * discarded and the sparklines fell back entirely to their 120s/60s polls.
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ControllerPerformanceSnapshot } from "./api";
 import { executorsQuery, queryClient } from "./queryClient";
-import { handleMessage } from "./shared-socket";
+import { acquireSocket, handleMessage, releaseSocket } from "./shared-socket";
 
 const SERVER = "prod";
 
@@ -349,5 +349,62 @@ describe("executors cache writes", () => {
 
       expect(cached()).toBeUndefined();
     });
+  });
+});
+
+describe("reconnect resync", () => {
+  class FakeSocket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    onmessage: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor() {
+      FakeSocket.instances.push(this);
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+      this.onclose?.();
+    }
+    open() {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeSocket);
+    queryClient.clear();
+  });
+
+  afterEach(() => {
+    releaseSocket();
+    vi.advanceTimersByTime(1000);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("invalidates the executor walk when the connection comes back (FD-04)", () => {
+    // The walk has no whole-list poll, so a reconnect is what repairs the
+    // frames a drop lost.
+    const key = ["executors-infinite", SERVER];
+    queryClient.setQueryData(key, { pages: [{ executors: [], next_cursor: null }], pageParams: [""] });
+    const invalidated = () => queryClient.getQueryState(key)?.isInvalidated;
+
+    acquireSocket("jwt");
+    FakeSocket.instances[0].open();
+    // Nothing was missed before there was a connection.
+    expect(invalidated()).toBe(false);
+
+    FakeSocket.instances[0].close();
+    vi.advanceTimersByTime(1000);
+    FakeSocket.instances[1].open();
+    expect(invalidated()).toBe(true);
   });
 });
