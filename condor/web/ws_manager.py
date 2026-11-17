@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Any, Optional
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 # Re-exported for back-compat: tests and callers import the candle helpers
 # (and patch ``ws_manager.dex_candles``) through this module.
@@ -23,7 +23,7 @@ from condor import dex_candles  # noqa: F401
 from condor.asyncutil import TaskSet
 from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
 from condor.server_data_service import CacheKey, ServerDataType, get_server_data_service
-from condor.web.auth import decode_jwt
+from condor.web.auth import decode_jwt, is_active_user
 from condor.web.streams.candles import (  # noqa: F401
     CandleStreamsMixin,
     _CandleBuffer,
@@ -283,6 +283,21 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
     # -- Message handling --
 
     async def handle_message(self, conn: _Connection, raw: str) -> None:
+        # The role ``connect`` checked is re-read on every action: a user
+        # blocked or demoted after the tab was opened must not keep driving
+        # the socket. The connection is closed and the caller's receive loop
+        # ended the way a client hang-up would end it.
+        if not is_active_user(conn.user_id):
+            logger.warning(
+                "WS closed: user %s is no longer an approved user", conn.user_id
+            )
+            self.disconnect(conn)
+            try:
+                await conn.ws.close(code=4003, reason="Forbidden")
+            except Exception:
+                pass
+            raise WebSocketDisconnect(code=4003)
+
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:

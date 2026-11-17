@@ -7,6 +7,7 @@ Manages multiple agent sessions per user and streams ACPEvents as JSON.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Any
@@ -41,7 +42,12 @@ from condor.runtime.confirmations import (
 from condor.runtime.events import RuntimeEvent
 from condor.runtime.timeouts import TIMEOUTS
 from condor.runtime.wake import register_note_sink, register_sink_factory
-from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
+from condor.web.auth import (
+    decode_jwt,
+    extract_ws_token,
+    get_current_user,
+    is_active_user,
+)
 from condor.web.models import WebUser
 
 log = logging.getLogger(__name__)
@@ -475,6 +481,17 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     try:
         while True:
             raw = await ws.receive_text()
+            # The handshake check above is re-run on every action: this socket
+            # outlives it by hours and is the surface with the most authority,
+            # so a user blocked or demoted since must not start a session,
+            # prompt an agent or approve a tool call through it.
+            if not is_active_user(user_id):
+                log.warning(
+                    "Chat WS closed: user %d is no longer an approved user", user_id
+                )
+                with contextlib.suppress(Exception):
+                    await ws.close(code=4003, reason="Forbidden")
+                break
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:

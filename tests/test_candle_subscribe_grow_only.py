@@ -45,6 +45,7 @@ def mgr(monkeypatch):
 
     monkeypatch.setattr(WebSocketManager, "_send", fake_send)
     monkeypatch.setattr(WebSocketManager, "_ensure_stream", lambda self, p, c: None)
+    monkeypatch.setattr("condor.web.ws_manager.is_active_user", lambda uid: True)
     manager.sent_snapshots = sent
     return manager
 
