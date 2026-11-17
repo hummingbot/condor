@@ -18,18 +18,23 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerContext } from "@/hooks/useServer";
-import type { ReportSummary, RoutineInfo } from "@/lib/api";
+import type { ReportSummary, RoutineInfo, RoutineInstance } from "@/lib/api";
 
 const getRoutineReports = vi.fn();
 const deleteReport = vi.fn();
+const runRoutine = vi.fn();
+const getRoutineInstance = vi.fn();
+const stopRoutineInstance = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getRoutines: () => Promise.resolve([routine("alpha_check")]),
     getRoutineReports: (...a: unknown[]) => getRoutineReports(...a),
-    getRoutineInstance: () => Promise.resolve(null),
+    getRoutineInstance: (...a: unknown[]) => getRoutineInstance(...a),
+    stopRoutineInstance: (...a: unknown[]) => stopRoutineInstance(...a),
     getRoutineSource: () => Promise.resolve({ filename: "x.py", source: "" }),
-    runRoutine: () => Promise.resolve({ instance_id: "i9" }),
+    getRoutineFields: () => Promise.resolve({ fields: {} }),
+    runRoutine: (...a: unknown[]) => runRoutine(...a),
     scheduleRoutine: () => Promise.resolve({ instance_id: "i9" }),
     deleteReport: (...a: unknown[]) => deleteReport(...a),
     getReportHtml: () => Promise.resolve(""),
@@ -98,13 +103,13 @@ const settle = async (turns = 4) => {
   }
 };
 
-async function render() {
+async function render(instances: RoutineInstance[] = []) {
   qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
     root.render(
       <QueryClientProvider client={qc}>
         <ServerContext.Provider value={{ server: "dashboard-server", setServer: () => {} }}>
-          <ReportBrowser hosted instances={[]} onClose={() => {}} />
+          <ReportBrowser hosted instances={instances} onClose={() => {}} />
         </ServerContext.Provider>
       </QueryClientProvider>,
     );
@@ -137,6 +142,12 @@ beforeEach(() => {
   getRoutineReports.mockResolvedValue({ reports: [report("b"), report("a")] });
   deleteReport.mockReset();
   deleteReport.mockResolvedValue({ deleted: true });
+  runRoutine.mockReset();
+  runRoutine.mockResolvedValue({ instance_id: "i9" });
+  getRoutineInstance.mockReset();
+  getRoutineInstance.mockResolvedValue(null);
+  stopRoutineInstance.mockReset();
+  stopRoutineInstance.mockResolvedValue({ stopped: true });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -191,5 +202,80 @@ describe("ReportBrowser selection", () => {
     expect(frame()).toBe("b");
     expect(titled("Confirm delete report")).toBeNull();
     expect(deleteReport).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A run that fails is said where it can be seen (FU-08).
+ *
+ * Every case here has reports on file: that is the path where the previous
+ * report stayed up and read as the result, with the error behind a collapsed
+ * panel or an Output toggle the view never switched to.
+ */
+describe("ReportBrowser run status, with reports on file", () => {
+  const strip = () => container.querySelector("[data-status-strip]")?.textContent ?? null;
+
+  it("shows a rejected run POST in the status strip", async () => {
+    runRoutine.mockRejectedValue(new Error("server unreachable"));
+    await render();
+    expect(frame()).toBe("b");
+    expect(strip()).toBeNull();
+
+    await click(titled("Run with current config"));
+    await settle();
+
+    expect(strip()).toContain("Could not run alpha check: server unreachable");
+  });
+
+  it("surfaces a run that ended failed, and opens its output", async () => {
+    getRoutineInstance.mockResolvedValue({
+      instance_id: "i9",
+      routine_name: "alpha_check",
+      config: {},
+      status: "failed",
+      source: "web",
+      run_count: 1,
+      created_at: 1,
+      last_run_at: 1,
+      last_result: null,
+      last_duration: null,
+      error: "KeyError: 'price'\n  File x.py, line 3",
+    });
+    await render();
+
+    await click(titled("Run with current config"));
+    await settle();
+
+    expect(strip()).toContain("Last run failed: KeyError: 'price'");
+    // The Output view is open on that run — not the previous report.
+    expect(frame()).toBeUndefined();
+    expect(container.querySelector("pre")?.textContent).toContain("File x.py, line 3");
+  });
+
+  it("asks before stopping from the running chip, and shows a failed stop", async () => {
+    stopRoutineInstance.mockRejectedValue(new Error("no such instance"));
+    await render([
+      {
+        instance_id: "i1",
+        routine_name: "alpha_check",
+        config: {},
+        status: "running",
+        source: "web",
+        run_count: 3,
+        created_at: 1,
+        last_run_at: 1,
+        last_result: null,
+        last_duration: null,
+      },
+    ]);
+
+    await click(titled("Stop"));
+    expect(stopRoutineInstance).not.toHaveBeenCalled();
+
+    await click(titled("Confirm stop"));
+    await settle();
+
+    expect(stopRoutineInstance).toHaveBeenCalledWith("i1");
+    expect(strip()).toContain("Could not stop the run: no such instance");
   });
 });
