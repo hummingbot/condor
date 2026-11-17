@@ -10,7 +10,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -29,7 +29,10 @@ let client: QueryClient;
 let seen: ReturnType<typeof useCredentials>;
 
 function Probe() {
-  seen = useCredentials();
+  const value = useCredentials();
+  useEffect(() => {
+    seen = value;
+  });
   return null;
 }
 

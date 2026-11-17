@@ -9,7 +9,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, useState } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,8 +40,10 @@ let getServers: ReturnType<typeof vi.spyOn>;
 
 function Harness({ initial }: { initial: string | null }) {
   const [server, setServer] = useState<string | null>(initial);
-  selected = server;
-  select = setServer;
+  useEffect(() => {
+    selected = server;
+    select = setServer;
+  });
   return (
     <ServerContext.Provider value={{ server, setServer }}>
       <ServerSelector />

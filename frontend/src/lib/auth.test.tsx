@@ -9,7 +9,7 @@
  * @vitest-environment jsdom
  */
 
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -41,7 +41,10 @@ let root: Root;
 let state: AuthState;
 
 function Probe() {
-  state = useAuthState();
+  const value = useAuthState();
+  useEffect(() => {
+    state = value;
+  });
   return null;
 }
 

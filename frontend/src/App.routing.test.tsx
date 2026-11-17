@@ -4,7 +4,7 @@
  * @vitest-environment jsdom
  */
 
-import { act, useState } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,13 +25,17 @@ let signIn: () => void;
 
 function Where() {
   const { pathname, search, hash } = useLocation();
-  location = pathname + search + hash;
+  useEffect(() => {
+    location = pathname + search + hash;
+  });
   return null;
 }
 
 function Harness({ start }: { start: string }) {
   const [isAuthenticated, setAuthenticated] = useState(false);
-  signIn = () => setAuthenticated(true);
+  useEffect(() => {
+    signIn = () => setAuthenticated(true);
+  }, []);
   const auth: AuthState = {
     user: null,
     token: null,
