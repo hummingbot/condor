@@ -37,6 +37,13 @@ from condor.web.streams.hummingbot_ws import (
 
 logger = logging.getLogger(__name__)
 
+# Longest one subscriber may hold up a broadcast. A tab that stops reading
+# with TCP still open (sleeping laptop, backgrounded phone) blocks its
+# ``send_text`` once the write buffer fills, and the broadcast is awaited by
+# the task reading the upstream socket — so without a bound that one tab
+# froze the channel for everyone until the keepalive ping gave up on it.
+WS_SEND_TIMEOUT = 10
+
 # Mapping from WS channel prefix to ServerDataType
 # NOTE: executors now uses dedicated WS streaming (not SDS polling)
 _CHANNEL_TO_SDT = {
@@ -621,16 +628,35 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
     async def _fan_out(
         self, channel: str, subscribers: list[_Connection], payload: str
     ) -> None:
-        """Send one encoded frame to every subscriber, dropping dead sockets."""
+        """Send one encoded frame to every subscriber, dropping dead sockets.
+
+        Each send is bounded by ``WS_SEND_TIMEOUT``. A subscriber that does not
+        take the frame in time is treated as dead: it is disconnected here and
+        its socket closed, so a tab that was only slow reconnects and
+        re-subscribes instead of sitting on a connection with no channels.
+        """
         # Fan out concurrently so a slow/backpressured client does not block the
         # rest of the subscribers in the same broadcast tick.
         results = await asyncio.gather(
-            *(conn.ws.send_text(payload) for conn in subscribers),
+            *(
+                asyncio.wait_for(conn.ws.send_text(payload), WS_SEND_TIMEOUT)
+                for conn in subscribers
+            ),
             return_exceptions=True,
         )
         dead: list[_Connection] = []
+        stalled: list[_Connection] = []
         for conn, result in zip(subscribers, results):
-            if isinstance(result, Exception):
+            if isinstance(result, asyncio.TimeoutError):
+                logger.warning(
+                    "Broadcast send stalled for %ds: channel=%s user=%s — "
+                    "dropping the connection",
+                    WS_SEND_TIMEOUT,
+                    channel,
+                    conn.user_id,
+                )
+                stalled.append(conn)
+            elif isinstance(result, Exception):
                 logger.warning(
                     "Broadcast send failed: channel=%s user=%s: %s",
                     channel,
@@ -638,8 +664,29 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                     result,
                 )
                 dead.append(conn)
-        for conn in dead:
+        for conn in dead + stalled:
             self.disconnect(conn)
+        for conn in stalled:
+            self._oneshot_tasks.track(
+                asyncio.create_task(
+                    self._close_stalled(conn), name=f"close_stalled:{conn.user_id}"
+                )
+            )
+
+    @staticmethod
+    async def _close_stalled(conn: _Connection) -> None:
+        """Close a socket whose send timed out, without waiting on it for long.
+
+        Off the broadcast path: the close frame queues behind the same full
+        write buffer. If it cannot go out either, the server's keepalive ping
+        ends the connection.
+        """
+        try:
+            await asyncio.wait_for(
+                conn.ws.close(code=1013, reason="Slow consumer"), WS_SEND_TIMEOUT
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _encode(channel: str, data: Any) -> str:
