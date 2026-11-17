@@ -339,8 +339,12 @@ export function ReportBrowser({
    * to that report rather than to index 0 — derived rather than corrected in an
    * effect, so the right report is on screen in the first paint and a poll that
    * refreshes the list can never drag the reader back to it.
+   *
+   * The pick is the report's *id*, never its place in the list: a scheduled
+   * routine's list is refetched every 10 s and grows at the front, and a pick
+   * held as an index would then be pointing at the report's neighbour.
    */
-  const [pickedReportIdx, setSelectedReportIdx] = useState<number | null>(null);
+  const [pickedReportId, setPickedReportId] = useState<string | null>(null);
   const openedOnIdx = useMemo(() => {
     if (!initialReportId) return 0;
     return Math.max(
@@ -348,13 +352,22 @@ export function ReportBrowser({
       reports.findIndex((r) => r.id === initialReportId),
     );
   }, [reports, initialReportId]);
-  const selectedReportIdx = pickedReportIdx ?? openedOnIdx;
+  const pickedReportIdx = useMemo(
+    () => (pickedReportId == null ? -1 : reports.findIndex((r) => r.id === pickedReportId)),
+    [reports, pickedReportId],
+  );
+  // A pick the list no longer holds (deleted elsewhere) reads as no pick.
+  const selectedReportIdx = pickedReportIdx >= 0 ? pickedReportIdx : openedOnIdx;
   const selectedReport = reports[selectedReportIdx] ?? null;
+  const selectReportAt = useCallback(
+    (idx: number) => setPickedReportId(reports[idx]?.id ?? null),
+    [reports],
+  );
 
   // Another routine is read from the top — back to "no pick", which is the
   // newest for a routine the pane was not opened on.
   useEffect(() => {
-    setSelectedReportIdx(null);
+    setPickedReportId(null);
   }, [activeSource]);
 
   // Active instances for current source
@@ -486,7 +499,7 @@ export function ReportBrowser({
       qc.invalidateQueries({ queryKey: ["reports-grouped"] });
       qc.invalidateQueries({ queryKey: ["routine-reports", activeSource] });
       if (selectedReport?.id === id) {
-        setSelectedReportIdx(Math.max(0, selectedReportIdx - 1));
+        selectReportAt(Math.max(0, selectedReportIdx - 1));
       }
     },
   });
@@ -522,7 +535,9 @@ export function ReportBrowser({
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
   }, [runServer, runContext, filteredRoutines, qc]);
 
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  // Which report Delete is armed for — an id, not a flag, so the confirm can
+  // only ever delete the report the reader was looking at when they armed it.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   /**
    * Download the report body.
@@ -559,13 +574,13 @@ export function ReportBrowser({
   }, [activeSourceIdx, filteredRoutines, selectSource]);
 
   const goPrevReport = useCallback(() => {
-    if (selectedReportIdx > 0) setSelectedReportIdx(selectedReportIdx - 1);
-  }, [selectedReportIdx]);
+    if (selectedReportIdx > 0) selectReportAt(selectedReportIdx - 1);
+  }, [selectedReportIdx, selectReportAt]);
 
   const goNextReport = useCallback(() => {
     if (selectedReportIdx < reports.length - 1)
-      setSelectedReportIdx(selectedReportIdx + 1);
-  }, [selectedReportIdx, reports.length]);
+      selectReportAt(selectedReportIdx + 1);
+  }, [selectedReportIdx, reports.length, selectReportAt]);
 
   /**
    * The browser's own keys.
@@ -881,13 +896,13 @@ export function ReportBrowser({
             {/* Delete */}
             {view === "report" && selectedReport && (
               <InlineConfirm
-                confirming={confirmDelete}
-                onRequest={() => setConfirmDelete(true)}
+                confirming={confirmDelete === selectedReport.id}
+                onRequest={() => setConfirmDelete(selectedReport.id)}
                 onConfirm={() => {
-                  deleteMutation.mutate(selectedReport.id);
-                  setConfirmDelete(false);
+                  if (confirmDelete) deleteMutation.mutate(confirmDelete);
+                  setConfirmDelete(null);
                 }}
-                onCancel={() => setConfirmDelete(false)}
+                onCancel={() => setConfirmDelete(null)}
                 pending={deleteMutation.isPending}
                 triggerLabel="Delete report"
                 confirmLabel="Confirm delete report"
@@ -980,7 +995,7 @@ export function ReportBrowser({
             {reports.slice(0, 10).map((r, idx) => (
               <button
                 key={r.id}
-                onClick={() => setSelectedReportIdx(idx)}
+                onClick={() => selectReportAt(idx)}
                 className={`shrink-0 rounded px-2 py-1 text-[10px] transition-all ${
                   idx === selectedReportIdx
                     ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
@@ -997,7 +1012,7 @@ export function ReportBrowser({
                   value={selectedReportIdx >= 10 ? selectedReportIdx : ""}
                   onChange={(e) => {
                     const val = e.target.value;
-                    if (val !== "") setSelectedReportIdx(Number(val));
+                    if (val !== "") selectReportAt(Number(val));
                   }}
                   className={`appearance-none rounded-md pl-2.5 pr-7 py-1 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
                     selectedReportIdx >= 10
