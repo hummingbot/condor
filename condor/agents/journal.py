@@ -1126,9 +1126,14 @@ class JournalManager:
         """Replace the content of a section, preserving other sections."""
         text = self.read_full()
         pattern = rf"(^## {re.escape(name)}\n).*?(?=^## |\Z)"
-        replacement = rf"\g<1>{content}\n\n"
+        # A function, not a template string: ``content`` is model/error text and
+        # a backslash in it must not be read as a regex replacement escape.
         new_text, count = re.subn(
-            pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL
+            pattern,
+            lambda m: f"{m.group(1)}{content}\n\n",
+            text,
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
         )
         if count == 0:
             new_text = text.rstrip() + f"\n\n## {name}\n{content}\n"
