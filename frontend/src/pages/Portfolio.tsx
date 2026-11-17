@@ -1023,15 +1023,17 @@ export function Portfolio() {
   const totalUsd = data?.total_usd ?? 0;
   const connectors = data?.connectors ?? [];
 
-  // The period's change in value (follows the period selector): the *live*
-  // total against where the period started. Measured between the history's own
-  // two ends it lagged the headline beside it by up to a sampling interval plus
-  // a 60 s refetch — the total said one thing and its arrow another (FP-15).
-  // Not while the total on screen is still the previous server's.
+  // The period's change in value (follows the period selector), measured
+  // between the history's own two ends. NOT the live total minus the first
+  // point (FP-15 tried that): the live total is deduped for unified accounts
+  // (`dedupe_unified_accounts`) and history points are not, so the two are not
+  // the same quantity and a Hyperliquid unified account showed a permanent
+  // false loss. Both ends from one series can lag the headline by a sampling
+  // interval, but they cannot disagree about what is being counted.
   const historyPoints = periodHistory?.points ?? [];
   const portfolioPnl =
-    data && !isPlaceholderData && historyPoints.length >= 1
-      ? totalUsd - historyPoints[0].total_usd
+    historyPoints.length >= 2
+      ? historyPoints[historyPoints.length - 1].total_usd - historyPoints[0].total_usd
       : null;
 
   // Compute aggregate stats

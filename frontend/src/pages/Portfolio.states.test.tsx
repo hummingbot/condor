@@ -173,20 +173,30 @@ describe("Portfolio history chart", () => {
 });
 
 /**
- * The arrow beside the total is "now − start of period" (FP-15).
+ * The arrow beside the total is the period's last history point minus its
+ * first -- both ends from the one series.
  *
- * It was the last history point minus the first, so a total of 120 beside a
- * history that ends at 110 showed +10: the headline live, its delta a sampling
- * interval behind it.
+ * FP-15 made it "live total − first point". The live total is deduped for
+ * unified accounts and the history is not, so the two are different quantities:
+ * an account double-counted in history showed a permanent false loss.
  */
 describe("Portfolio period change", () => {
-  it("measures the live total against the period's first point", async () => {
+  it("measures the period between the history's own two ends, not against the live total", async () => {
     // Defaults: live total 120, history [100, 110].
     await render();
 
-    expect(tile("Portfolio")).toContain("+$20.00");
-    expect(tile("Portfolio")).not.toContain("+$10.00");
+    expect(tile("Portfolio")).toContain("+$10.00");
+    expect(tile("Portfolio")).not.toContain("+$20.00");
     expect(container.querySelector('[title^="Change in portfolio value over 1W"]')).not.toBeNull();
+  });
+
+  it("shows no false loss when history double-counts what the live total dedupes", async () => {
+    // A unified account: history carries it twice (240), the live total once (120).
+    calls.getPortfolioHistory.mockResolvedValue(history(240, 240));
+    await render();
+
+    expect(tile("Portfolio")).not.toContain("-$");
+    expect(tile("Portfolio")).toContain("+$0.00");
   });
 
   it("shows no change at all when the period has no history to measure from", async () => {
