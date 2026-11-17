@@ -498,11 +498,39 @@ class TickEngine:
         down here: stop() waits until the winddown's own teardown has recorded
         STOPPED and returns False. Cancelling the tick task at that point would
         abort run_shutdown mid-flight and leave positions stranded.
+
+        The same goes for a run that is already ending itself (``max_ticks``, a
+        single-tick run, an error): its tick task is inside :meth:`_finish`,
+        and cancelling it would land in the order sweep or the close-out
+        report and leave orders resting with nothing recorded (AG1-11). stop()
+        waits for that teardown and returns False -- the run ended on its own,
+        with its own final state, and this call did not stop it.
         """
         if self._shutting_down:
             finished = getattr(self, "_shutdown_finished", None)
             if finished is not None:
                 await finished.wait()
+            return False
+        if getattr(self, "_finished", False):
+            task = self._task
+            if (
+                task is not None
+                and task is not asyncio.current_task()
+                and not task.done()
+            ):
+                try:
+                    # Shielded: a caller that is itself cancelled while waiting
+                    # (a request that went away) must not pass the cancel on to
+                    # the teardown it was waiting for.
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if not task.cancelled():
+                        raise
+                except Exception:
+                    log.exception(
+                        "TickEngine %s: the run's own teardown raised",
+                        self.agent_id,
+                    )
             return False
         self._running = False
         if self._task and not self._task.done():

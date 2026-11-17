@@ -191,3 +191,86 @@ def test_stop_after_self_completion_is_a_noop(tmp_path, monkeypatch, supervisor,
     assert runs == ["max_ticks"]  # no second event
     assert read_owned(engine.session_dir)[0].until == until
     assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
+
+
+# ── AG1-11: stop() racing a run that is finishing itself ──
+
+
+def _self_finishing_engine(tmp_path, monkeypatch, sweep_events):
+    """A ``max_ticks=1`` loop whose teardown sweep is slow enough to race."""
+    engine = _loop_engine_that_owns_a_bot(tmp_path, monkeypatch)
+    in_sweep = asyncio.Event()
+
+    async def slow_sweep():
+        sweep_events.append("start")
+        in_sweep.set()
+        await asyncio.sleep(0.2)
+        sweep_events.append("done")
+
+    monkeypatch.setattr(engine, "_cancel_resting_orders", slow_sweep)
+    monkeypatch.setattr(engine, "_emit_closeout", _async(None))
+    monkeypatch.setattr(engine, "_preflight_gate", _async(None))
+    return engine, in_sweep
+
+
+def test_stop_during_a_runs_own_teardown_does_not_cancel_it(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    sweep_events: list[str] = []
+    engine, in_sweep = _self_finishing_engine(tmp_path, monkeypatch, sweep_events)
+
+    async def go():
+        await engine.start()
+        await asyncio.wait_for(in_sweep.wait(), timeout=5)
+        assert engine._finished is True and not engine._task.done()
+        return await engine.stop()
+
+    stopped = asyncio.run(go())
+
+    assert stopped is False, "the run ended itself; this call did not stop it"
+    assert sweep_events == ["start", "done"], "the sweep ran to completion"
+    assert engine._task.cancelled() is False
+    assert runs == ["max_ticks"]
+    assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
+    assert supervisor.all() == {}
+
+
+def test_stop_all_does_not_suspend_a_run_that_completed_itself(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    """SUSPENDED over COMPLETED made a ``restart_on_boot`` strategy that had
+    just reached ``max_ticks`` start again on the next boot."""
+    sweep_events: list[str] = []
+    engine, in_sweep = _self_finishing_engine(tmp_path, monkeypatch, sweep_events)
+
+    async def go():
+        await engine.start()
+        await asyncio.wait_for(in_sweep.wait(), timeout=5)
+        await supervisor.stop_all()
+
+    asyncio.run(go())
+
+    assert sweep_events == ["start", "done"]
+    assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
+
+
+def test_a_cancelled_stop_does_not_cancel_the_teardown_it_waits_on(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    sweep_events: list[str] = []
+    engine, in_sweep = _self_finishing_engine(tmp_path, monkeypatch, sweep_events)
+
+    async def go():
+        await engine.start()
+        await asyncio.wait_for(in_sweep.wait(), timeout=5)
+        waiter = asyncio.create_task(engine.stop())
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await engine._task
+
+    asyncio.run(go())
+
+    assert sweep_events == ["start", "done"]
+    assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
