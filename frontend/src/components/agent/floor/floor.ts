@@ -62,6 +62,7 @@ export function emptyTotals(): PerfTotals {
     closeTypes: [],
     closeTotal: 0,
     returnPct: undefined,
+    unconverted: [],
   };
 }
 

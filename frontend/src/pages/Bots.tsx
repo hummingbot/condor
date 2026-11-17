@@ -83,6 +83,7 @@ export function Bots() {
       bots={fleet.bots}
       server={server}
       convert={fleet.convert}
+      ratesLoading={fleet.ratesLoading}
       currencySymbol={fleet.currencySymbol}
       // The fleet history the hook walked: the browser's combined scopes fold
       // these rows rather than issuing a second walk of their own.

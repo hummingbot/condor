@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 
 import type { CandleData } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
+import { intervalSeconds } from "@/lib/gridExecutor";
 
 /** Staleness thresholds by interval category */
 const STALE_THRESHOLD_SUB_1H_MS = 30_000; // 30s for intervals < 1h
@@ -89,7 +90,8 @@ export function useCandleStore(
   };
 
   const setDuration = (seconds: number) => {
-    if (key) candleStore.setDuration(key, seconds);
+    // With the interval, so the store keeps as many candles as the range holds.
+    if (key) candleStore.setDuration(key, seconds, intervalSeconds(interval));
   };
 
   return { candles, isStale, mergeCandles, setDuration };

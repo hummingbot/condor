@@ -32,7 +32,7 @@ vi.mock("@/components/executor/PairLabel", () => ({
   PairLabel: ({ tradingPair }: { tradingPair: string }) => <span>{tradingPair}</span>,
 }));
 
-import { DetailPanel, ExecutorTable } from "./ExecutorTable";
+import { DetailPanel, ExecutorTable, LiveDetailPanel } from "./ExecutorTable";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -130,6 +130,41 @@ describe("stoppable executor table (onStop given)", () => {
     expect(button).toBeDefined();
     act(() => button!.click());
     expect(onStop).toHaveBeenCalledWith("ex-1");
+  });
+});
+
+describe("live detail panel (FP-06)", () => {
+  const panel = (executors: ExecutorInfo[]) => (
+    <LiveDetailPanel executorId="ex-1" executors={executors} server="local" onClose={() => {}} onStop={() => {}} />
+  );
+
+  it("follows the list: a later frame for the same id replaces what the panel shows", () => {
+    render(panel([active]));
+    expect(container.textContent).toContain("active");
+    expect(panelStop()).toBeDefined();
+
+    // The next frame: same id, new object, the executor has closed.
+    render(panel([{ ...active, status: "terminated", close_type: "TAKE_PROFIT", pnl: 42.5 }]));
+
+    expect(container.textContent).toContain("terminated");
+    expect(container.textContent).toContain("42.5");
+    expect(panelStop()).toBeUndefined();
+    expect(container.querySelector("[data-detail-gone]")).toBeNull();
+  });
+
+  it("keeps the last frame, says so and withholds Stop when the id leaves the list", () => {
+    render(panel([active]));
+    render(panel([{ ...active, pnl: 7.25 }]));
+    render(panel([]));
+
+    expect(container.querySelector("[data-detail-gone]")).not.toBeNull();
+    expect(container.textContent).toContain("7.25");
+    expect(panelStop()).toBeUndefined();
+  });
+
+  it("draws nothing for an id the list never carried", () => {
+    render(panel([]));
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
   });
 });
 

@@ -155,10 +155,15 @@ interface RowProps {
   onToggleOpen: (id: string) => void;
   cv: ConvertQuote;
   currencySymbol: string;
+  ratesLoading: boolean;
   now: number;
   compact: boolean;
   renderAction?: (node: PerfNode) => ReactNode;
 }
+
+/** Why a row's figures carry a ⚠: some of what they add up was never converted. */
+const unconvertedTitle = (quotes: string[]) =>
+  `No conversion rate for ${quotes.join(", ")} — those amounts are counted at face value, not converted`;
 
 /**
  * What the row calls itself.
@@ -206,6 +211,7 @@ function ScopeRow({
   onToggleOpen,
   cv,
   currencySymbol,
+  ratesLoading,
   now,
   compact,
   renderAction,
@@ -214,6 +220,12 @@ function ScopeRow({
   // Each row shows what its own subtree adds up to, through the same fold the
   // report pane uses — a row and the pane it opens cannot disagree.
   const totals = useMemo(() => foldLeaves(node.leaves, cv, now), [node.leaves, cv, now]);
+  // A quote with no rate is folded in quote units (FP-01). While the rates are
+  // on their way the row says nothing rather than something wrong; once it is
+  // known there is no rate, the figure stands and is marked.
+  const unconverted = totals.unconverted.length > 0;
+  const withheld = ratesLoading && unconverted;
+  const flag = unconverted && !withheld ? " ⚠" : "";
   // Only an agent row makes a claim about *who*, so only an agent row qualifies
   // it. Every leaf under it has to agree, or the row would understate itself.
   const byDeed = node.kind === "agent" && provenanceOf(node.leaves) === "deed";
@@ -240,7 +252,7 @@ function ScopeRow({
           node.children.map((child) => (
             <ScopeRow
               key={child.id}
-              {...{ activeId, open, showBot, owners, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
+              {...{ activeId, open, showBot, owners, onSelect, onToggleOpen, cv, currencySymbol, ratesLoading, now, compact, renderAction }}
               node={child}
               depth={depth + 1}
             />
@@ -299,9 +311,10 @@ function ScopeRow({
             )}
             <span
               className="ml-auto shrink-0 tabular-nums text-[11px] font-semibold"
-              style={{ color: pnlColor(totals.net) }}
+              style={withheld ? undefined : { color: pnlColor(totals.net) }}
+              title={flag ? unconvertedTitle(totals.unconverted) : undefined}
             >
-              {formatCurrencyPnl(totals.net, currencySymbol)}
+              {withheld ? "—" : `${formatCurrencyPnl(totals.net, currencySymbol)}${flag}`}
             </span>
           </div>
           <div className="mt-0.5 flex items-center gap-2 pl-4.5 text-[10px] text-[var(--color-text-muted)]">
@@ -311,7 +324,7 @@ function ScopeRow({
             {/* Volume is what tells two similarly-profitable configs apart at a
                 glance, so it rides beside the PnL. */}
             <span className="ml-auto shrink-0 tabular-nums">
-              {formatCurrencyVolume(totals.volume, currencySymbol)}
+              {withheld ? "—" : formatCurrencyVolume(totals.volume, currencySymbol)}
             </span>
           </div>
         </button>
@@ -324,7 +337,7 @@ function ScopeRow({
         node.children.map((child) => (
           <ScopeRow
             key={child.id}
-            {...{ activeId, open, showBot, owners, onSelect, onToggleOpen, cv, currencySymbol, now, compact, renderAction }}
+            {...{ activeId, open, showBot, owners, onSelect, onToggleOpen, cv, currencySymbol, ratesLoading, now, compact, renderAction }}
             node={child}
             depth={depth + 1}
           />
@@ -363,6 +376,7 @@ export function ScopeTree({
   onToggleOpen,
   cv,
   currencySymbol,
+  ratesLoading = false,
   now,
   compact = false,
   renderAction,
@@ -384,6 +398,8 @@ export function ScopeTree({
   onToggleOpen: (id: string) => void;
   cv: ConvertQuote;
   currencySymbol: string;
+  /** The rate table has not answered yet: unconvertible rows read "—". */
+  ratesLoading?: boolean;
   now: number;
   compact?: boolean;
   /**
@@ -421,6 +437,7 @@ export function ScopeTree({
           onToggleOpen={onToggleOpen}
           cv={cv}
           currencySymbol={currencySymbol}
+          ratesLoading={ratesLoading}
           now={now}
           compact={compact}
           renderAction={renderAction}

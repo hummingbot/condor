@@ -265,3 +265,50 @@ describe("ControllerPnlChart refresh traffic", () => {
     expect(first.get("start_time")).toBe(deployedAt);
   });
 });
+
+/**
+ * A failed history request is not a controller with no history (FP-10).
+ *
+ * The component read only `data` and `isLoading`, so a rejected request fell
+ * through to "No performance history available" — an API outage reading as a
+ * bot that never recorded anything.
+ */
+describe("ControllerPnlChart when the history request fails", () => {
+  const state = () => container.querySelector<HTMLElement>("[data-chart-state]");
+
+  it("says the load failed, and Retry asks again", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("upstream down");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await mount(new Date(NOW - 60 * MINUTE).toISOString());
+    for (let i = 0; i < 5 && state()?.dataset.chartState !== "error"; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(state()?.dataset.chartState).toBe("error");
+    expect(container.textContent).toContain("Could not load this controller's performance history");
+    expect(container.textContent).not.toContain("No performance history available");
+
+    const before = fetchMock.mock.calls.length;
+    await act(async () => {
+      container.querySelector("button")!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("still says there is no history when the request answers with none", async () => {
+    serve([{ snapshots: [] }]);
+    await mount(new Date(NOW - 60 * MINUTE).toISOString());
+    for (let i = 0; i < 5 && state()?.dataset.chartState !== "empty"; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(state()?.dataset.chartState).toBe("empty");
+  });
+});

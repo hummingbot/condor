@@ -59,9 +59,18 @@ vi.mock("@/lib/api", () => ({
   api: { getCandles: vi.fn(async () => []) },
 }));
 
+type Listener = (candles: CandleData[]) => void;
+/** The chart's own store listener, so a test can push a frame the way the WS does. */
+const live = vi.hoisted(() => ({ listener: null as Listener | null }));
+
 vi.mock("@/lib/candle-store", () => ({
   candleChannelKey: (...parts: unknown[]) => parts.join(":"),
-  candleStore: { onUpdate: vi.fn(() => () => {}) },
+  candleStore: {
+    onUpdate: vi.fn((_key: string, cb: Listener) => {
+      live.listener = cb;
+      return () => {};
+    }),
+  },
 }));
 
 declare global {
@@ -101,6 +110,12 @@ async function render(lookbackSeconds: number) {
 function draws(): number[][] {
   const setData = chartDouble.series!.setData as Mock;
   return setData.mock.calls.map(([bars]) => (bars as { time: number }[]).map((b) => b.time));
+}
+
+/** The bar times of every incremental `update()` so far, in call order. */
+function updates(): number[] {
+  const update = chartDouble.series!.update as Mock;
+  return update.mock.calls.map(([bar]) => (bar as { time: number }).time);
 }
 
 function fits(): number {
@@ -172,5 +187,63 @@ describe("TradeChart range", () => {
 
     expect(draws()).toHaveLength(1);
     expect(fits()).toBe(1);
+  });
+});
+
+describe("TradeChart live frames (FP-03)", () => {
+  it("draws every candle of a multi-candle frame, oldest first", async () => {
+    await render(DAY);
+    expect(draws()).toHaveLength(1);
+
+    // What a reconnect delivers: the buffer again, with five bars the chart
+    // never saw on the end of it.
+    act(() => live.listener!(minutes(1445, NEWEST + 5 * 60)));
+
+    // The last drawn bar is re-applied too — it may have closed at a different
+    // price than the tick the chart last saw.
+    expect(updates()).toEqual([0, 1, 2, 3, 4, 5].map((n) => NEWEST + n * 60));
+    expect(draws()).toHaveLength(1);
+  });
+
+  it("keeps drawing after a batch: the next frame starts from the new last bar", async () => {
+    await render(DAY);
+    act(() => live.listener!(minutes(1443, NEWEST + 3 * 60)));
+    (chartDouble.series!.update as Mock).mockClear();
+
+    act(() => live.listener!(minutes(1444, NEWEST + 4 * 60)));
+
+    expect(updates()).toEqual([NEWEST + 3 * 60, NEWEST + 4 * 60]);
+  });
+
+  it("redraws once, without refitting, when the gap is long", async () => {
+    await render(DAY);
+
+    act(() => live.listener!(minutes(1440 + 120, NEWEST + 120 * 60)));
+
+    expect(updates()).toEqual([]);
+    expect(draws()).toHaveLength(2);
+    expect(draws()[1][draws()[1].length - 1]).toBe(NEWEST + 120 * 60);
+    expect(fits()).toBe(1);
+  });
+
+  it("redraws when a bar behind the last drawn one changed", async () => {
+    await render(DAY);
+
+    const frame = minutes(1440);
+    frame[1000] = { ...frame[1000], close: 9 };
+    act(() => live.listener!(frame));
+
+    expect(updates()).toEqual([]);
+    expect(draws()).toHaveLength(2);
+    expect(fits()).toBe(1);
+  });
+
+  it("ignores a frame older than everything drawn", async () => {
+    await render(HOUR);
+
+    act(() => live.listener!(minutes(10, NEWEST - 2 * DAY)));
+
+    expect(updates()).toEqual([]);
+    expect(draws()).toHaveLength(1);
   });
 });

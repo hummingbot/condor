@@ -30,7 +30,16 @@ type Listener = (candles: CandleData[]) => void;
 
 // ── Constants ──
 
+/** What a channel keeps until a chart says how far back it wants to see. */
 const MAX_COLLECTION_SIZE = 2000;
+/**
+ * The most a channel is ever grown to, whatever duration is asked for. Sits
+ * above `MAX_CHART_CANDLES` (lib/gridExecutor, a week of minutes) so a chart's
+ * whole budget fits with room for the bars that arrive while it is open.
+ */
+export const COLLECTION_SIZE_CEILING = 12_000;
+/** Live bars a sized channel can take on before its oldest falls out of range. */
+const SIZE_HEADROOM = 120;
 const MAX_COLLECTIONS = 20;
 const TEARDOWN_DELAY_MS = 5 * 60 * 1000; // 5 minutes
 const IDLE_CLEANUP_MS = 10 * 60 * 1000; // 10 minutes
@@ -215,8 +224,21 @@ class CandleStore {
     this._notify(key);
   }
 
-  /** Send a duration hint to the backend without re-subscribing the WS channel. */
-  setDuration(key: string, durationSeconds: number): void {
+  /**
+   * Say how far back a chart on this channel wants to see.
+   *
+   * Sent to the backend as a duration hint (without re-subscribing), and —
+   * given the interval — used to size the channel itself: at the default cap a
+   * 3-day range of 1m candles kept its last 33 hours and dropped the rest on
+   * every merge. A channel only ever grows, to the largest range asked of it,
+   * and never past `COLLECTION_SIZE_CEILING`.
+   */
+  setDuration(key: string, durationSeconds: number, intervalSeconds?: number): void {
+    if (intervalSeconds && intervalSeconds > 0) {
+      const needed = Math.ceil(durationSeconds / intervalSeconds) + SIZE_HEADROOM;
+      const col = this._getOrCreateCollection(key);
+      col.maxSize = Math.max(col.maxSize, Math.min(needed, COLLECTION_SIZE_CEILING));
+    }
     if (this.ws) {
       this.ws.setCandleDuration(key, durationSeconds);
     }

@@ -47,6 +47,21 @@ vi.mock("@/components/agent/floor/floor", async () => {
 });
 
 // Everything the browser asks the API for is beside the point here.
+/**
+ * The clock, pinned (FP-14).
+ *
+ * `useCoarseClock` answers the wall clock floored to the minute, and several
+ * of the browser's memos take it. A minute boundary crossed between two render
+ * passes of one draw therefore re-runs them, and a test that counts calls sees
+ * double — for no change in anything it is about. The window is every 60th
+ * second, wider the slower the suite runs. This file counts; the clock holds
+ * still for it. `PerfBrowser.clockTick.test.tsx` is where the tick is tested.
+ */
+vi.mock("@/hooks/useCoarseClock", () => {
+  const pinned = Math.floor(Date.now() / 60_000) * 60_000;
+  return { useCoarseClock: () => pinned };
+});
+
 vi.mock("@/lib/api", () => ({
   api: new Proxy({}, { get: () => () => Promise.resolve({}) }),
 }));

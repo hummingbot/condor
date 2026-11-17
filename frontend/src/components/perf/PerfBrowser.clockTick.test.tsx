@@ -41,7 +41,20 @@ const spy = vi.hoisted(() => ({
   trees: [] as number[],
   /** How many times a leaf set was folded into totals. */
   folds: 0,
+  /** How many times the owner chart's history was folded (N+1 full folds each). */
+  ownerCharts: 0,
 }));
+
+vi.mock("@/lib/owner-series", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/owner-series")>("@/lib/owner-series");
+  return {
+    ...actual,
+    ownerSeries: ((...args) => {
+      spy.ownerCharts += 1;
+      return actual.ownerSeries(...args);
+    }) as typeof actual.ownerSeries,
+  };
+});
 
 vi.mock("@/lib/perf-population", async () => {
   const actual =
@@ -204,6 +217,7 @@ beforeEach(() => {
   spy.populations = 0;
   spy.trees = [];
   spy.folds = 0;
+  spy.ownerCharts = 0;
 });
 
 afterEach(async () => {
@@ -270,6 +284,21 @@ describe("a bare clock tick", () => {
     // an identical answer.
     expect(spy.populations).toBe(0);
     expect(spy.trees).toEqual([]);
+  });
+
+  // FP-11: the owner chart is the fleet's whole performance history folded
+  // once per line plus once for the Total, and the minute changes none of it —
+  // a line is its capital and its net, neither of which reads the clock. The
+  // split used to take `now` anyway, so every tick refolded an identical picture.
+  it("does not refold the owner chart", async () => {
+    await draw("/bots?groupBy=bot");
+    // Grouped by bot the fixture's fleet splits in two, or this would prove nothing.
+    expect(spy.ownerCharts).toBeGreaterThan(0);
+    spy.ownerCharts = 0;
+
+    await tick();
+
+    expect(spy.ownerCharts).toBe(0);
   });
 
   it("still refolds the totals, so every runtime divisor moves", async () => {

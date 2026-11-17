@@ -11,7 +11,6 @@ import {
   Play,
   PlayCircle,
   Settings2,
-  Trash2,
   X,
   Zap,
   AlertTriangle,
@@ -339,8 +338,12 @@ export function ReportBrowser({
    * to that report rather than to index 0 — derived rather than corrected in an
    * effect, so the right report is on screen in the first paint and a poll that
    * refreshes the list can never drag the reader back to it.
+   *
+   * The pick is the report's *id*, never its place in the list: a scheduled
+   * routine's list is refetched every 10 s and grows at the front, and a pick
+   * held as an index would then be pointing at the report's neighbour.
    */
-  const [pickedReportIdx, setSelectedReportIdx] = useState<number | null>(null);
+  const [pickedReportId, setPickedReportId] = useState<string | null>(null);
   const openedOnIdx = useMemo(() => {
     if (!initialReportId) return 0;
     return Math.max(
@@ -348,14 +351,34 @@ export function ReportBrowser({
       reports.findIndex((r) => r.id === initialReportId),
     );
   }, [reports, initialReportId]);
-  const selectedReportIdx = pickedReportIdx ?? openedOnIdx;
+  const pickedReportIdx = useMemo(
+    () => (pickedReportId == null ? -1 : reports.findIndex((r) => r.id === pickedReportId)),
+    [reports, pickedReportId],
+  );
+  // A pick the list no longer holds (deleted elsewhere) reads as no pick.
+  const selectedReportIdx = pickedReportIdx >= 0 ? pickedReportIdx : openedOnIdx;
   const selectedReport = reports[selectedReportIdx] ?? null;
+  const selectReportAt = useCallback(
+    (idx: number) => setPickedReportId(reports[idx]?.id ?? null),
+    [reports],
+  );
 
   // Another routine is read from the top — back to "no pick", which is the
   // newest for a routine the pane was not opened on.
   useEffect(() => {
-    setSelectedReportIdx(null);
+    setPickedReportId(null);
   }, [activeSource]);
+
+  /**
+   * The run started from this pane that ended `failed`, until the next one.
+   *
+   * With reports already on file the previous report stays on screen after a
+   * failed run and reads as its result; this is what the status strip under
+   * the header points at instead (FU-08).
+   */
+  const [failedRun, setFailedRun] = useState<RoutineInstance | null>(null);
+  // Which running chip's Stop is armed — an id, as every armed action here is.
+  const [confirmStop, setConfirmStop] = useState<string | null>(null);
 
   // Active instances for current source
   const sourceInstances = useMemo(
@@ -374,6 +397,9 @@ export function ReportBrowser({
       initialInstanceId &&
       forSource.find((i) => i.instance_id === initialInstanceId);
     if (clicked) return clicked;
+    // The run this pane just watched fail is the one its strip points at —
+    // shown from the polled copy, which the instance list may not hold yet.
+    if (failedRun && failedRun.routine_name === activeSource) return failedRun;
     return (
       [...forSource].sort(
         (a, b) =>
@@ -381,7 +407,7 @@ export function ReportBrowser({
           toMs(a.last_run_at ?? a.created_at),
       )[0] ?? null
     );
-  }, [instances, activeSource, initialInstanceId]);
+  }, [instances, activeSource, initialInstanceId, failedRun]);
 
   // `last_result` on the list is truncated; the sections, tables and chart of a
   // run live behind its own route, so the view that shows them fetches it.
@@ -422,6 +448,10 @@ export function ReportBrowser({
 
   // Track running instance to poll for completion
   const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
+  // A run this pane started and is still waiting on, when no chip says so
+  // already: the instance list reaches the chips a poll later than the POST.
+  const runInFlight =
+    !!pollingInstanceId && !sourceInstances.some((i) => i.instance_id === pollingInstanceId);
 
   const { data: polledInstance } = useQuery({
     queryKey: ["routine-instance", pollingInstanceId],
@@ -430,11 +460,16 @@ export function ReportBrowser({
     refetchInterval: 2000,
   });
 
-  // When polled instance completes, refresh reports
+  // When polled instance completes, refresh reports — and when it failed, say
+  // so where it cannot be missed: the strip, and the Output view it points at.
   useEffect(() => {
     if (polledInstance && polledInstance.status !== "running") {
       setPollingInstanceId(null);
       invalidateRoutineQueries(qc, activeSource);
+      if (polledInstance.status === "failed") {
+        setFailedRun(polledInstance);
+        setView("output");
+      }
     }
   }, [polledInstance, activeSource, qc]);
 
@@ -454,12 +489,22 @@ export function ReportBrowser({
         attributeTo: runContext?.agentSlug,
       });
     },
+    // A new run supersedes what the last one said.
+    onMutate: () => setFailedRun(null),
     onSuccess: (data) => {
       setPollingInstanceId(data.instance_id);
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
     },
   });
+  // A failure belongs to the routine it happened on: moving to another one
+  // must not carry the message along under the new name.
+  const { reset: resetRun } = runMutation;
+  useEffect(() => {
+    resetRun();
+    setFailedRun(null);
+    setConfirmStop(null);
+  }, [activeSource, resetRun]);
 
   const scheduleMutation = useMutation({
     mutationFn: async (intervalSec: number) => {
@@ -486,7 +531,7 @@ export function ReportBrowser({
       qc.invalidateQueries({ queryKey: ["reports-grouped"] });
       qc.invalidateQueries({ queryKey: ["routine-reports", activeSource] });
       if (selectedReport?.id === id) {
-        setSelectedReportIdx(Math.max(0, selectedReportIdx - 1));
+        selectReportAt(Math.max(0, selectedReportIdx - 1));
       }
     },
   });
@@ -522,7 +567,9 @@ export function ReportBrowser({
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
   }, [runServer, runContext, filteredRoutines, qc]);
 
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  // Which report Delete is armed for — an id, not a flag, so the confirm can
+  // only ever delete the report the reader was looking at when they armed it.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   /**
    * Download the report body.
@@ -559,13 +606,13 @@ export function ReportBrowser({
   }, [activeSourceIdx, filteredRoutines, selectSource]);
 
   const goPrevReport = useCallback(() => {
-    if (selectedReportIdx > 0) setSelectedReportIdx(selectedReportIdx - 1);
-  }, [selectedReportIdx]);
+    if (selectedReportIdx > 0) selectReportAt(selectedReportIdx - 1);
+  }, [selectedReportIdx, selectReportAt]);
 
   const goNextReport = useCallback(() => {
     if (selectedReportIdx < reports.length - 1)
-      setSelectedReportIdx(selectedReportIdx + 1);
-  }, [selectedReportIdx, reports.length]);
+      selectReportAt(selectedReportIdx + 1);
+  }, [selectedReportIdx, reports.length, selectReportAt]);
 
   /**
    * The browser's own keys.
@@ -720,14 +767,20 @@ export function ReportBrowser({
                       </span>
                     )}
                     <span className="text-[var(--color-text-muted)]">{inst.run_count} runs</span>
-                    <button
-                      onClick={() => stopMutation.mutate(inst.instance_id)}
+                    <InlineConfirm
+                      confirming={confirmStop === inst.instance_id}
+                      onRequest={() => setConfirmStop(inst.instance_id)}
+                      onConfirm={() => {
+                        stopMutation.mutate(inst.instance_id);
+                        setConfirmStop(null);
+                      }}
+                      onCancel={() => setConfirmStop(null)}
+                      pending={stopMutation.isPending}
                       disabled={stopMutation.isPending}
-                      className="ml-0.5 rounded p-0.5 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
-                      title="Stop"
-                    >
-                      <Trash2 className="h-2.5 w-2.5" />
-                    </button>
+                      triggerLabel="Stop"
+                      confirmLabel="Confirm stop"
+                      cancelLabel="Cancel stop"
+                    />
                   </div>
                 ))}
               </div>
@@ -881,13 +934,13 @@ export function ReportBrowser({
             {/* Delete */}
             {view === "report" && selectedReport && (
               <InlineConfirm
-                confirming={confirmDelete}
-                onRequest={() => setConfirmDelete(true)}
+                confirming={confirmDelete === selectedReport.id}
+                onRequest={() => setConfirmDelete(selectedReport.id)}
                 onConfirm={() => {
-                  deleteMutation.mutate(selectedReport.id);
-                  setConfirmDelete(false);
+                  if (confirmDelete) deleteMutation.mutate(confirmDelete);
+                  setConfirmDelete(null);
                 }}
-                onCancel={() => setConfirmDelete(false)}
+                onCancel={() => setConfirmDelete(null)}
                 pending={deleteMutation.isPending}
                 triggerLabel="Delete report"
                 confirmLabel="Confirm delete report"
@@ -909,13 +962,57 @@ export function ReportBrowser({
           </div>
         </div>
 
-        {/* Schedule failure — surfaced outside the collapsible panels so it is
-            always visible after a failed ScheduleDropdown action (CORR-097) */}
-        {scheduleMutation.isError && (
-          <div className="border-b border-[var(--color-border)] bg-[var(--color-red)]/5 px-4 py-2">
-            <p className="text-xs text-[var(--color-red)]">
-              Could not schedule {activeSource.replace(/_/g, " ")}: {(scheduleMutation.error as Error).message}
-            </p>
+        {/* The status strip — what the last action on this routine came to,
+            outside the collapsible panels and above the report, so it is
+            visible whatever is open and however many reports are on file
+            (CORR-097 for Schedule; FU-08 for Run, Stop and a failed run). */}
+        {(runMutation.isError || scheduleMutation.isError || stopMutation.isError || failedRun || runInFlight) && (
+          <div
+            data-status-strip
+            role="status"
+            className={`space-y-1 border-b border-[var(--color-border)] px-4 py-2 ${
+              runMutation.isError || scheduleMutation.isError || stopMutation.isError || failedRun
+                ? "bg-[var(--color-red)]/5"
+                : ""
+            }`}
+          >
+            {runMutation.isError && (
+              <p className="text-xs text-[var(--color-red)]">
+                Could not run {activeSource.replace(/_/g, " ")}: {(runMutation.error as Error).message}
+              </p>
+            )}
+            {scheduleMutation.isError && (
+              <p className="text-xs text-[var(--color-red)]">
+                Could not schedule {activeSource.replace(/_/g, " ")}: {(scheduleMutation.error as Error).message}
+              </p>
+            )}
+            {stopMutation.isError && (
+              <p className="text-xs text-[var(--color-red)]">
+                Could not stop the run: {(stopMutation.error as Error).message}
+              </p>
+            )}
+            {failedRun && (
+              <p className="flex items-center gap-2 text-xs text-[var(--color-red)]">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 truncate">
+                  Last run failed{failedRun.error ? `: ${failedRun.error.split("\n")[0]}` : ""}
+                </span>
+                {view !== "output" && (
+                  <button
+                    onClick={() => setView("output")}
+                    className="shrink-0 underline underline-offset-2 hover:no-underline"
+                  >
+                    View output
+                  </button>
+                )}
+              </p>
+            )}
+            {runInFlight && (
+              <p className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Running {activeSource.replace(/_/g, " ")}…
+              </p>
+            )}
           </div>
         )}
 
@@ -948,11 +1045,6 @@ export function ReportBrowser({
             ) : (
               <p className="text-xs text-[var(--color-text-muted)]">No configurable fields</p>
             )}
-            {runMutation.isError && (
-              <p className="mt-2 text-xs text-[var(--color-red)]">
-                {(runMutation.error as Error).message}
-              </p>
-            )}
           </div>
         )}
 
@@ -980,7 +1072,7 @@ export function ReportBrowser({
             {reports.slice(0, 10).map((r, idx) => (
               <button
                 key={r.id}
-                onClick={() => setSelectedReportIdx(idx)}
+                onClick={() => selectReportAt(idx)}
                 className={`shrink-0 rounded px-2 py-1 text-[10px] transition-all ${
                   idx === selectedReportIdx
                     ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
@@ -997,7 +1089,7 @@ export function ReportBrowser({
                   value={selectedReportIdx >= 10 ? selectedReportIdx : ""}
                   onChange={(e) => {
                     const val = e.target.value;
-                    if (val !== "") setSelectedReportIdx(Number(val));
+                    if (val !== "") selectReportAt(Number(val));
                   }}
                   className={`appearance-none rounded-md pl-2.5 pr-7 py-1 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
                     selectedReportIdx >= 10
@@ -1119,11 +1211,6 @@ export function ReportBrowser({
                       )}
                       Run for the first time
                     </button>
-                  )}
-                  {runMutation.isError && (
-                    <p className="mt-2 text-xs text-[var(--color-red)]">
-                      {(runMutation.error as Error).message}
-                    </p>
                   )}
                 </>
               )}

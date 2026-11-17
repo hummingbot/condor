@@ -139,6 +139,8 @@ export interface FleetData {
   hygiene: ExecutorHygiene;
   /** Display-currency conversion over every quote on screen. */
   convert: ConvertFn;
+  /** The rate table has not answered yet: `convert` cannot convert anything. */
+  ratesLoading: boolean;
   currencySymbol: string;
   rateFormatPnl: (val: number, quote: string) => string;
   rateFormatValue: (val: number, quote: string) => string;
@@ -422,6 +424,7 @@ export function useFleetData(
     formatValue,
     formatValueDetailed,
     resolvedSymbol: currencySymbol,
+    isLoading: ratesLoading,
   } = useRates(quoteCurrencies);
 
   return {
@@ -438,6 +441,7 @@ export function useFleetData(
     diagnostics: fleet?.diagnostics ?? UNKNOWN_DIAGNOSTICS,
     hygiene: data?.executor_hygiene ?? UNKNOWN_EXECUTOR_HYGIENE,
     convert,
+    ratesLoading,
     currencySymbol,
     rateFormatPnl: formatPnlValue,
     rateFormatValue: formatValue,

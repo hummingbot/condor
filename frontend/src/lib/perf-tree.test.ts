@@ -11,6 +11,8 @@
 import { describe, expect, it } from "vitest";
 
 import { BEFORE_LEDGER, OUTSIDE } from "@/components/perf/agentFilter";
+import { quoteConverter } from "@/lib/perf-population";
+import type { ConvertFn } from "@/lib/rates";
 import type { DeedIndex } from "@/lib/agent-attribution";
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "./api";
 import {
@@ -1268,6 +1270,71 @@ describe("foldLeaves", () => {
     expect(fold).toMatchObject({ net: 0, volume: 0, count: 0, closed: 0, hours: 0, closeTotal: 0 });
     expect(fold.winRate).toBeUndefined();
     expect(fold.returnPct).toBeUndefined();
+  });
+});
+
+/**
+ * The `converted` flag survives the fold (FP-01).
+ *
+ * `useRates().convert` answers `{ value, converted: false }` — the value still
+ * in quote units — when there is no rate, and every aggregate used to keep the
+ * number and drop the flag. A BRL controller's +5,000 then went into a dollar
+ * total as +5,000: overstated by the whole FX rate, under a `$`, with nothing
+ * said. It happens on every cold load (rates are `undefined` until the first
+ * `/rates` answer) and permanently when the server has no path for the pair.
+ *
+ * The converter is the production adapter, `quoteConverter`, over a
+ * `useRates().convert` with a USD display currency: stablecoins are 1:1, any
+ * other quote needs a rate from the table. (`lib/rates` itself reads
+ * `localStorage` at import, which this node-environment file does not have.)
+ */
+describe("foldLeaves, with a quote that has no rate (FP-01)", () => {
+  const converterFor = (rates: Record<string, number | null> | undefined) => {
+    const convert: ConvertFn = (value, quote) => {
+      const rate = quote === "USDC" || quote === "USDT" ? 1 : (rates?.[quote] ?? null);
+      return rate != null ? { value: value / rate, converted: true } : { value, converted: false };
+    };
+    return quoteConverter(convert);
+  };
+
+  const mixed = () => [
+    leafFromController(
+      controller({ controller_id: "sol", trading_pair: "SOL-USDC", realized_pnl_quote: 100, unrealized_pnl_quote: 0, global_pnl_quote: 100 }),
+    ),
+    leafFromController(
+      controller({ controller_id: "brl", trading_pair: "BTC-BRL", realized_pnl_quote: 5000, unrealized_pnl_quote: 0, global_pnl_quote: 5000 }),
+    ),
+  ];
+
+  it("converts both quotes and reports nothing unconverted once the rates are in", () => {
+    const fold = foldLeaves(mixed(), converterFor({ BRL: 5.4 }), NOW);
+    expect(fold.net).toBeCloseTo(100 + 5000 / 5.4, 6);
+    expect(fold.unconverted).toEqual([]);
+  });
+
+  it("names BRL while the rates are still loading", () => {
+    const fold = foldLeaves(mixed(), converterFor(undefined), NOW);
+    // The face-value sum is what it is — and it is *not* dollars, which is
+    // exactly what the caller is now told.
+    expect(fold.net).toBe(5100);
+    expect(fold.unconverted).toEqual(["BRL"]);
+  });
+
+  it("names BRL when the server says there is no path for it", () => {
+    const fold = foldLeaves(mixed(), converterFor({ BRL: null }), NOW);
+    expect(fold.net).toBe(5100);
+    expect(fold.unconverted).toEqual(["BRL"]);
+  });
+
+  it("does not name a quote whose leaves have nothing to convert", () => {
+    const flat = leafFromController(
+      controller({ controller_id: "flat", trading_pair: "BTC-BRL", realized_pnl_quote: 0, unrealized_pnl_quote: 0, global_pnl_quote: 0, volume_traded: 0, config: {} }),
+    );
+    expect(foldLeaves([flat], converterFor(undefined), NOW).unconverted).toEqual([]);
+  });
+
+  it("reports nothing for a converter that never fails to convert", () => {
+    expect(foldLeaves(mixed(), identity, NOW).unconverted).toEqual([]);
   });
 });
 

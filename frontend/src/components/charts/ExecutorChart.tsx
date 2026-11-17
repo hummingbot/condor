@@ -15,14 +15,18 @@ import {
 } from "@/lib/executor-overlays";
 import { tsToSeconds } from "@/lib/formatters";
 import { geckoIntervalForSpan } from "@/lib/gecko-candles";
+import { parseSnapshotTs } from "@/hooks/useSnapshotBubbles";
 import { candlesQuery } from "@/lib/queryClient";
 import { getThemeColors } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
   tick: number;
-  timestamp: string; // human-readable, e.g. "2024-01-15 14:30:22"
+  timestamp: string; // as the engine titles it, e.g. "2024-01-15 14:30 UTC"
+  /** Absent until the snapshot body has been read — it is fetched on hover. */
   agentResponse?: string;
   toolCallCount?: number;
+  /** The body was asked for and could not be read. */
+  previewFailed?: boolean;
 }
 
 interface ExecutorChartProps {
@@ -34,6 +38,8 @@ interface ExecutorChartProps {
   height?: number;
   snapshots?: SnapshotBubble[];
   onSnapshotClick?: (tick: number) => void;
+  /** A bubble was hovered: the owner may now fetch that tick's preview. */
+  onSnapshotHover?: (tick: number) => void;
 }
 
 const isActive = (status: string) => {
@@ -49,12 +55,37 @@ interface GridVerticalLine {
   color: string;
 }
 
-/** Parse snapshot timestamp string to unix seconds */
-function parseSnapshotTs(ts: string): number {
-  // Handle formats like "2024-01-15 14:30:22" or ISO
-  const d = new Date(ts.replace(" ", "T"));
-  if (isNaN(d.getTime())) return 0;
-  return Math.floor(d.getTime() / 1000);
+const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Write one tick's card into the snapshot tooltip. */
+function fillSnapshotTip(tip: HTMLElement, snap: SnapshotBubble): void {
+  const { textMuted: muted, border: bdr } = getThemeColors();
+
+  // `undefined` is "not read yet", which is not the same fact as an empty
+  // response: the body is fetched by this very hover.
+  const preview =
+    snap.agentResponse === undefined
+      ? snap.previewFailed
+        ? "Could not load this snapshot's preview"
+        : "Loading preview…"
+      : snap.agentResponse
+        ? snap.agentResponse.length > 280
+          ? snap.agentResponse.slice(0, 280) + "..."
+          : snap.agentResponse
+        : "No response recorded";
+  const toolLine = snap.toolCallCount
+    ? `<div style="margin-top:4px;font-size:10px;color:${muted}">${snap.toolCallCount} tool call${snap.toolCallCount !== 1 ? "s" : ""}</div>`
+    : "";
+
+  tip.innerHTML = `
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <span style="background:rgba(139,92,246,0.15);color:#a78bfa;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px">TICK #${snap.tick}</span>
+      <span style="font-size:10px;color:${muted}">${escapeHtml(snap.timestamp)}</span>
+    </div>
+    <div style="font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word">${escapeHtml(preview)}</div>
+    ${toolLine}
+    <div style="margin-top:6px;font-size:9px;color:${muted};border-top:1px solid ${bdr};padding-top:4px">Click to view full snapshot</div>
+  `;
 }
 
 /**
@@ -100,6 +131,7 @@ export function ExecutorChart({
   height = 350,
   snapshots,
   onSnapshotClick,
+  onSnapshotHover,
 }: ExecutorChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -627,6 +659,19 @@ export function ExecutorChart({
     return () => { chart.timeScale().unsubscribeVisibleLogicalRangeChange(handler); };
   }, [chartReady, snapshots, updateBubblePositions]);
 
+  // ── Snapshot tooltip ──
+  // The preview is fetched when the bubble is first hovered, so the card is
+  // written twice: at once with what is known, and again when the body lands
+  // while the pointer is still on the same bubble.
+  const hoveredTickRef = useRef<number | null>(null);
+  useEffect(() => {
+    const tip = snapshotTooltipRef.current;
+    const tick = hoveredTickRef.current;
+    if (!tip || tick == null) return;
+    const snap = snapshots?.find((s) => s.tick === tick);
+    if (snap) fillSnapshotTip(tip, snap);
+  }, [snapshots]);
+
   const [fullscreen, setFullscreen] = useState(false);
 
   const toggleFullscreen = useCallback(() => {
@@ -730,26 +775,9 @@ export function ExecutorChart({
                   const wrapper = wrapperRef.current;
                   if (!tip || !wrapper) return;
 
-                  const { textMuted: muted, border: bdr } = getThemeColors();
-
-                  const preview = snap.agentResponse
-                    ? snap.agentResponse.length > 280
-                      ? snap.agentResponse.slice(0, 280) + "..."
-                      : snap.agentResponse
-                    : "No response recorded";
-                  const toolLine = snap.toolCallCount
-                    ? `<div style="margin-top:4px;font-size:10px;color:${muted}">${snap.toolCallCount} tool call${snap.toolCallCount !== 1 ? "s" : ""}</div>`
-                    : "";
-
-                  tip.innerHTML = `
-                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-                      <span style="background:rgba(139,92,246,0.15);color:#a78bfa;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px">TICK #${snap.tick}</span>
-                      <span style="font-size:10px;color:${muted}">${snap.timestamp}</span>
-                    </div>
-                    <div style="font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word">${preview.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
-                    ${toolLine}
-                    <div style="margin-top:6px;font-size:9px;color:${muted};border-top:1px solid ${bdr};padding-top:4px">Click to view full snapshot</div>
-                  `;
+                  hoveredTickRef.current = snap.tick;
+                  onSnapshotHover?.(snap.tick);
+                  fillSnapshotTip(tip, snap);
                   tip.style.display = "block";
 
                   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -762,6 +790,7 @@ export function ExecutorChart({
                   tip.style.top = `${28 + 4}px`;
                 }}
                 onMouseLeave={() => {
+                  hoveredTickRef.current = null;
                   if (snapshotTooltipRef.current) snapshotTooltipRef.current.style.display = "none";
                 }}
               >

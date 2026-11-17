@@ -335,6 +335,40 @@ describe("aggregatePnlSeries — currency conversion", () => {
     );
     expect(points[0]).toMatchObject({ realized: 1.5, volume: 9 });
   });
+
+  // FP-01: a point that mixes an unconverted quote into the series looks
+  // exactly like one that does not, so the fold has to say which quotes those
+  // were. `convert` above converts USDC and nothing else.
+  it("reports the quotes it folded in without a rate", () => {
+    const unconverted = new Set<string>();
+    const points = aggregatePnlSeries(
+      [
+        snap({ controller_id: "ctrl-a", timestamp: at("10:00"), trading_pair: "SOL-USDC", realized_pnl_quote: 100 }),
+        snap({ controller_id: "ctrl-b", timestamp: at("10:00"), trading_pair: "BTC-BRL", realized_pnl_quote: 5000 }),
+      ],
+      new Set([key("ctrl-a"), key("ctrl-b")]),
+      [],
+      convert,
+      unconverted,
+    );
+    expect(points[0].realized).toBe(200 + 5000);
+    expect([...unconverted]).toEqual(["BRL"]);
+  });
+
+  it("reports nothing when every quote converts, or when the unconverted value is zero", () => {
+    const unconverted = new Set<string>();
+    aggregatePnlSeries(
+      [
+        snap({ controller_id: "ctrl-a", timestamp: at("10:00"), trading_pair: "SOL-USDC", realized_pnl_quote: 100 }),
+        snap({ controller_id: "ctrl-b", timestamp: at("10:00"), trading_pair: "BTC-BRL", realized_pnl_quote: 0, unrealized_pnl_quote: 0, volume_traded: 0 }),
+      ],
+      new Set([key("ctrl-a"), key("ctrl-b")]),
+      [],
+      convert,
+      unconverted,
+    );
+    expect([...unconverted]).toEqual([]);
+  });
 });
 
 describe("aggregatePnlSeries — the live \"now\" point", () => {
