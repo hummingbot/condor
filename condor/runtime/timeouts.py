@@ -50,6 +50,14 @@ class TimeoutPolicy:
     sse_stream: int = 1800
     # Budget for one MCP tool call.
     mcp_call: float = 15.0
+    # Budget for the tool call that starts a loop. Not ``mcp_call``: the start
+    # route answers only after the model check, the trading preflight and the
+    # first tick's bounded wait (``condor.agents.engine.FIRST_TICK_WAIT_SEC``,
+    # 20s), so fifteen seconds expired on any ordinary LLM tick and the tool
+    # reported a failure for a loop that was running — an invitation to start
+    # a second one (MC-01). ``tests/test_mcp_start_budget.py`` holds this above
+    # that wait; the engine constant cannot be imported here.
+    mcp_start: float = 60.0
     # How long to probe a local inference server for the model it serves, when
     # a bare "ollama:" / "lmstudio:" key leaves the model id to us. Short: it
     # is a localhost request on the session-start path, and a backend that is

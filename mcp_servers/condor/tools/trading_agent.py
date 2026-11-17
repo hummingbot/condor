@@ -5,7 +5,7 @@ from pathlib import Path
 
 from condor.fsutil import atomic_write_text
 from mcp_servers.condor.condor_client import agent_strategy_from_agent_id, call_main_api
-from mcp_servers.condor.exceptions import APIError
+from mcp_servers.condor.exceptions import APIError, APITimeout
 from mcp_servers.condor.settings import settings
 
 # ---------------------------------------------------------------------------
@@ -796,6 +796,56 @@ def _manage_agent(
 # ---------------------------------------------------------------------------
 
 
+async def _start_timed_out(strategy, reason: str) -> dict:
+    """What to tell the caller when the start call outlived its budget.
+
+    Giving up on the call does not cancel the route, so the loop may be up. A
+    bare failure here is read as "not started" and retried, and the start route
+    has no already-running guard: the retry is a second live session of the
+    same loop (MC-01). So look before answering.
+    """
+    loop_id = f"{strategy.agent_slug}.{strategy.slug}"
+    check = 'control_agent(action="list")'
+    try:
+        summaries = await call_main_api("GET", "/agents")
+    except APIError:
+        return {
+            "error": (
+                f"{reason} Whether loop '{loop_id}' started could not be "
+                f"confirmed — do NOT start it again until {check} shows no "
+                "running instance of it."
+            )
+        }
+
+    running = [
+        inst.get("agent_id")
+        for summary in (summaries if isinstance(summaries, list) else [])
+        if summary.get("slug") == strategy.agent_slug
+        for strat in summary.get("strategies", [])
+        if strat.get("slug") == strategy.slug
+        for inst in strat.get("instances", [])
+        if inst.get("status") in ("running", "paused")
+    ]
+    if running:
+        return {
+            "timed_out": True,
+            "loop_id": loop_id,
+            "running_instances": running,
+            "note": (
+                "The start call did not answer in time, but this loop has a "
+                "running instance — treat it as started and do NOT start it "
+                "again. Its first tick may still be in flight."
+            ),
+        }
+    return {
+        "error": (
+            f"{reason} No running instance of loop '{loop_id}' is listed yet; "
+            f"it may still be coming up. Check {check} before retrying — a "
+            "second start would run a second session of the same loop."
+        )
+    }
+
+
 async def _agent_lifecycle(
     action: str,
     loop_id: str | None,
@@ -857,15 +907,24 @@ async def _agent_lifecycle(
 
             trading_context = config_dict.pop("trading_context", "")
 
-            return await call_main_api(
-                "POST",
-                f"/agents/{strategy.agent_slug}/strategies/{strategy.slug}/start",
-                {
-                    "config": config_dict,
-                    "trading_context": trading_context,
-                    "chat_id": settings.chat_id,
-                },
-            )
+            # The route answers after the preflight and the first tick's
+            # bounded wait, so it is given the budget that covers those rather
+            # than the 15 seconds of a plain question (MC-01).
+            from condor.runtime.timeouts import TIMEOUTS
+
+            try:
+                return await call_main_api(
+                    "POST",
+                    f"/agents/{strategy.agent_slug}/strategies/{strategy.slug}/start",
+                    {
+                        "config": config_dict,
+                        "trading_context": trading_context,
+                        "chat_id": settings.chat_id,
+                    },
+                    timeout=TIMEOUTS.mcp_start,
+                )
+            except APITimeout as exc:
+                return await _start_timed_out(strategy, str(exc))
 
         if action in ("stop_agent", "pause_agent", "resume_agent", "shutdown_agent"):
             if not agent_id:
