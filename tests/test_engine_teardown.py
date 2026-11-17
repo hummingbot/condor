@@ -274,3 +274,46 @@ def test_a_cancelled_stop_does_not_cancel_the_teardown_it_waits_on(
 
     assert sweep_events == ["start", "done"]
     assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
+
+
+# ── AG2-01 (engine half): a journal failure in the error path ──
+
+
+def test_a_journal_failure_while_recording_a_tick_error_does_not_end_the_loop(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    """``append_error`` raising inside the except handler was unhandled: the
+    loop task ended with ``_running`` still True, so the run read "running"
+    while nothing ticked. The loop carries on and the owner is still told."""
+    engine = _engine(tmp_path, monkeypatch, mode="loop")
+    monkeypatch.setattr(engine, "_preflight_gate", _async(None))
+    monkeypatch.setattr(engine, "_cancel_resting_orders", _async(None))
+    monkeypatch.setattr(engine, "_emit_closeout", _async(None))
+    ticks: list[int] = []
+    notices: list[str] = []
+
+    async def tick():
+        ticks.append(len(ticks) + 1)
+        if len(ticks) == 1:
+            raise RuntimeError(r"bad escape \d at position 53")
+        engine._running = False
+
+    async def notify(message):
+        notices.append(message)
+
+    def append_error(text):
+        raise ValueError("journal is poisoned")
+
+    monkeypatch.setattr(engine, "_tick", tick)
+    monkeypatch.setattr(engine, "_notify", notify)
+    monkeypatch.setattr(engine.journal, "append_error", append_error)
+
+    async def go():
+        await engine.start()
+        await asyncio.wait_for(engine._task, timeout=5)
+
+    asyncio.run(go())
+
+    assert ticks == [1, 2], "the loop ticked again after the failed journal write"
+    assert engine._task.exception() is None
+    assert len(notices) == 1 and "bad escape" in notices[0]

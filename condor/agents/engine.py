@@ -853,7 +853,20 @@ class TickEngine:
                     self._last_error = tick_error
                     log.exception("TickEngine %s tick error", self.agent_id)
                     if self.journal:
-                        self.journal.append_error(tick_error)
+                        # A journal write that fails here must not end the
+                        # loop (AG2-01). This is an except handler, so a raise
+                        # from it is unhandled: the task died while
+                        # ``_running`` stayed True and the status went on
+                        # saying "running" over positions nobody was ticking.
+                        # The error is in the log above and still reaches the
+                        # owner below.
+                        try:
+                            self.journal.append_error(tick_error)
+                        except Exception:
+                            log.exception(
+                                "TickEngine %s: could not journal the tick error",
+                                self.agent_id,
+                            )
                     if self.is_experiment:
                         self._record_failed_experiment(tick_error)
                     elif not repeated:
