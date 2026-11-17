@@ -13,7 +13,11 @@ from pydantic import BaseModel
 from condor import routine_hooks
 from condor.agents.code_trust import PendingConsentError
 from condor.reports import list_reports
-from condor.routine_store import get_routine_store, routine_source_roots
+from condor.routine_store import (
+    RoutineStopUnavailable,
+    get_routine_store,
+    routine_source_roots,
+)
 from condor.runtime import client, wake
 from condor.runtime.wake import (
     ON_COMPLETE_CHOICES,
@@ -310,7 +314,12 @@ async def set_instance_on_complete(
 async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_user)):
     """Stop a running or scheduled instance."""
     _authorized_instance(instance_id, user)
-    if not get_routine_store().stop(instance_id):
+    try:
+        stopped = get_routine_store().stop(instance_id)
+    except RoutineStopUnavailable as e:
+        # 409, not a false success: the routine is still running (ST-02).
+        raise HTTPException(409, str(e))
+    if not stopped:
         raise HTTPException(404, "Instance not found")
     return {"stopped": True}
 

@@ -34,7 +34,7 @@ import time
 import traceback
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import condor.reports as reports
 from condor import primitives, routine_hooks
@@ -307,6 +307,16 @@ _MAX_TERMINAL_INSTANCES = _MAX_RESULTS
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped"})
 
 
+class RoutineStopUnavailable(RuntimeError):
+    """The store holds an instance's record but not the means to stop it.
+
+    A Telegram-started instance is only mirrored here: its task or job lives
+    with the Telegram handlers. Dropping the record and answering "stopped"
+    while the routine keeps running is the one outcome ``stop`` must never
+    produce (ST-02), so it raises this instead and the caller says so.
+    """
+
+
 class RoutineStore:
     """Singleton store for routine instances and results."""
 
@@ -314,6 +324,9 @@ class RoutineStore:
         self._instances: dict[str, dict] = {}
         self._results: dict[str, RoutineResult] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        # instance_id -> callable that really stops an instance whose task the
+        # store does not own (a Telegram-started one). See ``stop``.
+        self._stoppers: dict[str, Callable[[], Any]] = {}
         self._bot = None  # Telegram bot instance, set via set_bot()
 
     def set_bot(self, bot) -> None:
@@ -495,13 +508,30 @@ class RoutineStore:
         entry.setdefault("error", None)
         return entry
 
-    def add_instance(self, instance_id: str, metadata: dict) -> None:
+    def add_instance(
+        self,
+        instance_id: str,
+        metadata: dict,
+        stopper: Callable[[], Any] | None = None,
+    ) -> None:
         self._instances[instance_id] = metadata
+        if stopper is not None:
+            self._stoppers[instance_id] = stopper
         self._prune_instances()
+
+    def register_stopper(self, instance_id: str, stopper: Callable[[], Any]) -> None:
+        """Hand the store the way to stop an instance it only mirrors (ST-02).
+
+        The Telegram handlers keep the task (or the JobQueue job) and the
+        persisted record of what they start; ``stopper`` is their own stop,
+        closed over that state, so the dashboard's Stop reaches the real thing.
+        """
+        self._stoppers[instance_id] = stopper
 
     def remove_instance(self, instance_id: str) -> None:
         self._instances.pop(instance_id, None)
         self._tasks.pop(instance_id, None)
+        self._stoppers.pop(instance_id, None)
         # The result dies with its instance. Every read path resolves the
         # instance first (the dashboard detail and chart endpoints via
         # _authorized_instance, the MCP tool via get_instance), so a result left
@@ -1129,6 +1159,34 @@ class RoutineStore:
             logger.info(f"Scheduled routine {instance_id} cancelled")
 
     def stop(self, instance_id: str) -> bool:
+        """Stop an instance and drop its record. False when it is unknown.
+
+        Raises :class:`RoutineStopUnavailable` for an instance the store cannot
+        actually stop — a Telegram-started one with no registered stopper, or
+        one whose stopper failed. The record is kept in that case: it is still
+        running, and the dashboard must keep showing it (ST-02).
+        """
+        meta = self._instances.get(instance_id)
+        stopper = self._stoppers.get(instance_id)
+        if stopper is not None:
+            try:
+                stopper()
+            except Exception as e:
+                logger.error(f"Stopper for routine instance {instance_id} failed: {e}")
+                raise RoutineStopUnavailable(
+                    f"Instance {instance_id} could not be stopped: {e}"
+                ) from e
+            self._stoppers.pop(instance_id, None)
+        elif (
+            meta is not None
+            and meta.get("source") == "telegram"
+            and instance_id not in self._tasks
+        ):
+            raise RoutineStopUnavailable(
+                f"Instance {instance_id} was started from Telegram and can only "
+                "be stopped there (/routines)."
+            )
+
         task = self._tasks.pop(instance_id, None)
         if task and not task.done():
             task.cancel()

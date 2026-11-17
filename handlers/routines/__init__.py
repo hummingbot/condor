@@ -14,6 +14,7 @@ import hashlib
 import logging
 import time
 from datetime import time as dt_time
+from types import SimpleNamespace
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
@@ -304,6 +305,72 @@ def _stop_instance(
         logger.info(f"Stopped instance {instance_id} ({routine_name})")
         return True
     return False
+
+
+def _register_stopper(
+    application,
+    job_queue,
+    instance_id: str,
+    chat_id: int,
+    owner_id: int | None,
+    instances: dict,
+) -> None:
+    """Give the shared store the means to stop this instance (ST-02).
+
+    The store only mirrors a Telegram instance: the task lives in
+    ``_continuous_tasks``, the job in the JobQueue and the persisted record in
+    the owner's ``user_data``. Without this the dashboard's Stop dropped the
+    mirror and answered "stopped" while the routine kept running — and a
+    restart then restored it from the pickle. The closure does what
+    ``_stop_instance`` does, from the state a web request has no context for.
+
+    ``instances`` is the owner's bucket as the creator saw it; it is re-read
+    through ``application`` at stop time when there is one.
+    """
+
+    def _stop() -> None:
+        if job_queue is not None:
+            for job in job_queue.get_jobs_by_name(_job_name(chat_id, instance_id)):
+                job.schedule_removal()
+
+        task = _continuous_tasks.pop(instance_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        bucket = instances
+        if application is not None:
+            bucket = _owner_data(application, owner_id, chat_id).get(
+                "routine_instances", instances
+            )
+        inst = bucket.pop(instance_id, None)
+        if inst is not None:
+            routine = get_routine(inst.get("routine_name", ""))
+            if routine and routine.cleanup_fn and application is not None:
+                asyncio.create_task(
+                    routine.cleanup_fn(
+                        SimpleNamespace(
+                            application=application,
+                            bot=application.bot,
+                            job_queue=job_queue,
+                            user_data=_owner_data(application, owner_id, chat_id),
+                            _chat_id=chat_id,
+                        ),
+                        instance_id,
+                        chat_id,
+                    )
+                )
+        # No update is being processed, so PTB will not flush the owner's
+        # bucket on its own: without the mark the pickle keeps the instance and
+        # the next restart restores it.
+        mark = getattr(application, "mark_data_for_update_persistence", None)
+        if mark is not None:
+            mark(user_ids=owner_id if owner_id is not None else chat_id)
+        logger.info(f"Stopped instance {instance_id} from the shared store")
+
+    try:
+        get_routine_store().register_stopper(instance_id, _stop)
+    except Exception:
+        pass
 
 
 def _stop_all_routine(
@@ -760,6 +827,14 @@ def _create_scheduled_instance(
         get_routine_store().add_instance(instance_id, inst_meta.copy())
     except Exception:
         pass
+    _register_stopper(
+        context.application,
+        context.job_queue,
+        instance_id,
+        chat_id,
+        user_id,
+        instances,
+    )
 
     # Capture the active server at creation time so routines in groups
     # connect to the correct server (user_data is keyed by user_id,
@@ -864,6 +939,14 @@ def _create_continuous_instance(
         get_routine_store().add_instance(instance_id, inst_meta.copy())
     except Exception:
         pass
+    _register_stopper(
+        context.application,
+        context.job_queue,
+        instance_id,
+        chat_id,
+        user_id,
+        instances,
+    )
 
     # Create and store asyncio task (copy config to isolate from draft changes)
     frozen_config = config_dict.copy()
@@ -1987,6 +2070,14 @@ async def restore_scheduled_jobs(application) -> int:
                     )
                     _continuous_tasks[instance_id] = task
                     _sync_instance_to_store(instance_id, inst)
+                    _register_stopper(
+                        application,
+                        application.job_queue,
+                        instance_id,
+                        chat_id,
+                        owner_id,
+                        instances,
+                    )
                     restored += 1
                     logger.info(
                         f"Restored continuous routine {instance_id}: {routine_name}"
@@ -2021,6 +2112,14 @@ async def restore_scheduled_jobs(application) -> int:
                         chat_id=chat_id,
                     )
                     _sync_instance_to_store(instance_id, inst)
+                    _register_stopper(
+                        application,
+                        application.job_queue,
+                        instance_id,
+                        chat_id,
+                        owner_id,
+                        instances,
+                    )
                     restored += 1
                     logger.info(
                         f"Restored interval job {instance_id} for {routine_name} (every {interval}s)"
@@ -2037,6 +2136,14 @@ async def restore_scheduled_jobs(application) -> int:
                         chat_id=chat_id,
                     )
                     _sync_instance_to_store(instance_id, inst)
+                    _register_stopper(
+                        application,
+                        application.job_queue,
+                        instance_id,
+                        chat_id,
+                        owner_id,
+                        instances,
+                    )
                     restored += 1
                     logger.info(
                         f"Restored daily job {instance_id} for {routine_name} (at {time_str})"
