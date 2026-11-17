@@ -406,9 +406,12 @@ async def _fetch_performance(
         calculate_pnl_from_trades,
     )
 
+    # Both engines are pure CPU over everything the run ever did — a sort and
+    # a walk of tens of thousands of trades — so they run in a worker thread
+    # rather than stalling the event loop on every cold open.
     if all_trades and trades_complete:
         stats_source = "trades"
-        pnl_data = calculate_pnl_from_trades(all_trades)
+        pnl_data = await asyncio.to_thread(calculate_pnl_from_trades, all_trades)
         fill_count = len(all_trades)
         buy_count = sum(
             1 for t in all_trades if str(t.get("trade_type", "")).upper() == "BUY"
@@ -416,7 +419,9 @@ async def _fetch_performance(
         sell_count = fill_count - buy_count
     else:
         stats_source = "executors"
-        pnl_data = calculate_pnl_from_executors(executors, quote_rates)
+        pnl_data = await asyncio.to_thread(
+            calculate_pnl_from_executors, executors, quote_rates
+        )
         fill_count = len(executors)
         # Counted separately rather than as the complement of buys: an
         # unrecognized side stays uncounted instead of inflating the sells.

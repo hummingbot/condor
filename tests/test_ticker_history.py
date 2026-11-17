@@ -166,6 +166,52 @@ def test_the_listener_only_records_ticker_pool_writes():
     assert len(ticker_history._ring("srv")) == 1
 
 
+def test_listener_on_the_event_loop_persists_off_it(monkeypatch):
+    """DL-14: the hourly write must not run inline on the loop's cache write."""
+    import asyncio
+    import threading
+
+    from condor.server_data_service import CacheKey, ServerDataType
+
+    writers: list[str] = []
+    real_persist = ticker_history._persist
+
+    def spy(server, ring):
+        writers.append(threading.current_thread().name)
+        real_persist(server, ring)
+
+    monkeypatch.setattr(ticker_history, "_persist", spy)
+
+    async def _drive():
+        ticker_history._on_cache_write(
+            CacheKey.make("srv", ServerDataType.TICKER_POOL), pool(BTC_USDT=100.0)
+        )
+        # In memory at once; on disk a moment later, from a worker thread.
+        assert len(ticker_history._ring("srv")) == 1
+        for _ in range(200):
+            if writers:
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(_drive())
+
+    assert writers and writers[0] != threading.main_thread().name
+    ticker_history.reset()
+    assert len(ticker_history._ring("srv")) == 1, "the snapshot never reached disk"
+
+
+def test_prices_are_not_walked_when_no_snapshot_is_due(monkeypatch):
+    """DL-14: fifty-nine of every sixty pool writes are not due, and used to
+    walk every ticker of every connector before finding that out."""
+    assert ticker_history.record("srv", pool(BTC_USDT=100.0), now=0.0) is True
+
+    def boom(_pool):
+        raise AssertionError("prices built for a snapshot that is not due")
+
+    monkeypatch.setattr(ticker_history, "_prices", boom)
+    assert ticker_history.record("srv", pool(BTC_USDT=101.0), now=60.0) is False
+
+
 def test_recording_never_reaches_for_a_client():
     """The whole design rests on this: history is free, or it is not worth it.
 
