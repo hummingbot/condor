@@ -1,4 +1,5 @@
-"""An upstream Hummingbot socket that goes quiet is a dead one (WS-03).
+"""An upstream Hummingbot socket that goes quiet is a dead one (WS-03), and a
+reconnect is never immediate (WS-05, second half of this file).
 
 Nothing bounded the receive on the bridged sockets, so a connection whose path
 died without a FIN/RST (NAT idle drop, a sleeping host) parked the stream task
@@ -256,3 +257,117 @@ def test_a_tab_subscribing_during_an_outage_is_told_the_snapshot_is_stale(harnes
     assert late.frames[1]["channel"] == "stream_status:alpha"
     assert late.frames[1]["data"]["type"] == "stale"
     assert late.frames[1]["data"]["channel"] == CHANNEL
+
+
+# -- Reconnecting after a clean close (WS-05) --
+#
+# The client turns an upstream close into the end of iteration, not an
+# exception, so the except-path backoff never ran: five of the seven streams,
+# and candles, redialled a server that accepts-then-drops with no pause at all.
+
+
+def test_an_upstream_that_accepts_then_closes_is_backed_off(harness):
+    upstream = _Upstream(*([[CLOSE]] * 6))
+    mgr, _, _ = harness(upstream)
+
+    run(_run_positions(mgr, upstream))
+
+    assert upstream.attempts == 7
+    assert harness.slept == [5, 10, 20, 40, 60, 60]
+
+
+def test_a_heartbeat_only_connection_does_not_reset_the_backoff(harness):
+    """Being subscribed and heartbeating says nothing about the stream."""
+    upstream = _Upstream(*([[{"type": "heartbeat"}, CLOSE]] * 4))
+    mgr, _, _ = harness(upstream)
+
+    run(_run_positions(mgr, upstream))
+
+    assert harness.slept == [5, 10, 20, 40]
+
+
+def test_an_upstream_error_frame_is_backed_off(harness):
+    """A subscription erroring every tick takes the same no-exception exit."""
+    upstream = _Upstream(*([[{"type": "error", "message": "boom"}]] * 3))
+    mgr, _, _ = harness(upstream)
+
+    run(_run_positions(mgr, upstream))
+
+    assert harness.slept == [5, 10, 20]
+
+
+def test_a_close_after_real_data_still_pauses_but_resets_the_backoff(harness):
+    upstream = _Upstream(
+        [CLOSE],
+        [CLOSE],
+        [{"type": "positions", "data": [{"id": 1}]}, CLOSE],
+        [CLOSE],
+    )
+    mgr, _, _ = harness(upstream)
+
+    run(_run_positions(mgr, upstream))
+
+    first, second, after_data, after_reset = harness.slept
+    assert (first, second) == (5, 10)
+    assert 1 <= after_data <= 2, "a healthy stream reconnects on a short floor"
+    assert after_reset == 5, "real data did not reset the backoff"
+
+
+@pytest.mark.parametrize(
+    "stream, channel, kind",
+    [
+        ("_trade_stream", "trades:alpha:binance:SOL-USDC", "market_data"),
+        ("_order_book_stream", "orderbook:alpha:binance:SOL-USDC", "market_data"),
+        ("_bots_ws_stream", "bots_ws:alpha", "executors"),
+        ("_positions_ws_stream", "positions_ws:alpha", "executors"),
+        ("_performance_ws_stream", "performance_ws:alpha", "executors"),
+        ("_candle_stream", CANDLES, "market_data"),
+    ],
+)
+def test_every_stream_pauses_between_attempts(
+    harness, monkeypatch, stream, channel, kind
+):
+    """Each stream family, through its real entry point."""
+
+    class _AnyWs(_UpstreamWs):
+        def __getattr__(self, name):
+            if not name.startswith("subscribe_"):
+                raise AttributeError(name)
+
+            async def _subscribe(*args, **kwargs):
+                return "sub-1"
+
+            return _subscribe
+
+    class _AnyUpstream(_Upstream):
+        def open(self, _client=None):
+            self.attempts += 1
+            if not self._scripts:
+                raise asyncio.CancelledError
+            return _AnyWs(self._scripts.pop(0))
+
+    upstream = _AnyUpstream([CLOSE], [CLOSE], [CLOSE])
+    mgr, _, _ = harness(upstream, channel)
+
+    class _Client:
+        class ws:
+            market_data = staticmethod(upstream.open)
+            executors = staticmethod(upstream.open)
+
+    import config_manager
+
+    cm = config_manager.get_config_manager()
+
+    async def get_client(name):
+        return _Client()
+
+    cm.get_client = get_client
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: cm)
+
+    # The candle REST fallback sleeps on its own schedule beside the socket.
+    mgr._ensure_candle_poll_fallback = lambda channel: None
+
+    run(getattr(mgr, stream)(channel))
+
+    assert upstream.attempts == 4
+    assert harness.slept[:3] == [5, 10, 20], f"{stream} redialled without a pause"

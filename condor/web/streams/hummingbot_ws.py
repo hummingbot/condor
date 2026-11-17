@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import aiohttp
@@ -41,6 +42,10 @@ WS_RECEIVE_TIMEOUT = 75
 # Health is not sent on the data channel itself: those payloads are written
 # straight into the dashboard's caches, whose shapes a status frame would break.
 STREAM_STATUS_PREFIX = "stream_status"
+
+# Shortest pause before reconnecting a stream that had been delivering data
+# and was then closed by the upstream; jittered up to one second on top.
+WS_RECONNECT_FLOOR = 1.0
 
 # Handshake statuses that mean the upstream refused us rather than failed.
 _REFUSED_STATUSES = frozenset({401, 403, 404})
@@ -212,7 +217,6 @@ class HummingbotStreamsMixin:
         open_ws: Callable[[Any], Any],
         subscribe: Callable[[Any], Awaitable[None]],
         on_message: Callable[[dict], Awaitable[None]],
-        backoff_on_empty_close: bool = False,
     ) -> None:
         """Shared connect/reconnect skeleton for all Hummingbot WS streams.
 
@@ -232,10 +236,12 @@ class HummingbotStreamsMixin:
         - ``on_message``: handles data messages (heartbeat/error are
           handled here).
 
-        ``backoff_on_empty_close`` reproduces the executor stream's
-        behavior: don't reset backoff on subscribe; after a clean close,
-        reset it only if at least one message arrived, otherwise back off
-        (guards against a server that accepts then immediately drops).
+        A reconnect is never immediate. The client turns an upstream close
+        into the end of iteration rather than an exception, so a server that
+        accepts and then drops — a restart behind a proxy, a connection cap, a
+        subscription that errors every tick — would otherwise be redialled as
+        fast as the network allows. Backoff is reset only by a real data
+        message: subscribing, or a heartbeat, proves nothing about the stream.
         """
         from config_manager import get_config_manager
 
@@ -250,9 +256,7 @@ class HummingbotStreamsMixin:
                 async with open_ws(client) as ws:
                     await subscribe(ws)
                     logger.info("%s subscribed: %s", subscribed_label, channel)
-                    if not backoff_on_empty_close:
-                        backoff = 5
-                    got_message = False
+                    got_data = False
                     while True:
                         try:
                             msg = await self._receive_upstream(ws)
@@ -267,7 +271,6 @@ class HummingbotStreamsMixin:
                             )
                             return
 
-                        got_message = True
                         msg_type = msg.get("type")
                         if msg_type == "heartbeat":
                             continue
@@ -280,24 +283,28 @@ class HummingbotStreamsMixin:
                             )
                             break
                         await on_message(msg)
+                        if not got_data:
+                            got_data = True
+                            backoff = 5
                         await self._mark_stream_live(channel)
 
                     await self._mark_stream_stale(channel, "Upstream connection closed")
 
-                    if backoff_on_empty_close:
-                        # Connection closed cleanly — back off if short-lived
-                        if got_message:
-                            backoff = 5
-                        else:
-                            logger.warning(
-                                "%s stream closed immediately for %s, "
-                                "reconnecting in %ds...",
-                                label,
-                                channel,
-                                backoff,
-                            )
-                            await asyncio.sleep(backoff)
-                            backoff = min(backoff * 2, WS_RETRY_CAP)
+                # Closed by the upstream, or by an upstream error frame, with
+                # no exception: pause before redialling, and back off for real
+                # if the connection never delivered anything.
+                if got_data:
+                    delay = WS_RECONNECT_FLOOR + random.random()
+                else:
+                    delay = backoff
+                    backoff = min(backoff * 2, WS_RETRY_CAP)
+                logger.warning(
+                    "%s stream closed for %s, reconnecting in %.0fs...",
+                    label,
+                    channel,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
             except asyncio.CancelledError:
                 return
@@ -537,7 +544,6 @@ class HummingbotStreamsMixin:
             open_ws=lambda client: client.ws.executors(),
             subscribe=subscribe,
             on_message=on_message,
-            backoff_on_empty_close=True,
         )
 
     # -- Bots WS streaming (via Hummingbot /ws/executors all_bots_status) --

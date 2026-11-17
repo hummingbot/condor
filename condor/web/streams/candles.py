@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import math
+import random
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,7 @@ from condor.asyncutil import TaskSet
 from condor.fetchers.market_data import fetch_historical_candles, normalize_candle
 from condor.web.streams.hummingbot_ws import (
     WS_PERMANENT,
+    WS_RECONNECT_FLOOR,
     WS_RETRY_CAP,
     WS_SLOW_RETRY,
     WS_SLOW_RETRY_CAP,
@@ -476,7 +478,7 @@ class CandleStreamsMixin:
                         update_interval=1.0,
                     )
                     logger.info("Candle WS subscribed: %s", channel)
-                    backoff = 5  # Reset on successful connection
+                    got_data = False
                     while True:
                         try:
                             # Bounded: a half-open socket otherwise never
@@ -513,6 +515,10 @@ class CandleStreamsMixin:
                             raw = msg.get("data")
                             candle = self._normalize_candle(raw) if raw else None
                             if candle:
+                                if not got_data:
+                                    # Only real data resets the backoff.
+                                    got_data = True
+                                    backoff = 5
                                 self._last_candle_ws_update[channel] = time.monotonic()
                                 self._upsert_candle_buffer(channel, candle)
                                 await self.broadcast(
@@ -527,6 +533,9 @@ class CandleStreamsMixin:
                                 if (c := self._normalize_candle(r)) is not None
                             ]
                             if candles:
+                                if not got_data:
+                                    got_data = True
+                                    backoff = 5
                                 self._last_candle_ws_update[channel] = time.monotonic()
                                 self._upsert_candle_buffer_many(channel, candles)
                                 await self.broadcast(
@@ -563,6 +572,21 @@ class CandleStreamsMixin:
                                     else type(msg).__name__
                                 ),
                             )
+
+                # Closed by the upstream without an exception: never redial
+                # immediately, and back off for real if nothing was delivered.
+                # The REST poll fallback covers the chart meanwhile.
+                if got_data:
+                    delay = WS_RECONNECT_FLOOR + random.random()
+                else:
+                    delay = backoff
+                    backoff = min(backoff * 2, WS_RETRY_CAP)
+                logger.warning(
+                    "Candle stream closed for %s, reconnecting in %.0fs...",
+                    channel,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
             except asyncio.CancelledError:
                 return
