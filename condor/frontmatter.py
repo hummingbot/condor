@@ -21,6 +21,11 @@ import yaml
 
 log = logging.getLogger(__name__)
 
+# The closing delimiter is a whole line. Matching ``---`` as a substring ended
+# the header at the first dash run inside a *value*, silently dropping every key
+# after it (tool allowlist, server pin, loop config).
+_CLOSING_DELIMITER_RE = re.compile(r"^---[ \t]*\r?$", re.MULTILINE)
+
 
 def slugify(name: str, fallback: str = "unnamed") -> str:
     """Convert a name to a filesystem-safe slug.
@@ -44,12 +49,12 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not text.startswith("---"):
         return {}, text
 
-    end = text.find("---", 3)
-    if end == -1:
+    closing = _CLOSING_DELIMITER_RE.search(text, 3)
+    if closing is None:
         return {}, text
 
-    frontmatter_str = text[3:end].strip()
-    body = text[end + 3 :].strip()
+    frontmatter_str = text[3 : closing.start()].strip()
+    body = text[closing.end() :].strip()
 
     try:
         meta = yaml.safe_load(frontmatter_str) or {}
