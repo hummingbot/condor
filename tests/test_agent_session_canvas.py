@@ -382,3 +382,40 @@ def test_canvas_block_sits_after_the_volatile_data_blocks():
         recent_decisions="- **#1** did a thing",
     )
     assert prompt.index("[RECENT DECISIONS") < prompt.index("[SESSION CANVAS")
+
+
+# ── A heading inside a section body (AG2-11) ──
+#
+# ``## `` is the file's own section delimiter. A body stored verbatim with a
+# ``## `` line of its own parsed back as an unknown section, and everything from
+# that line on was dropped the next time *any* section was written.
+
+
+def test_a_subheading_in_a_section_survives_the_next_write(session_dir):
+    canvas.write_section(
+        session_dir, "thesis", "Thesis line\n## Risks\n- funding flips", tick=1
+    )
+    canvas.write_section(session_dir, "working", "Tight grid fills.", tick=2)
+
+    sections = canvas.read_sections(session_dir)
+    assert sections["thesis"] == "Thesis line\n### Risks\n- funding flips"
+    assert sections["working"] == "Tight grid fills."
+
+
+def test_a_body_line_naming_another_section_does_not_overwrite_it(session_dir):
+    canvas.write_section(session_dir, "questions", "Is the peg holding?", tick=1)
+    canvas.write_section(
+        session_dir, "thesis", "Range holds.\n## Open Questions\nnone", tick=2
+    )
+
+    sections = canvas.read_sections(session_dir)
+    assert sections["questions"] == "Is the peg holding?"
+    assert sections["thesis"] == "Range holds.\n### Open Questions\nnone"
+
+
+def test_a_demoted_heading_still_respects_the_cap(session_dir):
+    body = "\n".join(["## h"] * (canvas.MAX_SECTION_CHARS // 4))
+    result = canvas.write_section(session_dir, "thesis", body, tick=1)
+
+    assert result["truncated_to"] == canvas.MAX_SECTION_CHARS
+    assert len(canvas.read_sections(session_dir)["thesis"]) <= canvas.MAX_SECTION_CHARS

@@ -7,6 +7,7 @@ tick, and it never deletes a row.
 """
 
 import json
+import os
 import typing
 
 import pytest
@@ -209,6 +210,52 @@ def test_the_trim_moves_the_head_to_the_archive_and_deletes_nothing(tmp_path):
     assert [json.loads(line)["tick"] for line in archived + live] == [
         r.tick for r in rows
     ]
+
+
+def test_a_trim_that_fails_mid_rewrite_keeps_every_row(tmp_path):
+    """The rewrite is atomic (AG2-12): a plain ``write_text`` truncates first, so
+    dying mid-write lost the kept rows — the ones the archive does not hold."""
+    path = tmp_path / ACTIONS_FILENAME
+    rows = [
+        AgentAction(tick=i, at=0.0, tool="t", verb="t", summary=f"#{i}", ok=True)
+        for i in range(MAX_ACTION_LINES + 3)
+    ]
+    path.write_text(
+        "".join(json.dumps(r.__dict__) + "\n" for r in rows[:-1]), encoding="utf-8"
+    )
+
+    real_fdopen = os.fdopen
+
+    class _FillsUp:
+        """The temp file's handle, dying part-way like a disk filling up."""
+
+        def __init__(self, fd, mode):
+            self._handle = real_fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            return False
+
+        def write(self, data):
+            self._handle.write(data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+
+    # ``context()``, not ``monkeypatch.undo()``: undo would also revert the
+    # autouse runtime-root isolation.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("condor.fsutil.os.fdopen", _FillsUp)
+        append_actions(tmp_path, rows[-1:])
+
+    live = path.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["tick"] for line in live] == [r.tick for r in rows]
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+    # The next tick's trim retries and lands.
+    append_actions(tmp_path, rows[-1:])
+    assert len(path.read_text(encoding="utf-8").splitlines()) == MAX_ACTION_LINES
 
 
 def test_a_write_that_raises_does_not_reach_the_caller(tmp_path, monkeypatch):

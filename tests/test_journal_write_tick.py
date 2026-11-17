@@ -197,3 +197,55 @@ def test_the_tick_prompt_risk_block_comes_from_the_shared_renderer():
 
     assert prompts.render_risk_lines is journal.render_risk_lines
     assert "Position Size:" not in inspect.getsource(prompts)
+
+
+# ── Backslashes in model/error text are stored verbatim (AG2-01) ──
+#
+# ``_replace_section`` handed the section body to ``re.subn`` as a replacement
+# *template*, so ``\d`` raised ``re.error``, ``\n`` became a newline, ``\1``
+# injected the section header and ``\\d`` was stored as ``\d`` — which then made
+# every later append raise, because the whole section is re-submitted each time.
+
+_BACKSLASH_TEXTS = [
+    r"range \d+ ok",
+    r"path C:\\Users\\dev",
+    r"line1\nline2",
+    r"group \1 here",
+    r"template \g<1> here",
+    r"spread \approx 5 \times 2",
+]
+
+
+@pytest.mark.parametrize("text", _BACKSLASH_TEXTS)
+def test_a_tick_summary_with_a_backslash_is_stored_verbatim(tmp_path, text):
+    from condor.agents.journal import JournalManager
+
+    journal = JournalManager("agt.grid", session_dir=tmp_path / "s")
+
+    journal.record_tick(text, 0)
+    assert journal._get_section("Ticks").splitlines()[-1].endswith(f"| {text}")
+
+    # The stored line is re-submitted on every append: it must not poison them,
+    # neither in this process nor for a fresh manager on the same directory.
+    journal.record_tick("next", 0)
+    JournalManager("agt.grid", session_dir=tmp_path / "s").record_tick("again", 0)
+    ticks = journal._get_section("Ticks").splitlines()
+    assert ticks[-3].endswith(f"| {text}")
+    assert ticks[-1].endswith("| again")
+
+
+@pytest.mark.parametrize("text", _BACKSLASH_TEXTS)
+def test_every_section_writer_keeps_a_backslash_verbatim(tmp_path, text):
+    from condor.agents.journal import JournalManager
+
+    journal = JournalManager("agt.grid", session_dir=tmp_path / "s")
+
+    journal.append_action(3, "deploy", text)
+    journal.append_error(text)
+    journal.write_state(text)
+
+    decisions = journal._get_section("Decisions").splitlines()
+    assert decisions[-2].endswith(f"deploy -- {text}")
+    assert decisions[-1].endswith(f") {text}")
+    assert journal._get_section("Summary") == text
+    assert journal.read_full().count("## Decisions") == 1

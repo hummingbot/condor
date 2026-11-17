@@ -2191,26 +2191,40 @@ def plan_update(
                 )
             )
 
-    if stamp is not None and bundle.version < stamp.version:
+    # Which number orders this bundle against the installed one. A bundle
+    # derived from a Botcamp zip always says version 1, so for a hub update the
+    # bundle's own counter orders nothing: every update read as "the same
+    # version, new build", and an agent that had once taken a file bundle at
+    # version 2 could never take a hub update again. The listing version is the
+    # hub's lineage, and the stamp carries the one last installed.
+    if hub_version:
+        incoming_version = hub_version
+        stamped_version = stamp.hub_version if stamp is not None else 0
+        what = "Botcamp version"
+    else:
+        incoming_version = bundle.version
+        stamped_version = stamp.version if stamp is not None else 0
+        what = "version"
+    if stamp is not None and incoming_version < stamped_version:
         blockers.append(
             UpdateBlocker(
                 code="older_bundle",
                 message=(
-                    f"This bundle is version {bundle.version} and '{slug}' is "
-                    f"already at version {stamp.version} — it is not newer."
+                    f"This bundle is {what} {incoming_version} and '{slug}' is "
+                    f"already at {what} {stamped_version} — it is not newer."
                 ),
             )
         )
     elif (
         stamp is not None
-        and bundle.version == stamp.version
+        and incoming_version == stamped_version
         and carried != stamp.digests
     ):
         warnings.append(
             UpdateWarning(
                 code="same_version_new_build",
                 message=(
-                    f"This bundle says version {bundle.version}, the same as the "
+                    f"This bundle says {what} {incoming_version}, the same as the "
                     "one installed, but its files differ — a different build of "
                     "the same version. A version only orders bundles within one "
                     "agent's lineage; the diff is the authoritative answer."
@@ -2297,6 +2311,10 @@ def plan_update(
 def _engine_running(slug: str) -> bool:
     """Whether a ``TickEngine`` exists for ``slug`` — a live trading loop.
 
+    The registry is keyed by each engine's ``agent_id``
+    (``{agent}.{strategy}_{N}``), never by the bare agent slug, so the answer
+    comes from the engines' owning agents rather than from a lookup by ``slug``.
+
     A supervisor that cannot be reached answers *no engine*: this is one of six
     blockers and the only one that depends on live runtime state, and a preview
     that refused every update because the supervisor was mid-import would be a
@@ -2304,9 +2322,12 @@ def _engine_running(slug: str) -> bool:
     the check runs again against the state of the moment.
     """
     try:
-        from condor.agents.engine import get_engine
+        from condor.agents import engine as engine_module
 
-        return get_engine(slug) is not None
+        return any(
+            getattr(getattr(live, "agent", None), "slug", None) == slug
+            for live in engine_module.get_all_engines().values()
+        )
     except Exception:  # noqa: BLE001 - no supervisor is not a running loop
         log.debug("agents: could not ask the supervisor about '%s'", slug)
         return False
@@ -2383,13 +2404,18 @@ def apply_update(update_plan: UpdatePlan, user_id: int = 0) -> dict:
                 code_trust.allow(slug, name, texts[row.path])
     if _verdict_of(update_plan, AGENT_MD) == UNCHANGED:
         _carry_bookkeeping(home / AGENT_MD, update_plan)
+    # Copied from the stamp on disk rather than built fresh: a plain file
+    # update says nothing about where the agent came from, so the ``hub_*``
+    # provenance ``record_hub_install`` left there has to survive it.
     write_stamp(
         home,
-        BundleStamp(
-            agent_uid=update_plan.agent_uid,
-            version=update_plan.version,
-            exported_at=update_plan.bundle.exported_at,
-            digests=digests,
+        (read_stamp(home) or BundleStamp()).model_copy(
+            update={
+                "agent_uid": update_plan.agent_uid,
+                "version": update_plan.version,
+                "exported_at": update_plan.bundle.exported_at,
+                "digests": digests,
+            }
         ),
     )
 
