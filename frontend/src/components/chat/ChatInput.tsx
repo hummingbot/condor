@@ -98,10 +98,19 @@ export function ChatInput({
   }, []);
 
   // A different conversation: whatever was left in *its* box, not this one's.
+  // The pictures move with the words — left in the box, a screenshot picked
+  // for one chat was sent to the next one the user tabbed to (FU-15).
   useEffect(() => {
     if (draftKey === draftKeyRef.current) return;
+    const leaving = draftKeyRef.current;
     draftKeyRef.current = draftKey;
     setValue(readDraft(draftKey));
+    if (filesRef.current.length > 0) {
+      parkedFiles.current.set(leaving, filesRef.current);
+    }
+    setFiles(parkedFiles.current.get(draftKey) ?? []);
+    parkedFiles.current.delete(draftKey);
+    setFileError(null);
   }, [draftKey]);
 
   // The box around the textarea is the affordance, so it has to know when the
@@ -153,9 +162,15 @@ export function ChatInput({
   // the URLs of the chips beside it.
   const filesRef = useRef<PendingFile[]>([]);
   filesRef.current = files;
+  // The attachments of the conversations this composer is not showing, by
+  // draft key. Kept for the life of the composer only: unlike the words they
+  // are `File`s and object URLs, which do not survive a reload anyway.
+  const parkedFiles = useRef(new Map<string | undefined, PendingFile[]>());
   useEffect(() => {
+    const parked = parkedFiles.current;
     return () => {
       filesRef.current.forEach((f) => URL.revokeObjectURL(f.url));
+      parked.forEach((list) => list.forEach((f) => URL.revokeObjectURL(f.url)));
     };
   }, []);
 
