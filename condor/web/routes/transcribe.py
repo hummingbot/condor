@@ -59,9 +59,11 @@ async def transcribe_audio(
             language=effective_lang or None,
             model_size=effective_model,
         )
-    except Exception as e:
+    except Exception:
+        # The reason stays in the log: the exception's text is a local path or a
+        # model-download URL, neither of which the browser has any use for.
         log.exception("Transcription failed")
-        raise HTTPException(500, f"Transcription failed: {e}")
+        raise HTTPException(500, "Transcription failed")
 
     if not text or not text.strip():
         return {"text": "", "error": "No speech detected"}

@@ -331,6 +331,9 @@ AGENT_WRITES = [
     ("post", "/agents/brigado/skill-proposals/accept", None),
     ("put", "/agents/brigado/mutes", {"kind": "skill", "name": "x", "muted": True}),
     ("put", "/agents/brigado", {"content": "---\nname: Brigado\n---\nGo long"}),
+    # WR-11: the two mutators of the same inputs that had no gate.
+    ("patch", "/agents/brigado/config", {"agent_key": "claude-acp:opus"}),
+    ("delete", "/agents/brigado/skill-proposals", None),
 ]
 
 
@@ -385,8 +388,8 @@ def test_the_owner_and_an_admin_still_write_into_the_live_loop(
 
 def test_the_owner_still_curates_the_agent_a_live_loop_reads(run):
     for method, url, body in AGENT_WRITES:
-        if url.endswith("/accept"):
-            continue  # nothing pending: the store's own 400, past the guard
+        if "/skill-proposals" in url:
+            continue  # nothing pending: the store's own 400/404, past the guard
         res = _send(OWNER, method, url, body)
         assert res.status_code == 200, (url, res.text)
 

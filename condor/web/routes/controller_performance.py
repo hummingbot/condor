@@ -24,6 +24,7 @@ from condor.fetchers.performance_history import (
 )
 from condor.fetchers.run_history import (
     RunHistoryUnavailable,
+    _to_ms,
     declared_controllers,
     fetch_run_history,
     fill_classes_from_config,
@@ -45,7 +46,7 @@ from condor.web.models import (
     TerminatedControllersResponse,
     WebUser,
 )
-from condor.web.routes._errors import upstream_error
+from condor.web.routes._errors import offline_hint, server_client, upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -166,7 +167,7 @@ async def get_bot_runs(
 
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     async def _fetch_runs():
         return await client.bot_orchestration.get_bot_runs(
@@ -176,7 +177,10 @@ async def get_bot_runs(
             strategy_name=strategy_name,
             run_status=run_status,
             deployment_status=deployment_status,
-            limit=limit,
+            # One more than the page: upstream reports no total (its ``total``
+            # is the page length), so the extra row is the only way to know
+            # whether another page exists (WR-05).
+            limit=limit + 1,
             offset=offset,
         )
 
@@ -213,10 +217,13 @@ async def get_bot_runs(
         raise upstream_error("Failed to fetch bot runs", e)
 
     runs_list = _extract_runs_list(result)
+    has_more = len(runs_list) > limit
+    runs_list = runs_list[:limit]
 
     return BotRunsResponse(
         runs=[_parse_bot_run(r, perf_by_bot, archive_paths) for r in runs_list],
         total=len(runs_list),
+        has_more=has_more,
     )
 
 
@@ -231,7 +238,7 @@ async def delete_bot_run(
     """Delete an archived bot run by its numeric ID."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     try:
         result = await client.bot_orchestration.delete_bot_run(bot_run_id)
@@ -287,9 +294,8 @@ async def get_latest_controller_performance(
     """
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
-
     try:
+        client = await cm.get_client(name)
         if bot_name is None:
             snapshots = await fetch_latest_snapshots(client)
         else:
@@ -304,7 +310,7 @@ async def get_latest_controller_performance(
         )
         return ControllerPerformanceLatestResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     return ControllerPerformanceLatestResponse(
@@ -339,9 +345,8 @@ async def get_controller_performance_history(
     """Get historical controller performance with pagination and interval sampling."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
-
     try:
+        client = await cm.get_client(name)
         result = await client.bot_orchestration.get_controller_performance_history(
             bot_name=bot_name,
             controller_id=controller_id,
@@ -357,7 +362,7 @@ async def get_controller_performance_history(
         )
         return ControllerPerformanceHistoryResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     snapshots = _extract_snapshots(result)
@@ -475,9 +480,9 @@ async def get_performance_history(
         raise HTTPException(status_code=400, detail=foreign)
 
     cm = get_config_manager()
-    client = await cm.get_client(name)
 
     try:
+        client = await cm.get_client(name)
         result = await fetch_performance_history(
             client,
             subject=subject,
@@ -508,7 +513,7 @@ async def get_performance_history(
             subject=subject,
             interval=interval,
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     return PerformanceHistoryResponse(
@@ -592,21 +597,23 @@ async def get_terminated_controllers(
         return cached[1]
 
     cm = get_config_manager()
-    client = await cm.get_client(name)
 
-    async def _fetch_latest():
+    async def _fetch_latest(client):
         return await fetch_latest_snapshots(client)
 
-    async def _fetch_runs():
+    async def _fetch_runs(client):
         return await client.bot_orchestration.get_bot_runs(limit=limit)
 
     try:
-        latest, runs_raw = await asyncio.gather(_fetch_latest(), _fetch_runs())
+        client = await cm.get_client(name)
+        latest, runs_raw = await asyncio.gather(
+            _fetch_latest(client), _fetch_runs(client)
+        )
     except Exception as e:
         logger.warning("Failed to fetch terminated controllers from '%s': %s", name, e)
         return TerminatedControllersResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     runs = [_parse_bot_run(r) for r in _extract_runs_list(runs_raw)]
@@ -694,17 +701,24 @@ async def get_run_history(
             raise HTTPException(status_code=400, detail=str(e))
 
     cm = get_config_manager()
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     # The run's own deployment names its controllers, which is what makes the
     # walk per controller — and per controller is a correctness requirement, not
     # a tuning choice: upstream buckets by time only, so a request spanning
     # several controllers keeps one row per bucket and silently drops the rest.
-    run = await _find_run(client, bot_name, deployed_at)
+    try:
+        run = await _find_run(client, bot_name, deployed_at)
+    except Exception as e:
+        logger.warning("Could not resolve run %s on '%s': %s", bot_name, name, e)
+        raise upstream_error("Failed to fetch run history", e)
     if run is None:
         return RunHistoryResponse(
             source="none",
-            detail=f"No run recorded for {bot_name} at {deployed_at}",
+            detail=(
+                f"No run recorded for {bot_name} at {deployed_at} among its "
+                f"newest {_FIND_RUN_LIMIT} runs"
+            ),
         )
 
     try:
@@ -735,23 +749,44 @@ async def get_run_history(
     )
 
 
+#: How many of a bot name's newest runs ``_find_run`` looks through.
+_FIND_RUN_LIMIT = 50
+
+#: How far apart two spellings of one deploy instant may be and still be the
+#: same run: a caller that rounded the timestamp to the second, or a server
+#: that reformatted it. Far below the time a stop-archive-redeploy of the same
+#: name takes, so it cannot reach across to a neighbouring run.
+_RUN_MATCH_TOLERANCE_MS = 1000.0
+
+
 async def _find_run(client, bot_name: str, deployed_at: str) -> BotRunInfo | None:
-    """The run this request is about, by name and deploy time.
+    """The run this request is about, by name and deploy time — or ``None``.
 
     Both are needed because a bot name is reused across runs, and asked of the
     server rather than taken from the query so the controller ids come from the
     deployment itself rather than from whatever the caller passed.
+
+    Never a *different* run (WR-06). This used to fall back to the newest run of
+    the name when the timestamp matched none, and the route then drew that run's
+    curve under the requested run's row with nothing to say so. The timestamps
+    are compared as instants, with a tolerance, which is everything the fallback
+    was for; a run that still matches nothing is reported as not found.
+
+    A failed listing raises: an outage is not a run that never existed.
     """
-    try:
-        raw = await client.bot_orchestration.get_bot_runs(bot_name=bot_name, limit=50)
-    except Exception:
-        logger.debug("Could not resolve run %s for its history", bot_name)
-        return None
+    raw = await client.bot_orchestration.get_bot_runs(
+        bot_name=bot_name, limit=_FIND_RUN_LIMIT
+    )
     runs = [_parse_bot_run(r) for r in _extract_runs_list(raw)]
     exact = [r for r in runs if r.created_at == deployed_at]
     if exact:
         return exact[0]
-    # A caller that rounded the timestamp, or a server that reformatted it: fall
-    # back to the newest run of that name rather than refusing to draw anything.
-    named = sorted(runs, key=lambda r: r.created_at or "", reverse=True)
-    return named[0] if named else None
+    wanted = _to_ms(deployed_at)
+    if wanted is None:
+        return None
+    near: list[tuple[float, BotRunInfo]] = []
+    for run in runs:
+        at = _to_ms(run.created_at) if run.created_at else None
+        if at is not None and abs(at - wanted) <= _RUN_MATCH_TOLERANCE_MS:
+            near.append((abs(at - wanted), run))
+    return min(near, key=lambda pair: pair[0])[1] if near else None

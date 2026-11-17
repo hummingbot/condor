@@ -188,9 +188,29 @@ def test_the_archive_route_gunzips_off_the_loop(store, threads, monkeypatch):
         ),
     )
 
-    body = asyncio.run(bt_routes.get_archived_backtest("task-1", user=ALICE))
+    # XC-03: the serialization is the bigger half, and FastAPI runs its own on
+    # the loop for any handler that returns a plain dict. Finished bytes come
+    # back instead, so the encoder is never reached — prove it by breaking it.
+    def _encoder_must_not_run(*_a, **_k):
+        raise AssertionError("jsonable_encoder ran on the event loop")
 
-    assert body["saved"] is True
+    monkeypatch.setattr("fastapi.encoders.jsonable_encoder", _encoder_must_not_run)
+    monkeypatch.setattr("fastapi.routing.jsonable_encoder", _encoder_must_not_run)
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from condor.web.auth import get_current_user
+
+    app = FastAPI()
+    app.include_router(bt_routes.router)
+    app.dependency_overrides[get_current_user] = lambda: ALICE
+    res = TestClient(app).get("/backtesting/archive/task-1")
+
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"] == "application/json"
+    body = res.json()
+    assert body["saved"] is True and body["task_id"] == "task-1"
     assert _off_loop(threads.read), "gunzip + parse ran on the event loop"
 
 

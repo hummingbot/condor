@@ -402,6 +402,10 @@ def test_the_shared_helper_is_the_only_mapping():
     """Each converted module raises through the shared helper, not its own copy."""
     for module in CONVERTED_MODULES:
         source = Path(module.__file__).read_text()
-        assert "from condor.web.routes._errors import upstream_error" in source
+        assert re.search(
+            r"^from condor\.web\.routes\._errors import .*\bupstream_error\b",
+            source,
+            re.M,
+        )
         assert "raise upstream_error(" in source
         assert "describe_executor_error" not in source, "no second sanitizer"

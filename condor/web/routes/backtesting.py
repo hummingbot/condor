@@ -9,9 +9,10 @@ makes no call to the Hummingbot API at all: a run is submitted through
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from condor.backtest_store import get_backtest_store
 from condor.backtesting import normalize_backtest_task
@@ -122,17 +123,32 @@ async def get_archived_backtest(
     summary = _archived_or_404(task_id, user)
     store = get_backtest_store()
 
+    def _render() -> bytes | None:
+        payload = store.get_result(task_id)
+        if payload is None:
+            return None
+        body = normalize_backtest_task({**payload, "task_id": task_id, "saved": True})
+        # The same encoding ``JSONResponse`` would produce.
+        return json.dumps(
+            body, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+
     # gunzip + parse of a payload that runs to 137 MB: off the loop, or this
     # one chart open stalls the Telegram poller and every other request with it.
-    payload = await asyncio.to_thread(store.get_result, task_id)
-    if payload is None:
+    # The serialization too (XC-03): returning the dict handed it back to
+    # FastAPI, whose ``jsonable_encoder`` + ``json.dumps`` then spent four times
+    # as long on the loop as the parse this thread was moved here to spare it.
+    # It came out of ``json.loads``, so there is nothing for the encoder to do;
+    # the bytes are built here and returned as a finished ``Response``.
+    content = await asyncio.to_thread(_render)
+    if content is None:
         # Not "not found": the run is real and its metrics are right here. The
         # UI has to be able to say "chart expired" rather than deny the run.
         raise HTTPException(
             status_code=409,
             detail={"reason": "payload_expired", "summary": _summary_entry(summary)},
         )
-    return normalize_backtest_task({**payload, "task_id": task_id, "saved": True})
+    return Response(content=content, media_type="application/json")
 
 
 @router.delete("/backtesting/archive/{task_id}")
