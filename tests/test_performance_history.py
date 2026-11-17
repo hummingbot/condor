@@ -200,11 +200,55 @@ def test_probe_says_no_for_a_404():
 def test_probe_separates_an_old_api_from_an_unreachable_one():
     # A server that was merely down must not have a fallback pinned to it for
     # the whole cache TTL after it comes back, so "could not ask" is its own
-    # answer rather than a "no".
+    # answer rather than a "no" — and it is raised, because anything returned
+    # is cached by SDS as a successful fetch for the full TTL (DL-13).
     session = FakeSession(raises=aiohttp.ClientError("connection refused"))
-    result = asyncio.run(probe_performance_history(FakeClient(session)))
-    assert result["supported"] is False
-    assert result["unknown"] is True
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(probe_performance_history(FakeClient(session)))
+
+
+def _probe_through_sds(session):
+    from condor.server_data_service import ServerDataService, ServerDataType
+
+    sds = ServerDataService()
+    client = FakeClient(session)
+
+    async def _fake_get_client(server_name):
+        return client
+
+    sds._get_client = _fake_get_client
+    sds.register_fetch(
+        ServerDataType.PERF_HISTORY_CAPABILITY, probe_performance_history
+    )
+    kind = ServerDataType.PERF_HISTORY_CAPABILITY
+    result = asyncio.run(sds.get_or_fetch("srv", kind))
+    return sds, kind, result
+
+
+def test_sds_caches_nothing_for_a_probe_that_could_not_ask():
+    """DL-13: one blip on the first chart load used to put every chart on that
+    server on the derived fallback for the full 1800s TTL."""
+    session = FakeSession(raises=aiohttp.ClientError("connection refused"))
+    sds, kind, result = _probe_through_sds(session)
+
+    # ``None`` is what the capability route maps to ``unknown=True``.
+    assert result is None
+    assert sds.get("srv", kind) is None
+    assert sds.get_entry("srv", kind).consecutive_errors == 1
+
+    # The server comes back: the very next read asks again and gets the answer.
+    session.raises = None
+    assert asyncio.run(sds.get_or_fetch("srv", kind)) == {"supported": True}
+
+
+def test_sds_caches_a_404_as_the_answer_it_is():
+    session = FakeSession(FakeResponse(status=404, body={"detail": "Not Found"}))
+    sds, kind, result = _probe_through_sds(session)
+
+    assert result["supported"] is False and not result.get("unknown")
+    assert sds.get("srv", kind) == result
+    assert asyncio.run(sds.get_or_fetch("srv", kind)) == result
+    assert len(session.calls) == 1, "a real answer is cached, not re-asked"
 
 
 def test_probe_asks_the_cheapest_possible_question():
