@@ -184,6 +184,16 @@ export interface ChatMessage {
    * for one another by a renderer that only sees a URL.
    */
   attachments?: ChatAttachment[];
+  /**
+   * Where a user turn stands with the wire, when it is not simply sent (FU-03).
+   *
+   * `queued` — the socket was down when it was written, so the frame is
+   * waiting for the reconnect. `unsent` — it waited too long (or the queue was
+   * full) and was dropped rather than replayed: an instruction that reaches a
+   * trading agent minutes after it was typed is not the instruction the user
+   * gave. Absent on everything that went out, and on everything hydrated.
+   */
+  delivery?: "queued" | "unsent";
 }
 
 /** One picture on a turn, as the transcript renders it. */
@@ -403,6 +413,23 @@ function settleToolCalls(
 function interruptToolCalls(msgs: ChatMessage[]): ChatMessage[] {
   return settleToolCalls(msgs, INTERRUPTED_STATUS);
 }
+
+/** A frame waiting for the socket, and the bubble it belongs to if any. */
+interface QueuedFrame {
+  msg: Record<string, unknown>;
+  /** `Date.now()` when it was queued. */
+  at: number;
+  slotId?: string;
+  messageId?: string;
+}
+
+/** How long a queued instruction is still worth sending (FU-03). Long enough
+ *  to ride out a reconnect, short enough that nothing typed before a sleep or
+ *  a long outage reaches the agent as if it had just been said. */
+export const QUEUED_FRAME_TTL_MS = 30_000;
+
+/** The queued actions that go stale: the ones that tell an agent to act. */
+const EXPIRING_ACTIONS = new Set(["send_message", "resolve_permission"]);
 
 /** Now, in the epoch seconds the transcript is recorded in. */
 function nowTs(): number {
@@ -681,7 +708,7 @@ export function useChatSocket() {
   // directory, and the conversation directory is created by the spawn this
   // queue is waiting for.
   const outbox = useRef<
-    Record<string, { text: string; view: string; files?: File[] }[]>
+    Record<string, { id: string; text: string; view: string; files?: File[] }[]>
   >({});
   // A tab opened optimistically is renamed on session_started: the client_ref
   // it was started under becomes the backend's slot id. The workspace follows
@@ -1035,16 +1062,69 @@ export function useChatSocket() {
   // opens the panel and starts a session in the same click, so the first frame
   // routinely predates the connection. Capped, because a socket that never
   // opens must not grow a backlog.
-  const unsent = useRef<Record<string, unknown>[]>([]);
+  //
+  // Each entry remembers when it was queued, and which bubble it is the wire
+  // half of, so the reconnect can tell a frame that is still what the user
+  // meant from one that has gone stale (FU-03) — see `flushUnsent`.
+  const unsent = useRef<QueuedFrame[]>([]);
   const MAX_UNSENT = 20;
 
-  const send = useCallback((msg: Record<string, unknown>) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-      return;
-    }
-    if (unsent.current.length < MAX_UNSENT) unsent.current.push(msg);
-  }, []);
+  const send = useCallback(
+    (
+      msg: Record<string, unknown>,
+      bubble?: { slotId: string; messageId: string },
+    ): "sent" | "queued" | "dropped" => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(msg));
+        return "sent";
+      }
+      if (unsent.current.length >= MAX_UNSENT) return "dropped";
+      unsent.current.push({ msg, at: Date.now(), ...bubble });
+      return "queued";
+    },
+    [],
+  );
+
+  /** Say on a user bubble where its frame stands; `undefined` is "it went". */
+  const markDelivery = useCallback(
+    (slotId: string, messageId: string, delivery: ChatMessage["delivery"]) => {
+      updateSlotMessages(slotId, (msgs) =>
+        msgs.some((m) => m.id === messageId && m.delivery !== delivery)
+          ? msgs.map((m) => (m.id === messageId ? { ...m, delivery } : m))
+          : msgs,
+      );
+    },
+    [updateSlotMessages],
+  );
+
+  /**
+   * Send what was queued while the socket was down — except what went stale.
+   *
+   * A prompt or an approval is an instruction to an agent that can trade, and
+   * it was given about the moment it was typed in. Replayed after a laptop
+   * slept through the afternoon it is a different instruction, so past
+   * `QUEUED_FRAME_TTL_MS` those two are dropped: the prompt's bubble says it
+   * was not sent, and an approval that is somehow still pending comes back on
+   * screen through `replayPendingConfirmations`. Everything else — opening a
+   * session, and above all Stop — is still sent however late.
+   */
+  const flushUnsent = useCallback(
+    (ws: WebSocket) => {
+      const queued = unsent.current;
+      unsent.current = [];
+      const now = Date.now();
+      for (const { msg, at, slotId, messageId } of queued) {
+        const stale =
+          EXPIRING_ACTIONS.has(String(msg.action)) &&
+          now - at > QUEUED_FRAME_TTL_MS;
+        if (!stale) ws.send(JSON.stringify(msg));
+        if (slotId && messageId) {
+          markDelivery(slotId, messageId, stale ? "unsent" : undefined);
+        }
+      }
+    },
+    [markDelivery],
+  );
 
   /**
    * Upload whatever was attached, then send the frame that names it.
@@ -1067,6 +1147,8 @@ export function useChatSocket() {
       text: string,
       view: string,
       files?: File[],
+      /** The optimistic bubble this frame is the wire half of. */
+      messageId?: string,
     ) => {
       let ids: string[] = [];
       if (files?.length) {
@@ -1084,15 +1166,23 @@ export function useChatSocket() {
           return;
         }
       }
-      send({
-        action: "send_message",
-        slot_id: slotId,
-        text,
-        view_context: view,
-        ...(ids.length ? { attachments: ids } : {}),
-      });
+      const outcome = send(
+        {
+          action: "send_message",
+          slot_id: slotId,
+          text,
+          view_context: view,
+          ...(ids.length ? { attachments: ids } : {}),
+        },
+        messageId ? { slotId, messageId } : undefined,
+      );
+      // The bubble is already on screen and looks sent. If the socket is down
+      // it says so itself, rather than looking identical to one that went.
+      if (messageId && outcome !== "sent") {
+        markDelivery(slotId, messageId, outcome === "queued" ? "queued" : "unsent");
+      }
     },
-    [appendSystemNote, send],
+    [appendSystemNote, markDelivery, send],
   );
 
   /**
@@ -1184,9 +1274,7 @@ export function useChatSocket() {
       needsResync.current = hasConnected.current;
       hasConnected.current = true;
       setIsConnected(true);
-      const queued = unsent.current;
-      unsent.current = [];
-      for (const msg of queued) ws.send(JSON.stringify(msg));
+      flushUnsent(ws);
       // The roster that follows says which conversations are alive; it says
       // nothing about which of them is holding a tool call waiting on a click.
       void replayPendingConfirmations();
@@ -1211,7 +1299,7 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token, closeSocket, replayPendingConfirmations]);
+  }, [token, closeSocket, flushUnsent, replayPendingConfirmations]);
 
   const disconnect = useCallback(() => {
     shouldConnect.current = false;
@@ -1253,7 +1341,9 @@ export function useChatSocket() {
             (
               slotsRef.current.find((s) => s.info.slot_id === slotId)?.messages ?? []
             )
-              .filter((m) => !m.open)
+              // A bubble that was never sent is in no transcript: replacing
+              // it would erase the only sign the message did not go (FU-03).
+              .filter((m) => !m.open && m.delivery !== "unsent")
               .map((m) => m.id),
           )
         : null;
@@ -1598,8 +1688,8 @@ export function useChatSocket() {
             // Sequential, not `forEach`: an upload is an await, and racing two
             // of them would let the second message overtake the first.
             void (async () => {
-              for (const { text, view, files } of queued) {
-                await uploadAndSend(newSlot.slot_id, convId, text, view, files);
+              for (const { id, text, view, files } of queued) {
+                await uploadAndSend(newSlot.slot_id, convId, text, view, files, id);
               }
             })();
           }
@@ -2071,7 +2161,7 @@ export function useChatSocket() {
       if (slot?.pending) {
         // The `File`s wait here with the words. Uploading now would write into a
         // conversation directory the spawn has not created yet.
-        (outbox.current[slotId] ||= []).push({ text, view, files });
+        (outbox.current[slotId] ||= []).push({ id, text, view, files });
         return;
       }
 
@@ -2084,6 +2174,7 @@ export function useChatSocket() {
         text,
         view,
         files,
+        id,
       );
     },
     [flushChunks, updateSlotMessages, uploadAndSend],
@@ -2290,7 +2381,19 @@ export function useChatSocket() {
 
   const abortPrompt = useCallback(
     (slotId: string) => {
-      send({ action: "abort_prompt", slot_id: slotId });
+      // One Stop is enough to wait for the socket: pressing it again while
+      // offline must not fill the queue with copies.
+      const waiting = unsent.current.some(
+        (q) => q.msg.action === "abort_prompt" && q.msg.slot_id === slotId,
+      );
+      const outcome = waiting
+        ? "queued"
+        : send({ action: "abort_prompt", slot_id: slotId });
+      // With the socket down nothing has been stopped — the agent runs on
+      // until the frame gets there. Showing "stopped" now would be a claim
+      // about a turn this tab cannot see (FU-03); the turn's real ending
+      // arrives with the reconnect.
+      if (outcome !== "sent") return;
       // What already arrived is part of the transcript even though the user
       // stopped the rest of it; the turn ends with it.
       flushChunks(slotId);

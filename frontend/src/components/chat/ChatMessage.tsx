@@ -632,26 +632,47 @@ export const ChatMessageView = memo(function ChatMessageView({
   // keeps a one-line question reading as an aside rather than as a banner.
   if (message.role === "user") {
     return (
-      <div className="group mb-4 flex items-start justify-end gap-2">
-        <div className="mt-1">
-          <TurnActions ts={message.ts} text={message.text} />
+      <div className="group mb-4">
+        <div className="flex items-start justify-end gap-2">
+          <div className="mt-1">
+            <TurnActions ts={message.ts} text={message.text} />
+          </div>
+          <div className="max-w-[70%] rounded-2xl rounded-tr-sm bg-[var(--color-primary)] px-3.5 py-2 text-sm text-[var(--on-primary)]">
+            {message.attachments && message.attachments.length > 0 && (
+              <div
+                className={`flex flex-wrap justify-end gap-1.5 ${message.text ? "mb-2" : ""}`}
+              >
+                {message.attachments.map((attachment) => (
+                  <Attachment key={attachment.url} attachment={attachment} />
+                ))}
+              </div>
+            )}
+            {/* An image with no words is a complete message, so the paragraph is
+                only drawn when there are words. */}
+            {message.text && (
+              <p className="whitespace-pre-wrap">{message.text}</p>
+            )}
+          </div>
         </div>
-        <div className="max-w-[70%] rounded-2xl rounded-tr-sm bg-[var(--color-primary)] px-3.5 py-2 text-sm text-[var(--on-primary)]">
-          {message.attachments && message.attachments.length > 0 && (
-            <div
-              className={`flex flex-wrap justify-end gap-1.5 ${message.text ? "mb-2" : ""}`}
-            >
-              {message.attachments.map((attachment) => (
-                <Attachment key={attachment.url} attachment={attachment} />
-              ))}
-            </div>
-          )}
-          {/* An image with no words is a complete message, so the paragraph is
-              only drawn when there are words. */}
-          {message.text && (
-            <p className="whitespace-pre-wrap">{message.text}</p>
-          )}
-        </div>
+        {/* The bubble is drawn before the wire carries it, so one written
+            while the socket was down would look exactly like one that went.
+            It says which it is (FU-03). */}
+        {message.delivery === "queued" && (
+          <p className="mt-1 flex items-center justify-end gap-1.5 text-[11px] text-[var(--color-text-muted)]">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Queued — sends when the connection is back
+          </p>
+        )}
+        {message.delivery === "unsent" && (
+          <p
+            role="alert"
+            className="mt-1 flex items-center justify-end gap-1.5 text-[11px] text-[var(--color-yellow)]"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            Not sent — the connection was down. Send it again if you still
+            want it.
+          </p>
+        )}
       </div>
     );
   }

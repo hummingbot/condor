@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
 import type { ChatSlot, PermissionRequest } from "@/hooks/useChatSocket";
+import { useConnectionLost } from "@/hooks/useConnectionLost";
 import {
   CHAT_SLUG,
   type AgentBindingOption,
@@ -45,6 +46,7 @@ export function ChatThread({
   agents,
   isStreaming,
   isQueued = false,
+  isConnected = true,
   permissionRequest,
   onResolvePermission,
   switchError,
@@ -72,6 +74,14 @@ export function ChatThread({
    * identical to a dropped one is the bug this replaces.
    */
   isQueued?: boolean;
+  /**
+   * Whether the chat socket is up. While it is not, the transcript says so —
+   * a message, a Stop or an Allow pressed now only reaches the agent after
+   * the reconnect, and nothing on screen used to hint at that (FU-03).
+   * Debounced here, so a drop that heals at once shows nothing. Optional: a
+   * surface that does not pass it is assumed connected, as before.
+   */
+  isConnected?: boolean;
   permissionRequest: PermissionRequest | null;
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
@@ -186,6 +196,8 @@ export function ChatThread({
   );
   const canRetryModel = !!onRetryModel;
 
+  const connectionLost = useConnectionLost(isConnected);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<number | null>(null);
@@ -259,6 +271,20 @@ export function ChatThread({
           <button onClick={onDismissSwitchError} title="Dismiss">
             <X className="h-3 w-3" />
           </button>
+        </div>
+      )}
+
+      {/* Offline — said before the user finds out by waiting for an answer. */}
+      {connectionLost && (
+        <div
+          role="status"
+          className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-xs text-[var(--color-text-muted)]"
+        >
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+          <span>
+            Reconnecting… nothing reaches the agent until the connection is
+            back. Messages sent now wait for it.
+          </span>
         </div>
       )}
 
