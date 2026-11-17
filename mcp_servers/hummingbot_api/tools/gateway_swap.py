@@ -8,15 +8,15 @@ Handles DEX trading operations via Hummingbot Gateway:
 """
 
 import logging
-from decimal import Decimal
 from typing import Any
 
 from condor.swap_watch import SwapResolveUnsupported
 from condor.swap_watch import resolve as resolve_stuck_swap
 from condor.swap_watch import watch
 from mcp_servers.hummingbot_api.exceptions import ToolError
-from mcp_servers.hummingbot_api.middleware import sent_write
+from mcp_servers.hummingbot_api.middleware import describe_error, sent_write
 from mcp_servers.hummingbot_api.schemas import GatewaySwapRequest
+from mcp_servers.hummingbot_api.tools._args import dec, opt_dec
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -104,13 +104,9 @@ async def manage_gateway_swaps(
             network=request.network,
             trading_pair=request.trading_pair,
             side=request.side,
-            amount=Decimal(request.amount),
+            amount=dec(request.amount, "amount"),
             # None -> SDK omits it and the connector's configured slippage applies
-            slippage_pct=(
-                Decimal(request.slippage_pct)
-                if request.slippage_pct is not None
-                else None
-            ),
+            slippage_pct=opt_dec(request.slippage_pct, "slippage_pct"),
             extra_params=request.extra_params,
         )
 
@@ -150,13 +146,9 @@ async def manage_gateway_swaps(
                 network=request.network,
                 trading_pair=request.trading_pair,
                 side=request.side,
-                amount=Decimal(request.amount),
+                amount=dec(request.amount, "amount"),
                 # None -> SDK omits it and the connector's configured slippage applies
-                slippage_pct=(
-                    Decimal(request.slippage_pct)
-                    if request.slippage_pct is not None
-                    else None
-                ),
+                slippage_pct=opt_dec(request.slippage_pct, "slippage_pct"),
                 wallet_address=request.wallet_address,
                 extra_params=request.extra_params,
             ),
@@ -201,7 +193,7 @@ async def manage_gateway_swaps(
                 quote_id=request.quote_id,
                 trading_pair=request.trading_pair,
                 side=request.side,
-                amount=Decimal(request.amount),
+                amount=dec(request.amount, "amount"),
                 wallet_address=request.wallet_address,
             ),
             what=f"the swap for quote {request.quote_id}",
@@ -318,7 +310,7 @@ async def manage_gateway_swaps(
                 "supported": False,
                 "detail": (
                     f"this Hummingbot API server does not offer a resolve route "
-                    f"for swaps ({exc}). Nothing was changed. The swap is still "
+                    f"for swaps ({describe_error(exc)}). Nothing was changed. The swap is still "
                     f"SUBMITTED and unverifiable; upgrade the API server, or read "
                     f"the explorer and act on what the chain shows."
                 ),

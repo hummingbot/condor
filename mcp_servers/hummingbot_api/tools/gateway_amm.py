@@ -11,13 +11,14 @@ positions[] breakdown, and positions_owned lists all of a wallet's positions. Fu
 (raydium, uniswap) ignore position_address and have no enumerable positions.
 """
 
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.middleware import sent_write
 from mcp_servers.hummingbot_api.schemas import AMMRequest
+from mcp_servers.hummingbot_api.tools._args import dec as _dec
+from mcp_servers.hummingbot_api.tools._args import opt_dec as _opt_dec
 
 SUPPORTED_CONNECTORS = {"meteora", "raydium", "uniswap"}
 # Non-fungible-LP (NFT position) connectors — position-addressed and enumerable.
@@ -34,19 +35,6 @@ def _guide() -> str:
     if guide_file.exists():
         return guide_file.read_text().strip()
     raise ToolError("AMM guide not found (guides/gateway_amm.md)")
-
-
-def _dec(value: str | None, name: str) -> Decimal:
-    if value is None:
-        raise ToolError(f"{name} is required for this action")
-    try:
-        return Decimal(str(value))
-    except Exception as exc:
-        raise ToolError(f"{name} must be a number, got {value!r}") from exc
-
-
-def _opt_dec(value: str | None) -> Decimal | None:
-    return None if value is None else Decimal(str(value))
 
 
 def _require(request: AMMRequest, *fields: str) -> None:
@@ -128,7 +116,7 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
             pool_address=request.pool_address,
             base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
             quote_token_amount=_dec(request.quote_token_amount, "quote_token_amount"),
-            slippage_pct=_opt_dec(request.slippage_pct),
+            slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
         )
 
     elif action == "add_liquidity":
@@ -143,7 +131,7 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
                 quote_token_amount=_dec(
                     request.quote_token_amount, "quote_token_amount"
                 ),
-                slippage_pct=_opt_dec(request.slippage_pct),
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
                 wallet_address=request.wallet_address,
                 position_address=request.position_address,
             ),
@@ -168,7 +156,7 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
                     request.percentage_to_remove, "percentage_to_remove"
                 ),
                 position_address=request.position_address,
-                slippage_pct=_opt_dec(request.slippage_pct),
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
                 wallet_address=request.wallet_address,
             ),
             what=f"the {connector} {action}",
@@ -192,8 +180,10 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
                 base_token=request.base_token,
                 quote_token=request.quote_token,
                 base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
-                quote_token_amount=_opt_dec(request.quote_token_amount),
-                initial_price=_opt_dec(request.initial_price),
+                quote_token_amount=_opt_dec(
+                    request.quote_token_amount, "quote_token_amount"
+                ),
+                initial_price=_opt_dec(request.initial_price, "initial_price"),
                 wallet_address=request.wallet_address,
                 extra_params=request.extra_params,
             ),

@@ -5,6 +5,7 @@ Middleware decorators for common tool patterns.
 import functools
 import inspect
 import logging
+import re
 from typing import Any, Callable, Coroutine, TypeVar
 
 from mcp_servers.hummingbot_api.exceptions import (
@@ -66,14 +67,52 @@ def is_outcome_unknown(exc: BaseException) -> bool:
     )
 
 
-def describe_error(exc: BaseException) -> str:
-    """``str(exc)``, or the exception's type when that is empty.
+#: A URL inside an error string. Only its scheme and authority are removed: the
+#: path says which route failed and is safe to show.
+_URL_AUTHORITY = re.compile(r"https?://[^/\s'\"<>)\]]+", re.IGNORECASE)
 
-    aiohttp's total timeout raises a bare ``TimeoutError`` whose text is empty,
-    which rendered as ``"Error creating position_executor: "`` — a blank error
-    for the one failure the caller most needs described.
+
+def scrub_urls(text: str) -> str:
+    """Remove every backend scheme://host:port from ``text``."""
+    return _URL_AUTHORITY.sub("<api>", text)
+
+
+def describe_error(exc: BaseException) -> str:
+    """What an exception may say to a model: never blank, never the backend's URL.
+
+    ``str(exc)`` is wrong in two ways. aiohttp's total timeout raises a bare
+    ``TimeoutError`` whose text is empty, which rendered as ``"Error creating
+    position_executor: "``. And an ``aiohttp.ClientResponseError`` stringifies
+    as ``429, message='Too Many Requests', url='http://10.0.0.7:8000/...'``, so
+    the server owner's internal host and port went to the model and on into
+    chat (the fetchers closed this in SEC-116; these tools had not).
+
+    The safe pieces are attributes: ``status`` is the code the API answered
+    with and ``message`` its own ``detail``. A transport failure has neither
+    and its text is mostly the address, so it is named by type instead.
     """
-    return str(exc).strip() or type(exc).__name__
+    import asyncio
+
+    import aiohttp
+
+    if isinstance(exc, ToolError):
+        return str(exc).strip() or type(exc).__name__
+    status = getattr(exc, "status", None)
+    if isinstance(exc, aiohttp.ClientResponseError) and isinstance(status, int):
+        message = getattr(exc, "message", None)
+        if isinstance(message, str) and message.strip():
+            return f"HTTP {status}: {scrub_urls(message.strip())}"
+        return f"the API returned HTTP {status}"
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        from mcp_servers.hummingbot_api.settings import settings
+
+        return (
+            f"the API did not answer within {settings.connection_timeout:g}s "
+            "(timeout)"
+        )
+    if isinstance(exc, aiohttp.ClientError):
+        return f"the API is unreachable ({type(exc).__name__})"
+    return scrub_urls(str(exc).strip()) or type(exc).__name__
 
 
 def outcome_unknown_message(what: str, check: str, exc: BaseException) -> str:

@@ -23,6 +23,7 @@ from mcp_servers.hummingbot_api.formatters.executors import (
     format_positions_held_table,
     format_positions_summary,
 )
+from mcp_servers.hummingbot_api.middleware import describe_error
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -73,8 +74,8 @@ async def list_executors(
     except Exception as e:
         return {
             "action": "list",
-            "error": str(e),
-            "formatted_output": f"Error listing executors: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error listing executors: {describe_error(e)}",
         }
 
 
@@ -149,8 +150,8 @@ async def get_executor(
         return {
             "action": "get",
             "executor_id": executor_id,
-            "error": str(e),
-            "formatted_output": f"Error getting executor {executor_id}: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error getting executor {executor_id}: {describe_error(e)}",
         }
 
     if include_logs:
@@ -163,8 +164,8 @@ async def get_executor(
             formatted += "\n\n" + _format_logs(executor_id, log_result, log_level)
         except Exception as e:
             # The detail was fetched; say the logs were not rather than losing both.
-            formatted += f"\n\nError getting logs for executor {executor_id}: {e}"
-            response["logs_error"] = str(e)
+            formatted += f"\n\nError getting logs for executor {executor_id}: {describe_error(e)}"
+            response["logs_error"] = describe_error(e)
 
     response["formatted_output"] = formatted
     return response
@@ -219,8 +220,8 @@ async def stop_executor(
     except Exception as e:
         return {
             "action": "stop",
-            "error": str(e),
-            "formatted_output": f"Error stopping executor {executor_id}: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error stopping executor {executor_id}: {describe_error(e)}",
         }
 
 
@@ -283,8 +284,8 @@ async def list_orphaned_positions(client: Any) -> dict[str, Any]:
     except Exception as e:
         return {
             "action": "orphaned",
-            "error": str(e),
-            "formatted_output": f"Error listing orphaned positions: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error listing orphaned positions: {describe_error(e)}",
         }
 
 
@@ -310,9 +311,9 @@ async def resolve_orphaned_position(client: Any, *, executor_id: str) -> dict[st
     except Exception as e:
         return {
             "action": "resolve_orphan",
-            "error": str(e),
+            "error": describe_error(e),
             "formatted_output": (
-                f"Error resolving orphan for executor {executor_id}: {e}"
+                f"Error resolving orphan for executor {executor_id}: {describe_error(e)}"
             ),
         }
 
@@ -390,8 +391,8 @@ async def list_positions_held(
     except Exception as e:
         return {
             "action": "positions_summary",
-            "error": str(e),
-            "formatted_output": f"Error getting positions: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error getting positions: {describe_error(e)}",
         }
 
 
@@ -430,8 +431,8 @@ async def clear_position_held(
     except Exception as e:
         return {
             "action": "clear_position",
-            "error": str(e),
-            "formatted_output": f"Error clearing position: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error clearing position: {describe_error(e)}",
         }
 
 
@@ -459,8 +460,8 @@ async def get_performance_report(
     except Exception as e:
         return {
             "action": "performance_report",
-            "error": str(e),
-            "formatted_output": f"Error getting performance report: {e}",
+            "error": describe_error(e),
+            "formatted_output": f"Error getting performance report: {describe_error(e)}",
         }
 
 

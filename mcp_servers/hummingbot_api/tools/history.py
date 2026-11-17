@@ -15,6 +15,7 @@ from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters.base import format_exact, get_field
 from mcp_servers.hummingbot_api.formatters.table_builder import render_table
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
+from mcp_servers.hummingbot_api.middleware import describe_error
 
 from . import gateway_clmm as gateway_clmm_tools
 from . import trading as trading_tools
@@ -386,4 +387,4 @@ async def search_history(
 
     except Exception as e:
         logger.error(f"Error in search_history: {str(e)}", exc_info=True)
-        raise Exception(f"Failed to search history: {str(e)}")
+        raise Exception(f"Failed to search history: {describe_error(e)}")

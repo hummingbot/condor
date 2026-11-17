@@ -322,4 +322,6 @@ def test_a_blank_exception_is_never_rendered_as_a_blank_error():
     with pytest.raises(ToolError) as caught:
         asyncio.run(get_prices())
 
-    assert str(caught.value) == "Failed to get prices: TimeoutError"
+    message = str(caught.value)
+    assert message.startswith("Failed to get prices: the API did not answer within")
+    assert "timeout" in message

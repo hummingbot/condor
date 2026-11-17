@@ -12,7 +12,6 @@ so the position has to be closed by address.
 """
 
 import logging
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,8 @@ from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters.base import format_number, get_field
 from mcp_servers.hummingbot_api.middleware import sent_write
 from mcp_servers.hummingbot_api.schemas import CLMMRequest, GatewayCLMMRequest
+from mcp_servers.hummingbot_api.tools._args import dec as _dec
+from mcp_servers.hummingbot_api.tools._args import opt_dec as _opt_dec
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -205,19 +206,6 @@ def _clmm_guide() -> str:
     raise ToolError("CLMM guide not found (guides/gateway_clmm.md)")
 
 
-def _dec(value: str | None, name: str) -> Decimal:
-    if value is None:
-        raise ToolError(f"{name} is required for this action")
-    try:
-        return Decimal(str(value))
-    except Exception as exc:
-        raise ToolError(f"{name} must be a number, got {value!r}") from exc
-
-
-def _opt_dec(value: str | None) -> Decimal | None:
-    return None if value is None else Decimal(str(value))
-
-
 def _require_clmm(request: CLMMRequest, *fields: str) -> None:
     for f in fields:
         if getattr(request, f) is None:
@@ -302,9 +290,13 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
                 pool_address=request.pool_address,
                 lower_price=_dec(request.lower_price, "lower_price"),
                 upper_price=_dec(request.upper_price, "upper_price"),
-                base_token_amount=_opt_dec(request.base_token_amount),
-                quote_token_amount=_opt_dec(request.quote_token_amount),
-                slippage_pct=_opt_dec(request.slippage_pct),
+                base_token_amount=_opt_dec(
+                    request.base_token_amount, "base_token_amount"
+                ),
+                quote_token_amount=_opt_dec(
+                    request.quote_token_amount, "quote_token_amount"
+                ),
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
                 wallet_address=request.wallet_address,
                 extra_params=request.extra_params,
             ),
@@ -323,9 +315,13 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
                 connector=connector,
                 network=net,
                 position_address=request.position_address,
-                base_token_amount=_opt_dec(request.base_token_amount),
-                quote_token_amount=_opt_dec(request.quote_token_amount),
-                slippage_pct=_opt_dec(request.slippage_pct),
+                base_token_amount=_opt_dec(
+                    request.base_token_amount, "base_token_amount"
+                ),
+                quote_token_amount=_opt_dec(
+                    request.quote_token_amount, "quote_token_amount"
+                ),
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
                 wallet_address=request.wallet_address,
                 extra_params=request.extra_params,
             ),
@@ -343,7 +339,7 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
                 percentage_to_remove=_dec(
                     request.percentage_to_remove, "percentage_to_remove"
                 ),
-                slippage_pct=_opt_dec(request.slippage_pct),
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
                 wallet_address=request.wallet_address,
             ),
             what=f"the {connector} CLMM {action}",
@@ -387,7 +383,7 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
                 base_token=request.base_token,
                 quote_token=request.quote_token,
                 # None -> hapi/gateway fetch the market price
-                initial_price=_opt_dec(request.initial_price),
+                initial_price=_opt_dec(request.initial_price, "initial_price"),
                 wallet_address=request.wallet_address,
                 extra_params=request.extra_params,
             ),
