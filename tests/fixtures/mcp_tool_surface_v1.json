@@ -1310,7 +1310,7 @@
       }
     },
     "configure_server": {
-      "description": "Configure the active Hummingbot API server connection.\n\n    This tool manages a single API server connection:\n    1. No parameters \u2192 Show the current server configuration\n    2. Any parameters \u2192 Update the server config and reconnect\n\n    Only the provided parameters are changed; omitted ones keep their current values.\n\n    Args:\n        name: Server label (e.g., 'macmini', 'production')\n        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42')\n        port: API port (e.g., 8000)\n        username: API username\n        password: API password\n    ",
+      "description": "Configure the active Hummingbot API server connection.\n\n    This tool manages a single API server connection:\n    1. No parameters \u2192 Show the current server configuration\n    2. Any parameters \u2192 Update the server config and reconnect\n\n    Only the provided parameters are changed; omitted ones keep their current values.\n\n    Args:\n        name: Server label (e.g., 'macmini', 'production')\n        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42').\n            The current scheme (http/https) and port are kept; pass\n            'https://api.example.com' to change the scheme.\n        port: API port (e.g., 8000). OMIT to keep the current one.\n        username: API username\n        password: API password\n    ",
       "inputSchema": {
         "properties": {
           "host": {

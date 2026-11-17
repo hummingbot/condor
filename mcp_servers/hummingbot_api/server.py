@@ -22,7 +22,10 @@ from mcp_servers.hummingbot_api.formatters import (
     format_gateway_config_result,
     format_gateway_swap_result,
 )
-from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+from mcp_servers.hummingbot_api.hummingbot_client import (
+    hummingbot_client,
+    trading_rules_cache,
+)
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.profiles import AGENT_SEAT_PROFILES, PROFILE_TOOLS
 from mcp_servers.hummingbot_api.schemas import (
@@ -115,8 +118,10 @@ async def configure_server(
 
     Args:
         name: Server label (e.g., 'macmini', 'production')
-        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42')
-        port: API port (e.g., 8000)
+        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42').
+            The current scheme (http/https) and port are kept; pass
+            'https://api.example.com' to change the scheme.
+        port: API port (e.g., 8000). OMIT to keep the current one.
         username: API username
         password: API password
     """
@@ -161,18 +166,47 @@ async def configure_server(
     from urllib.parse import urlparse
 
     parsed = urlparse(settings.api_url)
-    current_host = parsed.hostname or "localhost"
-    current_port = parsed.port or 8000
+    # The scheme is carried over, never rebuilt: an https server renamed with
+    # configure_server(name=...) used to be saved back as http://host:8000,
+    # which sends the API password in clear to a different port.
+    final_scheme = parsed.scheme or "http"
+    final_host = parsed.hostname or "localhost"
+    # A port is written only when there is one to write — given here, or
+    # already in the URL. https://api.example.com has none and must keep none.
+    final_port = parsed.port
+
+    if host is not None:
+        given = urlparse(host if "://" in host else f"//{host}")
+        if not given.hostname:
+            raise ToolError(
+                f"host must be a hostname or IP address, got {host!r} "
+                "(e.g. 'localhost', 'api.example.com')."
+            )
+        final_host = given.hostname
+        if given.scheme:
+            if given.scheme not in ("http", "https"):
+                raise ToolError(
+                    f"host scheme must be http or https, got {given.scheme!r}."
+                )
+            final_scheme = given.scheme
+        if given.scheme or given.port:
+            # A host that names its own scheme or port is a new endpoint; the
+            # old endpoint's port does not carry over to it.
+            final_port = given.port
+    if port is not None:
+        final_port = port
 
     final_name = name if name is not None else settings.server_name
-    final_host = host if host is not None else current_host
-    final_port = port if port is not None else current_port
     final_username = username if username is not None else settings.api_username
     final_password = password if password is not None else settings.api_password
 
+    netloc = f"[{final_host}]" if ":" in final_host else final_host
+    if final_port is not None:
+        netloc = f"{netloc}:{final_port}"
+
     new_config = ServerConfig(
         name=final_name,
-        url=f"http://{final_host}:{final_port}",
+        url=f"{final_scheme}://{netloc}",
         username=final_username,
         password=final_password,
     )
@@ -181,6 +215,10 @@ async def configure_server(
     save_server_config(new_config)
     settings.reload_from_server_config(new_config)
     await hummingbot_client.close()
+    # Rules are cached per (connector, pair) with no server in the key, so the
+    # old server's answers — and its cached misses — would otherwise vet the
+    # new server's creates for up to a minute.
+    trading_rules_cache.clear()
 
     try:
         await hummingbot_client.initialize(force=True)
@@ -2318,11 +2356,6 @@ def _apply_cli_args():
     """
     import argparse
 
-    if username := os.getenv("HUMMINGBOT_API_USERNAME"):
-        settings.api_username = username
-    if password := os.getenv("HUMMINGBOT_API_PASSWORD"):
-        settings.api_password = password
-
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
     parser.add_argument("--server-name")
@@ -2333,8 +2366,21 @@ def _apply_cli_args():
     parser.add_argument("--caller-id")
     args, _ = parser.parse_known_args()
 
+    username = os.getenv("HUMMINGBOT_API_USERNAME")
+    password = os.getenv("HUMMINGBOT_API_PASSWORD")
     if args.url:
+        # The spawner chose the server, so the credentials are the spawner's or
+        # nothing. Falling back to whatever ~/.hummingbot_mcp/server.yml holds
+        # would send ANOTHER server's username and password to this URL. An
+        # empty value fails authentication, which is the closed outcome.
         settings.api_url = args.url
+        settings.api_username = username or ""
+        settings.api_password = password or ""
+    else:
+        if username:
+            settings.api_username = username
+        if password:
+            settings.api_password = password
     if args.server_name:
         settings.server_name = args.server_name
     if args.agent_slug:
