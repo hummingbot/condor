@@ -32,7 +32,11 @@ from mcp_servers.hummingbot_api.schemas import (
     GatewayConfigRequest,
     GatewaySwapRequest,
 )
-from mcp_servers.hummingbot_api.settings import DEFAULT_TOOL_PROFILE, settings
+from mcp_servers.hummingbot_api.settings import (
+    DEFAULT_TOOL_PROFILE,
+    credentials_were_injected,
+    settings,
+)
 from mcp_servers.hummingbot_api.tools import bot_management as bot_management_tools
 from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
 from mcp_servers.hummingbot_api.tools import executor_create
@@ -90,9 +94,7 @@ def _credentials_were_injected() -> bool:
     external MCP host, the checked-in ``.mcp.json`` — sets neither, so it reads
     False and keeps the full configure-and-persist behaviour.
     """
-    return bool(
-        os.getenv("HUMMINGBOT_API_USERNAME") or os.getenv("HUMMINGBOT_API_PASSWORD")
-    )
+    return credentials_were_injected()
 
 
 @handle_errors("configure server")

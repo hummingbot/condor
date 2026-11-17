@@ -21,6 +21,19 @@ SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
 DEFAULT_TOOL_PROFILE = "full"
 
 
+def credentials_were_injected() -> bool:
+    """True when this process was spawned holding somebody else's credentials.
+
+    The same env signal ``server._apply_cli_args`` reads: whatever it lifted
+    onto ``settings`` is a secret this process was *handed* by its spawner
+    (``build_mcp_servers_for_session``), not one supplied by whoever is talking
+    to it over stdio. A standalone launch sets neither variable.
+    """
+    return bool(
+        os.getenv("HUMMINGBOT_API_USERNAME") or os.getenv("HUMMINGBOT_API_PASSWORD")
+    )
+
+
 class ServerConfig(BaseModel):
     """Active server configuration"""
 
