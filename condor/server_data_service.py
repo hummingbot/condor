@@ -335,6 +335,11 @@ class ServerDataService:
         # can't cancel them mid-flight (the event loop only keeps a weak
         # reference). Entries auto-remove on completion.
         self._callback_tasks = TaskSet(logger, "SDS callback error for %s: %s")
+        # One tracked task per key the poller is refreshing right now. The
+        # tick only *starts* these and never awaits them, so a slow or hung
+        # fetch delays its own key and nothing else.
+        self._poll_fetches: Dict[CacheKey, asyncio.Task] = {}
+        self._poll_fetch_tasks = TaskSet(logger, "SDS poll fetch error for %s: %s")
 
     # ------ Fetch registry ------
 
@@ -721,6 +726,8 @@ class ServerDataService:
             self._poll_task.cancel()
             logger.info("ServerDataService stopped")
         self._callback_tasks.cancel_all()
+        self._poll_fetch_tasks.cancel_all()
+        self._poll_fetches.clear()
 
     # ------ Poll loop ------
 
@@ -728,7 +735,10 @@ class ServerDataService:
         while self._running:
             try:
                 await asyncio.sleep(_POLL_TICK)
-                await self._poll_tick()
+                # Start, never await: the next tick must not wait on the
+                # slowest fetch of this one (a 60s client timeout on one hung
+                # server used to set the cadence for every key on every server).
+                self._start_due_fetches()
 
                 # Periodic cleanup
                 now = time.time()
@@ -761,15 +771,32 @@ class ServerDataService:
                 await asyncio.sleep(5)
 
     async def _poll_tick(self) -> None:
-        """Single tick: check each subscribed key and refresh if due.
+        """Single tick, awaited to completion: refresh every due key.
 
-        Collects all due keys first, then fetches them concurrently via gather.
+        The poll loop itself does not call this — it calls
+        :meth:`_start_due_fetches` and moves on. This is the same tick with the
+        started fetches awaited, for callers that need them settled.
+        """
+        tasks = self._start_due_fetches()
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    def _start_due_fetches(self) -> List[asyncio.Task]:
+        """Start one tracked fetch task per due key and return without waiting.
+
+        A key whose previous fetch is still running is skipped, so a slow key
+        is fetched at its own pace instead of piling up duplicates.
         """
         now = time.time()
         due_keys: List[CacheKey] = []
 
         for key, subs in list(self._subscriptions.items()):
             if not subs:
+                continue
+
+            # Already being refreshed — by an earlier tick or by a reader.
+            running = self._poll_fetches.get(key)
+            if (running is not None and not running.done()) or key in self._inflight:
                 continue
 
             # Effective interval = min of all subscriber intervals
@@ -789,36 +816,44 @@ class ServerDataService:
 
             due_keys.append(key)
 
-        if not due_keys:
+        tasks: List[asyncio.Task] = []
+        for key in due_keys:
+            task = asyncio.create_task(self._rate_limited_fetch(key))
+            self._poll_fetches[key] = task
+            task.add_done_callback(lambda t, k=key: self._poll_fetch_done(k, t))
+            self._poll_fetch_tasks.track(task, f"{key.server}:{key.data_type.value}")
+            tasks.append(task)
+        return tasks
+
+    def _poll_fetch_done(self, key: CacheKey, task: asyncio.Task) -> None:
+        """Drop a settled poll fetch, unless a newer one already replaced it."""
+        if self._poll_fetches.get(key) is task:
+            del self._poll_fetches[key]
+
+    async def _rate_limited_fetch(self, key: CacheKey) -> None:
+        """Acquire the server's rate limit, then refresh one key."""
+        limiter = self._get_rate_limiter(key.server)
+        if not await limiter.acquire(timeout=0.5):
             return
-
-        # Acquire rate limits and fetch concurrently
-        async def _rate_limited_fetch(key: CacheKey):
-            limiter = self._get_rate_limiter(key.server)
-            if not await limiter.acquire(timeout=0.5):
-                return
-            try:
-                await self._fetch_and_cache(key)
-            except asyncio.CancelledError:
-                # ``except Exception`` never caught this: CancelledError is a
-                # BaseException. Ours — the poll task was cancelled and gather
-                # cancelled this child with it — must propagate so stop() really
-                # stops. A cancellation that came out of the shared fetch is not
-                # ours, and must not travel up through gather into _poll_loop,
-                # where it is indistinguishable from a shutdown.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    raise
-                logger.warning(
-                    "SDS: fetch for %s:%s was cancelled by something it awaited; "
-                    "skipping it this tick",
-                    key.server,
-                    key.data_type.value,
-                )
-            except Exception:
-                pass  # Error already recorded in _fetch_and_cache
-
-        await asyncio.gather(*[_rate_limited_fetch(k) for k in due_keys])
+        try:
+            await self._fetch_and_cache(key)
+        except asyncio.CancelledError:
+            # ``except Exception`` never caught this: CancelledError is a
+            # BaseException. Ours — stop() cancelled this task — must
+            # propagate so the task really finishes cancelled. A cancellation
+            # that came out of the shared fetch is not ours: it is logged and
+            # the key is simply retried on a later tick.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            logger.warning(
+                "SDS: fetch for %s:%s was cancelled by something it awaited; "
+                "skipping it this tick",
+                key.server,
+                key.data_type.value,
+            )
+        except Exception:
+            pass  # Error already recorded in _fetch_and_cache
 
     async def _fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache, coalescing concurrent fetches per key.
