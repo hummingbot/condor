@@ -43,7 +43,9 @@ class FakeClient:
         self.archived_bots = self
 
     async def get_bot_runs(self, **kwargs):
-        return self._runs
+        self.runs_kwargs = kwargs
+        offset, limit = kwargs.get("offset", 0), kwargs.get("limit")
+        return self._runs[offset : offset + limit]
 
     async def list_databases(self):
         self.list_calls += 1
@@ -61,7 +63,7 @@ class FakeClient:
         return []
 
 
-def _run_route(client, monkeypatch):
+def _run_route(client, monkeypatch, limit=100, offset=0):
     """Call the bot-runs route against ``client``, bypassing auth and config."""
 
     class FakeCM:
@@ -69,7 +71,9 @@ def _run_route(client, monkeypatch):
             return client
 
     monkeypatch.setattr(cp, "get_config_manager", lambda: FakeCM())
-    return asyncio.run(cp.get_bot_runs(name="srv", user=object()))
+    return asyncio.run(
+        cp.get_bot_runs(name="srv", limit=limit, offset=offset, user=object())
+    )
 
 
 ARCHIVED_DIR = "bots/archived/{n}/data/{n}.sqlite"
@@ -140,3 +144,37 @@ def test_the_listing_is_fetched_once_per_page_not_once_per_run(monkeypatch):
 
     assert client.list_calls == 1
     assert all(r.archive_db_path for r in resp.runs)
+
+
+# ── WR-05: a full page is not the whole history ──
+
+
+def _three_runs():
+    return [{"bot_name": f"bot-{n}", "id": n} for n in (3, 2, 1)]
+
+
+def test_a_page_that_is_not_the_last_says_so(monkeypatch):
+    client = FakeClient(_three_runs())
+
+    out = _run_route(client, monkeypatch, limit=2)
+
+    assert [r.bot_name for r in out.runs] == ["bot-3", "bot-2"]
+    assert out.total == 2, "the page length, never the probe row"
+    assert out.has_more is True
+    # Asked for one more than the page; the caller's offset is untouched.
+    assert client.runs_kwargs["limit"] == 3
+    assert client.runs_kwargs["offset"] == 0
+
+
+def test_the_last_page_says_there_is_nothing_older(monkeypatch):
+    out = _run_route(FakeClient(_three_runs()), monkeypatch, limit=2, offset=2)
+
+    assert [r.bot_name for r in out.runs] == ["bot-1"]
+    assert out.has_more is False
+
+
+def test_a_history_that_exactly_fills_the_page_has_no_more(monkeypatch):
+    out = _run_route(FakeClient(_three_runs()), monkeypatch, limit=3)
+
+    assert out.total == 3
+    assert out.has_more is False

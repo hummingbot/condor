@@ -177,7 +177,10 @@ async def get_bot_runs(
             strategy_name=strategy_name,
             run_status=run_status,
             deployment_status=deployment_status,
-            limit=limit,
+            # One more than the page: upstream reports no total (its ``total``
+            # is the page length), so the extra row is the only way to know
+            # whether another page exists (WR-05).
+            limit=limit + 1,
             offset=offset,
         )
 
@@ -214,10 +217,13 @@ async def get_bot_runs(
         raise upstream_error("Failed to fetch bot runs", e)
 
     runs_list = _extract_runs_list(result)
+    has_more = len(runs_list) > limit
+    runs_list = runs_list[:limit]
 
     return BotRunsResponse(
         runs=[_parse_bot_run(r, perf_by_bot, archive_paths) for r in runs_list],
         total=len(runs_list),
+        has_more=has_more,
     )
 
 
