@@ -35,6 +35,11 @@ from typing import Any
 
 from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
 from mcp_servers.hummingbot_api.hummingbot_client import trading_rules_cache
+from mcp_servers.hummingbot_api.middleware import (
+    describe_error,
+    is_outcome_unknown,
+    outcome_unknown_message,
+)
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -88,6 +93,107 @@ def _triple_barrier(
     return barrier
 
 
+#: What ``save_as_default`` may persist, per executor type: settings that are
+#: about HOW the user trades and stay true on the next pair. A saved default
+#: merges underneath every later create of that type, so anything about one
+#: trade — the pair, the side, an amount, a price, a ladder, a pool, a time
+#: limit, a level id — would silently reshape a different trade: a saved
+#: ``entry_price`` turned the next "market" entry on another pair into a limit
+#: at the old pair's price. Top-level keys, then the keys allowed inside
+#: ``triple_barrier_config``.
+_SAVEABLE_DEFAULTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "position_executor": (
+        frozenset({"leverage"}),
+        frozenset(
+            {
+                "stop_loss",
+                "take_profit",
+                "open_order_type",
+                "take_profit_order_type",
+                "stop_loss_order_type",
+                "time_limit_order_type",
+            }
+        ),
+    ),
+    "grid_executor": (
+        frozenset(
+            {
+                "leverage",
+                "min_spread_between_orders",
+                "max_open_orders",
+                "max_orders_per_batch",
+                "order_frequency",
+                "activation_bounds",
+                "safe_extra_spread",
+                "keep_position",
+                "coerce_tp_to_step",
+                "deduct_base_fees",
+            }
+        ),
+        frozenset({"take_profit", "open_order_type", "take_profit_order_type"}),
+    ),
+    "dca_executor": (
+        frozenset({"leverage", "mode", "take_profit", "stop_loss"}),
+        frozenset(),
+    ),
+    "order_executor": (frozenset({"leverage", "chaser_config"}), frozenset()),
+    "lp_executor": (
+        frozenset({"swap_provider", "keep_position", "extra_params"}),
+        frozenset(),
+    ),
+}
+
+
+def saveable_defaults(executor_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    """The slice of ``config`` that ``save_as_default`` is allowed to persist.
+
+    An unknown type saves nothing: the allowlist fails closed.
+    """
+    top_keys, barrier_keys = _SAVEABLE_DEFAULTS.get(
+        executor_type, (frozenset(), frozenset())
+    )
+    saved = {key: value for key, value in config.items() if key in top_keys}
+    barrier = config.get("triple_barrier_config")
+    if isinstance(barrier, dict):
+        kept = {key: value for key, value in barrier.items() if key in barrier_keys}
+        if kept:
+            saved["triple_barrier_config"] = kept
+    return saved
+
+
+def _flatten_defaults(values: dict[str, Any]) -> list[str]:
+    """``k=v`` pairs, one level deep (``triple_barrier_config.take_profit=…``)."""
+    pairs: list[str] = []
+    for key, value in values.items():
+        if isinstance(value, dict):
+            pairs += [
+                f"{key}.{inner}={inner_value}" for inner, inner_value in value.items()
+            ]
+        else:
+            pairs.append(f"{key}={value}")
+    return pairs
+
+
+def applied_defaults(config: dict[str, Any], merged: dict[str, Any]) -> list[str]:
+    """Every value in ``merged`` that came from a saved default, as ``k=v``.
+
+    The create result prints these. Without them a saved default is invisible:
+    the model reads back the arguments it passed and reports a strategy that is
+    not the one that was deployed.
+    """
+    applied: dict[str, Any] = {}
+    for key, value in merged.items():
+        if key in ("type", "controller_id"):
+            continue
+        if key not in config:
+            applied[key] = value
+        elif isinstance(value, dict) and isinstance(config[key], dict):
+            inner = {k: v for k, v in value.items() if k not in config[key]}
+            if inner:
+                applied[key] = inner
+    return _flatten_defaults(applied)
+
+
 def _amount(value: Any) -> float | None:
     """Read a config amount as a positive float, or ``None`` if it is not one.
 
@@ -102,6 +208,56 @@ def _amount(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _usd_amount(value: Any) -> float | None:
+    """The USD value of a ``'$100'``-style amount, or ``None`` if it is not one.
+
+    ``create_order_executor`` takes its amount in base currency OR as a
+    ``$``-prefixed USD value the backend converts at execution. ``_amount`` reads
+    the second form as "not a number", which made both preflights pass it by
+    default — the first example in the tool's own docstring was never checked
+    against the venue minimum or the balance.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("$"):
+        return None
+    return _amount(text[1:].strip())
+
+
+def _require_positive(name: str, value: Any, unit: str) -> None:
+    """Refuse a zero or negative money parameter, naming it.
+
+    The backend accepts these and the executor then either fails at start or —
+    for a negative size on some venues — is read as the opposite side.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or _amount(value) is None:
+        raise ValueError(f"{name} must be greater than 0 ({unit}), got {value!r}")
+
+
+def _require_stop_loss_fraction(value: float | None) -> None:
+    """Refuse a stop-loss that is not a fraction strictly between 0 and 1.
+
+    ``stop_loss=2`` meant as 2% is read as 200% — a stop that can never trigger —
+    and was accepted without a word.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not (0 < value < 1):
+        hint = (
+            f" For a {value:g}% stop pass {value / 100:g}."
+            if not isinstance(value, bool) and 1 <= value <= 100
+            else ""
+        )
+        raise ValueError(
+            "stop_loss is a decimal FRACTION of the entry price, strictly between "
+            f"0 and 1 (0.02 = 2%), got {value!r}. A value of 1 or more is a stop "
+            f"of 100% or more, which never triggers.{hint}"
+        )
 
 
 def usd(value: float) -> str:
@@ -157,6 +313,30 @@ async def _base_amount_violation(
     """Check a base-denominated amount (position, order) against both minimums."""
     amount = _amount(config.get("amount"))
     if amount is None:
+        usd_value = _usd_amount(config.get("amount"))
+        if usd_value is None:
+            return None
+        # A '$' amount IS its notional, so the notional minimum needs no price.
+        if min_notional is not None and usd_value < min_notional:
+            return (
+                f"Order notional {usd(usd_value)} is below {connector}'s minimum "
+                f"of {usd(min_notional)} for {pair}. Increase the amount to at "
+                f"least '${min_notional:g}'."
+            )
+        if min_order_size is None:
+            return None
+        price = await reference_price(client, connector, pair, config)
+        if price is None:
+            return None
+        base_amount = usd_value / price
+        if base_amount < min_order_size:
+            base = pair.split("-")[0]
+            return (
+                f"Order size {base_amount:.8g} {base} ({usd(usd_value)} at a price "
+                f"of {price:g}) is below {connector}'s minimum of "
+                f"{min_order_size:g} {base} for {pair}. Increase the amount to at "
+                f"least '${min_order_size * price:.8g}'."
+            )
         return None
 
     if min_order_size is not None and amount < min_order_size:
@@ -294,6 +474,18 @@ async def create_executor(
     # inside the config.
     merged_config.pop("controller_id", None)
 
+    # Named in every outcome below, refusals included: a preflight can refuse on
+    # a value the caller never passed, and that is unreadable without this line.
+    applied = applied_defaults(config, merged_config)
+    defaults_line = (
+        f"Applied saved defaults: {', '.join(applied)}\n"
+        "  (not passed in this call; pass the parameter to override, or edit "
+        "them with executor_defaults)\n"
+        if applied
+        else ""
+    )
+    defaults_note = f"\n\n{defaults_line}" if defaults_line else ""
+
     logger.info(
         "create_%s: controller_id=%r, account=%s, pair=%s",
         executor_type,
@@ -311,7 +503,9 @@ async def create_executor(
             "action": "create",
             "executor_type": executor_type,
             "error": violation,
-            "formatted_output": f"Error creating {executor_type}: {violation}",
+            "formatted_output": (
+                f"Error creating {executor_type}: {violation}{defaults_note}"
+            ),
         }
 
     shortfall = await balance_violation(client, executor_type, merged_config, account)
@@ -323,7 +517,9 @@ async def create_executor(
             "action": "create",
             "executor_type": executor_type,
             "error": shortfall,
-            "formatted_output": f"Error creating {executor_type}: {shortfall}",
+            "formatted_output": (
+                f"Error creating {executor_type}: {shortfall}{defaults_note}"
+            ),
         }
 
     try:
@@ -333,15 +529,40 @@ async def create_executor(
             controller_id=tag,
         )
     except Exception as exc:
+        if is_outcome_unknown(exc):
+            # The POST left this process and no answer came back. The executor
+            # may exist and may be trading; an "Error creating" here is what
+            # invites the retry that opens the position twice.
+            pair = merged_config.get("trading_pair")
+            error = outcome_unknown_message(
+                f"the {executor_type} create",
+                f"call list_executors(controller_ids=[{tag!r}], "
+                f"trading_pairs=[{pair!r}]) and look for a new {executor_type}",
+                exc,
+            )
+            logger.error("create_%s: outcome unknown (%r)", executor_type, exc)
+            return {
+                "action": "create",
+                "executor_type": executor_type,
+                "outcome_unknown": True,
+                "error": error,
+                "formatted_output": f"{error}{defaults_note}",
+            }
+        reason = describe_error(exc)
         return {
             "action": "create",
             "executor_type": executor_type,
-            "error": str(exc),
-            "formatted_output": f"Error creating {executor_type}: {exc}",
+            "error": reason,
+            "formatted_output": (
+                f"Error creating {executor_type}: {reason}{defaults_note}"
+            ),
         }
 
+    saved: dict[str, Any] = {}
     if save_as_default:
-        executor_preferences.update_defaults(executor_type, config)
+        saved = saveable_defaults(executor_type, config)
+        if saved:
+            executor_preferences.update_defaults(executor_type, saved)
 
     executor_id = result.get("executor_id") or result.get("id")
 
@@ -358,6 +579,7 @@ async def create_executor(
         f"Type: {executor_type}\n"
         f"Account: {account}\n"
         f"Controller: {tag}\n"
+        f"{defaults_line}"
     )
 
     if status == "TERMINATED" and close_type in _NEVER_STARTED_CLOSE_TYPES:
@@ -404,8 +626,18 @@ async def create_executor(
         )
 
     formatted = f"{state}\n\n{header}"
-    if save_as_default:
-        formatted += f"\nConfiguration saved as default for {executor_type}"
+    if save_as_default and saved:
+        formatted += (
+            f"\nSaved as default for {executor_type}: "
+            f"{', '.join(_flatten_defaults(saved))}. The pair, side, amounts, "
+            "prices and time limit of this call are never saved."
+        )
+    elif save_as_default:
+        formatted += (
+            f"\nNothing saved as default for {executor_type}: this call passed no "
+            "reusable setting (leverage, order types, spreads, keep_position). The "
+            "pair, side, amounts, prices and time limit are never saved."
+        )
 
     return {
         "action": "create",
@@ -417,7 +649,9 @@ async def create_executor(
         "close_type": close_type or None,
         "filled_amount_quote": filled,
         "config_used": merged_config,
-        "saved_as_default": save_as_default,
+        "applied_defaults": applied,
+        "saved_as_default": bool(saved),
+        "saved_defaults": saved,
         "result": result,
         "formatted_output": formatted,
     }
@@ -548,7 +782,20 @@ async def _required_spend(
     if executor_type in ("position_executor", "order_executor"):
         amount = _amount(config.get("amount"))
         if amount is None:
-            return None
+            usd_value = _usd_amount(config.get("amount"))
+            if usd_value is None:
+                return None
+            if buy:
+                # Spent in the quote currency, at face value.
+                return quote, usd_value, f"a {usd(usd_value)} buy"
+            price = await reference_price(client, connector, pair, config)
+            if price is None:
+                return None
+            return (
+                base,
+                usd_value / price,
+                f"a {usd(usd_value)} sell of {base} at {price:g}",
+            )
         if not buy:
             return base, amount, f"a {amount:g} {base} sell"
         price = await reference_price(client, connector, pair, config)
@@ -645,7 +892,14 @@ async def create_position_executor(
     controller_id: str | None = None,
     save_as_default: bool = False,
 ) -> dict[str, Any]:
-    """Open a directional position with triple-barrier exits."""
+    """Open a directional position with triple-barrier exits.
+
+    Raises ``ValueError`` on a size that is not positive, or a stop-loss that is
+    not a fraction: the backend accepts both.
+    """
+    _require_positive("amount", amount, "BASE currency")
+    _require_stop_loss_fraction(stop_loss)
+
     config = _compact(
         {
             "connector_name": connector_name,
@@ -717,6 +971,10 @@ async def create_grid_executor(
     the backend accepts an inverted grid and it simply never fills, so the invariant the
     guide states in prose is checked here where the caller can still fix it.
     """
+    _require_positive("total_amount_quote", total_amount_quote, "QUOTE currency")
+    _require_positive(
+        "min_order_amount_quote", min_order_amount_quote, "QUOTE currency"
+    )
     if side == 1 and not (limit_price < start_price < end_price):
         raise ValueError(
             "LONG grid (side=1) requires limit_price < start_price < end_price, got "
@@ -805,6 +1063,13 @@ async def create_dca_executor(
         )
     if not amounts_quote:
         raise ValueError("amounts_quote must contain at least one level")
+    for index, level in enumerate(amounts_quote, start=1):
+        _require_positive(
+            f"amounts_quote[{index - 1}] (level {index})", level, "QUOTE currency"
+        )
+    for index, level_price in enumerate(prices, start=1):
+        _require_positive(f"prices[{index - 1}] (level {index})", level_price, "price")
+    _require_stop_loss_fraction(stop_loss)
 
     config = _compact(
         {
@@ -864,6 +1129,12 @@ async def create_order_executor(
     with no price, or a LIMIT_CHASER with no chaser config, is rejected by the backend
     only after a round trip.
     """
+    if _amount(amount) is None and _usd_amount(amount) is None:
+        raise ValueError(
+            "amount must be a positive number in BASE currency such as '0.5', or a "
+            f"USD value written with a leading '$' such as '$100', got {amount!r}. "
+            "No thousands separators."
+        )
     if execution_strategy in ("LIMIT", "LIMIT_MAKER") and price is None:
         raise ValueError(f"execution_strategy={execution_strategy} requires a price")
     if execution_strategy == "LIMIT_CHASER" and (
@@ -933,6 +1204,9 @@ async def create_lp_executor(
         raise ValueError(
             f"lower_price must be below upper_price, got {lower_price} >= {upper_price}"
         )
+    for name, value in (("base_amount", base_amount), ("quote_amount", quote_amount)):
+        if value is not None and (isinstance(value, bool) or value < 0):
+            raise ValueError(f"{name} cannot be negative, got {value!r}")
     if not (base_amount or quote_amount):
         raise ValueError(
             "an LP position needs funding — give base_amount, quote_amount, or both"

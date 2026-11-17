@@ -126,3 +126,75 @@ def test_the_request_model_carries_no_secret_field():
     fields = GatewayConfigRequest.model_fields
     assert "private_key" not in fields
     assert "wallet_address" not in fields
+
+
+# ---------------------------------------------------------------------------
+# An address another tool takes is printed whole (MH-04)
+# ---------------------------------------------------------------------------
+
+_WALLET = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+
+
+def test_the_wallet_list_prints_the_address_a_wallet_address_parameter_takes():
+    from mcp_servers.hummingbot_api.formatters import format_gateway_config_result
+
+    text = format_gateway_config_result(
+        {
+            "resource_type": "wallets",
+            "action": "list",
+            "result": {"wallets": [{"chain": "solana", "address": _WALLET}]},
+        }
+    )
+
+    assert _WALLET in text
+    assert "..." not in text
+
+
+def _tokens(count, search=None):
+    from mcp_servers.hummingbot_api.formatters import format_gateway_config_result
+
+    tokens = [
+        {"symbol": f"T{i}", "decimals": 6, "address": f"{_MINT[:-4]}{i:04d}"}
+        for i in range(count)
+    ]
+    return format_gateway_config_result(
+        {
+            "resource_type": "tokens",
+            "action": "list",
+            "search": search,
+            "result": {"network_id": "solana-mainnet-beta", "tokens": tokens},
+        }
+    )
+
+
+def test_the_token_list_prints_whole_mint_addresses():
+    text = _tokens(1)
+
+    assert f"{_MINT[:-4]}0000" in text
+    assert "..." not in text
+
+
+def test_an_unfiltered_token_list_says_it_is_a_page_and_how_to_search():
+    """It used to stop at 20 rows with '... and N more tokens' and no way on."""
+    text = _tokens(120)
+
+    assert "Showing the first 50 of 120 tokens" in text
+    assert "search=" in text
+    assert "NOT missing from Gateway" in text
+    assert f"{_MINT[:-4]}0049" in text
+    assert f"{_MINT[:-4]}0050" not in text
+
+
+def test_a_token_search_shows_every_match():
+    text = _tokens(120, search="T")
+
+    assert f"{_MINT[:-4]}0119" in text
+    assert "Showing the first" not in text
+
+
+def test_a_token_search_with_no_match_does_not_read_as_an_empty_registry():
+    text = _tokens(0, search="UMBRA")
+
+    assert "No token matches 'UMBRA'" in text
+    assert "by its\naddress" in text or "by its address" in text

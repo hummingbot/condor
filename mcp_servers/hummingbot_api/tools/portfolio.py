@@ -17,6 +17,7 @@ from mcp_servers.hummingbot_api.formatters import (
     format_portfolio_as_table,
 )
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
+from mcp_servers.hummingbot_api.middleware import describe_error
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
@@ -479,4 +480,4 @@ async def get_portfolio_overview(
 
     except Exception as e:
         logger.error(f"Error in get_portfolio_overview: {str(e)}", exc_info=True)
-        raise ToolError(f"Failed to get portfolio overview: {str(e)}")
+        raise ToolError(f"Failed to get portfolio overview: {describe_error(e)}")

@@ -8,7 +8,32 @@ table creation, reducing code duplication across all formatters.
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .base import format_table_separator
+#: What sits between two cells. No padding and no dashed separator line: a
+#: padded table has to cut whatever is wider than its column, and the 120-300
+#: dashes under each header were tokens that said nothing.
+COLUMN_SEPARATOR = " | "
+
+#: Shown for a value the row does not carry, so an empty cell cannot be misread
+#: as a shifted column.
+EMPTY_CELL = "-"
+
+
+def cell(value: Any) -> str:
+    """One table cell: the value whole, with the separator kept out of it."""
+    text = "" if value is None else str(value)
+    text = text.replace("\n", " ").replace(" | ", " / ").strip()
+    return text or EMPTY_CELL
+
+
+def render_table(headers: list[str], rows: list[list[Any]]) -> str:
+    """Render delimiter-separated rows under a header line.
+
+    The one renderer every result table goes through. Nothing is truncated: a
+    cell is an identifier or a number the next tool call is built from.
+    """
+    lines = [COLUMN_SEPARATOR.join(headers)]
+    lines += [COLUMN_SEPARATOR.join(cell(value) for value in row) for row in rows]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -20,8 +45,9 @@ class ColumnDef:
         name: Column header name displayed in the table
         key: Field key(s) to extract from data. Can be a single string or a list of
              strings for fallback keys (tries each in order until one is found)
-        width: Column width in characters
-        align: Text alignment ("left", "right", or "center")
+        width: Unused. Kept so existing column definitions still construct;
+             cells are neither padded nor truncated
+        align: Unused, for the same reason
         formatter: Optional callable to format the value. Receives the raw value
                    and should return a string
         default: Default value if the key is not found in the data
@@ -89,39 +115,19 @@ class ColumnDef:
 
     def format_cell(self, item: dict[str, Any]) -> str:
         """
-        Format value with proper width and alignment.
+        The cell for this column: the formatted value, whole.
 
-        Args:
-            item: Dictionary to extract value from
-
-        Returns:
-            Padded string with correct width and alignment
+        ``width`` and ``align`` are no longer applied — see :func:`render_table`.
         """
-        value = self.format_value(item)
-
-        # Truncate if too long
-        if len(value) > self.width:
-            value = (
-                value[: self.width - 3] + "..."
-                if self.width > 3
-                else value[: self.width]
-            )
-
-        # Apply alignment
-        if self.align == "right":
-            return value.rjust(self.width)
-        elif self.align == "center":
-            return value.center(self.width)
-        else:  # left
-            return value.ljust(self.width)
+        return cell(self.format_value(item))
 
 
 class TableBuilder:
     """
     Generic table builder for consistent table formatting.
 
-    Provides a standardized way to create ASCII tables with configurable columns,
-    headers, and formatting options.
+    Provides a standardized way to create delimiter-separated tables from
+    column definitions. Rows are rendered by :func:`render_table`.
 
     Example:
         >>> from mcp_servers.hummingbot_api.formatters.base import format_number
@@ -137,17 +143,14 @@ class TableBuilder:
         ...     {"id": "def456", "price": 789.01, "status": "pending"},
         ... ]
         >>> print(builder.build(data))
-        ID           | Price      | Status
-        -----------------------------------------
-        abc123       |    1234.56 | active
-        def456       |     789.01 | pending
+        ID | Price | Status
+        abc123 | 1234.56 | active
+        def456 | 789.01 | pending
     """
 
     def __init__(
         self,
         columns: list[ColumnDef],
-        separator_char: str = "-",
-        column_separator: str = " | ",
         empty_message: str = "No data found.",
     ):
         """
@@ -155,35 +158,10 @@ class TableBuilder:
 
         Args:
             columns: List of column definitions
-            separator_char: Character used for the separator line
-            column_separator: String used between columns
             empty_message: Message to return if data is empty
         """
         self.columns = columns
-        self.separator_char = separator_char
-        self.column_separator = column_separator
         self.empty_message = empty_message
-
-    def _calculate_width(self) -> int:
-        """Calculate total table width including separators."""
-        column_widths = sum(col.width for col in self.columns)
-        separator_widths = len(self.column_separator) * (len(self.columns) - 1)
-        return column_widths + separator_widths
-
-    def _build_header(self) -> str:
-        """Build the header row."""
-        cells = []
-        for col in self.columns:
-            header = col.name
-            if len(header) > col.width:
-                header = header[: col.width]
-            cells.append(header.ljust(col.width))
-        return self.column_separator.join(cells)
-
-    def _build_row(self, item: dict[str, Any]) -> str:
-        """Build a single data row."""
-        cells = [col.format_cell(item) for col in self.columns]
-        return self.column_separator.join(cells)
 
     def build(
         self, data: list[dict[str, Any]], empty_message: str | None = None
@@ -201,11 +179,10 @@ class TableBuilder:
         if not data:
             return empty_message or self.empty_message
 
-        header = self._build_header()
-        separator = format_table_separator(self._calculate_width(), self.separator_char)
-        rows = [self._build_row(item) for item in data]
-
-        return f"{header}\n{separator}\n" + "\n".join(rows)
+        return render_table(
+            [col.name for col in self.columns],
+            [[col.format_value(item) for col in self.columns] for item in data],
+        )
 
     def build_with_title(
         self, data: list[dict[str, Any]], title: str, empty_message: str | None = None

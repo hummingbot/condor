@@ -11,16 +11,23 @@ positions[] breakdown, and positions_owned lists all of a wallet's positions. Fu
 (raydium, uniswap) ignore position_address and have no enumerable positions.
 """
 
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.middleware import sent_write
 from mcp_servers.hummingbot_api.schemas import AMMRequest
+from mcp_servers.hummingbot_api.tools._args import dec as _dec
+from mcp_servers.hummingbot_api.tools._args import opt_dec as _opt_dec
 
 SUPPORTED_CONNECTORS = {"meteora", "raydium", "uniswap"}
 # Non-fungible-LP (NFT position) connectors — position-addressed and enumerable.
 NFT_POSITION_CONNECTORS = {"meteora"}
+
+
+#: Actions that sign a transaction. A request for one of these that was sent and
+#: never answered is OUTCOME UNKNOWN, not a failure (see ``sent_write``).
+WRITE_ACTIONS = frozenset({"add_liquidity", "remove_liquidity", "create_pool"})
 
 
 def _guide() -> str:
@@ -30,23 +37,23 @@ def _guide() -> str:
     raise ToolError("AMM guide not found (guides/gateway_amm.md)")
 
 
-def _dec(value: str | None, name: str) -> Decimal:
-    if value is None:
-        raise ToolError(f"{name} is required for this action")
-    try:
-        return Decimal(str(value))
-    except Exception as exc:
-        raise ToolError(f"{name} must be a number, got {value!r}") from exc
-
-
-def _opt_dec(value: str | None) -> Decimal | None:
-    return None if value is None else Decimal(str(value))
-
-
 def _require(request: AMMRequest, *fields: str) -> None:
     for f in fields:
         if getattr(request, f) is None:
             raise ToolError(f"{f} is required for the '{request.action}' action")
+
+
+def _amm_check(connector: str, network: str, pool_address: str | None) -> str:
+    if pool_address:
+        return (
+            f"call manage_amm(action='position_info', connector={connector!r}, "
+            f"network={network!r}, pool_address={pool_address!r}) and compare the "
+            "position with what it held before"
+        )
+    return (
+        "read the wallet balance with get_portfolio_overview and compare it with "
+        "what it held before"
+    )
 
 
 async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
@@ -109,21 +116,27 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
             pool_address=request.pool_address,
             base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
             quote_token_amount=_dec(request.quote_token_amount, "quote_token_amount"),
-            slippage_pct=_opt_dec(request.slippage_pct),
+            slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
         )
 
     elif action == "add_liquidity":
         _require(request, "pool_address", "base_token_amount", "quote_token_amount")
         # Meteora: position_address optional (omit = new position). Fungible-LP: ignored.
-        result = await ga.add_liquidity(
-            connector=connector,
-            network=net,
-            pool_address=request.pool_address,
-            base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
-            quote_token_amount=_dec(request.quote_token_amount, "quote_token_amount"),
-            slippage_pct=_opt_dec(request.slippage_pct),
-            wallet_address=request.wallet_address,
-            position_address=request.position_address,
+        result = await sent_write(
+            ga.add_liquidity(
+                connector=connector,
+                network=net,
+                pool_address=request.pool_address,
+                base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
+                quote_token_amount=_dec(
+                    request.quote_token_amount, "quote_token_amount"
+                ),
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
+                wallet_address=request.wallet_address,
+                position_address=request.position_address,
+            ),
+            what=f"the {connector} {action}",
+            check=_amm_check(connector, net, request.pool_address),
         )
 
     elif action == "remove_liquidity":
@@ -134,16 +147,20 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
                 f"position_address is required for {connector} remove_liquidity: DAMM v2 positions are NFTs "
                 "and a wallet may hold several per pool. List them with position_info or positions_owned."
             )
-        result = await ga.remove_liquidity(
-            connector=connector,
-            network=net,
-            pool_address=request.pool_address,
-            percentage_to_remove=_dec(
-                request.percentage_to_remove, "percentage_to_remove"
+        result = await sent_write(
+            ga.remove_liquidity(
+                connector=connector,
+                network=net,
+                pool_address=request.pool_address,
+                percentage_to_remove=_dec(
+                    request.percentage_to_remove, "percentage_to_remove"
+                ),
+                position_address=request.position_address,
+                slippage_pct=_opt_dec(request.slippage_pct, "slippage_pct"),
+                wallet_address=request.wallet_address,
             ),
-            position_address=request.position_address,
-            slippage_pct=_opt_dec(request.slippage_pct),
-            wallet_address=request.wallet_address,
+            what=f"the {connector} {action}",
+            check=_amm_check(connector, net, request.pool_address),
         )
 
     elif action == "create_pool":
@@ -156,16 +173,22 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
                 "are created against a config account that fixes the fee schedule). Discover configs via "
                 "the Meteora app/SDK; avoid token-launch configs whose base fee starts near 99%."
             )
-        result = await ga.create_pool(
-            connector=connector,
-            network=net,
-            base_token=request.base_token,
-            quote_token=request.quote_token,
-            base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
-            quote_token_amount=_opt_dec(request.quote_token_amount),
-            initial_price=_opt_dec(request.initial_price),
-            wallet_address=request.wallet_address,
-            extra_params=request.extra_params,
+        result = await sent_write(
+            ga.create_pool(
+                connector=connector,
+                network=net,
+                base_token=request.base_token,
+                quote_token=request.quote_token,
+                base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
+                quote_token_amount=_opt_dec(
+                    request.quote_token_amount, "quote_token_amount"
+                ),
+                initial_price=_opt_dec(request.initial_price, "initial_price"),
+                wallet_address=request.wallet_address,
+                extra_params=request.extra_params,
+            ),
+            what=f"the {connector} {action}",
+            check=_amm_check(connector, net, request.pool_address),
         )
 
     else:

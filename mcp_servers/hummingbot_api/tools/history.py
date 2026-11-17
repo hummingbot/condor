@@ -12,7 +12,10 @@ from typing import Any, Literal
 
 from condor.fetchers._pagination import next_cursor
 from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.formatters.base import format_exact, get_field
+from mcp_servers.hummingbot_api.formatters.table_builder import render_table
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
+from mcp_servers.hummingbot_api.middleware import describe_error
 
 from . import gateway_clmm as gateway_clmm_tools
 from . import trading as trading_tools
@@ -86,6 +89,44 @@ def _reject_unsupported_filters(data_type: str, **filters: Any) -> None:
     )
 
 
+def _reject_multi_value_clmm_filters(**filters: list[str] | None) -> None:
+    """Refuse a CLMM search that names more than one connector or pair.
+
+    ``gateway_clmm.search_positions`` filters on ONE connector and ONE pair.
+    Two of either used to set the filter to ``None`` and return every position
+    — an unfiltered answer wearing a filtered question — where the rest of this
+    module refuses rather than silently ignores.
+    """
+    for name, values in filters.items():
+        if values and len(values) > 1:
+            raise ToolError(
+                f"search_history(data_type='clmm_positions') can filter by only "
+                f"one of {name} per call, got {len(values)} ({', '.join(values)}): "
+                "the filter would be silently dropped and every position returned. "
+                f"Call once per value, or omit {name} to list them all."
+            )
+
+
+#: Addresses whole and amounts exact: the rows are what a close, a fee collect
+#: or an orphan reconciliation is built from.
+CLMM_POSITION_COLUMNS = [
+    "connector",
+    "network",
+    "pair",
+    "status",
+    "lower_price",
+    "upper_price",
+    "base_amount",
+    "quote_amount",
+    "base_fees_collected",
+    "quote_fees_collected",
+    "position_address",
+    "pool_address",
+    "created",
+    "closed",
+]
+
+
 async def search_history(
     client: HummingbotClient,
     data_type: Literal["orders", "perp_positions", "clmm_positions"],
@@ -153,6 +194,10 @@ async def search_history(
         offset=offset,
         cursor=cursor,
     )
+    if data_type == "clmm_positions":
+        _reject_multi_value_clmm_filters(
+            connector_names=connector_names, trading_pairs=trading_pairs
+        )
 
     try:
         # ============================================
@@ -237,8 +282,9 @@ async def search_history(
         # ============================================
         elif data_type == "clmm_positions":
             # Build search parameters for CLMM positions
+            page_size = max(1, min(limit, 1000))
             search_params = {
-                "limit": min(limit, 1000),
+                "limit": page_size,
                 "offset": offset,
                 "refresh": False,  # Don't refresh from blockchain for historical search
             }
@@ -248,14 +294,11 @@ async def search_history(
                 search_params["network"] = network
             if wallet_address:
                 search_params["wallet_address"] = wallet_address
+            # Exactly one of each, or none: more than one was refused above.
             if connector_names:
-                search_params["connector"] = (
-                    connector_names[0] if len(connector_names) == 1 else None
-                )
+                search_params["connector"] = connector_names[0]
             if trading_pairs:
-                search_params["trading_pair"] = (
-                    trading_pairs[0] if len(trading_pairs) == 1 else None
-                )
+                search_params["trading_pair"] = trading_pairs[0]
             if status:
                 search_params["status"] = status
             if position_addresses:
@@ -272,45 +315,60 @@ async def search_history(
                     "formatted_output": "No CLMM positions found",
                 }
 
-            positions = result.get("data", [])
+            positions = [
+                pos for pos in (result.get("data") or []) if isinstance(pos, dict)
+            ]
             total_count = len(positions)
 
             # Format CLMM positions as table
             if positions:
-                table_lines = ["CLMM LP Positions History", "=" * 150, ""]
-                table_lines.append(
-                    f"{'Connector':<10} | {'Network':<20} | {'Pair':<15} | {'Lower':<10} | {'Upper':<10} | "
-                    f"{'Status':<8} | {'Created':<20} | {'Closed':<20}"
-                )
-                table_lines.append("-" * 150)
+                rows = [
+                    [
+                        get_field(pos, "connector", default=None),
+                        get_field(pos, "network", default=None),
+                        get_field(pos, "trading_pair", default=None),
+                        get_field(pos, "status", default=None),
+                        format_exact(get_field(pos, "lower_price", default=None)),
+                        format_exact(get_field(pos, "upper_price", default=None)),
+                        format_exact(get_field(pos, "base_token_amount", default=None)),
+                        format_exact(
+                            get_field(pos, "quote_token_amount", default=None)
+                        ),
+                        format_exact(
+                            get_field(pos, "base_fee_collected", default=None)
+                        ),
+                        format_exact(
+                            get_field(pos, "quote_fee_collected", default=None)
+                        ),
+                        get_field(pos, "position_address", default=None),
+                        get_field(pos, "pool_address", default=None),
+                        get_field(pos, "created_at", default=None),
+                        get_field(pos, "closed_at", default=None),
+                    ]
+                    for pos in positions
+                ]
+                table_lines = [
+                    "CLMM LP Positions History",
+                    "",
+                    render_table(CLMM_POSITION_COLUMNS, rows),
+                ]
 
-                for pos in positions[:limit]:
-                    connector = pos.get("connector", "N/A")[:10]
-                    network = pos.get("network", "N/A")[:20]
-                    pair = pos.get("trading_pair", "N/A")[:15]
-                    lower = f"{float(pos.get('lower_price', 0)):.4f}"[:10]
-                    upper = f"{float(pos.get('upper_price', 0)):.4f}"[:10]
-                    status_val = pos.get("status", "N/A")[:8]
-                    created = pos.get("created_at", "N/A")[:20]
-                    closed = (
-                        pos.get("closed_at", "N/A")[:20]
-                        if pos.get("closed_at")
-                        else "-"
-                    )
-
+                # The backend was asked for at most `page_size` rows, so a full
+                # page is the only signal that more exist: the old test
+                # (`len(rows) > limit`) could never be true, and a full first
+                # page read as the whole history.
+                if total_count >= page_size:
                     table_lines.append(
-                        f"{connector:<10} | {network:<20} | {pair:<15} | {lower:<10} | {upper:<10} | "
-                        f"{status_val:<8} | {created:<20} | {closed:<20}"
-                    )
-
-                if total_count > limit:
-                    table_lines.append(
-                        f"\n... and {total_count - limit} more positions (use offset={offset + limit} to see more)"
+                        f"\n... this page is full ({total_count} rows), so there "
+                        f"may be more: use offset={offset + total_count} to see "
+                        "the next page."
                     )
 
                 formatted_output = "\n".join(table_lines)
             else:
                 formatted_output = "No CLMM positions found"
+                if offset:
+                    formatted_output += f" at offset={offset} (the end of the list)"
 
             return {
                 "data_type": "clmm_positions",
@@ -329,4 +387,4 @@ async def search_history(
 
     except Exception as e:
         logger.error(f"Error in search_history: {str(e)}", exc_info=True)
-        raise Exception(f"Failed to search history: {str(e)}")
+        raise Exception(f"Failed to search history: {describe_error(e)}")

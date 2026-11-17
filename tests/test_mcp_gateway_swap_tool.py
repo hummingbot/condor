@@ -198,3 +198,100 @@ def test_an_unset_slippage_stays_unset_on_the_request_model():
     """None is the wire signal for 'omit slippage_pct'; '0' is a real value."""
     assert GatewaySwapRequest(action="quote").slippage_pct is None
     assert GatewaySwapRequest(action="quote", slippage_pct="0").slippage_pct == "0"
+
+
+# ---------------------------------------------------------------------------
+# A hash another tool needs is never shortened (MH-04)
+# ---------------------------------------------------------------------------
+
+_SIGNATURE = (
+    "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+    "5Q9hVn3mK2pLwXyZ4rT8uB6cD1eF0gHiJkMnPqRsTuVw"
+)
+
+
+def _search_output(monkeypatch, rows):
+    import types
+    from unittest.mock import patch
+
+    import mcp_servers.hummingbot_api.server as server
+    from condor import swap_watch
+
+    swap_watch.reset_watch()
+    monkeypatch.setattr(swap_watch.time, "time", lambda: 1_000_000.0)
+
+    class _Router:
+        async def search_swaps(self, **kwargs):
+            return {"data": rows}
+
+    async def _get_client():
+        return types.SimpleNamespace(gateway_swap=_Router())
+
+    try:
+        with patch.object(server.hummingbot_client, "get_client", _get_client):
+            return asyncio.run(server.search_swaps())
+    finally:
+        swap_watch.reset_watch()
+
+
+def test_search_swaps_prints_the_whole_transaction_hash(monkeypatch):
+    """`get_swap_status` and `resolve_swap` take the hash, and their docstrings
+    send the caller here for it; `7xKXtg2C...osgAsU` cannot be passed on."""
+    output = _search_output(
+        monkeypatch,
+        [
+            {
+                "transaction_hash": _SIGNATURE,
+                "status": "CONFIRMED",
+                "connector": "jupiter/router",
+                "network": "solana-mainnet-beta",
+                "trading_pair": "SOL-USDC",
+                "side": "SELL",
+                "timestamp": 999_000,
+            }
+        ],
+    )
+
+    assert _SIGNATURE in output
+    assert "..." not in output
+
+
+def test_the_unverifiable_alert_carries_the_hash_resolve_swap_needs(monkeypatch):
+    output = _search_output(
+        monkeypatch,
+        [
+            {
+                "transaction_hash": _SIGNATURE,
+                "status": "SUBMITTED",
+                "connector": "jupiter/router",
+                "network": "solana-mainnet-beta",
+                "trading_pair": "SOL-USDC",
+                "timestamp": 1_000_000 - 4000,
+            }
+        ],
+    )
+
+    alert = output.split("Unverifiable swaps", 1)[1]
+    assert f"Swap {_SIGNATURE} SOL-USDC" in alert
+    assert "…" not in alert
+
+
+def test_the_dashboard_alert_keeps_its_short_hash():
+    """Only the agent path asks for the whole hash; the card stays compact."""
+    from condor.swap_watch import describe_alert
+
+    row = {"transaction_hash": _SIGNATURE, "unverifiable_for": "1h 6m"}
+
+    assert _SIGNATURE not in describe_alert(row)
+    assert _SIGNATURE in describe_alert(row, full_hash=True)
+
+
+def test_a_resolve_answer_names_the_whole_hash():
+    from mcp_servers.hummingbot_api.formatters import format_gateway_swap_result
+
+    for supported in (True, False):
+        text = format_gateway_swap_result(
+            "resolve",
+            {"transaction_hash": _SIGNATURE, "supported": supported, "result": {}},
+        )
+        assert _SIGNATURE in text

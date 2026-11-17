@@ -204,3 +204,107 @@ def test_the_tool_signature_offers_a_cursor():
     params = inspect.signature(hb_server.search_history).parameters
     assert "cursor" in params
     assert params["cursor"].default is None
+
+
+# ---------------------------------------------------------------------------
+# clmm_positions: a full page says there may be more (MH-12)
+# ---------------------------------------------------------------------------
+
+POSITION_ADDRESS = "H4vD69DsraHjHyKvRwRPHVGe2aJkvAUaNK5tMif2CiNw"
+POOL_ADDRESS = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"
+
+
+def _clmm_row(**overrides):
+    row = {
+        "connector": "pancakeswap-sol",
+        "network": "solana-mainnet-beta",
+        "trading_pair": "SOL-USDC",
+        "status": "CLOSED",
+        "lower_price": "130.500000000000000000",
+        "upper_price": "170.250000000000000000",
+        "base_token_amount": "0.115990048000000000",
+        "quote_token_amount": "25.5",
+        "base_fee_collected": "0.000012",
+        "quote_fee_collected": "0.0421",
+        "position_address": POSITION_ADDRESS,
+        "pool_address": POOL_ADDRESS,
+        "created_at": "2026-07-01T10:00:00.123456+00:00",
+        "closed_at": "2026-07-02T11:30:00.654321+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+def _clmm_search(monkeypatch, rows, **kwargs):
+    calls = []
+
+    class _Clmm:
+        async def search_positions(self, **params):
+            calls.append(params)
+            return {"data": rows}
+
+    class _Client:
+        gateway_clmm = _Clmm()
+
+    async def fake_get_client():
+        return _Client()
+
+    monkeypatch.setattr(hb_server.hummingbot_client, "get_client", fake_get_client)
+    output = asyncio.run(hb_server.search_history(data_type="clmm_positions", **kwargs))
+    return output, calls
+
+
+def test_a_full_clmm_page_prints_the_next_offset(monkeypatch):
+    """The backend is asked for at most `limit` rows, so `len(rows) > limit`
+    could never fire and a full first page read as the whole history."""
+    output, _calls = _clmm_search(
+        monkeypatch, [_clmm_row() for _ in range(3)], limit=3, offset=6
+    )
+
+    assert "use offset=9" in output
+
+
+def test_a_short_clmm_page_is_the_end_and_says_nothing_more(monkeypatch):
+    output, _calls = _clmm_search(monkeypatch, [_clmm_row() for _ in range(2)], limit=3)
+
+    assert "offset=" not in output
+
+
+def test_paging_past_the_end_reads_as_the_end(monkeypatch):
+    output, _calls = _clmm_search(monkeypatch, [], limit=3, offset=9)
+
+    assert "No CLMM positions found at offset=9" in output
+
+
+def test_a_clmm_row_carries_whole_addresses_and_exact_amounts(monkeypatch):
+    output, _calls = _clmm_search(monkeypatch, [_clmm_row()])
+
+    assert POSITION_ADDRESS in output
+    assert POOL_ADDRESS in output
+    assert "pancakeswap-sol" in output, "it was cut to 10 characters"
+    assert "0.115990048" in output
+    assert "130.5 | 170.25" in output
+    assert "0.0421" in output
+    assert "2026-07-02T11:30:00.654321+00:00" in output
+
+
+def test_a_null_field_is_one_empty_cell_not_a_failed_search(monkeypatch):
+    """`pos.get("connector", "N/A")[:10]` raised on an explicit null, turning one
+    bad row into "'NoneType' object is not subscriptable" for the whole page."""
+    output, _calls = _clmm_search(
+        monkeypatch,
+        [
+            _clmm_row(
+                connector=None,
+                lower_price=None,
+                upper_price=None,
+                status=None,
+                created_at=None,
+                closed_at=None,
+            ),
+            _clmm_row(),
+        ],
+    )
+
+    assert POSITION_ADDRESS in output
+    assert len([line for line in output.splitlines() if POOL_ADDRESS in line]) == 2

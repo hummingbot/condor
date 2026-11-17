@@ -8,16 +8,25 @@ Handles DEX trading operations via Hummingbot Gateway:
 """
 
 import logging
-from decimal import Decimal
 from typing import Any
 
 from condor.swap_watch import SwapResolveUnsupported
 from condor.swap_watch import resolve as resolve_stuck_swap
 from condor.swap_watch import watch
 from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.middleware import describe_error, sent_write
 from mcp_servers.hummingbot_api.schemas import GatewaySwapRequest
+from mcp_servers.hummingbot_api.tools._args import dec, opt_dec
 
 logger = logging.getLogger("hummingbot-mcp")
+
+
+#: The read that settles a swap whose submit was never answered.
+_SWAP_CHECK = (
+    "call search_swaps(trading_pair={pair!r}) and look for a new row (a swap "
+    "still SUBMITTED counts: it was signed), and read the wallet balance with "
+    "get_portfolio_overview"
+)
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:
@@ -95,13 +104,9 @@ async def manage_gateway_swaps(
             network=request.network,
             trading_pair=request.trading_pair,
             side=request.side,
-            amount=Decimal(request.amount),
+            amount=dec(request.amount, "amount"),
             # None -> SDK omits it and the connector's configured slippage applies
-            slippage_pct=(
-                Decimal(request.slippage_pct)
-                if request.slippage_pct is not None
-                else None
-            ),
+            slippage_pct=opt_dec(request.slippage_pct, "slippage_pct"),
             extra_params=request.extra_params,
         )
 
@@ -135,20 +140,20 @@ async def manage_gateway_swaps(
                 f"Invalid trading_pair format. Expected 'BASE-QUOTE', got '{request.trading_pair}'"
             )
 
-        result = await client.gateway_swap.execute_swap(
-            connector=request.connector,
-            network=request.network,
-            trading_pair=request.trading_pair,
-            side=request.side,
-            amount=Decimal(request.amount),
-            # None -> SDK omits it and the connector's configured slippage applies
-            slippage_pct=(
-                Decimal(request.slippage_pct)
-                if request.slippage_pct is not None
-                else None
+        result = await sent_write(
+            client.gateway_swap.execute_swap(
+                connector=request.connector,
+                network=request.network,
+                trading_pair=request.trading_pair,
+                side=request.side,
+                amount=dec(request.amount, "amount"),
+                # None -> SDK omits it and the connector's configured slippage applies
+                slippage_pct=opt_dec(request.slippage_pct, "slippage_pct"),
+                wallet_address=request.wallet_address,
+                extra_params=request.extra_params,
             ),
-            wallet_address=request.wallet_address,
-            extra_params=request.extra_params,
+            what=f"the {request.side} swap of {request.amount} on {request.trading_pair}",
+            check=_SWAP_CHECK.format(pair=request.trading_pair),
         )
 
         return {
@@ -181,14 +186,18 @@ async def manage_gateway_swaps(
                 "filed under the pair and size it was for."
             )
 
-        result = await client.gateway_swap.execute_quote(
-            connector=request.connector,
-            network=request.network,
-            quote_id=request.quote_id,
-            trading_pair=request.trading_pair,
-            side=request.side,
-            amount=Decimal(request.amount),
-            wallet_address=request.wallet_address,
+        result = await sent_write(
+            client.gateway_swap.execute_quote(
+                connector=request.connector,
+                network=request.network,
+                quote_id=request.quote_id,
+                trading_pair=request.trading_pair,
+                side=request.side,
+                amount=dec(request.amount, "amount"),
+                wallet_address=request.wallet_address,
+            ),
+            what=f"the swap for quote {request.quote_id}",
+            check=_SWAP_CHECK.format(pair=request.trading_pair),
         )
 
         return {
@@ -226,7 +235,7 @@ async def manage_gateway_swaps(
         condition = book.condition(row)
         if condition is not None:
             payload["condition"] = condition
-            payload["alerts"] = book.alerts([row])
+            payload["alerts"] = book.alerts([row], full_hash=True)
         return payload
 
     # ============================================
@@ -261,7 +270,7 @@ async def manage_gateway_swaps(
         book = watch()
         rows = _rows(result)
         book.observe(rows)
-        alerts = book.alerts(rows)
+        alerts = book.alerts(rows, full_hash=True)
 
         payload: dict[str, Any] = {
             "action": "search",
@@ -301,7 +310,7 @@ async def manage_gateway_swaps(
                 "supported": False,
                 "detail": (
                     f"this Hummingbot API server does not offer a resolve route "
-                    f"for swaps ({exc}). Nothing was changed. The swap is still "
+                    f"for swaps ({describe_error(exc)}). Nothing was changed. The swap is still "
                     f"SUBMITTED and unverifiable; upgrade the API server, or read "
                     f"the explorer and act on what the chain shows."
                 ),
