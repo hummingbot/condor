@@ -10,6 +10,7 @@ jobs:
   backend-lint:
     name: Backend Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -22,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --locked
 
       - name: Check formatting with black
         run: uv run black --check .
@@ -33,6 +34,7 @@ jobs:
   backend-import-check:
     name: Backend Import Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -45,7 +47,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Verify main modules import without errors
         run: |
@@ -59,6 +61,7 @@ jobs:
   backend-tests:
     name: Backend Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -71,7 +74,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --locked
 
       - name: Run tests
         run: uv run pytest --tb=short -q
@@ -79,6 +82,7 @@ jobs:
   frontend-build:
     name: Frontend Build & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -98,6 +102,9 @@ jobs:
       # 76 that predate this workflow -- see frontend/scripts/lint-baseline.mjs.
       - name: Lint
         run: npm run lint:ci
+
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build
