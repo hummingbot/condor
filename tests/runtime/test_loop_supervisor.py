@@ -597,6 +597,111 @@ def test_stop_all_keeps_the_stopped_a_winddown_wrote(tmp_path):
     assert read_status(winding_dir)["state"] == LoopState.STOPPED
 
 
+def _sleeping_engines(tmp_path, supervisor, delays):
+    """One fake engine per delay; each ``stop()`` sleeps, then ends its run."""
+    engines = []
+    for i, delay in enumerate(delays, start=1):
+        d = tmp_path / f"s{i}"
+        d.mkdir()
+        engine = _fake_engine(d, num=i)
+
+        async def _stop(engine=engine, delay=delay):
+            await asyncio.sleep(delay)
+            supervisor.unregister(engine.agent_id, LoopState.STOPPED)
+            return True
+
+        engine.stop = _stop
+        supervisor.register(engine)
+        engines.append(engine)
+    return engines
+
+
+def test_stop_all_stops_engines_concurrently(tmp_path):
+    """AG1-12: three 0.3s stops take about one stop, not three."""
+    import time
+
+    supervisor = LoopSupervisor()
+    engines = _sleeping_engines(tmp_path, supervisor, [0.3, 0.3, 0.3])
+
+    started = time.monotonic()
+    asyncio.run(supervisor.stop_all())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.7, f"stops ran serially ({elapsed:.2f}s)"
+    assert supervisor.all() == {}
+    for engine in engines:
+        assert read_status(engine.session_dir)["state"] == LoopState.SUSPENDED
+
+
+def test_stop_all_one_failing_stop_does_not_cost_the_others(tmp_path):
+    supervisor = LoopSupervisor()
+    good, bad = _sleeping_engines(tmp_path, supervisor, [0.0, 0.0])
+
+    async def _boom():
+        raise RuntimeError("stop blew up")
+
+    bad.stop = _boom
+
+    asyncio.run(supervisor.stop_all())
+
+    assert read_status(good.session_dir)["state"] == LoopState.SUSPENDED
+    # Never stopped, so never SUSPENDED: it keeps the live state it registered
+    # with, which the next boot reconciles as interrupted.
+    assert read_status(bad.session_dir)["state"] == LoopState.RUNNING
+
+
+def test_stop_all_gives_up_on_a_straggler_at_the_deadline(tmp_path, monkeypatch):
+    """A stop that hangs is cancelled and logged; it neither holds the exit
+    nor is recorded SUSPENDED for a teardown that did not finish."""
+    import time
+
+    from condor.runtime import loops as loops_module
+
+    monkeypatch.setattr(loops_module, "STOP_ALL_DEADLINE_SEC", 0.2)
+    supervisor = LoopSupervisor()
+    quick, hung = _sleeping_engines(tmp_path, supervisor, [0.0, 30.0])
+
+    started = time.monotonic()
+    asyncio.run(supervisor.stop_all())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5
+    assert read_status(quick.session_dir)["state"] == LoopState.SUSPENDED
+    assert read_status(hung.session_dir)["state"] == LoopState.RUNNING
+
+
+def test_stop_all_deadline_does_not_abandon_a_winddown(tmp_path, monkeypatch):
+    """An engine mid emergency winddown is waited for past the deadline: the
+    process must not exit under a close that is still going out."""
+    from condor.runtime import loops as loops_module
+
+    monkeypatch.setattr(loops_module, "STOP_ALL_DEADLINE_SEC", 0.05)
+    supervisor = LoopSupervisor()
+    d = tmp_path / "winding"
+    d.mkdir()
+    winding = _fake_engine(d, num=1)
+    winding._shutting_down = True
+    finished = []
+
+    async def _winding_stop():
+        await asyncio.sleep(0.3)
+        supervisor.unregister(winding.agent_id, LoopState.STOPPED)
+        finished.append(True)
+        return False
+
+    winding.stop = _winding_stop
+    supervisor.register(winding)
+
+    asyncio.run(supervisor.stop_all())
+
+    assert finished == [True]
+    assert read_status(d)["state"] == LoopState.STOPPED
+
+
+def test_stop_all_with_no_engines_returns():
+    asyncio.run(LoopSupervisor().stop_all())
+
+
 def test_for_strategy_filters_by_pair(tmp_path):
     supervisor = LoopSupervisor()
     supervisor.register(_fake_engine(tmp_path / "a", sslug="mm", num=1))
