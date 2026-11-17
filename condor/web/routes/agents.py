@@ -66,6 +66,7 @@ from condor.agents.sessions_index import (
     list_sessions,
 )
 from condor.agents.strategy import LOOP_MD, LOOPS_DIRNAME
+from condor.asyncutil import SingleFlight
 from condor.fsutil import atomic_write_text
 from condor.layering import fork_if_stock, write_preserving_stamp
 from condor.web.auth import (
@@ -80,8 +81,19 @@ if TYPE_CHECKING:
     from condor.agents.performance import AgentPerformance
 
 # ── Simple in-memory TTL cache for performance data ──
+# ``key -> (expires_at, value)``. The expiry is stored rather than the write
+# time so one entry can be kept for less than the others (WR-03).
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
 _PERF_TTL = 30.0  # seconds
+# How long a render that could not be fully priced is kept. Not a result worth
+# 30s, but worth this: without it every poll during an outage re-walks every
+# session id with no backoff at all. Short enough that the first poll a few
+# seconds after the server recovers prices again (CORR-709).
+_PERF_FAILED_TTL = 5.0
+# One in-flight rollup per cache key. The TTL above only helps once an answer
+# has arrived; at each expiry the roster, agent and strategy polls of one tab
+# all miss together and would otherwise each run the whole walk (WR-03).
+_PERF_INFLIGHT = SingleFlight()
 
 # Long-lived cache for CLOSED sessions/experiments, keyed by agent_id.
 # A closed session's executors are immutable (no engine running, no open
@@ -117,15 +129,15 @@ def _cache_get(key: str) -> Any | None:
     entry = _PERF_CACHE.get(key)
     if not entry:
         return None
-    ts, val = entry
-    if time.time() - ts > _PERF_TTL:
+    expires_at, val = entry
+    if time.time() > expires_at:
         _PERF_CACHE.pop(key, None)
         return None
     return val
 
 
-def _cache_set(key: str, val: Any) -> None:
-    _PERF_CACHE[key] = (time.time(), val)
+def _cache_set(key: str, val: Any, ttl: float | None = None) -> None:
+    _PERF_CACHE[key] = (time.time() + (_PERF_TTL if ttl is None else ttl), val)
 
 
 log = logging.getLogger(__name__)
@@ -1440,14 +1452,18 @@ async def _compute_strategy_performance(
     rendered the page first (SEC-334). ``_CLOSED_PERF_CACHE`` needs no such
     split: it is only ever read on the branch that already has a client.
 
-    A render in which any executor fetch failed is returned but not cached, so
-    the next poll re-fetches instead of serving the failed ids' $0 rows for 30s.
-    An ``unreachable`` render is returned but not cached either (CORR-709):
-    ``get_client`` already rate-limits reconnects, so a 30s entry here would only
-    stack on its fail-fast window. ``no_server``/``no_access`` stay cached.
-    """
-    from condor.agents.performance import fetch_agent_performance_batch
+    A render in which any executor fetch failed is kept only for
+    ``_PERF_FAILED_TTL``, so the failed ids' $0 rows are never served for 30s.
+    An ``unreachable`` render gets the same short entry (CORR-709): an outage is
+    transient, and the first poll after the server recovers must price again.
+    ``no_server``/``no_access`` stay cached for the full TTL.
 
+    Concurrent callers that miss the cache share one walk (WR-03): the work
+    runs as a single-flight task per cache key and writes the cache itself, so
+    a caller cancelled by navigation neither abandons the fetch nor leaves the
+    cache empty for the next one. Sharing by cache key is sharing by the same
+    priced/unpriced bucket the cache already shares by.
+    """
     priced = _may_use_strategy_server(
         _strategy_server(strategy_dir, default_config), principal
     )
@@ -1455,6 +1471,28 @@ async def _compute_strategy_performance(
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
+
+    return await _PERF_INFLIGHT.run(
+        cache_key,
+        lambda: _render_strategy_performance(
+            run_key, strategy_dir, default_config, principal, cache_key
+        ),
+    )
+
+
+async def _render_strategy_performance(
+    run_key: str,
+    strategy_dir: Path,
+    default_config: dict | None,
+    principal: int,
+    cache_key: str,
+):
+    """The uncached walk behind :func:`_compute_strategy_performance`.
+
+    Writes ``cache_key`` itself, so the entry lands even when every caller that
+    was waiting on this render has gone away.
+    """
+    from condor.agents.performance import fetch_agent_performance_batch
 
     ids = enumerate_agent_ids(run_key, strategy_dir)
     client, _server, unavailable = await _get_client_for_strategy(
@@ -1617,10 +1655,13 @@ async def _compute_strategy_performance(
         unavailable = "unreachable"
 
     result = (sessions, totals, unavailable)
-    # An outage is transient, not a config/permission state: skip the cache so
-    # the first poll after the server recovers prices again (CORR-709).
+    # An outage is transient, not a config/permission state: keep it only long
+    # enough to stop every poll re-walking a dead server, so the first poll a
+    # few seconds after it recovers prices again (CORR-709, WR-03).
     if not fetch_failed and unavailable != "unreachable":
         _cache_set(cache_key, result)
+    else:
+        _cache_set(cache_key, result, _PERF_FAILED_TTL)
     return result
 
 
