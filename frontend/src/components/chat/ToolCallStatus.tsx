@@ -1,4 +1,11 @@
-import { Check, ChevronDown, ChevronRight, Loader2, X } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleSlash,
+  Loader2,
+  X,
+} from "lucide-react";
 import type { RunStep, ToolCall } from "@/hooks/useChatSocket";
 import { useLiveDisclosure } from "@/hooks/useLiveDisclosure";
 import { formatToolName, toolCallState } from "@/lib/formatters";
@@ -17,6 +24,16 @@ export function ToolCallStatusIcon({
       return <Check className={`${size} shrink-0 text-[var(--color-green)]`} />;
     case "error":
       return <X className={`${size} shrink-0 text-[var(--color-red)]`} />;
+    case "interrupted":
+      // Neutral on purpose (FU-06): the turn was stopped while this call was
+      // in flight, so it is neither a success nor a failure anyone can vouch
+      // for.
+      return (
+        <CircleSlash
+          className={`${size} shrink-0 text-[var(--color-text-muted)]`}
+          aria-label={INTERRUPTED_LABEL}
+        />
+      );
     default:
       return (
         <Loader2
@@ -25,6 +42,9 @@ export function ToolCallStatusIcon({
       );
   }
 }
+
+/** What a call cut off by Stop or a redirect says for itself. */
+const INTERRUPTED_LABEL = "stopped — outcome unknown";
 
 /** One line of the opened run: a stretch of reasoning, or a call. */
 type RunRow =
@@ -173,6 +193,9 @@ export function RunStrip({
               >
                 <ToolCallStatusIcon status={row.call.status} />
                 <span className="font-mono">{formatToolName(row.call.title)}</span>
+                {toolCallState(row.call.status) === "interrupted" && (
+                  <span className="italic">{INTERRUPTED_LABEL}</span>
+                )}
               </div>
             ),
           )}

@@ -294,7 +294,7 @@ describe("a per-slot transcript update", () => {
     deliver({ event: "prompt_interrupted", slot_id: "s1" });
 
     expect(messages("s1")[0].interrupted).toBe(true);
-    expect(messages("s1")[0].toolCalls[0].status).toBe("completed");
+    expect(messages("s1")[0].toolCalls[0].status).toBe("interrupted");
     expect(messages("s2")[0].interrupted).toBeUndefined();
     expect(messages("s2")[0].toolCalls[0].status).toBe("in_progress");
   });
@@ -308,7 +308,7 @@ describe("a per-slot transcript update", () => {
       chat().abortPrompt("s2");
     });
 
-    expect(messages("s2")[0].toolCalls[0].status).toBe("completed");
+    expect(messages("s2")[0].toolCalls[0].status).toBe("interrupted");
     expect(messages("s1")[0].toolCalls[0].status).toBe("in_progress");
   });
 

@@ -11,7 +11,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { addUsage } from "@/lib/usage";
-import { namesATool, toolCallState } from "@/lib/formatters";
+import { INTERRUPTED_STATUS, namesATool, toolCallState } from "@/lib/formatters";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
@@ -379,19 +379,29 @@ function closeStream(msgs: ChatMessage[]): ChatMessage[] {
  *  is over: rewriting it to `completed` here told the user a tool ran that they
  *  had said no to. It reads as terminal there, so it is left exactly as the
  *  bridge reported it, which is also what the transcript on disk holds. */
-function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
+function settleToolCalls(
+  msgs: ChatMessage[],
+  status: string = "completed",
+): ChatMessage[] {
   return msgs.map((m) =>
     m.toolCalls.some((tc) => toolCallState(tc.status) === "pending")
       ? {
           ...m,
           toolCalls: m.toolCalls.map((tc) =>
-            toolCallState(tc.status) === "pending"
-              ? { ...tc, status: "completed" }
-              : tc,
+            toolCallState(tc.status) === "pending" ? { ...tc, status } : tc,
           ),
         }
       : m,
   );
+}
+
+/** The settle for a turn the user cut short — Stop, or a message sent over it
+ *  (FU-06). The call was in flight when the turn was abandoned, so its outcome
+ *  is not known here: `completed` put a green check on an order that may or
+ *  may not have gone out. It ends as `interrupted` instead, which is terminal
+ *  (nothing spins) without claiming a result. */
+function interruptToolCalls(msgs: ChatMessage[]): ChatMessage[] {
+  return settleToolCalls(msgs, INTERRUPTED_STATUS);
 }
 
 /** Now, in the epoch seconds the transcript is recorded in. */
@@ -1713,7 +1723,18 @@ export function useChatSocket() {
                       tc.tool_call_id === tcId
                         ? {
                             ...tc,
-                            status: status || tc.status,
+                            // A call the user cut off stays cut off unless the
+                            // server names how it actually ended: a straggling
+                            // `in_progress` would put it back in flight, for
+                            // the turn's closing settle to tick green (FU-06).
+                            status:
+                              status &&
+                              !(
+                                tc.status === INTERRUPTED_STATUS &&
+                                toolCallState(status) === "pending"
+                              )
+                                ? status
+                                : tc.status,
                             title: title || tc.title,
                           }
                         : tc,
@@ -1763,7 +1784,7 @@ export function useChatSocket() {
           });
           flushChunks(slotId);
           updateSlotMessages(slotId, (prev) => {
-            const msgs = settleToolCalls(prev);
+            const msgs = interruptToolCalls(prev);
             // The partial is the last thing the agent said. The user's new
             // message is already below it — `sendMessage` appended it before
             // the wire even carried it — so this walks back to find it.
@@ -1845,7 +1866,7 @@ export function useChatSocket() {
             // so the settle below sees the flushed transcript.
             flushChunks(slotId);
             // Mark any in-flight tool calls as completed so the spinner stops
-            updateSlotMessages(slotId, settleToolCalls);
+            updateSlotMessages(slotId, (msgs) => settleToolCalls(msgs));
             // Only this conversation ended. Another tab may still be
             // mid-answer, and its composer stays locked until its own turn is
             // done.
@@ -2025,7 +2046,9 @@ export function useChatSocket() {
         local: true,
       }));
       updateSlotMessages(slotId, (msgs) => [
-        ...settleToolCalls(msgs),
+        // Whatever was still in flight is cut off by this message, not
+        // finished by it.
+        ...interruptToolCalls(msgs),
         {
           id,
           role: "user" as const,
@@ -2275,8 +2298,9 @@ export function useChatSocket() {
       // stuck if the backend's prompt_done event is lost or delayed. Aborting
       // one conversation says nothing about the others.
       stopStreaming(slotId);
-      // Mark any in-flight tool calls as completed
-      updateSlotMessages(slotId, settleToolCalls);
+      // In-flight tool calls stop spinning — as stopped, not as completed:
+      // nobody here knows how far they got.
+      updateSlotMessages(slotId, interruptToolCalls);
     },
     [flushChunks, send, stopStreaming, updateSlotMessages],
   );
