@@ -1261,11 +1261,13 @@ class TickEngine:
         calls, the terminal ``PromptDone`` stop reason).
 
         A fresh client per tick (clean context window), streamed under the
-        tick's wall-clock budget. A timeout is not an error: the partial
-        response gets "(timed out)" appended. The client is always stopped and
-        ``_active_client`` cleared, whatever happens. Neither client raises when
-        the turn fails; it ends on a ``PromptDone`` whose reason says so, which
-        ``_tick`` checks against ``FAILED_STOP_REASONS``.
+        tick's wall-clock budget. A timeout does not raise here: the partial
+        response gets "(timed out)" appended and the stop reason is
+        ``"timeout"``, so the tick is persisted with whatever tool calls it
+        made and then reported as failed (AG1-13). The client is always stopped
+        and ``_active_client`` cleared, whatever happens. Neither client raises
+        when the turn fails; it ends on a ``PromptDone`` whose reason says so,
+        which ``_tick`` checks against ``FAILED_STOP_REASONS``.
         """
         acp_client = await self._create_client(risk_state, client)
         self._active_client = acp_client
@@ -1307,6 +1309,12 @@ class TickEngine:
                 tick_timeout,
             )
             response_chunks.append("(timed out)")
+            # The budget that actually fires is this one, and it used to leave
+            # the reason at "end_turn": a loop whose every tick was killed
+            # mid-turn cleared ``_last_error``, told nobody, and a dry run
+            # reported "complete". ``"timeout"`` is in ``FAILED_STOP_REASONS``,
+            # so the existing failure path journals it and notifies once.
+            stop_reason = "timeout"
         finally:
             await acp_client.stop()
             self._active_client = None

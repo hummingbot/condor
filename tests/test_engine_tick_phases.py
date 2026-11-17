@@ -64,9 +64,41 @@ def test_run_model_reaps_client_on_timeout(tmp_path, monkeypatch):
 
     assert text.endswith("(timed out)")
     assert tool_calls == []
-    assert stop_reason == "end_turn"
+    # AG1-13: the engine's own budget is a failed turn, not a clean one.
+    assert stop_reason == "timeout"
     assert fake.stops == 1
     assert engine._active_client is None
+
+
+def test_a_tick_that_times_out_is_persisted_and_then_fails(tmp_path, monkeypatch):
+    """AG1-13: a timed-out tick used to clear ``_last_error`` and notify nobody.
+
+    It now goes down the existing failed-turn path: persisted first (it may
+    already have run tool calls), then raised so ``_run_ticks`` journals it and
+    tells the owner.
+    """
+    import pytest
+
+    from condor.agents.engine import _TickContext
+
+    engine = _engine(tmp_path, monkeypatch, tick_timeout_sec=1)
+    ctx = _TickContext(risk_state=RiskState(), core_data_summaries={}, prompt="p")
+    monkeypatch.setattr(engine, "_get_client", _async(object()))
+    monkeypatch.setattr(engine, "_gather_tick_context", _async(ctx))
+    monkeypatch.setattr(engine, "_create_client", _async(_HangingClient()))
+    persisted: list[dict] = []
+
+    async def persist(ctx_, response_text, tool_calls, duration, failure=""):
+        persisted.append({"text": response_text, "failure": failure})
+
+    monkeypatch.setattr(engine, "_persist_tick", persist)
+
+    with pytest.raises(RuntimeError, match="agent session ended: timeout"):
+        asyncio.run(engine._tick())
+
+    assert persisted == [
+        {"text": "(timed out)", "failure": "agent session ended: timeout"}
+    ]
 
 
 def test_gather_tick_context_returns_none_when_blocked(tmp_path, monkeypatch):
