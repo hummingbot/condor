@@ -13,8 +13,11 @@ import asyncio
 import hashlib
 import logging
 import time
+from datetime import datetime
 from datetime import time as dt_time
+from datetime import timedelta, timezone, tzinfo
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
@@ -50,6 +53,64 @@ SCHEDULE_PRESETS = [
 ]
 
 DAILY_PRESETS = ["06:00", "09:00", "12:00", "18:00", "21:00"]
+
+# How late a job may start and still run (ST-05). APScheduler's default is one
+# second: a tick the event loop reached any later than that was dropped, not
+# delayed — a daily routine lost its day with only a WARNING in APScheduler's
+# own logger. An interval job gets its own interval as grace (a later start
+# would collide with the next tick anyway, which ``coalesce`` folds into one).
+_ONESHOT_GRACE_SEC = 60
+_DAILY_GRACE_SEC = 3600
+
+
+def _job_kwargs(grace_sec: float) -> dict:
+    """APScheduler options for a routine job: run late rather than skip."""
+    return {"misfire_grace_time": max(int(grace_sec), 1), "coalesce": True}
+
+
+def _local_tz_name() -> str:
+    """The server's timezone as a name a restart can resolve again (ST-06).
+
+    An IANA key when the host has one, so a daily schedule follows DST; else
+    the current fixed offset as ``+HH:MM``.
+    """
+    try:
+        from tzlocal import get_localzone_name
+
+        name = get_localzone_name()
+        if name:
+            ZoneInfo(name)
+            return name
+    except Exception:
+        pass
+    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+    minutes = int(offset.total_seconds() // 60)
+    sign = "-" if minutes < 0 else "+"
+    return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def _schedule_tz(schedule: dict) -> tzinfo:
+    """The zone a daily schedule fires in.
+
+    Stored on the schedule at creation so restore agrees with it. A schedule
+    persisted before the zone was recorded has none and stays on UTC, which is
+    when it has been firing all along — it does not move under its owner.
+    """
+    name = schedule.get("tz")
+    if not name or name == "UTC":
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        pass
+    try:
+        sign = -1 if name[0] == "-" else 1
+        hours, minutes = map(int, name[1:].split(":"))
+        return timezone(sign * timedelta(hours=hours, minutes=minutes))
+    except Exception:
+        logger.warning(f"Unknown schedule timezone {name!r}, using UTC")
+        return timezone.utc
+
 
 # Global storage for continuous routine tasks (not persisted).
 # Taken back from the module's own globals when it is re-executed: main.py's
@@ -231,7 +292,7 @@ def _format_schedule(schedule: dict) -> str:
     elif stype == "continuous":
         return "Running"
     elif stype == "daily":
-        return f"Daily @ {schedule.get('daily_time', '09:00')}"
+        return f"Daily @ {schedule.get('daily_time', '09:00')} {schedule.get('tz') or 'UTC'}"
     return "Unknown"
 
 
@@ -805,6 +866,11 @@ def _create_scheduled_instance(
     instance_id = _generate_instance_id()
     job_name_str = _job_name(chat_id, instance_id)
 
+    # A daily time is in the server's zone, as the menu says (ST-06). Recorded
+    # on the schedule so restore fires in the same zone after a restart.
+    if schedule.get("type") == "daily" and not schedule.get("tz"):
+        schedule = {**schedule, "tz": _local_tz_name()}
+
     # Store instance
     instances = _get_instances(context)
     inst_meta = {
@@ -869,6 +935,7 @@ def _create_scheduled_instance(
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
+            job_kwargs=_job_kwargs(_ONESHOT_GRACE_SEC),
         )
     elif stype == "interval":
         interval = schedule.get("interval_sec", 60)
@@ -879,16 +946,18 @@ def _create_scheduled_instance(
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
+            job_kwargs=_job_kwargs(interval),
         )
     elif stype == "daily":
         time_str = schedule.get("daily_time", "09:00")
         hour, minute = map(int, time_str.split(":"))
         context.job_queue.run_daily(
             _daily_job_callback,
-            time=dt_time(hour=hour, minute=minute),
+            time=dt_time(hour=hour, minute=minute, tzinfo=_schedule_tz(schedule)),
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
+            job_kwargs=_job_kwargs(_DAILY_GRACE_SEC),
         )
 
     return instance_id
@@ -1294,7 +1363,7 @@ async def _show_daily_menu(
     text = (
         f"📅 *Daily Schedule: {escape_markdown_v2(_display_name(routine_name))}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Choose a time \\(server timezone\\)\\.\n"
+        f"Choose a time \\(server timezone, {escape_markdown_v2(_local_tz_name())}\\)\\.\n"
         f"Or send custom time as `HH:MM`\\."
     )
 
@@ -2110,6 +2179,7 @@ async def restore_scheduled_jobs(application) -> int:
                         data=job_data,
                         name=job_name_str,
                         chat_id=chat_id,
+                        job_kwargs=_job_kwargs(interval),
                     )
                     _sync_instance_to_store(instance_id, inst)
                     _register_stopper(
@@ -2130,10 +2200,13 @@ async def restore_scheduled_jobs(application) -> int:
                     hour, minute = map(int, time_str.split(":"))
                     application.job_queue.run_daily(
                         _daily_job_callback,
-                        time=dt_time(hour=hour, minute=minute),
+                        time=dt_time(
+                            hour=hour, minute=minute, tzinfo=_schedule_tz(schedule)
+                        ),
                         data=job_data,
                         name=job_name_str,
                         chat_id=chat_id,
+                        job_kwargs=_job_kwargs(_DAILY_GRACE_SEC),
                     )
                     _sync_instance_to_store(instance_id, inst)
                     _register_stopper(
