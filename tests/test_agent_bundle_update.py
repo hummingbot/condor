@@ -141,11 +141,10 @@ def test_an_unreadable_stamp_is_no_basis(installed):
 
 def test_a_hub_updates_version_is_the_hubs_own_not_the_bundles(hub_installed):
     """CORR-1019: a hub update's ``version``/``installed_version`` stay the
-    bundle's own internal counters — ``older_bundle`` and
-    ``same_version_new_build`` above compare bundles by exactly those — but
-    ``hub_version``/``installed_hub_version`` are the separate number the
-    operator actually sees on Botcamp, which can move independently of the
-    bundle's own lineage.
+    bundle's own internal counters, but ``hub_version``/``installed_hub_version``
+    are the separate number the operator actually sees on Botcamp, which can
+    move independently of the bundle's own lineage — and which is the one
+    ``older_bundle``/``same_version_new_build`` order a hub update by (AG2-09).
     """
     plan = ab.plan_update(_newer(), "drifter", hub_reviewed=True, hub_version=9)
     assert plan.version == 2
@@ -217,6 +216,58 @@ def test_an_older_bundle_blocks_and_an_equal_version_only_warns(installed):
     assert [w.code for w in same.warnings] == ["same_version_new_build"]
     # Still a full diff, which is the point: the number only orders.
     assert same.counts == {"changed": 1, "unchanged": 2}
+
+
+def _hub_build(body: str) -> ab.Bundle:
+    """A zip-derived hub bundle: ``botcamp_import`` always stamps version 1."""
+    return _bundle(
+        version=1,
+        files=[
+            _file("AGENT.md", AGENT_MD.format(body=body)),
+            _file("skills/recon/SKILL.md", SKILL_MD.format(slug="recon", body="Look.")),
+            _file("routines/scan.py", ROUTINE_PY.format(body="v1")),
+        ],
+    )
+
+
+def test_a_hub_update_is_ordered_by_the_listing_version(hub_installed):
+    """AG2-09: every zip-derived bundle says version 1, so comparing the
+    bundle's own counter made every legitimate hub update warn
+    ``same_version_new_build``. The hub's lineage is the listing version.
+    """
+    newer = ab.plan_update(
+        _hub_build("Travel further."), "drifter", hub_reviewed=True, hub_version=5
+    )
+    assert newer.blockers == []
+    assert newer.warnings == []
+    assert newer.counts == {"changed": 1, "unchanged": 2}
+
+    ab.apply_update(newer, user_id=7)
+    ab.record_hub_install("drifter", hub_slug="drifter", hub_version=5, digest="e" * 64)
+
+    older = ab.plan_update(
+        _hub_build("Travel."), "drifter", hub_reviewed=True, hub_version=4
+    )
+    assert [b.code for b in older.blockers] == ["older_bundle"]
+    assert "Botcamp version 4" in older.blockers[0].message
+    assert "Botcamp version 5" in older.blockers[0].message
+
+    rebuild = ab.plan_update(
+        _hub_build("Travel elsewhere."), "drifter", hub_reviewed=True, hub_version=5
+    )
+    assert rebuild.blockers == []
+    assert [w.code for w in rebuild.warnings] == ["same_version_new_build"]
+
+
+def test_a_file_bundle_taken_in_between_does_not_block_hub_updates(hub_installed):
+    """The bundle's own counter (always 1 from the hub) is not compared against
+    a file bundle's version 3 — that blocked hub updates forever (AG2-09)."""
+    ab.apply_update(ab.plan_update(_bundle(version=3), "drifter"), user_id=7)
+
+    plan = ab.plan_update(
+        _hub_build("Travel further."), "drifter", hub_reviewed=True, hub_version=5
+    )
+    assert plan.blockers == []
 
 
 def test_a_live_loop_blocks_and_no_engine_does_not(installed, monkeypatch):

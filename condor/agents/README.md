@@ -364,7 +364,7 @@ and a plan. Each blocker refuses and names the reason.
 |---|---|
 | `different_agent` | The bundle's `agent_uid` is not the installed agent's. Two agents, not an update — the answer stays the 409 and a rename. |
 | `no_basis` | The agent has no `agent_uid` and no `.bundle.json`: it was authored here, or imported before the stamp existed. Nothing says this bundle is its upstream. |
-| `older_bundle` | The bundle's `version` is lower than the stamp's. |
+| `older_bundle` | The bundle's `version` is lower than the stamp's — or, for a Botcamp update, the listing version is lower than the stamp's `hub_version` (a zip-derived bundle always says version 1, so its own counter orders nothing). |
 | `live_loop` | Any registered engine's owning agent is this slug (`get_all_engines()`; the registry is keyed by `{agent}.{strategy}_{N}`, not by the slug). Swapping a skill's instructions under a session that is mid-tick changes what the model is told between one tool call and the next. |
 | `stock_agent` | An agent the repo ships. `publish_to_stock` is the one sanctioned write into the tracked library, and it is admin-only. |
 | `no_such_agent` | Nothing installed under that slug. |

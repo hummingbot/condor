@@ -2191,26 +2191,40 @@ def plan_update(
                 )
             )
 
-    if stamp is not None and bundle.version < stamp.version:
+    # Which number orders this bundle against the installed one. A bundle
+    # derived from a Botcamp zip always says version 1, so for a hub update the
+    # bundle's own counter orders nothing: every update read as "the same
+    # version, new build", and an agent that had once taken a file bundle at
+    # version 2 could never take a hub update again. The listing version is the
+    # hub's lineage, and the stamp carries the one last installed.
+    if hub_version:
+        incoming_version = hub_version
+        stamped_version = stamp.hub_version if stamp is not None else 0
+        what = "Botcamp version"
+    else:
+        incoming_version = bundle.version
+        stamped_version = stamp.version if stamp is not None else 0
+        what = "version"
+    if stamp is not None and incoming_version < stamped_version:
         blockers.append(
             UpdateBlocker(
                 code="older_bundle",
                 message=(
-                    f"This bundle is version {bundle.version} and '{slug}' is "
-                    f"already at version {stamp.version} — it is not newer."
+                    f"This bundle is {what} {incoming_version} and '{slug}' is "
+                    f"already at {what} {stamped_version} — it is not newer."
                 ),
             )
         )
     elif (
         stamp is not None
-        and bundle.version == stamp.version
+        and incoming_version == stamped_version
         and carried != stamp.digests
     ):
         warnings.append(
             UpdateWarning(
                 code="same_version_new_build",
                 message=(
-                    f"This bundle says version {bundle.version}, the same as the "
+                    f"This bundle says {what} {incoming_version}, the same as the "
                     "one installed, but its files differ — a different build of "
                     "the same version. A version only orders bundles within one "
                     "agent's lineage; the diff is the authoritative answer."
