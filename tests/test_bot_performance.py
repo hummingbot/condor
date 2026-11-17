@@ -2021,3 +2021,111 @@ def test_instance_histories_fetch_the_running_instance_of_every_base():
     assert histories["alpha-mm"][alpha][-1][1] == 7.0
     assert len(histories["zeta-mm"]) == 23
     clear_live_names_cache()
+
+
+# ---------------------------------------------------------------------------
+# DL-01: native money is never folded into a USD history at face value
+# ---------------------------------------------------------------------------
+
+
+def test_history_merge_excludes_a_known_quote_it_cannot_price():
+    """A BRL series merged with rates that did not resolve BRL came out as
+    realized 5000 "USD" — the history path multiplied an unpriced quote by 1.0
+    while the snapshot path excluded the very same controller (CORR-703)."""
+    from condor.fetchers.bot_performance import (
+        merge_controller_series,
+        unpriced_quotes,
+    )
+
+    series = {"brl": ("BRL", [(1.0, (5000.0, 90000.0, 4.0, 45.0))])}
+
+    # The rate lookup priced nothing: ``{}`` is "no rates", not "no conversion".
+    ((_, realized, volume, trades, fees),) = merge_controller_series(series, {})
+    assert (realized, volume, fees) == (0.0, 0.0, 0.0)
+    assert trades == 4.0  # counts are not money
+    assert unpriced_quotes(series, {}) == {"BRL"}
+
+    # Priced, it converts: 5000 BRL at 0.18 is 900 USD.
+    ((_, realized, *_),) = merge_controller_series(series, {"BRL": 0.18})
+    assert realized == pytest.approx(900.0)
+    assert unpriced_quotes(series, {"BRL": 0.18}) == set()
+
+    # No conversion asked for: quote units, as before.
+    ((_, raw, *_),) = merge_controller_series(series)
+    assert raw == 5000.0
+    assert unpriced_quotes(series, None) == set()
+
+
+def test_history_merge_keeps_priced_siblings_when_one_quote_is_unpriced():
+    from condor.fetchers.bot_performance import merge_controller_series
+
+    series = {
+        "eur": ("EUR", [(1.0, (100.0, 1000.0, 1.0, 1.0))]),
+        "usdt": ("USDT", [(1.0, (10.0, 200.0, 2.0, 0.5))]),
+        # Never named a pair: takes the first sibling's quote (EUR), unpriced.
+        "flat": ("", [(1.0, (7.0, 0.0, 0.0, 0.0))]),
+    }
+    ((_, realized, volume, trades, fees),) = merge_controller_series(
+        series, {"USDT": 1.0}
+    )
+    assert (realized, volume, fees) == (10.0, 200.0, 0.5)
+    assert trades == 3.0
+
+
+def test_history_merge_leaves_a_quoteless_bot_at_face_value():
+    """Nothing names this bot's currency, so nothing says it is not USD: a
+    controller that never held a sampled position is the common case, and
+    excluding it would zero the PnL the drawdown guard reads."""
+    from condor.fetchers.bot_performance import merge_controller_series
+
+    series = {"c": ("", [(1.0, (-42.0, 300.0, 1.0, 0.3))])}
+    ((_, realized, volume, _, fees),) = merge_controller_series(series, {})
+    assert (realized, volume, fees) == (-42.0, 300.0, 0.3)
+
+
+def test_base_histories_exclude_a_bot_whose_quote_could_not_be_priced(
+    monkeypatch, caplog
+):
+    """End to end: the ``/rates`` fallback fails, so BRL is absent from the
+    resolved rates and the session slice must not report R$5,000 as $5,000."""
+    import logging
+
+    from condor.fetchers import bot_performance as bp
+    from condor.quote_conversion import QuoteRates
+
+    rows = [
+        {
+            "timestamp": "2026-09-18T00:00:00+00:00",
+            "controller_id": "c",
+            "performance": {
+                "realized_pnl_quote": 0.0,
+                "volume_traded": 0.0,
+                "positions_summary": [{"trading_pair": "BTC-BRL"}],
+            },
+        },
+        {
+            "timestamp": "2026-09-18T01:00:00+00:00",
+            "controller_id": "c",
+            "performance": {"realized_pnl_quote": 5000.0, "volume_traded": 90000.0},
+        },
+    ]
+
+    class _History:
+        async def get_controller_performance_history(self, **kw):
+            return {"data": rows if not kw.get("cursor") else []}
+
+    async def _no_rates(client, quotes):
+        return QuoteRates({}, False)
+
+    monkeypatch.setattr(bp, "resolve_client_usd_rates", _no_rates)
+    client = SimpleNamespace(bot_orchestration=_History())
+
+    with caplog.at_level(logging.WARNING, logger=bp.logger.name):
+        hist = asyncio.run(
+            bp.fetch_base_histories(client, {}, ["bot"], 0.0, 1e10, extra_names=["bot"])
+        )
+
+    ((first, last),) = hist["bot"]
+    realized, volume, *_ = bp.slice_history(hist["bot"], first[0], last[0] + 1)
+    assert (realized, volume) == (0.0, 0.0)
+    assert any("No USD rate for quote BRL" in r.getMessage() for r in caplog.records)

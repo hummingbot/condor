@@ -1096,24 +1096,52 @@ def _drop_dead_readings(
     return out
 
 
+def unpriced_quotes(
+    by_controller: dict[str, ControllerSeries],
+    usd_rates: Mapping[str, float] | None,
+) -> set[str]:
+    """Quotes ``by_controller`` reports in that ``usd_rates`` could not price.
+
+    Empty when no conversion was asked for (``usd_rates is None``). These are
+    the controllers :func:`merge_controller_series` leaves out of the money.
+    """
+    if usd_rates is None:
+        return set()
+    return {q for q, _ in by_controller.values() if q and q not in usd_rates}
+
+
 def merge_controller_series(
     by_controller: dict[str, ControllerSeries],
     usd_rates: Mapping[str, float] | None = None,
 ) -> list[tuple[float, float, float, float, float]]:
     """Forward-carry every controller's cumulative and sum them per instant.
 
-    With ``usd_rates``, each controller's realized, volume and fees are first
-    multiplied by its own quote's rate — a controller that never named a pair
-    takes a sibling's quote, and an unpriced quote stays at face value. Without
-    it the sum is in the controllers' quote currencies, which is only meaningful
-    when they share one.
+    With ``usd_rates`` (an empty mapping included — that is a lookup which
+    priced nothing, not a request for face value), each controller's realized,
+    volume and fees are first multiplied by its own quote's rate; a controller
+    that never named a pair takes a sibling's quote. A controller whose quote
+    is *known* and absent from ``usd_rates`` contributes no money at all: the
+    mapping only ever holds a quote it resolved, and folding native money in
+    at 1.0 is how a BRL bot's history read five times too large while the
+    snapshot path (:func:`restate_universe_in_usd`) excluded the very same
+    controller. Its trade count is still summed — counts are not money. A
+    controller with no quote to go on, its own or a sibling's, stays at face
+    value: nothing says it is not USD.
+
+    With ``usd_rates=None`` the sum is in the controllers' quote currencies,
+    which is only meaningful when they share one.
     """
     if not by_controller:
         return []
 
     sibling = next((q for q, _ in by_controller.values() if q), "")
+    unpriced = unpriced_quotes(by_controller, usd_rates)
     rate = {
-        cid: (usd_rates.get(q or sibling, 1.0) if usd_rates else 1.0)
+        cid: (
+            1.0
+            if usd_rates is None
+            else 0.0 if (q or sibling) in unpriced else usd_rates.get(q or sibling, 1.0)
+        )
         for cid, (q, _) in by_controller.items()
     }
     series = {cid: samples for cid, (_, samples) in by_controller.items()}
@@ -1435,6 +1463,15 @@ async def fetch_instance_histories(
     rates = await resolve_client_usd_rates(
         client, {q for s in series.values() for q, _ in s.values() if q}
     )
+    for inst, s in series.items():
+        missing = unpriced_quotes(s, rates.rates)
+        if missing:
+            logger.warning(
+                "No USD rate for quote %s (bot %s); excluding its controllers "
+                "from the USD history",
+                ", ".join(sorted(missing)),
+                inst,
+            )
     history = {
         inst: merge_controller_series(s, rates.rates) for inst, s in series.items()
     }
