@@ -1041,9 +1041,33 @@ def _resolve_experiment_file(agent_id: str):
     return find_experiment_file(base_dir, num), num
 
 
+# What the two journal tools accept, in one place: the registered signatures
+# carry the same members as ``Literal``s, and the impls reject anything else
+# explicitly rather than falling through to a default (MC-13).
+JOURNAL_READ_SECTIONS = (
+    "recent",
+    "learnings",
+    "summary",
+    "state",
+    "full",
+    "runs",
+    "tracker",
+)
+JOURNAL_ENTRY_TYPES = ("action", "learning", "state", "canvas")
+
+
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
+    section = section or "recent"
+    if section not in JOURNAL_READ_SECTIONS and not section.startswith("run:"):
+        # A typo used to answer with "recent", which reads as a real reply to
+        # the question that was not asked.
+        return {
+            "error": f"Unknown section '{section}'. Use one of: "
+            + ", ".join(JOURNAL_READ_SECTIONS)
+            + ', or "run:N" for one run snapshot.'
+        }
 
     # Experiments (dry_run / run_once) have no journal — surface the saved
     # dry-run snapshot instead of the misleading "no journal available" error.
@@ -1114,13 +1138,22 @@ def journal_write(
     reasoning: str = "",
     risk_note: str = "",
     tick: int = 0,
-    category: str = "",
-    section: str = "",
+    category: str | None = "",
+    section: str | None = "",
 ) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
     if not text:
         return {"error": "text is required"}
+    if entry_type not in JOURNAL_ENTRY_TYPES:
+        # Anything unrecognised used to fall through to the action branch and
+        # be written under the default tick 0 — the "**#0**" entry the guard
+        # below exists to prevent, reached by a typo instead of a dropped
+        # argument (MC-13).
+        return {
+            "error": f"Unknown entry_type '{entry_type}'. Use one of: "
+            + ", ".join(JOURNAL_ENTRY_TYPES)
+        }
     # An action and a canvas revision are both *dated* by their tick, and the
     # default of 0 is not a date. Written through, it reached the journal as
     # "**#0**" -- which the Decisions panel renders as ERR, so a perfectly good
@@ -1171,7 +1204,7 @@ def journal_write(
         # inherits the engine resolution and the experiment-mode skip above.
         from condor.agents import canvas
 
-        return canvas.write_section(session_dir, section, text, tick=tick)
+        return canvas.write_section(session_dir, section or "", text, tick=tick)
 
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
@@ -1179,7 +1212,7 @@ def journal_write(
         jm.append_learning(text, category=category or "market")
     elif entry_type == "state":
         jm.write_state(text)
-    else:
+    else:  # "action" — the only member left; unknown types were refused above
         jm.append_action(tick, text, reasoning, risk_note)
     return {"written": True}
 

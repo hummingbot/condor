@@ -1,6 +1,6 @@
 {
   "_provenance": {
-    "commit": "277281096bf1c605f4ecad16272ec3504d74735f",
+    "commit": "551cc8984af82df2a6452d5aea312cad977bc470",
     "mcp": "2.2.0",
     "pydantic-ai": "2.52.0"
   },
@@ -1168,7 +1168,7 @@
       "outputSchema": null
     },
     "trading_agent_journal_read": {
-      "description": "Read the trading agent's journal.\n\n    Args:\n        agent_id: The trading agent instance ID.\n        section: What to read:\n                 \"recent\" (last 10 decisions from run snapshots),\n                 \"learnings\" (all learnings, max 20),\n                 \"summary\" (current status one-liner),\n                 \"state\" (alias for summary),\n                 \"full\" (entire journal),\n                 \"runs\" (list recent run snapshots),\n                 \"run:N\" (read specific run snapshot, e.g. \"run:3\"),\n                 \"tracker\" (full tracker markdown + summary dict: tick history,\n                 executor ledger, snapshots).\n        max_entries: Max entries for recent/runs (default 30).\n\n    Returns:\n        {\"content\": \"<journal text>\"}, {\"runs\": [...]} for runs listing, or\n        {\"tracker_md\": ..., \"summary\": {...}} for section=\"tracker\".\n    ",
+      "description": "Read the trading agent's journal.\n\n    Args:\n        agent_id: The trading agent instance ID.\n        section: What to read (an unknown value is an error, not \"recent\"):\n                 \"recent\" (the last `max_entries` decisions from run snapshots),\n                 \"learnings\" (all learnings, max 20),\n                 \"summary\" (current status one-liner),\n                 \"state\" (alias for summary),\n                 \"full\" (entire journal),\n                 \"runs\" (list recent run snapshots),\n                 \"run:N\" (read specific run snapshot, e.g. \"run:3\"),\n                 \"tracker\" (full tracker markdown + summary dict: tick history,\n                 executor ledger, snapshots).\n        max_entries: Max entries for recent/runs (default 30).\n\n    Returns:\n        {\"content\": \"<journal text>\"}, {\"runs\": [...]} for runs listing, or\n        {\"tracker_md\": ..., \"summary\": {...}} for section=\"tracker\".\n    ",
       "inputSchema": {
         "properties": {
           "agent_id": {
@@ -1196,7 +1196,7 @@
       "outputSchema": null
     },
     "trading_agent_journal_write": {
-      "description": "Write to the trading agent's journal. Keep entries SHORT (one line).\n\n    Args:\n        agent_id: The trading agent instance ID.\n        entry_type: \"action\", \"learning\", \"state\", or \"canvas\".\n            - \"action\": What you did this tick (auto-trimmed to last 10).\n            - \"learning\": A new insight. Duplicates are auto-filtered. Only write\n              if this is genuinely new and not already in learnings (max 20).\n            - \"state\": Overwrite the current state snapshot (e.g. price, position, grids).\n            - \"canvas\": Revise ONE section of your session canvas \u2014 the running\n              narrative shown to the user in the session report. Requires\n              `section`. Only revise a section when it is now wrong; a quiet\n              tick needs no canvas call.\n        text: The entry content. Keep it to ONE short line (a canvas section may\n            be a short paragraph, truncated past ~1200 chars).\n        reasoning: One-sentence reasoning (for actions only).\n        risk_note: Optional risk note (for actions only).\n        tick: Current tick number (for actions and canvas revisions). REQUIRED for\n            those two \u2014 an entry with no tick is refused, not silently filed under\n            tick 0.\n        category: Learning category: \"market\" (observations, patterns, volatility)\n            or \"execution\" (errors, fills, timing). Only used when entry_type=\"learning\".\n            Defaults to \"market\".\n        section: Which canvas section to replace \u2014 \"thesis\", \"working\",\n            \"changed\", or \"questions\". Only used when entry_type=\"canvas\".\n\n    Returns:\n        {\"written\": true} \u2014 or {\"skipped\": \"...\"} in dry-run / run-once mode,\n        which keep no journal.\n    ",
+      "description": "Write to the trading agent's journal. Keep entries SHORT (one line).\n\n    Args:\n        agent_id: The trading agent instance ID.\n        entry_type: \"action\", \"learning\", \"state\", or \"canvas\". Anything else is\n            refused, not filed as an action.\n            - \"action\": What you did this tick (auto-trimmed to last 10).\n            - \"learning\": A new insight. Duplicates are auto-filtered. Only write\n              if this is genuinely new and not already in learnings (max 20).\n            - \"state\": Overwrite the current state snapshot (e.g. price, position, grids).\n            - \"canvas\": Revise ONE section of your session canvas \u2014 the running\n              narrative shown to the user in the session report. Requires\n              `section`. Only revise a section when it is now wrong; a quiet\n              tick needs no canvas call.\n        text: The entry content. Keep it to ONE short line (a canvas section may\n            be a short paragraph, truncated past ~1200 chars).\n        reasoning: One-sentence reasoning (for actions only).\n        risk_note: Optional risk note (for actions only).\n        tick: Current tick number (for actions and canvas revisions). REQUIRED for\n            those two \u2014 an entry with no tick is refused, not silently filed under\n            tick 0.\n        category: Learning category: \"market\" (observations, patterns, volatility)\n            or \"execution\" (errors, fills, timing). Only used when entry_type=\"learning\".\n            OMIT for the default, \"market\".\n        section: Which canvas section to replace \u2014 \"thesis\", \"working\",\n            \"changed\", or \"questions\". Only used when entry_type=\"canvas\".\n\n    Returns:\n        {\"written\": true} \u2014 or {\"skipped\": \"...\"} in dry-run / run-once mode,\n        which keep no journal.\n    ",
       "inputSchema": {
         "properties": {
           "agent_id": {
@@ -1204,11 +1204,28 @@
             "type": "string"
           },
           "category": {
-            "default": "",
-            "title": "Category",
-            "type": "string"
+            "anyOf": [
+              {
+                "enum": [
+                  "market",
+                  "execution"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Category"
           },
           "entry_type": {
+            "enum": [
+              "action",
+              "learning",
+              "state",
+              "canvas"
+            ],
             "title": "Entry Type",
             "type": "string"
           },
@@ -1223,9 +1240,22 @@
             "type": "string"
           },
           "section": {
-            "default": "",
-            "title": "Section",
-            "type": "string"
+            "anyOf": [
+              {
+                "enum": [
+                  "thesis",
+                  "working",
+                  "changed",
+                  "questions"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Section"
           },
           "text": {
             "title": "Text",

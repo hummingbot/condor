@@ -1355,8 +1355,8 @@ async def trading_agent_journal_read(
 
     Args:
         agent_id: The trading agent instance ID.
-        section: What to read:
-                 "recent" (last 10 decisions from run snapshots),
+        section: What to read (an unknown value is an error, not "recent"):
+                 "recent" (the last `max_entries` decisions from run snapshots),
                  "learnings" (all learnings, max 20),
                  "summary" (current status one-liner),
                  "state" (alias for summary),
@@ -1378,19 +1378,20 @@ async def trading_agent_journal_read(
 @telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
     agent_id: str,
-    entry_type: str,
+    entry_type: Literal["action", "learning", "state", "canvas"],
     text: str,
     reasoning: str = "",
     risk_note: str = "",
     tick: int = 0,
-    category: str = "",
-    section: str = "",
+    category: Literal["market", "execution"] | None = None,
+    section: Literal["thesis", "working", "changed", "questions"] | None = None,
 ) -> dict:
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
     Args:
         agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", "state", or "canvas".
+        entry_type: "action", "learning", "state", or "canvas". Anything else is
+            refused, not filed as an action.
             - "action": What you did this tick (auto-trimmed to last 10).
             - "learning": A new insight. Duplicates are auto-filtered. Only write
               if this is genuinely new and not already in learnings (max 20).
@@ -1408,7 +1409,7 @@ async def trading_agent_journal_write(
             tick 0.
         category: Learning category: "market" (observations, patterns, volatility)
             or "execution" (errors, fills, timing). Only used when entry_type="learning".
-            Defaults to "market".
+            OMIT for the default, "market".
         section: Which canvas section to replace — "thesis", "working",
             "changed", or "questions". Only used when entry_type="canvas".
 

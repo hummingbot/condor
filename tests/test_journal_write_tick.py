@@ -197,3 +197,61 @@ def test_the_tick_prompt_risk_block_comes_from_the_shared_renderer():
 
     assert prompts.render_risk_lines is journal.render_risk_lines
     assert "Position Size:" not in inspect.getsource(prompts)
+
+
+# ── An unknown entry type is not an action (MC-13) ──
+
+
+@pytest.mark.parametrize("entry_type", ["decision", "Action", "note", ""])
+def test_an_unknown_entry_type_is_refused_not_filed_as_an_action(engine, entry_type):
+    """It fell through to ``append_action`` — under tick 0 when none was passed."""
+    result = _write(entry_type=entry_type, tick=8)
+
+    assert "Unknown entry_type" in result["error"]
+    for known in ("action", "learning", "state", "canvas"):
+        assert known in result["error"]
+    assert not (engine.session_dir / "journal.md").exists()
+
+
+def test_an_unknown_entry_type_with_no_tick_writes_no_tick_zero_entry(engine):
+    result = _write(entry_type="decision")
+
+    assert "error" in result
+    assert not (engine.session_dir / "journal.md").exists()
+
+
+def test_the_registered_tools_declare_the_same_members_as_literals():
+    """The schema rejects a typo before the call; the impl is the backstop."""
+    import inspect
+    from typing import get_args
+
+    from mcp_servers.condor import server
+
+    params = inspect.signature(server.trading_agent_journal_write).parameters
+    assert (
+        get_args(params["entry_type"].annotation) == trading_agent.JOURNAL_ENTRY_TYPES
+    )
+    section = get_args(get_args(params["section"].annotation)[0])
+    assert section == canvas.CANVAS_SECTIONS
+    category = get_args(get_args(params["category"].annotation)[0])
+    assert category == ("market", "execution")
+
+
+def test_an_omitted_category_and_section_still_write(engine):
+    """The tool passes ``None`` for both when the caller leaves them out."""
+    assert _write(entry_type="learning", category=None) == {"written": True}
+    assert _write(entry_type="action", tick=3, section=None, category=None) == {
+        "written": True
+    }
+
+
+def test_an_unknown_read_section_is_an_error_not_recent(engine):
+    result = trading_agent.journal_read(AGENT_ID, section="decisions")
+
+    assert "Unknown section 'decisions'" in result["error"]
+    assert "run:N" in result["error"]
+
+
+@pytest.mark.parametrize("section", ["recent", "learnings", "summary", "state", "runs"])
+def test_the_documented_read_sections_still_answer(engine, section):
+    assert "error" not in trading_agent.journal_read(AGENT_ID, section=section)
