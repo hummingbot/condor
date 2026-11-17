@@ -84,7 +84,14 @@ from .paths import (
     shared_skills_root,
     shared_skills_roots,
 )
-from .store import _atomic_write, _slugify, _utcnow
+from .store import (
+    _atomic_write,
+    _slugify,
+    _utcnow,
+    match_score,
+    query_terms,
+    snippet,
+)
 
 
 def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
@@ -100,12 +107,21 @@ def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
     agent while running perfectly well. A miss simply reports ``routine_ok=false``
     (advisory; never fatal).
     """
+    return name in _routine_names(agent_slug)
+
+
+def _routine_names(agent_slug: str | None = None) -> set[str]:
+    """Every routine name ``agent_slug`` can run; empty when the scan fails.
+
+    Taken once per :meth:`SkillStore.catalog` / :meth:`SkillStore.search` call
+    rather than once per playbook that references a routine (ST-11).
+    """
     try:
         from routines.base import catalog_routine_names
 
-        return name in catalog_routine_names(agent_slug)
+        return catalog_routine_names(agent_slug)
     except Exception:
-        return False
+        return set()
 
 
 class SkillStore:
@@ -552,32 +568,45 @@ class SkillStore:
         )
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
-        """Keyword/substring search over name + when_to_use + description + body.
+        """Ranked keyword search over name + when_to_use + description + body.
 
         Single seam for upgrading to semantic retrieval later without changing
-        any caller (mirrors :meth:`MemoryStore.search`).
+        any caller (mirrors :meth:`MemoryStore.search_with_total`, ST-12): the
+        query is split into terms, a playbook matches when any appears, and
+        the best ``limit`` come back ranked by terms matched, then by where
+        (name > when_to_use > description > body). Ties keep library order.
+
+        Hits carry ``when_to_use`` and a short ``snippet``, never the body —
+        :meth:`read` is how a caller pays for the playbook it picked.
         """
-        q = (query or "").lower().strip()
-        results: list[dict] = []
+        terms = query_terms(query)
+        ranked = []
         for _slug, meta, body, _shared, _stock in self._iter_skills():
-            haystack = (
-                f"{meta.get('name', '')} {meta.get('when_to_use', '')} "
-                f"{meta.get('description', '')} {body}"
-            ).lower()
-            if not q or q in haystack:
-                ref = meta.get("references_routine")
-                hit = {
-                    "name": meta.get("name", ""),
-                    "description": meta.get("description", ""),
-                    "when_to_use": meta.get("when_to_use", ""),
-                    "body": body,
-                }
-                if ref:
-                    hit["references_routine"] = ref
-                    hit["routine_ok"] = _routine_exists(ref, self.agent_slug)
-                results.append(hit)
-            if len(results) >= limit:
-                break
+            name = meta.get("name", "")
+            when_to_use = meta.get("when_to_use", "")
+            description = meta.get("description", "")
+            score = match_score(
+                terms, ((name, 4), (when_to_use, 3), (description, 2), (body, 1))
+            )
+            if terms and score is None:
+                continue
+            hit = {
+                "name": name,
+                "description": description,
+                "when_to_use": when_to_use,
+                "snippet": snippet(body, terms),
+            }
+            ref = meta.get("references_routine")
+            if ref:
+                hit["references_routine"] = ref
+            ranked.append((score or (0, 0), hit))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        results = [hit for _, hit in ranked[: max(limit, 0)]]
+        referencing = [hit for hit in results if "references_routine" in hit]
+        if referencing:
+            runnable = _routine_names(self.agent_slug)
+            for hit in referencing:
+                hit["routine_ok"] = hit["references_routine"] in runnable
         return results
 
     def catalog(self) -> list[dict]:
@@ -597,8 +626,11 @@ class SkillStore:
         # The operator view iterates everything, so the mute set is read here
         # rather than taken from ``self._muted`` (empty by construction then).
         muted = load_mutes(self.agent_slug)["skills"] if self.include_muted else set()
+        runnable: set[str] | None = None
         for slug, meta, _body, shared, stock in self._iter_skills():
             ref = meta.get("references_routine") or ""
+            if ref and runnable is None:
+                runnable = _routine_names(self.agent_slug)
             rows.append(
                 {
                     "slug": slug,
@@ -610,9 +642,7 @@ class SkillStore:
                     "inherited": bool(shared and not self.can_publish),
                     "muted": slug in muted,
                     "references_routine": ref,
-                    "routine_ok": (
-                        _routine_exists(ref, self.agent_slug) if ref else True
-                    ),
+                    "routine_ok": ref in runnable if ref else True,
                 }
             )
         return rows

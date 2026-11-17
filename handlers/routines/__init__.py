@@ -13,7 +13,11 @@ import asyncio
 import hashlib
 import logging
 import time
+from datetime import datetime
 from datetime import time as dt_time
+from datetime import timedelta, timezone, tzinfo
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
@@ -22,6 +26,7 @@ import condor.reports
 from condor import primitives, routine_hooks
 from condor.preferences import SERVER_PIN_KEY, get_active_server, set_active_server
 from condor.routine_store import _agent_of, get_routine_store
+from condor.runtime import code_guard
 from handlers import clear_all_input_states
 from routines.base import (
     discover_routines,
@@ -50,8 +55,72 @@ SCHEDULE_PRESETS = [
 
 DAILY_PRESETS = ["06:00", "09:00", "12:00", "18:00", "21:00"]
 
-# Global storage for continuous routine tasks (not persisted)
-_continuous_tasks: dict[str, asyncio.Task] = {}  # instance_id -> Task
+# How late a job may start and still run (ST-05). APScheduler's default is one
+# second: a tick the event loop reached any later than that was dropped, not
+# delayed — a daily routine lost its day with only a WARNING in APScheduler's
+# own logger. An interval job gets its own interval as grace (a later start
+# would collide with the next tick anyway, which ``coalesce`` folds into one).
+_ONESHOT_GRACE_SEC = 60
+_DAILY_GRACE_SEC = 3600
+
+
+def _job_kwargs(grace_sec: float) -> dict:
+    """APScheduler options for a routine job: run late rather than skip."""
+    return {"misfire_grace_time": max(int(grace_sec), 1), "coalesce": True}
+
+
+def _local_tz_name() -> str:
+    """The server's timezone as a name a restart can resolve again (ST-06).
+
+    An IANA key when the host has one, so a daily schedule follows DST; else
+    the current fixed offset as ``+HH:MM``.
+    """
+    try:
+        from tzlocal import get_localzone_name
+
+        name = get_localzone_name()
+        if name:
+            ZoneInfo(name)
+            return name
+    except Exception:
+        pass
+    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+    minutes = int(offset.total_seconds() // 60)
+    sign = "-" if minutes < 0 else "+"
+    return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def _schedule_tz(schedule: dict) -> tzinfo:
+    """The zone a daily schedule fires in.
+
+    Stored on the schedule at creation so restore agrees with it. A schedule
+    persisted before the zone was recorded has none and stays on UTC, which is
+    when it has been firing all along — it does not move under its owner.
+    """
+    name = schedule.get("tz")
+    if not name or name == "UTC":
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        pass
+    try:
+        sign = -1 if name[0] == "-" else 1
+        hours, minutes = map(int, name[1:].split(":"))
+        return timezone(sign * timedelta(hours=hours, minutes=minutes))
+    except Exception:
+        logger.warning(f"Unknown schedule timezone {name!r}, using UTC")
+        return timezone.utc
+
+
+# Global storage for continuous routine tasks (not persisted).
+# Taken back from the module's own globals when it is re-executed: main.py's
+# hot reload runs ``importlib.reload`` on this module, and a fresh ``{}`` here
+# would orphan every running task — Stop would find nothing to cancel, drop the
+# instance and report success while the routine kept running (ST-04).
+_continuous_tasks: dict[str, asyncio.Task] = globals().get(
+    "_continuous_tasks", {}
+)  # instance_id -> Task
 
 
 # =============================================================================
@@ -224,7 +293,7 @@ def _format_schedule(schedule: dict) -> str:
     elif stype == "continuous":
         return "Running"
     elif stype == "daily":
-        return f"Daily @ {schedule.get('daily_time', '09:00')}"
+        return f"Daily @ {schedule.get('daily_time', '09:00')} {schedule.get('tz') or 'UTC'}"
     return "Unknown"
 
 
@@ -300,6 +369,72 @@ def _stop_instance(
     return False
 
 
+def _register_stopper(
+    application,
+    job_queue,
+    instance_id: str,
+    chat_id: int,
+    owner_id: int | None,
+    instances: dict,
+) -> None:
+    """Give the shared store the means to stop this instance (ST-02).
+
+    The store only mirrors a Telegram instance: the task lives in
+    ``_continuous_tasks``, the job in the JobQueue and the persisted record in
+    the owner's ``user_data``. Without this the dashboard's Stop dropped the
+    mirror and answered "stopped" while the routine kept running — and a
+    restart then restored it from the pickle. The closure does what
+    ``_stop_instance`` does, from the state a web request has no context for.
+
+    ``instances`` is the owner's bucket as the creator saw it; it is re-read
+    through ``application`` at stop time when there is one.
+    """
+
+    def _stop() -> None:
+        if job_queue is not None:
+            for job in job_queue.get_jobs_by_name(_job_name(chat_id, instance_id)):
+                job.schedule_removal()
+
+        task = _continuous_tasks.pop(instance_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        bucket = instances
+        if application is not None:
+            bucket = _owner_data(application, owner_id, chat_id).get(
+                "routine_instances", instances
+            )
+        inst = bucket.pop(instance_id, None)
+        if inst is not None:
+            routine = get_routine(inst.get("routine_name", ""))
+            if routine and routine.cleanup_fn and application is not None:
+                asyncio.create_task(
+                    routine.cleanup_fn(
+                        SimpleNamespace(
+                            application=application,
+                            bot=application.bot,
+                            job_queue=job_queue,
+                            user_data=_owner_data(application, owner_id, chat_id),
+                            _chat_id=chat_id,
+                        ),
+                        instance_id,
+                        chat_id,
+                    )
+                )
+        # No update is being processed, so PTB will not flush the owner's
+        # bucket on its own: without the mark the pickle keeps the instance and
+        # the next restart restores it.
+        mark = getattr(application, "mark_data_for_update_persistence", None)
+        if mark is not None:
+            mark(user_ids=owner_id if owner_id is not None else chat_id)
+        logger.info(f"Stopped instance {instance_id} from the shared store")
+
+    try:
+        get_routine_store().register_stopper(instance_id, _stop)
+    except Exception:
+        pass
+
+
 def _stop_all_routine(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, routine_name: str
 ) -> int:
@@ -366,11 +501,22 @@ async def _execute_routine(
                 source_name=routine_name,
             ),
             primitives.bind_context(context),
+            # The same two guards the store runner applies (XC-04): the
+            # run_code policy, and exit() as an error rather than a shutdown —
+            # asyncio re-raises SystemExit straight out of the event loop.
+            code_guard.guarded(code_guard.routine_scope(instance_id)),
+            code_guard.contain_exit(),
         ):
             config = routine.config_class(**config_dict)
             raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
+    except code_guard.CodeRunDeadline as e:
+        # A BaseException: left to propagate it would skip the bookkeeping
+        # below and take the job callback down with it.
+        result_text = f"Error: CodeRunDeadline: {e}"
+        rich_result = None
+        logger.warning(f"Routine {routine_name}[{instance_id}] interrupted: {e}")
     except Exception as e:
         result_text = f"Error: {e}"
         rich_result = None
@@ -477,6 +623,10 @@ async def _run_continuous_routine(
                 source_name=routine_name,
             ),
             primitives.bind_context(context),
+            # Guarded like every other runner (XC-04): a continuous routine
+            # calling exit() must end itself, not Condor.
+            code_guard.guarded(code_guard.routine_scope(instance_id)),
+            code_guard.contain_exit(),
         ):
             config = routine.config_class(**config_dict)
             result = await routine.run_fn(config, context)
@@ -732,6 +882,11 @@ def _create_scheduled_instance(
     instance_id = _generate_instance_id()
     job_name_str = _job_name(chat_id, instance_id)
 
+    # A daily time is in the server's zone, as the menu says (ST-06). Recorded
+    # on the schedule so restore fires in the same zone after a restart.
+    if schedule.get("type") == "daily" and not schedule.get("tz"):
+        schedule = {**schedule, "tz": _local_tz_name()}
+
     # Store instance
     instances = _get_instances(context)
     inst_meta = {
@@ -754,6 +909,14 @@ def _create_scheduled_instance(
         get_routine_store().add_instance(instance_id, inst_meta.copy())
     except Exception:
         pass
+    _register_stopper(
+        context.application,
+        context.job_queue,
+        instance_id,
+        chat_id,
+        user_id,
+        instances,
+    )
 
     # Capture the active server at creation time so routines in groups
     # connect to the correct server (user_data is keyed by user_id,
@@ -788,6 +951,7 @@ def _create_scheduled_instance(
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
+            job_kwargs=_job_kwargs(_ONESHOT_GRACE_SEC),
         )
     elif stype == "interval":
         interval = schedule.get("interval_sec", 60)
@@ -798,16 +962,18 @@ def _create_scheduled_instance(
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
+            job_kwargs=_job_kwargs(interval),
         )
     elif stype == "daily":
         time_str = schedule.get("daily_time", "09:00")
         hour, minute = map(int, time_str.split(":"))
         context.job_queue.run_daily(
             _daily_job_callback,
-            time=dt_time(hour=hour, minute=minute),
+            time=dt_time(hour=hour, minute=minute, tzinfo=_schedule_tz(schedule)),
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
+            job_kwargs=_job_kwargs(_DAILY_GRACE_SEC),
         )
 
     return instance_id
@@ -858,6 +1024,14 @@ def _create_continuous_instance(
         get_routine_store().add_instance(instance_id, inst_meta.copy())
     except Exception:
         pass
+    _register_stopper(
+        context.application,
+        context.job_queue,
+        instance_id,
+        chat_id,
+        user_id,
+        instances,
+    )
 
     # Create and store asyncio task (copy config to isolate from draft changes)
     frozen_config = config_dict.copy()
@@ -1205,7 +1379,7 @@ async def _show_daily_menu(
     text = (
         f"📅 *Daily Schedule: {escape_markdown_v2(_display_name(routine_name))}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Choose a time \\(server timezone\\)\\.\n"
+        f"Choose a time \\(server timezone, {escape_markdown_v2(_local_tz_name())}\\)\\.\n"
         f"Or send custom time as `HH:MM`\\."
     )
 
@@ -1981,6 +2155,14 @@ async def restore_scheduled_jobs(application) -> int:
                     )
                     _continuous_tasks[instance_id] = task
                     _sync_instance_to_store(instance_id, inst)
+                    _register_stopper(
+                        application,
+                        application.job_queue,
+                        instance_id,
+                        chat_id,
+                        owner_id,
+                        instances,
+                    )
                     restored += 1
                     logger.info(
                         f"Restored continuous routine {instance_id}: {routine_name}"
@@ -2013,8 +2195,17 @@ async def restore_scheduled_jobs(application) -> int:
                         data=job_data,
                         name=job_name_str,
                         chat_id=chat_id,
+                        job_kwargs=_job_kwargs(interval),
                     )
                     _sync_instance_to_store(instance_id, inst)
+                    _register_stopper(
+                        application,
+                        application.job_queue,
+                        instance_id,
+                        chat_id,
+                        owner_id,
+                        instances,
+                    )
                     restored += 1
                     logger.info(
                         f"Restored interval job {instance_id} for {routine_name} (every {interval}s)"
@@ -2025,12 +2216,23 @@ async def restore_scheduled_jobs(application) -> int:
                     hour, minute = map(int, time_str.split(":"))
                     application.job_queue.run_daily(
                         _daily_job_callback,
-                        time=dt_time(hour=hour, minute=minute),
+                        time=dt_time(
+                            hour=hour, minute=minute, tzinfo=_schedule_tz(schedule)
+                        ),
                         data=job_data,
                         name=job_name_str,
                         chat_id=chat_id,
+                        job_kwargs=_job_kwargs(_DAILY_GRACE_SEC),
                     )
                     _sync_instance_to_store(instance_id, inst)
+                    _register_stopper(
+                        application,
+                        application.job_queue,
+                        instance_id,
+                        chat_id,
+                        owner_id,
+                        instances,
+                    )
                     restored += 1
                     logger.info(
                         f"Restored daily job {instance_id} for {routine_name} (at {time_str})"

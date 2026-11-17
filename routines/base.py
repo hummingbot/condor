@@ -804,6 +804,61 @@ def assistant_routines(
 
 
 @dataclass(frozen=True)
+class _StaticRead:
+    """What one routine file says about itself, read without importing it."""
+
+    state: str
+    meta: Any
+    digest: str
+    last_modified: float | None
+
+
+# path -> ((mtime_ns, size, trust fingerprint), read). The static listing path
+# had no cache at all, unlike the import one (``_path_caches``): every routines
+# page, chat context panel and agent page re-read, re-hashed and ``ast.parse``d
+# every agent routine file on the event loop — about 0.3 s per call here
+# (ST-11). The consent record's fingerprint is in the key for the same reason
+# it is in ``_path_caches``: allowing a file leaves its mtime untouched.
+#
+# A stale entry cannot run code: this only feeds listings, and the gate in
+# :func:`discover_routines_from_path` reads the file again before importing.
+_static_reads: dict[str, tuple[tuple, _StaticRead]] = {}
+
+
+def _static_read(file_path: Path, stem: str, trust, fingerprint) -> _StaticRead:
+    """The cached static read of one routine file, refreshed when it changed.
+
+    ``trust`` is the agent's consent record (``None`` when it is not gated) and
+    ``fingerprint`` its ``fingerprint()``, taken once per listing by the caller.
+    A file that cannot be stat-ed is read every time and never cached.
+    """
+    code_trust = _code_trust()
+    try:
+        stat = file_path.stat()
+        key = (stat.st_mtime_ns, stat.st_size, fingerprint)
+        last_modified: float | None = stat.st_mtime
+    except OSError:
+        key, last_modified = None, None
+    cache_key = str(file_path)
+    cached = _static_reads.get(cache_key)
+    if key is not None and cached is not None and cached[0] == key:
+        return cached[1]
+
+    text = _read_text(file_path)
+    read = _StaticRead(
+        state=trust.state(stem, text) if trust is not None else code_trust.ALLOWED,
+        meta=meta_from_source(text, name=stem),
+        digest=code_trust.digest_of(text) if text else "",
+        last_modified=last_modified,
+    )
+    if key is not None:
+        _static_reads[cache_key] = (key, read)
+    else:
+        _static_reads.pop(cache_key, None)
+    return read
+
+
+@dataclass(frozen=True)
 class PendingRoutine:
     """A routine that exists on disk and has not been allowed to run (FEAT-147).
 
@@ -867,6 +922,7 @@ def pending_routines(agent_slug: str | None = None) -> list[PendingRoutine]:
     if trust is None:
         return []
 
+    fingerprint = trust.fingerprint()
     muted = load_mutes(agent_slug)["routines"]
     default_category = agent_slug.replace("_", " ").replace("-", " ").title()
     found: dict[str, PendingRoutine] = {}
@@ -879,11 +935,10 @@ def pending_routines(agent_slug: str | None = None) -> list[PendingRoutine]:
             stem = file_path.stem
             if stem.startswith("_"):
                 continue
-            text = _read_text(file_path)
-            state = trust.state(stem, text)
+            read = _static_read(file_path, stem, trust, fingerprint)
+            state, meta = read.state, read.meta
             if state == code_trust.ALLOWED:
                 continue
-            meta = meta_from_source(text, name=stem)
             found[stem] = PendingRoutine(
                 name=stem,
                 source_path=file_path,
@@ -893,8 +948,8 @@ def pending_routines(agent_slug: str | None = None) -> list[PendingRoutine]:
                 continuous=meta.continuous,
                 muted=stem in muted,
                 reason=state,
-                digest=code_trust.digest_of(text) if text else "",
-                last_modified=_safe_mtime(file_path),
+                digest=read.digest,
+                last_modified=read.last_modified,
             )
     return [found[name] for name in sorted(found)]
 
@@ -948,6 +1003,7 @@ def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
         return []
     code_trust = _code_trust()
     trust = code_trust.load(agent_slug)
+    fingerprint = trust.fingerprint() if trust is not None else None
     muted = load_mutes(agent_slug)["routines"]
     default_category = agent_slug.replace("_", " ").replace("-", " ").title()
     found: dict[str, AgentRoutineRow] = {}
@@ -960,9 +1016,8 @@ def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
             stem = file_path.stem
             if stem.startswith("_"):
                 continue
-            text = _read_text(file_path)
-            state = trust.state(stem, text) if trust is not None else code_trust.ALLOWED
-            meta = meta_from_source(text, name=stem)
+            read = _static_read(file_path, stem, trust, fingerprint)
+            state, meta = read.state, read.meta
             found[stem] = AgentRoutineRow(
                 name=stem,
                 source_path=file_path,
@@ -972,7 +1027,7 @@ def agent_routine_overview(agent_slug: str) -> list[AgentRoutineRow]:
                 muted=stem in muted,
                 allowed=state == code_trust.ALLOWED,
                 pending_reason="" if state == code_trust.ALLOWED else state,
-                last_modified=_safe_mtime(file_path),
+                last_modified=read.last_modified,
             )
     return [found[name] for name in sorted(found)]
 

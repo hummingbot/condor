@@ -49,6 +49,8 @@ def no_routines(monkeypatch):
     monkeypatch.setattr(
         skills_module, "_routine_exists", lambda name, agent_slug=None: False
     )
+    # ``catalog()`` and ``search()`` take the whole name set once per call.
+    monkeypatch.setattr(skills_module, "_routine_names", lambda agent_slug=None: set())
 
 
 def _write_skill(root, agent_slug, slug, *, shared=False, when_to_use="whenever"):

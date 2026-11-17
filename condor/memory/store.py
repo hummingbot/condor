@@ -22,6 +22,7 @@ Each store lives under its assistant's home, keyed by ``user_id`` (FEAT-003);
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -113,6 +114,65 @@ def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
     _atomic_write(audit_file, "".join(tail))
 
 
+# -- search helpers (shared with SkillStore) -----------------------------------
+
+SNIPPET_CHARS = 200
+
+_TERM = re.compile(r"[a-z0-9]+")
+
+
+def query_terms(query: str | None) -> list[str]:
+    """The distinct lowercase alphanumeric terms of a query, in order."""
+    return list(dict.fromkeys(_TERM.findall((query or "").lower())))
+
+
+def _starts_a_word(term: str, words: list[str]) -> bool:
+    return any(word.startswith(term) for word in words)
+
+
+def match_score(
+    terms: list[str], weighted_fields: tuple[tuple[str, int], ...]
+) -> tuple[int, int] | None:
+    """Rank key for one document, or ``None`` when no term appears in it.
+
+    ``(terms matched, sum of each matched term's best field weight)`` — so a
+    document matching more of the query always outranks one matching less, and
+    among equals a hit in the name beats one buried in the body.
+
+    A term matches a word it *starts* ("binan" finds "binance"), not any
+    substring: split queries produce short terms, and "re" from "re-centre"
+    would otherwise match every "whenever" and "already".
+    """
+    fields = [
+        (_TERM.findall((text or "").lower()), weight)
+        for text, weight in weighted_fields
+    ]
+    matched = total = 0
+    for term in terms:
+        best = max(
+            (weight for words, weight in fields if _starts_a_word(term, words)),
+            default=0,
+        )
+        if best:
+            matched += 1
+            total += best
+    return (matched, total) if matched else None
+
+
+def snippet(body: str, terms: list[str], width: int = SNIPPET_CHARS) -> str:
+    """About ``width`` characters of ``body``, around the first matched term."""
+    text = " ".join((body or "").split())
+    if len(text) <= width:
+        return text
+    lowered = text.lower()
+    found = [re.search(rf"(?<![a-z0-9]){re.escape(term)}", lowered) for term in terms]
+    positions = [match.start() for match in found if match]
+    start = max(min(positions) - width // 4, 0) if positions else 0
+    start = min(start, len(text) - width)
+    piece = text[start : start + width]
+    return ("…" if start else "") + piece + ("…" if start + width < len(text) else "")
+
+
 class MemoryStore:
     """Per-assistant, per-user memory store.
 
@@ -188,29 +248,51 @@ class MemoryStore:
         return body
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
-        """Keyword/substring search over name + description + body.
+        """Ranked keyword search over name + description + body.
 
         This is the single seam for upgrading to semantic retrieval later
-        without changing any caller.
+        without changing any caller. See :meth:`search_with_total` for the
+        matching rules; this is the same page without the count.
         """
-        q = (query or "").lower().strip()
-        results: list[dict] = []
-        for meta, body in self._iter_memories():
-            haystack = (
-                f"{meta.get('name', '')} {meta.get('description', '')} {body}".lower()
-            )
-            if not q or q in haystack:
-                results.append(
+        return self.search_with_total(query, limit)[0]
+
+    def search_with_total(self, query: str, limit: int = 10) -> tuple[list[dict], int]:
+        """The best ``limit`` matches and how many memories matched in all.
+
+        The query is split into terms and a memory matches when any of them
+        appears — "sol usdc slippage" used to be one substring, so it found
+        nothing unless that exact phrase was stored, and the agent concluded
+        there was no memory (ST-12). Ranked by how many terms matched, then by
+        where (name > description > body), then newest first: the cut at
+        ``limit`` used to fall on the newest memories. An empty query lists
+        everything, newest first.
+
+        Hits carry a ~200-character ``snippet``, not the body — :meth:`read`
+        is how a caller pays for the one it wants.
+        """
+        terms = query_terms(query)
+        ranked = []
+        # Oldest-first from _iter_memories; reversed so the stable sort below
+        # leaves ties newest-first.
+        for meta, body in reversed(list(self._iter_memories())):
+            name = meta.get("name", "")
+            description = meta.get("description", "")
+            score = match_score(terms, ((name, 3), (description, 2), (body, 1)))
+            if terms and score is None:
+                continue
+            ranked.append(
+                (
+                    score or (0, 0),
                     {
-                        "name": meta.get("name", ""),
-                        "description": meta.get("description", ""),
+                        "name": name,
+                        "description": description,
                         "type": meta.get("type", "fact"),
-                        "body": body,
-                    }
+                        "snippet": snippet(body, terms),
+                    },
                 )
-            if len(results) >= limit:
-                break
-        return results
+            )
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [hit for _, hit in ranked[: max(limit, 0)]], len(ranked)
 
     def catalog(self) -> list[dict]:
         """Every memory's metadata, oldest first — no bodies.

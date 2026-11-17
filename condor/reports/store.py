@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import json
+import html
+import logging
 import os
+import re
 from collections.abc import Iterable
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from condor import paths
-from condor.fsutil import atomic_write_json, atomic_write_text
+from condor.fsutil import atomic_write_json, atomic_write_text, read_json
 
-MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
+logger = logging.getLogger(__name__)
+
+# Retention (ST-07). One global FIFO of 100 let a single routine on a short
+# schedule flush everyone's archive — every 30 s is 100 reports in 50 minutes,
+# other users' included. So the first cut is per (owner, source): each keeps its
+# newest MAX_REPORTS_PER_SOURCE. The global cap is the backstop over all of
+# them, and correspondingly larger. Both are env-tunable; a per-source cap of 0
+# disables that cut. A routine that only wants "the latest" should update one
+# report in place with LiveReport instead of leaning on either.
+MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "500"))
+MAX_REPORTS_PER_SOURCE = int(os.environ.get("CONDOR_MAX_REPORTS_PER_SOURCE", "50"))
 
 _index_lock = asyncio.Lock()
 _last_report_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -180,13 +193,97 @@ def resolve_report_asset(filename: str) -> Path | None:
 
 
 def _read_index() -> list[dict]:
-    index_file = _index_file()
-    if not index_file.exists():
-        return []
+    """The index for a read-only caller: an unreadable one lists as empty.
+
+    Never feed this into a write — see :func:`_read_index_for_write`.
+    """
     try:
-        return json.loads(index_file.read_text(encoding="utf-8"))
+        entries = read_json(_index_file(), [])
     except Exception:
+        logger.warning("Failed to read %s; listing no reports", _index_file())
         return []
+    return entries if isinstance(entries, list) else []
+
+
+def _read_index_for_write() -> list[dict]:
+    """The index for a read-modify-write. Never mistakes "unreadable" for "empty".
+
+    Writing back what :func:`_read_index` degrades to made one failed read
+    permanent: the next save persisted its own entry alone and every other
+    report became an orphan file nothing lists or cleans (ST-08).
+
+    A read that did not happen (``OSError``) raises: nothing is known about
+    what is on disk, so nothing may be written over it. Content that is not a
+    JSON list will not get better on a retry, so it is moved aside as
+    ``reports_index.json.corrupt-<timestamp>`` and the index is rebuilt from
+    the report files themselves.
+    """
+    index_file = _index_file()
+    try:
+        entries = read_json(index_file, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"expected a list, found {type(entries).__name__}")
+        return entries
+    except ValueError as e:
+        aside = index_file.with_name(
+            f"{index_file.name}.corrupt-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
+        )
+        os.replace(index_file, aside)
+        entries = _rebuild_index_from_disk()
+        logger.error(
+            "Report index %s was unreadable (%s); kept as %s and rebuilt %d "
+            "entries from the report files",
+            index_file,
+            e,
+            aside.name,
+            len(entries),
+        )
+        return entries
+
+
+# ``<YYYYmmdd_HHMMSS>_<slug>_<id>.html`` — the name ``ReportBuilder.save`` mints.
+_REPORT_FILENAME = re.compile(r"(\d{8}_\d{6})_(.*)_([0-9a-f]{6})\.html")
+_TITLE_TAG = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _rebuild_index_from_disk() -> list[dict]:
+    """Index entries recovered from the report files, oldest first.
+
+    Only what a file can prove about itself: its id and creation time (from its
+    name) and its title (from its head). Source, tags and subject lived in the
+    lost index alone. So did the owner — a recovered report has none, which the
+    web routes treat as admin-only, never as world-readable (SEC-196).
+    """
+    entries = []
+    for path in sorted(_charts_dir().glob("*.html")):
+        match = _REPORT_FILENAME.fullmatch(path.name)
+        if not match:
+            continue
+        stamp, slug, report_id = match.groups()
+        try:
+            created = datetime.strptime(stamp, "%Y%m%d_%H%M%S").replace(
+                tzinfo=timezone.utc
+            )
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                title = _TITLE_TAG.search(handle.read(4096))
+        except (OSError, ValueError):
+            continue
+        entries.append(
+            {
+                "id": report_id,
+                "title": html.unescape(title.group(1)).strip() if title else slug,
+                "filename": path.name,
+                "created_at": created.isoformat(),
+                "source_type": "",
+                "source_name": "",
+                "tags": [],
+                "subject": None,
+                "agent": "condor",
+                "user_id": None,
+                "recovered": True,
+            }
+        )
+    return entries
 
 
 def _write_index(entries: list[dict]) -> None:
@@ -314,7 +411,7 @@ def get_report(report_id: str) -> dict | None:
 async def delete_report(report_id: str) -> bool:
     """Delete a report's HTML and its index entry. True when one was removed."""
     async with _index_lock:
-        entries = _read_index()
+        entries = _read_index_for_write()
         new_entries = []
         deleted = False
         for entry in entries:
@@ -330,18 +427,45 @@ async def delete_report(report_id: str) -> bool:
     return deleted
 
 
-def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
-    """Run cleanup while the caller already holds the index lock."""
-    entries = _read_index()
-    if len(entries) <= max_reports:
-        return
+def _cleanup_locked(
+    max_reports: int | None = None, max_per_source: int | None = None
+) -> None:
+    """Run cleanup while the caller already holds the index lock.
+
+    Oldest-first by last update, in two passes: each (owner, source) down to
+    ``max_per_source``, then whatever is left down to ``max_reports``. A report
+    saved with no source belongs to no group and only meets the global cap.
+    The caps default to the module's, read at call time.
+    """
+    if max_reports is None:
+        max_reports = MAX_REPORTS
+    if max_per_source is None:
+        max_per_source = MAX_REPORTS_PER_SOURCE
+    entries = _read_index_for_write()
     entries.sort(
         key=lambda entry: entry.get("updated_at") or entry.get("created_at", "")
     )
-    to_remove = entries[: len(entries) - max_reports]
-    keep_ids = {entry["id"] for entry in entries[len(entries) - max_reports :]}
-    for entry in to_remove:
-        path = _charts_dir() / entry["filename"]
-        if path.exists():
-            path.unlink()
-    _write_index([entry for entry in entries if entry["id"] in keep_ids])
+
+    doomed: set[str] = set()
+    if max_per_source > 0:
+        by_source: dict[tuple, list[dict]] = {}
+        for entry in entries:
+            if entry.get("source_name"):
+                key = (entry.get("user_id"), entry["source_name"])
+                by_source.setdefault(key, []).append(entry)
+        for group in by_source.values():
+            doomed.update(entry["id"] for entry in group[:-max_per_source])
+
+    survivors = [entry for entry in entries if entry["id"] not in doomed]
+    excess = len(survivors) - max_reports
+    if excess > 0:
+        doomed.update(entry["id"] for entry in survivors[:excess])
+    if not doomed:
+        return
+
+    for entry in entries:
+        if entry["id"] in doomed:
+            path = _charts_dir() / entry["filename"]
+            if path.exists():
+                path.unlink()
+    _write_index([entry for entry in entries if entry["id"] not in doomed])

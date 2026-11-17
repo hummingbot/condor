@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from condor import paths
-from condor.fsutil import atomic_write_bytes, atomic_write_json
+from condor.fsutil import atomic_write_bytes, atomic_write_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -321,14 +321,42 @@ class RunHistoryStore:
         atomic_write_bytes(self._payload_path(key), gzip.compress(raw, _GZIP_LEVEL))
 
     def _load_index(self) -> None:
-        if not self._index_path.exists():
-            return
+        """Read the index into memory, telling "missing" from "failed to read".
+
+        Both used to leave ``_index`` empty, and the next ``put`` then persisted
+        its one entry over everything the file held — entries this module keeps
+        for ever (ST-08). Now a read that did not happen leaves the store
+        *unloaded* (``_persist_index`` retries it and refuses to write until it
+        succeeds), and content that is not a JSON object — which no retry will
+        fix — is moved aside as ``_index.json.corrupt-<timestamp>`` first.
+        """
+        self._index_unloaded = False
         try:
-            raw = json.loads(self._index_path.read_text(encoding="utf-8"))
-        except Exception:
-            logger.warning("Unreadable run-history index at %s", self._index_path)
+            raw = read_json(self._index_path, None)
+            if raw is not None and not isinstance(raw, dict):
+                raise ValueError(f"expected an object, found {type(raw).__name__}")
+        except OSError as e:
+            logger.error(
+                "Could not read run-history index %s (%s); it will not be "
+                "overwritten until it can be read",
+                self._index_path,
+                e,
+            )
+            self._index_unloaded = True
             return
-        if not isinstance(raw, dict):
+        except ValueError as e:
+            aside = self._index_path.with_name(
+                f"{self._index_path.name}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}"
+            )
+            os.replace(self._index_path, aside)
+            logger.error(
+                "Run-history index %s was unreadable (%s); kept as %s",
+                self._index_path,
+                e,
+                aside.name,
+            )
+            return
+        if raw is None:
             return
         self._meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
         entries = raw.get("entries")
@@ -348,6 +376,19 @@ class RunHistoryStore:
                 logger.warning("Skipping malformed run-history entry %s", key)
 
     def _persist_index(self) -> None:
+        if self._index_unloaded:
+            # The file on disk was never read: load it now and lay this
+            # session's entries over it, or leave it alone.
+            pending, pending_meta = self._index, self._meta
+            self._index, self._meta = {}, {}
+            self._load_index()
+            self._index.update(pending)
+            self._meta.update(pending_meta)
+            if self._index_unloaded:
+                raise OSError(
+                    f"run-history index {self._index_path} is unreadable; "
+                    "not overwriting it"
+                )
         atomic_write_json(
             self._index_path,
             {
@@ -377,6 +418,16 @@ def get_run_history_store() -> RunHistoryStore:
         if _store is None:
             _store = RunHistoryStore()
         return _store
+
+
+def prune_run_history_if_due() -> None:
+    """Run the daily retention check now, without waiting for a write (ST-13).
+
+    ``put`` is the only other caller of the check, so on a store nobody writes
+    to, payloads past retention stayed on disk indefinitely. Called once at
+    boot, off the event loop.
+    """
+    get_run_history_store()._maybe_prune()
 
 
 def reset_run_history_store() -> None:

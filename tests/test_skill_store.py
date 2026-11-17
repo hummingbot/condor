@@ -392,7 +392,7 @@ def test_local_skill_shadows_the_inherited_one(project_root):
     assert "agent trigger" in index
     assert "chat trigger" not in index
     assert index.count("[routine_cookbook]") == 1
-    assert [h["body"] for h in agent.search("body")] == ["agent body"]
+    assert [h["snippet"] for h in agent.search("body")] == ["agent body"]
     # Condor's file on disk is untouched.
     assert SkillStore().read("routine_cookbook")["body"] == "chat body"
 
@@ -610,3 +610,57 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
     assert meta.get("name") == "shared"
     assert body == "x" * 5000
     assert list(target.parent.glob("*.tmp")) == []
+
+
+# ── ST-12: ranked, tokenized search ──
+
+
+def test_search_matches_non_adjacent_words_and_ranks_the_trigger_first(project_root):
+    _write_skill(
+        project_root,
+        None,
+        "generic_notes",
+        when_to_use="general notes",
+        body="A passing mention of slippage.",
+    )
+    _write_skill(
+        project_root,
+        None,
+        "swap_playbook",
+        when_to_use="when a SOL swap shows high slippage",
+        body="Quote, then compare.",
+    )
+    s = SkillStore()
+
+    hits = s.search("slippage sol")
+
+    assert [h["name"] for h in hits] == ["swap_playbook", "generic_notes"]
+
+
+def test_search_hits_carry_the_trigger_and_a_snippet_not_the_body(project_root):
+    _write_skill(
+        project_root,
+        None,
+        "long_playbook",
+        when_to_use="when the needle appears",
+        body=("step " * 300) + "needle " + ("more " * 300),
+        references_routine="band_scanner",
+    )
+    hit = SkillStore().search("needle")[0]
+
+    assert "body" not in hit
+    assert hit["when_to_use"] == "when the needle appears"
+    assert len(hit["snippet"]) <= 202
+    assert hit["references_routine"] == "band_scanner"
+    assert "routine_ok" in hit
+
+
+def test_search_limit_cuts_after_ranking(project_root):
+    for n in range(5):
+        _write_skill(project_root, None, f"filler_{n}", when_to_use="filler alpha")
+    _write_skill(project_root, None, "zz_best", when_to_use="alpha beta")
+
+    hits = SkillStore().search("alpha beta", limit=1)
+
+    # Last in library order, first by rank: the old loop stopped at filler_0.
+    assert [h["name"] for h in hits] == ["zz_best"]

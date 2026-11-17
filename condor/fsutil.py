@@ -42,7 +42,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-__all__ = ["atomic_write_bytes", "atomic_write_text", "atomic_write_json"]
+__all__ = ["atomic_write_bytes", "atomic_write_text", "atomic_write_json", "read_json"]
 
 # Mode for a file this helper creates from scratch. Matches what
 # ``tempfile.mkstemp`` produces, i.e. what most of the folded-in copies already
@@ -119,6 +119,25 @@ def atomic_write_json(
     cannot be encoded raises without having touched the filesystem at all.
     """
     atomic_write_text(path, json.dumps(data, **json_kw), fsync=fsync, mkdir=mkdir)
+
+
+def read_json(path: str | Path, default: Any = None) -> Any:
+    """Parse ``path`` as JSON; ``default`` only when the file does not exist.
+
+    The reader for a read-modify-write of a whole file. "Missing" and "failed
+    to read" are different answers: a store that treats an unreadable index as
+    an empty one persists that emptiness with its next write (ST-08). So any
+    other failure raises — ``OSError`` for a read that did not happen (too many
+    open files, permissions), ``ValueError`` for content that is not JSON
+    (``json.JSONDecodeError`` and ``UnicodeDecodeError`` are both subclasses) —
+    and the caller decides whether it may degrade (a read-only path) or must
+    not go on (a write path).
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default
+    return json.loads(text)
 
 
 def _target_mode(path: Path) -> int:
