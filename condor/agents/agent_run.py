@@ -185,7 +185,9 @@ async def run_agent_to_completion(
     # ``CONSULT_FALLBACK_MODEL`` was this knob's name when the only door was the
     # consult tool, and is still honoured so a deployment that set it does not
     # silently lose its override.
-    model_key = agent.agent_key
+    from condor.llm.options import resolve_auto_agent_key
+
+    model_key = resolve_auto_agent_key(agent.agent_key)
     fallback_note = ""
     # A custom endpoint's URL/key live in the user's saved endpoints, not in the
     # agent record — resolve them here so the run can reach the same provider

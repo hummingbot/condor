@@ -17,6 +17,7 @@ import {
 } from "react";
 
 import {
+  CHAT_SLUG,
   type AgentBundleFinding,
   type AgentImportPlan,
   type AgentUpdatePlan,
@@ -156,6 +157,39 @@ function updateConsentNote(hubReviewed: boolean, keptLocalRoutines: string[]): s
     ", and the hub's own review covers every routine this update replaces" +
     ` — but ${keptLocalRoutines.join(", ")} kept ${n === 1 ? "its" : "their"} own copy` +
     ` and still ${n === 1 ? "needs" : "need"} your allow before ${n === 1 ? "it" : "they"} can run.`
+  );
+}
+
+/**
+ * The wizard's bottom action row — the same chrome on step 1's Cancel/
+ * Continue as on step 2's consent checkbox/Import, so the two pages of the
+ * review read as one card rather than page 2 looking like a different
+ * component bolted underneath page 1. `stickyAction` sticks it to this
+ * card's own bottom edge for a host that scrolls the review in a box of its
+ * own (the Hub's modal); the file panel, which scrolls the whole page
+ * instead, gets the plain divider.
+ */
+function wizardActionBar(stickyAction: boolean): string {
+  return stickyAction
+    ? "sticky bottom-0 flex items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] py-3"
+    : "flex items-center justify-between gap-3 border-t border-[var(--color-border)] pt-3";
+}
+
+/**
+ * The seed message "Finalize setup with Condor" opens Condor's chat with
+ * (via the `?agent=&ask=` hand-off, FEAT-092) — naming the agent and its
+ * loop(s) so Condor knows what to read and walk through conversationally,
+ * rather than the raw config editor this success screen used to embed.
+ */
+function condorFinalizeMessage(slug: string, loops: string[]): string {
+  const loopPart =
+    loops.length > 0
+      ? ` Its loop${loops.length > 1 ? "s are" : " is"} ${loops.join(", ")}.`
+      : "";
+  return (
+    `I just imported the agent \`${slug}\`.${loopPart} Walk me through finishing its setup — ` +
+    "show me its default venue, pairs, capital, model and any loop cadence/budget/risk-limit " +
+    "values, explain what each one does, and help me pick the values I actually want before it runs."
   );
 }
 
@@ -366,15 +400,19 @@ export function ImportAgentDialog({
    */
   stickyAction?: boolean;
   /**
-   * Offered as a next action once the agent has landed — "Start chatting",
-   * dropping the operator straight into a chat with the agent that just
-   * landed, which is what the moment calls for rather than its settings
-   * page. Omitted (the file panel's case) leaves the success screen with no
-   * such button; a host with somewhere to send the operator passes this
-   * instead of reaching into the dialog's own `landed`/`applied` state for
-   * the slug.
+   * Opens a chat with the named agent — optionally seeded with `text`, the
+   * same `?agent=&ask=` hand-off `AgentWorkspace.askAgent` uses (FEAT-092).
+   * The success screen below uses this for two different asks: "Start
+   * chatting" opens Condor plain, and "Finalize setup with Condor" opens
+   * Condor seeded with a request to walk through the just-landed agent's
+   * config. Neither opens the landed agent itself — nothing it carries has
+   * had a chance to be reviewed in a live conversation yet, so Condor is the
+   * front door rather than its settings page. Omitted (the file panel's
+   * case) leaves the success screen with neither button; a host with
+   * somewhere to send the operator passes this instead of reaching into the
+   * dialog's own `landed`/`applied` state for the slug.
    */
-  onOpenAgent?: (slug: string) => void;
+  onOpenAgent?: (slug: string, text?: string) => void;
   /**
    * Offered as "Close" on the success screen, for a host that renders this
    * dialog inside a dismissable shell (the Hub's review modal). Omitted
@@ -675,14 +713,16 @@ export function ImportAgentDialog({
         </label>
       )}
 
+      {/* Above the plan, not inside it: where this came from is the first
+          question, and the answer is the same whichever verb follows — and
+          outside the fade below so it renders once for the whole wizard
+          rather than crossfading out and back in, identically, every time
+          step 1 hands off to step 2. Gone once it lands — the trust note is
+          about the decision, not the outcome it led to. */}
+      {!landedOrApplied && provenance}
+
       <ScreenFade phaseKey={phase}>
         <div className="space-y-4">
-          {/* Above the plan, not inside it: where this came from is the first
-              question, and the answer is the same whichever verb follows.
-              Gone once it lands — the trust note is about the decision, not
-              the outcome it led to. */}
-          {!landedOrApplied && provenance}
-
           {busy && (
             <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
               <Loader2 className="h-4 w-4 animate-spin" /> Reading the bundle…
@@ -1137,7 +1177,7 @@ export function ImportAgentDialog({
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-2 pt-1">
+          <div className={wizardActionBar(stickyAction)}>
             <SecondaryButton onClick={cancel}>Cancel</SecondaryButton>
             <PrimaryButton onClick={() => setStep(2)} disabled={busy}>
               Continue
@@ -1152,13 +1192,7 @@ export function ImportAgentDialog({
             <div className="space-y-3">
               <ConsentDisclaimer plan={plan} />
 
-              <div
-                className={
-                  stickyAction
-                    ? "sticky bottom-0 flex items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] py-3"
-                    : "flex items-center justify-between gap-3"
-                }
-              >
+              <div className={wizardActionBar(stickyAction)}>
                 {/* The explicit consent the owner has to give before Install
                     is enabled. */}
                 <label className="flex items-start gap-2 text-[11px] text-[var(--color-text)]">
@@ -1372,7 +1406,7 @@ function SuccessScreen({
 }: {
   landed: AgentImportPlan | null;
   applied: AgentUpdatePlan | null;
-  onOpenAgent?: (slug: string) => void;
+  onOpenAgent?: (slug: string, text?: string) => void;
   onDismiss?: () => void;
 }) {
   const result = landed ?? applied;
@@ -1400,6 +1434,16 @@ function SuccessScreen({
   // about allowing them (Greptile, PR #314) — `churn`-style updates that
   // touch no routine were saying "no further allow needed" regardless.
   const appliedHasRoutines = applied ? applied.files.some((f) => routineNameOf(f.path) !== null) : false;
+  // Same `loops/<name>/loop.md` shape the pre-confirm review screen reads
+  // (`carriedLoops` above) — the loops this exact install/update just landed,
+  // so "Finalize setup with Condor" names the right strategies rather than
+  // guessing from the agent's full roster.
+  const landedLoops = result.files
+    .filter((f) => {
+      const parts = f.path.split("/");
+      return parts.length === 3 && parts[0] === "loops" && parts[2] === "loop.md";
+    })
+    .map((f) => f.path.split("/")[1]);
 
   return (
     <div className="space-y-4">
@@ -1418,7 +1462,7 @@ function SuccessScreen({
           stitching all three together. */}
       <div
         data-import-facts
-        className="space-y-1.5 text-sm leading-relaxed text-[var(--color-text-muted)]"
+        className="space-y-3 text-sm leading-relaxed text-[var(--color-text-muted)]"
       >
         <p>
           {landed && <span data-import-done>Nothing is running yet.</span>}
@@ -1507,59 +1551,87 @@ function SuccessScreen({
       )}
 
       {findings.length > 0 && (
-        <ReviewSection
-          summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
-        >
-          <div className="@container">
-            <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
-              {categoriesOf(findings).map((category) => {
-                const rows = findings.filter((f) => f.category === category);
-                const copy = FINDING_COPY[category];
-                return (
-                  <div
-                    key={category}
-                    className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
-                  >
-                    <p className="text-[11px] font-semibold text-[var(--color-text)]">
-                      {copy?.title ?? category}{" "}
-                      <span className="font-normal text-[var(--color-text-muted)]">
-                        ({rows.length})
-                      </span>
-                    </p>
-                    <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
-                      {rows.map((f) => (
-                        <li
-                          key={`${f.path}:${f.start}:${f.label}`}
-                          className="text-[11px] text-[var(--color-text-muted)]"
-                        >
-                          <span
-                            className={
-                              f.certain
-                                ? "font-semibold text-[var(--color-red)]"
-                                : "text-amber-400"
-                            }
+        <div className="mt-1">
+          <ReviewSection
+            summary={`View the ${findings.length} finding${findings.length !== 1 ? "s" : ""}`}
+          >
+            <div className="@container">
+              <div className="grid grid-cols-1 gap-2 @md:grid-cols-2 @2xl:grid-cols-3">
+                {categoriesOf(findings).map((category) => {
+                  const rows = findings.filter((f) => f.category === category);
+                  const copy = FINDING_COPY[category];
+                  return (
+                    <div
+                      key={category}
+                      className="min-w-0 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2"
+                    >
+                      <p className="text-[11px] font-semibold text-[var(--color-text)]">
+                        {copy?.title ?? category}{" "}
+                        <span className="font-normal text-[var(--color-text-muted)]">
+                          ({rows.length})
+                        </span>
+                      </p>
+                      <ul className="mt-0.5 max-h-40 space-y-0.5 overflow-y-auto pr-0.5">
+                        {rows.map((f) => (
+                          <li
+                            key={`${f.path}:${f.start}:${f.label}`}
+                            className="text-[11px] text-[var(--color-text-muted)]"
                           >
-                            {f.label}
-                            {f.certain && " (certain)"}
-                          </span>{" "}
-                          <span className="font-mono text-[var(--color-text)]">
-                            {f.path}:{f.line}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                );
-              })}
+                            <span
+                              className={
+                                f.certain
+                                  ? "font-semibold text-[var(--color-red)]"
+                                  : "text-amber-400"
+                              }
+                            >
+                              {f.label}
+                              {f.certain && " (certain)"}
+                            </span>{" "}
+                            <span className="font-mono text-[var(--color-text)]">
+                              {f.path}:{f.line}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        </ReviewSection>
+          </ReviewSection>
+        </div>
+      )}
+
+      {/* Its venue, pairs, capital, model pin and loop cadence/budget/
+          risk-limit values are set to the bundle's own defaults — rather
+          than a raw config editor bolted on here, Condor walks through them
+          conversationally once asked to. One bundle carrying a loop gets
+          this; an agent with none renders nothing extra here. */}
+      {landedLoops.length > 0 && onOpenAgent && (
+        <div
+          data-finalize-setup
+          className="space-y-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5"
+        >
+          <p className="text-xs font-semibold text-[var(--color-text)]">
+            Review its configuration
+          </p>
+          <p className="text-[11px] text-[var(--color-text-muted)]">
+            {slug}'s venue, pairs, capital and model are set to its bundled defaults.
+            Condor can walk you through what each one does and help you pick the
+            values you want, before it runs.
+          </p>
+          <SecondaryButton
+            onClick={() => onOpenAgent(CHAT_SLUG, condorFinalizeMessage(slug, landedLoops))}
+          >
+            Finalize setup with Condor
+          </SecondaryButton>
+        </div>
       )}
 
       {(onOpenAgent || onDismiss) && (
         <div className="flex items-center gap-2 border-t border-[var(--color-border)] pt-3">
           {onOpenAgent && (
-            <PrimaryButton onClick={() => onOpenAgent(slug)}>Start chatting</PrimaryButton>
+            <PrimaryButton onClick={() => onOpenAgent(CHAT_SLUG)}>Start chatting</PrimaryButton>
           )}
           {onDismiss && <SecondaryButton onClick={onDismiss}>Close</SecondaryButton>}
         </div>

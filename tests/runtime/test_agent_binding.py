@@ -218,6 +218,31 @@ def test_agent_key_precedence(agents_root, monkeypatch):
     assert overridden.agent_key == "claude-code"
 
 
+def test_agent_key_auto_defers_to_install_default(agents_root, monkeypatch):
+    """``agent_key: auto`` (the bundled-agent default, CORR-1160) resolves to
+    the install-wide default rather than being spawned as a literal backend.
+    """
+    monkeypatch.setattr(
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **kw: []
+    )
+    monkeypatch.setenv("CONDOR_DEFAULT_AGENT", "gemini")
+    AgentStore().create(
+        name="Auto Specialist",
+        description="Ships with no pinned model",
+        agent_key="auto",
+        server_required=False,
+    )
+
+    bound = binding.resolve(_spec(agent_slug="auto_specialist"))
+    assert bound.agent_key == "gemini"
+
+    # A deliberate spec override still wins outright over the Agent's "auto".
+    overridden = binding.resolve(
+        _spec(agent_slug="auto_specialist", agent_key="claude-code")
+    )
+    assert overridden.agent_key == "claude-code"
+
+
 def test_unknown_agent_slug(agents_root):
     """A bad slug fails loudly, before anything is spawned."""
     with pytest.raises(UnknownAgent) as exc:

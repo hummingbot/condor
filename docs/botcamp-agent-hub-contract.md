@@ -149,7 +149,7 @@ Field notes, normative for the hub as much as for Condor:
 ### 2.1 Base URL
 
 ```
-https://botcamp.xyz/api
+https://www.botcamp.xyz/api
 ```
 
 Condor compiles this in as a constant (`condor/hub.py`'s `HUB_URL`) and ships
@@ -160,16 +160,24 @@ deliberate SSRF defense, not an oversight to design around: a server-side
 fetch of a **user-supplied** URL is the surface Condor refuses to build; a
 fetch of a **compiled-in** one, to a single path segment that has already
 passed an identifier check, is not. There is no `hub.` subdomain and no
-versioned `/v1` path segment — the hub lives on the `botcamp.xyz` app itself,
-under two path families: `/api/condor/*` (this install's own account and
-device-login state — §4) and `/api/agents/*` (the catalogue and submission
-surface — §3, §5, §7, §8). Two consequences for the hub's design:
+versioned `/v1` path segment — the hub lives on the `www.botcamp.xyz` app
+itself, under two path families: `/api/condor/*` (this install's own account
+and device-login state — §4) and `/api/agents/*` (the catalogue and
+submission surface — §3, §5, §7, §8). Two consequences for the hub's design:
 
 - **Never require a redirect.** Condor's HTTP client refuses every redirect
   response outright (it raises rather than following a `3xx`), on every verb,
   including the bundle download. If a future CDN or load balancer in front of
   the hub issues a `302`, every Condor install breaks at once. Terminate
-  redirects before they reach the client, or don't use them.
+  redirects before they reach the client, or don't use them. The bare
+  `botcamp.xyz` host already does this today — it `307`s every request to
+  `www.botcamp.xyz` — which is why the base URL above is the `www` host
+  directly, never the bare one: a client that follows that redirect with
+  `Authorization` set drops the header on the cross-host hop (curl's
+  documented behavior since 7.58, and most HTTP libraries' default), turning
+  a valid token into a `401`. Any client of this contract, Condor or
+  otherwise, must call `www.botcamp.xyz` directly and must not rely on
+  `-L`/follow-redirects to get there.
 - **The path prefix is part of the contract.** Every endpoint below is given
   as a full path under this base. A new, incompatible shape for an existing
   path is a new path segment Condor would need a release to pick up — version
@@ -569,7 +577,7 @@ Response `200`:
 {
   "device_code": "dev_3f8c1a9e2b7d4f60",
   "user_code": "WXYZ-4821",
-  "verification_uri": "https://botcamp.xyz/connect",
+  "verification_uri": "https://www.botcamp.xyz/connect",
   "expires_in": 600,
   "interval": 5
 }

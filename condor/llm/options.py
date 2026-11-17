@@ -82,3 +82,17 @@ def _default_agent() -> str:
 
 
 DEFAULT_AGENT = _default_agent()
+
+
+def resolve_auto_agent_key(key: str) -> str:
+    """Expand the ``auto`` sentinel to the install-wide default (CORR-1160).
+
+    ``auto`` is what a bundled agent's ``AGENT.md`` ships with instead of a
+    pinned backend, so every resolution point that reads an Agent's
+    ``agent_key`` literally — the tick engine, chat/consult/delegate session
+    binding — must call this on the value it gets before using it to start
+    anything. Resolved fresh each call, never the import-time ``DEFAULT_AGENT``
+    above, so a changed ``CONDOR_DEFAULT_AGENT`` takes effect without a
+    restart. Any other value, including empty, is returned unchanged.
+    """
+    return _default_agent() if key == "auto" else key

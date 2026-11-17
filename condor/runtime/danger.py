@@ -50,6 +50,7 @@ DANGEROUS_TOOLS = {
     "manage_clmm",  # every action that moves liquidity
     "manage_amm",  # every action that moves liquidity
     "control_agent",  # only `start`, which launches an unattended trading loop
+    "manage_loops",  # only `update`, which rewrites a loop's own stored config
     # The executor family is gated by NAME (FEAT-062), the same way the swap family
     # is: a create and a stop each have their own tool, so there is no `action` to
     # read out of the arguments and no fail-closed ambiguity. Every other executor
@@ -132,6 +133,18 @@ DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 # so the gate has to know both or `start_agent` walks straight past it.
 DANGEROUS_CONTROL_ACTIONS = {"start", "start_agent"}
 
+#: Actions within `manage_loops` that require confirmation (FEAT-192). `update`
+#: rewrites the loop's own stored cadence, budget and risk limits — the same
+#: class of decision `control_agent(start)` gates above, and the one place a
+#: chat-driven edit is shown to a human before it lands, since `update_strategy`
+#: (`mcp_servers/condor/tools/trading_agent.py`) writes straight to the store
+#: with no diff of its own. `list`, `get` and `create` stay ungated: `create` is
+#: a new loop the `loop_builder` playbook already walks the user through
+#: step by step, and `delete` is a separate lifecycle concern (CORR-1134), not
+#: this gate's. The legacy `update_strategy` spelling is accepted by the tool's
+#: own `_resolve_action`, so the gate has to know it too.
+DANGEROUS_LOOP_ACTIONS = {"update", "update_strategy"}
+
 #: The Botcamp hub actions within ``manage_agents`` that still do something
 #: (SEC review C1/C3). ``publish_hub`` sends the agent's routines, skills,
 #: controllers and sample configs out under the install's Botcamp account —
@@ -192,6 +205,21 @@ MUTATING_CONTROL_ACTIONS = {
     "shutdown_agent",
     "set_state",
 }
+
+#: `manage_loops`' writes and reads, split the same way as `control_agent`'s —
+#: `update` is gated above and still has to be recorded, and `create`/`delete`
+#: write without a human in front of them but must not go unlogged either. The
+#: legacy prefixed spellings (`create_strategy`, etc.) are accepted by the
+#: tool's own `_resolve_action`, so both have to resolve here too.
+MUTATING_LOOP_ACTIONS = {
+    "create",
+    "create_strategy",
+    "update",
+    "update_strategy",
+    "delete",
+    "delete_strategy",
+}
+READ_ONLY_LOOP_ACTIONS = {"list", "list_strategies", "get", "get_strategy"}
 
 # The reads of each dispatch tool, named explicitly. They are what keeps the
 # fail-open rule below from recording a `manage_bots(action="status")`: an
@@ -461,6 +489,9 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         if tool_name == "control_agent":
             return _has_dangerous_action(tool_call, DANGEROUS_CONTROL_ACTIONS)
 
+        if tool_name == "manage_loops":
+            return _has_dangerous_action(tool_call, DANGEROUS_LOOP_ACTIONS)
+
         return True
 
     # manage_bots with deploy/stop/update actions (a bot deploy places real
@@ -621,6 +652,11 @@ def is_mutating_tool_call(tool_call: dict[str, Any]) -> bool:
     if tool_name == "control_agent":
         return _is_mutating_action(
             tool_call, MUTATING_CONTROL_ACTIONS, READ_ONLY_CONTROL_ACTIONS
+        )
+
+    if tool_name == "manage_loops":
+        return _is_mutating_action(
+            tool_call, MUTATING_LOOP_ACTIONS, READ_ONLY_LOOP_ACTIONS
         )
 
     if tool_name == "manage_gateway_config":
@@ -992,6 +1028,15 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
             return summary
         agent_id = str(input_data.get("agent_id") or "?")
         return f"Agent instance {agent_id}: {action}"
+
+    if tool_name == "manage_loops":
+        action = input_data.get("action", "?")
+        loop = input_data.get("loop_id") or "?"
+        if action in DANGEROUS_LOOP_ACTIONS:
+            # The detail builder (`condor/runtime/confirmations.py`) carries the
+            # actual old→new diff; this line only has to name which loop.
+            return f"Update loop '{loop}' configuration"
+        return f"Loop '{loop}': {action}"
 
     if tool_name == AGENTS_TOOL:
         # Only publish_hub reaches a human now; hub_install is an

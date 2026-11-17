@@ -194,6 +194,73 @@ def test_deleting_a_stock_agent_is_refused(stock):
     assert (stock / "AGENT.md").exists()
 
 
+def test_deleting_a_locally_forked_stock_agent_clears_its_local_customization(stock):
+    """A local fork of a shipped agent still has a stock twin — the slug
+    keeps resolving (to the shipped definition) after delete, reverted to
+    stock rather than gone. But delete must still clear every bit of this
+    install's own customization of it: the fork, its loops/config/sessions,
+    routines, consent and mutes. Leaving any of that behind is exactly what
+    let a later reimport of the same slug silently inherit it (CORR-1134) —
+    and it is what the only delete UI promises happens ("... and all its
+    loops")."""
+    agent = AgentStore().get("scout")
+    agent.agent_key = "claude-code"
+    AgentStore().update(agent)
+    local_loop = agent_home("scout") / "loops" / "grid" / "loop.md"
+    _write(local_loop, "---\nname: Grid\n---\n\ntick\n")
+    config_yml = agent_home("scout") / "config.yml"
+    _write(config_yml, "frequency_sec: 60\n")
+
+    assert AgentStore().delete("scout") is True
+
+    assert not (agent_home("scout") / "AGENT.md").exists()
+    assert (stock / "AGENT.md").exists()
+    # Reverted to stock, not gone.
+    assert AgentStore().get("scout") is not None
+    assert AgentStore().get("scout").source == stock / "AGENT.md"
+    # Everything this install's fork of the agent owned is gone too.
+    assert not local_loop.exists()
+    assert not config_yml.exists()
+    assert not agent_home("scout").exists()
+
+
+def test_deleting_and_recreating_a_customized_bundled_agent_inherits_nothing(stock):
+    """The central scenario CORR-1134 targets: an agent imported from a
+    bundle, customized (a model picked, a routine installed and allowed, a
+    skill muted), then deleted and recreated at the same slug. None of the
+    old customization may survive to be inherited by the new agent — a
+    stock-twin delete that only reverted the ``AGENT.md`` fork left its
+    routine, its consent entry and its mute entry all still readable by a
+    reimport of the same slug."""
+    from condor.agents import code_trust
+    from condor.memory.mutes import is_muted, set_muted
+
+    agent = AgentStore().get("scout")
+    agent.agent_key = "claude-code"
+    AgentStore().update(agent)
+
+    routine_text = "def run():\n    pass\n"
+    _write(agent_home("scout") / "routines" / "patrol.py", routine_text)
+    code_trust.arm("scout")
+    code_trust.allow("scout", "patrol.py", routine_text)
+    set_muted("scout", "skill", "recon", True)
+
+    assert AgentStore().delete("scout") is True
+
+    assert not (agent_home("scout") / "routines" / "patrol.py").exists()
+    assert code_trust.load("scout") is None
+    assert is_muted("scout", "skill", "recon") is False
+
+    # Recreate: picking a model again forks AGENT.md down the same way.
+    recreated = AgentStore().get("scout")
+    recreated.agent_key = "claude-code"
+    AgentStore().update(recreated)
+
+    assert not (agent_home("scout") / "routines" / "patrol.py").exists()
+    assert code_trust.load("scout") is None
+    assert is_muted("scout", "skill", "recon") is False
+
+
 def test_deleting_a_stock_strategy_is_refused(stock):
     _write(
         stock / "loops" / "shipped" / "loop.md",

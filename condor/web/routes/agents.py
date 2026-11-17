@@ -3811,6 +3811,37 @@ async def update_strategy_config(
     }
 
 
+@router.post("/{slug}/strategies/{sslug}/config/diff")
+async def preview_strategy_config_diff(
+    slug: str,
+    sslug: str,
+    req: UpdateConfigRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Old→new lines a proposed config write would produce, without writing it.
+
+    Reuses FEAT-192's own diff (``describe_loop_update``) so a review surface
+    outside chat — the import flow's review step (FEAT-202) — shows the
+    identical confirmation text a chat-driven ``manage_loops(action="update")``
+    would, rather than a second diff implementation drifting from it.
+
+    ``describe_loop_update`` was written for ``update_strategy``, which
+    assigns ``default_config`` whole, so it reports a key ``incoming`` omits
+    as ``(removed)``. ``update_strategy_config`` (this route's own write,
+    just above) *merges* instead (``config_dict.update(req.config)``), so the
+    diff is computed against the merge's own result — a shallow top-level
+    merge here too — rather than against ``req.config`` alone, or every
+    untouched key would read as a change this write does not make.
+    """
+    strategy = _get_strategy(slug, sslug)
+    from condor.agents.config import describe_loop_update, load_full_config
+
+    current = load_full_config(strategy.home, strategy.default_config)
+    merged = {**current, **req.config}
+    lines = describe_loop_update({"config": current}, {"config": merged})
+    return {"lines": lines}
+
+
 @router.delete("/{slug}/strategies/{sslug}")
 async def delete_strategy(
     slug: str, sslug: str, user: WebUser = Depends(get_current_user)
