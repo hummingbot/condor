@@ -2763,6 +2763,7 @@ async def discard_agent_skill_proposal(
 ):
     """Throw the offered playbook away. The library is untouched either way."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     if not _proposals().discard(agent.slug):
         raise HTTPException(status_code=404, detail="No proposal is pending")
     return {"discarded": True}
@@ -2911,6 +2912,8 @@ async def update_agent_config(
     from config_manager import get_config_manager
 
     agent = _get_agent(slug)
+    # The same front matter ``update_agent_md`` gates (SEC-638, WR-11).
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
 
     # A pin decides which account the Agent's tools trade on, so it is gated
     # like every other server-scoped write. An empty string clears the pin and
