@@ -372,13 +372,16 @@ async def search_history(
     Filters (only the ones listed for a data type are honoured; passing any other
     filter raises an error instead of silently ignoring it):
         account_names: All data types (optional)
-        connector_names: All data types (optional)
+        connector_names: All data types (optional). clmm_positions takes at most
+            ONE connector per call.
         limit: All data types (default: 50, max: 1000)
-        trading_pairs: orders, clmm_positions (optional)
+        trading_pairs: orders, clmm_positions (optional). clmm_positions takes at
+            most ONE pair per call.
         status: orders, clmm_positions (optional, e.g., 'FILLED', 'CANCELED')
         start_time: orders only, timestamp in seconds (optional)
         end_time: orders only, timestamp in seconds (optional)
-        offset: clmm_positions only, pagination offset (default: 0)
+        offset: clmm_positions only, pagination offset (default: 0). A full page
+            ends with the offset of the next one.
         cursor: orders only, the cursor printed at the end of the previous page
             (optional). orders is cursor-paginated and has no offset at all;
             clmm_positions is offset-paginated and takes no cursor.

@@ -216,3 +216,39 @@ def test_docstrings_no_longer_promise_common_filters():
 
     tool_doc = history_tools.search_history.__doc__
     assert "perp_positions: Perpetual positions (both open and closed)" not in tool_doc
+
+
+# ---------------------------------------------------------------------------
+# clmm_positions: one connector and one pair, or a refusal (MH-12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "filters, name",
+    [
+        ({"connector_names": ["meteora", "raydium"]}, "connector_names"),
+        ({"trading_pairs": ["SOL-USDC", "BONK-SOL"]}, "trading_pairs"),
+    ],
+)
+def test_clmm_positions_refuses_a_filter_it_would_have_dropped(
+    clmm_calls, filters, name
+):
+    """Two values used to set the filter to None and return EVERY position."""
+    with pytest.raises(ToolError) as caught:
+        asyncio.run(hb_server.search_history(data_type="clmm_positions", **filters))
+
+    message = str(caught.value)
+    assert name in message
+    assert "silently dropped" in message
+    assert message.count("Failed to search history") == 0
+    assert clmm_calls.search_calls == [], "nothing may reach the backend"
+
+
+def test_two_connectors_are_still_fine_for_orders(client_calls):
+    asyncio.run(
+        hb_server.search_history(
+            data_type="orders", connector_names=["binance", "kucoin"]
+        )
+    )
+
+    assert client_calls.order_calls[0]["connector_names"] == ["binance", "kucoin"]
