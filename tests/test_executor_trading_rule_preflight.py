@@ -150,6 +150,7 @@ def test_grid_min_order_amount_quote_below_the_venue_minimum_is_refused():
             limit_price=95.0,
             total_amount_quote=500.0,
             min_order_amount_quote=2.0,
+            take_profit=0.002,
         )
     )
 
@@ -171,6 +172,7 @@ def test_a_grid_funded_below_one_order_is_refused():
             end_price=110.0,
             limit_price=95.0,
             total_amount_quote=3.0,
+            take_profit=0.002,
         )
     )
 

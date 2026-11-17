@@ -105,6 +105,7 @@ def test_creating_an_executor_is_a_single_backend_call():
             end_price=150,
             limit_price=138,
             total_amount_quote=500,
+            take_profit=0.002,
         )
     )
 
@@ -552,7 +553,9 @@ def test_a_fresh_install_sends_only_what_the_caller_passed(shipped_preferences):
     stated backend defaults on the very first create."""
     client = _RecordingClient()
 
-    result = asyncio.run(executor_create.create_grid_executor(client, **_grid_kwargs()))
+    result = asyncio.run(
+        executor_create.create_grid_executor(client, **_grid_kwargs(take_profit=0.002))
+    )
 
     config = client.calls[0]["config"]
     assert set(config) == {
@@ -566,10 +569,57 @@ def test_a_fresh_install_sends_only_what_the_caller_passed(shipped_preferences):
         "triple_barrier_config",
         "type",
     }
-    assert config["triple_barrier_config"] == {}
+    assert config["triple_barrier_config"] == {"take_profit": 0.002}
     assert "Applied saved defaults" not in result["formatted_output"]
     for executor_type in executor_create._SAVEABLE_DEFAULTS:
         assert shipped_preferences.get_defaults(executor_type) == {}
+
+
+# ── Review R6: a grid with no take-profit is refused before the POST ──
+
+
+def test_a_grid_with_no_take_profit_anywhere_is_refused_before_the_post(
+    shipped_preferences,
+):
+    """The template no longer ships a take-profit, the backend schema lets the
+    barrier be empty, and the grid executor then dies at start on ``None``."""
+    client = _RecordingClient()
+
+    result = asyncio.run(executor_create.create_grid_executor(client, **_grid_kwargs()))
+
+    assert client.calls == []
+    assert "take_profit" in result["error"]
+    assert "take_profit=0.002" in result["error"]  # an example value, not a default
+    assert result["formatted_output"].startswith("Error creating grid_executor")
+
+
+def test_an_explicit_take_profit_passes_and_no_default_is_invented(
+    shipped_preferences,
+):
+    client = _RecordingClient()
+
+    asyncio.run(
+        executor_create.create_grid_executor(client, **_grid_kwargs(take_profit=0.004))
+    )
+
+    assert client.calls[0]["config"]["triple_barrier_config"] == {"take_profit": 0.004}
+
+
+def test_a_saved_take_profit_passes_and_is_named_in_the_result(shipped_preferences):
+    shipped_preferences.update_defaults(
+        "grid_executor", {"triple_barrier_config": {"take_profit": 0.003}}
+    )
+    client = _RecordingClient()
+
+    result = asyncio.run(executor_create.create_grid_executor(client, **_grid_kwargs()))
+
+    assert client.calls[0]["config"]["triple_barrier_config"]["take_profit"] == 0.003
+    assert "Applied saved defaults" in result["formatted_output"]
+
+
+def test_other_executor_types_are_not_asked_for_a_take_profit():
+    for executor_type in ("position_executor", "dca_executor", "order_executor"):
+        assert executor_create.missing_required_setting(executor_type, {}) == ""
 
 
 def test_save_as_default_never_carries_a_price_or_amount_to_the_next_pair(
@@ -651,6 +701,10 @@ def test_saving_an_lp_create_keeps_no_pool_amount_or_limit_price(shipped_prefere
 
 
 def test_a_save_with_nothing_reusable_says_so_and_writes_nothing(shipped_preferences):
+    # The take-profit a grid cannot start without comes from the file here, so
+    # the call itself carries nothing a save could keep.
+    on_file = {"triple_barrier_config": {"take_profit": 0.002}}
+    shipped_preferences.update_defaults("grid_executor", on_file)
     client = _RecordingClient()
 
     result = asyncio.run(
@@ -660,7 +714,7 @@ def test_a_save_with_nothing_reusable_says_so_and_writes_nothing(shipped_prefere
     )
 
     assert "Nothing saved as default" in result["formatted_output"]
-    assert shipped_preferences.get_defaults("grid_executor") == {}
+    assert shipped_preferences.get_defaults("grid_executor") == on_file
 
 
 def test_the_result_names_every_saved_default_that_was_applied(shipped_preferences):

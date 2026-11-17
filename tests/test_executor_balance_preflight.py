@@ -161,6 +161,7 @@ def test_a_grid_buy_is_sized_in_quote():
             end_price=9.0,
             limit_price=6.5,
             total_amount_quote=100.0,
+            take_profit=0.002,
         )
     )
 

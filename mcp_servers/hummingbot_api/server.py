@@ -970,7 +970,8 @@ async def create_grid_executor(
         limit_price: Safety boundary that stops the grid. See DIRECTION RULES.
         total_amount_quote: Capital allocated, in QUOTE currency.
         take_profit: Distance for the opposite order on each fill, as a decimal
-            fraction, e.g. 0.0002 = 0.02%.
+            fraction, e.g. 0.0002 = 0.02%. REQUIRED unless a saved default supplies
+            it — there is no backend default, and the call is refused without one.
         time_limit: Maximum grid lifetime in SECONDS, after which the grid closes on
             its own — the dead-man switch an unattended run needs. OMIT for a grid
             that runs until `limit_price` or an explicit stop. e.g. 43200 = 12h.

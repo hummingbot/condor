@@ -227,6 +227,34 @@ def _usd_amount(value: Any) -> float | None:
     return _amount(text[1:].strip())
 
 
+def missing_required_setting(executor_type: str, merged_config: dict[str, Any]) -> str:
+    """Name a setting the executor cannot start without, or ``""``.
+
+    Judged on the config AFTER saved defaults were merged in, so a value the
+    user keeps on file counts exactly like one passed in the call.
+
+    A grid's ``take_profit`` is the distance of the closing order behind every
+    fill. The backend schema lets it be absent (``TripleBarrierConfig.take_profit``
+    is optional, default ``None``) and the grid executor then does arithmetic on
+    ``None`` at start: the create is accepted and the executor dies immediately.
+    The shipped preferences template used to carry one, which hid that; it no
+    longer does, and no default is invented here -- how far the closing order
+    sits is the strategy, not a detail to guess.
+    """
+    if executor_type != "grid_executor":
+        return ""
+    barrier = merged_config.get("triple_barrier_config")
+    take_profit = barrier.get("take_profit") if isinstance(barrier, dict) else None
+    if take_profit is not None:
+        return ""
+    return (
+        "take_profit is required for a grid executor and none was passed or saved "
+        "as a default. It is the distance of the closing order behind each fill, "
+        "as a decimal fraction — e.g. take_profit=0.002 for 0.2%. Pass it in "
+        "this call, or keep one on file with executor_defaults. Nothing was created."
+    )
+
+
 def _require_positive(name: str, value: Any, unit: str) -> None:
     """Refuse a zero or negative money parameter, naming it.
 
@@ -493,6 +521,20 @@ async def create_executor(
         account,
         merged_config.get("trading_pair"),
     )
+
+    missing = missing_required_setting(executor_type, merged_config)
+    if missing:
+        # Refused before anything is fetched or sent: the backend accepts the
+        # config and the executor then fails the moment it starts.
+        logger.info("create_%s refused, incomplete config: %s", executor_type, missing)
+        return {
+            "action": "create",
+            "executor_type": executor_type,
+            "error": missing,
+            "formatted_output": (
+                f"Error creating {executor_type}: {missing}{defaults_note}"
+            ),
+        }
 
     violation = await trading_rule_violation(client, executor_type, merged_config)
     if violation:
