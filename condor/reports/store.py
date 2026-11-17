@@ -18,7 +18,15 @@ from condor.fsutil import atomic_write_json, atomic_write_text, read_json
 
 logger = logging.getLogger(__name__)
 
-MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
+# Retention (ST-07). One global FIFO of 100 let a single routine on a short
+# schedule flush everyone's archive — every 30 s is 100 reports in 50 minutes,
+# other users' included. So the first cut is per (owner, source): each keeps its
+# newest MAX_REPORTS_PER_SOURCE. The global cap is the backstop over all of
+# them, and correspondingly larger. Both are env-tunable; a per-source cap of 0
+# disables that cut. A routine that only wants "the latest" should update one
+# report in place with LiveReport instead of leaning on either.
+MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "500"))
+MAX_REPORTS_PER_SOURCE = int(os.environ.get("CONDOR_MAX_REPORTS_PER_SOURCE", "50"))
 
 _index_lock = asyncio.Lock()
 _last_report_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -419,18 +427,45 @@ async def delete_report(report_id: str) -> bool:
     return deleted
 
 
-def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
-    """Run cleanup while the caller already holds the index lock."""
+def _cleanup_locked(
+    max_reports: int | None = None, max_per_source: int | None = None
+) -> None:
+    """Run cleanup while the caller already holds the index lock.
+
+    Oldest-first by last update, in two passes: each (owner, source) down to
+    ``max_per_source``, then whatever is left down to ``max_reports``. A report
+    saved with no source belongs to no group and only meets the global cap.
+    The caps default to the module's, read at call time.
+    """
+    if max_reports is None:
+        max_reports = MAX_REPORTS
+    if max_per_source is None:
+        max_per_source = MAX_REPORTS_PER_SOURCE
     entries = _read_index_for_write()
-    if len(entries) <= max_reports:
-        return
     entries.sort(
         key=lambda entry: entry.get("updated_at") or entry.get("created_at", "")
     )
-    to_remove = entries[: len(entries) - max_reports]
-    keep_ids = {entry["id"] for entry in entries[len(entries) - max_reports :]}
-    for entry in to_remove:
-        path = _charts_dir() / entry["filename"]
-        if path.exists():
-            path.unlink()
-    _write_index([entry for entry in entries if entry["id"] in keep_ids])
+
+    doomed: set[str] = set()
+    if max_per_source > 0:
+        by_source: dict[tuple, list[dict]] = {}
+        for entry in entries:
+            if entry.get("source_name"):
+                key = (entry.get("user_id"), entry["source_name"])
+                by_source.setdefault(key, []).append(entry)
+        for group in by_source.values():
+            doomed.update(entry["id"] for entry in group[:-max_per_source])
+
+    survivors = [entry for entry in entries if entry["id"] not in doomed]
+    excess = len(survivors) - max_reports
+    if excess > 0:
+        doomed.update(entry["id"] for entry in survivors[:excess])
+    if not doomed:
+        return
+
+    for entry in entries:
+        if entry["id"] in doomed:
+            path = _charts_dir() / entry["filename"]
+            if path.exists():
+                path.unlink()
+    _write_index([entry for entry in entries if entry["id"] not in doomed])

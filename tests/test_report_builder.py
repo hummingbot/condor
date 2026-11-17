@@ -172,6 +172,80 @@ def test_cleanup_keeps_recently_updated_report(reports_dir):
     assert not (reports_dir / "middle.html").exists()
 
 
+def _index_entry(n: int, source: str, user_id: int | None = 1) -> dict:
+    return {
+        "id": f"{source or 'none'}-{user_id}-{n:04d}",
+        "filename": f"{source or 'none'}-{user_id}-{n:04d}.html",
+        "created_at": f"2026-01-01T00:{n // 60:02d}:{n % 60:02d}Z",
+        "source_type": "routine" if source else "",
+        "source_name": source,
+        "user_id": user_id,
+    }
+
+
+def _seed(reports_dir, entries):
+    for entry in entries:
+        (reports_dir / entry["filename"]).write_text(entry["id"], encoding="utf-8")
+    store._write_index(entries)
+
+
+def test_a_chatty_source_cannot_evict_another_sources_reports(reports_dir):
+    """ST-07: 150 reports from one routine used to flush everything older."""
+    quiet = [_index_entry(n, "quiet") for n in range(3)]
+    chatty = [_index_entry(10 + n, "chatty") for n in range(150)]
+    _seed(reports_dir, quiet + chatty)
+
+    store._cleanup_locked(max_reports=100, max_per_source=20)
+
+    kept = store._read_index()
+    assert {e["id"] for e in quiet} <= {e["id"] for e in kept}
+    kept_chatty = sorted(e["id"] for e in kept if e["source_name"] == "chatty")
+    assert kept_chatty == sorted(e["id"] for e in chatty[-20:])
+    assert not (reports_dir / chatty[0]["filename"]).exists()
+    assert sorted(p.name for p in reports_dir.glob("*.html")) == sorted(
+        e["filename"] for e in kept
+    )
+
+
+def test_the_per_source_quota_is_per_owner(reports_dir):
+    mine = [_index_entry(n, "bot_report", user_id=1) for n in range(5)]
+    theirs = [_index_entry(10 + n, "bot_report", user_id=2) for n in range(30)]
+    _seed(reports_dir, mine + theirs)
+
+    store._cleanup_locked(max_reports=100, max_per_source=10)
+
+    kept = store._read_index()
+    assert sum(e["user_id"] == 1 for e in kept) == 5
+    assert sum(e["user_id"] == 2 for e in kept) == 10
+
+
+def test_the_global_cap_still_bounds_the_store_and_sourceless_reports(reports_dir):
+    sourceless = [_index_entry(n, "") for n in range(30)]
+    many = [_index_entry(100 + n, f"src{n}") for n in range(30)]
+    _seed(reports_dir, sourceless + many)
+
+    store._cleanup_locked(max_reports=40, max_per_source=5)
+
+    kept = store._read_index()
+    assert len(kept) == 40
+    # Oldest first across the whole store: the sourceless ones were older.
+    assert sum(not e["source_name"] for e in kept) == 10
+
+
+def test_the_caps_are_read_from_the_module_at_call_time(reports_dir, monkeypatch):
+    _seed(reports_dir, [_index_entry(n, "probe") for n in range(8)])
+    monkeypatch.setattr(store, "MAX_REPORTS", 500)
+    monkeypatch.setattr(store, "MAX_REPORTS_PER_SOURCE", 3)
+
+    store._cleanup_locked()
+    assert len(store._read_index()) == 3
+
+    monkeypatch.setattr(store, "MAX_REPORTS", 1)
+    monkeypatch.setattr(store, "MAX_REPORTS_PER_SOURCE", 0)  # disabled
+    store._cleanup_locked()
+    assert len(store._read_index()) == 1
+
+
 def test_footprint_filters_invalid_rows_and_keeps_zero_visible():
     candles = [
         {
