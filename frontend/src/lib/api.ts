@@ -9,13 +9,68 @@ import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
 
 import { authFetch, authHeaders } from "./auth-token";
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * What to do when a request made with the stored token comes back 401.
+ *
+ * Resolves `true` when the session was renewed and the request is worth one
+ * more attempt (local mode claims a fresh session), `false` otherwise — the
+ * handler has then either ended the session or decided the 401 was not about
+ * it. Registered by `useAuthState` (lib/auth.ts); nothing is registered in
+ * tests or before the app mounts, and a 401 is then simply thrown.
+ */
+type UnauthorizedHandler = () => Promise<boolean> | boolean;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+let unauthorizedInFlight: Promise<boolean> | null = null;
+
+/** Register the 401 handler. Returns the unregister function. */
+export function setOnUnauthorized(handler: UnauthorizedHandler): () => void {
+  unauthorizedHandler = handler;
+  return () => {
+    if (unauthorizedHandler === handler) unauthorizedHandler = null;
+  };
+}
+
+/**
+ * Run the 401 handler, once for however many callers report at the same time:
+ * an expired session fails every poll on the page in the same tick, and each
+ * of them must not log out (or re-login) on its own (FD-01).
+ */
+export function reportUnauthorized(): Promise<boolean> {
+  const handler = unauthorizedHandler;
+  if (!handler) return Promise.resolve(false);
+  if (!unauthorizedInFlight) {
+    unauthorizedInFlight = Promise.resolve()
+      .then(handler)
+      .catch(() => false)
+      .finally(() => {
+        unauthorizedInFlight = null;
+      });
+  }
+  return unauthorizedInFlight;
+}
+
+/** The login routes answer 401 for a bad login, not for a dead session. */
+const AUTH_ROUTE_PREFIX = "/api/v1/auth/";
+
+async function apiFetch<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
+  const auth = authHeaders();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...authHeaders(),
+    ...auth,
     ...(init?.headers as Record<string, string>),
   };
   const res = await fetch(path, { ...init, headers });
+  if (res.status === 401 && !retried && auth.Authorization && !path.startsWith(AUTH_ROUTE_PREFIX)) {
+    // A token that changed while this request was in flight means another
+    // request already went through the handler: retry on the new session
+    // rather than report again, or give up if the session is gone.
+    const current = authHeaders().Authorization;
+    const renewed = current !== auth.Authorization ? !!current : await reportUnauthorized();
+    // A 401 never ran the handler behind it, so repeating the request — a
+    // mutation included — cannot apply it twice.
+    if (renewed) return apiFetch<T>(path, init, true);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     // The status rides along on the Error so a caller can tell apart failures that

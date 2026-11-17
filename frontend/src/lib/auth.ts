@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 
+import { setOnUnauthorized } from "./api";
 import { TOKEN_KEY, authHeaders } from "./auth-token";
 import { clearDiagnostics } from "./diagnostics";
 import { queryClient } from "./queryClient";
@@ -70,6 +71,45 @@ function resetForNewUser(incoming: User) {
   queryClient.clear();
   clearDiagnostics();
   clearSessionState();
+}
+
+/**
+ * Decide what a 401 means for the stored session, and act on it (FD-01).
+ *
+ * `/auth/me` is the authority: a 401 from any other route can be about
+ * something else — the hub routes pass Botcamp's own 401 through — and only a
+ * session `/auth/me` itself refuses is over. Anything else it answers (a 502
+ * from the proxy while Condor restarts, a network error) says nothing about
+ * the token, and logging out on it would wipe the saved order sizes, leverage
+ * and routine configs for a session that is still good.
+ *
+ * A dead session in local mode is claimed again rather than ended: there is no
+ * login step to send the user back to. Resolves `true` only then, so the
+ * caller knows a retry will carry a live token.
+ */
+export async function resolveUnauthorized(actions: {
+  loginLocal: () => Promise<void>;
+  logout: () => void;
+}): Promise<boolean> {
+  let status: number;
+  try {
+    status = (await fetch("/api/v1/auth/me", { headers: authHeaders() })).status;
+  } catch {
+    // server not available, keep token
+    return false;
+  }
+  if (status !== 401 && status !== 403) return false;
+  try {
+    const res = await fetch("/api/v1/auth/mode");
+    if (res.ok && (await res.json())?.mode === "local") {
+      await actions.loginLocal();
+      return true;
+    }
+  } catch {
+    // Mode unknown or the local login failed: the session is still dead.
+  }
+  actions.logout();
+  return false;
 }
 
 export const AuthContext = createContext<AuthState>({
@@ -156,16 +196,16 @@ export function useAuthState(): AuthState {
   // Validate token on mount
   useEffect(() => {
     if (!token) return;
-    fetch("/api/v1/auth/me", {
-      headers: authHeaders(),
-    }).then((res) => {
-      if (!res.ok) {
-        logout();
-      }
-    }).catch(() => {
-      // server not available, keep token
-    });
+    void resolveUnauthorized({ loginLocal, logout });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ...and whenever a request made with it is refused later: a tab left open
+  // past the token's lifetime otherwise keeps yesterday's numbers on screen
+  // while every request behind them fails.
+  useEffect(
+    () => setOnUnauthorized(() => resolveUnauthorized({ loginLocal, logout })),
+    [loginLocal, logout],
+  );
 
   return {
     user,
