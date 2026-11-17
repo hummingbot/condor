@@ -208,6 +208,8 @@ def _set_duration(mgr, conn, channel, duration):
         called.append((channel, duration))
 
     mgr._handle_candle_duration_change = record
+    # A live socket: handle_message refuses one the manager no longer holds.
+    mgr._connections.append(conn)
     msg = {"action": "set_candle_duration", "channel": channel, "duration": duration}
     run(mgr.handle_message(conn, json.dumps(msg)))
     return called

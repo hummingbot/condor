@@ -289,7 +289,21 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
 
     # -- Message handling --
 
+    def _require_registered(self, conn: _Connection) -> None:
+        """End the receive loop of a connection this manager already dropped.
+
+        ``_fan_out`` disconnects a subscriber whose send timed out and closes
+        its socket in the background, so messages the client had already queued
+        are still delivered to ``handle_message`` first. A ``subscribe`` among
+        them started an upstream stream or SDS poll for a connection that is no
+        longer in ``_connections`` -- and the ``disconnect`` that follows the
+        close is then a no-op, so nothing ever stopped it.
+        """
+        if conn not in self._connections:
+            raise WebSocketDisconnect(code=1013)
+
     async def handle_message(self, conn: _Connection, raw: str) -> None:
+        self._require_registered(conn)
         # The role ``connect`` checked is re-read on every action: a user
         # blocked or demoted after the tab was opened must not keep driving
         # the socket. The connection is closed and the caller's receive loop
@@ -349,10 +363,15 @@ class WebSocketManager(CandleStreamsMixin, HummingbotStreamsMixin):
                         await conn.ws.send_text(
                             self._encode_stream_status(channel, "stale")
                         )
+                # The snapshot sends above yield: the connection may have been
+                # dropped meanwhile, and a stream started now would have nobody
+                # left to stop it.
+                self._require_registered(conn)
                 self._ensure_stream(prefix, channel)
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
+                    self._require_registered(conn)
                 # Registered now, primed in the background: the prime is an
                 # upstream fetch (a connect timeout when the server is down)
                 # and every later message on this socket would queue behind it.
